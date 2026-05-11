@@ -1,0 +1,1464 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AiWorker Pro</title>
+    <!-- Bootstrap 5 CSS -->
+    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Bootstrap Icons -->
+    <link href="/static/css/bootstrap-icons.css" rel="stylesheet">
+    <!-- Alpine.js -->
+    <script defer src="/static/js/alpine.min.js"></script>
+    <style>
+        :root {
+            --sidebar-width: 250px;
+            --bg-dark: #1e1e2d;
+            --bg-darker: #151521;
+            --text-primary: #e4e6ef;
+            --text-secondary: #92929f;
+            --accent: #3699ff;
+        }
+        body {
+            background-color: var(--bg-darker);
+            color: var(--text-primary);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+        }
+        .sidebar {
+            width: var(--sidebar-width);
+            background-color: var(--bg-dark);
+            height: 100vh;
+            position: fixed;
+            left: 0;
+            top: 0;
+            border-right: 1px solid #2d2d3f;
+            z-index: 1000;
+        }
+        .main-content {
+            margin-left: var(--sidebar-width);
+            padding: 20px;
+            height: 100vh;
+            overflow-y: auto;
+        }
+        .nav-link {
+            color: var(--text-secondary);
+            padding: 12px 20px;
+            border-radius: 0;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+        }
+        .nav-link:hover, .nav-link.active {
+            color: var(--accent);
+            background-color: rgba(54, 153, 255, 0.1);
+            border-right: 3px solid var(--accent);
+        }
+        .nav-link i {
+            margin-right: 10px;
+            font-size: 1.1rem;
+        }
+        .card {
+            background-color: var(--bg-dark);
+            border: 1px solid #2d2d3f;
+            color: var(--text-primary);
+            margin-bottom: 20px;
+        }
+        .card-header {
+            border-bottom: 1px solid #2d2d3f;
+            font-weight: 600;
+        }
+        .form-control, .form-select {
+            background-color: var(--bg-darker);
+            border: 1px solid #2d2d3f;
+            color: var(--text-primary);
+        }
+        .form-control:focus, .form-select:focus {
+            background-color: var(--bg-darker);
+            border-color: var(--accent);
+            color: var(--text-primary);
+            box-shadow: none;
+        }
+        .btn-primary {
+            background-color: var(--accent);
+            border-color: var(--accent);
+        }
+        .log-console {
+            background-color: #000;
+            color: #0f0;
+            font-family: 'Consolas', monospace;
+            height: 400px;
+            overflow-y: auto;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 0.9rem;
+        }
+        .table {
+            color: var(--text-primary);
+        }
+        .table-hover tbody tr:hover {
+            color: var(--text-primary);
+            background-color: rgba(255,255,255,0.05);
+        }
+        .modal-content {
+            background-color: var(--bg-dark);
+            color: var(--text-primary);
+            border: 1px solid #2d2d3f;
+        }
+        .modal-header, .modal-footer {
+            border-color: #2d2d3f;
+        }
+        .btn-close {
+            filter: invert(1);
+        }
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: var(--bg-darker); 
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #444; 
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #555; 
+        }
+    </style>
+</head>
+<body x-data="appData()" x-init="init()">
+
+    <!-- Sidebar -->
+    <div class="sidebar d-flex flex-column">
+        <div class="p-4 mb-3 border-bottom border-secondary">
+            <h4 class="text-white fw-bold"><i class="bi bi-robot"></i> AiWorker</h4>
+            <small class="text-white">AI数字员工</small>
+                            <div x-show="serverIp" style="color:#92929f; font-size: 0.8em; word-break: break-all;">
+                    <a :href="'http://' + serverIp" target="_blank" class="text-decoration-none" style="color: var(--accent);" x-text="'' + serverIp"></a>
+                </div>  
+        </div>
+        <ul class="nav flex-column">
+            <li class="nav-item">
+                <a href="#" class="nav-link" :class="{ 'active': currentTab === 'dashboard' }" @click="currentTab = 'dashboard'">
+                    <i class="bi bi-speedometer2"></i> 控制台
+                </a>
+            </li>
+            <li class="nav-item">
+                <a href="#" class="nav-link" :class="{ 'active': currentTab === 'config' }" @click="currentTab = 'config'">
+                    <i class="bi bi-gear"></i> 参数配置
+                </a>
+            </li>
+            <li class="nav-item">
+                <a href="#" class="nav-link" :class="{ 'active': currentTab === 'data' }" @click="currentTab = 'data'">
+                    <i class="bi bi-folder2-open"></i> 数据管理
+                </a>
+            </li>
+            <li class="nav-item">
+                <a href="#" class="nav-link" :class="{ 'active': currentTab === 'json-editor' }" @click="currentTab = 'json-editor'; fetchConfigRaw(); fetchBackups();">
+                    <i class="bi bi-file-code"></i> 配置编辑
+                </a>
+            </li>
+        </ul>
+        <div class="mt-auto p-3">
+            <div class="d-grid">
+                <button class="btn btn-outline-danger btn-sm" @click="stopCrawler" :disabled="!isRunning">
+                    <i class="bi bi-stop-circle"></i> 紧急停止
+                </button>
+            </div>
+            <div class="mt-2 text-center small">
+                <div style="color:#e4e6ef; margin-bottom: 5px;">
+                    系统状态: <span x-text="isRunning ? 'Running' : 'ok'" :class="isRunning ? 'text-success' : 'text-secondary'"></span>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="main-content">
+        
+        <!-- Dashboard Tab -->
+        <div x-show="currentTab === 'dashboard'" x-transition.opacity>
+            <h3 class="mb-4">控制台</h3>
+            
+            <div class="row mb-4">
+                <div class="col-md-8">
+                    <div class="card h-100">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <span><i class="bi bi-terminal"></i> 运行日志</span>
+                            <div>
+                                <span class="badge bg-primary" x-show="batchProgress" x-text="'Batch: ' + batchProgress"></span>
+                                <button class="btn btn-sm btn-outline-secondary ms-2" @click="logs = []">清空</button>
+                            </div>
+                        </div>
+                        <div class="card-body p-0">
+                            <!-- 
+                            <div class="log-console" id="logConsole">
+                                <template x-for="log in logs">
+                                    <div x-text="log" :class="{'text-danger': log.includes('[ERROR]'), 'text-info': log.includes('[INFO]'), 'text-success': log.includes('[SUCCESS]')}"></div>
+                                </template>
+                            </div>
+                            -->
+                             <div class="table-responsive" style="height: 400px; overflow-y: auto;">
+                                <table class="table table-dark table-striped table-hover table-sm mb-0" style="font-size: 0.85rem;">
+                                    <thead style="position: sticky; top: 0; background-color: #1e1e2d; z-index: 1;">
+                                        <tr>
+                                            <th style="width: 100px;">时间</th>
+                                            <th style="width: 80px;">级别</th>
+                                            <th>消息内容</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <template x-for="log in logs">
+                                            <tr>
+                                                <td class="text-white" x-text="parseLog(log).time"></td>
+                                                <td>
+                                                    <span class="badge" 
+                                                          :class="{
+                                                              'bg-danger': parseLog(log).level === 'ERROR', 
+                                                              'bg-info': parseLog(log).level === 'INFO', 
+                                                              'bg-success': parseLog(log).level === 'SUCCESS'
+                                                          }" 
+                                                          x-text="parseLog(log).level">
+                                                    </span>
+                                                </td>
+                                                <td x-text="parseLog(log).message" style="word-break: break-all;"></td>
+                                            </tr>
+                                        </template>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card mb-3">
+                        <div class="card-header">快速操作</div>
+                        <div class="card-body d-grid gap-2">
+                            <button class="btn btn-primary btn-lg" @click="runCrawler" :disabled="isRunning">
+                                <i class="bi bi-play-circle-fill"></i> 开始爬取
+                            </button>
+                            <button class="btn btn-outline-light" @click="currentTab = 'config'">
+                                <i class="bi bi-sliders"></i> 修改配置
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header">系统状态</div>
+                        <div class="card-body">
+                            <p class="mb-1">状态: <strong x-text="isRunning ? '运行中' : '空闲'"></strong></p>
+                            <p class="mb-1">当前项目: <span x-text="config.projects ? Object.keys(config.projects).filter(k=>config.projects[k]).length : 0"></span> 个选中</p>
+                            <p class="mb-0">平台: <span x-text="config.platform"></span></p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Config Tab -->
+        <div x-show="currentTab === 'config'" x-transition.opacity>
+            <h3 class="mb-4">参数配置</h3>
+            <form @submit.prevent="runCrawler">
+                <div class="row">
+                    <div class="col-md-6">
+                        <!-- Basic Config -->
+                        <div class="card">
+                            <div class="card-header">基础配置</div>
+                            <div class="card-body">
+                                <div class="mb-3">
+                                    <label class="form-label">媒体平台</label>
+                                    <select class="form-select" x-model="config.platform">
+                                        <option value="dy">抖音 (dy)</option>
+                                        <!-- <option value="xhs">小红书 (xhs)</option>
+                                        <option value="ks">快手 (ks)</option>
+                                        <option value="bili">哔哩哔哩 (bili)</option>
+                                        <option value="wb">微博 (wb)</option> -->
+                                    </select>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">爬取类型</label>
+                                    <select class="form-select" x-model="config.crawler_type">
+                                        <option value="search">搜索 (search)</option>
+                                        <option value="detail">详情 (detail)</option>
+                                        <option value="creator">创作者 (creator)</option>
+                                    </select>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">登录方式</label>
+                                    <select class="form-select" x-model="config.login_type" @change="onLoginTypeChange()">
+                                        <option value="qrcode">二维码 (qrcode)</option>
+                                        <option value="phone">手机号 (phone)</option>
+                                        <option value="cookie">Cookie</option>
+                                    </select>
+                                </div>
+                                
+                                <!-- QR Code Login Section -->
+                                <div x-show="config.login_type === 'qrcode'" class="mb-3 p-3 border border-secondary rounded">
+                                    <div class="d-flex align-items-center gap-2 flex-wrap">
+                                        <button class="btn btn-primary btn-sm" @click="startQrcodeLogin" :disabled="isRunning || qrcodeLoggingIn">
+                                            <i class="bi bi-qr-code"></i> 前往扫码
+                                        </button>
+                                        <span x-show="qrcodeLoggingIn" class="spinner-border spinner-border-sm" role="status"></span>
+                                        <span class="badge" :class="qrcodeStatus.has_state ? 'bg-success' : 'bg-secondary'" x-text="qrcodeStatus.message || '未登录'"></span>
+                                        <button x-show="qrcodeStatus.has_state" class="btn btn-outline-danger btn-sm" @click="clearQrcodeLogin">
+                                            <i class="bi bi-trash"></i> 清除
+                                        </button>
+                                    </div>
+                                    <small class="text-muted d-block mt-2">
+                                        点击"前往扫码"后会弹出浏览器，请使用手机抖音扫描二维码登录
+                                    </small>
+                                </div>
+                                
+                                <div class="mb-3">
+                                    <label class="form-label">Cookie (可选)</label>
+                                    <input type="text" class="form-control" x-model="config.cookie" placeholder="输入Cookie字符串">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Run Config -->
+                        <div class="card" style="display: none;">
+                            <div class="card-header">运行配置</div>
+                            <div class="card-body">
+                                <div class="row mb-3">
+                                    <div class="col">
+                                        <label class="form-label">起始页码</label>
+                                        <input type="number" class="form-control" x-model.number="config.start_page" min="1">
+                                    </div>
+                                    <div class="col">
+                                        <label class="form-label">保存格式</label>
+                                        <select class="form-select" x-model="config.save_option">
+                                            <option value="json">JSON</option>
+                                            <option value="csv">CSV</option>
+                                            <option value="db">MySQL</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="form-check form-switch mb-2">
+                                    <input class="form-check-input" type="checkbox" x-model="config.headless">
+                                    <label class="form-check-label">无头模式 (不显示浏览器)</label>
+                                </div>
+                                <div class="form-check form-switch mb-2">
+                                    <input class="form-check-input" type="checkbox" x-model="config.get_comment">
+                                    <label class="form-check-label">爬取一级评论</label>
+                                </div>
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" x-model="config.get_sub_comment">
+                                    <label class="form-check-label">爬取二级评论</label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-md-6">
+                        <!-- Project Selection -->
+                        <div class="card">
+                            <div class="card-header">项目选择 (AI托管)</div>
+                            <div class="card-body" style="max-height: 300px; overflow-y: auto;">
+                                <template x-if="projectItems.length > 0">
+                                    <div>
+                                        <template x-for="item in projectItems" :key="item.project">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" 
+                                                       :checked="config.projects[item.project]" 
+                                                       @change="config.projects[item.project] = $event.target.checked">
+                                                <label class="form-check-label" x-text="item.project"></label>
+                                            </div>
+                                        </template>
+                                    </div>
+                                </template>
+                                <template x-if="projectItems.length === 0">
+                                    <div>
+                                        <label class="form-label">关键词 (无项目配置时使用)</label>
+                                        <input type="text" class="form-control" x-model="config.keywords" placeholder="输入关键词，逗号分隔">
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+
+                        <!-- Auto Run Config -->
+                        <div class="card mb-3">
+                            <div class="card-header bg-warning text-dark">
+                                <div class="form-check form-switch mb-0">
+                                    <input class="form-check-input" type="checkbox" id="autoRunSwitch" x-model="config.autoRun">
+                                    <label class="form-check-label fw-bold" for="autoRunSwitch">启用【自动托管】模式</label>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <small class="text-white">
+                                    开启后，爬取Contents完成后将自动执行：<br>
+                                    1. 自动爬取评论 <i class="bi bi-arrow-right"></i>
+                                    2. 自动导出Excel <i class="bi bi-arrow-right"></i>
+                                    3. 自动上传到服务器
+                                </small>
+                            </div>
+                        </div>
+
+                        <!-- Douyin Specific -->
+                        <div class="card" x-show="config.platform === 'dy'">
+                            <div class="card-header">抖音专用配置</div>
+                            <div class="card-body">
+                                <div class="mb-3">
+                                    <label class="form-label">搜索频道</label>
+                                    <select class="form-select" x-model="config.dy_channel">
+                                        <option value="video">视频 (video)</option>
+                                        <option value="general">综合 (general)</option>
+                                        <option value="user">用户 (user)</option>
+                                        <option value="live">直播 (live)</option>
+                                    </select>
+                                </div>
+                                <div class="row">
+                                    <div class="col">
+                                        <label class="form-label">排序</label>
+                                        <select class="form-select" x-model="config.dy_sort">
+                                            <option value="latest">最新发布</option>
+                                            <option value="most_like">最多点赞</option>
+                                            <option value="general">综合排序</option>
+                                        </select>
+                                    </div>
+                                    <div class="col">
+                                        <label class="form-label">发布时间</label>
+                                        <select class="form-select" x-model="config.dy_publish_time">
+                                            <option value="unlimited">不限</option>
+                                            <option value="1_day">一天内</option>
+                                            <option value="1_week">一周内</option>
+                                            <option value="6_months">半年内</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Advanced -->
+                        <div class="card" style="display: none;">
+                            <div class="card-header">高级配置</div>
+                            <div class="card-body">
+                                <div class="mb-3">
+                                    <label class="form-label">指定帖子ID列表 (逗号分隔)</label>
+                                    <input type="text" class="form-control" x-model="config.specified_ids">
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">指定创作者ID列表 (逗号分隔)</label>
+                                    <input type="text" class="form-control" x-model="config.creator_ids">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </form>
+        </div>
+
+        <!-- Data Tab -->
+        <div x-show="currentTab === 'data'" x-transition.opacity>
+            <h3 class="mb-4">数据管理</h3>
+            
+            <div class="card mb-4">
+                <div class="card-body d-flex gap-2">
+                    <button class="btn btn-outline-light" :class="{'active': fileFilter === 'all'}" @click="fileFilter='all'; fetchFiles()">全部</button>
+                    <button class="btn btn-outline-light" :class="{'active': fileFilter === 'Comments'}" @click="fileFilter='Comments'; fetchFiles()">评论 (Comments)</button>
+                    <button class="btn btn-outline-light" :class="{'active': fileFilter === 'Contents'}" @click="fileFilter='Contents'; fetchFiles()">内容 (Contents)</button>
+                    <button class="btn btn-primary ms-auto" @click="fetchFiles"><i class="bi bi-arrow-clockwise"></i> 刷新</button>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-body p-0">
+                    <table class="table table-hover table-dark mb-0 align-middle">
+                        <thead>
+                            <tr>
+                                <th class="ps-4">文件名</th>
+                                <th>大小</th>
+                                <th>修改时间</th>
+                                <th>类型</th>
+                                <th>视频</th>
+                                <th>音频</th>
+                                <th class="text-end pe-4">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="file in files" :key="file.path">
+                                <tr>
+                                    <td class="ps-4">
+                                        <div class="d-flex align-items-center">
+                                            <i class="bi bi-file-earmark-text fs-4 me-3 text-secondary"></i>
+                                            <span x-text="file.name" class="fw-bold"></span>
+                                        </div>
+                                    </td>
+                                    <td x-text="formatSize(file.size)"></td>
+                                    <td x-text="formatDate(file.modified)"></td>
+                                    <td>
+                                        <span class="badge" :class="file.category === 'Comments' ? 'bg-info' : 'bg-success'" x-text="file.category"></span>
+                                    </td>
+                                    <td>
+                                        <template x-if="file.category === 'Contents' && file.type === 'json'">
+                                            <button class="btn btn-sm btn-outline-primary" @click="openMediaModal(file.path, 'video')" title="下载视频">
+                                                <i class="bi bi-video"></i> <span x-text="getMediaCount(file, 'video')"></span>
+                                            </button>
+                                        </template>
+                                    </td>
+                                    <td>
+                                        <template x-if="file.category === 'Contents' && file.type === 'json'">
+                                            <button class="btn btn-sm btn-outline-success" @click="openMediaModal(file.path, 'music')" title="下载音频">
+                                                <i class="bi bi-music-note"></i> <span x-text="getMediaCount(file, 'music')"></span>
+                                            </button>
+                                        </template>
+                                    </td>
+                                    <td class="text-end pe-4">
+                                        <button class="btn btn-sm btn-outline-light me-1" @click="downloadFile(file.path)">下载</button>
+                                        <template x-if="file.category === 'Contents' && file.type === 'json'">
+                                            <div>
+                                                <button class="btn btn-sm btn-outline-warning me-1" @click="openProjectModal(file.path, 'crawl')">爬评论</button>
+                                                <button class="btn btn-sm btn-outline-info me-1" @click="reviewFile(file.path)">复查</button>
+                                            </div>
+                                        </template>
+                                        <template x-if="file.category === 'Comments' && file.type === 'json'">
+                                            <button class="btn btn-sm btn-outline-success" @click="openProjectModal(file.path, 'export')">导Excel</button>
+                                        </template>
+                                    </td>
+                                </tr>
+                            </template>
+                            <tr x-show="files.length === 0">
+                                <td colspan="7" class="text-center py-4 text-muted">暂无数据文件</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- JSON Editor Tab -->
+        <div x-show="currentTab === 'json-editor'" x-transition.opacity>
+            <h3 class="mb-4">配置文件编辑 (data.json)</h3>
+            
+            <div class="row">
+                <div class="col-md-8">
+                    <div class="card h-100">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <div class="btn-group" role="group">
+                                <button type="button" class="btn btn-sm" :class="editorMode === 'visual' ? 'btn-primary' : 'btn-outline-primary'" @click="switchEditorMode('visual')">可视化编辑</button>
+                                <button type="button" class="btn btn-sm" :class="editorMode === 'json' ? 'btn-primary' : 'btn-outline-primary'" @click="switchEditorMode('json')">源码编辑</button>
+                            </div>
+                            <div>
+                                <button class="btn btn-secondary btn-sm me-2" @click="fetchConfigRaw">重新加载</button>
+                                <button class="btn btn-success btn-sm" @click="saveConfigRaw">保存修改</button>
+                            </div>
+                        </div>
+                        <div class="card-body p-0">
+                            <!-- 源码编辑器 -->
+                            <textarea x-show="editorMode === 'json'" class="form-control border-0 bg-dark text-light font-monospace h-100" 
+                                      style="resize: none;" 
+                                      x-model="configRaw" 
+                                      spellcheck="false"></textarea>
+                            
+                            <!-- 可视化编辑器 -->
+                            <div x-show="editorMode === 'visual'" class="h-100 d-flex flex-column p-3">
+                                <div class="row h-100">
+                                    <!-- 左侧项目列表 -->
+                                    <div class="col-4 border-end border-secondary pe-3 h-100 d-flex flex-column">
+                                        <div class="d-flex justify-content-between align-items-center mb-2">
+                                            <h6 class="mb-0">项目列表</h6>
+                                            <button class="btn btn-sm btn-outline-success" @click="addProject"><i class="bi bi-plus"></i></button>
+                                        </div>
+                                        <div class="list-group flex-grow-1 overflow-auto">
+                                            <template x-for="(item, index) in visualConfig.items" :key="index">
+                                                <button type="button" 
+                                                        class="list-group-item list-group-item-action bg-dark text-light border-secondary py-2 d-flex justify-content-between align-items-center"
+                                                        :class="{'active': currentProjectIndex === index}"
+                                                        @click="currentProjectIndex = index">
+                                                    <span class="text-truncate" x-text="item.project || '未命名项目'"></span>
+                                                    <i class="bi bi-trash text-danger" @click.stop="deleteProject(index)"></i>
+                                                </button>
+                                            </template>
+                                        </div>
+                                    </div>
+                                    
+                                    <!-- 右侧表单 -->
+                                    <div class="col-8 ps-3 h-100 overflow-auto">
+                                        <template x-if="currentProjectIndex !== null && visualConfig.items && visualConfig.items[currentProjectIndex]">
+                                            <form class="needs-validation">
+                                                <div class="mb-3">
+                                                    <label class="form-label">项目名称</label>
+                                                    <input type="text" class="form-control" x-model="visualConfig.items[currentProjectIndex].project">
+                                                </div>
+                                                <div class="mb-3">
+                                                    <label class="form-label">用户名 (上传用)</label>
+                                                    <input type="text" class="form-control" x-model="visualConfig.items[currentProjectIndex].username">
+                                                </div>
+                                                <div class="row mb-3">
+                                                    <div class="col">
+                                                        <label class="form-label">评论不少于 (条)</label>
+                                                        <input type="number" class="form-control" x-model.number="visualConfig.items[currentProjectIndex]['评论不少于']">
+                                                    </div>
+                                                    <div class="col">
+                                                        <label class="form-label">作品天数 (天)</label>
+                                                        <input type="number" class="form-control" x-model.number="visualConfig.items[currentProjectIndex]['作品天数']">
+                                                    </div>
+                                                </div>
+                                                <div class="mb-3">
+                                                    <label class="form-label">搜索关键词 (逗号分隔)</label>
+                                                    <textarea class="form-control" rows="3" x-model="visualConfig.items[currentProjectIndex]['搜索关键词']"></textarea>
+                                                </div>
+                                                <div class="mb-3">
+                                                    <label class="form-label">屏蔽关键词 (逗号分隔)</label>
+                                                    <textarea class="form-control" rows="3" x-model="visualConfig.items[currentProjectIndex]['屏蔽关键词']"></textarea>
+                                                </div>
+                                                <div class="mb-3">
+                                                    <label class="form-label">有关视频判定</label>
+                                                    <textarea class="form-control" rows="3" x-model="visualConfig.items[currentProjectIndex]['有关视频判定']"></textarea>
+                                                </div>
+                                                <div class="mb-3">
+                                                    <label class="form-label">黑名单视频判定</label>
+                                                    <textarea class="form-control" rows="3" x-model="visualConfig.items[currentProjectIndex]['黑名单视频判定']"></textarea>
+                                                </div>
+                                            </form>
+                                        </template>
+                                        <template x-if="currentProjectIndex === null">
+                                            <div class="h-100 d-flex align-items-center justify-content-center text-muted">
+                                                请从左侧选择一个项目进行编辑
+                                            </div>
+                                        </template>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="col-md-4">
+                    <div class="card mb-4">
+                        <div class="card-header">备份管理</div>
+                        <div class="card-body">
+                            <button class="btn btn-outline-success w-100 mb-3" @click="createBackup">
+                                <i class="bi bi-plus-circle"></i> 创建新备份
+                            </button>
+                            
+                            <div class="list-group" style="max-height: 500px; overflow-y: auto;">
+                                <template x-for="backup in backups" :key="backup.name">
+                                    <div class="list-group-item bg-dark text-light border-secondary">
+                                        <div class="d-flex justify-content-between align-items-center mb-2">
+                                            <span class="fw-bold" x-text="formatDate(backup.created)"></span>
+                                            <span class="badge bg-secondary" x-text="formatSize(backup.size)"></span>
+                                        </div>
+                                        <div class="small text-muted mb-2" x-text="backup.name"></div>
+                                        <div class="d-flex gap-2">
+                                            <button class="btn btn-sm btn-outline-warning flex-grow-1" @click="restoreBackup(backup.name)">恢复</button>
+                                            <button class="btn btn-sm btn-outline-danger flex-grow-1" @click="deleteBackup(backup.name)">删除</button>
+                                        </div>
+                                    </div>
+                                </template>
+                                <div x-show="backups.length === 0" class="text-center text-muted py-3">
+                                    暂无备份
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Media Download Modal -->
+    <div class="modal fade" id="mediaModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="mediaModalTitle">下载媒体</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="selectAllMedia" onclick="toggleAllMedia(this)">
+                            <label class="form-check-label" for="selectAllMedia">全选</label>
+                        </div>
+                        <span class="text-muted">已选择: <span id="selectedMediaCount">0</span> 项</span>
+                    </div>
+                    <div class="list-group" id="mediaListContainer" style="max-height: 400px; overflow-y: auto;">
+                        <!-- Media items will be rendered here by JavaScript -->
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary" id="downloadSelectedBtn" onclick="downloadSelectedMedia()" disabled>
+                        <i class="bi bi-download me-1"></i>下载选中 (<span id="downloadSelectedCount">0</span>)
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Project Selection Modal -->
+    <div class="modal fade" id="projectModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" x-text="modalMode === 'crawl' ? '选择要爬取评论的项目' : '选择要导出的项目'"></h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-white small">请勾选需要处理的项目（支持排序）</p>
+                    
+                    <!-- Auto Upload Checkbox (Only for export) -->
+                    <template x-if="modalMode === 'export'">
+                        <div class="form-check form-switch mb-3">
+                            <input class="form-check-input" type="checkbox" id="autoUploadCheck" x-model="autoUpload">
+                            <label class="form-check-label" for="autoUploadCheck">导出后自动上传</label>
+                        </div>
+                    </template>
+
+                    <div class="list-group">
+                        <template x-for="(item, index) in modalProjects" :key="item.name">
+                            <div class="list-group-item bg-dark text-white border-secondary d-flex justify-content-between align-items-center">
+                                <div class="d-flex align-items-center flex-grow-1">
+                                    <input class="form-check-input me-2" type="checkbox" :value="item.name" x-model="selectedModalProjects">
+                                    <span x-text="item.name"></span>
+                                    <span class="badge bg-secondary rounded-pill ms-2" x-text="item.count"></span>
+                                </div>
+                                <div class="btn-group">
+                                    <button class="btn btn-sm btn-outline-secondary" @click="moveProjectUp(index)" :disabled="index === 0">
+                                        <i class="bi bi-arrow-up"></i>
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary" @click="moveProjectDown(index)" :disabled="index === modalProjects.length - 1">
+                                        <i class="bi bi-arrow-down"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary" @click="confirmBatchAction">确认执行</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Global state for media modal
+        window.currentMediaType = 'video';
+        window.currentMediaItems = [];
+        window.selectedMediaUrls = new Set();
+
+        function appData() {
+            return {
+                currentTab: 'dashboard',
+                isRunning: false,
+                logs: [],
+                batchProgress: '',
+                fileFilter: 'all',
+                files: [],
+                config: {
+                    platform: 'dy',
+                    login_type: 'qrcode',
+                    crawler_type: 'search',
+                    keywords: '',
+                    start_page: 1,
+                    headless: false,
+                    save_option: 'json',
+                    get_comment: false,
+                    get_sub_comment: false,
+                    specified_ids: '',
+                    creator_ids: '',
+                    cookie: '',
+                    dy_channel: 'video',
+                    dy_sort: 'latest',
+                    dy_publish_time: '1_week',
+                    autoRun: false,
+                    projects: {}
+                },
+                configRaw: '',
+                visualConfig: { items: [] },
+                editorMode: 'visual',
+                currentProjectIndex: null,
+                backups: [],
+                projectItems: [],
+                
+                serverIp: '',
+                
+                // QR Code Login state
+                qrcodeStatus: { has_state: false, message: '' },
+                qrcodeLoggingIn: false,
+                
+                // Modal state
+                modalMode: 'crawl', // 'crawl' or 'export'
+                modalFile: '',
+                modalProjects: [], // Array of {name, count}
+                selectedModalProjects: [],
+                projectModal: null,
+                autoUpload: true,
+
+                async init() {
+                    // Init Bootstrap Modals
+                    this.projectModal = new bootstrap.Modal(document.getElementById('projectModal'));
+                    window.mediaModalInstance = new bootstrap.Modal(document.getElementById('mediaModal'));
+                    
+                    // Load Config
+                    await this.loadConfig();
+                    
+                    // Start Log Polling
+                    setInterval(() => this.fetchLogs(), 1000);
+                    
+                    // Initial File Load
+                    this.fetchFiles();
+                    
+                    // Fetch Server IP
+                    this.fetchServerIp();
+                    
+                    // Fetch QR Code Login Status
+                    this.fetchQrcodeStatus();
+                },
+
+                async fetchServerIp() {
+                    try {
+                        const res = await fetch('/api/server/ip');
+                        const data = await res.json();
+                        if (data.ip) {
+                            this.serverIp = `${data.ip}:${data.port}`;
+                        }
+                    } catch (e) {
+                        console.error("Fetch server ip error", e);
+                    }
+                },
+
+                async loadConfig() {
+                    try {
+                        const res = await fetch('/api/config');
+                        const data = await res.json();
+                        if (data) {
+                            // Extract items for project list
+                            if (data.items) {
+                                this.projectItems = data.items;
+                                // Init projects state
+                                this.projectItems.forEach(item => {
+                                    if (this.config.projects[item.project] === undefined) {
+                                        this.config.projects[item.project] = true;
+                                    }
+                                });
+                            }
+                            
+                            // Load saved defaults if any logic exists (omitted for brevity, relying on user inputs)
+                            
+                            // Load autoRun
+                            if (data.autoRun !== undefined) {
+                                this.config.autoRun = data.autoRun;
+                            }
+                        }
+                    } catch (e) {
+                        console.error("Config load error", e);
+                    }
+                },
+
+                async fetchLogs() {
+                    try {
+                        const res = await fetch('/api/logs');
+                        const data = await res.json();
+                        if (data.logs && data.logs.length > 0) {
+                            this.logs.push(...data.logs);
+                            // Auto scroll
+                            this.$nextTick(() => {
+                                const el = document.querySelector('.table-responsive');
+                                if (el) el.scrollTop = el.scrollHeight;
+                            });
+                        }
+                        this.isRunning = data.is_running;
+                        this.batchProgress = data.batch_progress;
+                    } catch (e) {}
+                },
+
+                async fetchConfigRaw() {
+                    try {
+                        const res = await fetch('/api/config/raw');
+                        const data = await res.json();
+                        this.configRaw = data.content;
+                        // Initialize visual config
+                        this.syncToVisual();
+                    } catch (e) {
+                        console.error("Fetch raw config error", e);
+                    }
+                },
+                
+                switchEditorMode(mode) {
+                    if (mode === 'visual') {
+                        if (!this.syncToVisual()) return;
+                    } else {
+                        this.syncToJson();
+                    }
+                    this.editorMode = mode;
+                },
+                
+                syncToVisual() {
+                    try {
+                        let data = JSON.parse(this.configRaw || '{}');
+                        if (Array.isArray(data)) {
+                            data = data[0] || { items: [] };
+                        }
+                        if (!data.items) data.items = [];
+                        this.visualConfig = data;
+                        return true;
+                    } catch (e) {
+                        alert('JSON格式错误，无法切换到可视化模式: ' + e.message);
+                        return false;
+                    }
+                },
+                
+                syncToJson() {
+                    // Update raw config from visual object
+                    // We need to preserve other global keys if they exist in configRaw
+                    try {
+                        let currentRaw = JSON.parse(this.configRaw || '[{}]');
+                        let targetObj = Array.isArray(currentRaw) ? currentRaw[0] : currentRaw;
+                        
+                        targetObj.items = this.visualConfig.items;
+                        
+                        if (Array.isArray(currentRaw)) {
+                            currentRaw[0] = targetObj;
+                        } else {
+                            currentRaw = [targetObj]; // Standardize to list
+                        }
+                        
+                        this.configRaw = JSON.stringify(currentRaw, null, 4);
+                    } catch(e) {
+                        // Fallback
+                        this.configRaw = JSON.stringify([this.visualConfig], null, 4);
+                    }
+                },
+                
+                addProject() {
+                    this.visualConfig.items.push({
+                        "project": "新项目",
+                        "username": "外部导入",
+                        "评论不少于": 3,
+                        "作品天数": 30,
+                        "搜索关键词": "",
+                        "屏蔽关键词": "",
+                        "有关视频判定": "",
+                        "黑名单视频判定": ""
+                    });
+                    this.currentProjectIndex = this.visualConfig.items.length - 1;
+                },
+                
+                deleteProject(index) {
+                    if (!confirm('确定要删除该项目吗？')) return;
+                    this.visualConfig.items.splice(index, 1);
+                    if (this.currentProjectIndex === index) {
+                        this.currentProjectIndex = null;
+                    } else if (this.currentProjectIndex > index) {
+                        this.currentProjectIndex--;
+                    }
+                },
+
+                async saveConfigRaw() {
+                    // If in visual mode, sync to json first
+                    if (this.editorMode === 'visual') {
+                        this.syncToJson();
+                    }
+                    
+                    try {
+                        const res = await fetch('/api/config/raw', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({content: this.configRaw})
+                        });
+                        const data = await res.json();
+                        if (data.status === 'success') {
+                            alert('保存成功');
+                            // Reload parsed config to update UI
+                            this.loadConfig();
+                        } else {
+                            alert('保存失败: ' + data.message);
+                        }
+                    } catch (e) {
+                        alert('请求失败');
+                    }
+                },
+
+                async fetchBackups() {
+                    try {
+                        const res = await fetch('/api/config/backups');
+                        this.backups = await res.json();
+                    } catch (e) {
+                        console.error("Fetch backups error", e);
+                    }
+                },
+
+                async createBackup() {
+                    try {
+                        const res = await fetch('/api/config/backup/create', {method: 'POST'});
+                        const data = await res.json();
+                        if (data.status === 'success') {
+                            alert('备份成功');
+                            this.fetchBackups();
+                        } else {
+                            alert('备份失败: ' + data.message);
+                        }
+                    } catch (e) {
+                        alert('请求失败');
+                    }
+                },
+
+                async restoreBackup(filename) {
+                    if (!confirm(`确定要恢复备份 ${filename} 吗？当前配置将被覆盖。`)) return;
+                    try {
+                        const res = await fetch('/api/config/backup/restore', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({filename: filename})
+                        });
+                        const data = await res.json();
+                        if (data.status === 'success') {
+                            alert('恢复成功');
+                            this.fetchConfigRaw();
+                            this.loadConfig();
+                        } else {
+                            alert('恢复失败: ' + data.message);
+                        }
+                    } catch (e) {
+                        alert('请求失败');
+                    }
+                },
+
+                async deleteBackup(filename) {
+                    if (!confirm(`确定要删除备份 ${filename} 吗？此操作不可撤销。`)) return;
+                    try {
+                        const res = await fetch('/api/config/backup/delete', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({filename: filename})
+                        });
+                        const data = await res.json();
+                        if (data.status === 'success') {
+                            this.fetchBackups();
+                        } else {
+                            alert('删除失败: ' + data.message);
+                        }
+                    } catch (e) {
+                        alert('请求失败');
+                    }
+                },
+
+                async runCrawler() {
+                    this.currentTab = 'dashboard';
+                    try {
+                        const res = await fetch('/api/run', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify(this.config)
+                        });
+                        const data = await res.json();
+                        if (data.status === 'error') {
+                            alert(data.message);
+                        } else {
+                            this.logs = ['[SYSTEM] 正在启动...'];
+                        }
+                    } catch (e) {
+                        alert('启动失败');
+                    }
+                },
+
+                async stopCrawler() {
+                    await fetch('/api/stop', {method: 'POST'});
+                },
+
+                async fetchFiles() {
+                    const res = await fetch(`/api/files?filter=${this.fileFilter}`);
+                    this.files = await res.json();
+                },
+
+                formatSize(bytes) {
+                    if (bytes === 0) return '0 B';
+                    const k = 1024;
+                    const sizes = ['B', 'KB', 'MB', 'GB'];
+                    const i = Math.floor(Math.log(bytes) / Math.log(k));
+                    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+                },
+
+                formatDate(timestamp) {
+                    return new Date(timestamp * 1000).toLocaleString();
+                },
+                
+                parseLog(logStr) {
+                    // Expected format: [HH:MM:SS] [LEVEL] message
+                    // OR: [LEVEL] YYYY-MM-DD HH:MM:SS ... (from file logger)
+                    
+                    // Try standard format first: [HH:MM:SS] [LEVEL] message
+                    let regex = /^\[(\d{2}:\d{2}:\d{2})\] \[(.*?)\] (.*)$/;
+                    let match = logStr.match(regex);
+                    if (match) {
+                        return {
+                            time: match[1],
+                            level: match[2],
+                            message: match[3]
+                        };
+                    }
+                    
+                    // Try file logger format: [LEVEL] YYYY-MM-DD HH:MM:SS ...
+                    regex = /^\[(.*?)\]\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+(.*)$/;
+                    match = logStr.match(regex);
+                    if (match) {
+                        return {
+                            time: match[2].split(' ')[1], // Just HH:MM:SS
+                            level: match[1],
+                            message: match[3]
+                        };
+                    }
+                    
+                    // Try another format seen in user input: 00:42:35 INFO 2026-02-07 ...
+                    regex = /^(\d{2}:\d{2}:\d{2})\s+(.*?)\s+(.*)$/;
+                    match = logStr.match(regex);
+                    if (match) {
+                         return {
+                            time: match[1],
+                            level: match[2],
+                            message: match[3]
+                        };
+                    }
+
+                    // Fallback
+                    return {
+                        time: '',
+                        level: 'INFO',
+                        message: logStr
+                    };
+                },
+
+                downloadFile(path) {
+                    window.open(`/api/file/download?path=${encodeURIComponent(path)}`, '_blank');
+                },
+
+                async openProjectModal(filePath, mode) {
+                    this.modalMode = mode;
+                    this.modalFile = filePath;
+                    this.selectedModalProjects = [];
+                    this.modalProjects = [];
+                    
+                    // Analyze file
+                    try {
+                        const res = await fetch('/api/file/analyze', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({file_path: filePath})
+                        });
+                        const data = await res.json();
+                        // Convert object to array for sorting
+                        this.modalProjects = Object.entries(data)
+                            .map(([name, count]) => ({ name, count }))
+                            .sort((a, b) => a.name.localeCompare(b.name));
+                            
+                        this.selectedModalProjects = this.modalProjects.map(p => p.name); // Default select all
+                        this.projectModal.show();
+                    } catch (e) {
+                        alert('分析文件失败');
+                    }
+                },
+
+                moveProjectUp(index) {
+                    if (index > 0) {
+                        const temp = this.modalProjects[index];
+                        this.modalProjects[index] = this.modalProjects[index - 1];
+                        this.modalProjects[index - 1] = temp;
+                    }
+                },
+
+                moveProjectDown(index) {
+                    if (index < this.modalProjects.length - 1) {
+                        const temp = this.modalProjects[index];
+                        this.modalProjects[index] = this.modalProjects[index + 1];
+                        this.modalProjects[index + 1] = temp;
+                    }
+                },
+
+                async confirmBatchAction() {
+                    if (this.selectedModalProjects.length === 0) {
+                        alert('请至少选择一个项目');
+                        return;
+                    }
+                    
+                    // Filter and order selected projects based on current list order
+                    const orderedSelection = this.modalProjects
+                        .filter(p => this.selectedModalProjects.includes(p.name))
+                        .map(p => p.name);
+
+                    if (orderedSelection.length === 0) {
+                         alert('请至少选择一个项目');
+                         return;
+                    }
+                    
+                    const endpoint = this.modalMode === 'crawl' ? '/api/batch/run' : '/api/export/excel';
+                    
+                    try {
+                        const res = await fetch(endpoint, {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({
+                                file_path: this.modalFile,
+                                projects: orderedSelection,
+                                auto_upload: this.autoUpload
+                            })
+                        });
+                        const data = await res.json();
+                        alert(data.message);
+                        this.projectModal.hide();
+                        this.currentTab = 'dashboard';
+                    } catch (e) {
+                        alert('操作失败');
+                    }
+                },
+                
+                async reviewFile(path) {
+                    if (!confirm(`确定要复查文件吗？\n这将清空所有现有的pass状态并重新通过接口筛选。`)) return;
+                    try {
+                        const res = await fetch('/api/file/review', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({file_path: path})
+                        });
+                        const data = await res.json();
+                        if (data.status === 'success') {
+                            this.currentTab = 'dashboard';
+                            // alert(data.message); // Dashboard will show logs, maybe no need for alert, or alert is fine.
+                            // Let's rely on dashboard logs.
+                        } else {
+                            alert(data.message);
+                        }
+                    } catch (e) {
+                        alert('请求失败');
+                    }
+                },
+                
+                // QR Code Login Methods
+                async fetchQrcodeStatus() {
+                    try {
+                        const res = await fetch('/api/qrcode/status');
+                        this.qrcodeStatus = await res.json();
+                    } catch (e) {
+                        console.error('获取扫码登录状态失败', e);
+                    }
+                },
+                
+                async onLoginTypeChange() {
+                    if (this.config.login_type === 'qrcode') {
+                        await this.fetchQrcodeStatus();
+                    }
+                },
+                
+                async startQrcodeLogin() {
+                    if (this.isRunning) {
+                        alert('爬虫正在运行中，请先停止');
+                        return;
+                    }
+                    
+                    this.qrcodeLoggingIn = true;
+                    this.currentTab = 'dashboard';
+                    
+                    try {
+                        const res = await fetch('/api/qrcode/login', { method: 'POST' });
+                        const data = await res.json();
+                        
+                        if (data.status === 'success') {
+                            // 开始轮询状态
+                            this.pollQrcodeStatus();
+                        } else {
+                            alert(data.message);
+                            this.qrcodeLoggingIn = false;
+                        }
+                    } catch (e) {
+                        alert('启动扫码登录失败');
+                        this.qrcodeLoggingIn = false;
+                    }
+                },
+                
+                async pollQrcodeStatus() {
+                    // 轮询检查扫码状态
+                    const checkInterval = setInterval(async () => {
+                        await this.fetchQrcodeStatus();
+                        
+                        // 如果登录成功或超时，停止轮询
+                        if (this.qrcodeStatus.has_state) {
+                            clearInterval(checkInterval);
+                            this.qrcodeLoggingIn = false;
+                            alert('扫码登录成功！');
+                        }
+                    }, 3000);
+                    
+                    // 5分钟后自动停止轮询
+                    setTimeout(() => {
+                        clearInterval(checkInterval);
+                        if (this.qrcodeLoggingIn) {
+                            this.qrcodeLoggingIn = false;
+                        }
+                    }, 300000);
+                },
+                
+                async clearQrcodeLogin() {
+                    if (!confirm('确定要清除保存的登录状态吗？')) return;
+
+                    try {
+                        const res = await fetch('/api/qrcode/clear', { method: 'POST' });
+                        const data = await res.json();
+
+                        if (data.status === 'success') {
+                            this.qrcodeStatus = { has_state: false, message: '' };
+                        } else {
+                            alert(data.message);
+                        }
+                    } catch (e) {
+                        alert('清除登录状态失败');
+                    }
+                },
+
+                // Media Download Methods
+                async fetchMediaList(file_path, media_type) {
+                    try {
+                        const res = await fetch(`/api/media/list?file_path=${encodeURIComponent(file_path)}`);
+                        const data = await res.json();
+                        if (data.error) {
+                            console.error('获取媒体列表失败', data.error);
+                            return media_type === 'video' ? [] : [];
+                        }
+                        return media_type === 'video' ? (data.videos || []) : (data.musics || []);
+                    } catch (e) {
+                        console.error('获取媒体列表失败', e);
+                        return [];
+                    }
+                },
+
+                getMediaCount(file, media_type) {
+                    return '-';
+                },
+
+                async openMediaModal(file_path, media_type) {
+                    const title = media_type === 'video' ? '下载视频' : '下载音频';
+                    window.currentMediaType = media_type;
+
+                    document.getElementById('mediaModalTitle').textContent = title;
+                    window.currentMediaItems = [];
+                    window.selectedMediaUrls.clear();
+
+                    try {
+                        const res = await fetch(`/api/media/list?file_path=${encodeURIComponent(file_path)}`);
+                        const data = await res.json();
+
+                        if (data.error) {
+                            alert('获取媒体列表失败: ' + data.error);
+                            return;
+                        }
+
+                        window.currentMediaItems = media_type === 'video' ? (data.videos || []) : (data.musics || []);
+
+                        this.renderMediaList();
+                        this.updateMediaCount();
+                        window.mediaModalInstance.show();
+
+                    } catch (e) {
+                        alert('获取媒体列表失败: ' + e.message);
+                    }
+                },
+
+                renderMediaList() {
+                    const container = document.getElementById('mediaListContainer');
+                    container.innerHTML = '';
+
+                    if (window.currentMediaItems.length === 0) {
+                        container.innerHTML = '<div class="text-center text-muted py-4">暂无媒体文件</div>';
+                        return;
+                    }
+
+                    window.currentMediaItems.forEach((item, index) => {
+                        const div = document.createElement('div');
+                        div.className = 'list-group-item bg-dark text-white border-secondary d-flex justify-content-between align-items-center';
+                        div.innerHTML = `
+                            <div class="form-check flex-grow-1">
+                                <input class="form-check-input me-2" type="checkbox" value="${item.url}" onclick="onMediaCheckboxChange(this)">
+                                <span>${item.title || '无标题'}</span>
+                                <small class="text-muted ms-2">${item.aweme_id}</small>
+                            </div>
+                            <button class="btn btn-sm btn-outline-secondary" onclick="downloadSingleMediaItem('${item.url}', '${item.aweme_id}', '${item.filename || ''}')" title="下载">
+                                <i class="bi bi-download"></i>
+                            </button>
+                        `;
+                        container.appendChild(div);
+                    });
+                },
+
+                updateMediaCount() {
+                    const count = window.selectedMediaUrls.size;
+                    document.getElementById('selectedMediaCount').textContent = count;
+                    document.getElementById('downloadSelectedCount').textContent = count;
+                    document.getElementById('downloadSelectedBtn').disabled = count === 0;
+                },
+
+                downloadSelectedMedia() {
+                    if (window.selectedMediaUrls.size === 0) {
+                        alert('请至少选择一个媒体文件');
+                        return;
+                    }
+
+                    const type = window.currentMediaType;
+                    let delay = 0;
+
+                    window.currentMediaItems.forEach(item => {
+                        if (window.selectedMediaUrls.has(item.url)) {
+                            setTimeout(() => {
+                                downloadSingleMediaItem(item.url, item.aweme_id, item.filename || '');
+                            }, delay);
+                            delay += 500;
+                        }
+                    });
+
+                    window.mediaModalInstance.hide();
+                }
+
+            }
+        }
+    </script>
+    <script>
+        function onMediaCheckboxChange(checkbox) {
+            const url = checkbox.value;
+            if (checkbox.checked) {
+                window.selectedMediaUrls.add(url);
+            } else {
+                window.selectedMediaUrls.delete(url);
+            }
+            updateCheckboxStates();
+            const count = window.selectedMediaUrls.size;
+            document.getElementById('selectedMediaCount').textContent = count;
+            document.getElementById('downloadSelectedCount').textContent = count;
+            document.getElementById('downloadSelectedBtn').disabled = count === 0;
+        }
+
+        function updateCheckboxStates() {
+            const checkboxes = document.querySelectorAll('#mediaListContainer input[type="checkbox"]');
+            checkboxes.forEach(cb => {
+                cb.checked = window.selectedMediaUrls.has(cb.value);
+            });
+        }
+
+        function toggleAllMedia(checkbox) {
+            const checkboxes = document.querySelectorAll('#mediaListContainer input[type="checkbox"]');
+            if (checkbox.checked) {
+                window.currentMediaItems.forEach(item => {
+                    window.selectedMediaUrls.add(item.url);
+                });
+            } else {
+                window.selectedMediaUrls.clear();
+            }
+            updateCheckboxStates();
+            const count = window.selectedMediaUrls.size;
+            document.getElementById('selectedMediaCount').textContent = count;
+            document.getElementById('downloadSelectedCount').textContent = count;
+            document.getElementById('downloadSelectedBtn').disabled = count === 0;
+        }
+
+        function downloadSingleMediaItem(url, awemeId, filename) {
+            const type = window.currentMediaType;
+            if (!filename) {
+                filename = `${awemeId}_${type}`;
+            }
+            window.open(`/api/media/download?url=${encodeURIComponent(url)}&media_type=${type}&filename=${encodeURIComponent(filename)}`, '_blank');
+        }
+    </script>
+    <script src="/static/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

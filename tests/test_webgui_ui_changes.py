@@ -173,6 +173,9 @@ def test_breakdown_generation_requires_transcript_and_shows_progress():
     assert "breakdownGenerationIndeterminate" in html
     assert "elapsed_seconds" in html
     assert "this.breakdownGenerationRunning() ? 8" not in html
+    assert "tickBreakdownGenerationElapsed" in html
+    assert "formatBreakdownGenerationElapsed" in html
+    assert "`已等待 ${this.formatBreakdownGenerationElapsed(seconds)}`" in html
 
 
 def test_webgui_python_source_contains_no_mojibake_text():

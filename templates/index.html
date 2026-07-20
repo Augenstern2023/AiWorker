@@ -2118,7 +2118,7 @@
                 creative: {platform: 'dy', items: [], loading: false, error: '', breakdown: null},
                 topicLibrary: {platform: '', status: '', category: '', minScore: '', hasLocked: '', items: [], loading: false, error: '', breakdown: null},
                 breakdownEditor: {source: '', title: '', record: null, content: {}, fieldGuide: [], saving: false, error: ''},
-                breakdownGeneration: {topic: null, source: '', jobId: '', status: '', message: '', progress: {}, coverage: [], notifiedStatus: '', error: ''},
+                breakdownGeneration: {topic: null, source: '', jobId: '', status: '', message: '', progress: {}, coverage: [], notifiedStatus: '', error: '', startedAt: 0, elapsedSeconds: 0},
                 creativeWorkspace: {
                     projects: [], eligibleTopics: [], lockedBreakdowns: [], project: null, loading: false, error: '', step: 'blueprints',
                     create: {topic_id: '', breakdown_id: '', name: '', target_platform: '', target_episode_count: 20},
@@ -2200,6 +2200,7 @@
                     this.initTooltips();
                     setInterval(() => this.fetchLogs(), 1000);
                     setInterval(() => this.fetchJobs(), 2000);
+                    setInterval(() => this.tickBreakdownGenerationElapsed(), 1000);
                 },
 
                 initTooltips() {
@@ -2964,7 +2965,9 @@
                         progress: {completed: 0, total: 1},
                         coverage: [],
                         notifiedStatus: '',
-                        error: ''
+                        error: '',
+                        startedAt: Date.now(),
+                        elapsedSeconds: 0
                     };
                     try {
                         const res = await fetch('/api/creative/breakdowns', {
@@ -2988,6 +2991,9 @@
                         this.breakdownGeneration.message = data.job.message || '已加载剧目脚本，正在生成个性化拆解';
                         this.breakdownGeneration.progress = data.job.progress || {completed: 0, total: 1};
                         this.breakdownGeneration.coverage = data.coverage || [];
+                        this.breakdownGeneration.startedAt = Number(data.job.started_at || 0) > 0
+                            ? Number(data.job.started_at) * 1000
+                            : Date.now();
                         this.breakdownGenerationProgressModal.show();
                         await this.fetchJobs();
                     } catch (e) {
@@ -3008,6 +3014,13 @@
                     this.breakdownGeneration.status = job.status;
                     this.breakdownGeneration.message = job.message || this.breakdownGeneration.message;
                     this.breakdownGeneration.progress = job.progress || this.breakdownGeneration.progress || {};
+                    if (!this.breakdownGeneration.startedAt && Number(job.started_at || 0) > 0) {
+                        this.breakdownGeneration.startedAt = Number(job.started_at) * 1000;
+                    }
+                    this.breakdownGeneration.elapsedSeconds = Math.max(
+                        Number(this.breakdownGeneration.elapsedSeconds || 0),
+                        Number(job.progress?.elapsed_seconds || 0)
+                    );
                     if (job.progress?.coverage?.length) this.breakdownGeneration.coverage = job.progress.coverage;
                     if (!['succeeded', 'failed', 'cancelled'].includes(job.status) || this.breakdownGeneration.notifiedStatus === job.status) return;
                     this.breakdownGeneration.notifiedStatus = job.status;
@@ -3063,11 +3076,27 @@
 
                 breakdownGenerationProgressLabel() {
                     if (!this.breakdownGenerationIndeterminate()) return `${this.breakdownGenerationProgressPercent()}%`;
-                    const seconds = Number(this.breakdownGeneration.progress?.elapsed_seconds || 0);
-                    if (!seconds) return '处理中';
-                    const minutes = Math.floor(seconds / 60);
-                    const remainder = seconds % 60;
+                    const seconds = Math.max(
+                        Number(this.breakdownGeneration.elapsedSeconds || 0),
+                        Number(this.breakdownGeneration.progress?.elapsed_seconds || 0)
+                    );
+                    return `已等待 ${this.formatBreakdownGenerationElapsed(seconds)}`;
+                },
+
+                formatBreakdownGenerationElapsed(seconds) {
+                    const safeSeconds = Math.max(0, Math.floor(Number(seconds || 0)));
+                    const minutes = Math.floor(safeSeconds / 60);
+                    const remainder = safeSeconds % 60;
                     return minutes ? `${minutes}分${remainder}秒` : `${remainder}秒`;
+                },
+
+                tickBreakdownGenerationElapsed() {
+                    if (!this.breakdownGenerationRunning()) return;
+                    if (!this.breakdownGeneration.startedAt) this.breakdownGeneration.startedAt = Date.now();
+                    this.breakdownGeneration.elapsedSeconds = Math.max(
+                        Number(this.breakdownGeneration.elapsedSeconds || 0),
+                        Math.floor((Date.now() - this.breakdownGeneration.startedAt) / 1000)
+                    );
                 },
 
                 breakdownGenerationProgressPercent() {

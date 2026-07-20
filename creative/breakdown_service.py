@@ -81,6 +81,14 @@ def _validate_sources(
     normalized: dict[str, list[dict[str, Any]]] = {}
     for field in _TEXT_FIELDS | _ARRAY_FIELDS:
         items = value.get(field)
+        if field == "comment_resonance" and (
+            "未提供评论" in content[field] or "未验证评论" in content[field]
+        ):
+            normalized[field] = []
+            continue
+        if field == "risk_notes" and isinstance(items, list) and not items:
+            normalized[field] = []
+            continue
         if not isinstance(items, list) or (content.get(field) and not items):
             raise ValueError(f"field_sources.{field} 必须提供证据数组")
         normalized[field] = []

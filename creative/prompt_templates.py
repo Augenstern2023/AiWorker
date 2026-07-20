@@ -74,9 +74,11 @@ def breakdown_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
         " title、one_line_selling_point、category、target_audience、protagonist_identity、resistance_source、"
         "core_conflict、hook_points、selling_points、emotional_curve、reversal_nodes、comment_resonance、"
         "imitable_elements、production_difficulty、risk_notes。field_sources 按 content 字段名组织为证据数组，"
-        "每条证据必须包含 episode_number、source_path、excerpt，source_path 必须原样使用输入转写的路径，"
+        "每条事实证据必须包含 episode_number、source_path、excerpt，source_path 必须原样使用输入转写的路径，"
         "excerpt 必须是该集转写中的原文短句。只有部分集数时，要在 risk_notes 和 risks 中明确覆盖缺口；"
-        "没有评论正文时，comment_resonance 必须明确写出当前未提供评论正文，不能声称观众观点。"
+        "没有评论正文时，comment_resonance 必须明确写出当前未提供评论正文，不能声称观众观点，且该字段的"
+        " field_sources 返回空数组。risk_notes 如果只记录集数覆盖或资料缺口，也应返回空证据数组，不能伪造"
+        "原文摘录。"
         "数组字段必须返回 JSON 数组，文本字段必须返回字符串。",
         payload,
     )

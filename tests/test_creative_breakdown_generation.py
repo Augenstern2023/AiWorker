@@ -126,6 +126,43 @@ async def test_generation_rejects_comment_claims_without_comment_evidence():
     assert "未提供评论正文" in content["comment_resonance"]
 
 
+@pytest.mark.asyncio
+async def test_generation_does_not_require_transcript_excerpt_for_missing_comments():
+    payload = personalized_breakdown_payload()
+    payload["field_sources"]["comment_resonance"] = [{
+        "episode_number": 1,
+        "source_path": transcript_bundle()["episodes"][0]["script_path"],
+        "excerpt": "当前未提供评论正文",
+    }]
+    provider = SequentialProvider([payload])
+
+    _, sources, _, meta = await generate_breakdown(
+        provider,
+        {"title": transcript_bundle()["title"]},
+        transcript_bundle(),
+    )
+
+    assert sources["comment_resonance"] == []
+    assert meta["repair_attempted"] is False
+
+
+@pytest.mark.asyncio
+async def test_generation_allows_evidence_gap_risk_notes_without_fake_excerpt():
+    payload = personalized_breakdown_payload()
+    payload["field_sources"]["risk_notes"] = []
+    provider = SequentialProvider([payload])
+
+    content, sources, _, meta = await generate_breakdown(
+        provider,
+        {"title": transcript_bundle()["title"]},
+        transcript_bundle(),
+    )
+
+    assert content["risk_notes"]
+    assert sources["risk_notes"] == []
+    assert meta["repair_attempted"] is False
+
+
 def test_field_examples_come_from_current_breakdown():
     guide = personalize_breakdown_field_guide({
         "protagonist_identity": "苏软，穿书女配",

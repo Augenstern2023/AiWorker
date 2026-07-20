@@ -164,6 +164,7 @@ def test_breakdown_generation_requires_transcript_and_shows_progress():
     assert "openTopicDownload(breakdownGeneration.topic)" in html
     assert "breakdownGeneration.coverage" in html
     assert "payload?.breakdown_id" in html
+    assert "fetch(`/api/jobs/${job.job_id}`)" in html
     assert "createTopicLibraryBreakdown(topic) {" in html
     assert "return this.startTranscriptBreakdown(topic, 'topic-library')" in html
     assert "createCreativeBreakdown(topic) {" in html

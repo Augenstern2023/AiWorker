@@ -3015,7 +3015,12 @@
                         this.breakdownGeneration.error = `拆解生成${job.status === 'cancelled' ? '已取消' : '失败'}：${job.message || '请查看任务日志'}`;
                         return;
                     }
-                    const finished = [...(job.events || [])].reverse().find(event => event.event === 'job_finished' && event.payload?.breakdown_id);
+                    let completedJob = job;
+                    if (!(completedJob.events || []).length) {
+                        const detailResponse = await fetch(`/api/jobs/${job.job_id}`);
+                        if (detailResponse.ok) completedJob = await detailResponse.json();
+                    }
+                    const finished = [...(completedJob.events || [])].reverse().find(event => event.event === 'job_finished' && event.payload?.breakdown_id);
                     const breakdownId = finished?.payload?.breakdown_id;
                     if (!breakdownId) {
                         this.breakdownGeneration.error = '生成任务已结束，但未返回拆解版本，请查看任务日志。';

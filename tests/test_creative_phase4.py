@@ -1,0 +1,497 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) 2025 relakkes@gmail.com
+#
+# This file is part of MediaCrawler project.
+# Repository: https://github.com/NanmiCoder/MediaCrawler
+# GitHub: https://github.com/NanmiCoder
+# Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from core.job import CrawlJob
+from creative.api import register_creative_routes
+from creative.imitation_service import assess_similarity_risk
+from creative.repository import CreativeRepository
+from runtime.job_state import JobState
+
+
+def seed_adopted_topic(repository: CreativeRepository) -> tuple[dict, dict]:
+    topic = repository.upsert_topics([
+        {
+            "platform": "hg",
+            "job_id": "rank-1",
+            "source_path": "data/hg/rank.json",
+            "captured_at": "2026-07-17T10:00:00",
+            "title": "测试短剧",
+            "description": "普通人逆袭",
+            "category": "都市",
+            "rank_type": "热播榜",
+            "score": 88,
+            "confidence": "high",
+            "score_details": {},
+            "recommendation": "值得拆解",
+            "evidence": [{"source_type": "rank", "excerpt": "热播榜第 1"}],
+        }
+    ])[0]
+    topic = repository.update_topic(topic["id"], "adopted")
+    breakdown = repository.create_breakdown(
+        topic["id"],
+        {
+            "protagonist": "林小满",
+            "core_conflict": "林小满被家族排斥后依靠特殊能力翻身",
+            "hooks": ["当众退婚", "隐藏身份曝光"],
+        },
+        {"core_conflict": [{"source_type": "asr", "excerpt": "当众退婚"}]},
+        [],
+    )
+    breakdown = repository.lock_breakdown(breakdown["id"])
+    return topic, breakdown
+
+
+def test_project_requires_adopted_topic_and_locked_breakdown(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+
+    first = repository.create_project(topic["id"], breakdown["id"], "方向 A", 20)
+    second = repository.create_project(topic["id"], breakdown["id"], "方向 B", 30)
+
+    assert first["id"] != second["id"]
+    assert first["status"] == "created"
+    assert first["target_episode_count"] == 20
+    assert len(repository.list_projects(topic_id=topic["id"])) == 2
+
+
+def test_project_accepts_one_and_one_hundred_episode_boundaries(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+
+    one = repository.create_project(topic["id"], breakdown["id"], "单集", 1)
+    hundred = repository.create_project(topic["id"], breakdown["id"], "百集", 100)
+
+    assert one["target_episode_count"] == 1
+    assert hundred["target_episode_count"] == 100
+
+
+def test_project_brief_settings_are_editable_until_brief_is_locked(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "旧名称", 20)
+
+    updated = repository.update_project(project["id"], {
+        "name": "新名称", "genre": "家庭", "target_platform": "dy",
+        "target_audience": "25-40 岁女性", "target_episode_count": 30,
+        "episode_duration_seconds": 150,
+    })
+
+    assert updated["name"] == "新名称"
+    assert updated["target_episode_count"] == 30
+    blueprint = repository.create_blueprints(project["id"], [{
+        "content": {"title": "方向"}, "risk_score": 10, "risk_level": "low",
+    }])[0]
+    repository.lock_brief(blueprint["id"])
+    with pytest.raises(ValueError, match="锁定 Brief"):
+        repository.update_project(project["id"], {"target_episode_count": 40})
+
+
+def test_project_rejects_unadopted_topic_or_unlocked_breakdown(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+    repository.update_topic(topic["id"], "pending_review")
+
+    with pytest.raises(ValueError, match="采纳"):
+        repository.create_project(topic["id"], breakdown["id"], "不允许", 20)
+
+    repository.update_topic(topic["id"], "adopted")
+    draft = repository.create_breakdown(topic["id"], {}, {}, [])
+    with pytest.raises(ValueError, match="锁定"):
+        repository.create_project(topic["id"], draft["id"], "不允许", 20)
+
+
+def test_project_accepts_locked_breakdown_from_same_title_on_another_platform(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topics = repository.upsert_topics([
+        {
+            "platform": platform, "job_id": f"job-{platform}", "source_path": f"{platform}.json",
+            "captured_at": "2026-07-17", "title": "跨平台同名剧", "description": "",
+            "category": "都市", "rank_type": "热播榜", "score": 90 if platform == "dy" else 80,
+            "confidence": "high", "score_details": {}, "recommendation": "推荐", "evidence": [],
+        }
+        for platform in ("dy", "hg")
+    ])
+    dy_topic = repository.list_topics(platform="dy")[0]
+    hg_topic = repository.list_topics(platform="hg")[0]
+    repository.update_topic(dy_topic["id"], "adopted")
+    breakdown = repository.create_breakdown(hg_topic["id"], {"core_conflict": "冲突"}, {}, [])
+    repository.lock_breakdown(breakdown["id"])
+
+    project = repository.create_project(dy_topic["id"], breakdown["id"], "跨平台项目", 20)
+
+    assert project["topic_id"] == dy_topic["id"]
+    assert project["breakdown_id"] == breakdown["id"]
+
+
+def test_high_risk_blueprint_requires_difference_note_before_lock(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "新项目", 20)
+    blueprint = repository.create_blueprints(project["id"], [{
+        "content": {"title": "替代方向", "core_conflict": "新的冲突"},
+        "risk_score": 82,
+        "risk_level": "high",
+    }], job_id="creative-job")[0]
+
+    with pytest.raises(ValueError, match="差异化"):
+        repository.lock_brief(blueprint["id"], "")
+
+    locked = repository.lock_brief(blueprint["id"], "更换主角身份、时代背景和冲突解法")
+    assert locked["status"] == "brief_locked"
+    assert locked["difference_note"]
+    assert locked["content"]["project_name"] == "新项目"
+    assert locked["content"]["target_episode_count"] == 20
+    assert locked["content"]["episode_duration_seconds"] == 120
+    assert repository.get_project(project["id"])["status"] == "brief_locked"
+
+    with pytest.raises(ValueError, match="锁定"):
+        repository.update_blueprint(blueprint["id"], {"title": "不能修改"})
+
+
+def test_character_outline_and_beats_follow_locked_upstream_versions(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "新项目", 2)
+    blueprint = repository.create_blueprints(project["id"], [{
+        "content": {"title": "新方向"}, "risk_score": 20, "risk_level": "low",
+    }])[0]
+
+    with pytest.raises(ValueError, match="Brief"):
+        repository.create_character_batch(project["id"], [], [])
+
+    repository.lock_brief(blueprint["id"])
+    character_batch = repository.create_character_batch(
+        project["id"],
+        [{"name": "周晴", "identity": "社区调解员"}],
+        [{"from": "周晴", "to": "顾川", "relation": "对手"}],
+        job_id="character-job",
+    )
+
+    with pytest.raises(ValueError, match="人物关系"):
+        repository.create_outline_batch(project["id"], [{"episode": 1}], "arc")
+
+    repository.lock_character_batch(project["id"], character_batch["batch_id"])
+    outline_batch = repository.create_outline_batch(
+        project["id"],
+        [
+            {"episode": 1, "core_event": "双方第一次交锋"},
+            {"episode": 2, "core_event": "误会反转"},
+        ],
+        "相识、对抗、合作",
+        job_id="outline-job",
+    )
+    repository.lock_outline_batch(project["id"], outline_batch["batch_id"])
+    beats = repository.create_episode_beats(
+        project["id"],
+        1,
+        {"beats": [{"order": 1, "scene": "社区大厅", "goal": "说服居民"}]},
+        job_id="beats-job",
+    )
+    locked_beats = repository.lock_episode_beats(beats["id"])
+
+    detail = repository.get_project(project["id"])
+    assert locked_beats["status"] == "locked"
+    assert detail["locked_brief_id"] == blueprint["id"]
+    assert detail["character_batch_id"] == character_batch["batch_id"]
+    assert detail["outline_batch_id"] == outline_batch["batch_id"]
+    assert detail["episodes"][0]["upstream_refs"]["outline_batch_id"] == outline_batch["batch_id"]
+
+
+def test_character_update_survives_project_reload(tmp_path: Path):
+    client, repository, _ = build_phase4_client(tmp_path)
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "保存测试", 2)
+    blueprint = repository.create_blueprints(project["id"], [{
+        "content": {"title": "方向"}, "risk_score": 10, "risk_level": "low",
+    }])[0]
+    repository.lock_brief(blueprint["id"])
+    batch = repository.create_character_batch(project["id"], [{"name": "旧名字", "identity": "旧身份"}], [])
+    character = batch["characters"][0]
+
+    response = client.patch(
+        f"/api/creative/characters/{character['id']}",
+        json={"content": {**character["content"], "name": "新名字", "identity": "已保存身份"}},
+    )
+    reloaded = client.get(f"/api/creative/projects/{project['id']}")
+
+    assert response.status_code == 200
+    assert reloaded.status_code == 200
+    saved = next(item for item in reloaded.json()["characters"] if item["id"] == character["id"])
+    assert saved["content"]["name"] == "新名字"
+    assert saved["content"]["identity"] == "已保存身份"
+
+
+def test_outline_requires_exact_episode_range(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "边界测试", 2)
+    blueprint = repository.create_blueprints(project["id"], [{
+        "content": {"title": "新方向"}, "risk_score": 20, "risk_level": "low",
+    }])[0]
+    repository.lock_brief(blueprint["id"])
+    batch = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
+    repository.lock_character_batch(project["id"], batch["batch_id"])
+
+    with pytest.raises(ValueError, match="1-2"):
+        repository.create_outline_batch(project["id"], [{"episode": 2}, {"episode": 3}], "arc")
+
+
+def test_new_beats_version_points_to_parent_version(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "版本测试", 1)
+    blueprint = repository.create_blueprints(project["id"], [{
+        "content": {"title": "新方向"}, "risk_score": 10, "risk_level": "low",
+    }])[0]
+    repository.lock_brief(blueprint["id"])
+    people = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
+    repository.lock_character_batch(project["id"], people["batch_id"])
+    outlines = repository.create_outline_batch(project["id"], [{"episode": 1}], "arc")
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    first = repository.create_episode_beats(project["id"], 1, {"beats": []})
+    repository.lock_episode_beats(first["id"])
+
+    second = repository.create_episode_beats(project["id"], 1, {"beats": [{"order": 1}]})
+
+    assert second["version"] == 2
+    assert second["parent_version_id"] == first["id"]
+
+
+def test_locking_new_brief_keeps_history_but_invalidates_current_downstream(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "分支测试", 1)
+    first = repository.create_blueprints(project["id"], [{
+        "content": {"title": "方向一"}, "risk_score": 10, "risk_level": "low",
+    }])[0]
+    repository.lock_brief(first["id"])
+    people = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
+    repository.lock_character_batch(project["id"], people["batch_id"])
+    outlines = repository.create_outline_batch(project["id"], [{"episode": 1}], "arc")
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+
+    second = repository.create_blueprint_version(first["id"])
+    repository.update_blueprint(second["id"], {"title": "方向二"})
+    repository.lock_brief(second["id"])
+
+    detail = repository.get_project(project["id"])
+    assert detail["locked_brief_id"] == second["id"]
+    assert detail["character_batch_id"] is None
+    assert detail["outline_batch_id"] is None
+    assert any(item["batch_id"] == people["batch_id"] for item in detail["characters"])
+    assert any(item["batch_id"] == outlines["batch_id"] for item in detail["episodes"])
+
+
+def test_similarity_risk_uses_more_conservative_score():
+    result = assess_similarity_risk(
+        {"core_conflict": "林小满当众退婚后隐藏身份曝光"},
+        {"core_conflict": "林小满当众退婚后隐藏身份曝光", "risk_score": 30},
+    )
+
+    assert result["risk_score"] >= 70
+    assert result["risk_level"] == "high"
+    assert result["overlap_score"] >= result["model_score"]
+
+
+class RecordingJobManager:
+    def __init__(self):
+        self.created: list[dict] = []
+
+    def create_job(self, data: dict):
+        payload = dict(data)
+        payload.setdefault("job_id", f"creative-{len(self.created) + 1}")
+        self.created.append(payload)
+        return JobState(job=CrawlJob.from_dict(payload), status="running")
+
+
+def build_phase4_client(tmp_path: Path) -> tuple[TestClient, CreativeRepository, RecordingJobManager]:
+    runtime_dir = tmp_path / ".runtime"
+    manager = RecordingJobManager()
+    app = FastAPI()
+    register_creative_routes(app, root=tmp_path, runtime_dir=runtime_dir, job_manager=manager)
+    return TestClient(app), CreativeRepository(runtime_dir / "creative" / "creative.db"), manager
+
+
+def write_episode_script(root: Path, title: str, episode_number: int, text: str) -> Path:
+    episode = root / "data" / "hg" / "jobs" / "job-1" / "dramas" / title / f"episode_{episode_number:02d}"
+    episode.mkdir(parents=True, exist_ok=True)
+    (episode / "source.json").write_text(
+        '{"title":"' + title + '","episode":{"episode":' + str(episode_number) + "}}",
+        encoding="utf-8",
+    )
+    script = episode / "script.md"
+    script.write_text("## 转写内容\n\n" + text, encoding="utf-8")
+    return script
+
+
+def test_phase4_api_creates_multiple_projects_and_lists_them(tmp_path: Path):
+    client, repository, _ = build_phase4_client(tmp_path)
+    topic, breakdown = seed_adopted_topic(repository)
+
+    first = client.post("/api/creative/projects", json={
+        "topic_id": topic["id"], "breakdown_id": breakdown["id"],
+        "name": "都市方向", "target_episode_count": 20,
+    })
+    second = client.post("/api/creative/projects", json={
+        "topic_id": topic["id"], "breakdown_id": breakdown["id"],
+        "name": "年代方向", "target_episode_count": 30,
+    })
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    updated = client.patch(f"/api/creative/projects/{first.json()['id']}", json={"target_audience": "女性用户"})
+    assert updated.status_code == 200
+    assert updated.json()["target_audience"] == "女性用户"
+    payload = client.get(f"/api/creative/projects?topic_id={topic['id']}").json()
+    assert {item["name"] for item in payload["items"]} == {"年代方向", "都市方向"}
+
+
+def test_breakdown_api_returns_personalized_field_writing_guide(tmp_path: Path):
+    client, repository, _ = build_phase4_client(tmp_path)
+    _, breakdown = seed_adopted_topic(repository)
+
+    response = client.get(f"/api/creative/breakdowns/{breakdown['id']}")
+
+    assert response.status_code == 200
+    guide = response.json()["field_guide"]
+    assert len(guide) == 15
+    assert next(item for item in guide if item["key"] == "hook_points")["evidence_rule"]
+    assert next(item for item in guide if item["key"] == "core_conflict")["example"] == breakdown["content"]["core_conflict"]
+
+
+def test_breakdown_api_requires_at_least_one_transcript(tmp_path: Path):
+    client, repository, manager = build_phase4_client(tmp_path)
+    topic, locked = seed_adopted_topic(repository)
+
+    response = client.post("/api/creative/breakdowns", json={"topic_id": topic["id"]})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "transcript_required",
+        "message": "请先下载剧目脚本再拆解",
+        "topic_id": topic["id"],
+        "title": topic["title"],
+    }
+    assert manager.created == []
+    with repository._connect() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM creative_breakdowns WHERE topic_id = ?", (topic["id"],)).fetchone()[0]
+    assert count == 1
+    assert repository.get_breakdown(locked["id"])["status"] == "locked"
+
+
+def test_breakdown_api_enqueues_job_when_transcript_exists(tmp_path: Path):
+    client, repository, manager = build_phase4_client(tmp_path)
+    topic, _ = seed_adopted_topic(repository)
+    write_episode_script(tmp_path, topic["title"], 1, "林小满在宴会上公开拒绝家族安排。")
+
+    response = client.post("/api/creative/breakdowns", json={"topic_id": topic["id"]})
+
+    assert response.status_code == 200
+    assert response.json()["job"]["status"] == "running"
+    assert response.json()["coverage"] == [1]
+    assert manager.created[0]["crawler_type"] == "breakdown_generate"
+    assert manager.created[0]["extra"]["topic_id"] == topic["id"]
+    assert manager.created[0]["extra"]["workspace_root"] == str(tmp_path.resolve())
+
+
+def test_breakdown_api_lists_locked_versions_for_project_source_selection(tmp_path: Path):
+    client, repository, _ = build_phase4_client(tmp_path)
+    topic, first = seed_adopted_topic(repository)
+    second = repository.create_breakdown(topic["id"], {"core_conflict": "新版冲突"}, {}, [], parent_version_id=first["id"])
+    second = repository.lock_breakdown(second["id"])
+
+    response = client.get(f"/api/creative/topics/{topic['id']}/breakdowns?status=locked")
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["items"]] == [second["id"], first["id"]]
+    assert [item["version"] for item in response.json()["items"]] == [2, 1]
+
+
+def test_phase4_generation_api_enqueues_standard_creative_job(tmp_path: Path):
+    client, repository, manager = build_phase4_client(tmp_path)
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "测试项目", 20)
+
+    response = client.post(
+        f"/api/creative/projects/{project['id']}/blueprints/generate",
+        json={"count": 4},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["job"]["status"] == "running"
+    assert manager.created[0]["platform"] == "creative"
+    assert manager.created[0]["crawler_type"] == "phase4_generate"
+    assert manager.created[0]["extra"]["action"] == "blueprints"
+    assert manager.created[0]["extra"]["count"] == 4
+
+
+def test_phase4_export_returns_markdown_and_json(tmp_path: Path):
+    client, repository, _ = build_phase4_client(tmp_path)
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "导出项目", 20)
+    blueprint = repository.create_blueprints(project["id"], [{
+        "content": {"title": "新方向", "core_conflict": "新的冲突"},
+        "risk_score": 20,
+        "risk_level": "low",
+    }])[0]
+    repository.lock_brief(blueprint["id"])
+
+    markdown = client.get(f"/api/creative/projects/{project['id']}/export?stage=brief&format=md")
+    json_response = client.get(f"/api/creative/projects/{project['id']}/export?stage=brief&format=json")
+
+    assert markdown.status_code == 200
+    assert "# 导出项目" in markdown.text
+    assert "新的冲突" in markdown.text
+    assert json_response.status_code == 200
+    assert json_response.json()["stage"] == "brief"
+
+
+def test_beats_markdown_export_uses_chinese_fields_and_includes_field_guide(tmp_path: Path):
+    client, repository, _ = build_phase4_client(tmp_path)
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "节拍导出", 1)
+    blueprint = repository.create_blueprints(project["id"], [{
+        "content": {"title": "方向"}, "risk_score": 10, "risk_level": "low",
+    }])[0]
+    repository.lock_brief(blueprint["id"])
+    characters = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(project["id"], [{"episode": 1}], "单集弧线")
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    repository.create_episode_beats(project["id"], 1, {"beats": [{
+        "order": 1,
+        "scene": "早餐店",
+        "characters": ["主角"],
+        "goal": "拿到账本",
+        "obstacle": "家人阻挠",
+        "emotion_change": "隐忍到坚定",
+        "turn": "旧账本出现",
+        "hook": "陌生通知到达",
+    }]})
+
+    response = client.get(f"/api/creative/projects/{project['id']}/export?stage=beats&format=md")
+
+    assert response.status_code == 200
+    assert "## 字段说明" in response.text
+    assert "**节拍序号**" in response.text
+    assert "**场景**" in response.text
+    assert "**出场人物**" in response.text
+    assert "**行动目标**" in response.text
+    assert "**情绪变化**" in response.text
+    assert "**结尾钩子**" in response.text
+    assert "用于说明该节拍发生的具体地点和情境" in response.text
+    assert "**order**" not in response.text
+    assert "**episode number**" not in response.text

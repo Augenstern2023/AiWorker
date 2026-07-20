@@ -169,6 +169,10 @@ def test_breakdown_generation_requires_transcript_and_shows_progress():
     assert "return this.startTranscriptBreakdown(topic, 'topic-library')" in html
     assert "createCreativeBreakdown(topic) {" in html
     assert "return this.startTranscriptBreakdown(topic, 'creative')" in html
+    assert "breakdownGenerationProgressLabel" in html
+    assert "breakdownGenerationIndeterminate" in html
+    assert "elapsed_seconds" in html
+    assert "this.breakdownGenerationRunning() ? 8" not in html
 
 
 def test_webgui_python_source_contains_no_mojibake_text():

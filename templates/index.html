@@ -2000,9 +2000,9 @@
                 </div>
                 <div class="modal-body">
                     <div class="small text-info mb-2" x-show="breakdownGeneration.coverage.length" x-text="`已加载第 ${breakdownGeneration.coverage.join('、')} 集剧目脚本`"></div>
-                    <div class="d-flex justify-content-between small mb-1"><span x-text="breakdownGeneration.message || '正在创建生成任务'"></span><strong x-text="`${breakdownGenerationProgressPercent()}%`"></strong></div>
+                    <div class="d-flex justify-content-between small mb-1"><span x-text="breakdownGeneration.message || '正在创建生成任务'"></span><strong x-text="breakdownGenerationProgressLabel()"></strong></div>
                     <div class="progress" role="progressbar" aria-label="拆解生成进度">
-                        <div class="progress-bar progress-bar-striped" :class="{'progress-bar-animated': breakdownGenerationRunning(), 'bg-danger': breakdownGeneration.status === 'failed'}" :style="`width: ${breakdownGenerationProgressPercent()}%`"></div>
+                        <div class="progress-bar progress-bar-striped" :class="{'progress-bar-animated': breakdownGenerationRunning(), 'bg-danger': breakdownGeneration.status === 'failed'}" :style="`width: ${breakdownGenerationIndeterminate() ? 100 : breakdownGenerationProgressPercent()}%`"></div>
                     </div>
                     <div class="alert alert-danger py-2 mt-3 mb-0" x-show="breakdownGeneration.error" x-text="breakdownGeneration.error"></div>
                 </div>
@@ -3054,11 +3054,27 @@
                     return ['failed', 'cancelled'].includes(this.breakdownGeneration.status);
                 },
 
+                breakdownGenerationIndeterminate() {
+                    if (!this.breakdownGenerationRunning()) return false;
+                    const progress = this.breakdownGeneration.progress || {};
+                    if (progress.indeterminate) return true;
+                    return Number(progress.completed || 0) === 0 && Number(progress.total || 0) <= 1;
+                },
+
+                breakdownGenerationProgressLabel() {
+                    if (!this.breakdownGenerationIndeterminate()) return `${this.breakdownGenerationProgressPercent()}%`;
+                    const seconds = Number(this.breakdownGeneration.progress?.elapsed_seconds || 0);
+                    if (!seconds) return '处理中';
+                    const minutes = Math.floor(seconds / 60);
+                    const remainder = seconds % 60;
+                    return minutes ? `${minutes}分${remainder}秒` : `${remainder}秒`;
+                },
+
                 breakdownGenerationProgressPercent() {
                     const progress = this.breakdownGeneration.progress || {};
                     const total = Number(progress.total || 0);
                     if (total) return Math.min(100, Math.round(Number(progress.completed || 0) * 100 / total));
-                    return this.breakdownGenerationRunning() ? 8 : (this.breakdownGeneration.status === 'succeeded' ? 100 : 0);
+                    return this.breakdownGeneration.status === 'succeeded' ? 100 : 0;
                 },
 
                 async openBreakdownTaskLog() {

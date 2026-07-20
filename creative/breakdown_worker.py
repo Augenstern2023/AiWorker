@@ -24,6 +24,9 @@ from creative.repository import CreativeRepository
 from creative.transcript_assets import find_transcript_bundle
 
 
+HEARTBEAT_SECONDS = 15.0
+
+
 def create_provider():
     return create_llm_provider_from_config(config)
 
@@ -46,6 +49,28 @@ def emit(
         payload or {},
         log_dir=runtime_dir / "logs",
     )
+
+
+async def emit_analysis_heartbeats(job: CrawlJob, coverage: list[int], stop: asyncio.Event) -> None:
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+    while not stop.is_set():
+        elapsed = max(0, int(loop.time() - started_at))
+        emit(
+            job,
+            "progress",
+            f"模型正在分析剧目脚本，已等待 {elapsed} 秒",
+            payload={
+                "stage": "model_analysis",
+                "indeterminate": True,
+                "elapsed_seconds": elapsed,
+                "coverage": coverage,
+            },
+        )
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_SECONDS)
+        except asyncio.TimeoutError:
+            continue
 
 
 async def run(job: CrawlJob) -> None:
@@ -73,7 +98,19 @@ async def run(job: CrawlJob) -> None:
         payload={"stage": "breakdown", "completed": 0, "total": 1, "coverage": coverage},
     )
 
-    content, sources, risks, meta = await generate_breakdown(create_provider(), topic, bundle)
+    heartbeat_stop = asyncio.Event()
+    heartbeat_task = asyncio.create_task(emit_analysis_heartbeats(job, coverage, heartbeat_stop))
+    try:
+        content, sources, risks, meta = await generate_breakdown(create_provider(), topic, bundle)
+    finally:
+        heartbeat_stop.set()
+        await heartbeat_task
+    emit(
+        job,
+        "progress",
+        "模型分析完成，正在校验并保存拆解",
+        payload={"stage": "persisting", "completed": 9, "total": 10, "coverage": coverage},
+    )
     locked = repository.get_latest_locked_breakdown(topic_id)
     breakdown = repository.create_breakdown(
         topic_id,

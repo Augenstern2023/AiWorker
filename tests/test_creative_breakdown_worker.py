@@ -27,6 +27,12 @@ class Provider:
         return self.response
 
 
+class SlowProvider(Provider):
+    async def complete_json(self, messages):
+        await asyncio.sleep(0.04)
+        return self.response
+
+
 def seed_topic(repository: CreativeRepository) -> tuple[dict, dict]:
     topic = repository.upsert_topics([{
         "platform": "hg", "job_id": "rank", "source_path": "rank.json",
@@ -132,3 +138,25 @@ def test_breakdown_worker_does_not_create_partial_draft_on_generation_failure(tm
     with repository._connect() as conn:
         count = conn.execute("SELECT COUNT(*) FROM creative_breakdowns WHERE topic_id = ?", (topic["id"],)).fetchone()[0]
     assert count == 1
+
+
+def test_breakdown_worker_emits_model_analysis_heartbeats(tmp_path, monkeypatch):
+    db_path = tmp_path / ".runtime/creative/creative.db"
+    repository = CreativeRepository(db_path)
+    topic, _ = seed_topic(repository)
+    script_path = write_script(tmp_path)
+    monkeypatch.setattr(breakdown_worker, "HEARTBEAT_SECONDS", 0.01)
+    monkeypatch.setattr(breakdown_worker, "create_provider", lambda: SlowProvider(generated_payload(script_path)))
+    events = []
+    monkeypatch.setattr(breakdown_worker, "emit_event", lambda *args, **kwargs: events.append((args, kwargs)))
+    job = CrawlJob(
+        job_id="breakdown-heartbeat", platform="creative", crawler_type="breakdown_generate",
+        extra={"topic_id": topic["id"], "db_path": str(db_path), "workspace_root": str(tmp_path)},
+    )
+
+    asyncio.run(breakdown_worker.run(job))
+
+    heartbeats = [args for args, _ in events if args[0] == "progress" and args[6].get("indeterminate")]
+    assert heartbeats
+    assert heartbeats[-1][6]["stage"] == "model_analysis"
+    assert heartbeats[-1][6]["elapsed_seconds"] >= 0

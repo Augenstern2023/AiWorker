@@ -81,6 +81,9 @@ def _validate_sources(
     normalized: dict[str, list[dict[str, Any]]] = {}
     for field in _TEXT_FIELDS | _ARRAY_FIELDS:
         items = value.get(field)
+        if field == "title":
+            normalized[field] = []
+            continue
         if field == "comment_resonance" and (
             "未提供评论" in content[field] or "未验证评论" in content[field]
         ):
@@ -159,6 +162,17 @@ async def generate_breakdown(
         lambda response: _validate_breakdown_payload(response, title, source_index),
     )
     content, sources, risks = result
+    metadata_episode = min(episodes, key=lambda item: int(item.get("episode_number") or 0))
+    sources["title"] = [{
+        "episode_number": int(metadata_episode.get("episode_number") or 1),
+        "source_path": str(
+            metadata_episode.get("metadata_path")
+            or metadata_episode.get("script_path")
+            or metadata_episode.get("transcript_path")
+            or ""
+        ),
+        "excerpt": title,
+    }]
     return content, sources, risks, {
         **meta,
         "prompt_version": BREAKDOWN_PROMPT_TEMPLATE_VERSION,

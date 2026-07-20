@@ -163,6 +163,26 @@ async def test_generation_allows_evidence_gap_risk_notes_without_fake_excerpt():
     assert meta["repair_attempted"] is False
 
 
+@pytest.mark.asyncio
+async def test_generation_uses_metadata_as_deterministic_title_evidence():
+    payload = personalized_breakdown_payload()
+    payload["field_sources"]["title"] = []
+    provider = SequentialProvider([payload])
+
+    _, sources, _, meta = await generate_breakdown(
+        provider,
+        {"title": transcript_bundle()["title"]},
+        transcript_bundle(),
+    )
+
+    assert sources["title"] == [{
+        "episode_number": 1,
+        "source_path": transcript_bundle()["episodes"][0]["metadata_path"],
+        "excerpt": transcript_bundle()["title"],
+    }]
+    assert meta["repair_attempted"] is False
+
+
 def test_field_examples_come_from_current_breakdown():
     guide = personalize_breakdown_field_guide({
         "protagonist_identity": "苏软，穿书女配",

@@ -178,6 +178,19 @@ def test_breakdown_generation_requires_transcript_and_shows_progress():
     assert "`已等待 ${this.formatBreakdownGenerationElapsed(seconds)}`" in html
 
 
+def test_existing_breakdown_opens_without_generation_and_regeneration_is_explicit():
+    html = Path("templates/index.html").read_text(encoding="utf-8")
+
+    assert "data.status === 'existing'" in html
+    assert "data.breakdown" in html
+    assert "this.breakdownGeneration.status = 'existing'" in html
+    assert "openBreakdownEditor(source, topic.title, data.breakdown)" in html
+    assert "regenerateCurrentBreakdown" in html
+    assert "force_regenerate: forceRegenerate" in html
+    assert "startTranscriptBreakdown(topic, source, true)" in html
+    assert ">重新生成</button>" in html
+
+
 def test_webgui_python_source_contains_no_mojibake_text():
     source = Path("WebGUI.py").read_text(encoding="utf-8")
     mojibake_tokens = (

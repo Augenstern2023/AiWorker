@@ -54,6 +54,16 @@ def seed_adopted_topic(repository: CreativeRepository) -> tuple[dict, dict]:
     return topic, breakdown
 
 
+def seed_topic_without_breakdown(repository: CreativeRepository, title: str = "首次拆解短剧") -> dict:
+    topic = repository.upsert_topics([{
+        "platform": "hg", "job_id": f"rank-{title}", "source_path": f"data/hg/{title}.json",
+        "captured_at": "2026-07-20", "title": title, "description": "首次生成",
+        "category": "都市", "rank_type": "热播榜", "score": 80, "confidence": "high",
+        "score_details": {}, "recommendation": "值得拆解", "evidence": [],
+    }])[0]
+    return repository.update_topic(topic["id"], "adopted")
+
+
 def test_project_requires_adopted_topic_and_locked_breakdown(tmp_path: Path):
     repository = CreativeRepository(tmp_path / "creative.db")
     topic, breakdown = seed_adopted_topic(repository)
@@ -372,9 +382,38 @@ def test_breakdown_api_returns_personalized_field_writing_guide(tmp_path: Path):
     assert next(item for item in guide if item["key"] == "core_conflict")["example"] == breakdown["content"]["core_conflict"]
 
 
-def test_breakdown_api_requires_at_least_one_transcript(tmp_path: Path):
+def test_repository_latest_breakdown_includes_newest_draft(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, locked = seed_adopted_topic(repository)
+    draft = repository.create_breakdown(
+        topic["id"], {"core_conflict": "最新草稿冲突"}, {}, [], parent_version_id=locked["id"],
+    )
+
+    latest = repository.get_latest_breakdown(topic["id"])
+
+    assert latest["id"] == draft["id"]
+    assert latest["status"] == "draft"
+
+
+def test_breakdown_api_reuses_latest_version_without_creating_job(tmp_path: Path):
     client, repository, manager = build_phase4_client(tmp_path)
     topic, locked = seed_adopted_topic(repository)
+    draft = repository.create_breakdown(
+        topic["id"], {"core_conflict": "最新草稿冲突"}, {}, [], parent_version_id=locked["id"],
+    )
+
+    response = client.post("/api/creative/breakdowns", json={"topic_id": topic["id"]})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "existing"
+    assert response.json()["breakdown"]["id"] == draft["id"]
+    assert response.json()["breakdown"]["field_guide"]
+    assert manager.created == []
+
+
+def test_breakdown_api_requires_at_least_one_transcript(tmp_path: Path):
+    client, repository, manager = build_phase4_client(tmp_path)
+    topic = seed_topic_without_breakdown(repository)
 
     response = client.post("/api/creative/breakdowns", json={"topic_id": topic["id"]})
 
@@ -388,13 +427,12 @@ def test_breakdown_api_requires_at_least_one_transcript(tmp_path: Path):
     assert manager.created == []
     with repository._connect() as conn:
         count = conn.execute("SELECT COUNT(*) FROM creative_breakdowns WHERE topic_id = ?", (topic["id"],)).fetchone()[0]
-    assert count == 1
-    assert repository.get_breakdown(locked["id"])["status"] == "locked"
+    assert count == 0
 
 
 def test_breakdown_api_enqueues_job_when_transcript_exists(tmp_path: Path):
     client, repository, manager = build_phase4_client(tmp_path)
-    topic, _ = seed_adopted_topic(repository)
+    topic = seed_topic_without_breakdown(repository)
     write_episode_script(tmp_path, topic["title"], 1, "林小满在宴会上公开拒绝家族安排。")
 
     response = client.post("/api/creative/breakdowns", json={"topic_id": topic["id"]})
@@ -405,6 +443,20 @@ def test_breakdown_api_enqueues_job_when_transcript_exists(tmp_path: Path):
     assert manager.created[0]["crawler_type"] == "breakdown_generate"
     assert manager.created[0]["extra"]["topic_id"] == topic["id"]
     assert manager.created[0]["extra"]["workspace_root"] == str(tmp_path.resolve())
+
+
+def test_breakdown_api_force_regenerate_enqueues_job_for_existing_version(tmp_path: Path):
+    client, repository, manager = build_phase4_client(tmp_path)
+    topic, _ = seed_adopted_topic(repository)
+    write_episode_script(tmp_path, topic["title"], 1, "林小满在宴会上公开拒绝家族安排。")
+
+    response = client.post("/api/creative/breakdowns", json={
+        "topic_id": topic["id"], "force_regenerate": True,
+    })
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    assert manager.created[0]["crawler_type"] == "breakdown_generate"
 
 
 def test_breakdown_api_lists_locked_versions_for_project_source_selection(tmp_path: Path):

@@ -49,6 +49,7 @@ class TopicUpdateRequest(BaseModel):
 
 class BreakdownCreateRequest(BaseModel):
     topic_id: int
+    force_regenerate: bool = False
 
 
 class BreakdownUpdateRequest(BaseModel):
@@ -357,6 +358,11 @@ def build_creative_router(
         topic = repository.get_topic(payload.topic_id)
         if not topic:
             raise HTTPException(404, "topic not found")
+        if not payload.force_regenerate:
+            existing = repository.get_latest_breakdown(payload.topic_id)
+            if existing:
+                existing["field_guide"] = personalize_breakdown_field_guide(existing["content"])
+                return {"status": "existing", "breakdown": existing}
         bundle = find_transcript_bundle(workspace_root, topic["title"], topic.get("platform") or "")
         episodes = bundle.get("episodes") or []
         if not episodes:

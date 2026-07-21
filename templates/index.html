@@ -1220,9 +1220,10 @@
                     </div>
                 </div>
 
-                <div class="border-bottom pb-3 mb-3" x-show="creativeWorkspace.jobId">
-                    <div class="d-flex justify-content-between align-items-center mb-2"><span class="small fw-semibold" x-text="creativeWorkspace.jobMessage || '后台生成中'"></span><span class="small text-muted" x-text="creativeProgressText()"></span></div>
-                    <div class="progress mb-2" style="height:8px"><div class="progress-bar" :style="`width:${creativeProgressPercent()}%`"></div></div>
+                <div class="border-bottom pb-3 mb-3" x-show="creativeWorkspace.startingAction || creativeWorkspace.jobId" x-cloak role="status" aria-live="polite">
+                    <div class="d-flex justify-content-between align-items-center mb-1"><span class="small fw-semibold" x-text="creativeWorkspace.jobMessage || '后台生成中'"></span><span class="small text-muted" x-text="creativeProgressText()"></span></div>
+                    <div class="small text-muted mb-2" x-text="creativeProgressElapsedText()"></div>
+                    <div class="progress mb-2" style="height:8px" role="progressbar" :aria-valuenow="creativeProgressIndeterminate() ? null : creativeProgressPercent()"><div class="progress-bar" :class="{'progress-bar-striped progress-bar-animated': creativeProgressIndeterminate(), 'bg-danger': creativeWorkspace.jobStatus === 'failed'}" :style="`width:${creativeProgressIndeterminate() ? 100 : creativeProgressPercent()}%`"></div></div>
                     <div class="d-flex gap-2">
                         <button class="btn btn-sm btn-outline-warning" x-show="!creativeWorkspace.paused && creativeJobRunning()" @click="pauseCreativeJob"><i class="bi bi-pause-fill me-1"></i>暂停</button>
                         <button class="btn btn-sm btn-outline-success" x-show="creativeWorkspace.paused && creativeJobRunning()" @click="resumeCreativeJob"><i class="bi bi-play-fill me-1"></i>继续</button>
@@ -1233,7 +1234,7 @@
                 </div>
 
                 <div x-show="creativeWorkspace.step === 'blueprints'">
-                    <div class="d-flex justify-content-between align-items-end mb-3"><div><h5 class="mb-1">仿制方向与 Brief</h5><div class="small text-muted">只借鉴结构和爽点，不复制剧情、人设、台词或具体表达</div></div><div class="d-flex gap-2 align-items-end"><div><label class="form-label small">方向数量</label><select class="form-select form-select-sm" x-model.number="creativeWorkspace.directionCount"><option :value="3">3</option><option :value="4">4</option><option :value="5">5</option></select></div><button class="btn btn-primary btn-sm" @click="generateProjectBlueprints" :disabled="creativeJobRunning()"><i class="bi bi-stars me-1"></i>生成方向</button></div></div>
+                    <div class="d-flex justify-content-between align-items-end mb-3"><div><h5 class="mb-1">仿制方向与 Brief</h5><div class="small text-muted">只借鉴结构和爽点，不复制剧情、人设、台词或具体表达</div></div><div class="d-flex gap-2 align-items-end"><div><label class="form-label small">方向数量</label><select class="form-select form-select-sm" x-model.number="creativeWorkspace.directionCount"><option :value="3">3</option><option :value="4">4</option><option :value="5">5</option></select></div><button class="btn btn-primary btn-sm" @click="generateProjectBlueprints" :disabled="creativeJobRunning() || !!creativeWorkspace.startingAction"><span class="spinner-border spinner-border-sm me-1" x-show="creativeActionRunning('blueprints')"></span><i class="bi bi-stars me-1" x-show="!creativeActionRunning('blueprints')"></i><span x-text="creativeActionRunning('blueprints') ? (creativeWorkspace.startingAction === 'blueprints' ? '正在启动' : '生成中') : '生成方向'"></span></button></div></div>
                     <table class="table table-sm table-hover align-middle mb-3"><thead><tr><th>方向</th><th>主角</th><th>核心冲突</th><th>背景</th><th>成本</th><th>风险</th><th>版本</th><th>操作</th></tr></thead><tbody><template x-for="item in latestProjectBlueprints()" :key="item.id"><tr :class="{'table-active': creativeWorkspace.selectedBlueprintId === item.id}"><td class="fw-semibold" x-text="item.content.title || '未命名方向'"></td><td x-text="item.content.protagonist || '-'"></td><td class="blueprint-conflict-cell" style="overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;" :title="item.content.core_conflict || '-'"><span x-text="item.content.core_conflict || '-'"></span></td><td x-text="item.content.background || '-'"></td><td x-text="item.content.cost_level || '-'"></td><td><span class="badge" :class="riskBadgeClass(item.risk_level)" x-text="`${riskLabel(item.risk_level)} ${Number(item.risk_score || 0).toFixed(0)}`"></span></td><td x-text="`v${item.version} · ${item.status === 'brief_locked' ? '已锁定' : '草稿'}`"></td><td><button class="btn btn-sm btn-outline-light" @click="creativeWorkspace.selectedBlueprintId = item.id"><i class="bi bi-pencil"></i></button></td></tr></template><tr x-show="!latestProjectBlueprints().length"><td colspan="8" class="text-center text-muted py-4">尚未生成仿制方向</td></tr></tbody></table>
                     <template x-if="selectedProjectBlueprint()"><div class="border-top pt-3">
                         <div class="row g-2 align-items-end border-bottom pb-3 mb-3">
@@ -2157,6 +2158,7 @@
                     create: {topic_id: '', breakdown_id: '', name: '', target_platform: '', target_episode_count: 20},
                     directionCount: 3, selectedBlueprintId: null, selectedEpisode: 1,
                     jobId: '', jobMessage: '', jobProgress: {}, jobStatus: '', paused: false, notifiedStatus: '',
+                    jobStartedAt: 0, jobElapsedSeconds: 0,
                     startingAction: '', activeAction: '',
                     saveState: {}, notice: '', noticeType: 'success', noticeTimer: null
                 },
@@ -2233,6 +2235,7 @@
                     this.initTooltips();
                     setInterval(() => this.fetchLogs(), 1000);
                     setInterval(() => this.fetchJobs(), 2000);
+                    setInterval(() => this.tickCreativeGenerationElapsed(), 1000);
                     setInterval(() => this.tickBreakdownGenerationElapsed(), 1000);
                 },
 
@@ -2781,6 +2784,14 @@
                     this.creativeWorkspace.error = '';
                     this.creativeWorkspace.startingAction = action;
                     this.creativeWorkspace.jobMessage = '正在创建生成任务';
+                    this.creativeWorkspace.jobId = '';
+                    this.creativeWorkspace.jobStatus = '';
+                    this.creativeWorkspace.jobProgress = {indeterminate: true};
+                    this.creativeWorkspace.jobStartedAt = Date.now();
+                    this.creativeWorkspace.jobElapsedSeconds = 0;
+                    this.creativeWorkspace.paused = false;
+                    this.creativeWorkspace.notifiedStatus = '';
+                    this.creativeWorkspace.activeAction = action;
                     try {
                         const res = await fetch(url, {
                             method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
@@ -2791,8 +2802,9 @@
                         this.creativeWorkspace.jobStatus = data.job.status;
                         this.creativeWorkspace.jobMessage = data.job.message || '任务已在后台启动';
                         this.creativeWorkspace.jobProgress = data.job.progress || {};
-                        this.creativeWorkspace.notifiedStatus = '';
-                        this.creativeWorkspace.activeAction = action;
+                        if (Number(data.job.started_at || 0) > 0) {
+                            this.creativeWorkspace.jobStartedAt = Number(data.job.started_at) * 1000;
+                        }
                         await this.fetchJobs();
                     } catch (e) {
                         this.creativeWorkspace.error = e.message || '创建生成任务失败';
@@ -2836,6 +2848,13 @@
                     this.creativeWorkspace.jobMessage = job.message || this.creativeWorkspace.jobMessage;
                     this.creativeWorkspace.jobProgress = job.progress || {};
                     this.creativeWorkspace.paused = Boolean(job.paused);
+                    if (Number(job.started_at || 0) > 0) {
+                        this.creativeWorkspace.jobStartedAt = Number(job.started_at) * 1000;
+                    }
+                    this.creativeWorkspace.jobElapsedSeconds = Math.max(
+                        Number(this.creativeWorkspace.jobElapsedSeconds || 0),
+                        Number(job.progress?.elapsed_seconds || 0)
+                    );
                     if (['succeeded', 'failed', 'cancelled'].includes(job.status) && this.creativeWorkspace.notifiedStatus !== job.status) {
                         this.creativeWorkspace.notifiedStatus = job.status;
                         if (this.creativeWorkspace.project?.id) this.selectCreativeProject(this.creativeWorkspace.project.id);
@@ -2845,14 +2864,35 @@
 
                 creativeJobRunning() { return ['pending', 'running', 'stopping'].includes(this.creativeWorkspace.jobStatus); },
                 creativeJobRetryable() { return ['failed', 'cancelled'].includes(this.creativeWorkspace.jobStatus); },
+                creativeProgressIndeterminate() {
+                    const progress = this.creativeWorkspace.jobProgress || {};
+                    return Boolean(this.creativeWorkspace.startingAction || this.creativeJobRunning())
+                        && (progress.indeterminate || (Number(progress.completed || 0) === 0 && Number(progress.total || 0) <= 1));
+                },
                 creativeProgressPercent() {
                     const progress = this.creativeWorkspace.jobProgress || {};
                     const total = Number(progress.total || 0);
-                    return total ? Math.min(100, Math.round(Number(progress.completed || 0) * 100 / total)) : (this.creativeJobRunning() ? 8 : 100);
+                    return total ? Math.min(100, Math.round(Number(progress.completed || 0) * 100 / total)) : 0;
                 },
                 creativeProgressText() {
                     const progress = this.creativeWorkspace.jobProgress || {};
+                    if (this.creativeWorkspace.startingAction && !this.creativeWorkspace.jobId) return '正在启动';
+                    if (this.creativeProgressIndeterminate()) return this.creativeWorkspace.paused ? '已暂停' : '处理中';
                     return progress.total ? `${progress.completed || 0}/${progress.total}` : this.creativeWorkspace.jobStatus;
+                },
+                creativeProgressElapsedText() {
+                    const seconds = Number(this.creativeWorkspace.jobElapsedSeconds || 0);
+                    const prefix = this.creativeWorkspace.startingAction || this.creativeJobRunning() ? '已等待' : '用时';
+                    return `${prefix} ${this.formatBreakdownGenerationElapsed(seconds)}`;
+                },
+                tickCreativeGenerationElapsed() {
+                    if (!this.creativeWorkspace.startingAction && !this.creativeJobRunning()) return;
+                    const startedAt = Number(this.creativeWorkspace.jobStartedAt || 0);
+                    if (!startedAt) return;
+                    this.creativeWorkspace.jobElapsedSeconds = Math.max(
+                        Number(this.creativeWorkspace.jobElapsedSeconds || 0),
+                        Math.floor((Date.now() - startedAt) / 1000)
+                    );
                 },
 
                 async pauseCreativeJob() {

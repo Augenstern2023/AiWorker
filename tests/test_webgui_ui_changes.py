@@ -183,6 +183,20 @@ def test_beats_generation_shows_local_start_and_progress_feedback():
     assert "beats-generation-status" in html
 
 
+def test_blueprint_generation_shows_immediate_and_live_progress_feedback():
+    html = Path("templates/index.html").read_text(encoding="utf-8")
+
+    assert 'x-show="creativeWorkspace.startingAction || creativeWorkspace.jobId"' in html
+    assert 'role="status" aria-live="polite"' in html
+    assert "creativeActionRunning('blueprints')" in html
+    assert "creativeProgressIndeterminate()" in html
+    assert "creativeProgressElapsedText()" in html
+    assert "tickCreativeGenerationElapsed" in html
+    assert "creativeWorkspace.jobId = ''" in html
+    assert "creativeWorkspace.jobProgress = {indeterminate: true}" in html
+    assert "正在创建生成任务" in html
+
+
 def test_breakdown_editor_opens_in_modal_instead_of_page_bottom():
     html = Path("templates/index.html").read_text(encoding="utf-8")
 

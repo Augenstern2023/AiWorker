@@ -1490,7 +1490,7 @@
                                                                             <template x-if="column.kind === 'category'"><span class="badge bg-secondary bg-opacity-25 text-light" x-text="item.board_type || item.category_label || '-'"></span></template>
                                                                             <template x-if="column.kind === 'status'"><span class="status-pill" :class="entryStatusClass(item, tbl.key)" x-text="entryStatus(item, tbl.key)"></span></template>
                                                                             <template x-if="column.kind === 'rank_delta'"><span class="status-pill" :class="entryStatusClass(item, tbl.key)" x-text="formatRankDelta(item.rank_delta)"></span></template>
-                                                                            <template x-if="column.kind === 'metric' || column.kind === 'text'"><span x-text="rankColumnValue(item, column, tbl)"></span></template>
+                                                                            <template x-if="column.kind === 'metric' || column.kind === 'text' || column.kind === 'rank_duration'"><span x-text="rankColumnValue(item, column, tbl)"></span></template>
                                                                         </td>
                                                                     </template>
                                                                 </tr>
@@ -1557,7 +1557,7 @@
                                                                 <template x-if="column.kind === 'category'"><span class="badge bg-secondary bg-opacity-25 text-light" x-text="item.board_type || item.category_label || '-'"></span></template>
                                                                 <template x-if="column.kind === 'status'"><span class="status-pill" :class="entryStatusClass(item, tbl.key)" x-text="entryStatus(item, tbl.key)"></span></template>
                                                                 <template x-if="column.kind === 'rank_delta'"><span class="status-pill" :class="entryStatusClass(item, tbl.key)" x-text="formatRankDelta(item.rank_delta)"></span></template>
-                                                                <template x-if="column.kind === 'metric' || column.kind === 'text'"><span x-text="rankColumnValue(item, column, tbl)"></span></template>
+                                                                            <template x-if="column.kind === 'metric' || column.kind === 'text' || column.kind === 'rank_duration'"><span x-text="rankColumnValue(item, column, tbl)"></span></template>
                                                             </td>
                                                         </template>
                                                     </tr>
@@ -4132,7 +4132,8 @@
                         {key: 'expectation_index', label: '期待指数', kind: 'metric', width: 105},
                         {key: 'search_index', label: '热搜指数', kind: 'metric', width: 105},
                         {key: 'max_heat', label: '最高热度', kind: 'metric', width: 105},
-                        {key: 'hot_comment', label: '热评', kind: 'text', width: 240}
+                        {key: 'hot_comment', label: '热评', kind: 'text', width: 240},
+                        {key: 'rank_duration', label: '在榜时长', kind: 'rank_duration', width: 210}
                     ];
                     const dynamic = candidates.filter(column => items.some(item => {
                         const value = column.key === 'subject' ? item.subject || item.topic_tags : item[column.key];
@@ -4166,8 +4167,17 @@
                 rankColumnValue(item = {}, column = {}) {
                     const value = item[column.key];
                     if (column.key === 'subject') return value || this.shortTags(item.topic_tags);
+                    if (column.kind === 'rank_duration') return this.formatRankDuration(item);
                     if (column.kind === 'text') return this.shortText(value, 64);
                     return this.formatMetric(value);
+                },
+
+                formatRankDuration(item = {}) {
+                    if (item.rank_duration) return item.rank_duration;
+                    const continuous = Number(item.continuous_rank_days || 0);
+                    const cumulative = Number(item.cumulative_rank_days || 0);
+                    if (!continuous || !cumulative) return '-';
+                    return `连续在榜${continuous}天 / 累计在榜${cumulative}天`;
                 },
 
                 rankColumnTooltip(item = {}, column = {}, tbl = {}) {

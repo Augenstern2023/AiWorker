@@ -289,6 +289,18 @@ def test_index_template_has_today_rank_page():
     assert 'type="date" x-model="todayRankDate"' not in html
 
 
+def test_today_rank_duration_column_is_after_hot_comment_and_formats_both_day_counts():
+    html = Path("templates/index.html").read_text(encoding="utf-8")
+
+    hot_comment = html.index("{key: 'hot_comment', label: '热评'")
+    rank_duration = html.index("{key: 'rank_duration', label: '在榜时长'")
+    assert hot_comment < rank_duration
+    assert "column.kind === 'rank_duration'" in html
+    assert "formatRankDuration" in html
+    assert "连续在榜" in html
+    assert "累计在榜" in html
+
+
 def test_removed_assets_and_rag_pages_are_not_in_sidebar():
     html = Path("templates/index.html").read_text(encoding="utf-8")
     sidebar = html.split("<nav class=\"nav flex-column py-3\">", 1)[1].split("</nav>", 1)[0]

@@ -2681,6 +2681,7 @@
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.detail || '读取项目失败');
                         this.creativeWorkspace.project = data;
+                        this.reconcileCreativeGenerationState(data);
                         const candidates = this.latestProjectBlueprints();
                         if (!candidates.some(item => item.id === this.creativeWorkspace.selectedBlueprintId)) {
                             this.creativeWorkspace.selectedBlueprintId = data.locked_brief_id || candidates[0]?.id || null;
@@ -2845,6 +2846,37 @@
                         || (this.creativeWorkspace.activeAction === action && this.creativeJobRunning());
                 },
 
+                creativeProjectHasJobResult(project, action, jobId) {
+                    if (!project || !action || !jobId) return false;
+                    const generatedByJob = item => item.generation_meta?.job_id === jobId;
+                    if (action === 'blueprints') return (project.blueprints || []).some(generatedByJob);
+                    if (action === 'characters') {
+                        return (project.characters || []).some(generatedByJob)
+                            || (project.relationships || []).some(generatedByJob);
+                    }
+                    if (action === 'outlines') {
+                        return (project.episodes || []).some(item => item.stage === 'outline' && item.generation_meta?.job_id === jobId);
+                    }
+                    if (action === 'beats') {
+                        return (project.episodes || []).some(item => item.stage === 'beats' && item.generation_meta?.job_id === jobId);
+                    }
+                    return false;
+                },
+
+                reconcileCreativeGenerationState(project) {
+                    const action = this.creativeWorkspace.activeAction;
+                    const jobId = this.creativeWorkspace.jobId;
+                    if (!this.creativeJobRunning() || !this.creativeProjectHasJobResult(project, action, jobId)) return false;
+                    this.creativeWorkspace.jobStatus = 'succeeded';
+                    this.creativeWorkspace.jobMessage = '生成完成，结果已回填到当前项目';
+                    this.creativeWorkspace.jobProgress = {completed: 1, total: 1};
+                    this.creativeWorkspace.startingAction = '';
+                    this.creativeWorkspace.paused = false;
+                    this.creativeWorkspace.notifiedStatus = 'succeeded';
+                    this.showCreativeNotice('生成完成，结果已回填到当前项目。');
+                    return true;
+                },
+
                 syncCreativeJobProgress() {
                     if (!this.creativeWorkspace.jobId) return;
                     const job = this.jobs.find(item => item.job_id === this.creativeWorkspace.jobId);
@@ -2860,6 +2892,7 @@
                         Number(this.creativeWorkspace.jobElapsedSeconds || 0),
                         Number(job.progress?.elapsed_seconds || 0)
                     );
+                    if (this.reconcileCreativeGenerationState(this.creativeWorkspace.project)) return;
                     if (['succeeded', 'failed', 'cancelled'].includes(job.status) && this.creativeWorkspace.notifiedStatus !== job.status) {
                         this.creativeWorkspace.notifiedStatus = job.status;
                         if (this.creativeWorkspace.project?.id) this.selectCreativeProject(this.creativeWorkspace.project.id);

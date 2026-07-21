@@ -217,6 +217,17 @@ def test_next_stage_generation_is_not_blocked_by_a_stale_previous_action():
     assert ':disabled="creativeActionDisabled(\'blueprints\')"' in html
 
 
+def test_saved_creative_results_reconcile_a_stale_running_indicator():
+    html = Path("templates/index.html").read_text(encoding="utf-8")
+
+    assert "creativeProjectHasJobResult(project, action, jobId)" in html
+    assert "item.generation_meta?.job_id === jobId" in html
+    assert "reconcileCreativeGenerationState(project)" in html
+    assert "this.creativeWorkspace.jobStatus = 'succeeded'" in html
+    assert "this.creativeWorkspace.jobProgress = {completed: 1, total: 1}" in html
+    assert "生成完成，结果已回填到当前项目" in html
+
+
 def test_breakdown_editor_opens_in_modal_instead_of_page_bottom():
     html = Path("templates/index.html").read_text(encoding="utf-8")
 

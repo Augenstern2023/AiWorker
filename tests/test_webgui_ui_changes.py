@@ -108,11 +108,22 @@ def test_today_hit_actions_follow_topic_status_without_conflicting_commands():
     html = Path("templates/index.html").read_text(encoding="utf-8")
     section = html.split('<section x-show="currentTab === \'creative\'">', 1)[1].split("</section>", 1)[0]
 
-    assert 'x-show="topic.status === \'pending_review\'" @click="updateCreativeTopic(topic, \'adopted\')"' in section
-    assert 'x-show="topic.status === \'pending_review\'" @click="updateCreativeTopic(topic, \'rejected\')"' in section
-    assert "['pending_review', 'adopted'].includes(topic.status)" in section
-    assert 'x-show="topic.status === \'rejected\'" @click="updateCreativeTopic(topic, \'adopted\')"' in section
+    assert 'x-show="!topic.latest_breakdown_id && topic.status === \'pending_review\'" @click="updateCreativeTopic(topic, \'adopted\')"' in section
+    assert 'x-show="!topic.latest_breakdown_id && topic.status === \'pending_review\'" @click="updateCreativeTopic(topic, \'rejected\')"' in section
+    assert "!topic.latest_breakdown_id && ['pending_review', 'adopted'].includes(topic.status)" in section
+    assert 'x-show="!topic.latest_breakdown_id && topic.status === \'rejected\'" @click="updateCreativeTopic(topic, \'adopted\')"' in section
     assert "重新采纳" in section
+
+
+def test_today_hit_actions_distinguish_existing_breakdowns():
+    html = Path("templates/index.html").read_text(encoding="utf-8")
+    section = html.split('<section x-show="currentTab === \'creative\'">', 1)[1].split("</section>", 1)[0]
+
+    assert 'x-show="!topic.latest_breakdown_id && topic.status === \'pending_review\'"' in section
+    assert "!topic.latest_breakdown_id && ['pending_review', 'adopted'].includes(topic.status)" in section
+    assert 'x-show="topic.latest_breakdown_id && topic.status !== \'archived\'"' in section
+    assert '@click="createCreativeBreakdown(topic)">再次拆解</button>' in section
+    assert '@click="updateCreativeTopic(topic, \'archived\')">归档</button>' in section
 
 
 def test_blueprint_core_conflict_uses_the_expandable_description_cell_pattern():

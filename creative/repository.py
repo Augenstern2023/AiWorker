@@ -195,11 +195,24 @@ class CreativeRepository:
         if captured_date:
             clauses.append("captured_at LIKE ?")
             params.append(f"{captured_date}%")
-        locked_expr = "(SELECT id FROM creative_breakdowns b WHERE b.topic_id = creative_topics.id AND b.status = 'locked' ORDER BY b.version DESC LIMIT 1)"
+        locked_expr = "(SELECT id FROM creative_breakdowns b WHERE b.topic_id = creative_topics.id AND b.status = 'locked' ORDER BY b.version DESC, b.id DESC LIMIT 1)"
+        latest_id_expr = "(SELECT id FROM creative_breakdowns b WHERE b.topic_id = creative_topics.id ORDER BY b.version DESC, b.id DESC LIMIT 1)"
+        latest_version_expr = "(SELECT version FROM creative_breakdowns b WHERE b.topic_id = creative_topics.id ORDER BY b.version DESC, b.id DESC LIMIT 1)"
+        latest_status_expr = "(SELECT status FROM creative_breakdowns b WHERE b.topic_id = creative_topics.id ORDER BY b.version DESC, b.id DESC LIMIT 1)"
         params.append(500)
         with self._connect() as conn:
             rows = conn.execute(
-                f"SELECT creative_topics.*, {locked_expr} AS locked_breakdown_id FROM creative_topics WHERE {' AND '.join(clauses)} ORDER BY score DESC, updated_at DESC LIMIT ?",
+                f"""
+                    SELECT creative_topics.*,
+                           {locked_expr} AS locked_breakdown_id,
+                           {latest_id_expr} AS latest_breakdown_id,
+                           {latest_version_expr} AS latest_breakdown_version,
+                           {latest_status_expr} AS latest_breakdown_status
+                    FROM creative_topics
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY score DESC, updated_at DESC
+                    LIMIT ?
+                """,
                 params,
             ).fetchall()
         merged = self._merge_topics([self._topic(dict(row)) for row in rows])
@@ -933,6 +946,11 @@ class CreativeRepository:
                 current["confidence"] = "high"
             if not current.get("locked_breakdown_id") and topic.get("locked_breakdown_id"):
                 current["locked_breakdown_id"] = topic["locked_breakdown_id"]
+            if topic.get("latest_breakdown_id") and int(topic["latest_breakdown_id"]) > int(current.get("latest_breakdown_id") or 0):
+                current["id"] = topic["id"]
+                current["latest_breakdown_id"] = topic["latest_breakdown_id"]
+                current["latest_breakdown_version"] = topic.get("latest_breakdown_version")
+                current["latest_breakdown_status"] = topic.get("latest_breakdown_status")
         return list(merged.values())
 
     @staticmethod

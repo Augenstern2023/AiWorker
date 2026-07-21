@@ -395,6 +395,39 @@ def test_repository_latest_breakdown_includes_newest_draft(tmp_path: Path):
     assert latest["status"] == "draft"
 
 
+def test_topic_list_exposes_latest_breakdown_metadata(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, locked = seed_adopted_topic(repository)
+    draft = repository.create_breakdown(
+        topic["id"], {"core_conflict": "最新草稿冲突"}, {}, [], parent_version_id=locked["id"],
+    )
+
+    listed = repository.list_topics(limit=10)[0]
+
+    assert listed["locked_breakdown_id"] == locked["id"]
+    assert listed["latest_breakdown_id"] == draft["id"]
+    assert listed["latest_breakdown_version"] == draft["version"]
+    assert listed["latest_breakdown_status"] == "draft"
+
+
+def test_merged_topic_uses_breakdown_owner_for_repeat_actions(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    base = {
+        "platform": "dy", "captured_at": "2026-07-20", "title": "跨快照短剧",
+        "description": "", "category": "都市", "rank_type": "热播榜",
+        "confidence": "high", "score_details": {}, "recommendation": "推荐", "evidence": [],
+    }
+    older = repository.upsert_topics([{**base, "job_id": "old", "source_path": "old.json", "score": 70}])[0]
+    breakdown = repository.create_breakdown(older["id"], {"core_conflict": "旧快照拆解"}, {}, [])
+    repository.upsert_topics([{**base, "job_id": "new", "source_path": "new.json", "score": 90}])
+
+    listed = repository.list_topics(platform="dy", limit=10)[0]
+
+    assert listed["score"] == 90
+    assert listed["latest_breakdown_id"] == breakdown["id"]
+    assert listed["id"] == older["id"]
+
+
 def test_breakdown_api_reuses_latest_version_without_creating_job(tmp_path: Path):
     client, repository, manager = build_phase4_client(tmp_path)
     topic, locked = seed_adopted_topic(repository)

@@ -1066,10 +1066,12 @@
                                 <td x-text="topic.score.toFixed(1)"></td>
                                 <td><span class="badge" :class="topic.status === 'adopted' ? 'bg-success' : 'bg-secondary'" x-text="topic.status"></span></td>
                                 <td>
-                                    <button class="btn btn-sm btn-outline-success me-1" x-show="topic.status === 'pending_review'" @click="updateCreativeTopic(topic, 'adopted')">采纳</button>
-                                    <button class="btn btn-sm btn-outline-light me-1" x-show="['pending_review', 'adopted'].includes(topic.status)" @click="createCreativeBreakdown(topic)">拆解</button>
-                                    <button class="btn btn-sm btn-outline-secondary" x-show="topic.status === 'pending_review'" @click="updateCreativeTopic(topic, 'rejected')">不跟进</button>
-                                    <button class="btn btn-sm btn-outline-success" x-show="topic.status === 'rejected'" @click="updateCreativeTopic(topic, 'adopted')"><i class="bi bi-arrow-counterclockwise me-1"></i>重新采纳</button>
+                                    <button class="btn btn-sm btn-outline-success me-1" x-show="!topic.latest_breakdown_id && topic.status === 'pending_review'" @click="updateCreativeTopic(topic, 'adopted')">采纳</button>
+                                    <button class="btn btn-sm btn-outline-light me-1" x-show="!topic.latest_breakdown_id && ['pending_review', 'adopted'].includes(topic.status)" @click="createCreativeBreakdown(topic)">拆解</button>
+                                    <button class="btn btn-sm btn-outline-secondary" x-show="!topic.latest_breakdown_id && topic.status === 'pending_review'" @click="updateCreativeTopic(topic, 'rejected')">不跟进</button>
+                                    <button class="btn btn-sm btn-outline-success" x-show="!topic.latest_breakdown_id && topic.status === 'rejected'" @click="updateCreativeTopic(topic, 'adopted')"><i class="bi bi-arrow-counterclockwise me-1"></i>重新采纳</button>
+                                    <button class="btn btn-sm btn-outline-light me-1" x-show="topic.latest_breakdown_id && topic.status !== 'archived'" @click="createCreativeBreakdown(topic)">再次拆解</button>
+                                    <button class="btn btn-sm btn-outline-warning" x-show="topic.latest_breakdown_id && topic.status !== 'archived'" @click="updateCreativeTopic(topic, 'archived')">归档</button>
                                 </td>
                             </tr>
                         </template>

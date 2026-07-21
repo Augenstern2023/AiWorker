@@ -104,6 +104,17 @@ def test_creative_project_creation_supports_selecting_a_locked_breakdown_version
     assert "background-color: #151722;" in html
 
 
+def test_today_hit_actions_follow_topic_status_without_conflicting_commands():
+    html = Path("templates/index.html").read_text(encoding="utf-8")
+    section = html.split('<section x-show="currentTab === \'creative\'">', 1)[1].split("</section>", 1)[0]
+
+    assert 'x-show="topic.status === \'pending_review\'" @click="updateCreativeTopic(topic, \'adopted\')"' in section
+    assert 'x-show="topic.status === \'pending_review\'" @click="updateCreativeTopic(topic, \'rejected\')"' in section
+    assert "['pending_review', 'adopted'].includes(topic.status)" in section
+    assert 'x-show="topic.status === \'rejected\'" @click="updateCreativeTopic(topic, \'adopted\')"' in section
+    assert "重新采纳" in section
+
+
 def test_blueprint_core_conflict_uses_the_expandable_description_cell_pattern():
     html = Path("templates/index.html").read_text(encoding="utf-8")
 

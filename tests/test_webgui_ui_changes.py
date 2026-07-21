@@ -197,6 +197,16 @@ def test_blueprint_generation_shows_immediate_and_live_progress_feedback():
     assert "正在创建生成任务" in html
 
 
+def test_character_and_outline_generation_show_the_same_button_progress_feedback():
+    html = Path("templates/index.html").read_text(encoding="utf-8")
+
+    assert "creativeActionRunning('characters')" in html
+    assert "creativeWorkspace.startingAction === 'characters' ? '正在启动' : '生成中'" in html
+    assert "creativeActionRunning('outlines')" in html
+    assert "creativeWorkspace.startingAction === 'outlines' ? '正在启动' : '生成中'" in html
+    assert html.count(':disabled="creativeJobRunning() || !!creativeWorkspace.startingAction"') >= 3
+
+
 def test_breakdown_editor_opens_in_modal_instead_of_page_bottom():
     html = Path("templates/index.html").read_text(encoding="utf-8")
 

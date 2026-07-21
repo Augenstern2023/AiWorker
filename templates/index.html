@@ -2866,7 +2866,7 @@
                 reconcileCreativeGenerationState(project) {
                     const action = this.creativeWorkspace.activeAction;
                     const jobId = this.creativeWorkspace.jobId;
-                    if (!this.creativeJobRunning() || !this.creativeProjectHasJobResult(project, action, jobId)) return false;
+                    if (!this.creativeJobStatusRunning() || !this.creativeProjectHasJobResult(project, action, jobId)) return false;
                     this.creativeWorkspace.jobStatus = 'succeeded';
                     this.creativeWorkspace.jobMessage = '生成完成，结果已回填到当前项目';
                     this.creativeWorkspace.jobProgress = {completed: 1, total: 1};
@@ -2900,7 +2900,17 @@
                     }
                 },
 
-                creativeJobRunning() { return ['pending', 'running', 'stopping'].includes(this.creativeWorkspace.jobStatus); },
+                creativeJobStatusRunning() {
+                    return ['pending', 'running', 'stopping'].includes(this.creativeWorkspace.jobStatus);
+                },
+                creativeJobRunning() {
+                    if (!this.creativeJobStatusRunning()) return false;
+                    return !this.creativeProjectHasJobResult(
+                        this.creativeWorkspace.project,
+                        this.creativeWorkspace.activeAction,
+                        this.creativeWorkspace.jobId
+                    );
+                },
                 creativeJobRetryable() { return ['failed', 'cancelled'].includes(this.creativeWorkspace.jobStatus); },
                 creativeProgressIndeterminate() {
                     const progress = this.creativeWorkspace.jobProgress || {};

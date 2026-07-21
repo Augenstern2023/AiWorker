@@ -228,6 +228,15 @@ def test_saved_creative_results_reconcile_a_stale_running_indicator():
     assert "生成完成，结果已回填到当前项目" in html
 
 
+def test_creative_running_state_stops_as_soon_as_its_saved_result_is_visible():
+    html = Path("templates/index.html").read_text(encoding="utf-8")
+
+    assert "creativeJobStatusRunning()" in html
+    assert "if (!this.creativeJobStatusRunning()) return false" in html
+    assert "!this.creativeProjectHasJobResult(" in html
+    assert "if (!this.creativeJobStatusRunning() || !this.creativeProjectHasJobResult" in html
+
+
 def test_breakdown_editor_opens_in_modal_instead_of_page_bottom():
     html = Path("templates/index.html").read_text(encoding="utf-8")
 

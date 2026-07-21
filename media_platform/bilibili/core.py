@@ -47,6 +47,7 @@ from tools import utils
 from tools.cdp_browser import CDPBrowserManager
 from var import crawler_type_var, source_keyword_var, project_var
 
+from analysis.media import get_durl_video_url, get_media_url, pick_best_dash_audio
 from .client import BilibiliClient
 from .exception import DataFetchError
 from .field import SearchOrderType
@@ -588,25 +589,32 @@ class BilibiliCrawler(AbstractCrawler):
         if result is None:
             utils.logger.info("[BilibiliCrawler.get_bilibili_video] get video play url failed")
             return
-        durl_list = result.get("durl")
-        max_size = -1
-        video_url = ""
-        for durl in durl_list:
-            size = durl.get("size")
-            if size > max_size:
-                max_size = size
-                video_url = durl.get("url")
-        if video_url == "":
-            utils.logger.info("[BilibiliCrawler.get_bilibili_video] get video url failed")
-            return
+        media_mode = getattr(config, "BILI_MEDIA_DOWNLOAD_MODE", "video")
+        if media_mode in ("audio", "both"):
+            audio_item = pick_best_dash_audio(result)
+            audio_url = get_media_url(audio_item) if audio_item else ""
+            if audio_url:
+                content = await self.bili_client.get_video_media(audio_url)
+                await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
+                utils.logger.info(f"[BilibiliCrawler.get_bilibili_video] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching audio {aid}")
+                if content is not None:
+                    await bilibili_store.store_media(aid, content, getattr(config, "BILI_AUDIO_FILE_NAME", "audio.m4s"))
+            elif media_mode == "audio":
+                utils.logger.info("[BilibiliCrawler.get_bilibili_video] get audio url failed")
 
-        content = await self.bili_client.get_video_media(video_url)
-        await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-        utils.logger.info(f"[BilibiliCrawler.get_bilibili_video] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching video {aid}")
-        if content is None:
-            return
-        extension_file_name = f"video.mp4"
-        await bilibili_store.store_video(aid, content, extension_file_name)
+        if media_mode in ("video", "both"):
+            video_url = get_durl_video_url(result)
+            if video_url == "":
+                utils.logger.info("[BilibiliCrawler.get_bilibili_video] get video url failed")
+                return
+
+            content = await self.bili_client.get_video_media(video_url)
+            await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
+            utils.logger.info(f"[BilibiliCrawler.get_bilibili_video] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching video {aid}")
+            if content is None:
+                return
+            extension_file_name = f"video.mp4"
+            await bilibili_store.store_video(aid, content, extension_file_name)
 
     async def get_all_creator_details(self, creator_url_list: List[str]):
         """

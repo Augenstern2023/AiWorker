@@ -189,3 +189,11 @@ template_check.txt
 发送记录.json
 backups/
 .DS_Store
+
+# Local runtime and generated verification artifacts
+/.runtime/
+/.tmp/
+/logs/
+/test/hg_decrypted_mp4_asr_*/
+/creative-*-beats.md
+/今日榜单.png

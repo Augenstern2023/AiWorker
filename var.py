@@ -30,3 +30,4 @@ comment_tasks_var: ContextVar[List[Task]] = ContextVar("comment_tasks", default=
 db_conn_pool_var: ContextVar[aiomysql.Pool] = ContextVar("db_conn_pool_var")
 source_keyword_var: ContextVar[str] = ContextVar("source_keyword", default="")
 project_var: ContextVar[List[str]] = ContextVar("project", default=[])
+job_id_var: ContextVar[str] = ContextVar("job_id", default="")

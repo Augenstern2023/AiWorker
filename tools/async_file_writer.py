@@ -24,7 +24,7 @@ import pathlib
 from typing import Dict, List
 import aiofiles
 import config
-from var import project_var
+from var import job_id_var, project_var
 from tools.utils import utils
 from tools.words import AsyncWordCloudGenerator
 
@@ -36,9 +36,16 @@ class AsyncFileWriter:
         self.wordcloud_generator = AsyncWordCloudGenerator() if config.ENABLE_GET_WORDCLOUD else None
 
     def _get_file_path(self, file_type: str, item_type: str) -> str:
-        base_path = f"data/{self.platform}/{file_type}"
+        job_id = job_id_var.get()
+        if job_id:
+            base_path = f"data/{self.platform}/jobs/{job_id}/{file_type}"
+        else:
+            base_path = f"data/{self.platform}/{file_type}"
         pathlib.Path(base_path).mkdir(parents=True, exist_ok=True)
-        file_name = f"{self.crawler_type}_{item_type}_{utils.get_current_date()}.{file_type}"
+        if job_id:
+            file_name = f"{self.crawler_type}_{item_type}.{file_type}"
+        else:
+            file_name = f"{self.crawler_type}_{item_type}_{utils.get_current_date()}.{file_type}"
         return f"{base_path}/{file_name}"
 
     async def write_to_csv(self, item: Dict, item_type: str):
@@ -142,9 +149,16 @@ class AsyncFileWriter:
                 return
 
             # Generate wordcloud
-            words_base_path = f"data/{self.platform}/words"
+            job_id = job_id_var.get()
+            if job_id:
+                words_base_path = f"data/{self.platform}/jobs/{job_id}/words"
+            else:
+                words_base_path = f"data/{self.platform}/words"
             pathlib.Path(words_base_path).mkdir(parents=True, exist_ok=True)
-            words_file_prefix = f"{words_base_path}/{self.crawler_type}_comments_{utils.get_current_date()}"
+            if job_id:
+                words_file_prefix = f"{words_base_path}/{self.crawler_type}_comments"
+            else:
+                words_file_prefix = f"{words_base_path}/{self.crawler_type}_comments_{utils.get_current_date()}"
 
             utils.logger.info(f"[AsyncFileWriter.generate_wordcloud_from_comments] Generating wordcloud from {len(filtered_data)} comments")
             await self.wordcloud_generator.generate_word_frequency_and_cloud(filtered_data, words_file_prefix)

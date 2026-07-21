@@ -19,10 +19,17 @@
 
 
 import asyncio
+from pathlib import Path
 from typing import Optional, Type
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 import cmd_arg
 import config
+from core.events import emit_event
+from core.job import CrawlJob
 from database import db
 from base.base_crawler import AbstractCrawler
 from media_platform.bilibili import BilibiliCrawler
@@ -33,7 +40,7 @@ from media_platform.weibo import WeiboCrawler
 from media_platform.xhs import XiaoHongShuCrawler
 from media_platform.zhihu import ZhihuCrawler
 from tools.async_file_writer import AsyncFileWriter
-from var import crawler_type_var, project_var
+from var import crawler_type_var, job_id_var, project_var
 
 
 class CrawlerFactory:
@@ -57,6 +64,7 @@ class CrawlerFactory:
 
 
 crawler: Optional[AbstractCrawler] = None
+current_job: Optional[CrawlJob] = None
 
 
 def _flush_excel_if_needed() -> None:
@@ -87,7 +95,7 @@ async def _generate_wordcloud_if_needed() -> None:
 
 
 async def main() -> None:
-    global crawler
+    global crawler, current_job
 
     args = await cmd_arg.parse_cmd()
     if args.init_db:
@@ -95,17 +103,67 @@ async def main() -> None:
         print(f"Database {args.init_db} initialized successfully.")
         return
 
+    if getattr(args, "job_file", ""):
+        current_job = CrawlJob.load(args.job_file)
+        current_job.apply_to_config()
+        job_id_var.set(current_job.job_id)
+        if current_job.project_name:
+            project_var.set([current_job.project_name])
+        emit_event(
+            "job_started",
+            job_id=current_job.job_id,
+            worker_id=f"{current_job.platform}-worker",
+            platform=current_job.platform,
+            level="info",
+            message="job started",
+            payload={"job_file": args.job_file},
+        )
+
     if config.PROJECT_NAME:
         project_var.set([config.PROJECT_NAME])
 
-    crawler = CrawlerFactory.create_crawler(platform=config.PLATFORM)
-    await crawler.start()
+    try:
+        crawler = CrawlerFactory.create_crawler(platform=config.PLATFORM)
+        await crawler.start()
 
-    _flush_excel_if_needed()
+        _flush_excel_if_needed()
 
-    # Generate wordcloud after crawling is complete
-    # Only for JSON save mode
-    await _generate_wordcloud_if_needed()
+        # Generate wordcloud after crawling is complete
+        # Only for JSON save mode
+        await _generate_wordcloud_if_needed()
+    except asyncio.CancelledError:
+        if current_job:
+            emit_event(
+                "job_cancelled",
+                job_id=current_job.job_id,
+                worker_id=f"{current_job.platform}-worker",
+                platform=current_job.platform,
+                level="warning",
+                message="job cancelled",
+            )
+        raise
+    except Exception as e:
+        if current_job:
+            emit_event(
+                "job_failed",
+                job_id=current_job.job_id,
+                worker_id=f"{current_job.platform}-worker",
+                platform=current_job.platform,
+                level="error",
+                message=str(e),
+                payload={"error_type": type(e).__name__},
+            )
+        raise
+    else:
+        if current_job:
+            emit_event(
+                "job_finished",
+                job_id=current_job.job_id,
+                worker_id=f"{current_job.platform}-worker",
+                platform=current_job.platform,
+                level="info",
+                message="job finished",
+            )
 
 
 async def async_cleanup() -> None:

@@ -214,11 +214,41 @@ class BilibiliClient(AbstractApiClient, ProxyRefreshMixin):
             "cid": cid,
             "qn": qn_value,
             "fourk": 1,
-            "fnval": 1,
+            "fnval": 16,
             "platform": "pc",
         }
 
         return await self.get(uri, params, enable_params_sign=True)
+
+    async def get_player_info(self, aid: int, cid: int) -> Dict:
+        """
+        Bilibili web player info api, including subtitle metadata.
+        :param aid: 稿件avid
+        :param cid: cid
+        :return:
+        """
+        if not aid or not cid or aid <= 0 or cid <= 0:
+            raise ValueError("aid 和 cid 必须存在")
+        uri = "/x/player/wbi/v2"
+        params = {
+            "aid": aid,
+            "cid": cid,
+        }
+        return await self.get(uri, params, enable_params_sign=True)
+
+    async def get_subtitle(self, subtitle_url: str) -> Dict:
+        """
+        Download Bilibili subtitle JSON by subtitle URL.
+        :param subtitle_url: subtitle_url from player info
+        :return:
+        """
+        if subtitle_url.startswith("//"):
+            subtitle_url = f"https:{subtitle_url}"
+
+        async with httpx.AsyncClient(proxy=self.proxy, follow_redirects=True) as client:
+            response = await client.get(subtitle_url, timeout=self.timeout, headers=self.headers)
+            response.raise_for_status()
+            return response.json()
 
     async def get_video_media(self, url: str) -> Union[bytes, None]:
         # Follow CDN 302 redirects and treat any 2xx as success (some endpoints return 206)

@@ -132,7 +132,6 @@ AiWorker provides three startup methods:
 |---------------|-----------|-------------|
 | Main GUI | `启动程序.bat` | Runs `GUI.py`, full desktop GUI |
 | Web GUI | `启动Web程序.bat` | Runs `WebGUI.py`, browser access |
-| Private GUI | `启动私信程序.bat` | Runs private GUI module |
 
 ```shell
 # Windows users can double-click the .bat files above

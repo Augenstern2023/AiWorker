@@ -127,6 +127,21 @@ PROJECT_KEYWORD_MAP = {}  # {keyword: [project_name, ...]}
 # 当前运行的项目名称（用于 detail/creator 模式）
 PROJECT_NAME = ""
 
+# ==================== RAG / 知识库配置 ====================
+# 默认使用本地 Hash Embedding，保证轻量本地版开箱可索引；配置 RAG_EMBEDDING_* 后可切 OpenAI-compatible。
+RAG_EMBEDDING_PROVIDER = "hash"  # hash | openai-compatible
+RAG_EMBEDDING_BASE_URL = ""
+RAG_EMBEDDING_API_KEY = ""
+RAG_EMBEDDING_MODEL = "text-embedding-3-small"
+RAG_LLM_BASE_URL = ""
+RAG_LLM_API_KEY = ""
+RAG_LLM_MODEL = "MiniMax-M3"
+RAG_LLM_PROVIDER = ""
+RAG_LLM_ENV_KEY = ""
+RAG_LLM_WIRE_API = ""
+RAG_LLM_REASONING_EFFORT = ""
+RAG_VECTOR_STORE_DIR = ".runtime/rag/chroma"
+
 from .bilibili_config import *
 from .xhs_config import *
 from .dy_config import *

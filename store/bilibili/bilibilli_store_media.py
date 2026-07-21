@@ -45,6 +45,18 @@ class BilibiliVideo(AbstractStoreVideo):
         """
         await self.save_video(video_content_item.get("aid"), video_content_item.get("video_content"), video_content_item.get("extension_file_name"))
 
+    async def store_media(self, media_content_item: Dict):
+        """
+        store arbitrary bilibili media bytes under the aid folder
+
+        Args:
+            media_content_item:
+
+        Returns:
+
+        """
+        await self.save_media(media_content_item.get("aid"), media_content_item.get("media_content"), media_content_item.get("file_name"))
+
     def make_save_file_name(self, aid: str, extension_file_name: str) -> str:
         """
         make save file name by store type
@@ -75,3 +87,21 @@ class BilibiliVideo(AbstractStoreVideo):
         async with aiofiles.open(save_file_name, 'wb') as f:
             await f.write(video_content)
             utils.logger.info(f"[BilibiliVideoImplement.save_video] save save_video {save_file_name} success ...")
+
+    async def save_media(self, aid: int, content: bytes, file_name: str):
+        """
+        save any bilibili media bytes to local
+
+        Args:
+            aid: aid
+            content: media content
+            file_name: target filename with extension
+
+        Returns:
+
+        """
+        pathlib.Path(self.video_store_path + "/" + str(aid)).mkdir(parents=True, exist_ok=True)
+        save_file_name = self.make_save_file_name(str(aid), file_name)
+        async with aiofiles.open(save_file_name, 'wb') as f:
+            await f.write(content)
+            utils.logger.info(f"[BilibiliVideoImplement.save_media] save media {save_file_name} success ...")

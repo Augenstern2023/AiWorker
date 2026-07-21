@@ -182,6 +182,19 @@ class CDPBrowserManager:
                         f"[CDPBrowserManager] CDP端口 {debug_port} 不可访问"
                     )
                     return False
+            async with httpx.AsyncClient(trust_env=False) as client:
+                response = await client.get(
+                    f"http://127.0.0.1:{debug_port}/json/version", timeout=5
+                )
+                response.raise_for_status()
+                data = response.json()
+                if not data.get("webSocketDebuggerUrl"):
+                    utils.logger.warning(
+                        f"[CDPBrowserManager] CDP端口 {debug_port} 未返回 webSocketDebuggerUrl"
+                    )
+                    return False
+                utils.logger.info(f"[CDPBrowserManager] CDP /json/version 校验通过")
+                return True
         except Exception as e:
             utils.logger.warning(f"[CDPBrowserManager] CDP连接测试失败: {e}")
             return False
@@ -220,8 +233,9 @@ class CDPBrowserManager:
 
         # 测试CDP连接
         if not await self._test_cdp_connection(self.debug_port):
-            utils.logger.warning(
-                "[CDPBrowserManager] CDP连接测试失败，但将继续尝试连接"
+            raise RuntimeError(
+                f"CDP调试端口 {self.debug_port} 未返回有效 DevTools 信息，"
+                "请确认本机代理未拦截 localhost/127.0.0.1，且端口未被其他程序占用。"
             )
 
     async def _get_browser_websocket_url(self, debug_port: int) -> str:
@@ -229,9 +243,9 @@ class CDPBrowserManager:
         获取浏览器的WebSocket连接URL
         """
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(trust_env=False) as client:
                 response = await client.get(
-                    f"http://localhost:{debug_port}/json/version", timeout=10
+                    f"http://127.0.0.1:{debug_port}/json/version", timeout=10
                 )
                 if response.status_code == 200:
                     data = response.json()

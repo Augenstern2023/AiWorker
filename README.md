@@ -145,7 +145,6 @@ AiWorker 提供三种启动方式：
 |---------|---------|------|
 | 主程序GUI | `启动程序.bat` | 运行 `GUI.py`，功能完整的桌面GUI |
 | 网页GUI | `启动Web程序.bat` | 运行 `WebGUI.py`，浏览器访问 |
-| 私信GUI | `启动私信程序.bat` | 运行私密GUI模块 |
 
 ```shell
 # Windows 用户直接双击上述 .bat 文件即可启动

@@ -343,6 +343,14 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
                 show_default=True,
             ),
         ] = str(config.AUTO_CLOSE_BROWSER),
+        job_file: Annotated[
+            str,
+            typer.Option(
+                "--job-file",
+                help="Path to a CrawlJob JSON file for worker-agent mode",
+                rich_help_panel="Agent",
+            ),
+        ] = "",
     ) -> SimpleNamespace:
         """MediaCrawler 命令行入口"""
 
@@ -440,9 +448,12 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
             cookies=config.COOKIES,
             specified_id=specified_id,
             creator_id=creator_id,
+            specified_id_list=specified_id_list,
+            creator_id_list=creator_id_list,
             dy_channel=dy_channel,
             dy_sort=dy_sort,
             dy_publish_time=dy_publish_time,
+            job_file=job_file,
         )
 
     command = typer.main.get_command(app)

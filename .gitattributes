@@ -1,3 +1,8 @@
 *.js linguist-language=python
 *.css linguist-language=python
 *.html linguist-language=python
+*.py text working-tree-encoding=UTF-8
+*.js text working-tree-encoding=UTF-8
+*.html text working-tree-encoding=UTF-8
+*.md text working-tree-encoding=UTF-8
+

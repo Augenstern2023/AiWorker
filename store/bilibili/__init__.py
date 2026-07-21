@@ -146,6 +146,21 @@ async def store_video(aid, video_content, extension_file_name):
     })
 
 
+async def store_media(aid, media_content, file_name):
+    """
+    media storage implementation
+    Args:
+        aid:
+        media_content:
+        file_name:
+    """
+    await BilibiliVideo().store_media({
+        "aid": aid,
+        "media_content": media_content,
+        "file_name": file_name,
+    })
+
+
 async def batch_update_bilibili_creator_fans(creator_info: Dict, fans_list: List[Dict]):
     if not fans_list:
         return

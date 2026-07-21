@@ -60,6 +60,5 @@ Three GUI options available:
 |-----|---------|--------|
 | Desktop GUI | `python GUI.py` | tkinter window |
 | Web GUI | `python WebGUI.py` | http://localhost:8080 |
-| Private GUI | (file with Chinese name) | - |
 
 The `启动*.bat` batch files activate `.venv` and run the respective GUI scripts.

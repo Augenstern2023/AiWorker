@@ -16,7 +16,16 @@
 #
 # 详细许可条款请参阅项目根目录下的LICENSE文件。
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
+import os
+
 # bilili 平台配置
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "y", "on")
 
 # 每天爬取视频/帖子的数量控制
 MAX_NOTES_PER_DAY = 1
@@ -53,6 +62,38 @@ BILI_SEARCH_MODE = "normal"
 # 16=360p, 32=480p, 64=720p, 80=1080p, 112=1080p高码率, 116=1080p60, 120=4K
 # 注意：更高清晰度需要账号/视频本身支持
 BILI_QN = 80
+
+# B站字幕与分析导出配置
+BILI_ENABLE_SUBTITLE = True
+BILI_SUBTITLE_LANG_PRIORITY = ["zh-CN", "zh-Hans", "ai-zh", "en-US"]
+TROVE_MARKDOWN_OUTPUT_DIR = "data/bili/analysis"
+
+# 后续阶段预留配置，默认关闭
+BILI_ENABLE_AUDIO_DOWNLOAD = True
+BILI_MEDIA_DOWNLOAD_MODE = "audio"
+BILI_AUDIO_FILE_NAME = "audio.m4s"
+BILI_ENABLE_ASR = False
+BILI_ENABLE_LLM_ANALYSIS = _env_bool("BILI_ENABLE_LLM_ANALYSIS", False)
+BILI_ASR_PROVIDER = "sensevoice"
+BILI_ASR_MAX_DURATION_SECONDS = 1800
+BILI_ASR_OUTPUT_FORMAT = "txt"
+BILI_FFMPEG_PATH = "imageio-ffmpeg"
+ASR_BASE_URL = os.getenv("ASR_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+ASR_API_KEY = os.getenv("ASR_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("SUB2API_KEY", "")
+ASR_MODEL = os.getenv("ASR_MODEL", "whisper-1")
+SENSEVOICE_PYTHON = os.getenv("SENSEVOICE_PYTHON", r"D:\qwen3_tts_rainfall\python\python.exe")
+SENSEVOICE_MODEL_DIR = os.getenv("SENSEVOICE_MODEL_DIR", r"D:\qwen3_tts_rainfall\models\SenseVoiceSmall")
+SENSEVOICE_FFMPEG_DIR = os.getenv("SENSEVOICE_FFMPEG_DIR", r"D:\qwen3_tts_rainfall\python\ffmpeg\bin")
+SENSEVOICE_DEVICE = os.getenv("SENSEVOICE_DEVICE", "cuda:0")
+SENSEVOICE_SCRIPT_PATH = os.getenv("SENSEVOICE_SCRIPT_PATH", "tools/sensevoice_transcribe.py")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "sub2api")
+LLM_ENV_KEY = os.getenv("LLM_ENV_KEY", "SUB2API_KEY")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://54.92.99.171:8080/v1")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "") or os.getenv(LLM_ENV_KEY, "")
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-5.5")
+LLM_WIRE_API = os.getenv("LLM_WIRE_API", "chat_completions")
+LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "high")
+BILI_LLM_MAX_TRANSCRIPT_CHARS = int(os.getenv("BILI_LLM_MAX_TRANSCRIPT_CHARS", "30000"))
 
 # 是否爬取用户信息
 CREATOR_MODE = True

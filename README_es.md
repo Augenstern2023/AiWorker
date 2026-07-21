@@ -133,7 +133,6 @@ AiWorker proporciona tres métodos de inicio:
 |-----------------|---------------|-------------|
 | GUI Principal | `启动程序.bat` | Ejecuta `GUI.py`, GUI de escritorio completo |
 | GUI Web | `启动Web程序.bat` | Ejecuta `WebGUI.py`, acceso desde navegador |
-| GUI Privado | `启动私信程序.bat` | Ejecuta módulo GUI privado |
 
 ```shell
 # Usuarios de Windows: haga doble clic en los archivos .bat anteriores

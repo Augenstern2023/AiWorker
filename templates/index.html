@@ -133,6 +133,31 @@
             outline: 1px solid var(--accent);
             background: rgba(59, 149, 246, .16) !important;
         }
+        .creative-project-row {
+            cursor: pointer;
+            transition: background-color .15s ease, box-shadow .15s ease;
+        }
+        .creative-project-row.table-active {
+            box-shadow: inset 3px 0 0 var(--accent);
+        }
+        .project-name-button {
+            appearance: none;
+            border: 0;
+            background: transparent;
+            color: var(--text);
+            padding: 0;
+            font: inherit;
+            font-weight: 700;
+            text-align: left;
+        }
+        .project-name-button:hover,
+        .creative-project-row.table-active .project-name-button {
+            color: #fff;
+        }
+        .project-name-button:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 3px;
+        }
         .scroll-pane {
             overflow: auto;
             max-height: 420px;
@@ -1177,10 +1202,10 @@
             </div>
 
             <table class="table table-sm align-middle mb-4">
-                <thead><tr><th>项目</th><th>来源选题</th><th>目标集数</th><th>当前阶段</th><th>更新时间</th><th style="width:90px">操作</th></tr></thead>
+                <thead><tr><th>项目</th><th>来源选题</th><th>目标集数</th><th>当前阶段</th><th>更新时间</th></tr></thead>
                 <tbody>
-                    <template x-for="project in creativeWorkspace.projects" :key="project.id"><tr class="creative-project-row" :class="{'table-active': creativeWorkspace.project?.id === project.id}" @click="selectCreativeProject(project.id)"><td class="fw-semibold" x-text="project.name"></td><td x-text="project.topic_title"></td><td x-text="project.target_episode_count"></td><td><span class="badge bg-secondary" x-text="creativeProjectStatusLabel(project.status)"></span></td><td x-text="formatDate(project.updated_at)"></td><td><button class="btn btn-sm btn-outline-light" @click.stop="selectCreativeProject(project.id)" title="打开项目" aria-label="打开项目"><i class="bi bi-arrow-right"></i></button></td></tr></template>
-                    <tr x-show="!creativeWorkspace.projects.length"><td colspan="6" class="text-center text-muted py-4">暂无创作项目，请先从已采纳且已锁定拆解的选题创建</td></tr>
+                    <template x-for="project in creativeWorkspace.projects" :key="project.id"><tr class="creative-project-row" :class="{'table-active': creativeWorkspace.project?.id === project.id}" @click="selectCreativeProject(project.id)"><td><button type="button" class="project-name-button" @click.stop="selectCreativeProject(project.id)" :aria-current="creativeWorkspace.project?.id === project.id ? 'page' : null" x-text="project.name"></button></td><td x-text="project.topic_title"></td><td x-text="project.target_episode_count"></td><td><span class="badge bg-secondary" x-text="creativeProjectStatusLabel(project.status)"></span></td><td x-text="formatDate(project.updated_at)"></td></tr></template>
+                    <tr x-show="!creativeWorkspace.projects.length"><td colspan="5" class="text-center text-muted py-4">暂无创作项目，请先从已采纳且已锁定拆解的选题创建</td></tr>
                 </tbody>
             </table>
 

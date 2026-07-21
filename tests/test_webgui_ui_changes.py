@@ -94,6 +94,22 @@ def test_webgui_registers_phase4_routes_and_flat_project_workspace():
     assert "--bs-table-active-color: var(--text);" in html
 
 
+def test_project_table_uses_name_navigation_without_redundant_action_column():
+    html = Path("templates/index.html").read_text(encoding="utf-8")
+    section = html.split('<section class="creative-project-workspace" x-show="currentTab === \'creative-projects\'">', 1)[1].split("</section>", 1)[0]
+    project_table = section.split('<table class="table table-sm align-middle mb-4">', 1)[1].split("</table>", 1)[0]
+
+    assert ">操作</th>" not in project_table
+    assert 'title="打开项目"' not in project_table
+    assert "bi-arrow-right" not in project_table
+    assert 'class="project-name-button"' in project_table
+    assert '@click.stop="selectCreativeProject(project.id)"' in project_table
+    assert ':aria-current="creativeWorkspace.project?.id === project.id ? \'page\' : null"' in project_table
+    assert ".creative-project-row.table-active" in html
+    assert ".project-name-button:focus-visible" in html
+    assert 'colspan="5"' in project_table
+
+
 def test_creative_project_creation_supports_selecting_a_locked_breakdown_version():
     html = Path("templates/index.html").read_text(encoding="utf-8")
 

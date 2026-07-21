@@ -1064,13 +1064,17 @@
                                 <td><div class="fw-semibold" x-text="topic.title"></div><small class="text-muted" x-text="topic.recommendation"></small></td>
                                 <td x-text="topic.platform"></td><td x-text="topic.category || '-' "></td>
                                 <td x-text="topic.score.toFixed(1)"></td>
-                                <td><span class="badge" :class="topic.status === 'adopted' ? 'bg-success' : 'bg-secondary'" x-text="topic.status"></span></td>
+                                <td>
+                                    <span class="badge" :class="topic.status === 'adopted' ? 'bg-success' : 'bg-secondary'" x-text="topic.status"></span>
+                                    <span class="badge d-block mt-1" :class="breakdownStatusClass(topic)" x-text="breakdownStatusLabel(topic)"></span>
+                                </td>
                                 <td>
                                     <button class="btn btn-sm btn-outline-success me-1" x-show="!topic.latest_breakdown_id && topic.status === 'pending_review'" @click="updateCreativeTopic(topic, 'adopted')">采纳</button>
                                     <button class="btn btn-sm btn-outline-light me-1" x-show="!topic.latest_breakdown_id && ['pending_review', 'adopted'].includes(topic.status)" @click="createCreativeBreakdown(topic)">拆解</button>
                                     <button class="btn btn-sm btn-outline-secondary" x-show="!topic.latest_breakdown_id && topic.status === 'pending_review'" @click="updateCreativeTopic(topic, 'rejected')">不跟进</button>
                                     <button class="btn btn-sm btn-outline-success" x-show="!topic.latest_breakdown_id && topic.status === 'rejected'" @click="updateCreativeTopic(topic, 'adopted')"><i class="bi bi-arrow-counterclockwise me-1"></i>重新采纳</button>
-                                    <button class="btn btn-sm btn-outline-light me-1" x-show="topic.latest_breakdown_id && topic.status !== 'archived'" @click="createCreativeBreakdown(topic)">再次拆解</button>
+                                    <button class="btn btn-sm btn-outline-light me-1" x-show="topic.latest_breakdown_id && topic.latest_breakdown_status === 'draft' && topic.status !== 'archived'" @click="createCreativeBreakdown(topic)">继续拆解</button>
+                                    <button class="btn btn-sm btn-outline-light me-1" x-show="topic.latest_breakdown_id && topic.latest_breakdown_status !== 'draft' && topic.status !== 'archived'" @click="createCreativeBreakdown(topic)">再次拆解</button>
                                     <button class="btn btn-sm btn-outline-warning" x-show="topic.latest_breakdown_id && topic.status !== 'archived'" @click="updateCreativeTopic(topic, 'archived')">归档</button>
                                 </td>
                             </tr>
@@ -1098,7 +1102,7 @@
                         <div class="col-md-2"><label class="form-label small">状态</label><select class="form-select form-select-sm" x-model="topicLibrary.status"><option value="">全部状态</option><option value="pending_review">待评估</option><option value="adopted">已采纳</option><option value="rejected">不跟进</option><option value="archived">已归档</option></select></div>
                         <div class="col-md-2"><label class="form-label small">题材</label><input class="form-control form-control-sm" x-model="topicLibrary.category" placeholder="筛选题材"></div>
                         <div class="col-md-2"><label class="form-label small">最低推荐分</label><input class="form-control form-control-sm" type="number" min="0" max="100" x-model="topicLibrary.minScore" placeholder="0"></div>
-                        <div class="col-md-2"><label class="form-label small">拆解版本</label><select class="form-select form-select-sm" x-model="topicLibrary.hasLocked"><option value="">全部</option><option value="true">已有锁定拆解</option><option value="false">待生成拆解</option></select></div>
+                        <div class="col-md-2"><label class="form-label small">拆解版本</label><select class="form-select form-select-sm" x-model="topicLibrary.hasLocked"><option value="">全部</option><option value="true">已有锁定拆解</option><option value="false">无锁定拆解</option></select></div>
                         <div class="col-md-2 d-grid"><button class="btn btn-primary btn-sm" @click="fetchTopicLibrary()"><i class="bi bi-funnel me-1"></i>应用筛选</button></div>
                     </div>
                 </div>
@@ -1131,7 +1135,7 @@
                                 <td x-text="topic.category || '-' "></td>
                                 <td><span class="fw-semibold" x-text="Number(topic.score || 0).toFixed(1)"></span></td>
                                 <td><span class="badge" :class="topicStatusClass(topic.status)" x-text="topicStatusLabel(topic.status)"></span></td>
-                                <td><span class="badge" :class="topic.locked_breakdown_id ? 'bg-success' : 'bg-secondary'" x-text="topic.locked_breakdown_id ? '已锁定' : '未生成'"></span></td>
+                                <td><span class="badge" :class="breakdownStatusClass(topic)" x-text="breakdownStatusLabel(topic)"></span></td>
                                 <td class="text-nowrap">
                                     <button class="btn btn-sm btn-outline-light me-1" @click="createTopicLibraryBreakdown(topic)" title="生成拆解" aria-label="生成拆解"><i class="bi bi-diagram-3"></i></button>
                                     <button class="btn btn-sm btn-outline-primary me-1" @click="openTopicDownload(topic)" title="下载剧集" aria-label="下载剧集"><i class="bi bi-download"></i></button>
@@ -1163,7 +1167,7 @@
 
             <div class="border-top border-bottom py-3 mb-3">
                 <div class="row g-2 align-items-end">
-                    <div class="col-lg-3"><label class="form-label small">已采纳选题</label><select class="form-select form-select-sm" x-model.number="creativeWorkspace.create.topic_id" @change="syncCreativeProjectSource()"><option value="">选择已锁定拆解的选题</option><template x-for="topic in creativeWorkspace.eligibleTopics" :key="topic.id"><option :value="topic.id" x-text="topic.title"></option></template></select></div>
+                    <div class="col-lg-3"><label class="form-label small">已采纳选题</label><select class="form-select form-select-sm" x-model.number="creativeWorkspace.create.topic_id" @change="syncCreativeProjectSource()"><option value="">选择已采纳选题</option><template x-for="topic in creativeWorkspace.eligibleTopics" :key="topic.id"><option :value="topic.id" :disabled="!topic.locked_breakdown_id" x-text="creativeTopicOptionLabel(topic)"></option></template></select></div>
                     <div class="col-lg-2"><label class="form-label small">拆解版本</label><select class="form-select form-select-sm" x-model.number="creativeWorkspace.create.breakdown_id" :disabled="!creativeWorkspace.create.topic_id"><option value="">选择拆解版本</option><template x-for="breakdown in creativeWorkspace.lockedBreakdowns" :key="breakdown.id"><option :value="breakdown.id" x-text="`v${breakdown.version} · 已锁定`"></option></template></select></div>
                     <div class="col-lg-3"><label class="form-label small">项目名称</label><input class="form-control form-control-sm" x-model="creativeWorkspace.create.name" placeholder="例如：都市女性成长方向"></div>
                     <div class="col-lg-1"><label class="form-label small">目标平台</label><select class="form-select form-select-sm" x-model="creativeWorkspace.create.target_platform"><option value="">待定</option><option value="dy">抖音</option><option value="hg">红果</option></select></div>
@@ -2533,13 +2537,36 @@
                     return {adopted: 'bg-success', rejected: 'bg-danger', archived: 'bg-secondary', pending_review: 'bg-warning text-dark'}[status] || 'bg-secondary';
                 },
 
+                breakdownStatusLabel(topic) {
+                    if (!topic?.latest_breakdown_id) return '未拆解';
+                    const version = topic.latest_breakdown_version ? ` v${topic.latest_breakdown_version}` : '';
+                    if (topic.latest_breakdown_status === 'locked') return `已锁定${version}`;
+                    return topic.locked_breakdown_id
+                        ? `草稿${version} · 已有锁定版`
+                        : `草稿${version} · 待锁定`;
+                },
+
+                breakdownStatusClass(topic) {
+                    if (!topic?.latest_breakdown_id) return 'bg-secondary';
+                    if (topic.latest_breakdown_status === 'locked') return 'bg-success';
+                    return topic.locked_breakdown_id ? 'bg-info text-dark' : 'bg-warning text-dark';
+                },
+
+                creativeTopicOptionLabel(topic) {
+                    if (!topic?.latest_breakdown_id) return `${topic.title}（未拆解）`;
+                    const version = topic.latest_breakdown_version ? ` v${topic.latest_breakdown_version}` : '';
+                    if (!topic.locked_breakdown_id) return `${topic.title}（草稿${version}，需先锁定）`;
+                    if (topic.latest_breakdown_status === 'draft') return `${topic.title}（已有锁定版，最新草稿${version}）`;
+                    return `${topic.title}（已锁定${version}）`;
+                },
+
                 async fetchCreativeProjects(selectId = null) {
                     this.creativeWorkspace.loading = true;
                     this.creativeWorkspace.error = '';
                     try {
                         const [projectsResponse, topicsResponse] = await Promise.all([
                             fetch('/api/creative/projects'),
-                            fetch('/api/creative/topics?status=adopted&has_locked_breakdown=true&limit=500')
+                            fetch('/api/creative/topics?status=adopted&limit=500')
                         ]);
                         const projectsData = await projectsResponse.json();
                         const topicsData = await topicsResponse.json();

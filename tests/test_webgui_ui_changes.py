@@ -104,6 +104,19 @@ def test_creative_project_creation_supports_selecting_a_locked_breakdown_version
     assert "background-color: #151722;" in html
 
 
+def test_draft_breakdowns_are_visible_but_not_project_eligible():
+    html = Path("templates/index.html").read_text(encoding="utf-8")
+
+    assert "breakdownStatusLabel(topic)" in html
+    assert "breakdownStatusClass(topic)" in html
+    assert "草稿${version} · 待锁定" in html
+    assert "草稿${version} · 已有锁定版" in html
+    assert "继续拆解" in html
+    assert "fetch('/api/creative/topics?status=adopted&limit=500')" in html
+    assert ':disabled="!topic.locked_breakdown_id"' in html
+    assert 'x-text="creativeTopicOptionLabel(topic)"' in html
+
+
 def test_today_hit_actions_follow_topic_status_without_conflicting_commands():
     html = Path("templates/index.html").read_text(encoding="utf-8")
     section = html.split('<section x-show="currentTab === \'creative\'">', 1)[1].split("</section>", 1)[0]

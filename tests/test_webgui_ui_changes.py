@@ -204,7 +204,17 @@ def test_character_and_outline_generation_show_the_same_button_progress_feedback
     assert "creativeWorkspace.startingAction === 'characters' ? '正在启动' : '生成中'" in html
     assert "creativeActionRunning('outlines')" in html
     assert "creativeWorkspace.startingAction === 'outlines' ? '正在启动' : '生成中'" in html
-    assert html.count(':disabled="creativeJobRunning() || !!creativeWorkspace.startingAction"') >= 3
+    assert html.count(':disabled="creativeActionDisabled(') >= 3
+
+
+def test_next_stage_generation_is_not_blocked_by_a_stale_previous_action():
+    html = Path("templates/index.html").read_text(encoding="utf-8")
+
+    assert "creativeActionDisabled(action)" in html
+    assert "this.creativeWorkspace.activeAction === action && this.creativeJobRunning()" in html
+    assert ':disabled="creativeActionDisabled(\'outlines\')"' in html
+    assert ':disabled="creativeActionDisabled(\'characters\')"' in html
+    assert ':disabled="creativeActionDisabled(\'blueprints\')"' in html
 
 
 def test_breakdown_editor_opens_in_modal_instead_of_page_bottom():

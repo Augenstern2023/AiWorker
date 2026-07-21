@@ -1,239 +1,168 @@
-# 🔥 AiWorker - AI数字员工 🕷️
+# AiWorker - 壹凡短剧选品平台
 
-<div align="center" markdown="1">
-   <sup>Special thanks to:</sup>
-   <br>
-   <br>
-   <a href="https://go.warp.dev/MediaCrawler">
-      <img alt="Warp sponsorship" width="400" src="https://github.com/warpdotdev/brand-assets/blob/main/Github/Sponsor/Warp-Github-LG-02.png?raw=true">
-   </a>
+AiWorker 是一套面向短剧内容运营、策划和制作团队的本地化工作平台。项目在 MediaCrawler 多平台采集能力之上，整合了榜单分析、剧目检索下载、脚本转写、爆款拆解、选题管理和创作项目工作流。
 
-### [Warp is built for coding with multiple AI agents](https://go.warp.dev/MediaCrawler)
+系统默认通过 Web GUI 使用，同时保留桌面 GUI 和命令行爬虫入口。耗时下载、转写和 AI 生成任务统一进入任务中心，可查看进度、日志和产物。
 
+## 当前能力
 
-</div>
-<hr>
+| 模块 | 主要能力 |
+| --- | --- |
+| 今日榜单 | 读取抖音、红果榜单快照；展示排名变化、热评及连续/累计在榜天数 |
+| 剧目检索下载 | 检索剧目和分集；批量下载视频、音频及脚本；显示进度并支持中断后继续 |
+| 今日爆款 | 从榜单生成候选选题 Top10，展示推荐分、题材、来源与运营状态 |
+| 选题库 | 采纳、不跟进、重新采纳、归档；筛选状态、平台、题材及拆解版本 |
+| 剧目拆解 | 至少基于一集已转写脚本生成个性化拆解，记录逐字段证据、来源和风险 |
+| 拆解版本 | 编辑、保存、锁定、选择历史版本；默认复用最新版本，明确操作后才重新生成 |
+| 创作项目 | 从锁定拆解生成仿制方向、Brief、人物关系、分集大纲和单集 Beats |
+| 版本与导出 | 各创作阶段支持保存、锁定和版本衔接，可导出 Markdown/JSON 等制作资料 |
+| 通用采集 | 支持小红书、抖音、快手、B 站、微博、贴吧和知乎的搜索、详情及创作者采集 |
+| 数据管理 | 支持 JSON、CSV、Excel、SQLite、MySQL 和 MongoDB 等存储方式 |
 
-<div align="center">
+## 核心工作流
 
-<a href="https://trendshift.io/repositories/8291" target="_blank">
-  <img src="https://trendshift.io/api/badge/repositories/8291" alt="NanmiCoder%2FMediaCrawler | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/>
-</a>
-
-[![GitHub Stars](https://img.shields.io/github/stars/NanmiCoder/MediaCrawler?style=social)](https://github.com/NanmiCoder/MediaCrawler/stargazers)
-[![GitHub Forks](https://img.shields.io/github/forks/NanmiCoder/MediaCrawler?style=social)](https://github.com/NanmiCoder/MediaCrawler/network/members)
-[![GitHub Issues](https://img.shields.io/github/issues/NanmiCoder/MediaCrawler)](https://github.com/NanmiCoder/MediaCrawler/issues)
-[![GitHub Pull Requests](https://img.shields.io/github/issues-pr/NanmiCoder/MediaCrawler)](https://github.com/NanmiCoder/MediaCrawler/pulls)
-[![License](https://img.shields.io/github/license/NanmiCoder/MediaCrawler)](https://github.com/NanmiCoder/MediaCrawler/blob/main/LICENSE)
-[![中文](https://img.shields.io/badge/🇨🇳_中文-当前-blue)](README.md)
-[![English](https://img.shields.io/badge/🇺🇸_English-Available-green)](README_en.md)
-[![Español](https://img.shields.io/badge/🇪🇸_Español-Available-green)](README_es.md)
-</div>
-
-
-
-> **免责声明：**
-> 
-> 大家请以学习为目的使用本仓库⚠️⚠️⚠️⚠️，[爬虫违法违规的案件](https://github.com/HiddenStrawberry/Crawler_Illegal_Cases_In_China)  <br>
->
->本仓库的所有内容仅供学习和参考之用，禁止用于商业用途。任何人或组织不得将本仓库的内容用于非法用途或侵犯他人合法权益。本仓库所涉及的爬虫技术仅用于学习和研究，不得用于对其他平台进行大规模爬虫或其他非法行为。对于因使用本仓库内容而引起的任何法律责任，本仓库不承担任何责任。使用本仓库的内容即表示您同意本免责声明的所有条款和条件。
->
-> 点击查看更为详细的免责声明。[点击跳转](#disclaimer)
-
-
-
-
-## 📖 项目简介
-
-一个功能强大的**AI数字员工工具**，支持抖音内容爬取、评论管理、数据导出等自动化工作流程。
-
-### 🔧 技术原理
-
-- **核心技术**：基于 [Playwright](https://playwright.dev/) 浏览器自动化框架和 CDP 模式
-- **自动化流程**：Contents爬取 → 评论爬取 → Excel导出 → 自动上传，全自动托管
-
-
-## ✨ 功能特性
-| 功能模块 | 说明 |
-| ------ | --- |
-| 内容爬取 | 关键词搜索、视频详情、创作者主页 |
-| 评论爬取 | 一级评论、二级评论自动爬取 |
-| 自动托管 | 开启后自动完成 爬取→导出→上传 全流程 |
-| 多项目管理 | 支持同时管理多个项目，配置独立关键词 |
-| 数据导出 | 支持 JSON、Excel 等格式导出 |
-| 自动上传 | 导出后自动上传到指定接口 |
-
-<details>
-
-#### 🎯 核心功能升级
-- ✅ **断点续爬功能**（重点特性）
-- ✅ **多账号 + IP代理池支持**（重点特性）
-- ✅ **去除 Playwright 依赖**，使用更简单
-- ✅ **完整 Linux 环境支持**
-
-#### 🏗️ 架构设计优化
-- ✅ **代码重构优化**，更易读易维护（解耦 JS 签名逻辑）
-- ✅ **企业级代码质量**，适合构建大型爬虫项目
-- ✅ **完美架构设计**，高扩展性，源码学习价值更大
-
-#### 🎁 额外功能
-- ✅ **自媒体视频下载器桌面端**（适合学习全栈开发）
-- ✅ **多平台首页信息流推荐**（HomeFeed）
-- [ ] **基于自媒体平台的AI Agent正在开发中 🚀🚀**
-
-
-</details>
-
-
-
-## 📋 前置依赖
-
-### 🚀 uv 安装（推荐）
-
-在进行下一步操作之前，请确保电脑上已经安装了 uv：
-
-- **安装地址**：[uv 官方安装指南](https://docs.astral.sh/uv/getting-started/installation)
-- **验证安装**：终端输入命令 `uv --version`，如果正常显示版本号，证明已经安装成功
-- **推荐理由**：uv 是目前最强的 Python 包管理工具，速度快、依赖解析准确
-
-### 🟢 Node.js 安装
-
-项目依赖 Node.js，请前往官网下载安装：
-
-- **下载地址**：https://nodejs.org/en/download/
-- **版本要求**：>= 16.0.0
-
-### 📦 Python 包安装
-
-```shell
-# 进入项目目录
-cd AiWorker
-
-# 使用 uv sync 命令来保证 python 版本和相关依赖包的一致性
-uv sync
+```text
+榜单/剧目数据
+  -> 剧目检索与分集下载
+  -> 至少一集脚本转写
+  -> 个性化爆款拆解
+  -> 选题采纳与拆解锁定
+  -> 仿制方向与 Brief
+  -> 人物关系
+  -> 分集大纲
+  -> 单集 Beats
+  -> 制作资料导出
 ```
 
-### 🌐 浏览器驱动安装
+拆解不会在每次点击时重复调用模型。已有草稿或锁定版本时，列表显示“再次拆解 / 归档”；“再次拆解”打开最新版本，只有编辑器中的“重新生成”才会重新分析已下载脚本。
 
-```shell
-# 安装浏览器驱动
+## 环境要求
+
+- Windows 10/11（当前 Web GUI 和批处理启动方式主要在 Windows 验证）
+- Python 3.11
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- Node.js 16 或更高版本
+- Chrome 或 Edge；CDP 模式默认连接本机浏览器
+
+## 安装
+
+```powershell
+git clone http://192.168.1.11:3000/yifangkeji/manjuxuanpin.git
+cd manjuxuanpin
+uv sync
 uv run playwright install
 ```
 
-## 🚀 运行爬虫程序
+项目统一使用 `uv` 管理 Python 环境和依赖，请不要直接使用 `pip install` 修改项目环境。
 
-```shell
-# 在 config/base_config.py 查看配置项目功能，写的有中文注释
+## 启动 Web GUI
 
-# 从配置文件中读取关键词搜索相关的帖子并爬取帖子信息与评论
+```powershell
+uv run WebGUI.py
+```
+
+启动后访问：
+
+- 本机：`http://127.0.0.1:8899`
+- 局域网：`http://<本机IP>:8899`
+
+Windows 用户也可以运行 `启动Web程序.bat`。程序会创建所需的数据和运行时目录；第一次使用 Playwright 或 CDP 时，浏览器可能要求完成登录。
+
+## 启动桌面 GUI
+
+```powershell
+uv run GUI.py
+```
+
+也可以运行 `启动程序.bat`。
+
+## 命令行采集
+
+```powershell
+# 查看全部参数
+uv run main.py --help
+
+# 关键词搜索
 uv run main.py --platform xhs --lt qrcode --type search
 
-# 从配置文件中读取指定的帖子ID列表获取指定帖子的信息与评论信息
+# 指定内容详情
 uv run main.py --platform xhs --lt qrcode --type detail
 
-# 打开对应APP扫二维码登录
-
-# 其他平台爬虫使用示例，执行下面的命令查看
-uv run main.py --help
+# 创作者主页
+uv run main.py --platform xhs --lt qrcode --type creator
 ```
 
-## 🖥️ GUI图形界面
+常用配置位于 [config/base_config.py](config/base_config.py)，平台覆盖配置位于 `config/<platform>_config.py`。支持的平台标识包括 `xhs`、`dy`、`ks`、`bili`、`wb`、`tieba` 和 `zhihu`。
 
-AiWorker 提供三种启动方式：
+## 短剧选品使用顺序
 
-| 启动方式 | 命令文件 | 说明 |
-|---------|---------|------|
-| 主程序GUI | `启动程序.bat` | 运行 `GUI.py`，功能完整的桌面GUI |
-| 网页GUI | `启动Web程序.bat` | 运行 `WebGUI.py`，浏览器访问 |
+1. 在“今日榜单”抓取或选择抖音/红果榜单快照。
+2. 在“剧目检索下载”中找到目标剧目，选择至少一集并完成下载与转写。
+3. 在“今日爆款”生成候选选题，结合推荐分、题材和在榜时长进行判断。
+4. 点击“拆解”。没有有效转写时，系统会提示先下载剧目脚本。
+5. 检查拆解字段、证据和风险，保存后锁定可用版本。
+6. 采纳选题并进入“创作项目”，依次完成方向、Brief、人物、分集大纲和 Beats。
+7. 每个阶段保存并锁定后再进入下游阶段，最后导出制作资料。
 
-```shell
-# Windows 用户直接双击上述 .bat 文件即可启动
-# 或手动运行：
-python GUI.py      # 桌面GUI
-python WebGUI.py   # Web界面（默认 http://localhost:8080）
+## 数据与运行时目录
+
+| 路径 | 内容 |
+| --- | --- |
+| `data/` | 爬取数据、剧目媒体、转写脚本、分析报告和导出文件 |
+| `.runtime/` | 任务状态、创意数据库、日志和临时运行数据 |
+| `browser_data/` | CDP 浏览器用户数据 |
+| `docs/` | 产品、实施、导出和架构文档 |
+
+创意工作流默认使用 `.runtime/creative/creative.db` 保存选题、拆解和创作版本。不要手工删除正在运行任务对应的运行时文件。
+
+## 测试与质量检查
+
+```powershell
+# 单元测试
+uv run pytest tests/ -q
+
+# 集成测试（部分用例需要 Redis、MongoDB 或有效平台环境）
+uv run pytest test/ -q
+
+# 浏览器驱动
+uv run playwright install
+
+# 提交前检查
+uv run pre-commit run --all-files
 ```
 
-> 注意：WebGUI 依赖 FastAPI 和 uvicorn，请确保已运行 `uv sync` 安装依赖。
+## 配置与凭证安全
 
-<details>
-<summary>🔗 <strong>使用 Python 原生 venv 管理环境（不推荐）</strong></summary>
+- 外部服务地址、激活码、Cookie、模型密钥等仅保存在本机配置或环境变量中。
+- 不要将包含真实凭证的 `data.json`、`.env`、浏览器数据或运行日志提交到 Git。
+- 榜单快照、评论和转写存在来源限制；拆解页面会保留证据与风险说明，不应将推断内容表述为平台事实。
 
-#### 创建并激活 Python 虚拟环境
+## 项目结构
 
-> 如果是爬取抖音和知乎，需要提前安装 nodejs 环境，版本大于等于：`16` 即可
-
-```shell
-# 进入项目根目录
-cd MediaCrawler
-
-# 创建虚拟环境
-# Python 版本要求：3.11，requirements.txt 中的库是基于这个版本的
-# 如果是其他 python 版本，可能 requirements.txt 中的库不兼容，需自行解决
-python -m venv venv
-
-# macOS & Linux 激活虚拟环境
-source venv/bin/activate
-
-# Windows 激活虚拟环境
-venv\Scripts\activate
+```text
+analysis/          榜单、热度、转写和模型分析
+agents/            抖音/红果分析与剧目下载代理
+creative/          选题、拆解、创作项目及导出子系统
+media_platform/    各内容平台采集实现
+runtime/           任务管理和工作进程
+templates/         Web GUI 页面
+tests/             单元与界面回归测试
+WebGUI.py           Web GUI 入口
+GUI.py              桌面 GUI 入口
+main.py             命令行采集入口
 ```
 
-#### 安装依赖库
+## 相关文档
 
-```shell
-pip install -r requirements.txt
-```
+- [短剧选品平台 PRD 实施文档](docs/壹凡短剧选品平台PRD实施文档.md)
+- [短剧选品平台改进方案](docs/壹凡短剧选品平台改进方案.md)
+- [基于剧目转写的个性化拆解设计](docs/superpowers/specs/2026-07-20-transcript-driven-breakdown-design.md)
+- [Excel 导出指南](docs/excel_export_guide.md)
+- [数据存储指南](docs/data_storage_guide.md)
+- [项目文档索引](docs/index.md)
 
-#### 安装 playwright 浏览器驱动
+## 免责声明
 
-```shell
-playwright install
-```
+本项目仅供学习、研究及获得权利人明确许可的场景使用。使用者必须遵守目标平台服务条款、数据授权范围以及所在地法律法规，不得将本项目用于未经授权的大规模采集、隐私侵害、账号攻击或其他违法用途。因不当使用产生的责任由使用者自行承担。
 
-#### 运行爬虫程序（原生环境）
-
-```shell
-# 项目默认是没有开启评论爬取模式，如需评论请在 config/base_config.py 中的 ENABLE_GET_COMMENTS 变量修改
-# 一些其他支持项，也可以在 config/base_config.py 查看功能，写的有中文注释
-
-# 从配置文件中读取关键词搜索相关的帖子并爬取帖子信息与评论
-python main.py --platform xhs --lt qrcode --type search
-
-# 从配置文件中读取指定的帖子ID列表获取指定帖子的信息与评论信息
-python main.py --platform xhs --lt qrcode --type detail
-
-# 打开对应APP扫二维码登录
-
-# 其他平台爬虫使用示例，执行下面的命令查看
-python main.py --help
-```
-
-</details>
-
-
-## 💾 数据保存
-
-AiWorker 支持多种数据存储方式，包括 CSV、JSON、Excel、SQLite 和 MySQL 数据库。
-
-📖 **详细使用说明请查看：[数据存储指南](docs/data_storage_guide.md)**
-
-
-**联系方式**：
-- 微信：`relakkes`
-- 邮箱：`relakkes@gmail.com`
----
-
-### 📚 其他
-- **常见问题**：[MediaCrawler 完整文档](https://nanmicoder.github.io/MediaCrawler/)
-- **爬虫入门教程**：[CrawlerTutorial 免费教程](https://github.com/NanmiCoder/CrawlerTutorial)
-- **新闻爬虫开源项目**：[NewsCrawlerCollection](https://github.com/NanmiCoder/NewsCrawlerCollection)
-
-
-
-## 📚 参考
-
-- **小红书签名仓库**：[Cloxl 的 xhs 签名仓库](https://github.com/Cloxl/xhshow)
-- **小红书客户端**：[ReaJason 的 xhs 仓库](https://github.com/ReaJason/xhs)
-- **短信转发**：[SmsForwarder 参考仓库](https://github.com/pppscn/SmsForwarder)
-- **内网穿透工具**：[ngrok 官方文档](https://ngrok.com/docs/)
-
+本项目基于开源 MediaCrawler 演进，原项目及相关组件的版权和许可仍归各自权利人所有。详见 [LICENSE](LICENSE)。

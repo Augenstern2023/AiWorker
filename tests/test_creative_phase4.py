@@ -560,7 +560,8 @@ def test_project_retry_prefers_system_bound_project_over_creative_mismatch(
 
     with repository._connect() as connection:
         connection.execute(
-            "UPDATE creative_projects SET workflow_task_id = NULL WHERE id = ?",
+            "UPDATE creative_projects SET workflow_task_id = NULL, "
+            "creation_workflow_task_id = NULL WHERE id = ?",
             (bound["id"],),
         )
     mismatch = repository.create_project(
@@ -598,16 +599,21 @@ def test_project_duplicate_migration_keeps_newest_nondeleted_row(tmp_path: Path)
     )
     with repository._connect() as connection:
         connection.execute("DROP INDEX uq_creative_projects_workflow_task")
+        connection.execute(
+            "DROP INDEX uq_creative_projects_creation_workflow_task"
+        )
         cursor = connection.execute(
             """
             INSERT INTO creative_projects (
                 topic_id, breakdown_id, name, genre, target_platform,
                 target_audience, target_episode_count, episode_duration_seconds,
-                status, workflow_task_id, created_by, created_at, updated_at
+                status, workflow_task_id, creation_workflow_task_id,
+                created_by, created_at, updated_at
             )
             SELECT topic_id, breakdown_id, 'Newer bound', genre, target_platform,
                    target_audience, target_episode_count, episode_duration_seconds,
-                   status, workflow_task_id, created_by, created_at + 1, updated_at + 1
+                   status, workflow_task_id, creation_workflow_task_id,
+                   created_by, created_at + 1, updated_at + 1
             FROM creative_projects WHERE id = ?
             """,
             (first["id"],),
@@ -617,11 +623,62 @@ def test_project_duplicate_migration_keeps_newest_nondeleted_row(tmp_path: Path)
     CreativeRepository(path)
     with repository._connect() as connection:
         rows = connection.execute(
-            "SELECT id, workflow_task_id FROM creative_projects ORDER BY id"
+            "SELECT id, workflow_task_id, creation_workflow_task_id "
+            "FROM creative_projects ORDER BY id"
         ).fetchall()
     assert rows[0]["workflow_task_id"] is None
+    assert rows[0]["creation_workflow_task_id"] is None
     assert rows[1]["id"] == newer_id
     assert rows[1]["workflow_task_id"] == "duplicate-task"
+    assert rows[1]["creation_workflow_task_id"] == "duplicate-task"
+
+
+def test_legacy_brief_orphan_reconciliation_preserves_new_current_stage_task(
+    tmp_path: Path,
+):
+    client, repository, _ = build_phase4_client(tmp_path)
+    topic, breakdown = seed_adopted_topic(repository)
+    brief_task = assign_phase4_task(client, "brief", topic_id=topic["id"])
+    orphan = repository.create_project(
+        topic["id"],
+        breakdown["id"],
+        "Older orphan",
+        20,
+        workflow_task_id=brief_task["id"],
+        created_by=client.principal.user_id,
+    )
+    target = repository.create_project(
+        topic["id"],
+        breakdown["id"],
+        "Bound target",
+        20,
+        created_by=client.principal.user_id,
+    )
+    client.workflow.bind_workflow_project(
+        brief_task["id"], str(target["id"]), client.principal
+    )
+    characters_task = client.workflow.create_task(
+        "legacy-current-characters",
+        "characters",
+        "creative_planner",
+        topic_id=topic["id"],
+        project_id=str(target["id"]),
+        actor=SYSTEM_ACTOR,
+    )
+    client.workflow.claim_task(characters_task["id"], client.principal)
+    repository.link_project_workflow_task(target["id"], characters_task["id"])
+
+    listed = client.get("/api/creative/projects")
+
+    assert listed.status_code == 200, listed.text
+    reloaded_target = repository.get_project(target["id"])
+    reloaded_orphan = repository.get_project(orphan["id"])
+    assert reloaded_target is not None
+    assert reloaded_orphan is not None
+    assert reloaded_target["workflow_task_id"] == characters_task["id"]
+    assert reloaded_target["creation_workflow_task_id"] == brief_task["id"]
+    assert reloaded_orphan["workflow_task_id"] is None
+    assert reloaded_orphan["creation_workflow_task_id"] is None
 
 
 def test_breakdown_api_returns_personalized_field_writing_guide(tmp_path: Path):

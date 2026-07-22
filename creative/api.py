@@ -1031,7 +1031,9 @@ def build_creative_router(
             task = workflow_repository.get_task(workflow_task_id)
             if task is None:
                 raise HTTPException(404, "workflow task not found")
-            project = repository.get_project_by_workflow_task_id(workflow_task_id)
+            project = repository.get_project_by_creation_workflow_task_id(
+                workflow_task_id
+            )
             if task.get("project_id") is not None:
                 try:
                     bound_project_id = int(task["project_id"])
@@ -1092,12 +1094,17 @@ def build_creative_router(
     ):
         items = repository.list_projects(topic_id=topic_id)
         for item in items:
-            task_id = str(item.get("workflow_task_id") or "")
+            task_id = str(item.get("creation_workflow_task_id") or "")
             if task_id and item.get("created_by") == principal.user_id:
                 try:
                     task = workflow_repository.get_task(task_id)
                     if task is None:
                         raise ValueError("workflow task not found")
+                    if task["task_type"] != "brief":
+                        repository.clear_project_creation_task(
+                            int(item["id"]), task_id
+                        )
+                        continue
                     bound_id = task.get("project_id")
                     if bound_id is not None and int(bound_id) != int(item["id"]):
                         repository.reconcile_project_workflow_task(

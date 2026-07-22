@@ -83,6 +83,7 @@ class CreativeRepository:
                     episode_duration_seconds INTEGER NOT NULL DEFAULT 120,
                     status TEXT NOT NULL DEFAULT 'created',
                     locked_brief_id INTEGER, character_batch_id TEXT, outline_batch_id TEXT,
+                    workflow_task_id TEXT, creation_workflow_task_id TEXT,
                     created_by TEXT NOT NULL DEFAULT 'local', deleted INTEGER NOT NULL DEFAULT 0,
                     created_at REAL NOT NULL, updated_at REAL NOT NULL,
                     FOREIGN KEY(topic_id) REFERENCES creative_topics(id),
@@ -167,6 +168,22 @@ class CreativeRepository:
                     conn.execute(
                         f"ALTER TABLE {table} ADD COLUMN workflow_task_id TEXT"
                     )
+            project_columns = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(creative_projects)"
+                ).fetchall()
+            }
+            if "creation_workflow_task_id" not in project_columns:
+                conn.execute(
+                    "ALTER TABLE creative_projects "
+                    "ADD COLUMN creation_workflow_task_id TEXT"
+                )
+                conn.execute(
+                    "UPDATE creative_projects "
+                    "SET creation_workflow_task_id = workflow_task_id "
+                    "WHERE workflow_task_id IS NOT NULL"
+                )
             duplicate_project_tasks = conn.execute(
                 """
                 SELECT workflow_task_id
@@ -191,6 +208,34 @@ class CreativeRepository:
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_creative_projects_workflow_task "
                 "ON creative_projects(workflow_task_id) "
                 "WHERE workflow_task_id IS NOT NULL"
+            )
+            duplicate_creation_tasks = conn.execute(
+                """
+                SELECT creation_workflow_task_id
+                FROM creative_projects
+                WHERE creation_workflow_task_id IS NOT NULL
+                GROUP BY creation_workflow_task_id HAVING COUNT(*) > 1
+                """
+            ).fetchall()
+            for duplicate in duplicate_creation_tasks:
+                keep = conn.execute(
+                    "SELECT id FROM creative_projects "
+                    "WHERE creation_workflow_task_id = ? "
+                    "ORDER BY deleted, id DESC LIMIT 1",
+                    (duplicate["creation_workflow_task_id"],),
+                ).fetchone()
+                assert keep is not None
+                conn.execute(
+                    "UPDATE creative_projects "
+                    "SET creation_workflow_task_id = NULL "
+                    "WHERE creation_workflow_task_id = ? AND id <> ?",
+                    (duplicate["creation_workflow_task_id"], keep["id"]),
+                )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "uq_creative_projects_creation_workflow_task "
+                "ON creative_projects(creation_workflow_task_id) "
+                "WHERE creation_workflow_task_id IS NOT NULL"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_creative_stage_exports_lookup "
@@ -389,7 +434,7 @@ class CreativeRepository:
             if workflow_task_id:
                 existing = conn.execute(
                     "SELECT id FROM creative_projects "
-                    "WHERE workflow_task_id = ? AND deleted = 0",
+                    "WHERE creation_workflow_task_id = ? AND deleted = 0",
                     (workflow_task_id,),
                 ).fetchone()
                 if existing is not None:
@@ -426,14 +471,14 @@ class CreativeRepository:
                     INSERT INTO creative_projects (
                         topic_id, breakdown_id, name, genre, target_platform, target_audience,
                         target_episode_count, episode_duration_seconds, workflow_task_id,
-                        created_by, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        creation_workflow_task_id, created_by, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         topic_id, breakdown_id, name.strip() or f"{topic['title']}创作项目",
                         genre.strip() or str(topic["category"] or ""), target_platform.strip(),
                         resolved_target_audience, int(target_episode_count),
-                        int(episode_duration_seconds), workflow_task_id,
+                        int(episode_duration_seconds), workflow_task_id, workflow_task_id,
                         created_by, now, now,
                     ),
                 )
@@ -441,7 +486,8 @@ class CreativeRepository:
                 if not workflow_task_id:
                     raise
                 existing = conn.execute(
-                    "SELECT id FROM creative_projects WHERE workflow_task_id = ?",
+                    "SELECT id FROM creative_projects "
+                    "WHERE creation_workflow_task_id = ?",
                     (workflow_task_id,),
                 ).fetchone()
                 if existing is None:
@@ -567,10 +613,15 @@ class CreativeRepository:
     def get_project_by_workflow_task_id(
         self, workflow_task_id: str
     ) -> dict[str, Any] | None:
+        return self.get_project_by_creation_workflow_task_id(workflow_task_id)
+
+    def get_project_by_creation_workflow_task_id(
+        self, workflow_task_id: str
+    ) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT id FROM creative_projects "
-                "WHERE workflow_task_id = ? AND deleted = 0",
+                "WHERE creation_workflow_task_id = ? AND deleted = 0",
                 (workflow_task_id,),
             ).fetchone()
         return self.get_project(int(row["id"])) if row is not None else None
@@ -586,19 +637,45 @@ class CreativeRepository:
             if target is None:
                 raise ValueError("system-bound creative project does not exist")
             conn.execute(
+                "UPDATE creative_projects SET creation_workflow_task_id = NULL, "
+                "workflow_task_id = CASE WHEN workflow_task_id = ? THEN NULL "
+                "ELSE workflow_task_id END, updated_at = ? "
+                "WHERE creation_workflow_task_id = ? AND id <> ?",
+                (workflow_task_id, time.time(), workflow_task_id, project_id),
+            )
+            conn.execute(
                 "UPDATE creative_projects SET workflow_task_id = NULL, updated_at = ? "
                 "WHERE workflow_task_id = ? AND id <> ?",
                 (time.time(), workflow_task_id, project_id),
             )
             conn.execute(
-                "UPDATE creative_projects SET workflow_task_id = ?, updated_at = ? "
+                "UPDATE creative_projects SET creation_workflow_task_id = ?, "
+                "workflow_task_id = CASE WHEN workflow_task_id IS NULL "
+                "OR workflow_task_id = ? THEN ? ELSE workflow_task_id END, "
+                "updated_at = ? "
                 "WHERE id = ?",
-                (workflow_task_id, time.time(), project_id),
+                (
+                    workflow_task_id,
+                    workflow_task_id,
+                    workflow_task_id,
+                    time.time(),
+                    project_id,
+                ),
             )
         project = self.get_project(project_id)
         if project is None:
             raise ValueError("system-bound creative project does not exist")
         return project
+
+    def clear_project_creation_task(
+        self, project_id: int, workflow_task_id: str
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE creative_projects SET creation_workflow_task_id = NULL, "
+                "updated_at = ? WHERE id = ? AND creation_workflow_task_id = ?",
+                (time.time(), project_id, workflow_task_id),
+            )
 
     def get_project_inputs(self, project_id: int) -> dict[str, Any]:
         project = self.get_project(project_id)

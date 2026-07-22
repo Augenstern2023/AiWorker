@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from identity.repository import IdentityRepository
-from identity.schema import Principal
+from identity.schema import DATA_SCOPE_ORDER, Principal
 
 from .state_machine import WorkflowStateMachine
 
@@ -151,11 +151,14 @@ class WorkflowRepository:
         assignee_user_id: str | None = None,
         details: dict[str, Any] | None = None,
         event_type: str | None = None,
+        authorization_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         actor_id = self._actor_id(actor)
         task = self._require_task(connection, task_id)
         live_actor = self._live_actor(connection, actor_id)
-        to_status = self.state_machine.transition(task, action, live_actor)
+        transition_actor = dict(live_actor)
+        transition_actor.update(authorization_context or {})
+        to_status = self.state_machine.transition(task, action, transition_actor)
         if assignee_user_id is None:
             cursor = connection.execute(
                 """
@@ -652,6 +655,18 @@ class WorkflowRepository:
             return
         if "project_owner" not in actor["role_codes"]:
             raise PermissionError("actor is not a project owner")
+        WorkflowRepository._assert_managed_project_membership(
+            connection, project_id, actor
+        )
+
+    @staticmethod
+    def _assert_managed_project_membership(
+        connection: sqlite3.Connection,
+        project_id: str,
+        actor: dict[str, Any],
+    ) -> None:
+        if actor["is_system_admin"]:
+            return
         member = connection.execute(
             """
             SELECT 1 FROM project_members
@@ -732,22 +747,30 @@ class WorkflowRepository:
                 (user_id,),
             )
         }
-        permissions = {
-            row["permission_code"]
-            for row in connection.execute(
-                """
-                SELECT rp.permission_code FROM user_roles AS ur
-                JOIN roles AS r ON r.id = ur.role_id AND r.is_enabled = 1
-                JOIN role_permissions AS rp ON rp.role_id = r.id
-                WHERE ur.user_id = ?
-                """,
-                (user_id,),
-            )
-        }
+        permission_scopes: dict[str, str] = {}
+        permission_rows = connection.execute(
+            """
+            SELECT rp.permission_code, rp.data_scope FROM user_roles AS ur
+            JOIN roles AS r ON r.id = ur.role_id AND r.is_enabled = 1
+            JOIN role_permissions AS rp ON rp.role_id = r.id
+            WHERE ur.user_id = ?
+            """,
+            (user_id,),
+        )
+        for row in permission_rows:
+            current_scope = permission_scopes.get(row["permission_code"])
+            if current_scope is None or (
+                DATA_SCOPE_ORDER[row["data_scope"]]
+                > DATA_SCOPE_ORDER[current_scope]
+            ):
+                permission_scopes[row["permission_code"]] = row["data_scope"]
+        if "system_admin" in roles:
+            permission_scopes = {"*": "all"}
         return {
             "user_id": user_id,
             "role_codes": roles,
-            "permissions": {"*"} if "system_admin" in roles else permissions,
+            "permissions": set(permission_scopes),
+            "permission_scopes": permission_scopes,
             "is_system_admin": "system_admin" in roles,
         }
 

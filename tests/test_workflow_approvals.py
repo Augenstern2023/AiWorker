@@ -104,6 +104,33 @@ def _managed_project(
     )
 
 
+def _custom_reviewer(
+    identity_repository: IdentityRepository,
+    repository: WorkflowRepository,
+    admin: Principal,
+    *,
+    username: str,
+    project_role: str,
+    project_id: str = "project-1",
+    permission_scope: str = "managed_projects",
+) -> Principal:
+    role = identity_repository.create_role(
+        f"{username}_role", username.title(), "Custom managed reviewer"
+    )
+    identity_repository.replace_role_permissions(
+        role["id"],
+        [
+            ("version.approve", permission_scope),
+            ("version.return", permission_scope),
+        ],
+    )
+    custom_reviewer = _user(identity_repository, username, role["code"])
+    repository.add_project_member(
+        project_id, custom_reviewer.user_id, project_role, admin
+    )
+    return custom_reviewer
+
+
 def _submitted(
     service: ApprovalService,
     repository: WorkflowRepository,
@@ -254,6 +281,76 @@ def test_managed_project_reviewer_can_approve_and_events_have_snapshots(
     assert event["details"]["after"]["status"] == "approved"
 
 
+def test_custom_role_managed_reviewer_can_approve(
+    service: ApprovalService,
+    repository: WorkflowRepository,
+    identity_repository: IdentityRepository,
+    author: Principal,
+    admin: Principal,
+):
+    custom_reviewer = _custom_reviewer(
+        identity_repository,
+        repository,
+        admin,
+        username="approval_reviewer",
+        project_role="manager",
+    )
+    task, submitted = _submitted(service, repository, author, admin)
+
+    approved = service.approve(submitted["id"], custom_reviewer)
+
+    assert approved["status"] == "approved"
+    assert approved["reviewed_by"] == custom_reviewer.user_id
+    assert repository.get_task(task["id"])["status"] == "completed"
+
+
+def test_custom_role_managed_reviewer_can_return(
+    service: ApprovalService,
+    repository: WorkflowRepository,
+    identity_repository: IdentityRepository,
+    author: Principal,
+    admin: Principal,
+):
+    custom_reviewer = _custom_reviewer(
+        identity_repository,
+        repository,
+        admin,
+        username="return_reviewer",
+        project_role="project_manager",
+    )
+    task, submitted = _submitted(service, repository, author, admin)
+
+    returned, draft = service.return_submission(
+        submitted["id"], custom_reviewer, "Revise the evidence"
+    )
+
+    assert returned["status"] == "returned"
+    assert returned["reviewed_by"] == custom_reviewer.user_id
+    assert draft["parent_submission_id"] == returned["id"]
+    assert repository.get_task(task["id"])["status"] == "returned"
+
+
+def test_task_scoped_review_permission_cannot_review_managed_project(
+    service: ApprovalService,
+    repository: WorkflowRepository,
+    identity_repository: IdentityRepository,
+    author: Principal,
+    admin: Principal,
+):
+    task_scoped_reviewer = _custom_reviewer(
+        identity_repository,
+        repository,
+        admin,
+        username="task_scoped_reviewer",
+        project_role="manager",
+        permission_scope="task",
+    )
+    _, submitted = _submitted(service, repository, author, admin)
+
+    with pytest.raises(PermissionError, match="managed_projects"):
+        service.approve(submitted["id"], task_scoped_reviewer)
+
+
 def test_return_requires_comment_preserves_source_and_creates_next_draft(
     service: ApprovalService,
     repository: WorkflowRepository,
@@ -311,6 +408,30 @@ def test_approving_newer_version_supersedes_previous_approval(
     assert second_approved["version"] == 2
     assert service.get_submission(first_approved["id"])["status"] == "superseded"
     assert service.get_submission(second_approved["id"])["status"] == "approved"
+
+
+def test_older_submission_cannot_replace_a_newer_approved_version(
+    service: ApprovalService,
+    repository: WorkflowRepository,
+    author: Principal,
+    reviewer: Principal,
+    admin: Principal,
+):
+    _managed_project(repository, reviewer, admin)
+    first_task, first_submitted = _submitted(
+        service, repository, author, admin, workflow_id="workflow-old"
+    )
+    _, second_submitted = _submitted(
+        service, repository, author, admin, workflow_id="workflow-new"
+    )
+    second_approved = service.approve(second_submitted["id"], reviewer)
+
+    with pytest.raises(ValueError, match="newer approved"):
+        service.approve(first_submitted["id"], reviewer)
+
+    assert service.get_submission(second_approved["id"])["status"] == "approved"
+    assert service.get_submission(first_submitted["id"])["status"] == "submitted"
+    assert repository.get_task(first_task["id"])["status"] == "waiting_review"
 
 
 @pytest.mark.parametrize("source_state", ["approved", "returned"])

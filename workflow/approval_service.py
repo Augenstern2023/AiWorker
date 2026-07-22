@@ -145,6 +145,21 @@ class ApprovalService:
                 raise PermissionError("a submitter cannot approve their own submission")
             task = self.repository._require_task(connection, before["task_id"])
             self._assert_reviewer(connection, task, live_actor, "version.approve")
+            newer_approved = connection.execute(
+                """
+                SELECT 1 FROM workflow_submissions
+                WHERE resource_type = ? AND resource_id = ?
+                  AND status = 'approved' AND version > ?
+                LIMIT 1
+                """,
+                (
+                    before["resource_type"],
+                    before["resource_id"],
+                    before["version"],
+                ),
+            ).fetchone()
+            if newer_approved is not None:
+                raise ValueError("a newer approved submission already exists")
             now = time.time()
             cursor = connection.execute(
                 """
@@ -195,6 +210,7 @@ class ApprovalService:
                 connection=connection,
                 details={"before": before, "after": after},
                 event_type="approve",
+                authorization_context={"can_manage_task": True},
             )
         return after
 
@@ -247,6 +263,7 @@ class ApprovalService:
                     "after": returned,
                     "new_draft": draft,
                 },
+                authorization_context={"can_manage_task": True},
             )
         return returned, draft
 
@@ -331,7 +348,19 @@ class ApprovalService:
             return
         if permission not in actor["permissions"]:
             raise PermissionError(f"{permission} permission is required")
-        self.repository._assert_task_manager(connection, task, actor)
+        if actor["permission_scopes"].get(permission) not in {
+            "managed_projects",
+            "all",
+        }:
+            raise PermissionError(
+                f"{permission} requires managed_projects permission scope"
+            )
+        project_id = task.get("project_id")
+        if project_id is None:
+            raise PermissionError("reviewer must manage the task project")
+        self.repository._assert_managed_project_membership(
+            connection, project_id, actor
+        )
 
     def _require_submission(
         self, connection: sqlite3.Connection, submission_id: str

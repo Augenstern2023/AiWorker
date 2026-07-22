@@ -88,6 +88,7 @@ class WorkflowStateMachine:
         role_codes = set(_actor_value(actor, "role_codes") or ())
         permissions = set(_actor_value(actor, "permissions") or ())
         is_admin = "system_admin" in role_codes or "*" in permissions
+        can_manage_task = bool(_actor_value(actor, "can_manage_task"))
         if requirement == "matching_role":
             if task.get("role_code") not in role_codes:
                 raise PermissionError("actor does not have the task pool role")
@@ -97,7 +98,7 @@ class WorkflowStateMachine:
                 raise PermissionError("only the task assignee may perform this action")
             return
         if requirement == "manager" and not (
-            is_admin or "project_owner" in role_codes
+            is_admin or "project_owner" in role_codes or can_manage_task
         ):
             raise PermissionError("only a project owner or system administrator may act")
 

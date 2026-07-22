@@ -26,10 +26,8 @@
                                     <span class="badge d-block mt-1" :class="breakdownStatusClass(topic)" x-text="breakdownStatusLabel(topic)"></span>
                                 </td>
                                 <td>
-                                    <button class="btn btn-sm btn-outline-success me-1" x-show="!topic.latest_breakdown_id && topic.status === 'pending_review'" @click="updateCreativeTopic(topic, 'adopted')">采纳</button>
-                                    <button class="btn btn-sm btn-outline-light me-1" x-show="!topic.latest_breakdown_id && ['pending_review', 'adopted'].includes(topic.status)" @click="createCreativeBreakdown(topic)">拆解</button>
+                                    <button class="btn btn-sm btn-outline-light me-1" x-show="!topic.latest_breakdown_id && topic.status === 'adopted'" @click="createCreativeBreakdown(topic)">拆解</button>
                                     <button class="btn btn-sm btn-outline-secondary" x-show="!topic.latest_breakdown_id && topic.status === 'pending_review'" @click="updateCreativeTopic(topic, 'rejected')">不跟进</button>
-                                    <button class="btn btn-sm btn-outline-success" x-show="!topic.latest_breakdown_id && topic.status === 'rejected'" @click="updateCreativeTopic(topic, 'adopted')"><i class="bi bi-arrow-counterclockwise me-1"></i>重新采纳</button>
                                     <button class="btn btn-sm btn-outline-light me-1" x-show="topic.latest_breakdown_id && topic.latest_breakdown_status === 'draft' && topic.status !== 'archived'" @click="createCreativeBreakdown(topic)">继续拆解</button>
                                     <button class="btn btn-sm btn-outline-light me-1" x-show="topic.latest_breakdown_id && topic.latest_breakdown_status !== 'draft' && topic.status !== 'archived'" @click="createCreativeBreakdown(topic)">再次拆解</button>
                                     <button class="btn btn-sm btn-outline-warning" x-show="topic.latest_breakdown_id && topic.status !== 'archived'" @click="updateCreativeTopic(topic, 'archived')">归档</button>
@@ -97,8 +95,6 @@
                                     <button class="btn btn-sm btn-outline-light me-1" @click="createTopicLibraryBreakdown(topic)" title="生成拆解" aria-label="生成拆解"><i class="bi bi-diagram-3"></i></button>
                                     <button class="btn btn-sm btn-outline-primary me-1" @click="openTopicDownload(topic)" title="下载剧集" aria-label="下载剧集"><i class="bi bi-download"></i></button>
                                     <button class="btn btn-sm btn-outline-info me-1" x-show="Number(topic.downloaded_episode_count || 0) > 0" @click="openTopicTranscriptPreview(topic)" title="预览剧目转写" aria-label="预览剧目转写"><i class="bi bi-eye"></i></button>
-                                    <button class="btn btn-sm btn-outline-success me-1" x-show="topic.status !== 'adopted'" @click="updateTopicLibrary(topic, 'adopted')" title="采纳" aria-label="采纳"><i class="bi bi-check2"></i></button>
-                                    {% if principal and (principal.is_system_admin or 'project.manage' in principal.permissions) %}<button class="btn btn-sm btn-outline-success me-1" x-show="topic.status === 'adopted'" @click="bootstrapTopicWorkflow(topic)" title="创建工作流" aria-label="创建工作流"><i class="bi bi-play-circle"></i></button>{% endif %}
                                     <button class="btn btn-sm btn-outline-warning" x-show="topic.status === 'adopted'" @click="updateTopicLibrary(topic, 'archived')" title="归档" aria-label="归档"><i class="bi bi-archive"></i></button>
                                 </td>
                             </tr>

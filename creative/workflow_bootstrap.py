@@ -67,26 +67,6 @@ class WorkflowBootstrapService:
             )
         return {"topic": topic, "task": task}
 
-    def adopt_topic(
-        self,
-        topic_id: int,
-        actor: Principal,
-        request: Request | None = None,
-        *,
-        project_id: str | None = None,
-    ) -> dict[str, Any]:
-        if self.creative_repository.get_topic(topic_id) is None:
-            raise KeyError(topic_id)
-        self._assert_authorized(actor, project_id)
-        result = self.ensure_topic_workflow(
-            topic_id, actor, request, project_id=project_id
-        )
-        topic = self.creative_repository.update_topic(topic_id, "adopted")
-        if topic is None:
-            raise KeyError(topic_id)
-        result["topic"] = topic
-        return result
-
     def _assert_authorized(
         self, actor: Principal, project_id: str | None
     ) -> None:

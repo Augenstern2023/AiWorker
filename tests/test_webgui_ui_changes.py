@@ -156,11 +156,11 @@ def test_today_hit_actions_follow_topic_status_without_conflicting_commands():
     html = _source("templates/common/workspace/selection_topics.html")
     section = html.split('<h3 class="mb-0">今日爆款</h3>', 1)[1].split('<h3 class="mb-1">选题库</h3>', 1)[0]
 
-    assert 'x-show="!topic.latest_breakdown_id && topic.status === \'pending_review\'" @click="updateCreativeTopic(topic, \'adopted\')"' in section
+    assert "updateCreativeTopic(topic, 'adopted')" not in section
     assert 'x-show="!topic.latest_breakdown_id && topic.status === \'pending_review\'" @click="updateCreativeTopic(topic, \'rejected\')"' in section
-    assert "!topic.latest_breakdown_id && ['pending_review', 'adopted'].includes(topic.status)" in section
-    assert 'x-show="!topic.latest_breakdown_id && topic.status === \'rejected\'" @click="updateCreativeTopic(topic, \'adopted\')"' in section
-    assert "重新采纳" in section
+    assert "!topic.latest_breakdown_id && topic.status === 'adopted'" in section
+    assert "updateTopicLibrary(topic, 'adopted')" not in section
+    assert "重新采纳" not in section
 
 
 def test_today_hit_actions_distinguish_existing_breakdowns():
@@ -168,7 +168,7 @@ def test_today_hit_actions_distinguish_existing_breakdowns():
     section = html.split('<h3 class="mb-0">今日爆款</h3>', 1)[1].split('<h3 class="mb-1">选题库</h3>', 1)[0]
 
     assert 'x-show="!topic.latest_breakdown_id && topic.status === \'pending_review\'"' in section
-    assert "!topic.latest_breakdown_id && ['pending_review', 'adopted'].includes(topic.status)" in section
+    assert "!topic.latest_breakdown_id && topic.status === 'adopted'" in section
     assert 'x-show="topic.latest_breakdown_id && topic.status !== \'archived\'"' in section
     assert '@click="createCreativeBreakdown(topic)">再次拆解</button>' in section
     assert '@click="updateCreativeTopic(topic, \'archived\')">归档</button>' in section

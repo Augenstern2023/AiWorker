@@ -3,7 +3,7 @@
 {% block content %}
 <div class="d-flex align-items-center justify-content-between border-bottom pb-3 mb-4"><div><h3 class="mb-1">负责项目</h3><div class="small text-muted">{% if project_id %}项目 {{ project_id }} 的成员与职责{% else %}当前账号负责的项目范围{% endif %}</div></div></div>
 {% if principal and (principal.is_system_admin or 'project.manage' in principal.permissions) %}
-<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>已批准选题</th><th>状态</th><th class="text-end">操作</th></tr></thead><tbody id="workflow-bootstrap-topics"><tr><td colspan="3" class="text-center text-muted py-4">正在加载...</td></tr></tbody></table></div>
+<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>待决策选题</th><th>状态</th><th class="text-end">操作</th></tr></thead><tbody id="workflow-bootstrap-topics"><tr><td colspan="3" class="text-center text-muted py-4">正在加载...</td></tr></tbody></table></div>
 <div class="alert alert-danger d-none" id="workflow-bootstrap-error" role="alert"></div>
 {% else %}
 <div class="alert alert-light border" role="status">当前账号没有创建项目工作流的权限。</div>

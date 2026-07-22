@@ -539,6 +539,16 @@ class WorkflowRepository:
                         row["project_id"] is not None
                         and row["project_id"] in managed_projects
                     )
+                    or (
+                        row["project_id"] is None
+                        and row["topic_id"] is not None
+                        and row["status"] == "waiting_review"
+                        and "project.manage" in live_actor["permissions"]
+                        and (
+                            "version.approve" in live_actor["permissions"]
+                            or "version.return" in live_actor["permissions"]
+                        )
+                    )
                 ]
         return [self._task_dict(row) for row in rows]
 
@@ -827,7 +837,10 @@ class WorkflowRepository:
                     return False
                 project_id = task.get("project_id")
                 if project_id is None:
-                    return False
+                    return bool(
+                        task.get("topic_id") is not None
+                        and "project.manage" in live_actor["permissions"]
+                    )
                 self._assert_managed_project_membership(
                     connection, project_id, live_actor
                 )

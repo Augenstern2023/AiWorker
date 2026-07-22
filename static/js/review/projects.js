@@ -30,7 +30,7 @@
     }
 
     async function load() {
-        const response = await window.aiworkerApi.request('/api/creative/topics?status=adopted&has_locked_breakdown=true&limit=500');
+        const response = await window.aiworkerApi.request('/api/creative/topics/workflow-candidates');
         const data = await response.json();
         if (!response.ok) {
             showError(data.detail || '读取选题失败');
@@ -38,7 +38,7 @@
         }
         const items = data.items || [];
         if (!items.length) {
-            body.innerHTML = '<tr><td colspan="3" class="text-center text-muted py-4">暂无已批准选题</td></tr>';
+            body.innerHTML = '<tr><td colspan="3" class="text-center text-muted py-4">暂无待决策选题</td></tr>';
             return;
         }
         body.replaceChildren(...items.map((topic) => {

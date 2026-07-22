@@ -367,7 +367,13 @@ def _visible_submission(
     submission = repository.get_submission(submission_id)
     if submission is None:
         raise HTTPException(status_code=404, detail="submission not found")
-    _visible_task(repository, submission["task_id"], principal)
+    task = repository.get_visible_task(submission["task_id"], principal)
+    if task is None and not repository.can_review_task(
+        submission["task_id"], principal, "version.approve"
+    ) and not repository.can_review_task(
+        submission["task_id"], principal, "version.return"
+    ):
+        raise HTTPException(status_code=404, detail="workflow task not found")
     return submission
 
 
@@ -382,6 +388,8 @@ def _call(operation: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except TypeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 def _audited_call(

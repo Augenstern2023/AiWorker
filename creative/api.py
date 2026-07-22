@@ -41,7 +41,7 @@ from creative.topic_service import TopicService
 from creative.transcript_assets import find_downloaded_video_assets, find_transcript_bundle
 from audit.service import AuditService
 from runtime.job_manager import JobConflictError
-from identity.dependencies import current_principal
+from identity.dependencies import current_principal, require_permission
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.schema import Principal
@@ -92,7 +92,11 @@ def creative_api_authorization(
     method = request.method.upper()
     permissions: tuple[str, ...] | None
     if path.startswith("/topics"):
-        if path.endswith("/workflow"):
+        if path == "/topics/workflow-candidates":
+            permissions = ("project.manage",)
+        elif path.endswith("/transcripts"):
+            permissions = ("drama.transcript.read",)
+        elif path.endswith("/workflow"):
             permissions = ("project.manage",)
         elif method == "GET":
             permissions = (
@@ -485,21 +489,45 @@ def build_creative_router(
     def project_view(project: dict[str, Any], principal: Principal) -> dict[str, Any]:
         if principal.is_system_admin:
             return project
-        is_author = project.get("created_by") == principal.user_id
         approved_statuses = {"approved", "locked", "brief_locked"}
+        stage_permissions = {
+            "blueprints": (("brief.read", "brief.read.approved"), "brief.read"),
+            "characters": (("character.read", "character.read.approved"), "character.read"),
+            "relationships": (("relationship.read", "relationship.read.approved"), "relationship.read"),
+            "outline": (("outline.read", "outline.read.approved"), "outline.read"),
+            "beats": (("beats.read",), "beats.read"),
+        }
 
-        def visible(item: dict[str, Any]) -> bool:
-            if item.get("status") in approved_statuses or is_author:
-                return True
+        def resource_identity(key: str, item: dict[str, Any]) -> tuple[str, str]:
+            if key == "blueprints":
+                return "brief", str(item["id"])
+            if key in {"characters", "relationships"}:
+                return "characters", f"{project['id']}:{item['batch_id']}"
+            if item["stage"] == "outline":
+                return "outline", f"{project['id']}:{item['batch_id']}"
+            return "beats", str(item["id"])
+
+        def visible(key: str, item: dict[str, Any]) -> bool:
+            stage_key = item.get("stage") if key == "episodes" else key
+            approved_permissions, draft_permission = stage_permissions[stage_key]
+            if item.get("status") in approved_statuses:
+                return bool(set(approved_permissions).intersection(principal.permissions))
+            if draft_permission not in principal.permissions:
+                return False
             task_id = str(item.get("workflow_task_id") or "")
             task = workflow_repository.get_task(task_id) if task_id else None
-            return bool(task and task.get("assignee_user_id") == principal.user_id)
+            if task and task.get("assignee_user_id") == principal.user_id:
+                return True
+            resource_type, resource_id = resource_identity(key, item)
+            submission = workflow_repository.get_latest_resource_submission(
+                resource_type, resource_id
+            )
+            return bool(submission and submission.get("created_by") == principal.user_id)
 
         viewed = dict(project)
         for key in ("blueprints", "characters", "relationships", "episodes"):
-            viewed[key] = [item for item in project.get(key, []) if visible(item)]
-        if not is_author:
-            viewed["allowed_actions"] = []
+            viewed[key] = [item for item in project.get(key, []) if visible(key, item)]
+        viewed["allowed_actions"] = []
         return viewed
 
     def create_generation_job(
@@ -677,6 +705,23 @@ def build_creative_router(
             items = [item for item in items if item.get("lifecycle_status") == lifecycle_status]
         return {"items": items[:limit]}
 
+    @router.get("/topics/workflow-candidates")
+    async def workflow_candidates(
+        _: Principal = Depends(require_permission("project.manage")),
+    ):
+        topics = repository.list_topics(status="pending_review", limit=500)
+        return {
+            "items": [
+                {
+                    key: topic.get(key)
+                    for key in (
+                        "id", "title", "platform", "category", "status", "captured_at"
+                    )
+                }
+                for topic in topics
+            ]
+        }
+
     @router.get("/topics/{topic_id}")
     async def get_topic(
         topic_id: int,
@@ -700,7 +745,10 @@ def build_creative_router(
         return topic
 
     @router.get("/topics/{topic_id}/transcripts")
-    async def preview_topic_transcripts(topic_id: int):
+    async def preview_topic_transcripts(
+        topic_id: int,
+        _: Principal = Depends(require_permission("drama.transcript.read")),
+    ):
         topic = repository.get_topic(topic_id)
         if not topic:
             raise HTTPException(404, "topic not found")
@@ -751,6 +799,10 @@ def build_creative_router(
         payload: TopicUpdateRequest,
         principal: Principal = Depends(current_principal),
     ):
+        if payload.status == "adopted":
+            raise HTTPException(
+                409, "topic adoption requires an approved topic_decision workflow"
+            )
         try:
             topic = repository.update_topic(topic_id, payload.status, payload.decision_note)
         except ValueError as exc:
@@ -768,7 +820,7 @@ def build_creative_router(
     ):
         bootstrap_service.audit_service = getattr(request.app.state, "audit_service", None)
         try:
-            return bootstrap_service.adopt_topic(
+            return bootstrap_service.ensure_topic_workflow(
                 topic_id,
                 principal,
                 request,

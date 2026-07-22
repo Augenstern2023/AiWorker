@@ -108,3 +108,29 @@ uv run pytest tests/test_project_visibility.py tests/test_workflow_api.py \
 ```
 
 Follow-up broader role/workflow/creative suite: `286 passed`. Updated unit suite: `488 passed, 1 failed`; the only failure remains the accepted pre-existing XHS Excel factory mismatch.
+
+## Final Important Re-review
+
+The last four Important findings were closed in a third TDD wave:
+
+- Aggregate project responses now apply stage-specific read permissions. Approved records require the matching normal or approved-only permission; non-approved records require the full stage read permission plus either matching workflow-submission authorship or current task assignment. Project authorship no longer grants blanket draft visibility.
+- Project owners load a dedicated `/api/creative/topics/workflow-candidates` feed containing only `id`, `title`, `platform`, `category`, `status`, and `captured_at`. The review bootstrap UI uses this restricted feed.
+- Transcript preview has an explicit `drama.transcript.read` dependency and is no longer reachable through general approved-topic compatibility.
+- Bootstrap leaves topics in `pending_review`. Direct `PATCH ... adopted` is rejected and the selection UI no longer exposes direct adoption. A real `topic_decision` approval performs idempotent creative adoption; returns remain pending. Adoption mirror failures return `503`, record only a failed approval audit, persist reconciliation state, and converge on retry or submission reconciliation.
+
+Third-wave RED evidence reproduced blanket project-author draft access, missing stage permissions, owner candidate-list authorization failure, transcript access through broad topic compatibility, direct selection adoption, missing topic-scope reviewer authorization, and partial cross-database adoption.
+
+Third-wave GREEN evidence:
+
+```text
+uv run pytest [22 focused identity/workflow/creative/UI modules] -q
+301 passed
+
+uv run pytest tests/ -q
+489 passed, 1 failed
+
+uv run pytest -q --ignore=test/test_proxy_ip_pool.py --ignore=test/test_redis_cache.py
+493 passed, 8 skipped, 1 failed
+```
+
+The sole unit failure remains the accepted pre-existing XHS Excel factory mismatch.

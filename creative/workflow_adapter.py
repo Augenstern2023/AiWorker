@@ -493,10 +493,23 @@ class CreativeWorkflowAdapter:
             return None
 
     def reconcile_submission(self, submission: dict) -> None:
+        if submission.get("resource_type") == "topic_decision":
+            if submission.get("status") == "approved":
+                self.on_topic_decision_approved(submission)
+            return
         if submission.get("resource_type") in RESOURCE_TYPES:
             self.reconcile_resource(
                 submission["resource_type"], submission["resource_id"]
             )
+
+    def on_topic_decision_approved(self, submission: dict) -> dict:
+        topic_id = int(submission["resource_id"])
+        topic = self._required(self.creative_repository.get_topic(topic_id))
+        if topic["status"] != "adopted":
+            topic = self._required(
+                self.creative_repository.update_topic(topic_id, "adopted")
+            )
+        return topic
 
     def reconcile_project(self, project_id: int) -> None:
         project = self.creative_repository.get_project(project_id)

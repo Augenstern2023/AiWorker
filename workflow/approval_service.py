@@ -402,6 +402,8 @@ class ApprovalService:
             )
         project_id = task.get("project_id")
         if project_id is None:
+            if task.get("topic_id") is not None and "project.manage" in actor["permissions"]:
+                return
             raise PermissionError("reviewer must manage the task project")
         self.repository._assert_managed_project_membership(
             connection, project_id, actor

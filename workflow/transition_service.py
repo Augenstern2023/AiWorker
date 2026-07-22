@@ -185,6 +185,21 @@ class TransitionService:
                 self.repository.record_mirror_error(
                     submission["task_id"], submission, str(exc)
                 )
+        if (
+            self.creative_adapter is not None
+            and submission["resource_type"] == "topic_decision"
+        ):
+            try:
+                result["topic"] = self.creative_adapter.on_topic_decision_approved(
+                    submission
+                )
+            except Exception as exc:
+                self.repository.record_mirror_error(
+                    submission["task_id"], submission, str(exc)
+                )
+                raise RuntimeError(
+                    "topic decision approved but adoption reconciliation failed"
+                ) from exc
         return result
 
     def return_submission(

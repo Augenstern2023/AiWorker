@@ -48,6 +48,7 @@ def test_project_author_owns_drafts_and_managed_reader_sees_approved_only(
         ("other", "creative_planner"),
         ("writer", "screenwriter"),
         ("owner", "project_owner"),
+        ("selector", "selection_operator"),
     ):
         role = identity.get_role_by_code(role_code)
         assert role is not None
@@ -72,6 +73,21 @@ def test_project_author_owns_drafts_and_managed_reader_sees_approved_only(
         name: _client(app, sessions, user["id"])
         for name, user in users.items()
     }
+    pending = next(item for item in creative.upsert_topics([{
+        "platform": "dy", "job_id": "pending-candidate", "source_path": "pending.json",
+        "captured_at": "2026-07-23", "title": "Pending candidate", "score": 88,
+        "confidence": "high", "score_details": {"secret": 1},
+        "recommendation": "candidate", "evidence": [{"private": "evidence"}],
+    }]) if item["title"] == "Pending candidate")
+    direct_adopt = clients["selector"].patch(
+        f"/api/creative/topics/{pending['id']}", json={"status": "adopted"}
+    )
+    assert direct_adopt.status_code == 409
+    assert creative.get_topic(pending["id"])["status"] == "pending_review"
+    candidates = clients["owner"].get("/api/creative/topics/workflow-candidates")
+    assert candidates.status_code == 200
+    candidate = next(item for item in candidates.json()["items"] if item["id"] == pending["id"])
+    assert set(candidate) == {"id", "title", "platform", "category", "status", "captured_at"}
 
     created = clients["author"].post("/api/creative/projects", json={
         "topic_id": topic["id"], "breakdown_id": breakdown["id"],
@@ -94,6 +110,10 @@ def test_project_author_owns_drafts_and_managed_reader_sees_approved_only(
     assert clients["author"].get(
         f"/api/creative/topics/{topic['id']}/breakdowns", params={"status": "locked"}
     ).status_code == 200
+    transcript = clients["writer"].get(
+        f"/api/creative/topics/{topic['id']}/transcripts"
+    )
+    assert transcript.status_code == 403
     drafts = creative.create_blueprints(project["id"], [
         {"content": {"name": "approved"}},
         {"content": {"name": "private draft"}},
@@ -116,6 +136,19 @@ def test_project_author_owns_drafts_and_managed_reader_sees_approved_only(
         [{"content": {"name": "assigned draft"}}],
         workflow_task_id=assigned_task["id"],
     )
+    author_task = workflow.create_task(
+        "author-draft",
+        "brief",
+        "creative_planner",
+        project_id=str(project["id"]),
+        actor=SYSTEM_ACTOR,
+    )
+    workflow.assign_task(author_task["id"], users["author"]["id"], owner_principal)
+    creative.create_blueprints(
+        project["id"],
+        [{"content": {"name": "author draft"}}],
+        workflow_task_id=author_task["id"],
+    )
 
     assert clients["other"].patch(
         f"/api/creative/projects/{project['id']}", json={"name": "stolen"}
@@ -125,6 +158,9 @@ def test_project_author_owns_drafts_and_managed_reader_sees_approved_only(
     author_view = clients["author"].get(f"/api/creative/projects/{project['id']}")
     assert owner_view.status_code == 200
     assert [item["content"]["name"] for item in writer_view.json()["blueprints"]] == [
-        "approved", "assigned draft"
+        "approved"
     ]
-    assert len(author_view.json()["blueprints"]) == 3
+    assert owner_view.json()["blueprints"] == []
+    assert [item["content"]["name"] for item in author_view.json()["blueprints"]] == [
+        "approved", "author draft"
+    ]

@@ -97,7 +97,8 @@ def test_topic_lifecycle_follows_the_complete_creation_flow(tmp_path: Path):
     assert topic_payload(client)["lifecycle_status"] == "pending_review"
     assert client.get(f"/api/creative/topics/{topic['id']}").json()["lifecycle_status"] == "pending_review"
     adopted = client.patch(f"/api/creative/topics/{topic['id']}", json={"status": "adopted"})
-    assert adopted.json()["lifecycle_status"] == "adopted"
+    assert adopted.status_code == 409
+    repository.update_topic(topic["id"], "adopted")
 
     manager.create_job({
         "platform": "hg",

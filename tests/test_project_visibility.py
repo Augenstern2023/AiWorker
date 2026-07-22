@@ -106,11 +106,14 @@ def test_project_author_owns_drafts_and_managed_reader_sees_approved_only(
     )
     workflow.claim_task(brief_task["id"], author_principal)
 
-    created = clients["author"].post("/api/creative/projects", json={
+    project_payload = {
         "topic_id": topic["id"], "breakdown_id": breakdown["id"],
         "name": "Owned draft", "target_episode_count": 2,
         "workflow_task_id": brief_task["id"],
-    })
+    }
+    created = clients["author"].post(
+        "/api/creative/projects", json=project_payload
+    )
     assert created.status_code == 200, created.text
     project = created.json()
     assert project["created_by"] == users["author"]["id"]
@@ -194,6 +197,11 @@ def test_project_author_owns_drafts_and_managed_reader_sees_approved_only(
     assert [item["content"]["name"] for item in author_view.json()["blueprints"]] == [
         "approved", "author draft"
     ]
+    member_retry = clients["author"].post(
+        "/api/creative/projects", json=project_payload
+    )
+    assert member_retry.status_code == 200, member_retry.text
+    assert member_retry.json()["id"] == project["id"]
 
     project_owner_principal = permissions.principal_for_user(
         users["owner"]["id"], "owner-remove"
@@ -206,22 +214,25 @@ def test_project_author_owns_drafts_and_managed_reader_sees_approved_only(
         member["user_id"] != users["author"]["id"]
         for member in workflow.list_project_members(str(project["id"]))
     )
-
-    retried = clients["author"].post("/api/creative/projects", json={
-        "topic_id": topic["id"], "breakdown_id": breakdown["id"],
-        "name": "Owned draft", "target_episode_count": 2,
-        "workflow_task_id": brief_task["id"],
-    })
-
-    assert retried.status_code == 200, retried.text
-    assert retried.json()["id"] == project["id"]
-    assert all(
-        member["user_id"] != users["author"]["id"]
-        for member in workflow.list_project_members(str(project["id"]))
+    creative.create_blueprints(
+        project["id"],
+        [{"content": {"name": "v11-sensitive-blueprint"}}],
+        workflow_task_id=author_task["id"],
     )
     assert clients["author"].get(
         f"/api/creative/projects/{project['id']}"
     ).status_code == 403
+
+    retried = clients["author"].post(
+        "/api/creative/projects", json=project_payload
+    )
+
+    assert retried.status_code == 403, retried.text
+    assert "v11-sensitive-blueprint" not in retried.text
+    assert all(
+        member["user_id"] != users["author"]["id"]
+        for member in workflow.list_project_members(str(project["id"]))
+    )
 
     listed = clients["author"].get("/api/creative/projects")
 

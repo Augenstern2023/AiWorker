@@ -486,6 +486,26 @@ def build_creative_router(
             raise HTTPException(404, "creative project not found")
         return project
 
+    def assert_project_read_access(
+        request: Request, project_id: int, principal: Principal
+    ) -> None:
+        if principal.is_system_admin:
+            return
+        permission_service = getattr(
+            request.app.state, "identity_permission_service", None
+        )
+        if not isinstance(permission_service, PermissionService):
+            raise HTTPException(500, "identity permission service is not configured")
+        if not (
+            permission_service.can_access_assigned_project(
+                principal, str(project_id)
+            )
+            or permission_service.can_access_managed_project(
+                principal, str(project_id)
+            )
+        ):
+            raise HTTPException(403, "只能访问当前分配或管理的项目")
+
     def project_view(project: dict[str, Any], principal: Principal) -> dict[str, Any]:
         if principal.is_system_admin:
             return project
@@ -1014,6 +1034,7 @@ def build_creative_router(
     @router.post("/projects")
     async def create_project(
         payload: ProjectCreateRequest,
+        request: Request,
         principal: Principal = Depends(current_principal),
     ):
         try:
@@ -1035,6 +1056,7 @@ def build_creative_router(
                 workflow_task_id
             )
             bound_id = task.get("project_id")
+            is_existing_project = project is not None or bound_id is not None
             if bound_id is not None:
                 try:
                     bound_project_id = int(bound_id)
@@ -1085,7 +1107,13 @@ def build_creative_router(
                         503,
                         "project created but workflow binding requires reconciliation",
                     ) from exc
-            return repository.get_project(int(project["id"])) or project
+            resolved_project = repository.get_project(int(project["id"])) or project
+            if is_existing_project:
+                assert_project_read_access(
+                    request, int(resolved_project["id"]), principal
+                )
+                return project_view(resolved_project, principal)
+            return resolved_project
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 

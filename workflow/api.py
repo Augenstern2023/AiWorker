@@ -142,15 +142,23 @@ def build_workflow_router(
     def add_project_member(
         project_id: str,
         payload: ProjectMemberCreateRequest,
+        request: Request,
         principal: Principal = Depends(member_manager),
     ) -> dict[str, Any]:
-        return _call(
+        return _audited_call(
+            repository,
+            request,
+            principal,
+            "project.member.add",
+            "project_member",
+            payload.user_id,
             repository.add_project_member,
             project_id,
             payload.user_id,
             payload.project_role,
             principal,
             status=payload.status,
+            audit_project_id=project_id,
         )
 
     @router.delete(
@@ -160,13 +168,21 @@ def build_workflow_router(
     def remove_project_member(
         project_id: str,
         user_id: str,
+        request: Request,
         principal: Principal = Depends(member_manager),
     ) -> Response:
-        _call(
+        _audited_call(
+            repository,
+            request,
+            principal,
+            "project.member.remove",
+            "project_member",
+            user_id,
             repository.remove_project_member,
             project_id,
             user_id,
             principal,
+            audit_project_id=project_id,
         )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -177,23 +193,35 @@ def build_workflow_router(
     def create_submission(
         task_id: str,
         payload: SubmissionCreateRequest,
+        request: Request,
         principal: Principal = Depends(current_principal),
     ) -> dict[str, Any]:
-        _visible_task(repository, task_id, principal)
-        if (
-            payload.resource_type in creative_resource_types
-            and transitions.creative_adapter is None
-        ):
-            raise HTTPException(
-                status_code=503, detail="creative workflow adapter is unavailable"
+        def create_visible_submission() -> dict[str, Any]:
+            _visible_task(repository, task_id, principal)
+            if (
+                payload.resource_type in creative_resource_types
+                and transitions.creative_adapter is None
+            ):
+                raise HTTPException(
+                    status_code=503,
+                    detail="creative workflow adapter is unavailable",
+                )
+            return transitions.create_submission(
+                task_id,
+                payload.resource_type,
+                payload.resource_id,
+                payload.content,
+                principal,
             )
-        return _call(
-            transitions.create_submission,
-            task_id,
-            payload.resource_type,
-            payload.resource_id,
-            payload.content,
+
+        return _audited_call(
+            repository,
+            request,
             principal,
+            "workflow.submission.create",
+            "task",
+            task_id,
+            create_visible_submission,
         )
 
     @router.get("/api/workflow/tasks/{task_id}/submissions")
@@ -365,6 +393,7 @@ def _audited_call(
     target_id: str,
     operation: Callable[..., Any],
     *args: Any,
+    audit_project_id: str | None = None,
     **kwargs: Any,
 ) -> Any:
     audit = getattr(request.app.state, "audit_service", None)
@@ -385,7 +414,10 @@ def _audited_call(
                 action=action,
                 target_type=target_type,
                 target_id=target_id,
-                project_id=str(task["project_id"]) if task and task["project_id"] else None,
+                project_id=(
+                    audit_project_id
+                    or (str(task["project_id"]) if task and task["project_id"] else None)
+                ),
                 before=task,
                 after={"detail": exc.detail},
                 reason=None,
@@ -399,7 +431,10 @@ def _audited_call(
             action=action,
             target_type=target_type,
             target_id=target_id,
-            project_id=str(task["project_id"]) if task and task["project_id"] else None,
+            project_id=(
+                audit_project_id
+                or (str(task["project_id"]) if task and task["project_id"] else None)
+            ),
             before=task,
             after=result,
             reason=None,

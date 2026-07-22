@@ -914,8 +914,9 @@ class WorkflowRepository:
             if (
                 not assignee["is_system_admin"]
                 and task["role_code"] not in assignee["role_codes"]
+                and task["task_type"] not in assignee["claimable_task_types"]
             ):
-                raise ValueError("assignee does not have the task role")
+                raise ValueError("assignee is not live-eligible for this task type")
             if task["project_id"] is not None:
                 membership = connection.execute(
                     """

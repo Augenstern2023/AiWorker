@@ -90,53 +90,58 @@ def creative_api_authorization(
 ) -> Principal:
     path = request.url.path.removeprefix("/api/creative")
     method = request.method.upper()
-    permission: str | None
+    permissions: tuple[str, ...] | None
     if path.startswith("/topics"):
         if path.endswith("/workflow"):
-            permission = "project.manage"
+            permissions = ("project.manage",)
         elif method == "GET":
-            permission = "topic.read"
+            permissions = (
+                "topic.read",
+                "breakdown.read.approved",
+                "brief.read.approved",
+                "outline.read.approved",
+            )
         elif path == "/topics/generate":
-            permission = "topic.generate"
+            permissions = ("topic.generate",)
         else:
-            permission = "topic.edit"
+            permissions = ("topic.edit",)
     elif path.startswith("/breakdowns"):
-        permission = (
-            "breakdown.read" if method == "GET"
-            else "breakdown.generate" if path == "/breakdowns" and method == "POST"
-            else "breakdown.edit"
+        permissions = (
+            ("breakdown.read", "breakdown.read.approved") if method == "GET"
+            else ("breakdown.generate",) if path == "/breakdowns" and method == "POST"
+            else ("breakdown.edit",)
         )
     elif path.startswith("/projects"):
         if method == "GET":
-            permission = "project.read.assigned"
+            permissions = ("project.read.assigned", "project.read.managed")
         elif path == "/projects":
-            permission = "project.create"
+            permissions = ("project.create",)
         elif "/blueprints/generate" in path:
-            permission = "blueprint.generate"
+            permissions = ("blueprint.generate",)
         elif "/characters" in path:
-            permission = "character.generate" if path.endswith("/generate") else "character.edit"
+            permissions = (("character.generate",) if path.endswith("/generate") else ("character.edit",))
         elif "/outlines" in path:
-            permission = "outline.generate" if path.endswith("/generate") else "outline.edit"
+            permissions = (("outline.generate",) if path.endswith("/generate") else ("outline.edit",))
         elif "/beats" in path:
-            permission = "beats.generate" if path.endswith("/generate") else "beats.edit"
+            permissions = (("beats.generate",) if path.endswith("/generate") else ("beats.edit",))
         else:
-            permission = "project.edit.own_draft"
+            permissions = ("project.edit.own_draft",)
     elif path.startswith("/blueprints"):
-        permission = "brief.edit"
+        permissions = ("brief.edit",)
     elif path.startswith("/characters"):
-        permission = "character.edit"
+        permissions = ("character.edit",)
     elif path.startswith("/relationships"):
-        permission = "relationship.edit"
+        permissions = ("relationship.edit",)
     elif path.startswith("/episodes"):
-        permission = "beats.edit" if path.endswith("/lock") else "outline.edit"
+        permissions = (("beats.edit",) if path.endswith("/lock") else ("outline.edit",))
     elif path == "/workflow/submit":
-        permission = None
+        permissions = None
     else:
-        permission = "*"
+        permissions = ("*",)
     if (
-        permission is not None
+        permissions is not None
         and not principal.is_system_admin
-        and permission not in principal.permissions
+        and not set(permissions).intersection(principal.permissions)
     ):
         raise HTTPException(403, "没有执行此操作的权限")
     match = re.match(r"/projects/(\d+)(?:/|$)", path)
@@ -477,6 +482,26 @@ def build_creative_router(
             raise HTTPException(404, "creative project not found")
         return project
 
+    def project_view(project: dict[str, Any], principal: Principal) -> dict[str, Any]:
+        if principal.is_system_admin:
+            return project
+        is_author = project.get("created_by") == principal.user_id
+        approved_statuses = {"approved", "locked", "brief_locked"}
+
+        def visible(item: dict[str, Any]) -> bool:
+            if item.get("status") in approved_statuses or is_author:
+                return True
+            task_id = str(item.get("workflow_task_id") or "")
+            task = workflow_repository.get_task(task_id) if task_id else None
+            return bool(task and task.get("assignee_user_id") == principal.user_id)
+
+        viewed = dict(project)
+        for key in ("blueprints", "characters", "relationships", "episodes"):
+            viewed[key] = [item for item in project.get(key, []) if visible(item)]
+        if not is_author:
+            viewed["allowed_actions"] = []
+        return viewed
+
     def create_generation_job(
         project_id: int,
         action: str,
@@ -603,6 +628,7 @@ def build_creative_router(
 
     @router.get("/topics")
     async def list_topics(
+        principal: Principal = Depends(current_principal),
         platform: str = "",
         status: str = "",
         category: str = "",
@@ -613,6 +639,12 @@ def build_creative_router(
         lifecycle_status: str = "",
         limit: int = Query(50, ge=1, le=500),
     ):
+        approved_context_only = (
+            not principal.is_system_admin and "topic.read" not in principal.permissions
+        )
+        if approved_context_only:
+            status = "adopted"
+            has_locked_breakdown = True
         topics = repository.list_topics(
             platform=platform,
             status=status,
@@ -646,7 +678,10 @@ def build_creative_router(
         return {"items": items[:limit]}
 
     @router.get("/topics/{topic_id}")
-    async def get_topic(topic_id: int):
+    async def get_topic(
+        topic_id: int,
+        principal: Principal = Depends(current_principal),
+    ):
         topic = lifecycle_service.enrich_topic(topic_id)
         if not topic:
             raise HTTPException(404, "topic not found")
@@ -656,6 +691,12 @@ def build_creative_router(
             )
             topic = lifecycle_service.enrich_topic(topic_id)
             assert topic is not None
+        if (
+            not principal.is_system_admin
+            and "topic.read" not in principal.permissions
+            and not topic.get("locked_breakdown_id")
+        ):
+            raise HTTPException(403, "只能读取已批准的选题上下文")
         return topic
 
     @router.get("/topics/{topic_id}/transcripts")
@@ -684,7 +725,11 @@ def build_creative_router(
         }
 
     @router.get("/topics/{topic_id}/breakdowns")
-    async def list_topic_breakdowns(topic_id: int, status: str = "locked"):
+    async def list_topic_breakdowns(
+        topic_id: int,
+        status: str = "locked",
+        principal: Principal = Depends(current_principal),
+    ):
         topic = repository.get_topic(topic_id)
         if not topic:
             raise HTTPException(404, "topic not found")
@@ -694,6 +739,8 @@ def build_creative_router(
         for item in items:
             workflow_adapter.reconcile_resource("breakdown", str(item["id"]))
         items = repository.list_locked_breakdowns(topic_id)
+        if not principal.is_system_admin and "breakdown.read" not in principal.permissions:
+            items = [item for item in items if item["status"] in {"approved", "locked"}]
         for item in items:
             item["field_guide"] = personalize_breakdown_field_guide(item["content"])
         return {"items": items}
@@ -885,7 +932,7 @@ def build_creative_router(
     @router.post("/projects")
     async def create_project(
         payload: ProjectCreateRequest,
-        principal: Principal | None = Depends(optional_principal),
+        principal: Principal = Depends(current_principal),
     ):
         try:
             validate_task(
@@ -904,6 +951,7 @@ def build_creative_router(
                 target_audience=payload.target_audience,
                 episode_duration_seconds=payload.episode_duration_seconds,
                 workflow_task_id=payload.workflow_task_id,
+                created_by=principal.user_id,
             )
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -938,12 +986,25 @@ def build_creative_router(
         return {"items": items}
 
     @router.get("/projects/{project_id}")
-    async def get_project(project_id: int):
-        return project_or_404(project_id)
+    async def get_project(
+        project_id: int,
+        principal: Principal = Depends(current_principal),
+    ):
+        return project_view(project_or_404(project_id), principal)
 
     @router.patch("/projects/{project_id}")
-    async def update_project(project_id: int, payload: ProjectUpdateRequest):
+    async def update_project(
+        project_id: int,
+        payload: ProjectUpdateRequest,
+        principal: Principal = Depends(current_principal),
+    ):
         try:
+            project = project_or_404(project_id)
+            if (
+                not principal.is_system_admin
+                and project.get("created_by") != principal.user_id
+            ):
+                raise HTTPException(403, "只能修改本人创建的项目草稿")
             return repository.update_project(project_id, payload.model_dump(exclude_none=True))
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc

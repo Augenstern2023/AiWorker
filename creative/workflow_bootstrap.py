@@ -44,15 +44,7 @@ class WorkflowBootstrapService:
         topic = self.creative_repository.get_topic(topic_id)
         if topic is None:
             raise KeyError(topic_id)
-        with self.workflow_repository.identity_repository.connect() as connection:
-            live_actor = self.workflow_repository._live_actor(connection, actor.user_id)
-        if not live_actor["is_system_admin"] and not (
-            "project_owner" in live_actor["role_codes"]
-            and "project.manage" in live_actor["permissions"]
-        ):
-            raise PermissionError(
-                "only a project owner or system administrator may bootstrap workflow"
-            )
+        self._assert_authorized(actor, project_id)
         task = self.workflow_repository.ensure_topic_task(
             topic_id,
             task_type="topic_decision",
@@ -83,11 +75,26 @@ class WorkflowBootstrapService:
         *,
         project_id: str | None = None,
     ) -> dict[str, Any]:
-        topic = self.creative_repository.update_topic(topic_id, "adopted")
-        if topic is None:
+        if self.creative_repository.get_topic(topic_id) is None:
             raise KeyError(topic_id)
+        self._assert_authorized(actor, project_id)
         result = self.ensure_topic_workflow(
             topic_id, actor, request, project_id=project_id
         )
+        topic = self.creative_repository.update_topic(topic_id, "adopted")
+        if topic is None:
+            raise KeyError(topic_id)
         result["topic"] = topic
         return result
+
+    def _assert_authorized(
+        self, actor: Principal, project_id: str | None
+    ) -> None:
+        with self.workflow_repository.identity_repository.connect() as connection:
+            live_actor = self.workflow_repository._live_actor(connection, actor.user_id)
+        if not live_actor["is_system_admin"] and "project.manage" not in live_actor["permissions"]:
+            raise PermissionError(
+                "project.manage permission is required to bootstrap workflow"
+            )
+        if project_id is not None and not live_actor["is_system_admin"]:
+            self.workflow_repository.assert_can_manage_project(project_id, actor)

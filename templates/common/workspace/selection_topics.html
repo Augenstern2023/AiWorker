@@ -98,7 +98,7 @@
                                     <button class="btn btn-sm btn-outline-primary me-1" @click="openTopicDownload(topic)" title="下载剧集" aria-label="下载剧集"><i class="bi bi-download"></i></button>
                                     <button class="btn btn-sm btn-outline-info me-1" x-show="Number(topic.downloaded_episode_count || 0) > 0" @click="openTopicTranscriptPreview(topic)" title="预览剧目转写" aria-label="预览剧目转写"><i class="bi bi-eye"></i></button>
                                     <button class="btn btn-sm btn-outline-success me-1" x-show="topic.status !== 'adopted'" @click="updateTopicLibrary(topic, 'adopted')" title="采纳" aria-label="采纳"><i class="bi bi-check2"></i></button>
-                                    <button class="btn btn-sm btn-outline-success me-1" x-show="topic.status === 'adopted'" @click="bootstrapTopicWorkflow(topic)" title="创建工作流" aria-label="创建工作流"><i class="bi bi-play-circle"></i></button>
+                                    {% if principal and (principal.is_system_admin or 'project.manage' in principal.permissions) %}<button class="btn btn-sm btn-outline-success me-1" x-show="topic.status === 'adopted'" @click="bootstrapTopicWorkflow(topic)" title="创建工作流" aria-label="创建工作流"><i class="bi bi-play-circle"></i></button>{% endif %}
                                     <button class="btn btn-sm btn-outline-warning" x-show="topic.status === 'adopted'" @click="updateTopicLibrary(topic, 'archived')" title="归档" aria-label="归档"><i class="bi bi-archive"></i></button>
                                 </td>
                             </tr>

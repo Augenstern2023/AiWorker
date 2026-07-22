@@ -54,6 +54,10 @@ def test_owner_adoption_bootstraps_one_topic_decision_task(tmp_path: Path):
         }]
     )[0]
 
+    with pytest.raises(PermissionError):
+        service.adopt_topic(topic["id"], selector)
+    assert creative.get_topic(topic["id"])["status"] == "pending_review"
+
     first = service.adopt_topic(topic["id"], owner)
     repeated = service.ensure_topic_workflow(topic["id"], owner)
 

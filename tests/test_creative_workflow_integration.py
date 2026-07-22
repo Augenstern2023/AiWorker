@@ -556,6 +556,7 @@ def test_creative_project_get_retries_pending_mirror(tmp_path: Path, monkeypatch
     assert adapter.domain_status("brief", resource_id) == "submitted"
     app = FastAPI()
     app.dependency_overrides[creative_api_principal] = lambda: admin
+    app.dependency_overrides[current_principal] = lambda: admin
     app.include_router(
         build_creative_router(root=tmp_path, runtime_dir=runtime)
     )

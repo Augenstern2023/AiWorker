@@ -79,3 +79,32 @@ git diff --check
 ```
 
 All static checks and scoped pre-commit hooks passed.
+
+## Important Re-review Fixes
+
+The seven Important findings from the follow-up review were addressed in a second TDD wave:
+
+- Planner/writer approved-context reads no longer require `topic.read`; managed project readers can load managed projects.
+- Project creation records the authenticated author. Project mutation is author-only outside system administration, and project reads expose non-approved stage records only to the project author or current task assignee. The existing migration continues to reattribute legacy `created_by = 'local'` projects to the bootstrap administrator.
+- Legacy file deletion and analytics synchronization are administrator-only while file/analytics reads retain their read permissions. Protected destructive requests continue through the unified API audit middleware.
+- Topic workflow bootstrap now authorizes before adoption, uses `project.manage` plus managed-project scope rather than a literal role, reconciles the task before adoption, is hidden from selection operators, and is available from the project-owner review page.
+- Direct assignment now uses the live configurable claimable task types as well as built-in role compatibility.
+- Beats delivery records only the selected episode artifact marker. A two-episode lifecycle remains partial after the first artifact and reaches `beats_exported` only after both artifacts are delivered.
+- Project membership add/remove and submission creation now record success/failure audits with request metadata and project scope.
+
+Follow-up RED evidence included unauthorized bootstrap changing topic state, custom-role assignment rejection, premature two-episode export completion, missing project authorship/draft filtering, method-insensitive destructive permissions, and absent membership/submission audit records.
+
+Follow-up focused GREEN evidence:
+
+```text
+uv run pytest tests/test_project_visibility.py tests/test_workflow_api.py \
+  tests/test_workflow_tasks.py tests/test_workflow_bootstrap.py \
+  tests/test_role_workflow_e2e.py tests/test_analytics_phase2.py \
+  tests/test_creative_lifecycle.py tests/test_creative_phase4.py \
+  tests/test_creative_workflow_integration.py tests/test_delivery_permissions.py \
+  tests/test_web_security.py tests/test_webgui_ui_changes.py \
+  tests/test_role_page_content.py tests/test_role_workflow_migration.py -q
+178 passed
+```
+
+Follow-up broader role/workflow/creative suite: `286 passed`. Updated unit suite: `488 passed, 1 failed`; the only failure remains the accepted pre-existing XHS Excel factory mismatch.

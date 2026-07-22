@@ -197,6 +197,7 @@ def test_project_member_api_adds_lists_and_protects_last_owner(
 
     created = client.post(
         "/api/workflow/projects/project-1/members",
+        headers={"X-Request-ID": "member-add-request"},
         json={
             "user_id": owner.user_id,
             "project_role": "project_owner",
@@ -221,7 +222,8 @@ def test_project_member_api_adds_lists_and_protects_last_owner(
     )
     listed = client.get("/api/workflow/projects/project-1/members")
     removed = client.delete(
-        f"/api/workflow/projects/project-1/members/{owner.user_id}"
+        f"/api/workflow/projects/project-1/members/{owner.user_id}",
+        headers={"X-Request-ID": "member-remove-failure"},
     )
     replacement = client.post(
         "/api/workflow/projects/project-1/members",
@@ -267,6 +269,15 @@ def test_project_member_api_adds_lists_and_protects_last_owner(
     }
     assert all(event["after"] is None for event in removed_events)
     assert all(event["actor_user_id"] == admin.user_id for event in events)
+    audit = client.app.state.audit_service
+    added_audit = audit.query(
+        action="project.member.add", project_id="project-1", result="success"
+    )
+    removed_audit = audit.query(
+        action="project.member.remove", project_id="project-1", result="failure"
+    )
+    assert any(event["request_id"] == "member-add-request" for event in added_audit)
+    assert any(event["request_id"] == "member-remove-failure" for event in removed_audit)
 
 
 def test_member_api_rejects_non_manager(
@@ -279,3 +290,42 @@ def test_member_api_rejects_non_manager(
     response = client.get("/api/workflow/projects/project-1/members")
 
     assert response.status_code == 403
+
+
+def test_submission_create_success_and_failure_are_audited(
+    identity_repository: IdentityRepository,
+    repository: WorkflowRepository,
+):
+    selector = _principal(identity_repository, "selector_submission", "selection_operator")
+    admin = _principal(identity_repository, "admin_submission", "system_admin")
+    task = repository.create_task(
+        "submission-audit", "topic_decision", "selection_operator", actor=SYSTEM_ACTOR
+    )
+    repository.claim_task(task["id"], selector)
+    repository.start_task(task["id"], selector)
+    selector_client = _client(identity_repository, repository, selector)
+    created = selector_client.post(
+        f"/api/workflow/tasks/{task['id']}/submissions",
+        headers={"X-Request-ID": "submission-create-request"},
+        json={
+            "resource_type": "topic_decision",
+            "resource_id": "topic-1",
+            "content": {"decision": "adopt"},
+        },
+    )
+    denied = _client(identity_repository, repository, admin).post(
+        f"/api/workflow/tasks/{task['id']}/submissions",
+        json={
+            "resource_type": "topic_decision",
+            "resource_id": "topic-2",
+            "content": {"decision": "adopt"},
+        },
+    )
+
+    assert created.status_code == 201
+    assert denied.status_code == 403
+    audit = selector_client.app.state.audit_service
+    successes = audit.query(action="workflow.submission.create", result="success")
+    failures = audit.query(action="workflow.submission.create", result="failure")
+    assert successes[0]["request_id"] == "submission-create-request"
+    assert failures

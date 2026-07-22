@@ -12,11 +12,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from analysis.drama_repository import DramaRepository
 from analysis.metrics import MetricsService
+from identity.dependencies import require_permission
+from identity.schema import Principal
 
 
 class AnalyticsSyncRequest(BaseModel):
@@ -41,7 +43,10 @@ def build_analytics_router(root: str | Path = ".", runtime_dir: str | Path = ".r
         return services["repository"], services["metrics"]
 
     @router.post("/sync")
-    async def sync(payload: AnalyticsSyncRequest):
+    async def sync(
+        payload: AnalyticsSyncRequest,
+        _: Principal = Depends(require_permission("*")),
+    ):
         if payload.platform not in {"dy", "hg"}:
             raise HTTPException(status_code=400, detail="platform must be dy or hg")
         try:
@@ -51,7 +56,10 @@ def build_analytics_router(root: str | Path = ".", runtime_dir: str | Path = ".r
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @router.post("/sync-all")
-    async def sync_all(payload: AnalyticsSyncAllRequest):
+    async def sync_all(
+        payload: AnalyticsSyncAllRequest,
+        _: Principal = Depends(require_permission("*")),
+    ):
         try:
             repository, _ = get_services()
             return repository.sync_all_jobs(payload.platforms)
@@ -59,7 +67,12 @@ def build_analytics_router(root: str | Path = ".", runtime_dir: str | Path = ".r
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @router.get("/overview")
-    async def overview(platform: str = "", start: str = "", end: str = ""):
+    async def overview(
+        platform: str = "",
+        start: str = "",
+        end: str = "",
+        _: Principal = Depends(require_permission("analytics.read")),
+    ):
         _, metrics = get_services()
         return metrics.overview(platform=platform, start=start, end=end)
 
@@ -70,27 +83,42 @@ def build_analytics_router(root: str | Path = ".", runtime_dir: str | Path = ".r
         sort: str = "heat",
         limit: int = Query(50, ge=1, le=500),
         date: str = "",
+        _: Principal = Depends(require_permission("analytics.read")),
     ):
         _, metrics = get_services()
         return {"items": metrics.dramas(platform=platform, category=category, sort=sort, limit=limit, date=date)}
 
     @router.get("/tags")
-    async def tags(platform: str = "", time_window: str = ""):
+    async def tags(
+        platform: str = "",
+        time_window: str = "",
+        _: Principal = Depends(require_permission("analytics.read")),
+    ):
         _, metrics = get_services()
         return metrics.tags(platform=platform, time_window=time_window)
 
     @router.get("/trends")
-    async def trends(platform: str = "", metric: str = "heat", interval: str = "day"):
+    async def trends(
+        platform: str = "",
+        metric: str = "heat",
+        interval: str = "day",
+        _: Principal = Depends(require_permission("analytics.read")),
+    ):
         _, metrics = get_services()
         return metrics.trends(platform=platform, metric=metric, interval=interval)
 
     @router.get("/assets")
-    async def assets():
+    async def assets(
+        _: Principal = Depends(require_permission("analytics.read")),
+    ):
         _, metrics = get_services()
         return metrics.assets()
 
     @router.get("/sentiment")
-    async def sentiment(platform: str = ""):
+    async def sentiment(
+        platform: str = "",
+        _: Principal = Depends(require_permission("analytics.read")),
+    ):
         _, metrics = get_services()
         return {"items": metrics.sentiment(platform=platform)}
 

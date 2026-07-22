@@ -113,7 +113,7 @@ def _api_permission(method: str, path: str) -> str | None:
     if path.startswith(("/api/rank/", "/api/hongguo/analyze-rank", "/api/douyin/analyze-rank")):
         return "rank.read"
     if path.startswith("/api/analytics/"):
-        return "analytics.read"
+        return "analytics.read" if method == "GET" else "*"
     if path.startswith("/api/creative/topics"):
         if method == "GET":
             return "topic.read"
@@ -136,6 +136,8 @@ def _api_permission(method: str, path: str) -> str | None:
         return "drama.download" if "job" in path or "download" in path else "drama.search"
     if path.startswith(("/api/file/analyze", "/api/audio/analyze", "/api/qrcode/")):
         return "job.create.selection"
+    if path == "/api/files" and method == "DELETE":
+        return "*"
     if path.startswith(("/api/files", "/api/file/", "/api/media/")):
         return "data.media.preview"
     if path.startswith(("/api/run", "/api/batch/", "/api/stop")):
@@ -2639,7 +2641,10 @@ async def download_file(path: str):
 
 
 @app.delete("/api/files")
-async def delete_files(req: FileDeleteRequest):
+async def delete_files(
+    req: FileDeleteRequest,
+    _: Principal = Depends(require_permission("*")),
+):
     paths = list(dict.fromkeys(path.strip() for path in req.paths if path.strip()))
     if not paths:
         raise HTTPException(400, "At least one file path is required")

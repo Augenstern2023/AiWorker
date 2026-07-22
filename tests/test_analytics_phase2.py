@@ -16,6 +16,22 @@ from fastapi.testclient import TestClient
 from analysis.analytics_api import build_analytics_router
 from analysis.drama_repository import DramaRepository, classify_sentiment
 from analysis.metrics import MetricsService
+from identity.dependencies import current_principal, permission_service_for_request
+from identity.schema import Principal
+
+
+def _authorize_admin(app: FastAPI) -> None:
+    admin = Principal(
+        user_id="analytics-admin",
+        username="analytics-admin",
+        display_name="Analytics Admin",
+        role_codes=("system_admin",),
+        permissions=frozenset({"*"}),
+        data_scope="all",
+        session_id="analytics-session",
+    )
+    app.dependency_overrides[current_principal] = lambda: admin
+    app.dependency_overrides[permission_service_for_request] = lambda: None
 
 
 def test_repository_syncs_dy_job_idempotently(tmp_path):
@@ -104,6 +120,7 @@ def test_dramas_backfill_missing_captured_date_for_legacy_rows(tmp_path):
 def test_analytics_api_sync_and_query(tmp_path):
     _write_dy_job(tmp_path)
     app = FastAPI()
+    _authorize_admin(app)
     app.include_router(build_analytics_router(root=tmp_path, runtime_dir=tmp_path / ".runtime"))
     client = TestClient(app)
 
@@ -128,6 +145,7 @@ def test_analytics_api_sync_all_scans_dy_and_hg_jobs(tmp_path):
     _write_dy_job(tmp_path)
     _write_hg_job_without_heat(tmp_path)
     app = FastAPI()
+    _authorize_admin(app)
     app.include_router(build_analytics_router(root=tmp_path, runtime_dir=tmp_path / ".runtime"))
     client = TestClient(app)
 

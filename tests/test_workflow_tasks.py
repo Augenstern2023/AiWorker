@@ -538,3 +538,38 @@ def test_custom_role_claims_configured_task_type(
     assert claimed["assignee_user_id"] == user["id"]
     with pytest.raises(PermissionError, match="task type"):
         repository.claim_task(outline["id"], principal)
+
+
+def test_manager_can_assign_configured_custom_role_live(
+    identity_repository: IdentityRepository,
+    repository: WorkflowRepository,
+    admin_user: Principal,
+):
+    role = identity_repository.create_role("beat_editor", "Beat editor", "")
+    identity_repository.replace_role_claimable_task_types(role["id"], ["beats"])
+    user = identity_repository.create_user("beat-editor", "Beat Editor", "hash")
+    identity_repository.replace_user_roles(user["id"], [role["id"]])
+    repository.add_project_member(
+        "assign-custom-project", user["id"], "beat_editor", admin_user
+    )
+    task = repository.create_task(
+        "assign-custom-workflow",
+        "beats",
+        "screenwriter",
+        project_id="assign-custom-project",
+        actor=SYSTEM_ACTOR,
+    )
+
+    assigned = repository.assign_task(task["id"], user["id"], admin_user)
+    assert assigned["assignee_user_id"] == user["id"]
+
+    identity_repository.replace_role_claimable_task_types(role["id"], [])
+    replacement = repository.create_task(
+        "assign-custom-workflow-2",
+        "beats",
+        "screenwriter",
+        project_id="assign-custom-project",
+        actor=SYSTEM_ACTOR,
+    )
+    with pytest.raises(ValueError, match="eligible"):
+        repository.assign_task(replacement["id"], user["id"], admin_user)

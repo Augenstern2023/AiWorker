@@ -196,11 +196,17 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
     assert first_task["task_type"] == "breakdown"
 
     assert clients["selection_operator"].get("/selection/breakdowns").status_code == 200
+    assert "创建工作流" not in clients["selection_operator"].get(
+        "/selection/topics"
+    ).text
     assert clients["selection_operator"].get("/writing/projects").status_code == 403
     assert clients["creative_planner"].get("/planning/projects").status_code == 200
     assert clients["creative_planner"].get("/admin/deliveries").status_code == 403
     assert clients["screenwriter"].get("/writing/projects").status_code == 200
     assert clients["project_owner"].get("/review/approvals").status_code == 200
+    assert "workflow-bootstrap-topics" in clients["project_owner"].get(
+        "/review/projects"
+    ).text
     assert clients["system_admin"].get("/admin/deliveries").status_code == 200
     assert clients["screenwriter"].post(
         f"/api/workflow/tasks/{first_task['id']}/claim"
@@ -353,6 +359,19 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
     assert clients["system_admin"].get(
         f"/api/admin/deliveries/{delivery['id']}/download"
     ).status_code == 200
+    assert TopicLifecycleService(creative, tmp_path).enrich_topic(topic["id"])[
+        "lifecycle_status"
+    ] == "beats_generated"
+    delivered_first = clients["system_admin"].post(
+        "/api/admin/deliveries",
+        json={
+            "project_id": project["id"],
+            "stage": "beats",
+            "submission_id": beats_submission["id"],
+            "format": "json",
+        },
+    )
+    assert delivered_first.status_code == 201, delivered_first.text
     assert TopicLifecycleService(creative, tmp_path).enrich_topic(topic["id"])[
         "lifecycle_status"
     ] == "beats_exported"

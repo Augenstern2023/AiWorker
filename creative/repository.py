@@ -354,6 +354,7 @@ class CreativeRepository:
         target_audience: str = "",
         episode_duration_seconds: int = 120,
         workflow_task_id: str | None = None,
+        created_by: str = "local",
     ) -> dict[str, Any]:
         if not 1 <= int(target_episode_count) <= 100:
             raise ValueError("目标集数必须在 1-100 之间")
@@ -390,14 +391,16 @@ class CreativeRepository:
                 """
                 INSERT INTO creative_projects (
                     topic_id, breakdown_id, name, genre, target_platform, target_audience,
-                    target_episode_count, episode_duration_seconds, workflow_task_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    target_episode_count, episode_duration_seconds, workflow_task_id,
+                    created_by, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     topic_id, breakdown_id, name.strip() or f"{topic['title']}创作项目",
                     genre.strip() or str(topic["category"] or ""), target_platform.strip(),
                     resolved_target_audience, int(target_episode_count),
-                    int(episode_duration_seconds), workflow_task_id, now, now,
+                    int(episode_duration_seconds), workflow_task_id,
+                    created_by, now, now,
                 ),
             )
         return self.get_project(int(cursor.lastrowid)) or {}

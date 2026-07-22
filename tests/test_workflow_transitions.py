@@ -372,6 +372,58 @@ def test_submission_can_be_created_only_for_allowed_assignee_task_states(
     assert draft["status"] == "draft"
 
 
+@pytest.mark.parametrize(
+    ("interleaving", "error_type", "message", "final_status"),
+    [
+        ("cancel", ValueError, "task status", "cancelled"),
+        ("reassign", PermissionError, "assignee", "assigned"),
+    ],
+)
+def test_task_interleaving_before_draft_transaction_creates_no_submission(
+    interleaving: str,
+    error_type: type[Exception],
+    message: str,
+    final_status: str,
+    service: TransitionService,
+    repository: WorkflowRepository,
+    identity_repository: IdentityRepository,
+    admin: Principal,
+) -> None:
+    actor = _user(identity_repository, "interleaved_author", "selection_operator")
+    task = repository.create_task(
+        "workflow-interleaved-cancel",
+        "breakdown",
+        "selection_operator",
+        actor=SYSTEM_ACTOR,
+    )
+    repository.assign_task(task["id"], actor.user_id, admin)
+    replacement = _user(
+        identity_repository, f"interleaved_{interleaving}", "selection_operator"
+    )
+    create_draft = service.approval_service.create_draft
+
+    def interleave_then_create_draft(**kwargs):
+        if interleaving == "cancel":
+            repository.cancel_task(task["id"], admin)
+        else:
+            repository.reassign_task(task["id"], replacement.user_id, admin)
+        return create_draft(**kwargs)
+
+    service.approval_service.create_draft = interleave_then_create_draft
+
+    with pytest.raises(error_type, match=message):
+        service.create_submission(
+            task["id"],
+            "breakdown",
+            f"resource-interleaved-{interleaving}",
+            {},
+            actor,
+        )
+
+    assert repository.get_task(task["id"])["status"] == final_status
+    assert repository.list_task_submissions(task["id"]) == []
+
+
 def test_submission_rejects_pool_task_and_non_assignee(
     service: TransitionService,
     repository: WorkflowRepository,

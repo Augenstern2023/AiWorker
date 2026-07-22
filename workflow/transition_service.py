@@ -31,9 +31,6 @@ WORKFLOW_NODES = {
     "delivery": ("system_admin", None, None),
 }
 
-_SUBMISSION_TASK_STATES = frozenset({"assigned", "in_progress", "returned"})
-
-
 class TransitionService:
     def __init__(
         self,
@@ -54,15 +51,6 @@ class TransitionService:
         content: Any,
         actor: Principal,
     ) -> dict[str, Any]:
-        task = self.repository.get_task(task_id)
-        if task is None:
-            raise KeyError(task_id)
-        if task["assignee_user_id"] != actor.user_id:
-            raise PermissionError("only the task assignee may create a submission")
-        if task["status"] not in _SUBMISSION_TASK_STATES:
-            raise ValueError(
-                "task status must be assigned, in_progress, or returned"
-            )
         return self.approval_service.create_draft(
             task_id=task_id,
             resource_type=resource_type,

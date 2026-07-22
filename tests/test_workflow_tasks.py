@@ -290,6 +290,49 @@ def test_project_member_add_remove_and_last_owner_guard(
     ]
 
 
+def test_manager_project_role_cannot_bootstrap_project_ownership(
+    repository: WorkflowRepository,
+    owner_user: Principal,
+) -> None:
+    with pytest.raises(PermissionError, match="manage"):
+        repository.add_project_member(
+            "project-manager-bootstrap",
+            owner_user.user_id,
+            "manager",
+            owner_user,
+        )
+
+
+def test_owner_alias_cannot_self_delete_without_different_owner(
+    repository: WorkflowRepository,
+    owner_user: Principal,
+    writer_user: Principal,
+) -> None:
+    repository.add_project_member(
+        "project-owner-alias", owner_user.user_id, "owner", owner_user
+    )
+    repository.add_project_member(
+        "project-owner-alias", owner_user.user_id, "manager", owner_user
+    )
+
+    with pytest.raises(ValueError, match="owner"):
+        repository.remove_project_member(
+            "project-owner-alias", owner_user.user_id, owner_user
+        )
+
+    repository.add_project_member(
+        "project-owner-alias", writer_user.user_id, "owner", owner_user
+    )
+    repository.remove_project_member(
+        "project-owner-alias", owner_user.user_id, owner_user
+    )
+
+    assert {
+        (member["user_id"], member["project_role"])
+        for member in repository.list_project_members("project-owner-alias")
+    } == {(writer_user.user_id, "owner")}
+
+
 def test_project_member_mutations_record_actor_before_after_and_timestamp(
     repository: WorkflowRepository,
     admin_user: Principal,

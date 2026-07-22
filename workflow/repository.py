@@ -22,8 +22,9 @@ from identity.schema import DATA_SCOPE_ORDER, Principal
 from .state_machine import WorkflowStateMachine
 
 
-_MANAGED_PROJECT_ROLES = frozenset(
-    {"owner", "project_owner", "manager", "project_manager"}
+OWNER_PROJECT_ROLES = frozenset({"owner", "project_owner"})
+_MANAGED_PROJECT_ROLES = OWNER_PROJECT_ROLES | frozenset(
+    {"manager", "project_manager"}
 )
 SYSTEM_ACTOR = Principal(
     user_id="workflow:system",
@@ -500,7 +501,7 @@ class WorkflowRepository:
             is_owner_bootstrap = (
                 has_members is None
                 and actor_id == user_id
-                and project_role in _MANAGED_PROJECT_ROLES
+                and project_role in OWNER_PROJECT_ROLES
                 and "project_owner" in live_actor["role_codes"]
             )
             if not is_owner_bootstrap:
@@ -646,20 +647,21 @@ class WorkflowRepository:
             removed_user_id = members[0]["user_id"]
             removes_active_owner = any(
                 member["status"] == "active"
-                and member["project_role"] == "project_owner"
+                and member["project_role"] in OWNER_PROJECT_ROLES
                 for member in members
             )
             if removes_active_owner:
-                other_owner = connection.execute(
+                other_roles = connection.execute(
                     """
-                    SELECT 1 FROM project_members
+                    SELECT project_role FROM project_members
                     WHERE project_id = ? AND user_id <> ? AND status = 'active'
-                      AND project_role = 'project_owner'
-                    LIMIT 1
                     """,
                     (project_id, removed_user_id),
-                ).fetchone()
-                if other_owner is None:
+                ).fetchall()
+                if not any(
+                    row["project_role"] in OWNER_PROJECT_ROLES
+                    for row in other_roles
+                ):
                     raise ValueError(
                         "current project owner cannot be removed until another owner is assigned"
                     )

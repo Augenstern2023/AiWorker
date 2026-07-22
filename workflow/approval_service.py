@@ -24,6 +24,9 @@ from identity.schema import Principal
 from .repository import WorkflowRepository
 
 
+_DRAFT_TASK_STATUSES = frozenset({"assigned", "in_progress", "returned"})
+
+
 class ApprovalService:
     def __init__(
         self,
@@ -68,6 +71,10 @@ class ApprovalService:
                     resource_id,
                 ):
                     raise ValueError("parent submission must belong to the same resource")
+            if task["status"] not in _DRAFT_TASK_STATUSES:
+                raise ValueError(
+                    "task status must be assigned, in_progress, or returned"
+                )
             draft = self._insert_draft(
                 connection,
                 task_id=task_id,

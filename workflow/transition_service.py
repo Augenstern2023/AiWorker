@@ -132,7 +132,9 @@ class TransitionService:
             "breakdown", "brief", "characters", "outline", "beats"
         }:
             try:
-                self.creative_adapter.on_approved(submission, actor)
+                authoritative = self.creative_adapter.on_approved(submission, actor)
+                if authoritative["id"] != submission["id"]:
+                    result["authoritative_submission_id"] = authoritative["id"]
             except Exception as exc:
                 self.repository.record_mirror_error(
                     submission["task_id"], submission, str(exc)

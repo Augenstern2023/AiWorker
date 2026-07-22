@@ -17,12 +17,14 @@ from fastapi.testclient import TestClient
 from creative.api import build_creative_router
 from creative.repository import CreativeRepository
 from creative.workflow_adapter import CreativeWorkflowAdapter
+from identity.dependencies import current_principal
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.schema import Principal
 from identity.session_service import SessionService
 from workflow import SYSTEM_ACTOR
 from workflow.repository import WorkflowRepository
+from workflow.api import build_workflow_router
 from workflow.transition_service import TransitionService
 
 
@@ -617,8 +619,15 @@ def test_reading_older_approved_after_partial_supersede_failure_never_reverses_n
     assert workflow.get_submission(second["id"])["status"] == "approved"
     monkeypatch.setattr(workflow, "supersede_resource_approvals", real_supersede)
 
-    transitions.list_task_submissions(first_task["id"])
+    app = FastAPI()
+    app.include_router(build_workflow_router(workflow, transitions))
+    app.dependency_overrides[current_principal] = lambda: owner
+    repeated = TestClient(app).post(
+        f"/api/workflow/submissions/{first['id']}/approve"
+    )
 
+    assert repeated.status_code == 200
+    assert repeated.json()["authoritative_submission_id"] == second["id"]
     assert workflow.get_submission(first["id"])["status"] == "superseded"
     assert workflow.get_submission(second["id"])["status"] == "approved"
     assert adapter.domain_status(resource_type, newer_resource_id) == "approved"

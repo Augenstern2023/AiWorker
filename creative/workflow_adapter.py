@@ -195,8 +195,14 @@ class CreativeWorkflowAdapter:
         submission: dict,
         actor: Principal,
         conn: sqlite3.Connection | None = None,
-    ) -> None:
+    ) -> dict:
         del conn
+        requested_submission = submission
+        authoritative = self._authoritative_approved_submission(
+            submission["resource_type"], submission["resource_id"]
+        )
+        if authoritative is not None:
+            submission = authoritative
         resource_type = submission["resource_type"]
         resource_id = submission["resource_id"]
         self._validate_type(resource_type)
@@ -329,6 +335,13 @@ class CreativeWorkflowAdapter:
             self.workflow_repository.supersede_resource_approvals(
                 resource_type, old_resource_id, actor
             )
+        if requested_submission["id"] != submission["id"]:
+            self.workflow_repository.supersede_resource_approvals(
+                requested_submission["resource_type"],
+                requested_submission["resource_id"],
+                actor,
+            )
+        return submission
 
     def on_returned(
         self,

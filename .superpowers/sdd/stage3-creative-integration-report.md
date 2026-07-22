@@ -93,3 +93,9 @@ uv run pytest tests/test_creative_workflow_integration.py -q
 uv run pytest <all creative tests> <all workflow tests> tests/test_role_page_content.py tests/test_webgui_ui_changes.py -q
 204 passed, 1 pre-existing SQLAlchemy deprecation warning
 ```
+
+## Repeated Approval Guard
+
+Authority selection now also runs inside `CreativeWorkflowAdapter.on_approved`, so no caller can replay an older approved creative submission directly. If repeated approval targets an older submission, the adapter mirrors the authoritative newer approval, retries superseding the older workflow entry, and returns the authoritative submission to the transition service. The approval response includes `authoritative_submission_id` when it differs from the requested submission.
+
+The regression uses the actual workflow approve POST route after an injected cross-database supersession failure and covers all five logical scopes. Repeated approval of the old submission must keep the newer domain resource current and the newer workflow submission approved.

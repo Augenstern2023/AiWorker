@@ -97,27 +97,27 @@ def build_identity_router(
                     raise HTTPException(
                         status_code=500, detail="系统管理员角色尚未初始化"
                     )
-                connection.execute(
-                    """
-                    UPDATE roles
-                    SET is_enabled = 1, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                    """,
-                    (role["id"],),
-                )
-                active_admins = connection.execute(
+                bound_active_admins = connection.execute(
                     """
                     SELECT COUNT(DISTINCT u.id)
                     FROM users AS u
                     JOIN user_roles AS ur ON ur.user_id = u.id
-                    JOIN roles AS r ON r.id = ur.role_id
                     WHERE u.status = 'active' AND u.is_deleted = 0
-                      AND r.code = 'system_admin' AND r.is_enabled = 1
-                    """
+                      AND ur.role_id = ?
+                    """,
+                    (role["id"],),
                 ).fetchone()[0]
-                if active_admins:
+                if bound_active_admins:
                     setup_already_complete = True
                 else:
+                    connection.execute(
+                        """
+                        UPDATE roles
+                        SET is_enabled = 1, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (role["id"],),
+                    )
                     connection.execute(
                         """
                         INSERT INTO users

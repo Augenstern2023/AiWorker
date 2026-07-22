@@ -212,6 +212,44 @@ def test_setup_restores_disabled_system_admin_role(
     ).status_code == 409
 
 
+def test_setup_does_not_reenable_role_with_existing_bound_admin(
+    client: TestClient, repository: IdentityRepository
+):
+    first_setup = client.post(
+        "/api/auth/setup",
+        json={
+            "username": "admin",
+            "display_name": "管理员",
+            "password": "Admin-Strong-123!",
+        },
+    )
+    assert first_setup.status_code == 201
+    with repository.connect() as connection:
+        connection.execute(
+            "UPDATE roles SET is_enabled = 0 WHERE code = 'system_admin'"
+        )
+        user_count_before = connection.execute(
+            "SELECT COUNT(*) FROM users"
+        ).fetchone()[0]
+
+    repeated_setup = client.post(
+        "/api/auth/setup",
+        json={
+            "username": "other",
+            "display_name": "其他",
+            "password": "Admin-Strong-456!",
+        },
+    )
+
+    assert repeated_setup.status_code == 409
+    assert repository.get_role_by_code("system_admin")["is_enabled"] is False
+    with repository.connect() as connection:
+        user_count_after = connection.execute(
+            "SELECT COUNT(*) FROM users"
+        ).fetchone()[0]
+    assert user_count_after == user_count_before
+
+
 def test_concurrent_setup_creates_exactly_one_admin(repository: IdentityRepository):
     app = FastAPI()
     app.include_router(

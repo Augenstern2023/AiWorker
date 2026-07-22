@@ -41,6 +41,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 import config
@@ -69,6 +70,8 @@ from agents.douyin_drama_fallback import DouyinDramaFallbackClient, DouyinFallba
 from core.job import CrawlJob
 from rag.api import register_rag_routes
 from runtime.job_manager import JobConflictError, JobManager, JobNotFoundError
+from web.navigation_service import NavigationService
+from web.page_router import build_page_router
 
 
 WORKSPACE_ROOT = Path(__file__).resolve().parent
@@ -249,6 +252,7 @@ app.state.identity_password_service = identity_password_service
 app.state.identity_session_service = identity_session_service
 app.state.identity_permission_service = identity_permission_service
 app.state.audit_service = audit_service
+templates = Jinja2Templates(directory=str(WORKSPACE_ROOT / "templates"))
 
 
 @app.middleware("http")
@@ -288,6 +292,7 @@ app.include_router(
     )
 )
 app.include_router(build_audit_router(audit_service))
+app.include_router(build_page_router(templates, NavigationService()))
 register_rag_routes(app, root=Path(__file__).resolve().parent, runtime_dir=Path(__file__).resolve().parent / ".runtime")
 register_analytics_routes(app, root=Path(__file__).resolve().parent, runtime_dir=Path(__file__).resolve().parent / ".runtime")
 register_today_rank_routes(app, root=Path(__file__).resolve().parent)
@@ -1302,15 +1307,6 @@ def build_comment_command(ids: List[str], project_name: str):
     return command
 
 # --- API Routes ---
-
-@app.get("/")
-async def index():
-    with open("templates/index.html", "r", encoding="utf-8") as f:
-        return HTMLResponse(
-            f.read(),
-            headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
-        )
-
 
 @app.get("/favicon.ico")
 async def favicon():

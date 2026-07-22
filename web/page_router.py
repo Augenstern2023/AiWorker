@@ -1,0 +1,153 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) 2025 relakkes@gmail.com
+#
+# This file is part of MediaCrawler project.
+# Repository: https://github.com/NanmiCoder/MediaCrawler
+# GitHub: https://github.com/NanmiCoder
+# Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
+
+from __future__ import annotations
+
+from collections.abc import Callable
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.routing import APIRoute
+from fastapi.templating import Jinja2Templates
+
+from identity.dependencies import current_principal, require_page
+from identity.schema import Principal
+
+from .navigation_service import PAGE_ROUTES, NavigationService
+
+
+def build_page_router(
+    templates: Jinja2Templates, navigation_service: NavigationService
+) -> APIRouter:
+    class PageRoute(APIRoute):
+        def get_route_handler(self) -> Callable:
+            handler = super().get_route_handler()
+
+            async def handle(request: Request) -> Response:
+                try:
+                    return await handler(request)
+                except HTTPException as exc:
+                    if exc.status_code == 401:
+                        return RedirectResponse("/login", status_code=303)
+                    if exc.status_code != 403:
+                        raise
+                    principal = _principal_from_request(request)
+                    return templates.TemplateResponse(
+                        request,
+                        "common/403.html",
+                        _template_context(
+                            request,
+                            principal,
+                            navigation_service,
+                            page_title="无权访问",
+                        ),
+                        status_code=403,
+                    )
+
+            return handle
+
+    router = APIRouter(route_class=PageRoute)
+
+    @router.get("/", include_in_schema=False)
+    def landing(
+        request: Request, principal: Principal = Depends(current_principal)
+    ) -> RedirectResponse:
+        last_route = navigation_service.last_route_for(principal)
+        route = (
+            last_route
+            if last_route and navigation_service.can_open(principal, last_route)
+            else navigation_service.default_route(principal)
+        )
+        if last_route and route != last_route:
+            navigation_service.forget_route(principal)
+        return RedirectResponse(route, status_code=303)
+
+    @router.get("/tasks", response_class=HTMLResponse)
+    def tasks(
+        request: Request, principal: Principal = Depends(current_principal)
+    ) -> Response:
+        return _page_response(
+            templates,
+            navigation_service,
+            request,
+            principal,
+            page_title="我的任务",
+        )
+
+    def page_endpoint(page_title: str, permission: str):
+        def endpoint(
+            request: Request,
+            principal: Principal = Depends(require_page(permission)),
+        ) -> Response:
+            return _page_response(
+                templates,
+                navigation_service,
+                request,
+                principal,
+                page_title=page_title,
+            )
+
+        return endpoint
+
+    for route, permission, title in PAGE_ROUTES:
+        router.add_api_route(
+            route,
+            page_endpoint(title, permission),
+            methods=["GET"],
+            response_class=HTMLResponse,
+            name=f"page_{permission}_{title}",
+            openapi_extra={"required_page_permission": permission},
+        )
+
+    return router
+
+
+def _page_response(
+    templates: Jinja2Templates,
+    navigation_service: NavigationService,
+    request: Request,
+    principal: Principal,
+    *,
+    page_title: str,
+) -> Response:
+    response = templates.TemplateResponse(
+        request,
+        "common/tasks.html",
+        _template_context(
+            request,
+            principal,
+            navigation_service,
+            page_title=page_title,
+        ),
+    )
+    navigation_service.remember_route(principal, request.url.path)
+    return response
+
+
+def _template_context(
+    request: Request,
+    principal: Principal | None,
+    navigation_service: NavigationService,
+    *,
+    page_title: str,
+) -> dict:
+    return {
+        "request": request,
+        "principal": principal,
+        "navigation": navigation_service.items_for(principal) if principal else [],
+        "current_route": request.url.path,
+        "page_title": page_title,
+    }
+
+
+def _principal_from_request(request: Request) -> Principal | None:
+    service = getattr(request.app.state, "identity_permission_service", None)
+    if service is None:
+        return None
+    raw_token = request.cookies.get(service.session_service.cookie_name)
+    return service.principal_for_session(raw_token)

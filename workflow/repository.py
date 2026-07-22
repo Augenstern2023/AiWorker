@@ -199,6 +199,80 @@ class WorkflowRepository:
                 (task_id, job_id),
             )
 
+    def bind_workflow_project(
+        self,
+        task_id: str,
+        project_id: str,
+        creator: Principal | dict[str, Any],
+    ) -> dict[str, Any]:
+        creator_id = self._actor_id(creator)
+        with self.identity_repository.transaction() as connection:
+            task = self._require_task(connection, task_id)
+            if task["project_id"] not in {None, project_id}:
+                raise ValueError("workflow task is already linked to another project")
+            self._live_actor(connection, creator_id)
+            self._ensure_system_actor(connection, SYSTEM_ACTOR.user_id)
+            connection.execute(
+                "UPDATE workflow_instances SET project_id = ?, resource_type = 'project', "
+                "resource_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (project_id, project_id, task["workflow_id"]),
+            )
+            connection.execute(
+                "UPDATE workflow_tasks SET project_id = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE workflow_id = ? AND project_id IS NULL",
+                (project_id, task["workflow_id"]),
+            )
+            members = {creator_id: task["role_code"]}
+            reviewers = connection.execute(
+                """
+                SELECT DISTINCT s.reviewed_by
+                FROM workflow_submissions s
+                JOIN workflow_tasks t ON t.id = s.task_id
+                WHERE t.workflow_id = ? AND s.reviewed_by IS NOT NULL
+                """,
+                (task["workflow_id"],),
+            ).fetchall()
+            for reviewer in reviewers:
+                members.setdefault(str(reviewer["reviewed_by"]), "project_owner")
+            for user_id, project_role in members.items():
+                existing = connection.execute(
+                    "SELECT * FROM project_members WHERE project_id = ? "
+                    "AND user_id = ? AND project_role = ?",
+                    (project_id, user_id, project_role),
+                ).fetchone()
+                if existing is not None:
+                    continue
+                membership_id = str(uuid.uuid4())
+                connection.execute(
+                    """
+                    INSERT INTO project_members
+                        (id, project_id, user_id, project_role, status, added_by)
+                    VALUES (?, ?, ?, ?, 'active', ?)
+                    """,
+                    (
+                        membership_id,
+                        project_id,
+                        user_id,
+                        project_role,
+                        SYSTEM_ACTOR.user_id,
+                    ),
+                )
+                member = connection.execute(
+                    "SELECT * FROM project_members WHERE id = ?",
+                    (membership_id,),
+                ).fetchone()
+                assert member is not None
+                self._record_project_member_event(
+                    connection,
+                    project_id,
+                    membership_id,
+                    "project_member.add",
+                    SYSTEM_ACTOR.user_id,
+                    None,
+                    dict(member),
+                )
+            return self._require_task(connection, task_id)
+
     def list_task_job_ids(self, task_id: str) -> list[str]:
         with self.identity_repository.connect() as connection:
             self._require_task(connection, task_id)

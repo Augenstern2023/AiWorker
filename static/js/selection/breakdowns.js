@@ -74,10 +74,11 @@ window.aiworkerModules.push(() => ({
                         elapsedSeconds: 0
                     };
                     try {
+                        const task = await this.resolveCreativeWorkflowTask('breakdown', null, topic.id);
                         const res = await aiworkerApi.request('/api/creative/breakdowns', {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({topic_id: topic.id, force_regenerate: forceRegenerate})
+                            body: JSON.stringify({topic_id: topic.id, force_regenerate: forceRegenerate, workflow_task_id: task.id})
                         });
                         const data = await res.json();
                         const detail = data.detail;
@@ -412,10 +413,11 @@ window.aiworkerModules.push(() => ({
                     this.dramaDownload.progressMessage = '正在创建下载任务…';
                     this.dramaDownload.progress = {completed: 0, total: isDouyinFallback ? this.dramaDownload.selectedAwemeIds.length : episodeNumbers.length, percent: 0, downloaded: 0, skipped_paid: 0, failed: 0};
                     try {
+                        const task = await this.resolveCreativeWorkflowTask('source_package', null, this.dramaDownload.topic?.id || null);
                         const endpoint = isDouyinFallback ? '/api/hongguo/drama/douyin-fallback/jobs' : '/api/hongguo/drama/download/jobs';
                         const payload = isDouyinFallback
-                            ? {title: this.dramaDownload.title, aweme_ids: this.dramaDownload.selectedAwemeIds, fallback_reason: this.dramaDownload.fallbackReason || ''}
-                            : {title: this.dramaDownload.title, book_id: this.dramaDownload.selectedCandidate.book_id, episodes: episodeNumbers, all_episodes: this.dramaDownload.allEpisodes && episodeNumbers.length === this.dramaDownload.episodes.length};
+                            ? {title: this.dramaDownload.title, aweme_ids: this.dramaDownload.selectedAwemeIds, fallback_reason: this.dramaDownload.fallbackReason || '', workflow_task_id: task.id}
+                            : {title: this.dramaDownload.title, book_id: this.dramaDownload.selectedCandidate.book_id, episodes: episodeNumbers, all_episodes: this.dramaDownload.allEpisodes && episodeNumbers.length === this.dramaDownload.episodes.length, workflow_task_id: task.id};
                         const res = await aiworkerApi.request(endpoint, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
                         const data = await res.json();
                         if (!res.ok || data.status === 'error') throw new Error(data.message || '创建下载任务失败');

@@ -76,9 +76,10 @@ window.aiworkerModules.push(() => ({
                     const source = this.creativeWorkspace.create;
                     if (!source.topic_id || !source.breakdown_id) return;
                     try {
+                        const task = await this.resolveCreativeWorkflowTask('brief', null, source.topic_id);
                         const res = await aiworkerApi.request('/api/creative/projects', {
                             method: 'POST', headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify(source)
+                            body: JSON.stringify({...source, workflow_task_id: task.id})
                         });
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.detail || '创建项目失败');

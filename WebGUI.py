@@ -634,16 +634,60 @@ def _validate_generic_selection_job(platform: str, crawler_type: str) -> None:
 
 
 def _job_task_context(
-    workflow_task_id: str | None, principal: Principal
+    workflow_task_id: str | None,
+    principal: Principal,
+    *,
+    expected_task_type: str | None = None,
+    topic_title: str = "",
 ) -> tuple[str | None, str | None]:
-    if not workflow_task_id:
+    resolved_task_id = workflow_task_id
+    topic_ids = {
+        int(topic["id"])
+        for topic in creative_repository.list_topics(limit=500)
+        if topic_title.strip()
+        and str(topic.get("title") or "").strip().casefold()
+        == topic_title.strip().casefold()
+    }
+    if expected_task_type and not resolved_task_id:
+        candidates = [
+            task
+            for task in workflow_repository.list_tasks(principal)
+            if task["task_type"] == expected_task_type
+            and task.get("assignee_user_id") == principal.user_id
+            and task["status"] in {"assigned", "in_progress", "returned"}
+            and (not topic_ids or task.get("topic_id") in topic_ids)
+        ]
+        if len(candidates) != 1:
+            raise HTTPException(
+                409,
+                "exactly one active assigned workflow task is required",
+            )
+        resolved_task_id = str(candidates[0]["id"])
+    if not resolved_task_id:
         return None, None
-    task = workflow_repository.get_visible_task(workflow_task_id, principal)
+    task = workflow_repository.get_visible_task(resolved_task_id, principal)
     if task is None:
         raise HTTPException(403, "没有访问此工作流任务的权限")
-    if not principal.is_system_admin and task.get("assignee_user_id") != principal.user_id:
+    if expected_task_type and task["task_type"] != expected_task_type:
+        raise HTTPException(409, "workflow node does not match machine job type")
+    if (
+        expected_task_type
+        and task.get("assignee_user_id") != principal.user_id
+    ) or (
+        not expected_task_type
+        and not principal.is_system_admin
+        and task.get("assignee_user_id") != principal.user_id
+    ):
         raise HTTPException(403, "只能为自己负责的工作流任务创建机器任务")
-    return workflow_task_id, task.get("project_id")
+    if expected_task_type and task["status"] not in {
+        "assigned",
+        "in_progress",
+        "returned",
+    }:
+        raise HTTPException(409, "workflow task is not open for machine work")
+    if topic_ids and task.get("topic_id") not in topic_ids:
+        raise HTTPException(409, "machine job topic does not match workflow task")
+    return resolved_task_id, task.get("project_id")
 
 
 def _public_created_job(job_state) -> dict[str, Any]:
@@ -1874,7 +1918,12 @@ async def create_hongguo_drama_job(
     if actor is not None:
         _require_permission(actor, "job.create.selection")
     task_id, project_id = (
-        _job_task_context(payload.workflow_task_id, actor)
+        _job_task_context(
+            payload.workflow_task_id,
+            actor,
+            expected_task_type="source_package",
+            topic_title=payload.title,
+        )
         if actor is not None
         else (None, None)
     )
@@ -1918,7 +1967,12 @@ async def create_hongguo_drama_download_job(
     if actor is not None:
         _require_permission(actor, "job.create.selection")
     task_id, project_id = (
-        _job_task_context(payload.workflow_task_id, actor)
+        _job_task_context(
+            payload.workflow_task_id,
+            actor,
+            expected_task_type="source_package",
+            topic_title=payload.title,
+        )
         if actor is not None
         else (None, None)
     )
@@ -1966,7 +2020,12 @@ async def create_douyin_fallback_drama_job(
     if actor is not None:
         _require_permission(actor, "job.create.selection")
     task_id, project_id = (
-        _job_task_context(payload.workflow_task_id, actor)
+        _job_task_context(
+            payload.workflow_task_id,
+            actor,
+            expected_task_type="source_package",
+            topic_title=payload.title,
+        )
         if actor is not None
         else (None, None)
     )

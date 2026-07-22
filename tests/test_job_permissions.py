@@ -134,9 +134,37 @@ def role_client(job_environment, role_code: str, username: str) -> TestClient:
 
 def test_selection_download_job_records_owner_task_link_and_audit(job_environment):
     client = role_client(job_environment, "selection_operator", "selector")
+    wrong_task = job_environment.workflow.create_task(
+        "workflow-download-wrong",
+        "breakdown",
+        "selection_operator",
+        actor=SYSTEM_ACTOR,
+    )
+    job_environment.workflow.claim_task(wrong_task["id"], client.principal)
+
+    wrong_node = client.post(
+        "/api/hongguo/drama/download/jobs",
+        json={
+            "title": "测试剧",
+            "book_id": "book-1",
+            "episodes": [1],
+            "workflow_task_id": wrong_task["id"],
+        },
+    )
+
+    assert wrong_node.status_code == 409
+    assert job_environment.manager.list_jobs() == []
+
+    omitted_without_source = client.post(
+        "/api/hongguo/drama/download/jobs",
+        json={"title": "测试剧", "book_id": "book-1", "episodes": [1]},
+    )
+    assert omitted_without_source.status_code == 409
+    assert job_environment.manager.list_jobs() == []
+
     task = job_environment.workflow.create_task(
         "workflow-download",
-        "breakdown",
+        "source_package",
         "selection_operator",
         actor=SYSTEM_ACTOR,
     )
@@ -148,7 +176,6 @@ def test_selection_download_job_records_owner_task_link_and_audit(job_environmen
             "title": "测试剧",
             "book_id": "book-1",
             "episodes": [1],
-            "workflow_task_id": task["id"],
         },
     )
 

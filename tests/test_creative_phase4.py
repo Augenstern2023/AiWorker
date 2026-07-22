@@ -22,6 +22,8 @@ from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.session_service import SessionService
 from runtime.job_state import JobState
+from workflow import SYSTEM_ACTOR
+from workflow.repository import WorkflowRepository
 
 
 def seed_adopted_topic(repository: CreativeRepository) -> tuple[dict, dict]:
@@ -394,7 +396,31 @@ def build_phase4_client(tmp_path: Path) -> tuple[TestClient, CreativeRepository,
     raw_token, _ = TestClient(session_app).get("/session").json()
     client = TestClient(app)
     client.cookies.set(sessions.cookie_name, raw_token)
+    client.workflow = WorkflowRepository(identity)
+    client.principal = permissions.principal_for_user(admin["id"], "phase4-admin")
+    assert client.principal is not None
     return client, CreativeRepository(runtime_dir / "creative" / "creative.db"), manager
+
+
+def assign_phase4_task(
+    client: TestClient,
+    task_type: str,
+    *,
+    topic_id: int | None = None,
+    project_id: int | None = None,
+) -> dict:
+    role_code = (
+        "selection_operator" if task_type == "breakdown" else "creative_planner"
+    )
+    task = client.workflow.create_task(
+        f"phase4-{task_type}-{topic_id}-{project_id}-{len(client.workflow.list_tasks(client.principal))}",
+        task_type,
+        role_code,
+        topic_id=topic_id,
+        project_id=str(project_id) if project_id is not None else None,
+        actor=SYSTEM_ACTOR,
+    )
+    return client.workflow.claim_task(task["id"], client.principal)
 
 
 def write_episode_script(root: Path, title: str, episode_number: int, text: str) -> Path:
@@ -424,14 +450,30 @@ def write_episode_video(root: Path, title: str, episode_number: int) -> Path:
 def test_phase4_api_creates_multiple_projects_and_lists_them(tmp_path: Path):
     client, repository, _ = build_phase4_client(tmp_path)
     topic, breakdown = seed_adopted_topic(repository)
+    first_task = assign_phase4_task(client, "brief", topic_id=topic["id"])
+    second_task = assign_phase4_task(client, "brief", topic_id=topic["id"])
+
+    locked_rejected = client.post("/api/creative/projects", json={
+        "topic_id": topic["id"], "breakdown_id": breakdown["id"],
+        "name": "未审批方向", "target_episode_count": 20,
+        "workflow_task_id": first_task["id"],
+    })
+    assert locked_rejected.status_code == 409
+    with repository._connect() as connection:
+        connection.execute(
+            "UPDATE creative_breakdowns SET status = 'approved' WHERE id = ?",
+            (breakdown["id"],),
+        )
 
     first = client.post("/api/creative/projects", json={
         "topic_id": topic["id"], "breakdown_id": breakdown["id"],
         "name": "都市方向", "target_episode_count": 20,
+        "workflow_task_id": first_task["id"],
     })
     second = client.post("/api/creative/projects", json={
         "topic_id": topic["id"], "breakdown_id": breakdown["id"],
         "name": "年代方向", "target_episode_count": 30,
+        "workflow_task_id": second_task["id"],
     })
 
     assert first.status_code == 200
@@ -508,6 +550,7 @@ def test_breakdown_api_reuses_latest_version_without_creating_job(tmp_path: Path
     draft = repository.create_breakdown(
         topic["id"], {"core_conflict": "最新草稿冲突"}, {}, [], parent_version_id=locked["id"],
     )
+    assign_phase4_task(client, "breakdown", topic_id=topic["id"])
 
     response = client.post("/api/creative/breakdowns", json={"topic_id": topic["id"]})
 
@@ -521,6 +564,7 @@ def test_breakdown_api_reuses_latest_version_without_creating_job(tmp_path: Path
 def test_breakdown_api_requires_at_least_one_transcript(tmp_path: Path):
     client, repository, manager = build_phase4_client(tmp_path)
     topic = seed_topic_without_breakdown(repository)
+    assign_phase4_task(client, "breakdown", topic_id=topic["id"])
 
     response = client.post("/api/creative/breakdowns", json={"topic_id": topic["id"]})
 
@@ -540,6 +584,7 @@ def test_breakdown_api_requires_at_least_one_transcript(tmp_path: Path):
 def test_breakdown_api_enqueues_job_when_transcript_exists(tmp_path: Path):
     client, repository, manager = build_phase4_client(tmp_path)
     topic = seed_topic_without_breakdown(repository)
+    assign_phase4_task(client, "breakdown", topic_id=topic["id"])
     write_episode_script(tmp_path, topic["title"], 1, "林小满在宴会上公开拒绝家族安排。")
 
     response = client.post("/api/creative/breakdowns", json={"topic_id": topic["id"]})
@@ -581,6 +626,7 @@ def test_topic_transcript_preview_reports_when_no_transcript_exists(tmp_path: Pa
 def test_breakdown_api_enqueues_transcription_when_only_video_exists(tmp_path: Path):
     client, repository, manager = build_phase4_client(tmp_path)
     topic = seed_topic_without_breakdown(repository)
+    assign_phase4_task(client, "breakdown", topic_id=topic["id"])
     write_episode_video(tmp_path, topic["title"], 1)
 
     response = client.post("/api/creative/breakdowns", json={"topic_id": topic["id"]})
@@ -594,6 +640,7 @@ def test_breakdown_api_enqueues_transcription_when_only_video_exists(tmp_path: P
 def test_breakdown_api_force_regenerate_enqueues_job_for_existing_version(tmp_path: Path):
     client, repository, manager = build_phase4_client(tmp_path)
     topic, _ = seed_adopted_topic(repository)
+    assign_phase4_task(client, "breakdown", topic_id=topic["id"])
     write_episode_script(tmp_path, topic["title"], 1, "林小满在宴会上公开拒绝家族安排。")
 
     response = client.post("/api/creative/breakdowns", json={
@@ -623,6 +670,24 @@ def test_phase4_generation_api_enqueues_standard_creative_job(tmp_path: Path):
     topic, breakdown = seed_adopted_topic(repository)
     project = repository.create_project(topic["id"], breakdown["id"], "测试项目", 20)
 
+    missing_task = client.post(
+        f"/api/creative/projects/{project['id']}/blueprints/generate",
+        json={"count": 4},
+    )
+
+    assert missing_task.status_code == 409
+    assert manager.created == []
+
+    task = client.workflow.create_task(
+        "phase4-generation",
+        "brief",
+        "creative_planner",
+        topic_id=topic["id"],
+        project_id=str(project["id"]),
+        actor=SYSTEM_ACTOR,
+    )
+    client.workflow.claim_task(task["id"], client.principal)
+
     response = client.post(
         f"/api/creative/projects/{project['id']}/blueprints/generate",
         json={"count": 4},
@@ -634,6 +699,7 @@ def test_phase4_generation_api_enqueues_standard_creative_job(tmp_path: Path):
     assert manager.created[0]["crawler_type"] == "phase4_generate"
     assert manager.created[0]["extra"]["action"] == "blueprints"
     assert manager.created[0]["extra"]["count"] == 4
+    assert manager.created[0]["extra"]["workflow_task_id"] == task["id"]
 
 
 def test_phase4_legacy_export_requires_approved_delivery_submission(tmp_path: Path):

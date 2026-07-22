@@ -49,6 +49,7 @@ def test_project_author_owns_drafts_and_managed_reader_sees_approved_only(
         ("writer", "screenwriter"),
         ("owner", "project_owner"),
         ("selector", "selection_operator"),
+        ("admin", "system_admin"),
     ):
         role = identity.get_role_by_code(role_code)
         assert role is not None
@@ -65,6 +66,11 @@ def test_project_author_owns_drafts_and_managed_reader_sees_approved_only(
     creative.update_topic(topic["id"], "adopted")
     breakdown = creative.create_breakdown(topic["id"], {"hook": "approved"}, {}, [])
     creative.lock_breakdown(breakdown["id"])
+    with creative._connect() as connection:
+        connection.execute(
+            "UPDATE creative_breakdowns SET status = 'approved' WHERE id = ?",
+            (breakdown["id"],),
+        )
     workflow = WorkflowRepository(identity)
     app = FastAPI()
     app.state.identity_permission_service = permissions
@@ -89,14 +95,26 @@ def test_project_author_owns_drafts_and_managed_reader_sees_approved_only(
     candidate = next(item for item in candidates.json()["items"] if item["id"] == pending["id"])
     assert set(candidate) == {"id", "title", "platform", "category", "status", "captured_at"}
 
+    author_principal = permissions.principal_for_user(users["author"]["id"], "author")
+    assert author_principal is not None
+    brief_task = workflow.create_task(
+        "visible-project-brief",
+        "brief",
+        "creative_planner",
+        topic_id=topic["id"],
+        actor=SYSTEM_ACTOR,
+    )
+    workflow.claim_task(brief_task["id"], author_principal)
+
     created = clients["author"].post("/api/creative/projects", json={
         "topic_id": topic["id"], "breakdown_id": breakdown["id"],
         "name": "Owned draft", "target_episode_count": 2,
+        "workflow_task_id": brief_task["id"],
     })
     assert created.status_code == 200, created.text
     project = created.json()
     assert project["created_by"] == users["author"]["id"]
-    owner_principal = permissions.principal_for_user(users["owner"]["id"], "owner")
+    owner_principal = permissions.principal_for_user(users["admin"]["id"], "admin")
     assert owner_principal is not None
     for name in ("owner", "author", "other", "writer"):
         workflow.add_project_member(
@@ -114,14 +132,26 @@ def test_project_author_owns_drafts_and_managed_reader_sees_approved_only(
         f"/api/creative/topics/{topic['id']}/transcripts"
     )
     assert transcript.status_code == 403
-    drafts = creative.create_blueprints(project["id"], [
-        {"content": {"name": "approved"}},
-        {"content": {"name": "private draft"}},
-    ])
+    approved_draft = creative.create_blueprints(
+        project["id"], [{"content": {"name": "approved"}}]
+    )[0]
+    other_task = workflow.create_task(
+        "other-private-draft",
+        "brief",
+        "creative_planner",
+        project_id=str(project["id"]),
+        actor=SYSTEM_ACTOR,
+    )
+    workflow.assign_task(other_task["id"], users["other"]["id"], owner_principal)
+    creative.create_blueprints(
+        project["id"],
+        [{"content": {"name": "private draft"}}],
+        workflow_task_id=other_task["id"],
+    )
     with creative._connect() as connection:
         connection.execute(
             "UPDATE creative_blueprints SET status = 'approved' WHERE id = ?",
-            (drafts[0]["id"],),
+            (approved_draft["id"],),
         )
     assigned_task = workflow.create_task(
         "assigned-draft",

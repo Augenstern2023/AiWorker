@@ -122,6 +122,27 @@ def test_blank_character_batch_links_the_active_workflow_task():
     assert "workflow_task_id: task.id" in method
 
 
+def test_workflow_governed_creation_actions_send_active_task_ids():
+    selection = _source("static/js/selection/breakdowns.js")
+    creative = _source("static/js/common/creative.js")
+    breakdown = selection.split("async startTranscriptBreakdown", 1)[1].split(
+        "syncBreakdownGenerationProgress", 1
+    )[0]
+    download = selection.split("async startDramaDownload", 1)[1].split(
+        "syncDramaDownloadProgress", 1
+    )[0]
+    project = creative.split("async createCreativeProject", 1)[1].split(
+        "async selectCreativeProject", 1
+    )[0]
+
+    assert "resolveCreativeWorkflowTask('breakdown'" in breakdown
+    assert "workflow_task_id: task.id" in breakdown
+    assert "resolveCreativeWorkflowTask('source_package'" in download
+    assert "workflow_task_id: task.id" in download
+    assert "resolveCreativeWorkflowTask('brief'" in project
+    assert "workflow_task_id: task.id" in project
+
+
 def test_project_table_uses_name_navigation_without_redundant_action_column():
     section = _source("templates/common/workspace/project_list.html")
     html = section + _source("static/css/workspaces.css")

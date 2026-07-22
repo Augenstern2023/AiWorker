@@ -10,10 +10,11 @@
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from audit.service import AuditService
+from creative.api import build_creative_router
 from creative.repository import CreativeRepository
 from creative.workflow_bootstrap import WorkflowBootstrapService
 from creative.workflow_adapter import CreativeWorkflowAdapter
@@ -49,13 +50,15 @@ def _successor_count(identity: IdentityRepository, task_id: str) -> int:
 
 
 def test_topic_decision_approval_adopts_after_pending_bootstrap(tmp_path: Path):
-    identity = IdentityRepository(tmp_path / "system.db")
+    runtime = tmp_path / ".runtime"
+    identity = IdentityRepository(runtime / "system/system.db")
     identity.seed_defaults()
-    creative = CreativeRepository(tmp_path / "creative.db")
+    creative = CreativeRepository(runtime / "creative/creative.db")
     workflow = WorkflowRepository(identity)
     service = WorkflowBootstrapService(creative, workflow)
     owner = _principal(identity, "owner", "project_owner")
     selector = _principal(identity, "selector", "selection_operator")
+    planner = _principal(identity, "planner", "creative_planner")
     topic = creative.upsert_topics(
         [{
             "platform": "dy",
@@ -102,9 +105,77 @@ def test_topic_decision_approval_adopts_after_pending_bootstrap(tmp_path: Path):
     assert creative.get_topic(topic["id"])["status"] == "pending_review"
     workflow.start_task(first["task"]["id"], selector)
     resubmitted = transitions.submit(returned["draft"]["id"], selector)
-    transitions.approve(resubmitted["id"], owner)
+    topic_approval = transitions.approve(resubmitted["id"], owner)
 
     assert creative.get_topic(topic["id"])["status"] == "adopted"
+    source_task = topic_approval["next_task"]
+    workflow.claim_task(source_task["id"], selector)
+    workflow.start_task(source_task["id"], selector)
+    source_draft = transitions.create_submission(
+        source_task["id"],
+        "source_package",
+        str(topic["id"]),
+        {"downloaded": True},
+        selector,
+    )
+    source_submitted = transitions.submit(source_draft["id"], selector)
+    breakdown_task = transitions.approve(source_submitted["id"], owner)["next_task"]
+    workflow.claim_task(breakdown_task["id"], selector)
+    workflow.start_task(breakdown_task["id"], selector)
+    breakdown = creative.create_breakdown(
+        topic["id"],
+        {"hook": "approved"},
+        {},
+        [],
+        workflow_task_id=breakdown_task["id"],
+    )
+    breakdown_draft = transitions.create_submission(
+        breakdown_task["id"],
+        "breakdown",
+        str(breakdown["id"]),
+        {},
+        selector,
+    )
+    breakdown_submitted = transitions.submit(breakdown_draft["id"], selector)
+    brief_task = transitions.approve(breakdown_submitted["id"], owner)["next_task"]
+    workflow.claim_task(brief_task["id"], planner)
+
+    sessions = SessionService(identity, secure_cookie=False)
+    permissions = PermissionService(identity, sessions)
+    app = FastAPI()
+    app.state.identity_permission_service = permissions
+    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    session_app = FastAPI()
+
+    @session_app.get("/session")
+    def create_session(request: Request):
+        return sessions.create_session(planner.user_id, request)
+
+    token, _ = TestClient(session_app).get("/session").json()
+    client = TestClient(app)
+    client.cookies.set(sessions.cookie_name, token)
+    created = client.post(
+        "/api/creative/projects",
+        json={
+            "topic_id": topic["id"],
+            "breakdown_id": breakdown["id"],
+            "name": "Normal chain",
+            "workflow_task_id": brief_task["id"],
+        },
+    )
+    assert created.status_code == 200, created.text
+    project = created.json()
+    assert project["workflow_task_id"] == brief_task["id"]
+    assert workflow.get_task(brief_task["id"])["project_id"] == str(project["id"])
+    assert any(
+        member["user_id"] == planner.user_id
+        for member in workflow.list_project_members(str(project["id"]))
+    )
+    assert any(
+        member["user_id"] == owner.user_id
+        and member["project_role"] == "project_owner"
+        for member in workflow.list_project_members(str(project["id"]))
+    )
     with pytest.raises(PermissionError):
         service.ensure_topic_workflow(topic["id"], selector)
 

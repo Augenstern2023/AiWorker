@@ -174,3 +174,44 @@ uv run pytest -q --ignore=test/test_proxy_ip_pool.py --ignore=test/test_redis_ca
 ```
 
 The only failure in both broad runs remains the accepted pre-existing XHS Excel factory mismatch.
+
+## Fail-Closed Creative Task Governance
+
+The final Important gap was closed with a fifth TDD wave:
+
+- Every workflow-governed creative creation route now resolves and validates an active task instead of treating `workflow_task_id` as optional. Omitted IDs resolve only when exactly one assigned, in-progress, or returned task matches the current actor and stage/project/topic; zero or multiple matches return `409`.
+- Breakdown generation requires `breakdown`; Brief/project/direction creation requires `brief`; character, outline, and Beats generation or manual version creation require their matching nodes. Explicit wrong-node, wrong-project, wrong-topic, unauthorized, and closed tasks remain rejected.
+- Hongguo download, material analysis, and Douyin fallback jobs require `source_package`. They resolve one eligible task when omitted, reject `breakdown` and other nodes, and always persist job creator, workflow-task, project, and task-job linkage.
+- Project creation now requires an approved breakdown plus an unbound active Brief task. Binding the new project updates the whole workflow and bootstraps memberships for the Brief creator and prior workflow reviewers, preserving the normal topic-to-project chain.
+- Selection and planning UI actions resolve/start and send the active task for source download, breakdown generation, project creation, directions, characters, outlines, and Beats.
+
+Fifth-wave RED evidence:
+
+```text
+tests/test_job_permissions.py::test_selection_download_job_records_owner_task_link_and_audit
+  a breakdown task was accepted for source download (200 instead of 409)
+tests/test_creative_phase4.py::test_phase4_generation_api_enqueues_standard_creative_job
+  Brief generation without a human task was accepted (200 instead of 409)
+tests/test_creative_phase4.py::test_phase4_api_creates_multiple_projects_and_lists_them
+  project creation accepted a merely locked, unapproved breakdown
+tests/test_webgui_ui_changes.py::test_workflow_governed_creation_actions_send_active_task_ids
+  source download, breakdown generation, and project creation omitted active task IDs
+```
+
+Fifth-wave GREEN evidence:
+
+```text
+uv run pytest tests/test_creative_phase4.py tests/test_job_permissions.py \
+  tests/test_role_workflow_e2e.py tests/test_project_visibility.py \
+  tests/test_creative_workflow_integration.py tests/test_workflow_bootstrap.py \
+  tests/test_webgui_ui_changes.py tests/test_workflow_tasks.py -q
+139 passed
+
+uv run pytest tests/ -q
+492 passed, 1 failed
+
+uv run pytest -q --ignore=test/test_proxy_ip_pool.py --ignore=test/test_redis_cache.py
+496 passed, 8 skipped, 1 failed
+```
+
+The only failure in both broad runs remains the accepted pre-existing XHS Excel factory mismatch.

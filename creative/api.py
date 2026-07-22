@@ -611,27 +611,46 @@ def build_creative_router(
         *,
         project_id: int | None = None,
         topic_id: int | None = None,
-    ) -> None:
-        if not task_id:
-            return
+    ) -> str:
         if principal is None:
             raise HTTPException(401, "登录已失效，请重新登录")
+        resolved_task_id = task_id
+        if not resolved_task_id:
+            candidates = [
+                task
+                for task in workflow_repository.list_tasks(principal)
+                if task["task_type"] == resource_type
+                and task.get("assignee_user_id") == principal.user_id
+                and task["status"] in {"assigned", "in_progress", "returned"}
+                and (
+                    project_id is None
+                    or str(task.get("project_id") or "") == str(project_id)
+                )
+                and (topic_id is None or task.get("topic_id") == topic_id)
+            ]
+            if len(candidates) != 1:
+                raise HTTPException(
+                    409,
+                    "exactly one active assigned workflow task is required",
+                )
+            resolved_task_id = str(candidates[0]["id"])
         try:
             workflow_adapter.assert_task_for_creation(
-                task_id,
+                resolved_task_id,
                 resource_type,
                 principal,
                 project_id=project_id,
                 topic_id=topic_id,
             )
             if project_id is not None:
-                repository.link_project_workflow_task(project_id, task_id)
+                repository.link_project_workflow_task(project_id, resolved_task_id)
         except KeyError as exc:
             raise HTTPException(404, "workflow task not found") from exc
         except PermissionError as exc:
             raise HTTPException(403, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+        return resolved_task_id
 
     def resolve_task_for_creation(
         task_id: str | None,
@@ -640,29 +659,12 @@ def build_creative_router(
         *,
         project_id: int,
     ) -> str:
-        if task_id:
-            validate_task(
-                task_id, resource_type, principal, project_id=project_id
-            )
-            return task_id
-        candidates = [
-            task
-            for task in workflow_repository.list_tasks(principal)
-            if task["task_type"] == resource_type
-            and str(task.get("project_id") or "") == str(project_id)
-            and task.get("assignee_user_id") == principal.user_id
-            and task["status"] in {"assigned", "in_progress", "returned"}
-        ]
-        if len(candidates) != 1:
-            raise HTTPException(
-                409,
-                "exactly one active assigned workflow task is required",
-            )
-        resolved_id = str(candidates[0]["id"])
-        validate_task(
-            resolved_id, resource_type, principal, project_id=project_id
+        return validate_task(
+            task_id,
+            resource_type,
+            principal,
+            project_id=project_id,
         )
-        return resolved_id
 
     def batch_resource_for(table: str, item_id: int) -> str | None:
         if table not in {"creative_characters", "creative_relationships"}:
@@ -877,7 +879,7 @@ def build_creative_router(
         topic = repository.get_topic(payload.topic_id)
         if not topic:
             raise HTTPException(404, "topic not found")
-        validate_task(
+        workflow_task_id = validate_task(
             payload.workflow_task_id,
             "breakdown",
             principal,
@@ -905,9 +907,7 @@ def build_creative_router(
             *[int(item["episode_number"]) for item in video_assets],
         })
         task = (
-            workflow_repository.get_task(payload.workflow_task_id)
-            if payload.workflow_task_id
-            else None
+            workflow_repository.get_task(workflow_task_id)
         )
         project_id = task.get("project_id") if task else None
         job_payload = {
@@ -923,7 +923,7 @@ def build_creative_router(
                 "runtime_dir": str(Path(runtime_dir).resolve()),
                 "workspace_root": str(workspace_root),
                 "transcript_coverage": coverage,
-                "workflow_task_id": payload.workflow_task_id,
+                "workflow_task_id": workflow_task_id,
                 "created_by_user_id": (
                     principal.user_id if principal is not None else None
                 ),
@@ -934,8 +934,7 @@ def build_creative_router(
             state = job_manager.create_job(job_payload)
         except JobConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
-        if payload.workflow_task_id:
-            workflow_repository.link_task_job(payload.workflow_task_id, state.job_id)
+        workflow_repository.link_task_job(workflow_task_id, state.job_id)
         job = state.to_dict()
         job.update(
             {
@@ -1018,13 +1017,25 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         try:
-            validate_task(
+            workflow_task_id = validate_task(
                 payload.workflow_task_id,
                 "brief",
                 principal,
                 topic_id=payload.topic_id,
             )
-            return repository.create_project(
+            breakdown = repository.get_breakdown(payload.breakdown_id)
+            if breakdown is None or breakdown.get("status") != "approved":
+                raise HTTPException(
+                    409, "project creation requires an approved breakdown"
+                )
+            task = workflow_repository.get_task(workflow_task_id)
+            if task is None:
+                raise HTTPException(404, "workflow task not found")
+            if task.get("project_id") is not None:
+                raise HTTPException(
+                    409, "brief workflow task is already linked to a project"
+                )
+            project = repository.create_project(
                 payload.topic_id,
                 payload.breakdown_id,
                 payload.name,
@@ -1033,9 +1044,15 @@ def build_creative_router(
                 target_platform=payload.target_platform,
                 target_audience=payload.target_audience,
                 episode_duration_seconds=payload.episode_duration_seconds,
-                workflow_task_id=payload.workflow_task_id,
+                workflow_task_id=workflow_task_id,
                 created_by=principal.user_id,
             )
+            workflow_repository.bind_workflow_project(
+                workflow_task_id,
+                str(project["id"]),
+                principal,
+            )
+            return project
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -1099,14 +1116,16 @@ def build_creative_router(
         request: Request,
         principal: Principal | None = Depends(creative_job_principal),
     ):
-        validate_task(payload.workflow_task_id, "brief", principal, project_id=project_id)
+        workflow_task_id = validate_task(
+            payload.workflow_task_id, "brief", principal, project_id=project_id
+        )
         return create_generation_job(
             project_id,
             "blueprints",
             principal,
             request,
             count=payload.count,
-            workflow_task_id=payload.workflow_task_id,
+            workflow_task_id=workflow_task_id,
         )
 
     @router.patch("/blueprints/{blueprint_id}")
@@ -1132,14 +1151,14 @@ def build_creative_router(
     async def create_blueprint_version(
         blueprint_id: int,
         payload: WorkflowLinkRequest | None = None,
-        principal: Principal | None = Depends(optional_principal),
+        principal: Principal = Depends(current_principal),
     ):
         try:
             current = repository.get_blueprint(blueprint_id)
             if not current:
                 raise ValueError("仿制方向不存在")
             workflow_task_id = payload.workflow_task_id if payload else None
-            validate_task(
+            workflow_task_id = validate_task(
                 workflow_task_id,
                 "brief",
                 principal,
@@ -1179,7 +1198,9 @@ def build_creative_router(
         if not project.get("locked_brief_id"):
             raise HTTPException(409, "必须先锁定 Brief")
         workflow_task_id = payload.workflow_task_id if payload else None
-        validate_task(workflow_task_id, "characters", principal, project_id=project_id)
+        workflow_task_id = validate_task(
+            workflow_task_id, "characters", principal, project_id=project_id
+        )
         return create_generation_job(
             project_id,
             "characters",
@@ -1266,7 +1287,9 @@ def build_creative_router(
         if not project.get("character_batch_id"):
             raise HTTPException(409, "必须先锁定人物关系版本")
         workflow_task_id = payload.workflow_task_id if payload else None
-        validate_task(workflow_task_id, "outline", principal, project_id=project_id)
+        workflow_task_id = validate_task(
+            workflow_task_id, "outline", principal, project_id=project_id
+        )
         return create_generation_job(
             project_id,
             "outlines",
@@ -1279,15 +1302,20 @@ def build_creative_router(
     async def create_project_outlines(
         project_id: int,
         payload: OutlineBatchRequest,
-        principal: Principal | None = Depends(optional_principal),
+        principal: Principal = Depends(current_principal),
     ):
         try:
-            validate_task(payload.workflow_task_id, "outline", principal, project_id=project_id)
+            workflow_task_id = validate_task(
+                payload.workflow_task_id,
+                "outline",
+                principal,
+                project_id=project_id,
+            )
             return repository.create_outline_batch(
                 project_id,
                 payload.episodes,
                 payload.series_arc,
-                workflow_task_id=payload.workflow_task_id,
+                workflow_task_id=workflow_task_id,
             )
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -1338,7 +1366,9 @@ def build_creative_router(
         if not 1 <= episode_number <= int(project["target_episode_count"]):
             raise HTTPException(400, "集数超出项目范围")
         workflow_task_id = payload.workflow_task_id if payload else None
-        validate_task(workflow_task_id, "beats", principal, project_id=project_id)
+        workflow_task_id = validate_task(
+            workflow_task_id, "beats", principal, project_id=project_id
+        )
         return create_generation_job(
             project_id,
             "beats",
@@ -1353,15 +1383,20 @@ def build_creative_router(
         project_id: int,
         episode_number: int,
         payload: EpisodeBeatsRequest,
-        principal: Principal | None = Depends(optional_principal),
+        principal: Principal = Depends(current_principal),
     ):
         try:
-            validate_task(payload.workflow_task_id, "beats", principal, project_id=project_id)
+            workflow_task_id = validate_task(
+                payload.workflow_task_id,
+                "beats",
+                principal,
+                project_id=project_id,
+            )
             return repository.create_episode_beats(
                 project_id,
                 episode_number,
                 payload.content,
-                workflow_task_id=payload.workflow_task_id,
+                workflow_task_id=workflow_task_id,
             )
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc

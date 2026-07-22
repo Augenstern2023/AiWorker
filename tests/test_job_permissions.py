@@ -167,6 +167,10 @@ def add_job(
     *,
     created_by_user_id: str | None = None,
     project_id: str | None = None,
+    workflow_task_id: str | None = None,
+    platform: str | None = None,
+    crawler_type: str = "search",
+    action: str | None = None,
     running: bool = False,
 ) -> None:
     extra = {}
@@ -174,8 +178,17 @@ def add_job(
         extra["created_by_user_id"] = created_by_user_id
     if project_id is not None:
         extra["project_id"] = project_id
+    if workflow_task_id is not None:
+        extra["workflow_task_id"] = workflow_task_id
+    if action is not None:
+        extra["action"] = action
     state = JobState(
-        job=CrawlJob(job_id=job_id, platform=job_id, crawler_type="search", extra=extra),
+        job=CrawlJob(
+            job_id=job_id,
+            platform=platform or job_id,
+            crawler_type=crawler_type,
+            extra=extra,
+        ),
         status="running" if running else "succeeded",
     )
     job_environment.manager.jobs[job_id] = state
@@ -229,9 +242,13 @@ def test_job_control_allows_creator_and_project_owner_but_denies_other_users(
         running=True,
     )
     add_job(job_environment, "project-running", project_id="project-1", running=True)
+    add_job(job_environment, "project-terminal", project_id="project-1")
     add_job(job_environment, "legacy-running", running=True)
 
     assert stranger.post("/api/jobs/creator-running/stop").status_code == 403
+    assert owner.post("/api/jobs/project-running/pause").status_code == 403
+    assert owner.post("/api/jobs/project-running/resume").status_code == 403
+    assert owner.post("/api/jobs/project-terminal/retry").status_code == 403
     assert creator.post("/api/jobs/creator-running/stop").status_code == 200
     assert owner.post("/api/jobs/project-running/stop").status_code == 200
     assert creator.post("/api/jobs/legacy-running/stop").status_code == 403
@@ -302,6 +319,80 @@ def test_creator_pause_resume_and_retry_are_audited(job_environment):
         for event in job_environment.audit.query(target_type="job", limit=20)
     }
     assert {"job.pause", "job.resume", "job.stop", "job.retry"} <= actions
+
+
+def test_removed_project_creator_cannot_retry_project_job(job_environment):
+    planner = role_client(job_environment, "creative_planner", "removed-planner")
+    admin = role_client(job_environment, "system_admin", "removed-admin")
+    job_environment.workflow.add_project_member(
+        "project-removed", planner.user_id, "creative_planner", admin.principal
+    )
+    add_job(
+        job_environment,
+        "removed-project-job",
+        created_by_user_id=planner.user_id,
+        project_id="project-removed",
+        platform="creative",
+        crawler_type="phase4_generate",
+        action="blueprints",
+    )
+    job_environment.workflow.add_project_member(
+        "project-removed",
+        planner.user_id,
+        "creative_planner",
+        admin.principal,
+        status="inactive",
+    )
+
+    response = planner.post("/api/jobs/removed-project-job/retry")
+
+    assert response.status_code == 403
+
+
+def test_reassigned_task_creator_cannot_retry_linked_job(job_environment):
+    original = role_client(job_environment, "selection_operator", "task-original")
+    replacement = role_client(
+        job_environment, "selection_operator", "task-replacement"
+    )
+    admin = role_client(job_environment, "system_admin", "task-admin")
+    task = job_environment.workflow.create_task(
+        "workflow-retry-reassignment",
+        "breakdown",
+        "selection_operator",
+        actor=SYSTEM_ACTOR,
+    )
+    job_environment.workflow.claim_task(task["id"], original.principal)
+    job_environment.workflow.reassign_task(
+        task["id"], replacement.user_id, admin.principal
+    )
+    add_job(
+        job_environment,
+        "reassigned-task-job",
+        created_by_user_id=original.user_id,
+        workflow_task_id=task["id"],
+    )
+
+    response = original.post("/api/jobs/reassigned-task-job/retry")
+
+    assert response.status_code == 403
+
+
+def test_latest_stop_of_owned_job_does_not_set_legacy_stop_flag(
+    job_environment, monkeypatch
+):
+    creator = role_client(job_environment, "selection_operator", "normal-stop")
+    add_job(
+        job_environment,
+        "normal-running",
+        created_by_user_id=creator.user_id,
+        running=True,
+    )
+    monkeypatch.setattr(WebGUI.state, "stop_requested", False)
+
+    response = creator.post("/api/stop")
+
+    assert response.status_code == 200
+    assert WebGUI.state.stop_requested is False
 
 
 @pytest.mark.parametrize(

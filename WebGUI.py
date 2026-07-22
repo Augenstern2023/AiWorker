@@ -551,7 +551,42 @@ def _assert_can_read_job(job: dict[str, Any], principal: Principal) -> None:
         raise HTTPException(403, "没有访问此机器任务的权限")
 
 
-def _assert_can_control_job(job: dict[str, Any], principal: Principal) -> None:
+def _assert_creator_has_live_job_scope(
+    job: dict[str, Any], principal: Principal
+) -> None:
+    if job.get("created_by_user_id") != principal.user_id:
+        raise HTTPException(403, "只有机器任务创建人可以执行此操作")
+    required_permission = _job_creation_permission(job)
+    if (
+        "job.cancel.own" not in principal.permissions
+        or required_permission not in principal.permissions
+    ):
+        raise HTTPException(403, "创建人当前不再具有此机器任务的操作权限")
+
+    task_id = job.get("workflow_task_id")
+    project_id = job.get("project_id")
+    if task_id is not None:
+        task = workflow_repository.get_visible_task(str(task_id), principal)
+        if task is None or task.get("assignee_user_id") != principal.user_id:
+            raise HTTPException(403, "关联工作流任务已不再分配给机器任务创建人")
+        task_project_id = task.get("project_id")
+        if (task_project_id is None) != (project_id is None) or (
+            task_project_id is not None
+            and str(task_project_id) != str(project_id)
+        ):
+            raise HTTPException(403, "机器任务的项目范围与工作流任务不一致")
+
+    if project_id is not None:
+        active_member = any(
+            member["user_id"] == principal.user_id
+            and member["status"] == "active"
+            for member in workflow_repository.list_project_members(str(project_id))
+        )
+        if not active_member:
+            raise HTTPException(403, "机器任务创建人已不再是项目成员")
+
+
+def _assert_can_stop_job(job: dict[str, Any], principal: Principal) -> None:
     if principal.is_system_admin:
         return
     creator_id = job.get("created_by_user_id")
@@ -559,12 +594,8 @@ def _assert_can_control_job(job: dict[str, Any], principal: Principal) -> None:
     if creator_id is None and project_id is None:
         raise HTTPException(403, "历史机器任务只能由系统管理员控制")
     if creator_id == principal.user_id:
-        required = _job_creation_permission(job)
-        if (
-            "job.cancel.own" in principal.permissions
-            and required in principal.permissions
-        ):
-            return
+        _assert_creator_has_live_job_scope(job, principal)
+        return
     if project_id is not None:
         try:
             workflow_repository.assert_can_manage_project(str(project_id), principal)
@@ -572,6 +603,16 @@ def _assert_can_control_job(job: dict[str, Any], principal: Principal) -> None:
         except PermissionError:
             pass
     raise HTTPException(403, "没有控制此机器任务的权限")
+
+
+def _assert_can_mutate_owned_job(
+    job: dict[str, Any], principal: Principal
+) -> None:
+    if principal.is_system_admin:
+        return
+    if job.get("created_by_user_id") is None:
+        raise HTTPException(403, "历史机器任务只能由系统管理员控制")
+    _assert_creator_has_live_job_scope(job, principal)
 
 DATA_ROOT = (WORKSPACE_ROOT / "data").resolve()
 CONFIG_ITEM_FIELDS = [
@@ -2109,7 +2150,7 @@ async def stop_job(
 ):
     try:
         before = job_manager.get_job(job_id)
-        _assert_can_control_job(before, principal)
+        _assert_can_stop_job(before, principal)
         stopped = job_manager.stop(job_id)
         if stopped:
             _record_job_audit(
@@ -2135,7 +2176,7 @@ async def pause_job(
 ):
     try:
         before = job_manager.get_job(job_id)
-        _assert_can_control_job(before, principal)
+        _assert_can_mutate_owned_job(before, principal)
         paused = job_manager.pause(job_id)
         if paused:
             _record_job_audit(
@@ -2158,7 +2199,7 @@ async def resume_job(
 ):
     try:
         before = job_manager.get_job(job_id)
-        _assert_can_control_job(before, principal)
+        _assert_can_mutate_owned_job(before, principal)
         resumed = job_manager.resume(job_id)
         if resumed:
             _record_job_audit(
@@ -2181,11 +2222,11 @@ async def retry_job(
 ):
     try:
         before = job_manager.get_job(job_id)
-        _assert_can_control_job(before, principal)
+        _assert_can_mutate_owned_job(before, principal)
         retried = job_manager.retry(job_id)
         retried_job = job_manager.get_job(retried.job_id)
         task_id = retried_job.get("workflow_task_id")
-        if task_id:
+        if task_id and workflow_repository.get_task(str(task_id)) is not None:
             workflow_repository.link_task_job(str(task_id), retried.job_id)
         _record_job_audit(
             request, principal, "job.retry", retried_job, before=before
@@ -2249,11 +2290,10 @@ async def stop_crawler(
         if job["status"] not in {"pending", "running", "stopping"}:
             continue
         try:
-            _assert_can_control_job(job, principal)
+            _assert_can_stop_job(job, principal)
         except HTTPException:
             continue
         if job_manager.stop(job["job_id"]):
-            state.stop_requested = True
             _record_job_audit(
                 request,
                 principal,

@@ -77,3 +77,25 @@ uv run pytest tests/ -q --deselect tests/test_store_factory.py::TestXhsStoreFact
 uv run pre-commit run
 PASS for all staged review-fix files
 ```
+
+## Control Authorization Follow-up
+
+- Split stop authorization from pause/resume/retry authorization. Managed
+  project ownership grants stop/cancel only; other controls require the
+  original creator or a system administrator.
+- Creator controls now revalidate the current job creation/cancel permissions,
+  live workflow assignment, workflow/project consistency, and active project
+  membership before mutating a job.
+- Retry reuses the same live scope checks and only relinks workflow tasks that
+  still exist; the administrator override remains available for recovery.
+- Normal JobManager stops through `/api/stop` no longer mutate the legacy
+  `state.stop_requested` flag. That flag is reserved for the authorized legacy
+  process/batch stop path.
+
+```text
+uv run pytest tests/test_job_manager.py tests/test_job_permissions.py tests/test_webgui_ui_changes.py tests/test_creative_phase4.py tests/test_creative_lifecycle.py tests/test_creative_workflow_integration.py tests/test_hongguo_drama.py -q
+160 passed, 1 warning in 14.81s
+
+uv run pytest tests/ -q --deselect tests/test_store_factory.py::TestXhsStoreFactory::test_create_excel_store
+459 passed, 1 deselected, 1 warning in 39.42s
+```

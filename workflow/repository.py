@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -160,11 +161,19 @@ class WorkflowRepository:
         role_code: str,
         *,
         actor: Principal | dict[str, Any],
+        connection: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
         actor_id = self._actor_id(actor)
-        with self.identity_repository.transaction() as connection:
-            predecessor = self._require_task(connection, predecessor_task_id)
-            existing = connection.execute(
+        transaction = (
+            nullcontext(connection)
+            if connection is not None
+            else self.identity_repository.transaction()
+        )
+        with transaction as active_connection:
+            predecessor = self._require_task(
+                active_connection, predecessor_task_id
+            )
+            existing = active_connection.execute(
                 """
                 SELECT * FROM workflow_tasks
                 WHERE workflow_id = ? AND task_type = ?
@@ -178,15 +187,15 @@ class WorkflowRepository:
             ).fetchone()
             if existing is not None:
                 return self._task_dict(existing)
-            self._ensure_system_actor(connection, actor_id)
-            role = connection.execute(
+            self._ensure_system_actor(active_connection, actor_id)
+            role = active_connection.execute(
                 "SELECT 1 FROM roles WHERE code = ? COLLATE NOCASE AND is_enabled = 1",
                 (role_code,),
             ).fetchone()
             if role is None:
                 raise ValueError(f"unknown or disabled role: {role_code}")
             task_id = str(uuid.uuid4())
-            connection.execute(
+            active_connection.execute(
                 """
                 INSERT INTO workflow_tasks
                     (id, workflow_id, task_type, role_code, topic_id, project_id,
@@ -204,7 +213,7 @@ class WorkflowRepository:
                 ),
             )
             self._record_event(
-                connection,
+                active_connection,
                 task_id,
                 "create",
                 actor_id,
@@ -215,7 +224,7 @@ class WorkflowRepository:
                     "predecessor_task_id": predecessor_task_id,
                 },
             )
-            task = self._require_task(connection, task_id)
+            task = self._require_task(active_connection, task_id)
         return task
 
     def transition_task_in_transaction(
@@ -617,55 +626,56 @@ class WorkflowRepository:
         with self.identity_repository.transaction() as connection:
             live_actor = self._live_actor(connection, actor_id)
             self._assert_project_manager(connection, project_id, live_actor)
-            member = connection.execute(
+            members = connection.execute(
                 """
-                SELECT * FROM project_members WHERE project_id = ? AND id = ?
+                SELECT * FROM project_members
+                WHERE project_id = ? AND user_id = ? ORDER BY rowid
                 """,
                 (project_id, membership_id),
-            ).fetchone()
-            if member is None:
-                matches = connection.execute(
+            ).fetchall()
+            if not members:
+                member = connection.execute(
                     """
-                    SELECT * FROM project_members
-                    WHERE project_id = ? AND user_id = ? ORDER BY rowid
+                    SELECT * FROM project_members WHERE project_id = ? AND id = ?
                     """,
                     (project_id, membership_id),
-                ).fetchall()
-                if len(matches) == 1:
-                    member = matches[0]
-                elif len(matches) > 1:
-                    raise ValueError("user has multiple project roles; remove by membership id")
-            if member is None:
+                ).fetchone()
+                members = [member] if member is not None else []
+            if not members:
                 raise KeyError(membership_id)
-            if (
+            removed_user_id = members[0]["user_id"]
+            removes_active_owner = any(
                 member["status"] == "active"
                 and member["project_role"] == "project_owner"
-            ):
+                for member in members
+            )
+            if removes_active_owner:
                 other_owner = connection.execute(
                     """
                     SELECT 1 FROM project_members
-                    WHERE project_id = ? AND id <> ? AND status = 'active'
+                    WHERE project_id = ? AND user_id <> ? AND status = 'active'
                       AND project_role = 'project_owner'
                     LIMIT 1
                     """,
-                    (project_id, member["id"]),
+                    (project_id, removed_user_id),
                 ).fetchone()
                 if other_owner is None:
                     raise ValueError(
                         "current project owner cannot be removed until another owner is assigned"
                     )
-            connection.execute(
-                "DELETE FROM project_members WHERE id = ?", (member["id"],)
-            )
-            self._record_project_member_event(
-                connection,
-                project_id,
-                member["id"],
-                "project_member.remove",
-                actor_id,
-                dict(member),
-                None,
-            )
+            for member in members:
+                connection.execute(
+                    "DELETE FROM project_members WHERE id = ?", (member["id"],)
+                )
+                self._record_project_member_event(
+                    connection,
+                    project_id,
+                    member["id"],
+                    "project_member.remove",
+                    actor_id,
+                    dict(member),
+                    None,
+                )
 
     def _assign(
         self,

@@ -206,9 +206,17 @@ def test_project_member_api_adds_lists_and_protects_last_owner(
             "status": "active",
         },
     )
+    additional_role = client.post(
+        "/api/workflow/projects/project-1/members",
+        json={
+            "user_id": owner.user_id,
+            "project_role": "manager",
+            "status": "active",
+        },
+    )
     listed = client.get("/api/workflow/projects/project-1/members")
     removed = client.delete(
-        f"/api/workflow/projects/project-1/members/{created.json()['id']}"
+        f"/api/workflow/projects/project-1/members/{owner.user_id}"
     )
     replacement = client.post(
         "/api/workflow/projects/project-1/members",
@@ -219,23 +227,40 @@ def test_project_member_api_adds_lists_and_protects_last_owner(
         },
     )
     removed_with_replacement = client.delete(
-        f"/api/workflow/projects/project-1/members/{created.json()['id']}"
+        f"/api/workflow/projects/project-1/members/{owner.user_id}"
     )
 
     assert created.status_code == 201
     assert updated.status_code == 201
+    assert additional_role.status_code == 201
     assert listed.status_code == 200
     assert listed.json()[0]["user_id"] == owner.user_id
     assert removed.status_code == 409
     assert replacement.status_code == 201
     assert removed_with_replacement.status_code == 204
+    assert {
+        (member["user_id"], member["project_role"])
+        for member in client.get(
+            "/api/workflow/projects/project-1/members"
+        ).json()
+    } == {(admin.user_id, "project_owner")}
     events = repository.list_project_member_events("project-1")
     assert [event["event_type"] for event in events] == [
         "project_member.add",
         "project_member.update",
         "project_member.add",
+        "project_member.add",
+        "project_member.remove",
         "project_member.remove",
     ]
+    removed_events = [
+        event for event in events if event["event_type"] == "project_member.remove"
+    ]
+    assert {event["before"]["project_role"] for event in removed_events} == {
+        "project_owner",
+        "manager",
+    }
+    assert all(event["after"] is None for event in removed_events)
     assert all(event["actor_user_id"] == admin.user_id for event in events)
 
 

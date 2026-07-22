@@ -14,6 +14,7 @@ import json
 import sqlite3
 import time
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -34,8 +35,13 @@ class ApprovalService:
             else WorkflowRepository(repository)
         )
 
-    def get_submission(self, submission_id: str) -> dict[str, Any] | None:
-        return self.repository.get_submission(submission_id)
+    def get_submission(
+        self,
+        submission_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        return self.repository.get_submission(submission_id, connection=connection)
 
     def create_draft(
         self,
@@ -134,18 +140,31 @@ class ApprovalService:
             )
         return after
 
-    def approve(self, submission_id: str, actor: Principal) -> dict[str, Any]:
+    def approve(
+        self,
+        submission_id: str,
+        actor: Principal,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
         actor_id = self.repository._actor_id(actor)
-        with self.repository.identity_repository.transaction() as connection:
-            before = self._require_submission(connection, submission_id)
+        transaction = (
+            nullcontext(connection)
+            if connection is not None
+            else self.repository.identity_repository.transaction()
+        )
+        with transaction as active_connection:
+            before = self._require_submission(active_connection, submission_id)
             if before["status"] != "submitted":
                 raise ValueError("only a submitted submission can be approved")
-            live_actor = self.repository._live_actor(connection, actor_id)
+            live_actor = self.repository._live_actor(active_connection, actor_id)
             if before["submitted_by"] == actor_id and not live_actor["is_system_admin"]:
                 raise PermissionError("a submitter cannot approve their own submission")
-            task = self.repository._require_task(connection, before["task_id"])
-            self._assert_reviewer(connection, task, live_actor, "version.approve")
-            newer_approved = connection.execute(
+            task = self.repository._require_task(active_connection, before["task_id"])
+            self._assert_reviewer(
+                active_connection, task, live_actor, "version.approve"
+            )
+            newer_approved = active_connection.execute(
                 """
                 SELECT 1 FROM workflow_submissions
                 WHERE resource_type = ? AND resource_id = ?
@@ -161,7 +180,7 @@ class ApprovalService:
             if newer_approved is not None:
                 raise ValueError("a newer approved submission already exists")
             now = time.time()
-            cursor = connection.execute(
+            cursor = active_connection.execute(
                 """
                 UPDATE workflow_submissions
                 SET status = 'approved', reviewed_by = ?, reviewed_at = ?,
@@ -171,8 +190,8 @@ class ApprovalService:
                 (actor_id, now, now, submission_id),
             )
             self._assert_updated(cursor)
-            after = self._require_submission(connection, submission_id)
-            previous_rows = connection.execute(
+            after = self._require_submission(active_connection, submission_id)
+            previous_rows = active_connection.execute(
                 """
                 SELECT * FROM workflow_submissions
                 WHERE resource_type = ? AND resource_id = ? AND status = 'approved'
@@ -187,7 +206,7 @@ class ApprovalService:
             ).fetchall()
             for row in previous_rows:
                 previous = self.repository._submission_dict(row)
-                connection.execute(
+                active_connection.execute(
                     """
                     UPDATE workflow_submissions
                     SET status = 'superseded', updated_at = ?
@@ -195,19 +214,21 @@ class ApprovalService:
                     """,
                     (now, previous["id"]),
                 )
-                superseded = self._require_submission(connection, previous["id"])
+                superseded = self._require_submission(
+                    active_connection, previous["id"]
+                )
                 self.repository.record_task_event_in_transaction(
                     previous["task_id"],
                     "submission.supersede",
                     actor,
-                    connection=connection,
+                    connection=active_connection,
                     details={"before": previous, "after": superseded},
                 )
             self.repository.transition_task_in_transaction(
                 before["task_id"],
                 "complete",
                 actor,
-                connection=connection,
+                connection=active_connection,
                 details={"before": before, "after": after},
                 event_type="approve",
                 authorization_context={"can_manage_task": True},

@@ -194,6 +194,50 @@ def test_repeated_approval_returns_same_next_task_without_duplicate(
     assert [item["task_type"] for item in workflow_tasks].count("brief") == 1
 
 
+def test_successor_failure_rolls_back_approval_and_task_completion(
+    identity_repository: IdentityRepository,
+    admin: Principal,
+    reviewer: Principal,
+) -> None:
+    class RejectSuccessorRepository(WorkflowRepository):
+        def create_next_task(
+            self,
+            predecessor_task_id: str,
+            task_type: str,
+            role_code: str,
+            *,
+            actor: Principal | dict,
+            connection=None,
+        ) -> dict:
+            if connection is None:
+                raise AssertionError("successor must use the approval transaction")
+            raise RuntimeError("injected successor failure")
+
+    repository = RejectSuccessorRepository(identity_repository)
+    service = TransitionService(repository)
+    task, submitted, _ = _submitted_node(
+        service,
+        repository,
+        identity_repository,
+        admin,
+        reviewer,
+        "breakdown",
+        suffix="successor-rollback",
+    )
+
+    with pytest.raises(RuntimeError, match="injected successor failure"):
+        service.approve(submitted["id"], reviewer)
+
+    assert service.approval_service.get_submission(submitted["id"])["status"] == (
+        "submitted"
+    )
+    assert repository.get_task(task["id"])["status"] == "waiting_review"
+    assert all(
+        item["predecessor_task_id"] != task["id"]
+        for item in repository.list_tasks(admin)
+    )
+
+
 def test_return_reopens_task_without_creating_next_task(
     service: TransitionService,
     repository: WorkflowRepository,

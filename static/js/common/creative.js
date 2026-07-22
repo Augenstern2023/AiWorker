@@ -83,7 +83,7 @@ window.aiworkerModules.push(() => ({
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.detail || '创建项目失败');
                         this.creativeWorkspace.create = {topic_id: '', breakdown_id: '', name: '', target_platform: '', target_episode_count: 20};
-                        await this.fetchCreativeProjects(data.id);
+                        window.location.assign(`/planning/projects/${data.id}/directions`);
                     } catch (e) {
                         this.creativeWorkspace.error = e.message || '创建项目失败';
                     }
@@ -523,7 +523,7 @@ window.aiworkerModules.push(() => ({
                     const data = await res.json();
                     if (!res.ok) { this.creativeWorkspace.error = data.detail || '锁定分集大纲失败'; return; }
                     await this.selectCreativeProject(projectId);
-                    this.creativeWorkspace.step = 'beats';
+                    this.showCreativeNotice('分集大纲已锁定，可从每集操作进入单集节拍表');
                 },
 
                 async lockProjectBeats() {

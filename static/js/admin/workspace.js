@@ -652,4 +652,63 @@ window.aiworkerModules.push(() => ({
                     await this.fetchQrcodeStatus();
                 },
 
+                async fetchDramaSettings() {
+                    try {
+                        const response = await aiworkerApi.request('/api/hongguo/drama/settings');
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.message || '读取设置失败');
+                        this.dramaAnalysis.settings = data;
+                        this.dramaAnalysis.activationCode = '';
+                    } catch (error) {
+                        this.dramaAnalysis.error = error.message || '读取剧目检索设置失败';
+                    }
+                },
+
+                async saveDramaSettings() {
+                    this.dramaAnalysis.loading = true;
+                    this.dramaAnalysis.error = '';
+                    try {
+                        const payload = {config_url: this.dramaAnalysis.settings.config_url};
+                        if (this.dramaAnalysis.activationCode) payload.activation_code = this.dramaAnalysis.activationCode;
+                        const response = await aiworkerApi.request('/api/hongguo/drama/settings', {
+                            method: 'PUT',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify(payload),
+                        });
+                        const data = await response.json();
+                        if (!response.ok || data.status === 'error') throw new Error(data.message || '保存设置失败');
+                        this.dramaAnalysis.settings = data;
+                        this.dramaAnalysis.activationCode = '';
+                        alert('设置已保存');
+                    } catch (error) {
+                        this.dramaAnalysis.error = error.message || '保存设置失败';
+                    } finally {
+                        this.dramaAnalysis.loading = false;
+                    }
+                },
+
+                async testDramaInterface() {
+                    this.dramaAnalysis.loading = true;
+                    this.dramaAnalysis.error = '';
+                    this.dramaAnalysis.interfaceTest = null;
+                    try {
+                        const payload = {config_url: this.dramaAnalysis.settings.config_url};
+                        if (this.dramaAnalysis.activationCode) payload.activation_code = this.dramaAnalysis.activationCode;
+                        const response = await aiworkerApi.request('/api/hongguo/drama/test', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify(payload),
+                        });
+                        const data = await response.json();
+                        this.dramaAnalysis.interfaceTest = {
+                            status: data.status || (response.ok ? 'success' : 'error'),
+                            message: data.message || (response.ok ? '接口可用' : '接口不可用'),
+                        };
+                    } catch (error) {
+                        this.dramaAnalysis.interfaceTest = {status: 'error', message: error.message || '接口测试失败'};
+                    } finally {
+                        this.dramaAnalysis.loading = false;
+                    }
+                },
+
 }));

@@ -138,6 +138,8 @@
             font: inherit;
             font-weight: 700;
             text-align: left;
+            text-decoration: none;
+            display: inline-block;
         }
         .project-name-button:hover,
         .creative-project-row.table-active .project-name-button {

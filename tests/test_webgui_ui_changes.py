@@ -108,7 +108,7 @@ def test_webgui_registers_phase4_routes_and_flat_project_workspace():
     assert "creative-workspace-scroll" not in html
     assert 'class="table table-sm table-hover align-middle mb-4"' not in html
     assert "creativeWorkspace.projects[0]?.id" in html
-    assert '@click="selectCreativeProject(project.id)"' in html
+    assert ':href="`/planning/projects/${project.id}/directions`"' in html
     assert "--bs-table-active-color: var(--text);" in html
 
 
@@ -121,8 +121,9 @@ def test_project_table_uses_name_navigation_without_redundant_action_column():
     assert 'title="打开项目"' not in project_table
     assert "bi-arrow-right" not in project_table
     assert 'class="project-name-button"' in project_table
-    assert '@click.stop="selectCreativeProject(project.id)"' in project_table
-    assert ':aria-current="creativeWorkspace.project?.id === project.id ? \'page\' : null"' in project_table
+    assert ':href="`/planning/projects/${project.id}/directions`"' in project_table
+    assert '@click.stop="selectCreativeProject(project.id)"' not in project_table
+    assert ':aria-current="creativeWorkspace.project?.id === project.id ? \'page\' : null"' not in project_table
     assert ".creative-project-row.table-active" in html
     assert ".project-name-button:focus-visible" in html
     assert 'colspan="5"' in project_table

@@ -114,3 +114,79 @@ def test_legacy_index_is_only_a_compatibility_redirect():
     assert "currentTab ===" not in html
     assert "创作项目" not in html
     assert "window.location.replace('/')" in html
+
+
+def test_selection_dashboard_loads_every_module_used_by_its_initializer():
+    dashboard = _read("templates/selection/dashboard.html")
+    common = _read("static/js/common/tasks.js")
+
+    assert "/static/js/selection/topics.js" in dashboard
+    assert "/static/js/selection/ranks.js" not in dashboard
+    assert "if (this.page === 'selection-ranks')" in common
+    assert "this.page === 'selection-ranks' || this.page === 'selection-dashboard'" not in common
+
+
+def test_planning_projects_use_real_stage_routes():
+    project_list = _read("templates/common/workspace/project_list.html")
+    creative = _read("static/js/common/creative.js")
+    directions = _read("templates/planning/directions.html")
+    brief = _read("templates/planning/brief.html")
+
+    assert "`/planning/projects/${project.id}/directions`" in project_list
+    assert "`/planning/projects/${data.id}/directions`" in creative
+    assert 'href="/planning/projects/{{ project_id }}/brief"' in directions
+    assert 'href="/planning/projects/{{ project_id }}/characters"' in brief
+
+
+def test_writing_outlines_link_each_episode_to_beats_route():
+    outlines = _read("templates/common/workspace/project_outlines.html")
+    creative = _read("static/js/common/creative.js")
+
+    assert (
+        "`/writing/projects/${creativeWorkspace.project.id}/episodes/"
+        "${item.episode_number}/beats`"
+    ) in outlines
+    assert "creativeWorkspace.step = 'beats'" not in creative
+
+
+def test_selection_drama_page_cannot_edit_admin_credentials():
+    selection = _read("templates/common/workspace/selection_dramas.html")
+    selection_script = _read("static/js/selection/dramas.js")
+    admin = _read("templates/admin/config.html")
+    admin_script = _read("static/js/admin/workspace.js")
+
+    for forbidden in (
+        "配置中心地址",
+        "激活码",
+        "config_url",
+        "activationCode",
+        "saveDramaSettings",
+        "testDramaInterface",
+    ):
+        assert forbidden not in selection
+        assert forbidden not in selection_script
+    assert "配置中心地址" in admin
+    assert "activationCode" in admin
+    assert "saveDramaSettings" in admin_script
+    assert "testDramaInterface" in admin_script
+
+
+def test_admin_identity_pages_expose_complete_management_flows():
+    users_html = _read("templates/admin/users.html")
+    users_js = _read("static/js/admin/users.js")
+    roles_html = _read("templates/admin/roles.html")
+    roles_js = _read("static/js/admin/roles.js")
+
+    assert 'id="user-editor-modal"' in users_html
+    assert 'id="user-role-select"' in users_html
+    assert "/api/admin/users/${user.id}/reset-password" in users_js
+    assert "method: 'PATCH'" in users_js
+    assert "role_ids" in users_js
+    assert "toggleUserStatus" in users_js
+
+    assert 'id="role-editor-modal"' in roles_html
+    assert 'id="permission-editor"' in roles_html
+    assert "/api/admin/permissions" in roles_js
+    assert "/api/admin/roles/${role.id}/clone" in roles_js
+    assert "permissions" in roles_js
+    assert "toggleRoleStatus" in roles_js

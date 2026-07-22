@@ -2,6 +2,16 @@
 
 {% block content %}
 <div class="d-flex align-items-center justify-content-between mb-3"><div><h3 class="mb-1">用户管理</h3><div class="small text-muted">管理本地账号、状态与角色分配</div></div><button class="btn btn-primary btn-sm" id="create-user"><i class="bi bi-person-plus me-1"></i>新建用户</button></div>
+<div class="alert alert-danger d-none" id="user-error" role="alert"></div>
 <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>用户名</th><th>显示名称</th><th>角色</th><th>状态</th><th>最近登录</th><th>操作</th></tr></thead><tbody id="user-list"><tr><td colspan="6" class="text-center text-muted py-4">正在加载用户...</td></tr></tbody></table></div>
+
+<div class="modal fade" id="user-editor-modal" tabindex="-1" aria-labelledby="user-editor-title" aria-hidden="true"><div class="modal-dialog modal-dialog-centered"><form class="modal-content" id="user-editor-form"><div class="modal-header"><h5 class="modal-title" id="user-editor-title">新建用户</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button></div><div class="modal-body">
+    <input type="hidden" id="user-id">
+    <div class="mb-3"><label class="form-label" for="user-username">用户名</label><input class="form-control" id="user-username" autocomplete="off" required></div>
+    <div class="mb-3"><label class="form-label" for="user-display-name">显示名称</label><input class="form-control" id="user-display-name" required></div>
+    <div class="mb-3" id="user-password-field"><label class="form-label" for="user-password">初始密码</label><input class="form-control" id="user-password" type="password" autocomplete="new-password" minlength="1"></div>
+    <div><label class="form-label" for="user-role-select">角色，可多选</label><select class="form-select" id="user-role-select" multiple size="6"></select></div>
+    <div class="alert alert-danger d-none mt-3 mb-0" id="user-form-error" role="alert"></div>
+</div><div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" id="save-user" type="submit"><i class="bi bi-save me-1"></i>保存</button></div></form></div></div>
 {% endblock %}
 {% block scripts %}<script src="/static/js/admin/users.js"></script>{% endblock %}

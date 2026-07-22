@@ -145,7 +145,7 @@ function localDateString(date = new Date()) {
                     this.creativeGenerationProgressModal = this.modal('creativeGenerationProgressModal');
 
                     await this.fetchJobs();
-                    if (this.page === 'selection-ranks' || this.page === 'selection-dashboard') {
+                    if (this.page === 'selection-ranks') {
                         this.parseTodayRankHash(false);
                         window.addEventListener('hashchange', () => this.parseTodayRankHash(true));
                         await this.fetchTodayRank();
@@ -155,7 +155,6 @@ function localDateString(date = new Date()) {
                         await this.fetchTopicLibrary();
                         this.restoreLatestActiveDramaDownload?.();
                     }
-                    if (this.page === 'selection-dramas') await this.fetchDramaSettings();
                     if (this.page.startsWith('planning-') || this.page.startsWith('writing-') || this.page === 'admin-deliveries') {
                         const queryProjectId = new URLSearchParams(window.location.search).get('project_id');
                         const pathProjectId = window.location.pathname.match(/\/projects\/([^/]+)/)?.[1];
@@ -172,6 +171,7 @@ function localDateString(date = new Date()) {
                         await this.loadConfig();
                         await this.fetchConfigForm();
                         await this.fetchBackups();
+                        await this.fetchDramaSettings();
                     }
                     if (this.page === 'admin-data') await this.fetchFiles();
                     if (this.page === 'admin-analytics') await this.refreshAnalyticsDashboard(false);

@@ -1,33 +1,9 @@
 <section>
             <div class="d-flex align-items-center justify-content-between mb-3">
                 <h3 class="mb-0">剧目检索下载</h3>
-                <button class="btn btn-outline-secondary btn-sm" @click="fetchDramaSettings">
-                    <i class="bi bi-arrow-clockwise me-1"></i>刷新设置
-                </button>
             </div>
             <div class="row g-3">
-                <div class="col-xl-4">
-                    <div class="card">
-                        <div class="card-header">接口设置</div>
-                        <div class="card-body">
-                            <label class="form-label">配置中心地址</label>
-                            <input class="form-control mb-3" x-model="dramaAnalysis.settings.config_url">
-                            <label class="form-label">激活码</label>
-                            <input class="form-control mb-2" type="password" x-model="dramaAnalysis.activationCode" placeholder="留空则保留已保存的激活码">
-                            <div class="small text-muted mb-3" x-text="dramaAnalysis.settings.has_activation_code ? '已保存激活码' : '未保存激活码'"></div>
-                            <div class="d-flex gap-2">
-                                <button class="btn btn-outline-info flex-fill" @click="testDramaInterface" :disabled="dramaAnalysis.loading">
-                                    <i class="bi bi-plug me-1"></i>测试接口
-                                </button>
-                                <button class="btn btn-outline-light flex-fill" @click="saveDramaSettings" :disabled="dramaAnalysis.loading">
-                                    <i class="bi bi-save me-1"></i>保存设置
-                                </button>
-                            </div>
-                            <div class="alert mt-3 mb-0 py-2" x-show="dramaAnalysis.interfaceTest" :class="dramaAnalysis.interfaceTest?.status === 'success' ? 'alert-success' : 'alert-danger'" x-text="dramaAnalysis.interfaceTest?.message"></div>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-xl-8">
+                <div class="col-12">
                     <div class="card mb-3">
                         <div class="card-header">检索并选择剧集</div>
                         <div class="card-body">

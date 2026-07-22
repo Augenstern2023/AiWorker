@@ -1,4 +1,14 @@
 {% extends "layouts/base.html" %}
 
-{% block content %}{% include "common/workspace/admin_config.html" %}{% endblock %}
+{% block content %}
+<section class="mb-4">
+    <div class="d-flex align-items-center justify-content-between mb-3"><div><h3 class="mb-1">剧目接口设置</h3><div class="small text-muted">仅系统管理员可修改红果配置中心与激活凭据</div></div><button class="btn btn-outline-secondary btn-sm" @click="fetchDramaSettings" title="刷新"><i class="bi bi-arrow-clockwise"></i></button></div>
+    <div class="card"><div class="card-body"><div class="row g-3 align-items-end">
+        <div class="col-lg-6"><label class="form-label">配置中心地址</label><input class="form-control" x-model="dramaAnalysis.settings.config_url"></div>
+        <div class="col-lg-4"><label class="form-label">激活码</label><input class="form-control" type="password" x-model="dramaAnalysis.activationCode" placeholder="留空则保留已保存的激活码"><div class="small text-muted mt-1" x-text="dramaAnalysis.settings.has_activation_code ? '已保存激活码' : '未保存激活码'"></div></div>
+        <div class="col-lg-2"><div class="d-grid gap-2"><button class="btn btn-outline-info" @click="testDramaInterface" :disabled="dramaAnalysis.loading"><i class="bi bi-plug me-1"></i>测试接口</button><button class="btn btn-primary" @click="saveDramaSettings" :disabled="dramaAnalysis.loading"><i class="bi bi-save me-1"></i>保存设置</button></div></div>
+    </div><div class="alert mt-3 mb-0 py-2" x-show="dramaAnalysis.interfaceTest" :class="dramaAnalysis.interfaceTest?.status === 'success' ? 'alert-success' : 'alert-danger'" x-text="dramaAnalysis.interfaceTest?.message"></div></div></div>
+</section>
+{% include "common/workspace/admin_config.html" %}
+{% endblock %}
 {% block scripts %}<script src="/static/js/admin/workspace.js"></script>{% endblock %}

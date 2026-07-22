@@ -430,39 +430,11 @@ class IdentityRepository:
         *,
         display_name: str | None = None,
         status: str | None = None,
+        role_ids: list[str] | None = None,
     ) -> dict[str, Any]:
-        if status == "disabled":
-            self.disable_user(user_id)
-        else:
-            with self.connect() as connection:
-                if connection.execute(
-                    "SELECT 1 FROM users WHERE id = ? AND is_deleted = 0", (user_id,)
-                ).fetchone() is None:
-                    raise KeyError(user_id)
-                connection.execute(
-                    """
-                    UPDATE users
-                    SET display_name = COALESCE(?, display_name),
-                        status = COALESCE(?, status),
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                    """,
-                    (display_name, status, user_id),
-                )
-        if display_name is not None and status == "disabled":
-            with self.connect() as connection:
-                connection.execute(
-                    "UPDATE users SET display_name = ? WHERE id = ?",
-                    (display_name, user_id),
-                )
-        user = self.get_user(user_id)
-        assert user is not None
-        return user
-
-    def replace_user_roles(
-        self, user_id: str, role_ids: list[str]
-    ) -> list[str]:
-        unique_role_ids = list(dict.fromkeys(role_ids))
+        unique_role_ids = (
+            list(dict.fromkeys(role_ids)) if role_ids is not None else None
+        )
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             user = connection.execute(
@@ -470,16 +442,20 @@ class IdentityRepository:
             ).fetchone()
             if user is None or user["is_deleted"]:
                 raise KeyError(user_id)
-            role_placeholders = ",".join("?" for _ in unique_role_ids)
-            roles = connection.execute(
-                f"SELECT id, code, is_enabled FROM roles "
-                f"WHERE id IN ({role_placeholders})"
-                if unique_role_ids
-                else "SELECT id, code, is_enabled FROM roles WHERE 0",
-                unique_role_ids,
-            ).fetchall()
-            if len(roles) != len(unique_role_ids):
-                raise ValueError("角色不存在")
+
+            roles: list[sqlite3.Row] | None = None
+            if unique_role_ids is not None:
+                role_placeholders = ",".join("?" for _ in unique_role_ids)
+                roles = connection.execute(
+                    f"SELECT id, code, is_enabled FROM roles "
+                    f"WHERE id IN ({role_placeholders})"
+                    if unique_role_ids
+                    else "SELECT id, code, is_enabled FROM roles WHERE 0",
+                    unique_role_ids,
+                ).fetchall()
+                if len(roles) != len(unique_role_ids):
+                    raise ValueError("角色不存在")
+
             currently_admin = connection.execute(
                 """
                 SELECT 1 FROM user_roles AS ur
@@ -488,14 +464,18 @@ class IdentityRepository:
                 """,
                 (user_id,),
             ).fetchone() is not None
-            remains_admin = any(
-                role["code"].casefold() == "system_admin" and role["is_enabled"]
-                for role in roles
-            )
+            remains_admin = currently_admin
+            if roles is not None:
+                remains_admin = any(
+                    role["code"].casefold() == "system_admin"
+                    and role["is_enabled"]
+                    for role in roles
+                )
+            resulting_status = status or user["status"]
             if (
                 currently_admin
                 and user["status"] == "active"
-                and not remains_admin
+                and (resulting_status != "active" or not remains_admin)
             ):
                 other_admins = connection.execute(
                     """
@@ -511,12 +491,40 @@ class IdentityRepository:
                 ).fetchone()[0]
                 if other_admins < 1:
                     raise ValueError("系统必须至少保留一个启用的系统管理员")
-            connection.execute("DELETE FROM user_roles WHERE user_id = ?", (user_id,))
-            connection.executemany(
-                "INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)",
-                [(user_id, role_id) for role_id in unique_role_ids],
+
+            connection.execute(
+                """
+                UPDATE users
+                SET display_name = COALESCE(?, display_name),
+                    status = COALESCE(?, status),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (display_name, status, user_id),
             )
-        return sorted(role["code"] for role in roles)
+            if unique_role_ids is not None:
+                connection.execute(
+                    "DELETE FROM user_roles WHERE user_id = ?", (user_id,)
+                )
+                connection.executemany(
+                    "INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)",
+                    [(user_id, role_id) for role_id in unique_role_ids],
+                )
+            if resulting_status == "disabled":
+                connection.execute(
+                    "UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP "
+                    "WHERE user_id = ? AND revoked_at IS NULL",
+                    (user_id,),
+                )
+        user = self.get_user(user_id)
+        assert user is not None
+        return user
+
+    def replace_user_roles(
+        self, user_id: str, role_ids: list[str]
+    ) -> list[str]:
+        user = self.update_user(user_id, role_ids=role_ids)
+        return user["role_codes"]
 
     def user_role_codes(self, user_id: str) -> list[str]:
         with self.connect() as connection:
@@ -574,50 +582,7 @@ class IdentityRepository:
             raise ValueError("系统必须至少保留一个启用的系统管理员")
 
     def disable_user(self, user_id: str) -> None:
-        with self.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            user = connection.execute(
-                "SELECT status, is_deleted FROM users WHERE id = ?", (user_id,)
-            ).fetchone()
-            if user is None:
-                raise KeyError(user_id)
-            if user["status"] == "disabled":
-                return
-
-            is_system_admin = connection.execute(
-                """
-                SELECT 1
-                FROM user_roles AS ur
-                JOIN roles AS r ON r.id = ur.role_id
-                WHERE ur.user_id = ? AND r.code = 'system_admin' AND r.is_enabled = 1
-                """,
-                (user_id,),
-            ).fetchone()
-            if is_system_admin is not None:
-                surviving_admins = connection.execute(
-                    """
-                    SELECT COUNT(DISTINCT u.id)
-                    FROM users AS u
-                    JOIN user_roles AS ur ON ur.user_id = u.id
-                    JOIN roles AS r ON r.id = ur.role_id
-                    WHERE u.status = 'active' AND u.is_deleted = 0
-                      AND r.code = 'system_admin' AND r.is_enabled = 1
-                      AND u.id <> ?
-                    """,
-                    (user_id,),
-                ).fetchone()[0]
-                if surviving_admins < 1:
-                    raise ValueError("系统必须至少保留一个启用的系统管理员")
-            connection.execute(
-                "UPDATE users SET status = 'disabled', updated_at = CURRENT_TIMESTAMP "
-                "WHERE id = ?",
-                (user_id,),
-            )
-            connection.execute(
-                "UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP "
-                "WHERE user_id = ? AND revoked_at IS NULL",
-                (user_id,),
-            )
+        self.update_user(user_id, status="disabled")
 
     @staticmethod
     def _role_dict(row: sqlite3.Row) -> dict[str, Any]:

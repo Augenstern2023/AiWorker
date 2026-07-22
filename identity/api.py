@@ -309,9 +309,6 @@ def build_identity_router(
         _: Principal = Depends(admin_write),
     ) -> dict[str, Any]:
         try:
-            if payload.role_ids is not None:
-                _validate_role_ids(payload.role_ids)
-                repository.replace_user_roles(user_id, payload.role_ids)
             repository.update_user(
                 user_id,
                 display_name=(
@@ -320,6 +317,7 @@ def build_identity_router(
                     else None
                 ),
                 status=payload.status,
+                role_ids=payload.role_ids,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="用户不存在") from exc
@@ -512,16 +510,6 @@ def build_identity_router(
         grants = _permission_pairs(permissions)
         _validate_permission_pairs(grants)
         requested_codes = {code for code, _ in grants}
-        required_codes = set(permission_service.expand_permissions(grants)) - requested_codes
-        existing_codes = {
-            item["permission_code"]
-            for item in repository.list_role_permissions(role_id)
-        }
-        removed_dependencies = sorted(required_codes & existing_codes - requested_codes)
-        if removed_dependencies:
-            raise ValueError(
-                "仍被高级权限依赖，不能移除: " + ", ".join(removed_dependencies)
-            )
         if role["code"].casefold() == "system_admin" and "*" not in requested_codes:
             raise ValueError("系统管理员角色必须保留通配权限")
         repository.replace_role_permissions(role_id, grants)

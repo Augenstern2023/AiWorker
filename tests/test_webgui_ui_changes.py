@@ -139,8 +139,20 @@ def test_workflow_governed_creation_actions_send_active_task_ids():
     assert "workflow_task_id: task.id" in breakdown
     assert "resolveCreativeWorkflowTask('source_package'" in download
     assert "workflow_task_id: task.id" in download
+    assert "topic_id: this.dramaDownload.topic.id" in download
     assert "resolveCreativeWorkflowTask('brief'" in project
     assert "workflow_task_id: task.id" in project
+
+
+def test_drama_material_jobs_send_exact_source_topic_and_task():
+    script = _source("static/js/selection/dramas.js")
+    method = script.split("async startDramaAnalysis", 1)[1].split(
+        "dramaJobArtifacts", 1
+    )[0]
+
+    assert "resolveSourcePackageWorkflowTask" in method
+    assert "topic_id: task.topic_id" in method
+    assert "workflow_task_id: task.id" in method
 
 
 def test_project_table_uses_name_navigation_without_redundant_action_column():

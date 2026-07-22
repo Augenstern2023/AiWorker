@@ -94,6 +94,8 @@ def job_environment(tmp_path: Path, monkeypatch):
     )
     monkeypatch.setattr(WebGUI, "job_manager", manager)
     monkeypatch.setattr(WebGUI, "workflow_repository", workflow)
+    creative = CreativeRepository(tmp_path / "creative.db")
+    monkeypatch.setattr(WebGUI, "creative_repository", creative)
     monkeypatch.setattr(WebGUI, "audit_service", audit)
     monkeypatch.setattr(WebGUI.app.state, "identity_session_service", sessions)
     monkeypatch.setattr(WebGUI.app.state, "identity_permission_service", permissions)
@@ -104,6 +106,7 @@ def job_environment(tmp_path: Path, monkeypatch):
         sessions=sessions,
         permissions=permissions,
         workflow=workflow,
+        creative=creative,
         audit=audit,
         manager=manager,
     )
@@ -134,10 +137,17 @@ def role_client(job_environment, role_code: str, username: str) -> TestClient:
 
 def test_selection_download_job_records_owner_task_link_and_audit(job_environment):
     client = role_client(job_environment, "selection_operator", "selector")
+    topic = job_environment.creative.upsert_topics([{
+        "platform": "hg", "job_id": "source-topic", "source_path": "source.json",
+        "captured_at": "2026-07-23", "title": "测试剧", "score": 90,
+        "confidence": "high", "score_details": {}, "recommendation": "adopt",
+        "evidence": [],
+    }])[0]
     wrong_task = job_environment.workflow.create_task(
         "workflow-download-wrong",
         "breakdown",
         "selection_operator",
+        topic_id=topic["id"],
         actor=SYSTEM_ACTOR,
     )
     job_environment.workflow.claim_task(wrong_task["id"], client.principal)
@@ -148,6 +158,7 @@ def test_selection_download_job_records_owner_task_link_and_audit(job_environmen
             "title": "测试剧",
             "book_id": "book-1",
             "episodes": [1],
+            "topic_id": topic["id"],
             "workflow_task_id": wrong_task["id"],
         },
     )
@@ -157,7 +168,12 @@ def test_selection_download_job_records_owner_task_link_and_audit(job_environmen
 
     omitted_without_source = client.post(
         "/api/hongguo/drama/download/jobs",
-        json={"title": "测试剧", "book_id": "book-1", "episodes": [1]},
+        json={
+            "title": "测试剧",
+            "book_id": "book-1",
+            "episodes": [1],
+            "topic_id": topic["id"],
+        },
     )
     assert omitted_without_source.status_code == 409
     assert job_environment.manager.list_jobs() == []
@@ -166,6 +182,7 @@ def test_selection_download_job_records_owner_task_link_and_audit(job_environmen
         "workflow-download",
         "source_package",
         "selection_operator",
+        topic_id=topic["id"],
         actor=SYSTEM_ACTOR,
     )
     job_environment.workflow.claim_task(task["id"], client.principal)
@@ -176,16 +193,74 @@ def test_selection_download_job_records_owner_task_link_and_audit(job_environmen
             "title": "测试剧",
             "book_id": "book-1",
             "episodes": [1],
+            "topic_id": topic["id"],
         },
     )
 
     assert response.status_code == 200
     job = response.json()["job"]
     assert job["created_by_user_id"] == client.user_id
+    assert job["job"]["extra"]["topic_id"] == topic["id"]
     assert job["workflow_task_id"] == task["id"]
     assert job_environment.workflow.list_task_job_ids(task["id"]) == [job["job_id"]]
     events = job_environment.audit.query(action="job.create", target_id=job["job_id"])
     assert events[0]["actor_user_id"] == client.user_id
+
+
+def test_source_job_rejects_unknown_or_mismatched_topic(job_environment):
+    client = role_client(job_environment, "selection_operator", "topic-selector")
+    topics = job_environment.creative.upsert_topics([
+        {
+            "platform": "hg", "job_id": f"topic-{index}",
+            "source_path": f"topic-{index}.json", "captured_at": "2026-07-23",
+            "title": title, "score": 90 - index, "confidence": "high",
+            "score_details": {}, "recommendation": "adopt", "evidence": [],
+        }
+        for index, title in enumerate(("精确剧名", "另一个剧"), start=1)
+    ])
+    task = job_environment.workflow.create_task(
+        "workflow-topic-source",
+        "source_package",
+        "selection_operator",
+        topic_id=topics[0]["id"],
+        actor=SYSTEM_ACTOR,
+    )
+    job_environment.workflow.claim_task(task["id"], client.principal)
+
+    unknown = client.post(
+        "/api/hongguo/drama/download/jobs",
+        json={
+            "topic_id": 999999,
+            "title": "精确剧名",
+            "book_id": "book-unknown",
+            "episodes": [1],
+            "workflow_task_id": task["id"],
+        },
+    )
+    assert unknown.status_code == 404
+    mismatched_title = client.post(
+        "/api/hongguo/drama/download/jobs",
+        json={
+            "topic_id": topics[0]["id"],
+            "title": "另一个剧",
+            "book_id": "book-title",
+            "episodes": [1],
+            "workflow_task_id": task["id"],
+        },
+    )
+    assert mismatched_title.status_code == 409
+    mismatched_task = client.post(
+        "/api/hongguo/drama/download/jobs",
+        json={
+            "topic_id": topics[1]["id"],
+            "title": "另一个剧",
+            "book_id": "book-task",
+            "episodes": [1],
+            "workflow_task_id": task["id"],
+        },
+    )
+    assert mismatched_task.status_code == 409
+    assert job_environment.manager.list_jobs() == []
 
 
 def add_job(

@@ -173,6 +173,36 @@ window.aiworkerModules.push(() => ({
                     return task;
                 },
 
+                async resolveSourcePackageWorkflowTask(title) {
+                    const [tasksResponse, topicsResponse] = await Promise.all([
+                        aiworkerApi.request('/api/workflow/tasks'),
+                        aiworkerApi.request('/api/creative/topics?limit=500'),
+                    ]);
+                    const tasks = await tasksResponse.json();
+                    const topics = await topicsResponse.json();
+                    if (!tasksResponse.ok) throw new Error(tasks.detail || '读取素材任务失败');
+                    if (!topicsResponse.ok) throw new Error(topics.detail || '读取选题失败');
+                    const titleKey = value => String(value || '').normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+                    const topicIds = new Set((topics.items || [])
+                        .filter(item => titleKey(item.title) === titleKey(title))
+                        .map(item => Number(item.id)));
+                    const open = ['assigned', 'in_progress', 'returned'];
+                    const matches = (tasks || []).filter(item =>
+                        item.task_type === 'source_package'
+                        && open.includes(item.status)
+                        && topicIds.has(Number(item.topic_id))
+                    );
+                    if (matches.length !== 1) throw new Error('当前剧目需要且只能有一个已分配的素材任务');
+                    const task = matches[0];
+                    if (['assigned', 'returned'].includes(task.status)) {
+                        const response = await aiworkerApi.request(`/api/workflow/tasks/${task.id}/start`, {method: 'POST'});
+                        const started = await response.json();
+                        if (!response.ok) throw new Error(started.detail || '开始素材任务失败');
+                        return started;
+                    }
+                    return task;
+                },
+
                 async submitCreativeResource(resourceType, resourceId, projectId = null, topicId = null) {
                     const task = await this.resolveCreativeWorkflowTask(resourceType, projectId, topicId);
                     const response = await aiworkerApi.request('/api/creative/workflow/submit', {

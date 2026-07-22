@@ -96,6 +96,9 @@ window.aiworkerModules.push(() => ({
                     this.dramaAnalysis.loading = true;
                     this.dramaAnalysis.error = '';
                     try {
+                        const task = await this.resolveSourcePackageWorkflowTask(
+                            this.dramaAnalysis.title || selected.title
+                        );
                         const endpoint = isDouyinFallback
                             ? '/api/hongguo/drama/douyin-fallback/jobs'
                             : '/api/hongguo/drama/jobs';
@@ -103,12 +106,16 @@ window.aiworkerModules.push(() => ({
                             ? {
                                 title: this.dramaAnalysis.title || selected.title,
                                 aweme_id: selected.aweme_id,
-                                fallback_reason: this.dramaAnalysis.fallbackReason
+                                fallback_reason: this.dramaAnalysis.fallbackReason,
+                                topic_id: task.topic_id,
+                                workflow_task_id: task.id
                             }
                             : {
                                 title: selected.title || this.dramaAnalysis.title,
                                 book_id: selected.book_id,
-                                episode: this.dramaAnalysis.episode
+                                episode: this.dramaAnalysis.episode,
+                                topic_id: task.topic_id,
+                                workflow_task_id: task.id
                             };
                         const res = await aiworkerApi.request(endpoint, {
                             method: 'POST',

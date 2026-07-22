@@ -416,8 +416,8 @@ window.aiworkerModules.push(() => ({
                         const task = await this.resolveCreativeWorkflowTask('source_package', null, this.dramaDownload.topic?.id || null);
                         const endpoint = isDouyinFallback ? '/api/hongguo/drama/douyin-fallback/jobs' : '/api/hongguo/drama/download/jobs';
                         const payload = isDouyinFallback
-                            ? {title: this.dramaDownload.title, aweme_ids: this.dramaDownload.selectedAwemeIds, fallback_reason: this.dramaDownload.fallbackReason || '', workflow_task_id: task.id}
-                            : {title: this.dramaDownload.title, book_id: this.dramaDownload.selectedCandidate.book_id, episodes: episodeNumbers, all_episodes: this.dramaDownload.allEpisodes && episodeNumbers.length === this.dramaDownload.episodes.length, workflow_task_id: task.id};
+                            ? {topic_id: this.dramaDownload.topic.id, title: this.dramaDownload.title, aweme_ids: this.dramaDownload.selectedAwemeIds, fallback_reason: this.dramaDownload.fallbackReason || '', workflow_task_id: task.id}
+                            : {topic_id: this.dramaDownload.topic.id, title: this.dramaDownload.title, book_id: this.dramaDownload.selectedCandidate.book_id, episodes: episodeNumbers, all_episodes: this.dramaDownload.allEpisodes && episodeNumbers.length === this.dramaDownload.episodes.length, workflow_task_id: task.id};
                         const res = await aiworkerApi.request(endpoint, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
                         const data = await res.json();
                         if (!res.ok || data.status === 'error') throw new Error(data.message || '创建下载任务失败');

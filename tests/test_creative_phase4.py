@@ -485,6 +485,57 @@ def test_phase4_api_creates_multiple_projects_and_lists_them(tmp_path: Path):
     assert {item["name"] for item in payload["items"]} == {"年代方向", "都市方向"}
 
 
+def test_project_creation_retries_binding_without_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    client, repository, _ = build_phase4_client(tmp_path)
+    topic, breakdown = seed_adopted_topic(repository)
+    with repository._connect() as connection:
+        connection.execute(
+            "UPDATE creative_breakdowns SET status = 'approved' WHERE id = ?",
+            (breakdown["id"],),
+        )
+    task = assign_phase4_task(client, "brief", topic_id=topic["id"])
+    original_bind = WorkflowRepository.bind_workflow_project
+
+    def fail_bind(*args, **kwargs):
+        raise OSError("system database unavailable")
+
+    monkeypatch.setattr(WorkflowRepository, "bind_workflow_project", fail_bind)
+    payload = {
+        "topic_id": topic["id"],
+        "breakdown_id": breakdown["id"],
+        "name": "Retry-safe project",
+        "target_episode_count": 20,
+        "workflow_task_id": task["id"],
+    }
+    failed = client.post("/api/creative/projects", json=payload)
+    assert failed.status_code == 503
+    orphan = repository.get_project_by_workflow_task_id(task["id"])
+    assert orphan is not None
+    assert client.workflow.get_task(task["id"])["project_id"] is None
+
+    monkeypatch.setattr(
+        WorkflowRepository, "bind_workflow_project", original_bind
+    )
+    reconciled_list = client.get("/api/creative/projects")
+    assert any(
+        item["id"] == orphan["id"]
+        for item in reconciled_list.json()["items"]
+    )
+    assert client.workflow.get_task(task["id"])["project_id"] == str(orphan["id"])
+    retried = client.post("/api/creative/projects", json=payload)
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["id"] == orphan["id"]
+    assert len([
+        project
+        for project in repository.list_projects(topic_id=topic["id"])
+        if project["workflow_task_id"] == task["id"]
+    ]) == 1
+    listed = client.get("/api/creative/projects")
+    assert any(item["id"] == orphan["id"] for item in listed.json()["items"])
+
+
 def test_breakdown_api_returns_personalized_field_writing_guide(tmp_path: Path):
     client, repository, _ = build_phase4_client(tmp_path)
     _, breakdown = seed_adopted_topic(repository)

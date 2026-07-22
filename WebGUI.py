@@ -519,6 +519,7 @@ class HongguoDramaEpisodesRequest(BaseModel):
 
 
 class HongguoDramaJobRequest(BaseModel):
+    topic_id: int
     title: str
     book_id: str
     episode: int
@@ -526,6 +527,7 @@ class HongguoDramaJobRequest(BaseModel):
 
 
 class HongguoDramaDownloadJobRequest(BaseModel):
+    topic_id: int
     title: str
     book_id: str
     episodes: List[int] = []
@@ -534,6 +536,7 @@ class HongguoDramaDownloadJobRequest(BaseModel):
 
 
 class DouyinFallbackDramaJobRequest(BaseModel):
+    topic_id: int
     title: str
     aweme_id: str = ""
     aweme_ids: List[str] = []
@@ -638,16 +641,19 @@ def _job_task_context(
     principal: Principal,
     *,
     expected_task_type: str | None = None,
+    topic_id: int | None = None,
     topic_title: str = "",
 ) -> tuple[str | None, str | None]:
     resolved_task_id = workflow_task_id
-    topic_ids = {
-        int(topic["id"])
-        for topic in creative_repository.list_topics(limit=500)
-        if topic_title.strip()
-        and str(topic.get("title") or "").strip().casefold()
-        == topic_title.strip().casefold()
-    }
+    topic = creative_repository.get_topic(topic_id) if topic_id is not None else None
+    if expected_task_type and topic is None:
+        raise HTTPException(404, "creative topic not found")
+    if (
+        topic is not None
+        and CreativeRepository._title_key(topic.get("title"))
+        != CreativeRepository._title_key(topic_title)
+    ):
+        raise HTTPException(409, "machine job title does not match creative topic")
     if expected_task_type and not resolved_task_id:
         candidates = [
             task
@@ -655,7 +661,7 @@ def _job_task_context(
             if task["task_type"] == expected_task_type
             and task.get("assignee_user_id") == principal.user_id
             and task["status"] in {"assigned", "in_progress", "returned"}
-            and (not topic_ids or task.get("topic_id") in topic_ids)
+            and task.get("topic_id") == topic_id
         ]
         if len(candidates) != 1:
             raise HTTPException(
@@ -685,7 +691,7 @@ def _job_task_context(
         "returned",
     }:
         raise HTTPException(409, "workflow task is not open for machine work")
-    if topic_ids and task.get("topic_id") not in topic_ids:
+    if expected_task_type and task.get("topic_id") != topic_id:
         raise HTTPException(409, "machine job topic does not match workflow task")
     return resolved_task_id, task.get("project_id")
 
@@ -1914,18 +1920,16 @@ async def create_hongguo_drama_job(
     payload: HongguoDramaJobRequest,
     principal: Principal = Depends(current_principal),
 ):
-    actor = principal if isinstance(principal, Principal) else None
-    if actor is not None:
-        _require_permission(actor, "job.create.selection")
-    task_id, project_id = (
-        _job_task_context(
-            payload.workflow_task_id,
-            actor,
-            expected_task_type="source_package",
-            topic_title=payload.title,
-        )
-        if actor is not None
-        else (None, None)
+    if not isinstance(principal, Principal):
+        raise HTTPException(401, "登录已失效，请重新登录")
+    actor = principal
+    _require_permission(actor, "job.create.selection")
+    task_id, project_id = _job_task_context(
+        payload.workflow_task_id,
+        actor,
+        expected_task_type="source_package",
+        topic_id=payload.topic_id,
+        topic_title=payload.title,
     )
     if not payload.title.strip() or not payload.book_id.strip() or payload.episode < 1:
         raise HTTPException(400, "剧名、book_id 和集数必须有效")
@@ -1934,6 +1938,7 @@ async def create_hongguo_drama_job(
         platform="hg",
         crawler_type="drama_analysis",
         extra={
+            "topic_id": payload.topic_id,
             "title": payload.title.strip(),
             "book_id": payload.book_id.strip(),
             "episode": payload.episode,
@@ -1963,18 +1968,16 @@ async def create_hongguo_drama_download_job(
     payload: HongguoDramaDownloadJobRequest,
     principal: Principal = Depends(current_principal),
 ):
-    actor = principal if isinstance(principal, Principal) else None
-    if actor is not None:
-        _require_permission(actor, "job.create.selection")
-    task_id, project_id = (
-        _job_task_context(
-            payload.workflow_task_id,
-            actor,
-            expected_task_type="source_package",
-            topic_title=payload.title,
-        )
-        if actor is not None
-        else (None, None)
+    if not isinstance(principal, Principal):
+        raise HTTPException(401, "登录已失效，请重新登录")
+    actor = principal
+    _require_permission(actor, "job.create.selection")
+    task_id, project_id = _job_task_context(
+        payload.workflow_task_id,
+        actor,
+        expected_task_type="source_package",
+        topic_id=payload.topic_id,
+        topic_title=payload.title,
     )
     episodes = sorted({int(item) for item in payload.episodes if int(item) > 0})
     if not payload.title.strip() or not payload.book_id.strip() or (not payload.all_episodes and not episodes):
@@ -1985,6 +1988,7 @@ async def create_hongguo_drama_download_job(
         platform="hg",
         crawler_type="drama_download",
         extra={
+            "topic_id": payload.topic_id,
             "title": payload.title.strip(),
             "book_id": payload.book_id.strip(),
             "episodes": episodes,
@@ -2016,18 +2020,16 @@ async def create_douyin_fallback_drama_job(
     payload: DouyinFallbackDramaJobRequest,
     principal: Principal = Depends(current_principal),
 ):
-    actor = principal if isinstance(principal, Principal) else None
-    if actor is not None:
-        _require_permission(actor, "job.create.selection")
-    task_id, project_id = (
-        _job_task_context(
-            payload.workflow_task_id,
-            actor,
-            expected_task_type="source_package",
-            topic_title=payload.title,
-        )
-        if actor is not None
-        else (None, None)
+    if not isinstance(principal, Principal):
+        raise HTTPException(401, "登录已失效，请重新登录")
+    actor = principal
+    _require_permission(actor, "job.create.selection")
+    task_id, project_id = _job_task_context(
+        payload.workflow_task_id,
+        actor,
+        expected_task_type="source_package",
+        topic_id=payload.topic_id,
+        topic_title=payload.title,
     )
     aweme_ids: List[str] = []
     for value in [*payload.aweme_ids, payload.aweme_id]:
@@ -2044,6 +2046,7 @@ async def create_douyin_fallback_drama_job(
         platform="hg",
         crawler_type="douyin_fallback_analysis",
         extra={
+            "topic_id": payload.topic_id,
             "title": payload.title.strip(),
             "aweme_id": aweme_ids[0],
             "aweme_ids": aweme_ids,

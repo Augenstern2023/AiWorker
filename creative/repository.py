@@ -167,6 +167,31 @@ class CreativeRepository:
                     conn.execute(
                         f"ALTER TABLE {table} ADD COLUMN workflow_task_id TEXT"
                     )
+            duplicate_project_tasks = conn.execute(
+                """
+                SELECT workflow_task_id
+                FROM creative_projects
+                WHERE workflow_task_id IS NOT NULL
+                GROUP BY workflow_task_id HAVING COUNT(*) > 1
+                """
+            ).fetchall()
+            for duplicate in duplicate_project_tasks:
+                keep = conn.execute(
+                    "SELECT id FROM creative_projects WHERE workflow_task_id = ? "
+                    "ORDER BY deleted, id LIMIT 1",
+                    (duplicate["workflow_task_id"],),
+                ).fetchone()
+                assert keep is not None
+                conn.execute(
+                    "UPDATE creative_projects SET workflow_task_id = NULL "
+                    "WHERE workflow_task_id = ? AND id <> ?",
+                    (duplicate["workflow_task_id"], keep["id"]),
+                )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_creative_projects_workflow_task "
+                "ON creative_projects(workflow_task_id) "
+                "WHERE workflow_task_id IS NOT NULL"
+            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_creative_stage_exports_lookup "
                 "ON creative_stage_exports(project_id, stage, content_fingerprint, exported_at)"
@@ -361,6 +386,14 @@ class CreativeRepository:
         if not 30 <= int(episode_duration_seconds) <= 1800:
             raise ValueError("单集时长必须在 30-1800 秒之间")
         with self._connect() as conn:
+            if workflow_task_id:
+                existing = conn.execute(
+                    "SELECT id FROM creative_projects "
+                    "WHERE workflow_task_id = ? AND deleted = 0",
+                    (workflow_task_id,),
+                ).fetchone()
+                if existing is not None:
+                    return self.get_project(int(existing["id"])) or {}
             topic = conn.execute(
                 "SELECT * FROM creative_topics WHERE id = ? AND deleted = 0", (topic_id,),
             ).fetchone()
@@ -387,22 +420,33 @@ class CreativeRepository:
                 or self._breakdown_target_audience(breakdown["content_json"])
             )
             now = time.time()
-            cursor = conn.execute(
-                """
-                INSERT INTO creative_projects (
-                    topic_id, breakdown_id, name, genre, target_platform, target_audience,
-                    target_episode_count, episode_duration_seconds, workflow_task_id,
-                    created_by, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    topic_id, breakdown_id, name.strip() or f"{topic['title']}创作项目",
-                    genre.strip() or str(topic["category"] or ""), target_platform.strip(),
-                    resolved_target_audience, int(target_episode_count),
-                    int(episode_duration_seconds), workflow_task_id,
-                    created_by, now, now,
-                ),
-            )
+            try:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO creative_projects (
+                        topic_id, breakdown_id, name, genre, target_platform, target_audience,
+                        target_episode_count, episode_duration_seconds, workflow_task_id,
+                        created_by, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        topic_id, breakdown_id, name.strip() or f"{topic['title']}创作项目",
+                        genre.strip() or str(topic["category"] or ""), target_platform.strip(),
+                        resolved_target_audience, int(target_episode_count),
+                        int(episode_duration_seconds), workflow_task_id,
+                        created_by, now, now,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                if not workflow_task_id:
+                    raise
+                existing = conn.execute(
+                    "SELECT id FROM creative_projects WHERE workflow_task_id = ?",
+                    (workflow_task_id,),
+                ).fetchone()
+                if existing is None:
+                    raise
+                return self.get_project(int(existing["id"])) or {}
         return self.get_project(int(cursor.lastrowid)) or {}
 
     @staticmethod
@@ -519,6 +563,17 @@ class CreativeRepository:
             ]
         project["allowed_actions"] = self._allowed_project_actions(project)
         return project
+
+    def get_project_by_workflow_task_id(
+        self, workflow_task_id: str
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM creative_projects "
+                "WHERE workflow_task_id = ? AND deleted = 0",
+                (workflow_task_id,),
+            ).fetchone()
+        return self.get_project(int(row["id"])) if row is not None else None
 
     def get_project_inputs(self, project_id: int) -> dict[str, Any]:
         project = self.get_project(project_id)

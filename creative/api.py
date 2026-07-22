@@ -1031,28 +1031,42 @@ def build_creative_router(
             task = workflow_repository.get_task(workflow_task_id)
             if task is None:
                 raise HTTPException(404, "workflow task not found")
-            if task.get("project_id") is not None:
+            project = repository.get_project_by_workflow_task_id(workflow_task_id)
+            if project is not None and (
+                int(project["topic_id"]) != payload.topic_id
+                or int(project["breakdown_id"]) != payload.breakdown_id
+            ):
+                raise HTTPException(
+                    409, "workflow task is already linked to another project request"
+                )
+            if project is None and task.get("project_id") is not None:
                 raise HTTPException(
                     409, "brief workflow task is already linked to a project"
                 )
-            project = repository.create_project(
-                payload.topic_id,
-                payload.breakdown_id,
-                payload.name,
-                payload.target_episode_count,
-                genre=payload.genre,
-                target_platform=payload.target_platform,
-                target_audience=payload.target_audience,
-                episode_duration_seconds=payload.episode_duration_seconds,
-                workflow_task_id=workflow_task_id,
-                created_by=principal.user_id,
-            )
-            workflow_repository.bind_workflow_project(
-                workflow_task_id,
-                str(project["id"]),
-                principal,
-            )
-            return project
+            if project is None:
+                project = repository.create_project(
+                    payload.topic_id,
+                    payload.breakdown_id,
+                    payload.name,
+                    payload.target_episode_count,
+                    genre=payload.genre,
+                    target_platform=payload.target_platform,
+                    target_audience=payload.target_audience,
+                    episode_duration_seconds=payload.episode_duration_seconds,
+                    workflow_task_id=workflow_task_id,
+                    created_by=principal.user_id,
+                )
+            try:
+                workflow_repository.bind_workflow_project(
+                    workflow_task_id,
+                    str(project["id"]),
+                    principal,
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    503, "project created but workflow binding requires reconciliation"
+                ) from exc
+            return repository.get_project(int(project["id"])) or project
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -1063,6 +1077,15 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         items = repository.list_projects(topic_id=topic_id)
+        for item in items:
+            task_id = str(item.get("workflow_task_id") or "")
+            if task_id and item.get("created_by") == principal.user_id:
+                try:
+                    workflow_repository.bind_workflow_project(
+                        task_id, str(item["id"]), principal
+                    )
+                except Exception:
+                    pass
         for item in items:
             workflow_adapter.reconcile_project(int(item["id"]))
         items = repository.list_projects(topic_id=topic_id)

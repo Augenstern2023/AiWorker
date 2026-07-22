@@ -215,3 +215,39 @@ uv run pytest -q --ignore=test/test_proxy_ip_pool.py --ignore=test/test_redis_ca
 ```
 
 The only failure in both broad runs remains the accepted pre-existing XHS Excel factory mismatch.
+
+## Exact Source Scope And Project Reconciliation
+
+The last two Important findings were closed with a sixth TDD wave:
+
+- Every Hongguo download/material request and Douyin fallback request now carries a required `topic_id`. The server loads that exact topic, compares normalized titles, and requires the active `source_package` task to reference the same topic. Unknown topics, title mismatches, task-topic mismatches, and omitted scope are rejected without scanning or treating an empty match as authorization.
+- Both selection download flows and the standalone drama-material UI resolve the one matching source task and send its exact `topic_id` and `workflow_task_id`. Created jobs retain `topic_id` in job extras together with ownership and workflow linkage.
+- `creative_projects.workflow_task_id` now has a migrated unique partial index. Duplicate legacy links are detached while preferring the active project. Repository creation is idempotent by task ID and handles unique races by reading the winner.
+- Project creation first finds an existing project for the Brief task, then reconciles workflow binding and memberships. A post-creative bind failure returns `503`; retry or project-list reconciliation binds the same project and exposes it without creating a duplicate.
+
+Sixth-wave RED evidence:
+
+```text
+tests/test_job_permissions.py::test_source_job_rejects_unknown_or_mismatched_topic
+  unknown topic_id was ignored and the source job was created
+tests/test_creative_phase4.py::test_project_creation_retries_binding_without_duplicate
+  injected system bind failure escaped instead of returning a reconcilable 503
+tests/test_webgui_ui_changes.py::test_drama_material_jobs_send_exact_source_topic_and_task
+  standalone material jobs omitted exact topic/task scope
+```
+
+Sixth-wave GREEN evidence:
+
+```text
+uv run pytest tests/test_job_permissions.py tests/test_creative_phase4.py \
+  tests/test_webgui_ui_changes.py tests/test_workflow_bootstrap.py -q
+103 passed
+
+uv run pytest tests/ -q
+495 passed, 1 failed
+
+uv run pytest -q --ignore=test/test_proxy_ip_pool.py --ignore=test/test_redis_cache.py
+499 passed, 8 skipped, 1 failed
+```
+
+The only failure in both broad runs remains the accepted pre-existing XHS Excel factory mismatch.

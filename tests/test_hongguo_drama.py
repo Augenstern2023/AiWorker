@@ -27,6 +27,7 @@ from agents.hongguo_drama import HongguoDramaClient, HongguoDramaError, HongguoP
 from agents import douyin_drama_fallback_worker, hongguo_drama_download_worker, hongguo_drama_worker
 from core.job import CrawlJob
 from runtime.worker_launcher import build_worker_command
+from workflow import SYSTEM_ACTOR
 
 
 def test_paid_content_policy_requires_explicit_provider_signal():
@@ -748,13 +749,20 @@ async def test_douyin_fallback_job_accepts_ordered_multiple_aweme_ids(monkeypatc
     monkeypatch.setattr(WebGUI.job_manager, "generate_job_id", lambda platform: "job-batch")
     monkeypatch.setattr(WebGUI.job_manager, "create_job", fake_create)
     monkeypatch.setattr(WebGUI, "_public_created_job", lambda state: state.to_dict())
+    monkeypatch.setattr(
+        WebGUI, "_job_task_context", lambda *args, **kwargs: ("task-source", None)
+    )
+    monkeypatch.setattr(WebGUI.workflow_repository, "link_task_job", lambda *args: None)
+    monkeypatch.setattr(WebGUI, "_record_job_audit", lambda *args, **kwargs: None)
 
     response = await WebGUI.create_douyin_fallback_drama_job(
         WebGUI.DouyinFallbackDramaJobRequest(
+            topic_id=17,
             title="测试短剧",
             aweme_ids=["aweme-2", "aweme-1", "aweme-2"],
             fallback_reason="红果无结果",
-        )
+        ),
+        principal=SYSTEM_ACTOR,
     )
 
     assert response["status"] == "success"

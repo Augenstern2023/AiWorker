@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -244,15 +245,23 @@ class IdentityRepository:
     def _expanded_permissions(
         permissions: tuple[tuple[str, str], ...],
     ) -> tuple[tuple[str, str], ...]:
-        expanded = dict(permissions)
-        pending = list(permissions)
+        from .schema import DATA_SCOPE_ORDER
+
+        expanded: dict[str, str] = {}
+        pending = sorted(permissions, reverse=True)
         while pending:
             permission_code, data_scope = pending.pop()
-            for dependency in PERMISSION_DEPENDENCIES.get(permission_code, set()):
-                if dependency not in expanded:
-                    expanded[dependency] = data_scope
-                    pending.append((dependency, data_scope))
-        return tuple(expanded.items())
+            current_scope = expanded.get(permission_code)
+            if current_scope is not None and (
+                DATA_SCOPE_ORDER[current_scope] >= DATA_SCOPE_ORDER[data_scope]
+            ):
+                continue
+            expanded[permission_code] = data_scope
+            for dependency in sorted(PERMISSION_DEPENDENCIES.get(permission_code, ())):
+                pending.append((dependency, data_scope))
+        if "*" in expanded:
+            return (("*", "all"),)
+        return tuple(sorted(expanded.items()))
 
     def list_roles(self) -> list[dict[str, Any]]:
         with self.connect() as connection:
@@ -266,6 +275,80 @@ class IdentityRepository:
             ).fetchone()
         return self._role_dict(row) if row else None
 
+    def get_role(self, role_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM roles WHERE id = ?", (role_id,)
+            ).fetchone()
+        return self._role_dict(row) if row else None
+
+    def create_role(
+        self, code: str, name: str, description: str, *, is_system: bool = False
+    ) -> dict[str, Any]:
+        role_id = str(uuid.uuid4())
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO roles (id, code, name, description, is_system)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (role_id, code, name, description, int(is_system)),
+            )
+        role = self.get_role(role_id)
+        assert role is not None
+        return role
+
+    def update_role(
+        self,
+        role_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        is_enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            role = connection.execute(
+                "SELECT * FROM roles WHERE id = ?", (role_id,)
+            ).fetchone()
+            if role is None:
+                raise KeyError(role_id)
+            if (
+                role["code"].casefold() == "system_admin"
+                and role["is_enabled"]
+                and is_enabled is False
+            ):
+                active_admins = connection.execute(
+                    """
+                    SELECT COUNT(DISTINCT u.id)
+                    FROM users AS u
+                    JOIN user_roles AS ur ON ur.user_id = u.id
+                    WHERE ur.role_id = ? AND u.status = 'active' AND u.is_deleted = 0
+                    """,
+                    (role_id,),
+                ).fetchone()[0]
+                if active_admins:
+                    raise ValueError("系统必须至少保留一个启用的系统管理员")
+            connection.execute(
+                """
+                UPDATE roles
+                SET name = COALESCE(?, name),
+                    description = COALESCE(?, description),
+                    is_enabled = COALESCE(?, is_enabled),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    name,
+                    description,
+                    int(is_enabled) if is_enabled is not None else None,
+                    role_id,
+                ),
+            )
+        updated = self.get_role(role_id)
+        assert updated is not None
+        return updated
+
     def list_role_permissions(self, role_id: str) -> list[dict[str, str]]:
         with self.connect() as connection:
             rows = connection.execute(
@@ -278,6 +361,174 @@ class IdentityRepository:
                 (role_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def replace_role_permissions(
+        self, role_id: str, permissions: list[tuple[str, str]]
+    ) -> list[dict[str, str]]:
+        expanded = self._expanded_permissions(tuple(permissions))
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute(
+                "SELECT 1 FROM roles WHERE id = ?", (role_id,)
+            ).fetchone() is None:
+                raise KeyError(role_id)
+            known_permissions = {
+                row["code"]
+                for row in connection.execute(
+                    "SELECT code FROM permissions"
+                ).fetchall()
+            }
+            unknown = {code for code, _ in expanded} - known_permissions
+            if unknown:
+                raise ValueError(f"未知权限: {', '.join(sorted(unknown))}")
+            connection.execute(
+                "DELETE FROM role_permissions WHERE role_id = ?", (role_id,)
+            )
+            connection.executemany(
+                """
+                INSERT INTO role_permissions (role_id, permission_code, data_scope)
+                VALUES (?, ?, ?)
+                """,
+                [(role_id, code, scope) for code, scope in expanded],
+            )
+        return self.list_role_permissions(role_id)
+
+    def list_users(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM users WHERE is_deleted = 0 ORDER BY normalized_username"
+            ).fetchall()
+        return [self._user_dict(row) for row in rows]
+
+    def get_user(self, user_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM users WHERE id = ? AND is_deleted = 0", (user_id,)
+            ).fetchone()
+        return self._user_dict(row) if row else None
+
+    def create_user(
+        self, username: str, display_name: str, password_hash: str
+    ) -> dict[str, Any]:
+        user_id = str(uuid.uuid4())
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO users
+                    (id, username, normalized_username, display_name, password_hash)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (user_id, username, username.casefold(), display_name, password_hash),
+            )
+        user = self.get_user(user_id)
+        assert user is not None
+        return user
+
+    def update_user(
+        self,
+        user_id: str,
+        *,
+        display_name: str | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        if status == "disabled":
+            self.disable_user(user_id)
+        else:
+            with self.connect() as connection:
+                if connection.execute(
+                    "SELECT 1 FROM users WHERE id = ? AND is_deleted = 0", (user_id,)
+                ).fetchone() is None:
+                    raise KeyError(user_id)
+                connection.execute(
+                    """
+                    UPDATE users
+                    SET display_name = COALESCE(?, display_name),
+                        status = COALESCE(?, status),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (display_name, status, user_id),
+                )
+        if display_name is not None and status == "disabled":
+            with self.connect() as connection:
+                connection.execute(
+                    "UPDATE users SET display_name = ? WHERE id = ?",
+                    (display_name, user_id),
+                )
+        user = self.get_user(user_id)
+        assert user is not None
+        return user
+
+    def replace_user_roles(
+        self, user_id: str, role_ids: list[str]
+    ) -> list[str]:
+        unique_role_ids = list(dict.fromkeys(role_ids))
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            user = connection.execute(
+                "SELECT status, is_deleted FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            if user is None or user["is_deleted"]:
+                raise KeyError(user_id)
+            role_placeholders = ",".join("?" for _ in unique_role_ids)
+            roles = connection.execute(
+                f"SELECT id, code, is_enabled FROM roles "
+                f"WHERE id IN ({role_placeholders})"
+                if unique_role_ids
+                else "SELECT id, code, is_enabled FROM roles WHERE 0",
+                unique_role_ids,
+            ).fetchall()
+            if len(roles) != len(unique_role_ids):
+                raise ValueError("角色不存在")
+            currently_admin = connection.execute(
+                """
+                SELECT 1 FROM user_roles AS ur
+                JOIN roles AS r ON r.id = ur.role_id
+                WHERE ur.user_id = ? AND r.code = 'system_admin' AND r.is_enabled = 1
+                """,
+                (user_id,),
+            ).fetchone() is not None
+            remains_admin = any(
+                role["code"].casefold() == "system_admin" and role["is_enabled"]
+                for role in roles
+            )
+            if (
+                currently_admin
+                and user["status"] == "active"
+                and not remains_admin
+            ):
+                other_admins = connection.execute(
+                    """
+                    SELECT COUNT(DISTINCT u.id)
+                    FROM users AS u
+                    JOIN user_roles AS ur ON ur.user_id = u.id
+                    JOIN roles AS r ON r.id = ur.role_id
+                    WHERE u.status = 'active' AND u.is_deleted = 0
+                      AND r.code = 'system_admin' AND r.is_enabled = 1
+                      AND u.id <> ?
+                    """,
+                    (user_id,),
+                ).fetchone()[0]
+                if other_admins < 1:
+                    raise ValueError("系统必须至少保留一个启用的系统管理员")
+            connection.execute("DELETE FROM user_roles WHERE user_id = ?", (user_id,))
+            connection.executemany(
+                "INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)",
+                [(user_id, role_id) for role_id in unique_role_ids],
+            )
+        return sorted(role["code"] for role in roles)
+
+    def user_role_codes(self, user_id: str) -> list[str]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT r.code FROM user_roles AS ur
+                JOIN roles AS r ON r.id = ur.role_id
+                WHERE ur.user_id = ? ORDER BY r.code
+                """,
+                (user_id,),
+            ).fetchall()
+        return [row["code"] for row in rows]
 
     def count_active_system_admins(
         self,
@@ -374,3 +625,12 @@ class IdentityRepository:
         role["is_system"] = bool(role["is_system"])
         role["is_enabled"] = bool(role["is_enabled"])
         return role
+
+    def _user_dict(self, row: sqlite3.Row) -> dict[str, Any]:
+        user = dict(row)
+        user["role_codes"] = self.user_role_codes(user["id"])
+        user.pop("password_hash", None)
+        user.pop("normalized_username", None)
+        user.pop("is_deleted", None)
+        user.pop("updated_at", None)
+        return user

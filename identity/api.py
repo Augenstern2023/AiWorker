@@ -14,12 +14,23 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from .dependencies import require_permission
 from .password_service import PasswordService
+from .permission_catalog import PERMISSIONS, PERMISSION_DEPENDENCIES
+from .permission_service import PermissionService
 from .repository import IdentityRepository
+from .schema import (
+    Principal,
+    RoleCreateRequest,
+    RolePermissionRequest,
+    RoleUpdateRequest,
+    UserCreateRequest,
+    UserUpdateRequest,
+)
 from .session_service import SessionContext, SessionService
 
 
@@ -43,10 +54,33 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
+class ResetPasswordRequest(BaseModel):
+    password: str
+
+
+class UserRolesRequest(BaseModel):
+    role_ids: list[str]
+
+
+class RolePermissionsRequest(BaseModel):
+    permissions: list[RolePermissionRequest]
+
+
+class RoleCloneRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_.-]*$")
+    name: str = Field(min_length=1, max_length=128)
+    description: str | None = None
+
+
 def build_identity_router(
     repository: IdentityRepository, session_service: SessionService
 ) -> APIRouter:
-    router = APIRouter()
+    permission_service = PermissionService(repository, session_service)
+
+    def bind_permission_service(request: Request) -> None:
+        request.state.identity_permission_service = permission_service
+
+    router = APIRouter(dependencies=[Depends(bind_permission_service)])
     password_service = PasswordService()
     dummy_password_hash = password_service.hash("Dummy-Password-123!")
     repository.seed_defaults()
@@ -60,7 +94,12 @@ def build_identity_router(
             raw_token or "", request.headers.get("X-CSRF-Token")
         ):
             raise HTTPException(status_code=403, detail="CSRF 校验失败")
-        return context
+        principal = permission_service.principal_for_user(
+            context.principal.user_id, context.principal.session_id
+        )
+        if principal is None:
+            raise HTTPException(status_code=401, detail="登录已失效，请重新登录")
+        return SessionContext(principal=principal, csrf_token=context.csrf_token)
 
     @router.get("/login", response_class=HTMLResponse)
     def login_page() -> HTMLResponse:
@@ -230,6 +269,263 @@ def build_identity_router(
         )
         return response
 
+    admin_read = require_permission("*")
+
+    def admin_write(
+        request: Request, principal: Principal = Depends(admin_read)
+    ) -> Principal:
+        session_context(request, require_csrf=True)
+        return principal
+
+    @router.get("/api/admin/users")
+    def list_users(_: Principal = Depends(admin_read)) -> list[dict[str, Any]]:
+        return repository.list_users()
+
+    @router.post("/api/admin/users", status_code=201)
+    def create_user(
+        payload: UserCreateRequest, _: Principal = Depends(admin_write)
+    ) -> dict[str, Any]:
+        username = payload.username.strip()
+        display_name = payload.display_name.strip()
+        if not username or not display_name:
+            raise HTTPException(
+                status_code=422, detail="用户名和显示名称不能为空"
+            )
+        _validate_role_ids(payload.role_ids)
+        try:
+            password_hash = password_service.hash(payload.password)
+            user = repository.create_user(username, display_name, password_hash)
+            repository.replace_user_roles(user["id"], payload.role_ids)
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="用户名已存在") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return _user_response(user["id"])
+
+    @router.patch("/api/admin/users/{user_id}")
+    def update_user(
+        user_id: str,
+        payload: UserUpdateRequest,
+        _: Principal = Depends(admin_write),
+    ) -> dict[str, Any]:
+        try:
+            if payload.role_ids is not None:
+                _validate_role_ids(payload.role_ids)
+                repository.replace_user_roles(user_id, payload.role_ids)
+            repository.update_user(
+                user_id,
+                display_name=(
+                    payload.display_name.strip()
+                    if payload.display_name is not None
+                    else None
+                ),
+                status=payload.status,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="用户不存在") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return _user_response(user_id)
+
+    @router.post("/api/admin/users/{user_id}/reset-password", status_code=204)
+    def reset_password(
+        user_id: str,
+        payload: ResetPasswordRequest,
+        _: Principal = Depends(admin_write),
+    ) -> Response:
+        if repository.get_user(user_id) is None:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        try:
+            password_hash = password_service.hash(payload.password)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        with repository.connect() as connection:
+            connection.execute(
+                """
+                UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (password_hash, user_id),
+            )
+            connection.execute(
+                "UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP "
+                "WHERE user_id = ? AND revoked_at IS NULL",
+                (user_id,),
+            )
+        return Response(status_code=204)
+
+    @router.put("/api/admin/users/{user_id}/roles")
+    def replace_user_roles(
+        user_id: str,
+        payload: UserRolesRequest,
+        _: Principal = Depends(admin_write),
+    ) -> dict[str, Any]:
+        try:
+            _validate_role_ids(payload.role_ids)
+            repository.replace_user_roles(user_id, payload.role_ids)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="用户不存在") from exc
+        except ValueError as exc:
+            status_code = 409 if "系统管理员" in str(exc) else 422
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        return _user_response(user_id)
+
+    @router.get("/api/admin/roles")
+    def list_roles(_: Principal = Depends(admin_read)) -> list[dict[str, Any]]:
+        return [_role_response(role) for role in repository.list_roles()]
+
+    @router.post("/api/admin/roles", status_code=201)
+    def create_role(
+        payload: RoleCreateRequest, _: Principal = Depends(admin_write)
+    ) -> dict[str, Any]:
+        try:
+            grants = _permission_pairs(payload.permissions)
+            _validate_permission_pairs(grants)
+            role = repository.create_role(
+                payload.code, payload.name.strip(), payload.description
+            )
+            repository.replace_role_permissions(role["id"], grants)
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="角色编码已存在") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return _role_response(role)
+
+    @router.patch("/api/admin/roles/{role_id}")
+    def update_role(
+        role_id: str,
+        payload: RoleUpdateRequest,
+        _: Principal = Depends(admin_write),
+    ) -> dict[str, Any]:
+        try:
+            if payload.permissions is not None:
+                _replace_permissions(role_id, payload.permissions)
+            role = repository.update_role(
+                role_id,
+                name=payload.name.strip() if payload.name is not None else None,
+                description=payload.description,
+                is_enabled=payload.is_enabled,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="角色不存在") from exc
+        except ValueError as exc:
+            status_code = 409 if "系统管理员" in str(exc) else 422
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        return _role_response(role)
+
+    @router.post("/api/admin/roles/{role_id}/clone", status_code=201)
+    def clone_role(
+        role_id: str,
+        payload: RoleCloneRequest,
+        _: Principal = Depends(admin_write),
+    ) -> dict[str, Any]:
+        source = repository.get_role(role_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="角色不存在")
+        try:
+            role = repository.create_role(
+                payload.code,
+                payload.name.strip(),
+                source["description"]
+                if payload.description is None
+                else payload.description,
+            )
+            source_permissions = repository.list_role_permissions(role_id)
+            repository.replace_role_permissions(
+                role["id"],
+                [
+                    (item["permission_code"], item["data_scope"])
+                    for item in source_permissions
+                ],
+            )
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="角色编码已存在") from exc
+        return _role_response(role)
+
+    @router.put("/api/admin/roles/{role_id}/permissions")
+    def replace_role_permissions(
+        role_id: str,
+        payload: RolePermissionsRequest,
+        _: Principal = Depends(admin_write),
+    ) -> dict[str, Any]:
+        try:
+            _replace_permissions(role_id, payload.permissions)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="角色不存在") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        role = repository.get_role(role_id)
+        assert role is not None
+        return _role_response(role)
+
+    @router.get("/api/admin/permissions")
+    def list_permissions(_: Principal = Depends(admin_read)) -> list[dict[str, Any]]:
+        with repository.connect() as connection:
+            rows = connection.execute(
+                "SELECT code, label FROM permissions ORDER BY code"
+            ).fetchall()
+        return [
+            {
+                "code": row["code"],
+                "label": row["label"],
+                "dependencies": sorted(PERMISSION_DEPENDENCIES.get(row["code"], ())),
+            }
+            for row in rows
+        ]
+
+    def _validate_role_ids(role_ids: list[str]) -> None:
+        known = {role["id"] for role in repository.list_roles()}
+        if not set(role_ids) <= known:
+            raise HTTPException(status_code=422, detail="角色不存在")
+
+    def _user_response(user_id: str) -> dict[str, Any]:
+        user = repository.get_user(user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        return user
+
+    def _role_response(role: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **role,
+            "permissions": repository.list_role_permissions(role["id"]),
+        }
+
+    def _permission_pairs(
+        permissions: list[RolePermissionRequest],
+    ) -> list[tuple[str, str]]:
+        return [
+            (permission.permission_code, permission.data_scope)
+            for permission in permissions
+        ]
+
+    def _validate_permission_pairs(grants: list[tuple[str, str]]) -> None:
+        unknown = {code for code, _ in grants} - set(PERMISSIONS)
+        if unknown:
+            raise ValueError(f"未知权限: {', '.join(sorted(unknown))}")
+
+    def _replace_permissions(
+        role_id: str, permissions: list[RolePermissionRequest]
+    ) -> None:
+        role = repository.get_role(role_id)
+        if role is None:
+            raise KeyError(role_id)
+        grants = _permission_pairs(permissions)
+        _validate_permission_pairs(grants)
+        requested_codes = {code for code, _ in grants}
+        required_codes = set(permission_service.expand_permissions(grants)) - requested_codes
+        existing_codes = {
+            item["permission_code"]
+            for item in repository.list_role_permissions(role_id)
+        }
+        removed_dependencies = sorted(required_codes & existing_codes - requested_codes)
+        if removed_dependencies:
+            raise ValueError(
+                "仍被高级权限依赖，不能移除: " + ", ".join(removed_dependencies)
+            )
+        if role["code"].casefold() == "system_admin" and "*" not in requested_codes:
+            raise ValueError("系统管理员角色必须保留通配权限")
+        repository.replace_role_permissions(role_id, grants)
+
     def authenticated_response(
         user_id: str,
         request: Request,
@@ -241,6 +537,12 @@ def build_identity_router(
         context = session_service.resolve_session(raw_token)
         if context is None:
             raise HTTPException(status_code=500, detail="无法创建登录会话")
+        principal = permission_service.principal_for_user(
+            context.principal.user_id, context.principal.session_id
+        )
+        if principal is None:
+            raise HTTPException(status_code=500, detail="无法创建登录会话")
+        context = SessionContext(principal=principal, csrf_token=context.csrf_token)
         if update_last_login:
             with repository.connect() as connection:
                 connection.execute(

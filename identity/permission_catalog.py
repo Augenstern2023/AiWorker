@@ -93,7 +93,7 @@ _PERMISSION_CODES = (
 )
 
 # The catalog is intentionally a mapping: membership checks use permission codes,
-# while seeding has a stable human-readable label to update idempotently.
+# while seeding has a stable fallback display label to update idempotently.
 PERMISSIONS = {code: code for code in _PERMISSION_CODES}
 
 PERMISSION_DEPENDENCIES = {

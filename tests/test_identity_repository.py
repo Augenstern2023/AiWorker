@@ -100,6 +100,63 @@ def test_seed_defaults_is_idempotent_and_preserves_custom_bindings(tmp_path: Pat
     assert repository.get_role_by_code("selection_operator")["description"] != "stale"
 
 
+def test_seed_defaults_removes_stale_system_grants_and_dependencies(tmp_path: Path):
+    repository = IdentityRepository(tmp_path / "system.db")
+    repository.seed_defaults()
+    admin_role = repository.get_role_by_code("system_admin")
+    assert admin_role is not None
+
+    with repository.connect() as connection:
+        connection.execute(
+            "INSERT INTO permissions (code, label) VALUES ('stale.permission', 'Stale')"
+        )
+        connection.execute(
+            "INSERT INTO role_permissions (role_id, permission_code, data_scope) "
+            "VALUES (?, 'stale.permission', 'all')",
+            (admin_role["id"],),
+        )
+        connection.execute(
+            "INSERT INTO permission_dependencies (permission_code, depends_on_code) "
+            "VALUES ('breakdown.edit', 'stale.permission')"
+        )
+
+    repository.seed_defaults()
+
+    assert repository.list_role_permissions(admin_role["id"]) == [
+        {"permission_code": "*", "data_scope": "all"},
+    ]
+    with repository.connect() as connection:
+        stale_dependency_count = connection.execute(
+            """
+            SELECT COUNT(*) FROM permission_dependencies
+            WHERE permission_code = 'breakdown.edit'
+              AND depends_on_code = 'stale.permission'
+            """
+        ).fetchone()[0]
+    assert stale_dependency_count == 0
+
+
+def test_default_roles_materialize_permission_dependency_closure(tmp_path: Path):
+    repository = IdentityRepository(tmp_path / "system.db")
+    repository.seed_defaults()
+    planner = repository.get_role_by_code("creative_planner")
+    writer = repository.get_role_by_code("screenwriter")
+    assert planner is not None
+    assert writer is not None
+
+    planner_permissions = {
+        permission["permission_code"]
+        for permission in repository.list_role_permissions(planner["id"])
+    }
+    writer_permissions = {
+        permission["permission_code"]
+        for permission in repository.list_role_permissions(writer["id"])
+    }
+
+    assert {"brief.read.approved", "page.planning"} <= planner_permissions
+    assert {"outline.read.approved", "page.writing"} <= writer_permissions
+
+
 def test_permission_dependencies_are_seeded(tmp_path: Path):
     repository = IdentityRepository(tmp_path / "system.db")
     repository.seed_defaults()

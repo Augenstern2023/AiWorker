@@ -192,6 +192,9 @@ class IdentityRepository:
                     (code, label),
                 )
 
+            # Dependency edges belong to the system catalog, so reseeding makes
+            # this table an exact projection rather than retaining retired edges.
+            connection.execute("DELETE FROM permission_dependencies")
             for permission_code, dependencies in PERMISSION_DEPENDENCIES.items():
                 for depends_on_code in dependencies:
                     connection.execute(
@@ -220,6 +223,12 @@ class IdentityRepository:
                 stored_role_id = connection.execute(
                     "SELECT id FROM roles WHERE code = ?", (role.code,)
                 ).fetchone()["id"]
+                # Default-role grants are system-owned. Custom-role grants and
+                # every user-role binding remain untouched.
+                connection.execute(
+                    "DELETE FROM role_permissions WHERE role_id = ?",
+                    (stored_role_id,),
+                )
                 for permission_code, data_scope in self._expanded_permissions(role.permissions):
                     connection.execute(
                         """

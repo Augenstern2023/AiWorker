@@ -163,6 +163,12 @@ window.aiworkerModules.push(() => ({
                         && (topicId === null || Number(item.topic_id) === Number(topicId))
                     );
                     if (!task) throw new Error('当前没有可提交的创作任务，请先领取或开始对应任务');
+                    if (['assigned', 'returned'].includes(task.status)) {
+                        const startResponse = await aiworkerApi.request(`/api/workflow/tasks/${task.id}/start`, {method: 'POST'});
+                        const started = await startResponse.json();
+                        if (!startResponse.ok) throw new Error(started.detail || '开始创作任务失败');
+                        return started;
+                    }
                     return task;
                 },
 
@@ -200,7 +206,7 @@ window.aiworkerModules.push(() => ({
                     const project = this.creativeWorkspace.project;
                     if (!project) return '';
                     const drafts = (project.characters || [])
-                        .filter(item => item.status === 'draft')
+                        .filter(item => ['draft', 'submitted', 'returned'].includes(item.status))
                         .sort((a, b) => Number(b.version) - Number(a.version));
                     if (drafts.length) return drafts[0].batch_id;
                     if (project.character_batch_id) return project.character_batch_id;
@@ -218,11 +224,15 @@ window.aiworkerModules.push(() => ({
                     return (this.creativeWorkspace.project?.relationships || []).filter(item => item.batch_id === batch);
                 },
 
+                currentCharacterBatchStatus() {
+                    return this.currentProjectCharacters()[0]?.status || 'draft';
+                },
+
                 latestOutlineBatchId() {
                     const project = this.creativeWorkspace.project;
                     if (!project) return '';
                     const drafts = (project.episodes || [])
-                        .filter(item => item.stage === 'outline' && item.status === 'draft')
+                        .filter(item => item.stage === 'outline' && ['draft', 'submitted', 'returned'].includes(item.status))
                         .sort((a, b) => Number(b.version) - Number(a.version));
                     if (drafts.length) return drafts[0].batch_id;
                     if (project.outline_batch_id) return project.outline_batch_id;
@@ -235,6 +245,10 @@ window.aiworkerModules.push(() => ({
                     return (this.creativeWorkspace.project?.episodes || [])
                         .filter(item => item.stage === 'outline' && item.batch_id === batch)
                         .sort((a, b) => Number(a.episode_number) - Number(b.episode_number));
+                },
+
+                currentOutlineBatchStatus() {
+                    return this.currentProjectOutlines()[0]?.status || 'draft';
                 },
 
                 selectedProjectBeats() {

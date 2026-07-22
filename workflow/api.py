@@ -32,6 +32,9 @@ def build_workflow_router(
 ) -> APIRouter:
     router = APIRouter()
     transitions = transition_service or TransitionService(repository)
+    creative_resource_types = {
+        "breakdown", "brief", "characters", "outline", "beats"
+    }
 
     @router.get("/api/workflow/tasks")
     def list_tasks(
@@ -50,6 +53,9 @@ def build_workflow_router(
         task = repository.get_visible_task(task_id, principal)
         if task is None:
             raise HTTPException(status_code=404, detail="workflow task not found")
+        transitions.reconcile_task(task_id)
+        task = repository.get_visible_task(task_id, principal)
+        assert task is not None
         return _task_view(repository, task, principal)
 
     @router.post("/api/workflow/tasks/{task_id}/claim")
@@ -150,6 +156,13 @@ def build_workflow_router(
         principal: Principal = Depends(current_principal),
     ) -> dict[str, Any]:
         _visible_task(repository, task_id, principal)
+        if (
+            payload.resource_type in creative_resource_types
+            and transitions.creative_adapter is None
+        ):
+            raise HTTPException(
+                status_code=503, detail="creative workflow adapter is unavailable"
+            )
         return _call(
             transitions.create_submission,
             task_id,
@@ -165,14 +178,21 @@ def build_workflow_router(
         principal: Principal = Depends(current_principal),
     ) -> list[dict[str, Any]]:
         _visible_task(repository, task_id, principal)
-        return _call(repository.list_task_submissions, task_id)
+        return _call(transitions.list_task_submissions, task_id)
 
     @router.post("/api/workflow/submissions/{submission_id}/submit")
     def submit_submission(
         submission_id: str,
         principal: Principal = Depends(current_principal),
     ) -> dict[str, Any]:
-        _visible_submission(repository, submission_id, principal)
+        submission = _visible_submission(repository, submission_id, principal)
+        if (
+            submission["resource_type"] in creative_resource_types
+            and transitions.creative_adapter is None
+        ):
+            raise HTTPException(
+                status_code=503, detail="creative workflow adapter is unavailable"
+            )
         return _call(transitions.submit, submission_id, principal)
 
     @router.post("/api/workflow/submissions/{submission_id}/approve")
@@ -180,7 +200,14 @@ def build_workflow_router(
         submission_id: str,
         principal: Principal = Depends(current_principal),
     ) -> dict[str, Any]:
-        _visible_submission(repository, submission_id, principal)
+        submission = _visible_submission(repository, submission_id, principal)
+        if (
+            submission["resource_type"] in creative_resource_types
+            and transitions.creative_adapter is None
+        ):
+            raise HTTPException(
+                status_code=503, detail="creative workflow adapter is unavailable"
+            )
         return _call(transitions.approve, submission_id, principal)
 
     @router.post("/api/workflow/submissions/{submission_id}/return")
@@ -189,7 +216,14 @@ def build_workflow_router(
         payload: SubmissionReturnRequest,
         principal: Principal = Depends(current_principal),
     ) -> dict[str, Any]:
-        _visible_submission(repository, submission_id, principal)
+        submission = _visible_submission(repository, submission_id, principal)
+        if (
+            submission["resource_type"] in creative_resource_types
+            and transitions.creative_adapter is None
+        ):
+            raise HTTPException(
+                status_code=503, detail="creative workflow adapter is unavailable"
+            )
         return _call(
             transitions.return_submission,
             submission_id,
@@ -202,7 +236,14 @@ def build_workflow_router(
         submission_id: str,
         principal: Principal = Depends(current_principal),
     ) -> dict[str, Any]:
-        _visible_submission(repository, submission_id, principal)
+        submission = _visible_submission(repository, submission_id, principal)
+        if (
+            submission["resource_type"] in creative_resource_types
+            and transitions.creative_adapter is None
+        ):
+            raise HTTPException(
+                status_code=503, detail="creative workflow adapter is unavailable"
+            )
         return _call(transitions.fork, submission_id, principal)
 
     return router

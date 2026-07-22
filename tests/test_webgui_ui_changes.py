@@ -99,7 +99,7 @@ def test_webgui_registers_phase4_routes_and_flat_project_workspace():
     assert "/planning/projects" in _source("web/navigation_service.py")
     assert "fetchCreativeProjects" in html
     assert "generateProjectBlueprints" in html
-    assert "lockProjectBrief" in html
+    assert "submitProjectBrief" in html
     assert "generateProjectCharacters" in html
     assert "generateProjectOutlines" in html
     assert "generateProjectBeats" in html
@@ -144,8 +144,8 @@ def test_draft_breakdowns_are_visible_but_not_project_eligible():
 
     assert "breakdownStatusLabel(topic)" in html
     assert "breakdownStatusClass(topic)" in html
-    assert "草稿${version} · 待锁定" in html
-    assert "草稿${version} · 已有锁定版" in html
+    assert "草稿${version} · 待提交" in html
+    assert "草稿${version} · 已有批准版" in html
     assert "继续拆解" in html
     assert "aiworkerApi.request('/api/creative/topics?status=adopted&limit=500')" in html
     assert ':disabled="!topic.locked_breakdown_id"' in html
@@ -339,7 +339,7 @@ def test_breakdown_editor_opens_in_modal_instead_of_page_bottom():
     assert "item.evidence_rule" in html
     assert "openBreakdownEditor" in html
     assert "saveBreakdownEditor" in html
-    assert "lockBreakdownEditor" in html
+    assert "submitBreakdownEditor" in html
     assert "this.modal('breakdownEditorModal')" in html
     assert "normalizeBreakdownEditorContent" in html
     assert "breakdownEditor.draft" not in html
@@ -570,7 +570,7 @@ def test_hongguo_drama_routes_replace_legacy_proxy_routes():
     assert "/api/hongguo/drama/download/search" in html
     assert "全剧下载" in html
     assert "后台下载" in html
-    assert "breakdownEditor.record?.status === 'locked'" in html
+    assert "breakdownEditor.record?.status !== 'draft'" in html
     assert "episodesLoading" in html
     assert 'x-show="dramaDownload.searching"' in html
     assert "onDramaTitleInput" in html

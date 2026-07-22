@@ -41,8 +41,8 @@
                         <template x-for="item in breakdownEditor.fieldGuide" :key="item.key">
                             <div class="col-12 border-bottom border-secondary-subtle pb-3">
                                 <div class="d-flex align-items-center justify-content-between gap-2 mb-2"><label class="form-label fw-semibold mb-0" x-text="item.label"></label><span class="badge bg-secondary" x-text="item.type"></span></div>
-                                <template x-if="item.type !== '数组'"><textarea class="form-control" rows="3" x-model="breakdownEditor.content[item.key]" :disabled="breakdownEditor.record?.status === 'locked'"></textarea></template>
-                                <template x-if="item.type === '数组'"><div class="vstack gap-2"><template x-for="(entry, index) in breakdownEditor.content[item.key]" :key="`${item.key}-${index}`"><div class="input-group"><textarea class="form-control" rows="2" x-model="breakdownEditor.content[item.key][index]" :disabled="breakdownEditor.record?.status === 'locked'"></textarea><button type="button" class="btn btn-outline-danger" @click="removeBreakdownArrayItem(item.key, index)" :disabled="breakdownEditor.record?.status === 'locked'" title="删除此项" aria-label="删除此项"><i class="bi bi-trash"></i></button></div></template><button type="button" class="btn btn-sm btn-outline-light align-self-start" @click="addBreakdownArrayItem(item.key)" :disabled="breakdownEditor.record?.status === 'locked'" title="添加一项" aria-label="添加一项"><i class="bi bi-plus-lg"></i></button></div></template>
+                                <template x-if="item.type !== '数组'"><textarea class="form-control" rows="3" x-model="breakdownEditor.content[item.key]" :disabled="breakdownEditor.record?.status !== 'draft'"></textarea></template>
+                                <template x-if="item.type === '数组'"><div class="vstack gap-2"><template x-for="(entry, index) in breakdownEditor.content[item.key]" :key="`${item.key}-${index}`"><div class="input-group"><textarea class="form-control" rows="2" x-model="breakdownEditor.content[item.key][index]" :disabled="breakdownEditor.record?.status !== 'draft'"></textarea><button type="button" class="btn btn-outline-danger" @click="removeBreakdownArrayItem(item.key, index)" :disabled="breakdownEditor.record?.status !== 'draft'" title="删除此项" aria-label="删除此项"><i class="bi bi-trash"></i></button></div></template><button type="button" class="btn btn-sm btn-outline-light align-self-start" @click="addBreakdownArrayItem(item.key)" :disabled="breakdownEditor.record?.status !== 'draft'" title="添加一项" aria-label="添加一项"><i class="bi bi-plus-lg"></i></button></div></template>
                                 <div class="small text-muted mt-2" x-text="item.description"></div>
                                 <div class="small text-info mt-1"><span>写法：</span><span x-text="item.writing_prompt"></span></div>
                                 <div class="small text-warning mt-1"><span>示例：</span><span x-text="item.example"></span></div>
@@ -50,12 +50,12 @@
                             </div>
                         </template>
                     </div>
-                    <div class="small text-muted mt-2">内容字段来源和风险信息保留在拆解版本中。提交后不可覆盖；状态：待审批、已批准或已退回。</div>
+                    <div class="small text-muted mt-2">内容字段来源和风险信息保留在拆解版本中。提交后不可覆盖。<span class="badge text-bg-secondary ms-2" x-text="breakdownRecordStatusLabel(breakdownEditor.record?.status)"></span><span class="visually-hidden">待审批 已批准 已退回 已替代</span></div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">关闭</button>
                     <button type="button" class="btn btn-outline-info" @click="regenerateCurrentBreakdown" :disabled="breakdownEditor.saving || breakdownGenerationRunning()"><i class="bi bi-arrow-clockwise me-1"></i>重新生成</button>
-                    <button type="button" class="btn btn-outline-light" @click="saveBreakdownEditor" :disabled="breakdownEditor.saving || breakdownEditor.record?.status === 'locked'"><i class="bi bi-save me-1"></i>保存草稿</button>
+                    <button type="button" class="btn btn-outline-light" @click="saveBreakdownEditor" :disabled="breakdownEditor.saving || breakdownEditor.record?.status !== 'draft'"><i class="bi bi-save me-1"></i>保存草稿</button>
                     <button type="button" class="btn btn-warning" @click="submitBreakdownEditor" :disabled="breakdownEditor.saving || breakdownEditor.record?.status !== 'draft'"><i class="bi bi-send me-1"></i>提交审批</button>
                 </div>
             </div>

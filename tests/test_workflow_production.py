@@ -122,7 +122,7 @@ def test_production_workflow_uses_real_auth_csrf_and_role_filtered_listing() -> 
             f"/api/workflow/tasks/{visible['id']}/submissions",
             headers={"X-CSRF-Token": csrf_token},
             json={
-                "resource_type": "breakdown",
+                    "resource_type": "production_artifact",
                 "resource_id": f"production-resource-{suffix}",
                 "content": {"verified": True},
             },

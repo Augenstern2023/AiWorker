@@ -550,6 +550,13 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
+                breakdownRecordStatusLabel(status) {
+                    return {
+                        draft: '草稿', submitted: '待审批', approved: '已批准',
+                        returned: '已退回', superseded: '已替代', locked: '已批准'
+                    }[status] || status || '草稿';
+                },
+
                 async submitBreakdownEditor() {
                     const record = this.breakdownEditor.record;
                     if (!record || record.status !== 'draft') return;
@@ -565,6 +572,12 @@ window.aiworkerModules.push(() => ({
                             && Number(item.topic_id) === Number(record.topic_id)
                         );
                         if (!task) throw new Error('当前没有可提交的拆解任务，请先领取或开始任务');
+                        if (['assigned', 'returned'].includes(task.status)) {
+                            const startResponse = await aiworkerApi.request(`/api/workflow/tasks/${task.id}/start`, {method: 'POST'});
+                            const started = await startResponse.json();
+                            if (!startResponse.ok) throw new Error(started.detail || '开始拆解任务失败');
+                            task.status = started.status;
+                        }
                         const res = await aiworkerApi.request('/api/creative/workflow/submit', {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json'},

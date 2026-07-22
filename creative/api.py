@@ -288,6 +288,7 @@ def build_creative_router(
         return permission_service.principal_for_session(token)
 
     def project_or_404(project_id: int) -> dict[str, Any]:
+        workflow_adapter.reconcile_project(project_id)
         project = repository.get_project(project_id)
         if not project:
             raise HTTPException(404, "creative project not found")
@@ -391,6 +392,23 @@ def build_creative_router(
             limit=500 if lifecycle_status else limit,
         )
         items = lifecycle_service.enrich_topics(topics)
+        for item in items:
+            if item.get("latest_breakdown_id"):
+                workflow_adapter.reconcile_resource(
+                    "breakdown", str(item["latest_breakdown_id"])
+                )
+        if any(item.get("latest_breakdown_id") for item in items):
+            topics = repository.list_topics(
+                platform=platform,
+                status=status,
+                category=category,
+                min_score=min_score,
+                max_score=max_score,
+                captured_date=captured_date,
+                has_locked_breakdown=has_locked_breakdown,
+                limit=500 if lifecycle_status else limit,
+            )
+            items = lifecycle_service.enrich_topics(topics)
         if lifecycle_status:
             items = [item for item in items if item.get("lifecycle_status") == lifecycle_status]
         return {"items": items[:limit]}
@@ -400,6 +418,12 @@ def build_creative_router(
         topic = lifecycle_service.enrich_topic(topic_id)
         if not topic:
             raise HTTPException(404, "topic not found")
+        if topic.get("latest_breakdown_id"):
+            workflow_adapter.reconcile_resource(
+                "breakdown", str(topic["latest_breakdown_id"])
+            )
+            topic = lifecycle_service.enrich_topic(topic_id)
+            assert topic is not None
         return topic
 
     @router.get("/topics/{topic_id}/transcripts")
@@ -434,6 +458,9 @@ def build_creative_router(
             raise HTTPException(404, "topic not found")
         if status != "locked":
             raise HTTPException(400, "only locked breakdown versions are available for project creation")
+        items = repository.list_locked_breakdowns(topic_id)
+        for item in items:
+            workflow_adapter.reconcile_resource("breakdown", str(item["id"]))
         items = repository.list_locked_breakdowns(topic_id)
         for item in items:
             item["field_guide"] = personalize_breakdown_field_guide(item["content"])
@@ -517,6 +544,7 @@ def build_creative_router(
 
     @router.get("/breakdowns/{breakdown_id}")
     async def get_breakdown(breakdown_id: int):
+        workflow_adapter.reconcile_resource("breakdown", str(breakdown_id))
         breakdown = repository.get_breakdown(breakdown_id)
         if not breakdown:
             raise HTTPException(404, "breakdown not found")
@@ -583,6 +611,9 @@ def build_creative_router(
 
     @router.get("/projects")
     async def list_projects(topic_id: int | None = None):
+        items = repository.list_projects(topic_id=topic_id)
+        for item in items:
+            workflow_adapter.reconcile_project(int(item["id"]))
         return {"items": repository.list_projects(topic_id=topic_id)}
 
     @router.get("/projects/{project_id}")

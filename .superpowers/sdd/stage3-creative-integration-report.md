@@ -51,3 +51,25 @@ All passed
 - Supporting edits were required in `workflow/approval_service.py`, `workflow/repository.py`, the two creative workers, `static/js/selection/topics.js`, and `project_list.html`. These are directly required for transactional return registry updates, approved-resource worker reads, task linkage propagation, and approved-breakdown eligibility in the UI; no Job ownership behavior changed.
 - The runtime still exposes legacy `locked` and `brief_locked` values for compatibility, but new creative UI actions do not write them.
 - The existing SQLAlchemy 2.0 deprecation warning in `database/models.py` remains unrelated to this task.
+
+## Review Remediation
+
+Follow-up review findings were addressed with additional red-green cycles:
+
+- Generic workflow creation now ignores client creative content and delegates creative drafts and submits to the adapter. Existing drafts are resnapshotted from the creative database and the snapshot/fingerprint are replaced atomically with submission.
+- Returned clones were edited and resubmitted through approval for all five resource types in regression coverage.
+- Replayed Brief and character approvals preserve existing downstream pointers when the approved resource is already current.
+- Character, outline, and Beats submission and approval validate their live approved upstream pointers and embedded upstream references. Stale resources cannot submit or approve.
+- Creative project/topic/resource GETs and workflow task/submission detail reads retry pending idempotent mirrors.
+- All creative editors and submit controls now use draft-only editability and surface workflow status labels, including superseded versions.
+
+Follow-up verification:
+
+```text
+uv run pytest <all creative tests> <all workflow tests> tests/test_role_page_content.py tests/test_webgui_ui_changes.py -q
+199 passed, 1 pre-existing SQLAlchemy deprecation warning
+
+uv run pytest tests/ -q
+430 passed; 4 updated UI expectations initially failed and were corrected for the approval workflow.
+1 unrelated pre-existing store-factory assertion remained outside the creative/workflow/UI scope.
+```

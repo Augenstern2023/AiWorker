@@ -56,6 +56,13 @@ class TransitionService:
         content: Any,
         actor: Principal,
     ) -> dict[str, Any]:
+        if (
+            self.creative_adapter is not None
+            and resource_type in {"breakdown", "brief", "characters", "outline", "beats"}
+        ):
+            return self.creative_adapter.create_draft(
+                task_id, resource_type, resource_id, actor
+            )
         return self.approval_service.create_draft(
             task_id=task_id,
             resource_type=resource_type,
@@ -65,6 +72,14 @@ class TransitionService:
         )
 
     def submit(self, submission_id: str, actor: Principal) -> dict[str, Any]:
+        submission = self.approval_service.get_submission(submission_id)
+        if (
+            submission is not None
+            and self.creative_adapter is not None
+            and submission["resource_type"]
+            in {"breakdown", "brief", "characters", "outline", "beats"}
+        ):
+            return self.creative_adapter.submit_draft(submission_id, actor)
         return self.approval_service.submit(submission_id, actor)
 
     def approve(self, submission_id: str, actor: Principal) -> dict[str, Any]:
@@ -74,6 +89,13 @@ class TransitionService:
             )
             if current is None:
                 raise KeyError(submission_id)
+            if (
+                current["status"] == "submitted"
+                and self.creative_adapter is not None
+                and current["resource_type"]
+                in {"breakdown", "brief", "characters", "outline", "beats"}
+            ):
+                self.creative_adapter.assert_approvable(current)
             if current["status"] == "approved":
                 self._assert_repeated_approval_allowed(
                     current, actor, connection=connection
@@ -152,6 +174,16 @@ class TransitionService:
 
     def fork(self, submission_id: str, actor: Principal) -> dict[str, Any]:
         return self.approval_service.fork(submission_id, actor)
+
+    def list_task_submissions(self, task_id: str) -> list[dict[str, Any]]:
+        submissions = self.repository.list_task_submissions(task_id)
+        if self.creative_adapter is not None:
+            for submission in submissions:
+                self.creative_adapter.reconcile_submission(submission)
+        return self.repository.list_task_submissions(task_id)
+
+    def reconcile_task(self, task_id: str) -> None:
+        self.list_task_submissions(task_id)
 
     def _assert_repeated_approval_allowed(
         self,

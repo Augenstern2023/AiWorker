@@ -271,3 +271,11 @@ def test_creative_workflow_ui_submits_and_reviews_without_direct_locks():
     assert "writeReview(submission, 'return'" in approvals
     assert "review_comment" in approvals
     assert "trim()" in approvals
+    assert "breakdownEditor.record?.status === 'locked'" not in workspace
+    assert "breakdownRecordStatusLabel" in workspace + breakdowns
+    assert "creativeWorkflowStatusLabel(currentCharacterBatchStatus())" in workspace
+    assert "creativeWorkflowStatusLabel(currentOutlineBatchStatus())" in workspace
+    assert "creativeWorkflowStatusLabel(selectedProjectBeats().status)" in workspace
+    assert "已替代" in workspace
+    assert "!creativeResourceEditable(currentProjectCharacters()[0])" in workspace
+    assert "!creativeResourceEditable(currentProjectOutlines()[0])" in workspace

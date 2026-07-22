@@ -107,7 +107,13 @@ class ApprovalService:
             raise PermissionError("only the task assignee may edit this draft")
         return submission
 
-    def submit(self, submission_id: str, actor: Principal) -> dict[str, Any]:
+    def submit(
+        self,
+        submission_id: str,
+        actor: Principal,
+        *,
+        content_snapshot: dict[str, Any] | list[Any] | None = None,
+    ) -> dict[str, Any]:
         actor_id = self.repository._actor_id(actor)
         with self.repository.identity_repository.transaction() as connection:
             before = self._require_submission(connection, submission_id)
@@ -117,7 +123,11 @@ class ApprovalService:
             self.repository._live_actor(connection, actor_id)
             if task["assignee_user_id"] != actor_id:
                 raise PermissionError("only the task assignee may submit")
-            canonical = self._canonical_json(before["content_snapshot"])
+            canonical = self._canonical_json(
+                before["content_snapshot"]
+                if content_snapshot is None
+                else content_snapshot
+            )
             now = time.time()
             cursor = connection.execute(
                 """

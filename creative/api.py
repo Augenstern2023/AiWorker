@@ -1032,6 +1032,20 @@ def build_creative_router(
             if task is None:
                 raise HTTPException(404, "workflow task not found")
             project = repository.get_project_by_workflow_task_id(workflow_task_id)
+            if task.get("project_id") is not None:
+                try:
+                    bound_project_id = int(task["project_id"])
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(
+                        409, "workflow task has an invalid project binding"
+                    ) from exc
+                if project is None or int(project["id"]) != bound_project_id:
+                    try:
+                        project = repository.reconcile_project_workflow_task(
+                            workflow_task_id, bound_project_id
+                        )
+                    except ValueError as exc:
+                        raise HTTPException(409, str(exc)) from exc
             if project is not None and (
                 int(project["topic_id"]) != payload.topic_id
                 or int(project["breakdown_id"]) != payload.breakdown_id
@@ -1081,11 +1095,23 @@ def build_creative_router(
             task_id = str(item.get("workflow_task_id") or "")
             if task_id and item.get("created_by") == principal.user_id:
                 try:
-                    workflow_repository.bind_workflow_project(
-                        task_id, str(item["id"]), principal
-                    )
-                except Exception:
-                    pass
+                    task = workflow_repository.get_task(task_id)
+                    if task is None:
+                        raise ValueError("workflow task not found")
+                    bound_id = task.get("project_id")
+                    if bound_id is not None and int(bound_id) != int(item["id"]):
+                        repository.reconcile_project_workflow_task(
+                            task_id, int(bound_id)
+                        )
+                    else:
+                        workflow_repository.bind_workflow_project(
+                            task_id, str(item["id"]), principal
+                        )
+                except Exception as exc:
+                    raise HTTPException(
+                        503, "project workflow reconciliation failed"
+                    ) from exc
+        items = repository.list_projects(topic_id=topic_id)
         for item in items:
             workflow_adapter.reconcile_project(int(item["id"]))
         items = repository.list_projects(topic_id=topic_id)

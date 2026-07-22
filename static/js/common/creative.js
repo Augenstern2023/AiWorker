@@ -174,24 +174,24 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async resolveSourcePackageWorkflowTask(title) {
-                    const [tasksResponse, topicsResponse] = await Promise.all([
-                        aiworkerApi.request('/api/workflow/tasks'),
-                        aiworkerApi.request('/api/creative/topics?limit=500'),
-                    ]);
+                    const tasksResponse = await aiworkerApi.request('/api/workflow/tasks');
                     const tasks = await tasksResponse.json();
-                    const topics = await topicsResponse.json();
                     if (!tasksResponse.ok) throw new Error(tasks.detail || '读取素材任务失败');
-                    if (!topicsResponse.ok) throw new Error(topics.detail || '读取选题失败');
                     const titleKey = value => String(value || '').normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
-                    const topicIds = new Set((topics.items || [])
-                        .filter(item => titleKey(item.title) === titleKey(title))
-                        .map(item => Number(item.id)));
                     const open = ['assigned', 'in_progress', 'returned'];
-                    const matches = (tasks || []).filter(item =>
+                    const candidates = (tasks || []).filter(item =>
                         item.task_type === 'source_package'
                         && open.includes(item.status)
-                        && topicIds.has(Number(item.topic_id))
                     );
+                    const resolved = await Promise.all(candidates.map(async task => {
+                        const response = await aiworkerApi.request(`/api/creative/topics/${task.topic_id}`);
+                        const topic = await response.json();
+                        if (!response.ok) throw new Error(topic.detail || '读取素材任务选题失败');
+                        return {task, topic};
+                    }));
+                    const matches = resolved
+                        .filter(item => titleKey(item.topic.title) === titleKey(title))
+                        .map(item => item.task);
                     if (matches.length !== 1) throw new Error('当前剧目需要且只能有一个已分配的素材任务');
                     const task = matches[0];
                     if (['assigned', 'returned'].includes(task.status)) {

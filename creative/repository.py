@@ -178,7 +178,7 @@ class CreativeRepository:
             for duplicate in duplicate_project_tasks:
                 keep = conn.execute(
                     "SELECT id FROM creative_projects WHERE workflow_task_id = ? "
-                    "ORDER BY deleted, id LIMIT 1",
+                    "ORDER BY deleted, id DESC LIMIT 1",
                     (duplicate["workflow_task_id"],),
                 ).fetchone()
                 assert keep is not None
@@ -574,6 +574,31 @@ class CreativeRepository:
                 (workflow_task_id,),
             ).fetchone()
         return self.get_project(int(row["id"])) if row is not None else None
+
+    def reconcile_project_workflow_task(
+        self, workflow_task_id: str, project_id: int
+    ) -> dict[str, Any]:
+        with self._connect() as conn:
+            target = conn.execute(
+                "SELECT id FROM creative_projects WHERE id = ? AND deleted = 0",
+                (project_id,),
+            ).fetchone()
+            if target is None:
+                raise ValueError("system-bound creative project does not exist")
+            conn.execute(
+                "UPDATE creative_projects SET workflow_task_id = NULL, updated_at = ? "
+                "WHERE workflow_task_id = ? AND id <> ?",
+                (time.time(), workflow_task_id, project_id),
+            )
+            conn.execute(
+                "UPDATE creative_projects SET workflow_task_id = ?, updated_at = ? "
+                "WHERE id = ?",
+                (workflow_task_id, time.time(), project_id),
+            )
+        project = self.get_project(project_id)
+        if project is None:
+            raise ValueError("system-bound creative project does not exist")
+        return project
 
     def get_project_inputs(self, project_id: int) -> dict[str, Any]:
         project = self.get_project(project_id)

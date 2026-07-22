@@ -251,3 +251,39 @@ uv run pytest -q --ignore=test/test_proxy_ip_pool.py --ignore=test/test_redis_ca
 ```
 
 The only failure in both broad runs remains the accepted pre-existing XHS Excel factory mismatch.
+
+## Bound Project Preservation And Exact Topic Reads
+
+The final two Important findings were closed with a seventh TDD wave:
+
+- Legacy duplicate project migration now preserves the newest nondeleted row for each workflow task, matching the known older-orphan/newer-bound failure pattern, and detaches the workflow link from the other rows before recreating the unique index.
+- API create retries and project-list reads treat the system task's `project_id` as authoritative. If the creative task link points at another row, reconciliation detaches that row, restores the exact system-bound project, and surfaces failures as `409` or `503` instead of silently ignoring them.
+- Browser source-task resolution no longer reads the merged, capped topic list. It fetches every active source candidate's exact `/api/creative/topics/{topic_id}` record concurrently, compares normalized titles, and rejects zero or multiple exact-task matches.
+
+Seventh-wave RED evidence:
+
+```text
+tests/test_creative_phase4.py::test_project_duplicate_migration_keeps_newest_nondeleted_row
+  duplicate cleanup retained the older orphan instead of the newer bound row
+tests/test_creative_phase4.py::test_project_retry_prefers_system_bound_project_over_creative_mismatch
+  retry returned 503 rather than restoring the system-bound project
+tests/test_webgui_ui_changes.py::test_drama_material_jobs_send_exact_source_topic_and_task
+  source resolution still depended on the merged /topics?limit=500 list
+```
+
+Seventh-wave GREEN evidence:
+
+```text
+uv run pytest tests/test_job_permissions.py tests/test_creative_phase4.py \
+  tests/test_webgui_ui_changes.py tests/test_workflow_bootstrap.py \
+  tests/test_hongguo_drama.py::test_douyin_fallback_job_accepts_ordered_multiple_aweme_ids -q
+106 passed
+
+uv run pytest tests/ -q
+497 passed, 1 failed
+
+uv run pytest -q --ignore=test/test_proxy_ip_pool.py --ignore=test/test_redis_cache.py
+501 passed, 8 skipped, 1 failed
+```
+
+The only failure in both broad runs remains the accepted pre-existing XHS Excel factory mismatch.

@@ -153,6 +153,12 @@ def test_drama_material_jobs_send_exact_source_topic_and_task():
     assert "resolveSourcePackageWorkflowTask" in method
     assert "topic_id: task.topic_id" in method
     assert "workflow_task_id: task.id" in method
+    resolver = _source("static/js/common/creative.js").split(
+        "async resolveSourcePackageWorkflowTask", 1
+    )[1].split("async submitCreativeResource", 1)[0]
+    assert "/api/creative/topics?limit=500" not in resolver
+    assert "/api/creative/topics/${task.topic_id}" in resolver
+    assert "Promise.all" in resolver
 
 
 def test_project_table_uses_name_navigation_without_redundant_action_column():

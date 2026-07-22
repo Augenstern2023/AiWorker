@@ -536,6 +536,94 @@ def test_project_creation_retries_binding_without_duplicate(
     assert any(item["id"] == orphan["id"] for item in listed.json()["items"])
 
 
+def test_project_retry_prefers_system_bound_project_over_creative_mismatch(
+    tmp_path: Path,
+):
+    client, repository, _ = build_phase4_client(tmp_path)
+    topic, breakdown = seed_adopted_topic(repository)
+    with repository._connect() as connection:
+        connection.execute(
+            "UPDATE creative_breakdowns SET status = 'approved' WHERE id = ?",
+            (breakdown["id"],),
+        )
+    task = assign_phase4_task(client, "brief", topic_id=topic["id"])
+    payload = {
+        "topic_id": topic["id"],
+        "breakdown_id": breakdown["id"],
+        "name": "Bound project",
+        "target_episode_count": 20,
+        "workflow_task_id": task["id"],
+    }
+    first = client.post("/api/creative/projects", json=payload)
+    assert first.status_code == 200, first.text
+    bound = first.json()
+
+    with repository._connect() as connection:
+        connection.execute(
+            "UPDATE creative_projects SET workflow_task_id = NULL WHERE id = ?",
+            (bound["id"],),
+        )
+    mismatch = repository.create_project(
+        topic["id"],
+        breakdown["id"],
+        "Mismatched project",
+        20,
+        workflow_task_id=task["id"],
+        created_by=client.principal.user_id,
+    )
+    assert mismatch["id"] != bound["id"]
+
+    retried = client.post("/api/creative/projects", json=payload)
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["id"] == bound["id"]
+    with repository._connect() as connection:
+        rows = connection.execute(
+            "SELECT id, workflow_task_id FROM creative_projects ORDER BY id"
+        ).fetchall()
+    assert [row["id"] for row in rows if row["workflow_task_id"] == task["id"]] == [
+        bound["id"]
+    ]
+
+
+def test_project_duplicate_migration_keeps_newest_nondeleted_row(tmp_path: Path):
+    path = tmp_path / "creative.db"
+    repository = CreativeRepository(path)
+    topic, breakdown = seed_adopted_topic(repository)
+    first = repository.create_project(
+        topic["id"],
+        breakdown["id"],
+        "Older orphan",
+        20,
+        workflow_task_id="duplicate-task",
+    )
+    with repository._connect() as connection:
+        connection.execute("DROP INDEX uq_creative_projects_workflow_task")
+        cursor = connection.execute(
+            """
+            INSERT INTO creative_projects (
+                topic_id, breakdown_id, name, genre, target_platform,
+                target_audience, target_episode_count, episode_duration_seconds,
+                status, workflow_task_id, created_by, created_at, updated_at
+            )
+            SELECT topic_id, breakdown_id, 'Newer bound', genre, target_platform,
+                   target_audience, target_episode_count, episode_duration_seconds,
+                   status, workflow_task_id, created_by, created_at + 1, updated_at + 1
+            FROM creative_projects WHERE id = ?
+            """,
+            (first["id"],),
+        )
+        newer_id = int(cursor.lastrowid)
+
+    CreativeRepository(path)
+    with repository._connect() as connection:
+        rows = connection.execute(
+            "SELECT id, workflow_task_id FROM creative_projects ORDER BY id"
+        ).fetchall()
+    assert rows[0]["workflow_task_id"] is None
+    assert rows[1]["id"] == newer_id
+    assert rows[1]["workflow_task_id"] == "duplicate-task"
+
+
 def test_breakdown_api_returns_personalized_field_writing_guide(tmp_path: Path):
     client, repository, _ = build_phase4_client(tmp_path)
     _, breakdown = seed_adopted_topic(repository)

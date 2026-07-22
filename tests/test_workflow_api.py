@@ -20,6 +20,7 @@ from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.schema import Principal
 from identity.session_service import SessionService
+from workflow import SYSTEM_ACTOR
 from workflow.api import build_workflow_router
 from workflow.repository import WorkflowRepository
 
@@ -71,14 +72,32 @@ def test_task_api_lists_claimable_owned_and_managed_tasks_only(
     owner = _principal(identity_repository, "owner_api", "project_owner")
     repository.add_project_member("project-1", owner.user_id, "owner", owner)
     selection_pool = repository.create_task(
-        "wf-selection", "breakdown.create", "selection_operator", topic_id=1
-    )
-    repository.create_task("wf-writing", "outline.create", "screenwriter", topic_id=1)
-    managed = repository.create_task(
-        "wf-managed", "outline.review", "project_owner", project_id="project-1"
+        "wf-selection",
+        "breakdown.create",
+        "selection_operator",
+        topic_id=1,
+        actor=SYSTEM_ACTOR,
     )
     repository.create_task(
-        "wf-other", "outline.review", "project_owner", project_id="project-2"
+        "wf-writing",
+        "outline.create",
+        "screenwriter",
+        topic_id=1,
+        actor=SYSTEM_ACTOR,
+    )
+    managed = repository.create_task(
+        "wf-managed",
+        "outline.review",
+        "project_owner",
+        project_id="project-1",
+        actor=SYSTEM_ACTOR,
+    )
+    repository.create_task(
+        "wf-other",
+        "outline.review",
+        "project_owner",
+        project_id="project-2",
+        actor=SYSTEM_ACTOR,
     )
 
     selector_tasks = _client(identity_repository, repository, selector).get(
@@ -101,7 +120,11 @@ def test_claim_start_cancel_api_and_conflict_statuses(
     selector = _principal(identity_repository, "selector_mutation", "selection_operator")
     admin = _principal(identity_repository, "admin_mutation", "system_admin")
     task = repository.create_task(
-        "wf-api", "breakdown.create", "selection_operator", topic_id=1
+        "wf-api",
+        "breakdown.create",
+        "selection_operator",
+        topic_id=1,
+        actor=SYSTEM_ACTOR,
     )
     selector_client = _client(identity_repository, repository, selector)
 
@@ -136,7 +159,11 @@ def test_assign_and_reassign_api_require_manager_scope(
         "project-1", second.user_id, "selection_operator", owner
     )
     task = repository.create_task(
-        "wf-assign", "breakdown.create", "selection_operator", project_id="project-1"
+        "wf-assign",
+        "breakdown.create",
+        "selection_operator",
+        project_id="project-1",
+        actor=SYSTEM_ACTOR,
     )
     client = _client(identity_repository, repository, owner)
 
@@ -171,15 +198,45 @@ def test_project_member_api_adds_lists_and_protects_last_owner(
             "status": "active",
         },
     )
+    updated = client.post(
+        "/api/workflow/projects/project-1/members",
+        json={
+            "user_id": owner.user_id,
+            "project_role": "project_owner",
+            "status": "active",
+        },
+    )
     listed = client.get("/api/workflow/projects/project-1/members")
     removed = client.delete(
         f"/api/workflow/projects/project-1/members/{created.json()['id']}"
     )
+    replacement = client.post(
+        "/api/workflow/projects/project-1/members",
+        json={
+            "user_id": admin.user_id,
+            "project_role": "project_owner",
+            "status": "active",
+        },
+    )
+    removed_with_replacement = client.delete(
+        f"/api/workflow/projects/project-1/members/{created.json()['id']}"
+    )
 
     assert created.status_code == 201
+    assert updated.status_code == 201
     assert listed.status_code == 200
     assert listed.json()[0]["user_id"] == owner.user_id
     assert removed.status_code == 409
+    assert replacement.status_code == 201
+    assert removed_with_replacement.status_code == 204
+    events = repository.list_project_member_events("project-1")
+    assert [event["event_type"] for event in events] == [
+        "project_member.add",
+        "project_member.update",
+        "project_member.add",
+        "project_member.remove",
+    ]
+    assert all(event["actor_user_id"] == admin.user_id for event in events)
 
 
 def test_member_api_rejects_non_manager(

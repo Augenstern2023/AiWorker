@@ -24,6 +24,30 @@ from .state_machine import WorkflowStateMachine
 _MANAGED_PROJECT_ROLES = frozenset(
     {"owner", "project_owner", "manager", "project_manager"}
 )
+SYSTEM_ACTOR = Principal(
+    user_id="workflow:system",
+    username="workflow-system",
+    display_name="Workflow System",
+    role_codes=("system_admin",),
+    permissions=frozenset({"*"}),
+    data_scope="all",
+    session_id="workflow:system",
+)
+
+_PROJECT_MEMBER_EVENTS_SQL = """
+CREATE TABLE IF NOT EXISTS workflow_project_member_events (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    membership_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    actor_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    before_json TEXT,
+    after_json TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_project_member_events_project
+ON workflow_project_member_events(project_id, created_at);
+"""
 
 
 class WorkflowRepository:
@@ -38,6 +62,8 @@ class WorkflowRepository:
             else IdentityRepository(repository)
         )
         self.state_machine = state_machine or WorkflowStateMachine()
+        with self.identity_repository.connect() as connection:
+            connection.executescript(_PROJECT_MEMBER_EVENTS_SQL)
 
     def create_task(
         self,
@@ -48,11 +74,12 @@ class WorkflowRepository:
         project_id: str | None = None,
         topic_id: int | None = None,
         due_at: str | None = None,
-        actor: Principal | dict[str, Any] | None = None,
+        actor: Principal | dict[str, Any],
     ) -> dict[str, Any]:
         task_id = str(uuid.uuid4())
-        actor_id = self._actor_id(actor) if actor is not None else None
+        actor_id = self._actor_id(actor)
         with self.identity_repository.transaction() as connection:
+            self._ensure_system_actor(connection, actor_id)
             role = connection.execute(
                 "SELECT 1 FROM roles WHERE code = ? COLLATE NOCASE AND is_enabled = 1",
                 (role_code,),
@@ -168,15 +195,15 @@ class WorkflowRepository:
                 )
             ):
                 raise PermissionError("actor must be an active project member")
-            self.state_machine.transition(task, "claim", live_actor)
+            to_status = self.state_machine.transition(task, "claim", live_actor)
             cursor = connection.execute(
                 """
                 UPDATE workflow_tasks
-                SET assignee_id = ?, assigned_by = ?, status = 'assigned',
+                SET assignee_id = ?, assigned_by = ?, status = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND status = 'pool' AND assignee_id IS NULL
                 """,
-                (actor_id, actor_id, task_id),
+                (actor_id, actor_id, to_status, task_id),
             )
             if cursor.rowcount != 1:
                 raise ValueError("task has already been claimed")
@@ -186,7 +213,7 @@ class WorkflowRepository:
                 "claim",
                 actor_id,
                 task["status"],
-                "assigned",
+                to_status,
                 {"assignee_user_id": actor_id},
             )
             claimed = self._require_task(connection, task_id)
@@ -311,7 +338,7 @@ class WorkflowRepository:
                 raise ValueError("project member user does not exist or is inactive")
             existing = connection.execute(
                 """
-                SELECT id FROM project_members
+                SELECT * FROM project_members
                 WHERE project_id = ? AND user_id = ? AND project_role = ?
                 """,
                 (project_id, user_id, project_role),
@@ -339,7 +366,16 @@ class WorkflowRepository:
             member = connection.execute(
                 "SELECT * FROM project_members WHERE id = ?", (membership_id,)
             ).fetchone()
-        assert member is not None
+            assert member is not None
+            self._record_project_member_event(
+                connection,
+                project_id,
+                membership_id,
+                "project_member.update" if existing else "project_member.add",
+                actor_id,
+                dict(existing) if existing else None,
+                dict(member),
+            )
         return dict(member)
 
     def list_project_members(self, project_id: str) -> list[dict[str, Any]]:
@@ -352,6 +388,17 @@ class WorkflowRepository:
                 (project_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def list_project_member_events(self, project_id: str) -> list[dict[str, Any]]:
+        with self.identity_repository.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM workflow_project_member_events
+                WHERE project_id = ? ORDER BY created_at, rowid
+                """,
+                (project_id,),
+            ).fetchall()
+        return [self._project_member_event_dict(row) for row in rows]
 
     def assert_can_manage_project(
         self, project_id: str, actor: Principal | dict[str, Any]
@@ -391,12 +438,15 @@ class WorkflowRepository:
                     raise ValueError("user has multiple project roles; remove by membership id")
             if member is None:
                 raise KeyError(membership_id)
-            if member["status"] == "active" and member["project_role"] in _MANAGED_PROJECT_ROLES:
+            if (
+                member["status"] == "active"
+                and member["project_role"] == "project_owner"
+            ):
                 other_owner = connection.execute(
                     """
                     SELECT 1 FROM project_members
                     WHERE project_id = ? AND id <> ? AND status = 'active'
-                      AND project_role IN ('owner', 'project_owner', 'manager', 'project_manager')
+                      AND project_role = 'project_owner'
                     LIMIT 1
                     """,
                     (project_id, member["id"]),
@@ -407,6 +457,15 @@ class WorkflowRepository:
                     )
             connection.execute(
                 "DELETE FROM project_members WHERE id = ?", (member["id"],)
+            )
+            self._record_project_member_event(
+                connection,
+                project_id,
+                member["id"],
+                "project_member.remove",
+                actor_id,
+                dict(member),
+                None,
             )
 
     def _assign(
@@ -593,6 +652,8 @@ class WorkflowRepository:
 
     @staticmethod
     def _actor_id(actor: Principal | dict[str, Any]) -> str:
+        if actor is None:
+            raise ValueError("a non-null actor is required")
         if isinstance(actor, dict):
             actor_id = actor.get("user_id") or actor.get("id")
         else:
@@ -600,6 +661,29 @@ class WorkflowRepository:
         if not actor_id:
             raise PermissionError("an authenticated actor is required")
         return str(actor_id)
+
+    @staticmethod
+    def _ensure_system_actor(
+        connection: sqlite3.Connection, actor_id: str
+    ) -> None:
+        if actor_id != SYSTEM_ACTOR.user_id:
+            return
+        connection.execute(
+            """
+            INSERT INTO users
+                (id, username, normalized_username, display_name, password_hash,
+                 status, is_deleted)
+            VALUES (?, ?, ?, ?, ?, 'disabled', 1)
+            ON CONFLICT(id) DO NOTHING
+            """,
+            (
+                SYSTEM_ACTOR.user_id,
+                SYSTEM_ACTOR.username,
+                SYSTEM_ACTOR.username,
+                SYSTEM_ACTOR.display_name,
+                "system-managed-account",
+            ),
+        )
 
     @staticmethod
     def _ensure_workflow(
@@ -675,10 +759,52 @@ class WorkflowRepository:
         )
 
     @staticmethod
+    def _record_project_member_event(
+        connection: sqlite3.Connection,
+        project_id: str,
+        membership_id: str,
+        event_type: str,
+        actor_id: str,
+        before: dict[str, Any] | None,
+        after: dict[str, Any] | None,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO workflow_project_member_events
+                (id, project_id, membership_id, event_type, actor_id,
+                 before_json, after_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                project_id,
+                membership_id,
+                event_type,
+                actor_id,
+                json.dumps(before, ensure_ascii=True, sort_keys=True)
+                if before is not None
+                else None,
+                json.dumps(after, ensure_ascii=True, sort_keys=True)
+                if after is not None
+                else None,
+            ),
+        )
+
+    @staticmethod
     def _event_dict(row: sqlite3.Row) -> dict[str, Any]:
         event = dict(row)
         event["actor_user_id"] = event.pop("actor_id")
         event["before_status"] = event.pop("from_status")
         event["after_status"] = event.pop("to_status")
         event["details"] = json.loads(event.pop("details_json"))
+        return event
+
+    @staticmethod
+    def _project_member_event_dict(row: sqlite3.Row) -> dict[str, Any]:
+        event = dict(row)
+        event["actor_user_id"] = event.pop("actor_id")
+        before_json = event.pop("before_json")
+        after_json = event.pop("after_json")
+        event["before"] = json.loads(before_json) if before_json else None
+        event["after"] = json.loads(after_json) if after_json else None
         return event

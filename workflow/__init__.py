@@ -9,7 +9,7 @@
 
 """Human workflow task pools and project membership management."""
 
-from .repository import WorkflowRepository
+from .repository import SYSTEM_ACTOR, WorkflowRepository
 from .state_machine import WorkflowStateMachine
 
-__all__ = ["WorkflowRepository", "WorkflowStateMachine"]
+__all__ = ["SYSTEM_ACTOR", "WorkflowRepository", "WorkflowStateMachine"]

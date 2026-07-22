@@ -89,7 +89,7 @@ class WorkflowStateMachine:
         permissions = set(_actor_value(actor, "permissions") or ())
         is_admin = "system_admin" in role_codes or "*" in permissions
         if requirement == "matching_role":
-            if not is_admin and task.get("role_code") not in role_codes:
+            if task.get("role_code") not in role_codes:
                 raise PermissionError("actor does not have the task pool role")
             return
         if requirement == "assignee":

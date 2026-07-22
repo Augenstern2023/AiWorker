@@ -18,7 +18,7 @@ from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.schema import Principal
 from identity.session_service import SessionService
-from workflow.repository import WorkflowRepository
+from workflow import SYSTEM_ACTOR, WorkflowRepository
 from workflow.state_machine import WorkflowStateMachine
 
 
@@ -76,6 +76,7 @@ def test_role_pool_task_is_not_auto_assigned(repository: WorkflowRepository):
         role_code="selection_operator",
         project_id=None,
         topic_id=12,
+        actor=SYSTEM_ACTOR,
     )
 
     assert task["status"] == "pool"
@@ -89,7 +90,11 @@ def test_only_matching_current_role_can_claim(
     writer_user: Principal,
 ):
     task = repository.create_task(
-        "wf-1", "breakdown.create", "selection_operator", topic_id=12
+        "wf-1",
+        "breakdown.create",
+        "selection_operator",
+        topic_id=12,
+        actor=SYSTEM_ACTOR,
     )
 
     with pytest.raises(PermissionError):
@@ -102,7 +107,11 @@ def test_only_matching_current_role_can_claim(
     # Role checks are live, not based on the roles cached in the Principal.
     identity_repository.replace_user_roles(selection_user.user_id, [])
     another = repository.create_task(
-        "wf-2", "topic.prepare", "selection_operator", topic_id=13
+        "wf-2",
+        "topic.prepare",
+        "selection_operator",
+        topic_id=13,
+        actor=SYSTEM_ACTOR,
     )
     with pytest.raises(PermissionError):
         repository.claim_task(another["id"], selection_user)
@@ -115,7 +124,11 @@ def test_claim_is_atomic_when_two_eligible_users_race(
 ):
     second = _user(identity_repository, "selector_two", "selection_operator")
     task = repository.create_task(
-        "wf-race", "breakdown.create", "selection_operator", topic_id=12
+        "wf-race",
+        "breakdown.create",
+        "selection_operator",
+        topic_id=12,
+        actor=SYSTEM_ACTOR,
     )
 
     def claim(actor: Principal):
@@ -152,7 +165,11 @@ def test_owner_can_assign_and_reassign_only_in_managed_project(
         "project-1", writer_user.user_id, "selection_operator", owner_user
     )
     task = repository.create_task(
-        "wf-project", "breakdown.create", "selection_operator", project_id="project-1"
+        "wf-project",
+        "breakdown.create",
+        "selection_operator",
+        project_id="project-1",
+        actor=SYSTEM_ACTOR,
     )
 
     assigned = repository.assign_task(task["id"], selection_user.user_id, owner_user)
@@ -168,7 +185,11 @@ def test_owner_can_assign_and_reassign_only_in_managed_project(
     assert reassigned["assignee_user_id"] == writer_user.user_id
 
     outside = repository.create_task(
-        "wf-outside", "breakdown.create", "selection_operator", project_id="project-2"
+        "wf-outside",
+        "breakdown.create",
+        "selection_operator",
+        project_id="project-2",
+        actor=SYSTEM_ACTOR,
     )
     with pytest.raises(PermissionError):
         repository.assign_task(outside["id"], selection_user.user_id, owner_user)
@@ -184,7 +205,11 @@ def test_project_task_cannot_be_assigned_to_user_outside_project(
         "project-1", owner_user.user_id, "project_owner", owner_user
     )
     task = repository.create_task(
-        "wf-membership", "breakdown.create", "selection_operator", project_id="project-1"
+        "wf-membership",
+        "breakdown.create",
+        "selection_operator",
+        project_id="project-1",
+        actor=SYSTEM_ACTOR,
     )
 
     with pytest.raises(ValueError, match="project member"):
@@ -200,7 +225,11 @@ def test_assignee_can_start_and_manager_can_cancel_with_event_history(
     admin_user: Principal,
 ):
     task = repository.create_task(
-        "wf-events", "breakdown.create", "selection_operator", topic_id=12
+        "wf-events",
+        "breakdown.create",
+        "selection_operator",
+        topic_id=12,
+        actor=SYSTEM_ACTOR,
     )
     repository.claim_task(task["id"], selection_user)
     started = repository.start_task(task["id"], selection_user)
@@ -243,14 +272,166 @@ def test_project_member_add_remove_and_last_owner_guard(
             "project-1", owner_membership["id"], admin_user
         )
 
+    manager = repository.add_project_member(
+        "project-1", admin_user.user_id, "manager", admin_user
+    )
+    with pytest.raises(ValueError, match="owner"):
+        repository.remove_project_member(
+            "project-1", owner_membership["id"], admin_user
+        )
     second_owner = repository.add_project_member(
-        "project-1", admin_user.user_id, "owner", admin_user
+        "project-1", admin_user.user_id, "project_owner", admin_user
     )
     repository.remove_project_member("project-1", owner_membership["id"], admin_user)
     repository.remove_project_member("project-1", writer_membership["id"], admin_user)
     assert [member["id"] for member in repository.list_project_members("project-1")] == [
-        second_owner["id"]
+        manager["id"],
+        second_owner["id"],
     ]
+
+
+def test_project_member_mutations_record_actor_before_after_and_timestamp(
+    repository: WorkflowRepository,
+    admin_user: Principal,
+    owner_user: Principal,
+    writer_user: Principal,
+):
+    repository.add_project_member(
+        "project-events", owner_user.user_id, "project_owner", admin_user
+    )
+    membership = repository.add_project_member(
+        "project-events", writer_user.user_id, "screenwriter", admin_user
+    )
+    repository.add_project_member(
+        "project-events",
+        writer_user.user_id,
+        "screenwriter",
+        admin_user,
+        status="inactive",
+    )
+    repository.remove_project_member(
+        "project-events", membership["id"], admin_user
+    )
+
+    events = repository.list_project_member_events("project-events")
+    assert [event["event_type"] for event in events] == [
+        "project_member.add",
+        "project_member.add",
+        "project_member.update",
+        "project_member.remove",
+    ]
+    assert all(event["actor_user_id"] == admin_user.user_id for event in events)
+    assert events[1]["before"] is None
+    assert events[1]["after"]["status"] == "active"
+    assert events[2]["before"]["status"] == "active"
+    assert events[2]["after"]["status"] == "inactive"
+    assert events[3]["before"]["id"] == membership["id"]
+    assert events[3]["after"] is None
+    assert all(event["created_at"] for event in events)
+
+
+def test_create_task_requires_actor_and_system_actor_is_recorded(
+    repository: WorkflowRepository,
+    selection_user: Principal,
+):
+    with pytest.raises(TypeError):
+        repository.create_task("wf-missing-actor", "topic.prepare", "selection_operator")
+    with pytest.raises(ValueError, match="actor"):
+        repository.create_task(
+            "wf-null-actor",
+            "topic.prepare",
+            "selection_operator",
+            actor=None,
+        )
+
+    task = repository.create_task(
+        "wf-system-actor",
+        "topic.prepare",
+        "selection_operator",
+        actor=SYSTEM_ACTOR,
+    )
+
+    event = repository.list_task_events(task["id"])[0]
+    assert event["actor_user_id"] == SYSTEM_ACTOR.user_id
+
+    user_task = repository.create_task(
+        "wf-user-actor",
+        "topic.prepare",
+        "selection_operator",
+        actor=selection_user,
+    )
+    user_event = repository.list_task_events(user_task["id"])[0]
+    assert user_event["actor_user_id"] == selection_user.user_id
+
+
+def test_system_admin_claim_requires_matching_target_role(
+    repository: WorkflowRepository,
+    identity_repository: IdentityRepository,
+    admin_user: Principal,
+    selection_user: Principal,
+):
+    task = repository.create_task(
+        "wf-admin-claim",
+        "topic.prepare",
+        "selection_operator",
+        actor=SYSTEM_ACTOR,
+    )
+    with pytest.raises(PermissionError, match="task pool role"):
+        repository.claim_task(task["id"], admin_user)
+
+    assigned_to_admin = repository.create_task(
+        "wf-admin-assign-self",
+        "topic.prepare",
+        "selection_operator",
+        actor=SYSTEM_ACTOR,
+    )
+    assigned_to_user = repository.create_task(
+        "wf-admin-assign-other",
+        "topic.prepare",
+        "selection_operator",
+        actor=SYSTEM_ACTOR,
+    )
+    assert repository.assign_task(
+        assigned_to_admin["id"], admin_user.user_id, admin_user
+    )["assignee_user_id"] == admin_user.user_id
+    assert repository.assign_task(
+        assigned_to_user["id"], selection_user.user_id, admin_user
+    )["assignee_user_id"] == selection_user.user_id
+
+    admin_role = identity_repository.get_role_by_code("system_admin")
+    selection_role = identity_repository.get_role_by_code("selection_operator")
+    assert admin_role is not None
+    assert selection_role is not None
+    identity_repository.replace_user_roles(
+        admin_user.user_id, [admin_role["id"], selection_role["id"]]
+    )
+
+    assert repository.claim_task(task["id"], admin_user)["status"] == "assigned"
+
+
+def test_claim_uses_state_machine_target_status_in_update_and_event(
+    identity_repository: IdentityRepository,
+    selection_user: Principal,
+):
+    class ClaimToInProgress(WorkflowStateMachine):
+        def transition(self, task, action, actor):
+            assert action == "claim"
+            return "in_progress"
+
+    repository = WorkflowRepository(
+        identity_repository, state_machine=ClaimToInProgress()
+    )
+    task = repository.create_task(
+        "wf-claim-target",
+        "topic.prepare",
+        "selection_operator",
+        actor=SYSTEM_ACTOR,
+    )
+
+    claimed = repository.claim_task(task["id"], selection_user)
+
+    assert claimed["status"] == "in_progress"
+    assert repository.list_task_events(task["id"])[-1]["after_status"] == "in_progress"
 
 
 def test_state_machine_declares_all_states_and_rejects_invalid_transition(

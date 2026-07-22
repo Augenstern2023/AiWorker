@@ -194,3 +194,24 @@ def test_project_author_owns_drafts_and_managed_reader_sees_approved_only(
     assert [item["content"]["name"] for item in author_view.json()["blueprints"]] == [
         "approved", "author draft"
     ]
+
+    project_owner_principal = permissions.principal_for_user(
+        users["owner"]["id"], "owner-remove"
+    )
+    assert project_owner_principal is not None
+    workflow.remove_project_member(
+        str(project["id"]), users["author"]["id"], project_owner_principal
+    )
+    assert all(
+        member["user_id"] != users["author"]["id"]
+        for member in workflow.list_project_members(str(project["id"]))
+    )
+
+    listed = clients["author"].get("/api/creative/projects")
+
+    assert listed.status_code == 200
+    assert listed.json()["items"] == []
+    assert all(
+        member["user_id"] != users["author"]["id"]
+        for member in workflow.list_project_members(str(project["id"]))
+    )

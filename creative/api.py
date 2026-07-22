@@ -1106,13 +1106,13 @@ def build_creative_router(
                         )
                         continue
                     bound_id = task.get("project_id")
-                    if bound_id is not None and int(bound_id) != int(item["id"]):
-                        repository.reconcile_project_workflow_task(
-                            task_id, int(bound_id)
-                        )
-                    else:
+                    if bound_id is None:
                         workflow_repository.bind_workflow_project(
                             task_id, str(item["id"]), principal
+                        )
+                    elif int(bound_id) != int(item["id"]):
+                        repository.reconcile_project_workflow_task(
+                            task_id, int(bound_id)
                         )
                 except Exception as exc:
                     raise HTTPException(

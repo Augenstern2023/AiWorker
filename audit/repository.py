@@ -1,0 +1,171 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) 2025 relakkes@gmail.com
+#
+# This file is part of MediaCrawler project.
+# Repository: https://github.com/NanmiCoder/MediaCrawler
+# GitHub: https://github.com/NanmiCoder
+# Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
+#
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from identity.repository import IdentityRepository
+
+
+_AUDIT_COLUMNS = {
+    "actor_user_id": "TEXT REFERENCES users(id) ON DELETE SET NULL",
+    "actor_role_snapshot_json": "TEXT NOT NULL DEFAULT '[]'",
+    "target_type": "TEXT",
+    "target_id": "TEXT",
+    "before_summary_json": "TEXT",
+    "after_summary_json": "TEXT",
+    "request_id": "TEXT",
+    "user_agent": "TEXT",
+    "result": "TEXT NOT NULL DEFAULT 'success'",
+}
+
+
+class AuditRepository:
+    """Persists normalized audit events in the shared system database."""
+
+    def __init__(self, identity_repository: IdentityRepository) -> None:
+        self.identity_repository = identity_repository
+        self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        with self.identity_repository.connect() as connection:
+            existing = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(audit_logs)")
+            }
+            for column, definition in _AUDIT_COLUMNS.items():
+                if column not in existing:
+                    connection.execute(
+                        f"ALTER TABLE audit_logs ADD COLUMN {column} {definition}"
+                    )
+            connection.execute(
+                "UPDATE audit_logs SET actor_user_id = actor_id "
+                "WHERE actor_user_id IS NULL AND actor_id IS NOT NULL"
+            )
+            connection.execute(
+                "UPDATE audit_logs SET target_type = resource_type "
+                "WHERE target_type IS NULL"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_logs_action "
+                "ON audit_logs(action)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_logs_actor_user_id "
+                "ON audit_logs(actor_user_id)"
+            )
+
+    def insert(self, event: dict[str, Any]) -> str:
+        with self.identity_repository.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO audit_logs (
+                    id, actor_id, actor_user_id, actor_role_snapshot_json,
+                    action, resource_type, target_type, resource_id, target_id,
+                    project_id, reason, details_json, before_summary_json,
+                    after_summary_json, request_id, ip_address, user_agent,
+                    result, created_at
+                ) VALUES (
+                    :id, :actor_user_id, :actor_user_id,
+                    :actor_role_snapshot_json, :action, :target_type,
+                    :target_type, :target_id, :target_id, :project_id, :reason,
+                    '{}', :before_summary_json, :after_summary_json, :request_id,
+                    :ip_address, :user_agent, :result, CURRENT_TIMESTAMP
+                )
+                """,
+                event,
+            )
+        return str(event["id"])
+
+    def get(self, event_id: str) -> dict[str, Any] | None:
+        with self.identity_repository.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM audit_logs WHERE id = ?", (event_id,)
+            ).fetchone()
+        return self._event_dict(row) if row is not None else None
+
+    def query(
+        self,
+        *,
+        actor_user_id: str | None = None,
+        action: str | None = None,
+        target_type: str | None = None,
+        target_id: str | None = None,
+        project_id: str | None = None,
+        result: str | None = None,
+        created_from: str | None = None,
+        created_to: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        filters = {
+            "actor_user_id": actor_user_id,
+            "action": action,
+            "target_type": target_type,
+            "target_id": target_id,
+            "project_id": project_id,
+            "result": result,
+        }
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        for column, value in filters.items():
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                parameters.append(value)
+        if created_from is not None:
+            clauses.append("created_at >= ?")
+            parameters.append(created_from)
+        if created_to is not None:
+            clauses.append("created_at <= ?")
+            parameters.append(created_to)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        parameters.extend((max(1, min(limit, 500)), max(0, offset)))
+        with self.identity_repository.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM audit_logs
+                {where}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                parameters,
+            ).fetchall()
+        return [self._event_dict(row) for row in rows]
+
+    @staticmethod
+    def _event_dict(row: Any) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "actor_user_id": row["actor_user_id"],
+            "actor_role_snapshot": json.loads(
+                row["actor_role_snapshot_json"] or "[]"
+            ),
+            "action": row["action"],
+            "target_type": row["target_type"],
+            "target_id": row["target_id"],
+            "project_id": row["project_id"],
+            "before_summary": (
+                json.loads(row["before_summary_json"])
+                if row["before_summary_json"] is not None
+                else None
+            ),
+            "after_summary": (
+                json.loads(row["after_summary_json"])
+                if row["after_summary_json"] is not None
+                else None
+            ),
+            "request_id": row["request_id"],
+            "ip_address": row["ip_address"],
+            "user_agent": row["user_agent"],
+            "reason": row["reason"],
+            "result": row["result"],
+            "created_at": row["created_at"],
+        }

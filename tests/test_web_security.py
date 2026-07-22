@@ -1,0 +1,148 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) 2025 relakkes@gmail.com
+#
+# This file is part of MediaCrawler project.
+# Repository: https://github.com/NanmiCoder/MediaCrawler/blob/main/WebGUI.py
+# GitHub: https://github.com/NanmiCoder
+# Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
+#
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
+
+from identity.api import build_identity_router
+from identity.repository import IdentityRepository
+from identity.session_service import SessionService
+from WebGUI import configure_cors, install_security_middleware
+
+
+def _secured_app(tmp_path: Path) -> tuple[FastAPI, SessionService]:
+    repository = IdentityRepository(tmp_path / "system.db")
+    session_service = SessionService(repository, secure_cookie=False)
+    app = FastAPI()
+    seen_request_ids: list[str | None] = []
+
+    @app.middleware("http")
+    async def observe_request_id(request: Request, call_next):
+        seen_request_ids.append(getattr(request.state, "request_id", None))
+        return await call_next(request)
+
+    @app.post("/api/protected")
+    def protected() -> dict[str, bool]:
+        return {"ok": True}
+
+    @app.post("/api/public-write")
+    def public_write() -> dict[str, bool]:
+        return {"ok": True}
+
+    app.include_router(build_identity_router(repository, session_service))
+    install_security_middleware(app, session_service)
+    app.state.seen_request_ids = seen_request_ids
+    return app, session_service
+
+
+def test_request_id_is_available_before_logging_and_returned(tmp_path: Path):
+    app, _ = _secured_app(tmp_path)
+
+    response = TestClient(app).post(
+        "/api/public-write", headers={"X-Request-ID": "client-request-123"}
+    )
+
+    assert response.status_code == 200
+    assert response.headers["X-Request-ID"] == "client-request-123"
+    assert app.state.seen_request_ids == ["client-request-123"]
+
+
+def test_authenticated_write_requires_matching_csrf_token(tmp_path: Path):
+    app, _ = _secured_app(tmp_path)
+    client = TestClient(app)
+    setup = client.post(
+        "/api/auth/setup",
+        json={
+            "username": "admin",
+            "display_name": "Admin",
+            "password": "Admin-Strong-123!",
+        },
+    )
+    assert setup.status_code == 201
+    csrf_token = setup.json()["csrf_token"]
+
+    missing = client.post("/api/protected")
+    incorrect = client.post(
+        "/api/protected", headers={"X-CSRF-Token": "incorrect"}
+    )
+    accepted = client.post(
+        "/api/protected", headers={"X-CSRF-Token": csrf_token}
+    )
+
+    assert missing.status_code == 403
+    assert missing.json() == {"detail": "CSRF 校验失败"}
+    assert incorrect.status_code == 403
+    assert accepted.status_code == 200
+
+
+def test_login_and_first_run_setup_are_csrf_exempt(tmp_path: Path):
+    app, _ = _secured_app(tmp_path)
+    client = TestClient(app)
+
+    setup = client.post(
+        "/api/auth/setup",
+        json={
+            "username": "admin",
+            "display_name": "Admin",
+            "password": "Admin-Strong-123!",
+        },
+    )
+    client.cookies.clear()
+    login = client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "Admin-Strong-123!"},
+    )
+
+    assert setup.status_code == 201
+    assert login.status_code == 200
+
+
+def test_unauthenticated_write_is_left_to_route_authorization(tmp_path: Path):
+    app, _ = _secured_app(tmp_path)
+
+    response = TestClient(app).post("/api/public-write")
+
+    assert response.status_code == 200
+
+
+def test_cors_defaults_to_same_origin_and_uses_explicit_origin_list():
+    same_origin_app = FastAPI()
+
+    @same_origin_app.get("/ping")
+    def ping() -> dict[str, bool]:
+        return {"ok": True}
+
+    configure_cors(same_origin_app, "")
+    cross_origin = TestClient(same_origin_app).get(
+        "/ping", headers={"Origin": "https://untrusted.example"}
+    )
+    assert "access-control-allow-origin" not in cross_origin.headers
+
+    configured_app = FastAPI()
+
+    @configured_app.get("/ping")
+    def configured_ping() -> dict[str, bool]:
+        return {"ok": True}
+
+    configure_cors(
+        configured_app,
+        "https://admin.example, https://review.example,https://admin.example",
+    )
+    allowed = TestClient(configured_app).get(
+        "/ping", headers={"Origin": "https://review.example"}
+    )
+    rejected = TestClient(configured_app).get(
+        "/ping", headers={"Origin": "https://untrusted.example"}
+    )
+    assert allowed.headers["access-control-allow-origin"] == "https://review.example"
+    assert "access-control-allow-origin" not in rejected.headers

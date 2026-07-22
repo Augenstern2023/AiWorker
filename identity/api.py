@@ -18,6 +18,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from audit.service import AuditService
+
 from .dependencies import require_permission
 from .password_service import PasswordService
 from .permission_catalog import PERMISSIONS, PERMISSION_DEPENDENCIES
@@ -73,7 +75,9 @@ class RoleCloneRequest(BaseModel):
 
 
 def build_identity_router(
-    repository: IdentityRepository, session_service: SessionService
+    repository: IdentityRepository,
+    session_service: SessionService,
+    audit_service: AuditService | None = None,
 ) -> APIRouter:
     permission_service = PermissionService(repository, session_service)
 
@@ -84,6 +88,30 @@ def build_identity_router(
     password_service = PasswordService()
     dummy_password_hash = password_service.hash("Dummy-Password-123!")
     repository.seed_defaults()
+
+    def record_audit(
+        *,
+        actor: Principal | None,
+        action: str,
+        target_type: str,
+        target_id: str | None,
+        before: Any,
+        after: Any,
+        result: str,
+        request: Request,
+    ) -> None:
+        if audit_service is not None:
+            audit_service.record(
+                actor=actor,
+                action=action,
+                target_type=target_type,
+                target_id=target_id,
+                before=before,
+                after=after,
+                reason=None,
+                result=result,
+                request=request,
+            )
 
     def session_context(request: Request, *, require_csrf: bool = False) -> SessionContext:
         raw_token = request.cookies.get(session_service.cookie_name)
@@ -181,7 +209,11 @@ def build_identity_router(
             raise HTTPException(status_code=409, detail="系统已经完成初始化")
 
         return authenticated_response(
-            user_id, request, status_code=201, update_last_login=True
+            user_id,
+            request,
+            status_code=201,
+            update_last_login=True,
+            audit_action="user.setup",
         )
 
     @router.post("/api/auth/login")
@@ -203,17 +235,41 @@ def build_identity_router(
             or user["status"] != "active"
             or user["is_deleted"]
         ):
+            record_audit(
+                actor=None,
+                action="auth.login",
+                target_type="user",
+                target_id=user["id"] if user is not None else normalized_username,
+                before=None,
+                after={"username": normalized_username},
+                result="failure",
+                request=request,
+            )
             raise HTTPException(status_code=401, detail=AUTHENTICATION_ERROR)
         return authenticated_response(
-            user["id"], request, status_code=200, update_last_login=True
+            user["id"],
+            request,
+            status_code=200,
+            update_last_login=True,
+            audit_action="auth.login",
         )
 
     @router.post("/api/auth/logout", status_code=204)
     def logout(request: Request) -> Response:
-        session_context(request, require_csrf=True)
+        context = session_context(request, require_csrf=True)
         raw_token = request.cookies.get(session_service.cookie_name)
         if raw_token:
             session_service.revoke_session(raw_token)
+        record_audit(
+            actor=context.principal,
+            action="auth.logout",
+            target_type="session",
+            target_id=context.principal.session_id,
+            before={"active": True},
+            after={"active": False},
+            result="success",
+            request=request,
+        )
         response = Response(status_code=204)
         response.delete_cookie(
             session_service.cookie_name,
@@ -259,6 +315,16 @@ def build_identity_router(
                 "WHERE user_id = ? AND revoked_at IS NULL",
                 (context.principal.user_id,),
             )
+        record_audit(
+            actor=context.principal,
+            action="auth.password.change",
+            target_type="user",
+            target_id=context.principal.user_id,
+            before=None,
+            after={"sessions_revoked": True},
+            result="success",
+            request=request,
+        )
         response = Response(status_code=204)
         response.delete_cookie(
             session_service.cookie_name,
@@ -283,7 +349,9 @@ def build_identity_router(
 
     @router.post("/api/admin/users", status_code=201)
     def create_user(
-        payload: UserCreateRequest, _: Principal = Depends(admin_write)
+        payload: UserCreateRequest,
+        request: Request,
+        principal: Principal = Depends(admin_write),
     ) -> dict[str, Any]:
         username = payload.username.strip()
         display_name = payload.display_name.strip()
@@ -300,14 +368,27 @@ def build_identity_router(
             raise HTTPException(status_code=409, detail="用户名已存在") from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return _user_response(user["id"])
+        created = _user_response(user["id"])
+        record_audit(
+            actor=principal,
+            action="user.create",
+            target_type="user",
+            target_id=user["id"],
+            before=None,
+            after=created,
+            result="success",
+            request=request,
+        )
+        return created
 
     @router.patch("/api/admin/users/{user_id}")
     def update_user(
         user_id: str,
         payload: UserUpdateRequest,
-        _: Principal = Depends(admin_write),
+        request: Request,
+        principal: Principal = Depends(admin_write),
     ) -> dict[str, Any]:
+        before = repository.get_user(user_id)
         try:
             repository.update_user(
                 user_id,
@@ -323,13 +404,25 @@ def build_identity_router(
             raise HTTPException(status_code=404, detail="用户不存在") from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return _user_response(user_id)
+        updated = _user_response(user_id)
+        record_audit(
+            actor=principal,
+            action="user.update",
+            target_type="user",
+            target_id=user_id,
+            before=before,
+            after=updated,
+            result="success",
+            request=request,
+        )
+        return updated
 
     @router.post("/api/admin/users/{user_id}/reset-password", status_code=204)
     def reset_password(
         user_id: str,
         payload: ResetPasswordRequest,
-        _: Principal = Depends(admin_write),
+        request: Request,
+        principal: Principal = Depends(admin_write),
     ) -> Response:
         if repository.get_user(user_id) is None:
             raise HTTPException(status_code=404, detail="用户不存在")
@@ -350,14 +443,26 @@ def build_identity_router(
                 "WHERE user_id = ? AND revoked_at IS NULL",
                 (user_id,),
             )
+        record_audit(
+            actor=principal,
+            action="user.password.reset",
+            target_type="user",
+            target_id=user_id,
+            before=None,
+            after={"sessions_revoked": True},
+            result="success",
+            request=request,
+        )
         return Response(status_code=204)
 
     @router.put("/api/admin/users/{user_id}/roles")
     def replace_user_roles(
         user_id: str,
         payload: UserRolesRequest,
-        _: Principal = Depends(admin_write),
+        request: Request,
+        principal: Principal = Depends(admin_write),
     ) -> dict[str, Any]:
+        user_before = repository.get_user(user_id)
         try:
             _validate_role_ids(payload.role_ids)
             repository.replace_user_roles(user_id, payload.role_ids)
@@ -366,7 +471,20 @@ def build_identity_router(
         except ValueError as exc:
             status_code = 409 if "系统管理员" in str(exc) else 422
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-        return _user_response(user_id)
+        user_after = _user_response(user_id)
+        record_audit(
+            actor=principal,
+            action="user.roles.replace",
+            target_type="user",
+            target_id=user_id,
+            before={
+                "role_codes": user_before["role_codes"] if user_before else []
+            },
+            after={"role_codes": user_after["role_codes"]},
+            result="success",
+            request=request,
+        )
+        return user_after
 
     @router.get("/api/admin/roles")
     def list_roles(_: Principal = Depends(admin_read)) -> list[dict[str, Any]]:
@@ -374,7 +492,9 @@ def build_identity_router(
 
     @router.post("/api/admin/roles", status_code=201)
     def create_role(
-        payload: RoleCreateRequest, _: Principal = Depends(admin_write)
+        payload: RoleCreateRequest,
+        request: Request,
+        principal: Principal = Depends(admin_write),
     ) -> dict[str, Any]:
         try:
             grants = _permission_pairs(payload.permissions)
@@ -387,14 +507,28 @@ def build_identity_router(
             raise HTTPException(status_code=409, detail="角色编码已存在") from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return _role_response(role)
+        created = _role_response(role)
+        record_audit(
+            actor=principal,
+            action="role.create",
+            target_type="role",
+            target_id=role["id"],
+            before=None,
+            after=created,
+            result="success",
+            request=request,
+        )
+        return created
 
     @router.patch("/api/admin/roles/{role_id}")
     def update_role(
         role_id: str,
         payload: RoleUpdateRequest,
-        _: Principal = Depends(admin_write),
+        request: Request,
+        principal: Principal = Depends(admin_write),
     ) -> dict[str, Any]:
+        existing_role = repository.get_role(role_id)
+        before = _role_response(existing_role) if existing_role is not None else None
         try:
             if payload.permissions is not None:
                 _replace_permissions(role_id, payload.permissions)
@@ -409,13 +543,25 @@ def build_identity_router(
         except ValueError as exc:
             status_code = 409 if "系统管理员" in str(exc) else 422
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-        return _role_response(role)
+        updated = _role_response(role)
+        record_audit(
+            actor=principal,
+            action="role.update",
+            target_type="role",
+            target_id=role_id,
+            before=before,
+            after=updated,
+            result="success",
+            request=request,
+        )
+        return updated
 
     @router.post("/api/admin/roles/{role_id}/clone", status_code=201)
     def clone_role(
         role_id: str,
         payload: RoleCloneRequest,
-        _: Principal = Depends(admin_write),
+        request: Request,
+        principal: Principal = Depends(admin_write),
     ) -> dict[str, Any]:
         source = repository.get_role(role_id)
         if source is None:
@@ -438,14 +584,27 @@ def build_identity_router(
             )
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="角色编码已存在") from exc
-        return _role_response(role)
+        cloned = _role_response(role)
+        record_audit(
+            actor=principal,
+            action="role.clone",
+            target_type="role",
+            target_id=role["id"],
+            before={"source_role_id": role_id},
+            after=cloned,
+            result="success",
+            request=request,
+        )
+        return cloned
 
     @router.put("/api/admin/roles/{role_id}/permissions")
     def replace_role_permissions(
         role_id: str,
         payload: RolePermissionsRequest,
-        _: Principal = Depends(admin_write),
+        request: Request,
+        principal: Principal = Depends(admin_write),
     ) -> dict[str, Any]:
+        before = repository.list_role_permissions(role_id)
         try:
             _replace_permissions(role_id, payload.permissions)
         except KeyError as exc:
@@ -454,7 +613,18 @@ def build_identity_router(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         role = repository.get_role(role_id)
         assert role is not None
-        return _role_response(role)
+        updated = _role_response(role)
+        record_audit(
+            actor=principal,
+            action="role.permissions.replace",
+            target_type="role",
+            target_id=role_id,
+            before={"permissions": before},
+            after={"permissions": updated["permissions"]},
+            result="success",
+            request=request,
+        )
+        return updated
 
     @router.get("/api/admin/permissions")
     def list_permissions(_: Principal = Depends(admin_read)) -> list[dict[str, Any]]:
@@ -520,6 +690,7 @@ def build_identity_router(
         *,
         status_code: int,
         update_last_login: bool,
+        audit_action: str | None = None,
     ) -> JSONResponse:
         raw_token, _ = session_service.create_session(user_id, request)
         context = session_service.resolve_session(raw_token)
@@ -537,6 +708,17 @@ def build_identity_router(
                     "UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?",
                     (user_id,),
                 )
+        if audit_action is not None:
+            record_audit(
+                actor=principal,
+                action=audit_action,
+                target_type="user",
+                target_id=user_id,
+                before=None,
+                after={"username": principal.username},
+                result="success",
+                request=request,
+            )
         response = JSONResponse(_auth_body(context), status_code=status_code)
         response.set_cookie(
             session_service.cookie_name,

@@ -29,6 +29,7 @@ import subprocess
 import webbrowser
 import queue
 import shutil
+import uuid
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 from contextlib import asynccontextmanager
@@ -68,6 +69,9 @@ WEB_LOG_LEVEL = os.getenv("AIWORKER_WEB_LOG_LEVEL", "INFO").strip().upper()
 WEB_LOG_MAX_BYTES = 5 * 1024 * 1024
 WEB_LOG_BACKUP_COUNT = 5
 WEB_LOG_PATH = WORKSPACE_ROOT / "logs" / "webgui.log"
+UNSAFE_HTTP_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+CSRF_EXEMPT_PATHS = frozenset({"/api/auth/login", "/api/auth/setup"})
+REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 def configure_backend_logging(log_path: Path = WEB_LOG_PATH, log_level: str = WEB_LOG_LEVEL) -> logging.Logger:
@@ -100,6 +104,63 @@ def configure_backend_logging(log_path: Path = WEB_LOG_PATH, log_level: str = WE
 
 
 backend_logger = configure_backend_logging()
+
+
+def configure_cors(target_app: FastAPI, origins: str | None = None) -> list[str]:
+    """Enable credentialed CORS only for explicitly configured origins."""
+    configured = os.getenv("AIWORKER_ALLOWED_ORIGINS", "") if origins is None else origins
+    allowed_origins = list(dict.fromkeys(
+        origin.strip() for origin in configured.split(",") if origin.strip()
+    ))
+    if "*" in allowed_origins:
+        raise ValueError("AIWORKER_ALLOWED_ORIGINS must contain explicit origins")
+    if allowed_origins:
+        target_app.add_middleware(
+            CORSMiddleware,
+            allow_origins=allowed_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+    return allowed_origins
+
+
+def install_security_middleware(target_app: FastAPI, session_service=None) -> None:
+    """Install authenticated-write CSRF and outer request-ID middleware."""
+    if session_service is not None:
+        target_app.state.identity_session_service = session_service
+
+    async def enforce_csrf(request: Request, call_next):
+        if (
+            request.method.upper() in UNSAFE_HTTP_METHODS
+            and request.url.path not in CSRF_EXEMPT_PATHS
+        ):
+            service = getattr(request.app.state, "identity_session_service", None)
+            cookie_name = getattr(service, "cookie_name", "aiworker_session")
+            raw_token = request.cookies.get(cookie_name)
+            if (
+                service is not None
+                and raw_token
+                and service.resolve_session(raw_token) is not None
+                and not service.verify_csrf(
+                    raw_token, request.headers.get("X-CSRF-Token")
+                )
+            ):
+                return JSONResponse(status_code=403, content={"detail": "CSRF 校验失败"})
+        return await call_next(request)
+
+    async def attach_request_id(request: Request, call_next):
+        supplied = request.headers.get("X-Request-ID", "")
+        request_id = supplied if REQUEST_ID_PATTERN.fullmatch(supplied) else str(uuid.uuid4())
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+    # Starlette executes the last registered middleware first. Register the
+    # request ID last so logging and every inner route can rely on it.
+    target_app.middleware("http")(enforce_csrf)
+    target_app.middleware("http")(attach_request_id)
 
 # Try to import optional dependencies
 try:
@@ -174,26 +235,27 @@ async def log_backend_requests(request, call_next):
     try:
         response = await call_next(request)
     except Exception:
-        backend_logger.exception("Unhandled request error: %s %s", request.method, request.url.path)
+        backend_logger.exception(
+            "Unhandled request error: %s %s request_id=%s",
+            request.method,
+            request.url.path,
+            getattr(request.state, "request_id", None),
+        )
         raise
 
     duration_ms = (time.perf_counter() - started_at) * 1000
     backend_logger.info(
-        "%s %s status=%s duration_ms=%.1f",
+        "%s %s status=%s duration_ms=%.1f request_id=%s",
         request.method,
         request.url.path,
         response.status_code,
         duration_ms,
+        getattr(request.state, "request_id", None),
     )
     return response
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+install_security_middleware(app)
+configure_cors(app)
 register_rag_routes(app, root=Path(__file__).resolve().parent, runtime_dir=Path(__file__).resolve().parent / ".runtime")
 register_analytics_routes(app, root=Path(__file__).resolve().parent, runtime_dir=Path(__file__).resolve().parent / ".runtime")
 register_today_rank_routes(app, root=Path(__file__).resolve().parent)

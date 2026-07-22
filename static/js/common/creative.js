@@ -550,8 +550,9 @@ window.aiworkerModules.push(() => ({
 
                 async createBlankCharacterBatch() {
                     const projectId = this.creativeWorkspace.project.id;
+                    const task = await this.resolveCreativeWorkflowTask('characters', projectId);
                     const blank = {name: '新角色', age_range: '', identity: '', external_tags: [], desire: '', secret: '', growth_arc: '', dialogue_style: '', appearance_prompt: '', voice_prompt: ''};
-                    const res = await aiworkerApi.request(`/api/creative/projects/${projectId}/characters`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({characters: [blank], relationships: []})});
+                    const res = await aiworkerApi.request(`/api/creative/projects/${projectId}/characters`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({characters: [blank], relationships: [], workflow_task_id: task.id})});
                     const data = await res.json();
                     if (!res.ok) { this.creativeWorkspace.error = data.detail || '创建空白人物版本失败'; return; }
                     await this.selectCreativeProject(projectId);

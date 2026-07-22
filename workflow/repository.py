@@ -289,6 +289,7 @@ class WorkflowRepository:
         self, task_id: str, submission: dict[str, Any], message: str
     ) -> None:
         with self.identity_repository.transaction() as connection:
+            self._ensure_system_actor(connection, SYSTEM_ACTOR.user_id)
             self._record_event(
                 connection,
                 task_id,

@@ -248,13 +248,67 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
     )["next_task"]
     assert characters_task["role_code"] == "creative_planner"
 
-    characters = creative.create_character_batch(
-        project["id"],
-        [{"name": "Lead"}],
-        [{"from": "Lead", "to": "Rival", "relation": "conflict"}],
-    )
-    character_resource_id = f"{project_id}:{characters['batch_id']}"
     _claim_start(clients["creative_planner"], characters_task["id"])
+    planner_role = identity.get_role_by_code("creative_planner")
+    assert planner_role is not None
+    other_planner = identity.create_user("other-planner", "Other Planner", "hash")
+    identity.replace_user_roles(other_planner["id"], [planner_role["id"]])
+    workflow.add_project_member(
+        project_id, other_planner["id"], "creative_planner", admin
+    )
+    other_planner_client = _client(app, sessions, other_planner["id"])
+    unauthorized_characters = other_planner_client.post(
+        f"/api/creative/projects/{project_id}/characters",
+        json={
+            "characters": [{"name": "Not mine"}],
+            "relationships": [],
+            "workflow_task_id": characters_task["id"],
+        },
+    )
+    assert unauthorized_characters.status_code == 403
+
+    created_characters = clients["creative_planner"].post(
+        f"/api/creative/projects/{project_id}/characters",
+        json={
+            "characters": [{"name": "Lead"}],
+            "relationships": [
+                {"from": "Lead", "to": "Rival", "relation": "conflict"}
+            ],
+            "workflow_task_id": characters_task["id"],
+        },
+    )
+    assert created_characters.status_code == 200, created_characters.text
+    characters = created_characters.json()
+    assert all(
+        item["workflow_task_id"] == characters_task["id"]
+        for item in characters["characters"] + characters["relationships"]
+    )
+    visible_project = clients["creative_planner"].get(
+        f"/api/creative/projects/{project_id}"
+    )
+    assert visible_project.status_code == 200, visible_project.text
+    assert any(
+        item["batch_id"] == characters["batch_id"]
+        for item in visible_project.json()["characters"]
+    )
+    character = characters["characters"][0]
+    edited = clients["creative_planner"].patch(
+        f"/api/creative/characters/{character['id']}",
+        json={"content": {"name": "Lead", "identity": "Detective"}},
+    )
+    assert edited.status_code == 200, edited.text
+
+    resolved_characters = clients["creative_planner"].post(
+        f"/api/creative/projects/{project_id}/characters",
+        json={"characters": [{"name": "Supporting"}], "relationships": []},
+    )
+    assert resolved_characters.status_code == 200, resolved_characters.text
+    assert (
+        resolved_characters.json()["characters"][0]["workflow_task_id"]
+        == characters_task["id"]
+    )
+
+    character_resource_id = f"{project_id}:{characters['batch_id']}"
     character_submission = _submit(
         clients["creative_planner"],
         characters_task["id"],
@@ -265,6 +319,11 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
         clients["project_owner"], character_submission["id"]
     )["next_task"]
     assert outline_task["role_code"] == "screenwriter"
+    no_character_task = clients["creative_planner"].post(
+        f"/api/creative/projects/{project_id}/characters",
+        json={"characters": [{"name": "Too late"}], "relationships": []},
+    )
+    assert no_character_task.status_code == 409
 
     outline = creative.create_outline_batch(
         project["id"],

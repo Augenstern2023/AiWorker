@@ -134,3 +134,43 @@ uv run pytest -q --ignore=test/test_proxy_ip_pool.py --ignore=test/test_redis_ca
 ```
 
 The sole unit failure remains the accepted pre-existing XHS Excel factory mismatch.
+
+## Final Workflow Ordering And Draft Linkage
+
+The remaining two Important findings were closed with a fourth TDD wave:
+
+- Topic decisions now complete their system approval first, mirror adoption into the creative database second, and only then create the idempotent `source_package` successor. A failed adoption leaves no claimable successor. A failure after adoption is recoverable through retry or task/submission reads, which reconcile the missing successor without duplication.
+- Manual blank character batches now require an authenticated active `characters` task. The API validates an explicit task ID or resolves exactly one active assigned task for the current actor and project, persists that ID on every row, and rejects unauthorized, missing, or ambiguous task context. The UI sends the active task ID, and the linked draft remains visible, editable, and submittable.
+- Mirror-error event recording now ensures the disabled workflow system actor exists before writing the foreign-keyed event.
+
+Fourth-wave RED evidence:
+
+```text
+tests/test_workflow_bootstrap.py::test_topic_adoption_mirror_failure_audits_failure_and_reconciles
+  expected zero source_package tasks after adoption failure, observed one
+tests/test_workflow_bootstrap.py::test_topic_successor_failure_reconciles_on_task_read
+  expected adopted topic after injected successor failure, observed pending_review
+tests/test_role_workflow_e2e.py::test_five_role_workflow_isolated_audited_and_persistent
+  expected missing active characters task to return 409, observed 200
+tests/test_webgui_ui_changes.py::test_blank_character_batch_links_the_active_workflow_task
+  blank character creation did not resolve or send the active workflow task
+```
+
+Fourth-wave GREEN evidence:
+
+```text
+uv run pytest tests/test_workflow_bootstrap.py tests/test_role_workflow_e2e.py \
+  tests/test_webgui_ui_changes.py tests/test_workflow_transitions.py -q
+71 passed
+
+uv run pytest [22 focused identity/workflow/creative/UI modules] -q
+280 passed
+
+uv run pytest tests/ -q
+491 passed, 1 failed
+
+uv run pytest -q --ignore=test/test_proxy_ip_pool.py --ignore=test/test_redis_cache.py
+495 passed, 8 skipped, 1 failed
+```
+
+The only failure in both broad runs remains the accepted pre-existing XHS Excel factory mismatch.

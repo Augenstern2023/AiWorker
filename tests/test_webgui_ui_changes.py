@@ -112,6 +112,16 @@ def test_webgui_registers_phase4_routes_and_flat_project_workspace():
     assert "--bs-table-active-color: var(--text);" in html
 
 
+def test_blank_character_batch_links_the_active_workflow_task():
+    script = _source("static/js/common/creative.js")
+    method = script.split("async createBlankCharacterBatch()", 1)[1].split(
+        "async saveProjectCharacter", 1
+    )[0]
+
+    assert "resolveCreativeWorkflowTask('characters', projectId)" in method
+    assert "workflow_task_id: task.id" in method
+
+
 def test_project_table_uses_name_navigation_without_redundant_action_column():
     section = _source("templates/common/workspace/project_list.html")
     html = section + _source("static/css/workspaces.css")

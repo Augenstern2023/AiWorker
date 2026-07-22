@@ -38,6 +38,16 @@ def _principal(identity: IdentityRepository, username: str, role_code: str):
     return principal
 
 
+def _successor_count(identity: IdentityRepository, task_id: str) -> int:
+    with identity.connect() as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) AS count FROM workflow_tasks "
+            "WHERE predecessor_task_id = ? AND task_type = 'source_package'",
+            (task_id,),
+        ).fetchone()
+    return int(row["count"])
+
+
 def test_topic_decision_approval_adopts_after_pending_bootstrap(tmp_path: Path):
     identity = IdentityRepository(tmp_path / "system.db")
     identity.seed_defaults()
@@ -144,6 +154,7 @@ def test_topic_adoption_mirror_failure_audits_failure_and_reconciles(
     failed = client.post(f"/api/workflow/submissions/{submitted['id']}/approve")
     assert failed.status_code == 503
     assert creative.get_topic(topic["id"])["status"] == "pending_review"
+    assert _successor_count(identity, task["id"]) == 0
     assert audit.query(action="workflow.approve", result="failure")
     assert audit.query(action="workflow.approve", result="success") == []
 
@@ -151,4 +162,57 @@ def test_topic_adoption_mirror_failure_audits_failure_and_reconciles(
     retried = client.post(f"/api/workflow/submissions/{submitted['id']}/approve")
     assert retried.status_code == 200
     assert creative.get_topic(topic["id"])["status"] == "adopted"
+    assert _successor_count(identity, task["id"]) == 1
     assert audit.query(action="workflow.approve", result="success")
+
+
+def test_topic_successor_failure_reconciles_on_task_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    identity = IdentityRepository(tmp_path / "system.db")
+    identity.seed_defaults()
+    creative = CreativeRepository(tmp_path / "creative.db")
+    workflow = WorkflowRepository(identity)
+    owner = _principal(identity, "successor-owner", "project_owner")
+    selector = _principal(identity, "successor-selector", "selection_operator")
+    topic = creative.upsert_topics([{
+        "platform": "dy", "job_id": "successor-topic", "source_path": "successor.json",
+        "captured_at": "2026-07-23", "title": "Successor topic", "score": 92,
+        "confidence": "high", "score_details": {}, "recommendation": "adopt",
+        "evidence": [],
+    }])[0]
+    task = WorkflowBootstrapService(creative, workflow).ensure_topic_workflow(
+        topic["id"], owner
+    )["task"]
+    workflow.claim_task(task["id"], selector)
+    workflow.start_task(task["id"], selector)
+    transitions = TransitionService(
+        workflow, creative_adapter=CreativeWorkflowAdapter(creative, workflow)
+    )
+    draft = transitions.create_submission(
+        task["id"], "topic_decision", str(topic["id"]), {"decision": "adopt"}, selector
+    )
+    submitted = transitions.submit(draft["id"], selector)
+    app = FastAPI()
+    app.state.identity_permission_service = PermissionService(
+        identity, SessionService(identity)
+    )
+    app.dependency_overrides[current_principal] = lambda: owner
+    app.include_router(build_workflow_router(workflow, transitions))
+    client = TestClient(app)
+    original_create_next_task = workflow.create_next_task
+
+    def fail_create_next_task(*args, **kwargs):
+        raise RuntimeError("system database temporarily unavailable")
+
+    monkeypatch.setattr(workflow, "create_next_task", fail_create_next_task)
+    failed = client.post(f"/api/workflow/submissions/{submitted['id']}/approve")
+    assert failed.status_code == 503
+    assert creative.get_topic(topic["id"])["status"] == "adopted"
+    assert _successor_count(identity, task["id"]) == 0
+
+    monkeypatch.setattr(workflow, "create_next_task", original_create_next_task)
+    app.dependency_overrides[current_principal] = lambda: selector
+    reconciled = client.get(f"/api/workflow/tasks/{task['id']}")
+    assert reconciled.status_code == 200
+    assert _successor_count(identity, task["id"]) == 1

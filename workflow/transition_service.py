@@ -133,6 +133,10 @@ class TransitionService:
             next_node = node[2]
             next_task = None
             beats_progress = None
+            topic_requires_adoption = (
+                submission["resource_type"] == "topic_decision"
+                and self.creative_adapter is not None
+            )
             if (
                 submission["resource_type"] == "beats"
                 and self.creative_adapter is not None
@@ -158,7 +162,7 @@ class TransitionService:
                         beats_progress,
                     )
                 task = self.repository._require_task(connection, task["id"])
-            elif next_node is not None:
+            elif next_node is not None and not topic_requires_adoption:
                 next_role = WORKFLOW_NODES[next_node][0]
                 next_task = self.repository.create_next_task(
                     task["id"],
@@ -199,6 +203,13 @@ class TransitionService:
                 )
                 raise RuntimeError(
                     "topic decision approved but adoption reconciliation failed"
+                ) from exc
+            try:
+                next_task = self._create_topic_successor(submission["task_id"])
+                result["next_task"] = next_task
+            except Exception as exc:
+                raise RuntimeError(
+                    "topic decision adopted but successor creation failed"
                 ) from exc
         return result
 
@@ -243,10 +254,32 @@ class TransitionService:
         if self.creative_adapter is not None:
             for submission in submissions:
                 self.creative_adapter.reconcile_submission(submission)
+                if (
+                    submission["resource_type"] == "topic_decision"
+                    and submission["status"] == "approved"
+                ):
+                    self._create_topic_successor(task_id)
         return self.repository.list_task_submissions(task_id)
 
     def reconcile_task(self, task_id: str) -> None:
         self.list_task_submissions(task_id)
+
+    def _create_topic_successor(self, task_id: str) -> dict[str, Any]:
+        task = self.repository.get_task(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        node = WORKFLOW_NODES.get(task["task_type"])
+        if node is None or task["task_type"] != "topic_decision":
+            raise ValueError("task is not a topic decision")
+        next_node = node[2]
+        if next_node is None:
+            raise ValueError("topic decision has no successor")
+        return self.repository.create_next_task(
+            task_id,
+            next_node,
+            WORKFLOW_NODES[next_node][0],
+            actor=SYSTEM_ACTOR,
+        )
 
     def _assert_repeated_approval_allowed(
         self,

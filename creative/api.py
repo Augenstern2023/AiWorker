@@ -633,6 +633,37 @@ def build_creative_router(
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
+    def resolve_task_for_creation(
+        task_id: str | None,
+        resource_type: str,
+        principal: Principal,
+        *,
+        project_id: int,
+    ) -> str:
+        if task_id:
+            validate_task(
+                task_id, resource_type, principal, project_id=project_id
+            )
+            return task_id
+        candidates = [
+            task
+            for task in workflow_repository.list_tasks(principal)
+            if task["task_type"] == resource_type
+            and str(task.get("project_id") or "") == str(project_id)
+            and task.get("assignee_user_id") == principal.user_id
+            and task["status"] in {"assigned", "in_progress", "returned"}
+        ]
+        if len(candidates) != 1:
+            raise HTTPException(
+                409,
+                "exactly one active assigned workflow task is required",
+            )
+        resolved_id = str(candidates[0]["id"])
+        validate_task(
+            resolved_id, resource_type, principal, project_id=project_id
+        )
+        return resolved_id
+
     def batch_resource_for(table: str, item_id: int) -> str | None:
         if table not in {"creative_characters", "creative_relationships"}:
             raise ValueError("invalid creative table")
@@ -1161,15 +1192,20 @@ def build_creative_router(
     async def create_project_characters(
         project_id: int,
         payload: CharacterBatchRequest,
-        principal: Principal | None = Depends(optional_principal),
+        principal: Principal = Depends(current_principal),
     ):
         try:
-            validate_task(payload.workflow_task_id, "characters", principal, project_id=project_id)
+            workflow_task_id = resolve_task_for_creation(
+                payload.workflow_task_id,
+                "characters",
+                principal,
+                project_id=project_id,
+            )
             return repository.create_character_batch(
                 project_id,
                 payload.characters,
                 payload.relationships,
-                workflow_task_id=payload.workflow_task_id,
+                workflow_task_id=workflow_task_id,
             )
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc

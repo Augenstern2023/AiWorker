@@ -66,14 +66,18 @@ NAVIGATION_CATALOG = (
         "permission": "page.admin.delivery",
         "route": "/admin/users",
         "items": (
-            {"label": "用户管理", "route": "/admin/users"},
-            {"label": "角色权限", "route": "/admin/roles"},
-            {"label": "系统配置", "route": "/admin/config"},
-            {"label": "数据管理", "route": "/admin/data"},
-            {"label": "数据分析", "route": "/admin/analytics"},
-            {"label": "机器任务", "route": "/admin/jobs"},
-            {"label": "成果交付", "route": "/admin/deliveries"},
-            {"label": "审计日志", "route": "/admin/audit"},
+            {"label": "用户管理", "route": "/admin/users", "permission": "*"},
+            {"label": "角色权限", "route": "/admin/roles", "permission": "*"},
+            {"label": "系统配置", "route": "/admin/config", "permission": "*"},
+            {"label": "数据管理", "route": "/admin/data", "permission": "*"},
+            {"label": "数据分析", "route": "/admin/analytics", "permission": "*"},
+            {"label": "机器任务", "route": "/admin/jobs", "permission": "*"},
+            {
+                "label": "成果交付",
+                "route": "/admin/deliveries",
+                "permission": "page.admin.delivery",
+            },
+            {"label": "审计日志", "route": "/admin/audit", "permission": "*"},
         ),
     },
 )
@@ -104,14 +108,14 @@ PAGE_ROUTES = (
     ("/review/approvals", "page.review", "版本审批"),
     ("/review/projects/{project_id}/members", "page.review", "项目成员"),
     ("/review/projects/{project_id}/versions", "page.review", "项目版本"),
-    ("/admin/users", "page.admin.delivery", "用户管理"),
-    ("/admin/roles", "page.admin.delivery", "角色权限"),
-    ("/admin/config", "page.admin.delivery", "系统配置"),
-    ("/admin/data", "page.admin.delivery", "数据管理"),
-    ("/admin/analytics", "page.admin.delivery", "数据分析"),
-    ("/admin/jobs", "page.admin.delivery", "机器任务"),
+    ("/admin/users", "*", "用户管理"),
+    ("/admin/roles", "*", "角色权限"),
+    ("/admin/config", "*", "系统配置"),
+    ("/admin/data", "*", "数据管理"),
+    ("/admin/analytics", "*", "数据分析"),
+    ("/admin/jobs", "*", "机器任务"),
     ("/admin/deliveries", "page.admin.delivery", "成果交付"),
-    ("/admin/audit", "page.admin.delivery", "审计日志"),
+    ("/admin/audit", "*", "审计日志"),
 )
 
 
@@ -127,12 +131,22 @@ class NavigationService:
         self._last_routes_lock = threading.Lock()
 
     def items_for(self, principal: Principal) -> list[dict[str, Any]]:
-        return [
-            deepcopy(group)
-            for group in NAVIGATION_CATALOG
-            if principal.is_system_admin
-            or group["permission"] in principal.permissions
-        ]
+        visible_groups = []
+        for group in NAVIGATION_CATALOG:
+            items = [
+                deepcopy(item)
+                for item in group["items"]
+                if principal.is_system_admin
+                or item.get("permission", group["permission"])
+                in principal.permissions
+            ]
+            if not items:
+                continue
+            visible_group = deepcopy(group)
+            visible_group["items"] = tuple(items)
+            visible_group["route"] = items[0]["route"]
+            visible_groups.append(visible_group)
+        return visible_groups
 
     def can_open(self, principal: Principal, route: str) -> bool:
         permission = self.permission_for(route)

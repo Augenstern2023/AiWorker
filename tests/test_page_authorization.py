@@ -128,7 +128,11 @@ def test_default_roles_have_exact_navigation_and_page_visibility(
             "{episode_number}", "2"
         )
         response = client.get(concrete_route, follow_redirects=False)
-        expected_status = 200 if permission in allowed_permissions else 403
+        expected_status = (
+            200
+            if role_code == "system_admin" or permission in allowed_permissions
+            else 403
+        )
         assert response.status_code == expected_status
 
 
@@ -205,3 +209,39 @@ def test_forbidden_page_uses_html_error_template(writer_client: TestClient):
 
     assert response.status_code == 403
     assert "无权访问" in response.text
+
+
+def test_delivery_only_role_cannot_open_other_admin_pages(
+    page_app: tuple[FastAPI, IdentityRepository],
+):
+    repository = page_app[1]
+    role = repository.create_role("delivery_only", "交付专员", "仅导出批准成果")
+    repository.replace_role_permissions(
+        role["id"], [("page.admin.delivery", "all")]
+    )
+    client = _create_role_client(page_app, "delivery_only")
+
+    delivery = client.get("/admin/deliveries")
+
+    assert delivery.status_code == 200
+    assert "成果交付" in delivery.text
+    for route in (
+        "/admin/users",
+        "/admin/roles",
+        "/admin/config",
+        "/admin/data",
+        "/admin/analytics",
+        "/admin/jobs",
+        "/admin/audit",
+    ):
+        assert client.get(route).status_code == 403
+    for label in (
+        "用户管理",
+        "角色权限",
+        "系统配置",
+        "数据管理",
+        "数据分析",
+        "机器任务",
+        "审计日志",
+    ):
+        assert label not in delivery.text

@@ -6,6 +6,7 @@
 # GitHub: https://github.com/NanmiCoder
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
 
+import re
 from pathlib import Path
 
 
@@ -190,3 +191,48 @@ def test_admin_identity_pages_expose_complete_management_flows():
     assert "/api/admin/roles/${role.id}/clone" in roles_js
     assert "permissions" in roles_js
     assert "toggleRoleStatus" in roles_js
+
+
+def test_base_layout_globally_surfaces_permission_denials_without_rejection():
+    base = _read("templates/layouts/base.html")
+    session = _read("static/js/common/session.js")
+    api = _read("static/js/common/api.js")
+
+    assert 'id="permission-alert"' in base
+    assert 'id="permission-alert-message"' in base
+    assert "aiworker:permission-denied" in session
+    assert "permissionAlert.classList.remove('d-none')" in session
+    forbidden_branch = api.split("if (response.status === 403)", 1)[1].split(
+        "return response", 1
+    )[0]
+    assert "window.dispatchEvent" in forbidden_branch
+    assert "throw" not in forbidden_branch
+
+
+def test_selection_drama_page_only_references_loaded_methods():
+    page = _read("templates/selection/dramas.html")
+    html = _read("templates/common/workspace/selection_dramas.html")
+    if 'include "common/workspace/selection_modals.html"' in page:
+        html += _read("templates/common/workspace/selection_modals.html")
+    source = _read("static/js/common/tasks.js") + _read(
+        "static/js/selection/dramas.js"
+    )
+    calls = set(
+        re.findall(r"(?<![.\w])([A-Za-z_$][A-Za-z0-9_$]*)\(", html)
+    )
+    calls.update(
+        re.findall(
+            r'@(?:click|change|input|keydown\.enter)="([A-Za-z_$][A-Za-z0-9_$]*)"',
+            html,
+        )
+    )
+    definitions = set(
+        re.findall(
+            r"^\s*(?:async\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s*\(",
+            source,
+            re.MULTILINE,
+        )
+    )
+
+    assert "selection_modals.html" not in page
+    assert calls - definitions - {"Number", "calc"} == set()

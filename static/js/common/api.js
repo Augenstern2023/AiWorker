@@ -37,7 +37,6 @@
             window.dispatchEvent(new CustomEvent('aiworker:permission-denied', {
                 detail: {message: error.message},
             }));
-            throw error;
         }
         return response;
     }

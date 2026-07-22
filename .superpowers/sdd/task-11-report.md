@@ -40,3 +40,40 @@ The warning is the existing SQLAlchemy `declarative_base()` deprecation warning 
 `uv run pre-commit run --all-files` was also attempted. The task files passed
 the header check, but the repository-wide run failed because unrelated existing
 Python files lack required headers; its broad formatting changes were reverted.
+
+## Review Follow-up
+
+- Restricted generic job creation and legacy `/api/run` to an explicit
+  selection-worker platform/crawler allowlist; creative and drama workers must
+  use their dedicated routes.
+- Removed all client-supplied ownership fields from generic job `extra` and
+  derive project ownership only from a validated workflow task.
+- Required live project membership for planner/writer generation, managed
+  project scope for project owners, and preserved the administrator bypass.
+- Changed creative generation dependencies to fail closed with `401` for a
+  missing principal and `500` for missing identity configuration.
+- Moved legacy stop authorization before all mutations and added a normalized
+  audit event for successful administrator stops.
+
+Review regression verification:
+
+```text
+uv run pytest tests/test_job_manager.py tests/test_job_permissions.py tests/test_webgui_ui_changes.py tests/test_creative_phase4.py tests/test_creative_lifecycle.py tests/test_creative_workflow_integration.py -q
+127 passed, 1 warning in 14.24s
+```
+
+A repository-wide `uv run pytest tests/ -q` run exposed one Task 11 test-double
+compatibility failure, which was fixed, plus the pre-existing unrelated
+`tests/test_store_factory.py::TestXhsStoreFactory::test_create_excel_store`
+failure (the factory returns `ExcelStoreBase` rather than the asserted
+`XhsExcelStoreImplement`).
+
+Final review verification:
+
+```text
+uv run pytest tests/ -q --deselect tests/test_store_factory.py::TestXhsStoreFactory::test_create_excel_store
+456 passed, 1 deselected, 1 warning in 38.78s
+
+uv run pre-commit run
+PASS for all staged review-fix files
+```

@@ -293,11 +293,31 @@ def build_creative_router(
             request.app.state, "identity_permission_service", None
         )
         if not isinstance(permission_service, PermissionService):
-            return None
+            raise HTTPException(500, "identity permission service is not configured")
         principal = optional_principal(request)
         if principal is None:
             raise HTTPException(401, "登录已失效，请重新登录")
         return principal
+
+    def assert_project_generation_access(
+        project_id: int, principal: Principal | None
+    ) -> None:
+        if principal is None:
+            raise HTTPException(401, "登录已失效，请重新登录")
+        if principal.is_system_admin:
+            return
+        project_key = str(project_id)
+        active_member = any(
+            member["user_id"] == principal.user_id and member["status"] == "active"
+            for member in workflow_repository.list_project_members(project_key)
+        )
+        if not active_member:
+            raise HTTPException(403, "只能在已分配的项目中创建机器任务")
+        if "project_owner" in principal.role_codes:
+            try:
+                workflow_repository.assert_can_manage_project(project_key, principal)
+            except PermissionError as exc:
+                raise HTTPException(403, "项目负责人只能操作其管理的项目") from exc
 
     def project_or_404(project_id: int) -> dict[str, Any]:
         workflow_adapter.reconcile_project(project_id)
@@ -327,6 +347,7 @@ def build_creative_router(
             and required_permission not in principal.permissions
         ):
             raise HTTPException(403, "没有创建此机器任务的权限")
+        assert_project_generation_access(project_id, principal)
         workflow_task_id = str(extra.get("workflow_task_id") or "") or None
         payload = {
             "platform": "creative",

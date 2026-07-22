@@ -11,13 +11,16 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from core.job import CrawlJob
 from creative.api import register_creative_routes
 from creative.imitation_service import assess_similarity_risk
 from creative.repository import CreativeRepository
+from identity.permission_service import PermissionService
+from identity.repository import IdentityRepository
+from identity.session_service import SessionService
 from runtime.job_state import JobState
 
 
@@ -371,9 +374,27 @@ class RecordingJobManager:
 def build_phase4_client(tmp_path: Path) -> tuple[TestClient, CreativeRepository, RecordingJobManager]:
     runtime_dir = tmp_path / ".runtime"
     manager = RecordingJobManager()
+    identity = IdentityRepository(runtime_dir / "system" / "system.db")
+    identity.seed_defaults()
+    admin_role = identity.get_role_by_code("system_admin")
+    assert admin_role is not None
+    admin = identity.create_user("phase4-admin", "Phase 4 Admin", "hash")
+    identity.replace_user_roles(admin["id"], [admin_role["id"]])
+    sessions = SessionService(identity, secure_cookie=False)
+    permissions = PermissionService(identity, sessions)
     app = FastAPI()
+    app.state.identity_permission_service = permissions
     register_creative_routes(app, root=tmp_path, runtime_dir=runtime_dir, job_manager=manager)
-    return TestClient(app), CreativeRepository(runtime_dir / "creative" / "creative.db"), manager
+    session_app = FastAPI()
+
+    @session_app.get("/session")
+    async def create_session(request: Request):
+        return sessions.create_session(admin["id"], request)
+
+    raw_token, _ = TestClient(session_app).get("/session").json()
+    client = TestClient(app)
+    client.cookies.set(sessions.cookie_name, raw_token)
+    return client, CreativeRepository(runtime_dir / "creative" / "creative.db"), manager
 
 
 def write_episode_script(root: Path, title: str, episode_number: int, text: str) -> Path:

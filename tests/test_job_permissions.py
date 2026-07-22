@@ -304,6 +304,105 @@ def test_creator_pause_resume_and_retry_are_audited(job_environment):
     assert {"job.pause", "job.resume", "job.stop", "job.retry"} <= actions
 
 
+@pytest.mark.parametrize(
+    ("platform", "crawler_type"),
+    [
+        ("creative", "phase4_generate"),
+        ("hg", "drama_download"),
+        ("dy", "phase4_generate"),
+        ("unknown", "search"),
+    ],
+)
+def test_generic_job_create_rejects_sensitive_or_unknown_worker_combinations(
+    job_environment, platform: str, crawler_type: str
+):
+    creator = role_client(job_environment, "selection_operator", f"generic-{platform}")
+
+    response = creator.post(
+        "/api/jobs",
+        json={
+            "platform": platform,
+            "crawler_type": crawler_type,
+            "extra": {"action": "blueprints", "project_id": "project-secret"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert job_environment.manager.list_jobs() == []
+
+
+def test_generic_job_create_strips_unvalidated_client_project_ownership(
+    job_environment,
+):
+    creator = role_client(job_environment, "selection_operator", "project-spoof")
+
+    response = creator.post(
+        "/api/jobs",
+        json={
+            "platform": "dy",
+            "crawler_type": "search",
+            "keywords": "test",
+            "extra": {
+                "project_id": "project-secret",
+                "created_by_user_id": "other-user",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    job = response.json()["job"]
+    assert job["created_by_user_id"] == creator.user_id
+    assert job["project_id"] is None
+    assert "project_id" not in job["job"]["extra"]
+
+
+def test_legacy_run_endpoint_rejects_sensitive_worker_combinations(job_environment):
+    creator = role_client(job_environment, "selection_operator", "run-sensitive")
+
+    response = creator.post(
+        "/api/run",
+        json={
+            "platform": "creative",
+            "login_type": "qrcode",
+            "crawler_type": "phase4_generate",
+            "keywords": "test",
+            "start_page": 1,
+            "headless": True,
+            "save_option": "json",
+            "get_comment": False,
+            "get_sub_comment": False,
+        },
+    )
+
+    assert response.status_code == 400
+    assert job_environment.manager.list_jobs() == []
+
+
+def test_legacy_stop_authorizes_before_mutation_and_audits_admin_stop(
+    job_environment, monkeypatch
+):
+    creator = role_client(job_environment, "selection_operator", "legacy-denied")
+    admin = role_client(job_environment, "system_admin", "legacy-admin")
+    process = RunningProcess()
+    monkeypatch.setattr(WebGUI.state, "process", process)
+    monkeypatch.setattr(WebGUI.state, "stop_requested", False)
+    monkeypatch.setattr(WebGUI.sys, "platform", "linux")
+
+    denied = creator.post("/api/stop")
+
+    assert denied.status_code == 403
+    assert WebGUI.state.stop_requested is False
+    assert process.return_code is None
+
+    stopped = admin.post("/api/stop")
+
+    assert stopped.status_code == 200
+    assert WebGUI.state.stop_requested is True
+    assert process.return_code == -15
+    events = job_environment.audit.query(action="job.stop")
+    assert events[0]["target_id"] == f"legacy-process:{process.pid}"
+
+
 class RecordingJobManager:
     def __init__(self):
         self.payloads: list[dict] = []
@@ -405,3 +504,74 @@ def test_creative_generation_job_records_owner_project_task_link_and_audit(
     assert workflow.list_task_job_ids(task["id"]) == [job["job_id"]]
     event = audit.query(action="job.create", target_id=job["job_id"])[0]
     assert event["actor_user_id"] == user["id"]
+
+    unauthenticated = TestClient(app).post(
+        f"/api/creative/projects/{project['id']}/blueprints/generate",
+        json={"count": 3},
+    )
+    assert unauthenticated.status_code == 401
+
+    outsider_user = identity.create_user("creative-outsider", "Outsider", "hash")
+    identity.replace_user_roles(outsider_user["id"], [role["id"]])
+    outsider_session_app = FastAPI()
+
+    @outsider_session_app.get("/session")
+    async def create_outsider_session(request: Request):
+        return sessions.create_session(outsider_user["id"], request)
+
+    outsider_token, _ = TestClient(outsider_session_app).get("/session").json()
+    outsider = TestClient(app)
+    outsider.cookies.set(sessions.cookie_name, outsider_token)
+
+    denied = outsider.post(
+        f"/api/creative/projects/{project['id']}/blueprints/generate",
+        json={"count": 3},
+    )
+
+    assert denied.status_code == 403
+    assert len(manager.payloads) == 1
+
+
+def test_creative_generation_fails_closed_without_identity_configuration(
+    tmp_path: Path,
+):
+    runtime_dir = tmp_path / ".runtime"
+    manager = RecordingJobManager()
+    app = FastAPI()
+    register_creative_routes(
+        app, root=tmp_path, runtime_dir=runtime_dir, job_manager=manager
+    )
+    repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
+    topic = repository.upsert_topics(
+        [
+            {
+                "platform": "hg",
+                "job_id": "rank-unconfigured",
+                "source_path": "rank.json",
+                "captured_at": "2026-07-22",
+                "title": "未配置身份服务",
+                "description": "",
+                "category": "都市",
+                "rank_type": "热播",
+                "score": 90,
+                "confidence": "high",
+                "score_details": {},
+                "recommendation": "推荐",
+                "evidence": [],
+            }
+        ]
+    )[0]
+    repository.update_topic(topic["id"], "adopted")
+    breakdown = repository.create_breakdown(topic["id"], {"core": "conflict"}, {}, [])
+    repository.lock_breakdown(breakdown["id"])
+    project = repository.create_project(
+        topic["id"], breakdown["id"], "未配置项目", 1
+    )
+
+    response = TestClient(app).post(
+        f"/api/creative/projects/{project['id']}/blueprints/generate",
+        json={"count": 3},
+    )
+
+    assert response.status_code == 500
+    assert manager.payloads == []

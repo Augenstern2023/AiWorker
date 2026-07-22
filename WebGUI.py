@@ -459,6 +459,27 @@ def _require_permission(principal: Principal, code: str) -> None:
         raise HTTPException(403, "没有执行此操作的权限")
 
 
+_GENERIC_SELECTION_JOB_TYPES = {
+    "hg": frozenset({"rank"}),
+    "dy": frozenset({"search", "detail", "creator", "rank"}),
+    "xhs": frozenset({"search", "detail", "creator"}),
+    "ks": frozenset({"search", "detail", "creator"}),
+    "bili": frozenset({"search", "detail", "creator"}),
+    "wb": frozenset({"search", "detail", "creator"}),
+    "tieba": frozenset({"search", "detail", "creator"}),
+    "zhihu": frozenset({"search", "detail", "creator"}),
+}
+_CLIENT_JOB_OWNERSHIP_FIELDS = frozenset(
+    {"created_by_user_id", "workflow_task_id", "project_id"}
+)
+
+
+def _validate_generic_selection_job(platform: str, crawler_type: str) -> None:
+    allowed_types = _GENERIC_SELECTION_JOB_TYPES.get(platform)
+    if allowed_types is None or crawler_type not in allowed_types:
+        raise HTTPException(400, "该机器任务类型必须使用专用创建接口")
+
+
 def _job_task_context(
     workflow_task_id: str | None, principal: Principal
 ) -> tuple[str | None, str | None]:
@@ -1944,6 +1965,10 @@ async def run_crawler(
     principal: Principal = Depends(current_principal),
 ):
     _require_permission(principal, "job.create.selection")
+    _validate_generic_selection_job(
+        config.platform.split()[0].strip().lower(),
+        config.crawler_type.split()[0].strip().lower(),
+    )
     return await run_crawler_as_job(config, principal, request)
 
     if state.is_running:
@@ -2000,10 +2025,20 @@ async def create_job(
     principal: Principal = Depends(current_principal),
 ):
     _require_permission(principal, "job.create.selection")
+    platform = request.platform.strip().lower()
+    crawler_type = request.crawler_type.strip().lower()
+    _validate_generic_selection_job(platform, crawler_type)
+    workflow_task_id = str(request.extra.get("workflow_task_id") or "") or None
+    task_id, project_id = _job_task_context(workflow_task_id, principal)
+    safe_extra = {
+        key: value
+        for key, value in request.extra.items()
+        if key not in _CLIENT_JOB_OWNERSHIP_FIELDS
+    }
     data = {
-        "platform": request.platform,
+        "platform": platform,
         "login_type": request.login_type,
-        "crawler_type": request.crawler_type,
+        "crawler_type": crawler_type,
         "keywords": request.keywords,
         "start_page": request.start_page,
         "headless": request.headless,
@@ -2015,10 +2050,8 @@ async def create_job(
         "cookies": request.cookie,
         "project_keyword_map": request.project_map,
         "project_name": request.project_name,
-        "extra": request.extra,
+        "extra": safe_extra,
     }
-    workflow_task_id = str(request.extra.get("workflow_task_id") or "") or None
-    task_id, project_id = _job_task_context(workflow_task_id, principal)
     try:
         job_state = job_manager.create_job(
             data,
@@ -2212,7 +2245,6 @@ async def stop_crawler(
     request: Request,
     principal: Principal = Depends(current_principal),
 ):
-    state.stop_requested = True
     for job in job_manager.list_jobs():
         if job["status"] not in {"pending", "running", "stopping"}:
             continue
@@ -2221,6 +2253,7 @@ async def stop_crawler(
         except HTTPException:
             continue
         if job_manager.stop(job["job_id"]):
+            state.stop_requested = True
             _record_job_audit(
                 request,
                 principal,
@@ -2232,14 +2265,31 @@ async def stop_crawler(
     if state.process:
         if not principal.is_system_admin:
             raise HTTPException(403, "历史运行进程只能由系统管理员控制")
+        process = state.process
+        target_id = f"legacy-process:{process.pid}"
+        before = {"pid": process.pid, "status": "running", "legacy": True}
+        state.stop_requested = True
         state.log("正在停止...", "info")
 
         # 使用 taskkill 强制结束进程树
         if sys.platform == "win32":
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(state.process.pid)],
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
-            state.process.terminate()
+            process.terminate()
+
+        audit_service.record(
+            actor=principal,
+            action="job.stop",
+            target_type="job",
+            target_id=target_id,
+            project_id=None,
+            before=before,
+            after={"pid": process.pid, "status": "stop_requested", "legacy": True},
+            reason=None,
+            result="success",
+            request=request,
+        )
 
         return {"status": "success", "message": "stop signal sent"}
     return {"status": "error", "message": "没有运行中的爬虫"}

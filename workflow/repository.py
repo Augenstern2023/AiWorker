@@ -1,0 +1,684 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) 2025 relakkes@gmail.com
+#
+# This file is part of MediaCrawler project.
+# Repository: https://github.com/NanmiCoder/MediaCrawler
+# GitHub: https://github.com/NanmiCoder
+# Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
+#
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import uuid
+from pathlib import Path
+from typing import Any
+
+from identity.repository import IdentityRepository
+from identity.schema import Principal
+
+from .state_machine import WorkflowStateMachine
+
+
+_MANAGED_PROJECT_ROLES = frozenset(
+    {"owner", "project_owner", "manager", "project_manager"}
+)
+
+
+class WorkflowRepository:
+    def __init__(
+        self,
+        repository: IdentityRepository | str | Path,
+        state_machine: WorkflowStateMachine | None = None,
+    ) -> None:
+        self.identity_repository = (
+            repository
+            if isinstance(repository, IdentityRepository)
+            else IdentityRepository(repository)
+        )
+        self.state_machine = state_machine or WorkflowStateMachine()
+
+    def create_task(
+        self,
+        workflow_id: str,
+        task_type: str,
+        role_code: str,
+        *,
+        project_id: str | None = None,
+        topic_id: int | None = None,
+        due_at: str | None = None,
+        actor: Principal | dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        task_id = str(uuid.uuid4())
+        actor_id = self._actor_id(actor) if actor is not None else None
+        with self.identity_repository.transaction() as connection:
+            role = connection.execute(
+                "SELECT 1 FROM roles WHERE code = ? COLLATE NOCASE AND is_enabled = 1",
+                (role_code,),
+            ).fetchone()
+            if role is None:
+                raise ValueError(f"unknown or disabled role: {role_code}")
+            self._ensure_workflow(
+                connection,
+                workflow_id,
+                task_type,
+                project_id,
+                topic_id,
+                actor_id,
+            )
+            connection.execute(
+                """
+                INSERT INTO workflow_tasks
+                    (id, workflow_id, task_type, role_code, topic_id, project_id,
+                     assignee_id, assigned_by, status, due_at)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 'pool', ?)
+                """,
+                (
+                    task_id,
+                    workflow_id,
+                    task_type,
+                    role_code,
+                    topic_id,
+                    project_id,
+                    due_at,
+                ),
+            )
+            self._record_event(
+                connection,
+                task_id,
+                "create",
+                actor_id,
+                None,
+                "pool",
+                {"role_code": role_code},
+            )
+            task = self._get_task(connection, task_id)
+        assert task is not None
+        return task
+
+    def get_task(self, task_id: str) -> dict[str, Any] | None:
+        with self.identity_repository.connect() as connection:
+            return self._get_task(connection, task_id)
+
+    def list_tasks(
+        self, actor: Principal | dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.connect() as connection:
+            live_actor = self._live_actor(connection, actor_id)
+            if live_actor["is_system_admin"]:
+                rows = connection.execute(
+                    "SELECT * FROM workflow_tasks ORDER BY created_at, id"
+                ).fetchall()
+            else:
+                role_codes = live_actor["role_codes"]
+                managed_projects = self._managed_project_ids(connection, actor_id)
+                assigned_projects = self._assigned_project_ids(connection, actor_id)
+                rows = connection.execute(
+                    "SELECT * FROM workflow_tasks ORDER BY created_at, id"
+                ).fetchall()
+                rows = [
+                    row
+                    for row in rows
+                    if row["assignee_id"] == actor_id
+                    or (
+                        row["status"] == "pool"
+                        and row["role_code"] in role_codes
+                        and (
+                            row["project_id"] is None
+                            or (
+                                row["role_code"] == "project_owner"
+                                and row["project_id"] in managed_projects
+                            )
+                            or row["project_id"] in assigned_projects
+                        )
+                    )
+                    or (
+                        row["project_id"] is not None
+                        and row["project_id"] in managed_projects
+                    )
+                ]
+        return [self._task_dict(row) for row in rows]
+
+    def get_visible_task(
+        self, task_id: str, actor: Principal | dict[str, Any]
+    ) -> dict[str, Any] | None:
+        return next(
+            (task for task in self.list_tasks(actor) if task["id"] == task_id), None
+        )
+
+    def claim_task(
+        self, task_id: str, actor: Principal | dict[str, Any]
+    ) -> dict[str, Any]:
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.transaction() as connection:
+            task = self._require_task(connection, task_id)
+            live_actor = self._live_actor(connection, actor_id)
+            if (
+                task["role_code"] == "project_owner"
+                and not live_actor["is_system_admin"]
+            ):
+                self._assert_task_manager(connection, task, live_actor)
+            elif (
+                task["project_id"] is not None
+                and not live_actor["is_system_admin"]
+                and not self._is_active_project_member(
+                    connection, task["project_id"], actor_id
+                )
+            ):
+                raise PermissionError("actor must be an active project member")
+            self.state_machine.transition(task, "claim", live_actor)
+            cursor = connection.execute(
+                """
+                UPDATE workflow_tasks
+                SET assignee_id = ?, assigned_by = ?, status = 'assigned',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND status = 'pool' AND assignee_id IS NULL
+                """,
+                (actor_id, actor_id, task_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("task has already been claimed")
+            self._record_event(
+                connection,
+                task_id,
+                "claim",
+                actor_id,
+                task["status"],
+                "assigned",
+                {"assignee_user_id": actor_id},
+            )
+            claimed = self._require_task(connection, task_id)
+        return claimed
+
+    def assign_task(
+        self,
+        task_id: str,
+        assignee_user_id: str,
+        actor: Principal | dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._assign(task_id, assignee_user_id, actor, "assign")
+
+    def reassign_task(
+        self,
+        task_id: str,
+        assignee_user_id: str,
+        actor: Principal | dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._assign(task_id, assignee_user_id, actor, "reassign")
+
+    def start_task(
+        self, task_id: str, actor: Principal | dict[str, Any]
+    ) -> dict[str, Any]:
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.transaction() as connection:
+            task = self._require_task(connection, task_id)
+            live_actor = self._live_actor(connection, actor_id)
+            to_status = self.state_machine.transition(task, "start", live_actor)
+            connection.execute(
+                """
+                UPDATE workflow_tasks SET status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND status = ?
+                """,
+                (to_status, task_id, task["status"]),
+            )
+            self._record_event(
+                connection,
+                task_id,
+                "start",
+                actor_id,
+                task["status"],
+                to_status,
+            )
+            started = self._require_task(connection, task_id)
+        return started
+
+    def cancel_task(
+        self, task_id: str, actor: Principal | dict[str, Any]
+    ) -> dict[str, Any]:
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.transaction() as connection:
+            task = self._require_task(connection, task_id)
+            live_actor = self._live_actor(connection, actor_id)
+            self._assert_task_manager(connection, task, live_actor)
+            to_status = self.state_machine.transition(task, "cancel", live_actor)
+            connection.execute(
+                """
+                UPDATE workflow_tasks SET status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND status = ?
+                """,
+                (to_status, task_id, task["status"]),
+            )
+            self._record_event(
+                connection,
+                task_id,
+                "cancel",
+                actor_id,
+                task["status"],
+                to_status,
+            )
+            cancelled = self._require_task(connection, task_id)
+        return cancelled
+
+    def list_task_events(self, task_id: str) -> list[dict[str, Any]]:
+        with self.identity_repository.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM workflow_task_events
+                WHERE task_id = ? ORDER BY created_at, rowid
+                """,
+                (task_id,),
+            ).fetchall()
+        return [self._event_dict(row) for row in rows]
+
+    def add_project_member(
+        self,
+        project_id: str,
+        user_id: str,
+        project_role: str,
+        actor: Principal | dict[str, Any],
+        *,
+        status: str = "active",
+    ) -> dict[str, Any]:
+        if status not in {"active", "inactive"}:
+            raise ValueError("project member status must be active or inactive")
+        if not project_role.strip():
+            raise ValueError("project role is required")
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.transaction() as connection:
+            live_actor = self._live_actor(connection, actor_id)
+            has_members = connection.execute(
+                "SELECT 1 FROM project_members WHERE project_id = ? LIMIT 1",
+                (project_id,),
+            ).fetchone()
+            is_owner_bootstrap = (
+                has_members is None
+                and actor_id == user_id
+                and project_role in _MANAGED_PROJECT_ROLES
+                and "project_owner" in live_actor["role_codes"]
+            )
+            if not is_owner_bootstrap:
+                self._assert_project_manager(connection, project_id, live_actor)
+            user = connection.execute(
+                """
+                SELECT 1 FROM users
+                WHERE id = ? AND status = 'active' AND is_deleted = 0
+                """,
+                (user_id,),
+            ).fetchone()
+            if user is None:
+                raise ValueError("project member user does not exist or is inactive")
+            existing = connection.execute(
+                """
+                SELECT id FROM project_members
+                WHERE project_id = ? AND user_id = ? AND project_role = ?
+                """,
+                (project_id, user_id, project_role),
+            ).fetchone()
+            membership_id = existing["id"] if existing else str(uuid.uuid4())
+            connection.execute(
+                """
+                INSERT INTO project_members
+                    (id, project_id, user_id, project_role, status, added_by)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, user_id, project_role) DO UPDATE SET
+                    status = excluded.status,
+                    added_by = excluded.added_by,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    membership_id,
+                    project_id,
+                    user_id,
+                    project_role,
+                    status,
+                    actor_id,
+                ),
+            )
+            member = connection.execute(
+                "SELECT * FROM project_members WHERE id = ?", (membership_id,)
+            ).fetchone()
+        assert member is not None
+        return dict(member)
+
+    def list_project_members(self, project_id: str) -> list[dict[str, Any]]:
+        with self.identity_repository.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM project_members
+                WHERE project_id = ? ORDER BY created_at, rowid
+                """,
+                (project_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def assert_can_manage_project(
+        self, project_id: str, actor: Principal | dict[str, Any]
+    ) -> None:
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.connect() as connection:
+            live_actor = self._live_actor(connection, actor_id)
+            self._assert_project_manager(connection, project_id, live_actor)
+
+    def remove_project_member(
+        self,
+        project_id: str,
+        membership_id: str,
+        actor: Principal | dict[str, Any],
+    ) -> None:
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.transaction() as connection:
+            live_actor = self._live_actor(connection, actor_id)
+            self._assert_project_manager(connection, project_id, live_actor)
+            member = connection.execute(
+                """
+                SELECT * FROM project_members WHERE project_id = ? AND id = ?
+                """,
+                (project_id, membership_id),
+            ).fetchone()
+            if member is None:
+                matches = connection.execute(
+                    """
+                    SELECT * FROM project_members
+                    WHERE project_id = ? AND user_id = ? ORDER BY rowid
+                    """,
+                    (project_id, membership_id),
+                ).fetchall()
+                if len(matches) == 1:
+                    member = matches[0]
+                elif len(matches) > 1:
+                    raise ValueError("user has multiple project roles; remove by membership id")
+            if member is None:
+                raise KeyError(membership_id)
+            if member["status"] == "active" and member["project_role"] in _MANAGED_PROJECT_ROLES:
+                other_owner = connection.execute(
+                    """
+                    SELECT 1 FROM project_members
+                    WHERE project_id = ? AND id <> ? AND status = 'active'
+                      AND project_role IN ('owner', 'project_owner', 'manager', 'project_manager')
+                    LIMIT 1
+                    """,
+                    (project_id, member["id"]),
+                ).fetchone()
+                if other_owner is None:
+                    raise ValueError(
+                        "current project owner cannot be removed until another owner is assigned"
+                    )
+            connection.execute(
+                "DELETE FROM project_members WHERE id = ?", (member["id"],)
+            )
+
+    def _assign(
+        self,
+        task_id: str,
+        assignee_user_id: str,
+        actor: Principal | dict[str, Any],
+        action: str,
+    ) -> dict[str, Any]:
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.transaction() as connection:
+            task = self._require_task(connection, task_id)
+            live_actor = self._live_actor(connection, actor_id)
+            self._assert_task_manager(connection, task, live_actor)
+            to_status = self.state_machine.transition(task, action, live_actor)
+            assignee = self._live_actor(connection, assignee_user_id)
+            if (
+                not assignee["is_system_admin"]
+                and task["role_code"] not in assignee["role_codes"]
+            ):
+                raise ValueError("assignee does not have the task role")
+            if task["project_id"] is not None:
+                membership = connection.execute(
+                    """
+                    SELECT 1 FROM project_members
+                    WHERE project_id = ? AND user_id = ? AND status = 'active'
+                    """,
+                    (task["project_id"], assignee_user_id),
+                ).fetchone()
+                if membership is None:
+                    raise ValueError("assignee must be an active project member")
+            if action == "assign":
+                cursor = connection.execute(
+                    """
+                    UPDATE workflow_tasks
+                    SET assignee_id = ?, assigned_by = ?, status = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND status = 'pool' AND assignee_id IS NULL
+                    """,
+                    (assignee_user_id, actor_id, to_status, task_id),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE workflow_tasks
+                    SET assignee_id = ?, assigned_by = ?, status = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND status = ?
+                    """,
+                    (
+                        assignee_user_id,
+                        actor_id,
+                        to_status,
+                        task_id,
+                        task["status"],
+                    ),
+                )
+            if cursor.rowcount != 1:
+                raise ValueError("task assignment changed concurrently")
+            self._record_event(
+                connection,
+                task_id,
+                action,
+                actor_id,
+                task["status"],
+                to_status,
+                {
+                    "before_assignee_user_id": task["assignee_user_id"],
+                    "assignee_user_id": assignee_user_id,
+                },
+            )
+            assigned = self._require_task(connection, task_id)
+        return assigned
+
+    def _assert_task_manager(
+        self,
+        connection: sqlite3.Connection,
+        task: dict[str, Any],
+        actor: dict[str, Any],
+    ) -> None:
+        if actor["is_system_admin"]:
+            return
+        project_id = task.get("project_id")
+        if project_id is None:
+            raise PermissionError("only a system administrator may manage unscoped tasks")
+        self._assert_project_manager(connection, project_id, actor)
+
+    @staticmethod
+    def _assert_project_manager(
+        connection: sqlite3.Connection,
+        project_id: str,
+        actor: dict[str, Any],
+    ) -> None:
+        if actor["is_system_admin"]:
+            return
+        if "project_owner" not in actor["role_codes"]:
+            raise PermissionError("actor is not a project owner")
+        member = connection.execute(
+            """
+            SELECT 1 FROM project_members
+            WHERE project_id = ? AND user_id = ? AND status = 'active'
+              AND project_role IN ('owner', 'project_owner', 'manager', 'project_manager')
+            """,
+            (project_id, actor["user_id"]),
+        ).fetchone()
+        if member is None:
+            raise PermissionError("actor does not manage this project")
+
+    @staticmethod
+    def _managed_project_ids(
+        connection: sqlite3.Connection, actor_id: str
+    ) -> set[str]:
+        return {
+            row["project_id"]
+            for row in connection.execute(
+                """
+                SELECT DISTINCT project_id FROM project_members
+                WHERE user_id = ? AND status = 'active'
+                  AND project_role IN ('owner', 'project_owner', 'manager', 'project_manager')
+                """,
+                (actor_id,),
+            )
+        }
+
+    @staticmethod
+    def _assigned_project_ids(
+        connection: sqlite3.Connection, actor_id: str
+    ) -> set[str]:
+        return {
+            row["project_id"]
+            for row in connection.execute(
+                """
+                SELECT DISTINCT project_id FROM project_members
+                WHERE user_id = ? AND status = 'active'
+                """,
+                (actor_id,),
+            )
+        }
+
+    @staticmethod
+    def _is_active_project_member(
+        connection: sqlite3.Connection, project_id: str, actor_id: str
+    ) -> bool:
+        return (
+            connection.execute(
+                """
+                SELECT 1 FROM project_members
+                WHERE project_id = ? AND user_id = ? AND status = 'active'
+                LIMIT 1
+                """,
+                (project_id, actor_id),
+            ).fetchone()
+            is not None
+        )
+
+    @staticmethod
+    def _live_actor(connection: sqlite3.Connection, user_id: str) -> dict[str, Any]:
+        user = connection.execute(
+            """
+            SELECT id FROM users
+            WHERE id = ? AND status = 'active' AND is_deleted = 0
+            """,
+            (user_id,),
+        ).fetchone()
+        if user is None:
+            raise PermissionError("actor or assignee is inactive or unknown")
+        roles = {
+            row["code"]
+            for row in connection.execute(
+                """
+                SELECT r.code FROM user_roles AS ur
+                JOIN roles AS r ON r.id = ur.role_id AND r.is_enabled = 1
+                WHERE ur.user_id = ?
+                """,
+                (user_id,),
+            )
+        }
+        return {
+            "user_id": user_id,
+            "role_codes": roles,
+            "permissions": {"*"} if "system_admin" in roles else set(),
+            "is_system_admin": "system_admin" in roles,
+        }
+
+    @staticmethod
+    def _actor_id(actor: Principal | dict[str, Any]) -> str:
+        if isinstance(actor, dict):
+            actor_id = actor.get("user_id") or actor.get("id")
+        else:
+            actor_id = actor.user_id
+        if not actor_id:
+            raise PermissionError("an authenticated actor is required")
+        return str(actor_id)
+
+    @staticmethod
+    def _ensure_workflow(
+        connection: sqlite3.Connection,
+        workflow_id: str,
+        task_type: str,
+        project_id: str | None,
+        topic_id: int | None,
+        actor_id: str | None,
+    ) -> None:
+        resource_type = "project" if project_id else "topic" if topic_id is not None else "task"
+        resource_id = project_id or (str(topic_id) if topic_id is not None else workflow_id)
+        connection.execute(
+            """
+            INSERT INTO workflow_instances
+                (id, workflow_type, resource_type, resource_id, project_id, created_by)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO NOTHING
+            """,
+            (workflow_id, task_type, resource_type, resource_id, project_id, actor_id),
+        )
+
+    @classmethod
+    def _get_task(
+        cls, connection: sqlite3.Connection, task_id: str
+    ) -> dict[str, Any] | None:
+        row = connection.execute(
+            "SELECT * FROM workflow_tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        return cls._task_dict(row) if row is not None else None
+
+    @classmethod
+    def _require_task(
+        cls, connection: sqlite3.Connection, task_id: str
+    ) -> dict[str, Any]:
+        task = cls._get_task(connection, task_id)
+        if task is None:
+            raise KeyError(task_id)
+        return task
+
+    @staticmethod
+    def _task_dict(row: sqlite3.Row) -> dict[str, Any]:
+        task = dict(row)
+        task["assignee_user_id"] = task.pop("assignee_id")
+        task["assigned_by_user_id"] = task.pop("assigned_by")
+        return task
+
+    @staticmethod
+    def _record_event(
+        connection: sqlite3.Connection,
+        task_id: str,
+        event_type: str,
+        actor_id: str | None,
+        from_status: str | None,
+        to_status: str | None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO workflow_task_events
+                (id, task_id, event_type, actor_id, from_status, to_status, details_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                task_id,
+                event_type,
+                actor_id,
+                from_status,
+                to_status,
+                json.dumps(details or {}, ensure_ascii=True, sort_keys=True),
+            ),
+        )
+
+    @staticmethod
+    def _event_dict(row: sqlite3.Row) -> dict[str, Any]:
+        event = dict(row)
+        event["actor_user_id"] = event.pop("actor_id")
+        event["before_status"] = event.pop("from_status")
+        event["after_status"] = event.pop("to_status")
+        event["details"] = json.loads(event.pop("details_json"))
+        return event

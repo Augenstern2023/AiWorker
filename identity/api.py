@@ -85,13 +85,26 @@ def build_identity_router(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        role = repository.get_role_by_code("system_admin")
-        if role is None:
-            raise HTTPException(status_code=500, detail="系统管理员角色尚未初始化")
         user_id = str(uuid.uuid4())
+        setup_already_complete = False
         try:
             with repository.connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                role = connection.execute(
+                    "SELECT id FROM roles WHERE code = 'system_admin' COLLATE NOCASE"
+                ).fetchone()
+                if role is None:
+                    raise HTTPException(
+                        status_code=500, detail="系统管理员角色尚未初始化"
+                    )
+                connection.execute(
+                    """
+                    UPDATE roles
+                    SET is_enabled = 1, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (role["id"],),
+                )
                 active_admins = connection.execute(
                     """
                     SELECT COUNT(DISTINCT u.id)
@@ -103,21 +116,30 @@ def build_identity_router(
                     """
                 ).fetchone()[0]
                 if active_admins:
-                    raise HTTPException(status_code=409, detail="系统已经完成初始化")
-                connection.execute(
-                    """
-                    INSERT INTO users
-                        (id, username, normalized_username, display_name, password_hash)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (user_id, username, username.casefold(), display_name, password_hash),
-                )
-                connection.execute(
-                    "INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)",
-                    (user_id, role["id"]),
-                )
+                    setup_already_complete = True
+                else:
+                    connection.execute(
+                        """
+                        INSERT INTO users
+                            (id, username, normalized_username, display_name, password_hash)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            user_id,
+                            username,
+                            username.casefold(),
+                            display_name,
+                            password_hash,
+                        ),
+                    )
+                    connection.execute(
+                        "INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)",
+                        (user_id, role["id"]),
+                    )
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="用户名已存在") from exc
+        if setup_already_complete:
+            raise HTTPException(status_code=409, detail="系统已经完成初始化")
 
         return authenticated_response(
             user_id, request, status_code=201, update_last_login=True

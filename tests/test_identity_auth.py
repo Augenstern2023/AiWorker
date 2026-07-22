@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import hashlib
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -174,6 +176,69 @@ def test_first_setup_creates_system_admin_and_disables_setup(client: TestClient)
     assert client.get("/setup").status_code == 404
 
 
+def test_setup_restores_disabled_system_admin_role(
+    repository: IdentityRepository,
+):
+    with repository.connect() as connection:
+        connection.execute(
+            "UPDATE roles SET is_enabled = 0 WHERE code = 'system_admin'"
+        )
+    app = FastAPI()
+    app.include_router(
+        build_identity_router(repository, SessionService(repository, secure_cookie=False))
+    )
+    client = TestClient(app)
+
+    setup = client.post(
+        "/api/auth/setup",
+        json={
+            "username": "admin",
+            "display_name": "管理员",
+            "password": "Admin-Strong-123!",
+        },
+    )
+
+    assert setup.status_code == 201
+    assert setup.json()["user"]["role_codes"] == ["system_admin"]
+    assert repository.get_role_by_code("system_admin")["is_enabled"] is True
+    assert repository.count_active_system_admins() == 1
+    assert client.post(
+        "/api/auth/setup",
+        json={
+            "username": "other",
+            "display_name": "其他",
+            "password": "Admin-Strong-456!",
+        },
+    ).status_code == 409
+
+
+def test_concurrent_setup_creates_exactly_one_admin(repository: IdentityRepository):
+    app = FastAPI()
+    app.include_router(
+        build_identity_router(repository, SessionService(repository, secure_cookie=False))
+    )
+    barrier = threading.Barrier(2)
+
+    def submit_setup(index: int) -> int:
+        barrier.wait()
+        with TestClient(app) as thread_client:
+            response = thread_client.post(
+                "/api/auth/setup",
+                json={
+                    "username": f"admin{index}",
+                    "display_name": f"管理员{index}",
+                    "password": f"Admin-Strong-{index}23!",
+                },
+            )
+        return response.status_code
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        statuses = list(executor.map(submit_setup, (1, 2)))
+
+    assert sorted(statuses) == [201, 409]
+    assert repository.count_active_system_admins() == 1
+
+
 def test_session_cookie_sets_secure_when_configured(repository: IdentityRepository):
     app = FastAPI()
     app.include_router(
@@ -229,6 +294,10 @@ def test_me_returns_csrf_and_logout_requires_it(
     assert me.status_code == 200
     assert me.json()["csrf_token"] == csrf_token
     assert client.post("/api/auth/logout").status_code == 403
+    assert client.post(
+        "/api/auth/logout", headers={"X-CSRF-Token": "incorrect-token"}
+    ).status_code == 403
+    assert client.get("/api/auth/me").status_code == 200
     logout = client.post(
         "/api/auth/logout", headers={"X-CSRF-Token": csrf_token}
     )

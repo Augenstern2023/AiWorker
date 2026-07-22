@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Any
 
 from identity.repository import IdentityRepository
@@ -55,6 +56,10 @@ class AuditRepository:
                 "WHERE target_type IS NULL"
             )
             connection.execute(
+                "UPDATE audit_logs SET target_id = resource_id "
+                "WHERE target_id IS NULL AND resource_id IS NOT NULL"
+            )
+            connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_audit_logs_action "
                 "ON audit_logs(action)"
             )
@@ -63,27 +68,39 @@ class AuditRepository:
                 "ON audit_logs(actor_user_id)"
             )
 
-    def insert(self, event: dict[str, Any]) -> str:
-        with self.identity_repository.connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO audit_logs (
-                    id, actor_id, actor_user_id, actor_role_snapshot_json,
-                    action, resource_type, target_type, resource_id, target_id,
-                    project_id, reason, details_json, before_summary_json,
-                    after_summary_json, request_id, ip_address, user_agent,
-                    result, created_at
-                ) VALUES (
-                    :id, :actor_user_id, :actor_user_id,
-                    :actor_role_snapshot_json, :action, :target_type,
-                    :target_type, :target_id, :target_id, :project_id, :reason,
-                    '{}', :before_summary_json, :after_summary_json, :request_id,
-                    :ip_address, :user_agent, :result, CURRENT_TIMESTAMP
-                )
-                """,
-                event,
-            )
+    def insert(
+        self,
+        event: dict[str, Any],
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> str:
+        if connection is not None:
+            self._insert(connection, event)
+        else:
+            with self.identity_repository.connect() as owned_connection:
+                self._insert(owned_connection, event)
         return str(event["id"])
+
+    @staticmethod
+    def _insert(connection: sqlite3.Connection, event: dict[str, Any]) -> None:
+        connection.execute(
+            """
+            INSERT INTO audit_logs (
+                id, actor_id, actor_user_id, actor_role_snapshot_json,
+                action, resource_type, target_type, resource_id, target_id,
+                project_id, reason, details_json, before_summary_json,
+                after_summary_json, request_id, ip_address, user_agent,
+                result, created_at
+            ) VALUES (
+                :id, :actor_user_id, :actor_user_id,
+                :actor_role_snapshot_json, :action, :target_type,
+                :target_type, :target_id, :target_id, :project_id, :reason,
+                '{}', :before_summary_json, :after_summary_json, :request_id,
+                :ip_address, :user_agent, :result, CURRENT_TIMESTAMP
+            )
+            """,
+            event,
+        )
 
     def get(self, event_id: str) -> dict[str, Any] | None:
         with self.identity_repository.connect() as connection:

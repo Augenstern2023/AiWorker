@@ -87,6 +87,7 @@ _PERMISSION_CODES = (
     "job.read.own",
     "job.read.project",
     "job.cancel.own",
+    "audit.read",
     "audit.read.project",
     "approved_content.read",
     "export.create",

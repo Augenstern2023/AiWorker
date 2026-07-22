@@ -78,14 +78,19 @@ def build_identity_router(
     repository: IdentityRepository,
     session_service: SessionService,
     audit_service: AuditService | None = None,
+    *,
+    password_service: PasswordService | None = None,
+    permission_service: PermissionService | None = None,
 ) -> APIRouter:
-    permission_service = PermissionService(repository, session_service)
+    permission_service = permission_service or PermissionService(
+        repository, session_service
+    )
 
     def bind_permission_service(request: Request) -> None:
         request.state.identity_permission_service = permission_service
 
     router = APIRouter(dependencies=[Depends(bind_permission_service)])
-    password_service = PasswordService()
+    password_service = password_service or PasswordService()
     dummy_password_hash = password_service.hash("Dummy-Password-123!")
     repository.seed_defaults()
 
@@ -99,6 +104,7 @@ def build_identity_router(
         after: Any,
         result: str,
         request: Request,
+        connection: sqlite3.Connection | None = None,
     ) -> None:
         if audit_service is not None:
             audit_service.record(
@@ -111,6 +117,7 @@ def build_identity_router(
                 reason=None,
                 result=result,
                 request=request,
+                connection=connection,
             )
 
     def session_context(request: Request, *, require_csrf: bool = False) -> SessionContext:
@@ -154,9 +161,9 @@ def build_identity_router(
 
         user_id = str(uuid.uuid4())
         setup_already_complete = False
+        response: JSONResponse | None = None
         try:
-            with repository.connect() as connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with repository.transaction() as connection:
                 role = connection.execute(
                     "SELECT id FROM roles WHERE code = 'system_admin' COLLATE NOCASE"
                 ).fetchone()
@@ -203,18 +210,20 @@ def build_identity_router(
                         "INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)",
                         (user_id, role["id"]),
                     )
+                    response = authenticated_response(
+                        user_id,
+                        request,
+                        status_code=201,
+                        update_last_login=True,
+                        audit_action="user.setup",
+                        connection=connection,
+                    )
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="用户名已存在") from exc
         if setup_already_complete:
             raise HTTPException(status_code=409, detail="系统已经完成初始化")
-
-        return authenticated_response(
-            user_id,
-            request,
-            status_code=201,
-            update_last_login=True,
-            audit_action="user.setup",
-        )
+        assert response is not None
+        return response
 
     @router.post("/api/auth/login")
     def login(payload: LoginRequest, request: Request) -> JSONResponse:
@@ -258,18 +267,22 @@ def build_identity_router(
     def logout(request: Request) -> Response:
         context = session_context(request, require_csrf=True)
         raw_token = request.cookies.get(session_service.cookie_name)
-        if raw_token:
-            session_service.revoke_session(raw_token)
-        record_audit(
-            actor=context.principal,
-            action="auth.logout",
-            target_type="session",
-            target_id=context.principal.session_id,
-            before={"active": True},
-            after={"active": False},
-            result="success",
-            request=request,
-        )
+        with repository.transaction() as connection:
+            if raw_token:
+                session_service.revoke_session(
+                    raw_token, connection=connection
+                )
+            record_audit(
+                actor=context.principal,
+                action="auth.logout",
+                target_type="session",
+                target_id=context.principal.session_id,
+                before={"active": True},
+                after={"active": False},
+                result="success",
+                request=request,
+                connection=connection,
+            )
         response = Response(status_code=204)
         response.delete_cookie(
             session_service.cookie_name,
@@ -301,7 +314,7 @@ def build_identity_router(
             new_hash = password_service.hash(payload.new_password)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        with repository.connect() as connection:
+        with repository.transaction() as connection:
             connection.execute(
                 """
                 UPDATE users
@@ -315,16 +328,17 @@ def build_identity_router(
                 "WHERE user_id = ? AND revoked_at IS NULL",
                 (context.principal.user_id,),
             )
-        record_audit(
-            actor=context.principal,
-            action="auth.password.change",
-            target_type="user",
-            target_id=context.principal.user_id,
-            before=None,
-            after={"sessions_revoked": True},
-            result="success",
-            request=request,
-        )
+            record_audit(
+                actor=context.principal,
+                action="auth.password.change",
+                target_type="user",
+                target_id=context.principal.user_id,
+                before=None,
+                after={"sessions_revoked": True},
+                result="success",
+                request=request,
+                connection=connection,
+            )
         response = Response(status_code=204)
         response.delete_cookie(
             session_service.cookie_name,
@@ -362,23 +376,32 @@ def build_identity_router(
         _validate_role_ids(payload.role_ids)
         try:
             password_hash = password_service.hash(payload.password)
-            user = repository.create_user(username, display_name, password_hash)
-            repository.replace_user_roles(user["id"], payload.role_ids)
+            with repository.transaction() as connection:
+                user = repository.create_user(
+                    username,
+                    display_name,
+                    password_hash,
+                    connection=connection,
+                )
+                repository.replace_user_roles(
+                    user["id"], payload.role_ids, connection=connection
+                )
+                created = _user_response(user["id"], connection=connection)
+                record_audit(
+                    actor=principal,
+                    action="user.create",
+                    target_type="user",
+                    target_id=user["id"],
+                    before=None,
+                    after=created,
+                    result="success",
+                    request=request,
+                    connection=connection,
+                )
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="用户名已存在") from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        created = _user_response(user["id"])
-        record_audit(
-            actor=principal,
-            action="user.create",
-            target_type="user",
-            target_id=user["id"],
-            before=None,
-            after=created,
-            result="success",
-            request=request,
-        )
         return created
 
     @router.patch("/api/admin/users/{user_id}")
@@ -388,33 +411,37 @@ def build_identity_router(
         request: Request,
         principal: Principal = Depends(admin_write),
     ) -> dict[str, Any]:
-        before = repository.get_user(user_id)
         try:
-            repository.update_user(
-                user_id,
-                display_name=(
-                    payload.display_name.strip()
-                    if payload.display_name is not None
-                    else None
-                ),
-                status=payload.status,
-                role_ids=payload.role_ids,
-            )
+            with repository.transaction() as connection:
+                before = repository.get_user(user_id, connection=connection)
+                repository.update_user(
+                    user_id,
+                    display_name=(
+                        payload.display_name.strip()
+                        if payload.display_name is not None
+                        else None
+                    ),
+                    status=payload.status,
+                    role_ids=payload.role_ids,
+                    connection=connection,
+                )
+                updated = repository.get_user(user_id, connection=connection)
+                assert updated is not None
+                record_audit(
+                    actor=principal,
+                    action="user.update",
+                    target_type="user",
+                    target_id=user_id,
+                    before=before,
+                    after=updated,
+                    result="success",
+                    request=request,
+                    connection=connection,
+                )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="用户不存在") from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        updated = _user_response(user_id)
-        record_audit(
-            actor=principal,
-            action="user.update",
-            target_type="user",
-            target_id=user_id,
-            before=before,
-            after=updated,
-            result="success",
-            request=request,
-        )
         return updated
 
     @router.post("/api/admin/users/{user_id}/reset-password", status_code=204)
@@ -424,13 +451,13 @@ def build_identity_router(
         request: Request,
         principal: Principal = Depends(admin_write),
     ) -> Response:
-        if repository.get_user(user_id) is None:
-            raise HTTPException(status_code=404, detail="用户不存在")
         try:
             password_hash = password_service.hash(payload.password)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        with repository.connect() as connection:
+        with repository.transaction() as connection:
+            if repository.get_user(user_id, connection=connection) is None:
+                raise HTTPException(status_code=404, detail="用户不存在")
             connection.execute(
                 """
                 UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP
@@ -443,16 +470,17 @@ def build_identity_router(
                 "WHERE user_id = ? AND revoked_at IS NULL",
                 (user_id,),
             )
-        record_audit(
-            actor=principal,
-            action="user.password.reset",
-            target_type="user",
-            target_id=user_id,
-            before=None,
-            after={"sessions_revoked": True},
-            result="success",
-            request=request,
-        )
+            record_audit(
+                actor=principal,
+                action="user.password.reset",
+                target_type="user",
+                target_id=user_id,
+                before=None,
+                after={"sessions_revoked": True},
+                result="success",
+                request=request,
+                connection=connection,
+            )
         return Response(status_code=204)
 
     @router.put("/api/admin/users/{user_id}/roles")
@@ -462,28 +490,34 @@ def build_identity_router(
         request: Request,
         principal: Principal = Depends(admin_write),
     ) -> dict[str, Any]:
-        user_before = repository.get_user(user_id)
         try:
             _validate_role_ids(payload.role_ids)
-            repository.replace_user_roles(user_id, payload.role_ids)
+            with repository.transaction() as connection:
+                user_before = repository.get_user(user_id, connection=connection)
+                repository.replace_user_roles(
+                    user_id, payload.role_ids, connection=connection
+                )
+                user_after = _user_response(user_id, connection=connection)
+                record_audit(
+                    actor=principal,
+                    action="user.roles.replace",
+                    target_type="user",
+                    target_id=user_id,
+                    before={
+                        "role_codes": (
+                            user_before["role_codes"] if user_before else []
+                        )
+                    },
+                    after={"role_codes": user_after["role_codes"]},
+                    result="success",
+                    request=request,
+                    connection=connection,
+                )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="用户不存在") from exc
         except ValueError as exc:
             status_code = 409 if "系统管理员" in str(exc) else 422
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-        user_after = _user_response(user_id)
-        record_audit(
-            actor=principal,
-            action="user.roles.replace",
-            target_type="user",
-            target_id=user_id,
-            before={
-                "role_codes": user_before["role_codes"] if user_before else []
-            },
-            after={"role_codes": user_after["role_codes"]},
-            result="success",
-            request=request,
-        )
         return user_after
 
     @router.get("/api/admin/roles")
@@ -499,25 +533,32 @@ def build_identity_router(
         try:
             grants = _permission_pairs(payload.permissions)
             _validate_permission_pairs(grants)
-            role = repository.create_role(
-                payload.code, payload.name.strip(), payload.description
-            )
-            repository.replace_role_permissions(role["id"], grants)
+            with repository.transaction() as connection:
+                role = repository.create_role(
+                    payload.code,
+                    payload.name.strip(),
+                    payload.description,
+                    connection=connection,
+                )
+                repository.replace_role_permissions(
+                    role["id"], grants, connection=connection
+                )
+                created = _role_response(role, connection=connection)
+                record_audit(
+                    actor=principal,
+                    action="role.create",
+                    target_type="role",
+                    target_id=role["id"],
+                    before=None,
+                    after=created,
+                    result="success",
+                    request=request,
+                    connection=connection,
+                )
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="角色编码已存在") from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        created = _role_response(role)
-        record_audit(
-            actor=principal,
-            action="role.create",
-            target_type="role",
-            target_id=role["id"],
-            before=None,
-            after=created,
-            result="success",
-            request=request,
-        )
         return created
 
     @router.patch("/api/admin/roles/{role_id}")
@@ -527,33 +568,44 @@ def build_identity_router(
         request: Request,
         principal: Principal = Depends(admin_write),
     ) -> dict[str, Any]:
-        existing_role = repository.get_role(role_id)
-        before = _role_response(existing_role) if existing_role is not None else None
         try:
-            if payload.permissions is not None:
-                _replace_permissions(role_id, payload.permissions)
-            role = repository.update_role(
-                role_id,
-                name=payload.name.strip() if payload.name is not None else None,
-                description=payload.description,
-                is_enabled=payload.is_enabled,
-            )
+            with repository.transaction() as connection:
+                existing_role = repository.get_role(role_id, connection=connection)
+                before = (
+                    _role_response(existing_role, connection=connection)
+                    if existing_role is not None
+                    else None
+                )
+                if payload.permissions is not None:
+                    _replace_permissions(
+                        role_id, payload.permissions, connection=connection
+                    )
+                role = repository.update_role(
+                    role_id,
+                    name=(
+                        payload.name.strip() if payload.name is not None else None
+                    ),
+                    description=payload.description,
+                    is_enabled=payload.is_enabled,
+                    connection=connection,
+                )
+                updated = _role_response(role, connection=connection)
+                record_audit(
+                    actor=principal,
+                    action="role.update",
+                    target_type="role",
+                    target_id=role_id,
+                    before=before,
+                    after=updated,
+                    result="success",
+                    request=request,
+                    connection=connection,
+                )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="角色不存在") from exc
         except ValueError as exc:
             status_code = 409 if "系统管理员" in str(exc) else 422
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-        updated = _role_response(role)
-        record_audit(
-            actor=principal,
-            action="role.update",
-            target_type="role",
-            target_id=role_id,
-            before=before,
-            after=updated,
-            result="success",
-            request=request,
-        )
         return updated
 
     @router.post("/api/admin/roles/{role_id}/clone", status_code=201)
@@ -563,38 +615,48 @@ def build_identity_router(
         request: Request,
         principal: Principal = Depends(admin_write),
     ) -> dict[str, Any]:
-        source = repository.get_role(role_id)
-        if source is None:
-            raise HTTPException(status_code=404, detail="角色不存在")
         try:
-            role = repository.create_role(
-                payload.code,
-                payload.name.strip(),
-                source["description"]
-                if payload.description is None
-                else payload.description,
-            )
-            source_permissions = repository.list_role_permissions(role_id)
-            repository.replace_role_permissions(
-                role["id"],
-                [
-                    (item["permission_code"], item["data_scope"])
-                    for item in source_permissions
-                ],
-            )
+            with repository.transaction() as connection:
+                source = repository.get_role(role_id, connection=connection)
+                if source is None:
+                    raise KeyError(role_id)
+                role = repository.create_role(
+                    payload.code,
+                    payload.name.strip(),
+                    (
+                        source["description"]
+                        if payload.description is None
+                        else payload.description
+                    ),
+                    connection=connection,
+                )
+                source_permissions = repository.list_role_permissions(
+                    role_id, connection=connection
+                )
+                repository.replace_role_permissions(
+                    role["id"],
+                    [
+                        (item["permission_code"], item["data_scope"])
+                        for item in source_permissions
+                    ],
+                    connection=connection,
+                )
+                cloned = _role_response(role, connection=connection)
+                record_audit(
+                    actor=principal,
+                    action="role.clone",
+                    target_type="role",
+                    target_id=role["id"],
+                    before={"source_role_id": role_id},
+                    after=cloned,
+                    result="success",
+                    request=request,
+                    connection=connection,
+                )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="角色不存在") from exc
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="角色编码已存在") from exc
-        cloned = _role_response(role)
-        record_audit(
-            actor=principal,
-            action="role.clone",
-            target_type="role",
-            target_id=role["id"],
-            before={"source_role_id": role_id},
-            after=cloned,
-            result="success",
-            request=request,
-        )
         return cloned
 
     @router.put("/api/admin/roles/{role_id}/permissions")
@@ -604,26 +666,32 @@ def build_identity_router(
         request: Request,
         principal: Principal = Depends(admin_write),
     ) -> dict[str, Any]:
-        before = repository.list_role_permissions(role_id)
         try:
-            _replace_permissions(role_id, payload.permissions)
+            with repository.transaction() as connection:
+                before = repository.list_role_permissions(
+                    role_id, connection=connection
+                )
+                _replace_permissions(
+                    role_id, payload.permissions, connection=connection
+                )
+                role = repository.get_role(role_id, connection=connection)
+                assert role is not None
+                updated = _role_response(role, connection=connection)
+                record_audit(
+                    actor=principal,
+                    action="role.permissions.replace",
+                    target_type="role",
+                    target_id=role_id,
+                    before={"permissions": before},
+                    after={"permissions": updated["permissions"]},
+                    result="success",
+                    request=request,
+                    connection=connection,
+                )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="角色不存在") from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        role = repository.get_role(role_id)
-        assert role is not None
-        updated = _role_response(role)
-        record_audit(
-            actor=principal,
-            action="role.permissions.replace",
-            target_type="role",
-            target_id=role_id,
-            before={"permissions": before},
-            after={"permissions": updated["permissions"]},
-            result="success",
-            request=request,
-        )
         return updated
 
     @router.get("/api/admin/permissions")
@@ -646,16 +714,22 @@ def build_identity_router(
         if not set(role_ids) <= known:
             raise HTTPException(status_code=422, detail="角色不存在")
 
-    def _user_response(user_id: str) -> dict[str, Any]:
-        user = repository.get_user(user_id)
+    def _user_response(
+        user_id: str, *, connection: sqlite3.Connection | None = None
+    ) -> dict[str, Any]:
+        user = repository.get_user(user_id, connection=connection)
         if user is None:
             raise HTTPException(status_code=404, detail="用户不存在")
         return user
 
-    def _role_response(role: dict[str, Any]) -> dict[str, Any]:
+    def _role_response(
+        role: dict[str, Any], *, connection: sqlite3.Connection | None = None
+    ) -> dict[str, Any]:
         return {
             **role,
-            "permissions": repository.list_role_permissions(role["id"]),
+            "permissions": repository.list_role_permissions(
+                role["id"], connection=connection
+            ),
         }
 
     def _permission_pairs(
@@ -672,9 +746,12 @@ def build_identity_router(
             raise ValueError(f"未知权限: {', '.join(sorted(unknown))}")
 
     def _replace_permissions(
-        role_id: str, permissions: list[RolePermissionRequest]
+        role_id: str,
+        permissions: list[RolePermissionRequest],
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> None:
-        role = repository.get_role(role_id)
+        role = repository.get_role(role_id, connection=connection)
         if role is None:
             raise KeyError(role_id)
         grants = _permission_pairs(permissions)
@@ -682,7 +759,9 @@ def build_identity_router(
         requested_codes = {code for code, _ in grants}
         if role["code"].casefold() == "system_admin" and "*" not in requested_codes:
             raise ValueError("系统管理员角色必须保留通配权限")
-        repository.replace_role_permissions(role_id, grants)
+        repository.replace_role_permissions(
+            role_id, grants, connection=connection
+        )
 
     def authenticated_response(
         user_id: str,
@@ -691,23 +770,37 @@ def build_identity_router(
         status_code: int,
         update_last_login: bool,
         audit_action: str | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> JSONResponse:
-        raw_token, _ = session_service.create_session(user_id, request)
-        context = session_service.resolve_session(raw_token)
+        if connection is None:
+            with repository.transaction() as atomic_connection:
+                return authenticated_response(
+                    user_id,
+                    request,
+                    status_code=status_code,
+                    update_last_login=update_last_login,
+                    audit_action=audit_action,
+                    connection=atomic_connection,
+                )
+        raw_token, _ = session_service.create_session(
+            user_id, request, connection=connection
+        )
+        context = session_service.resolve_session(raw_token, connection=connection)
         if context is None:
             raise HTTPException(status_code=500, detail="无法创建登录会话")
         principal = permission_service.principal_for_user(
-            context.principal.user_id, context.principal.session_id
+            context.principal.user_id,
+            context.principal.session_id,
+            connection=connection,
         )
         if principal is None:
             raise HTTPException(status_code=500, detail="无法创建登录会话")
         context = SessionContext(principal=principal, csrf_token=context.csrf_token)
         if update_last_login:
-            with repository.connect() as connection:
-                connection.execute(
-                    "UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (user_id,),
-                )
+            connection.execute(
+                "UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (user_id,),
+            )
         if audit_action is not None:
             record_audit(
                 actor=principal,
@@ -718,6 +811,7 @@ def build_identity_router(
                 after={"username": principal.username},
                 result="success",
                 request=request,
+                connection=connection,
             )
         response = JSONResponse(_auth_body(context), status_code=status_code)
         response.set_cookie(

@@ -44,6 +44,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import config
+from audit.api import build_audit_router
+from audit.service import AuditService
 from analysis.analytics_api import register_analytics_routes
 from analysis.asr import (
     ASRError,
@@ -54,6 +56,11 @@ from analysis.asr import (
 from analysis.llm import LLMError, create_llm_provider_from_config
 from analysis.today_rank_api import register_today_rank_routes
 from creative.api import register_creative_routes
+from identity.api import build_identity_router
+from identity.password_service import PasswordService
+from identity.permission_service import PermissionService
+from identity.repository import IdentityRepository
+from identity.session_service import SessionService
 from agents.douyin_analysis_agent import AnalyzeOptions as DouyinAnalyzeOptions
 from agents.douyin_analysis_agent import analyze_rank_file as analyze_douyin_rank_file
 from agents.hongguo_analysis_agent import AnalyzeOptions, analyze_rank_file
@@ -69,6 +76,7 @@ WEB_LOG_LEVEL = os.getenv("AIWORKER_WEB_LOG_LEVEL", "INFO").strip().upper()
 WEB_LOG_MAX_BYTES = 5 * 1024 * 1024
 WEB_LOG_BACKUP_COUNT = 5
 WEB_LOG_PATH = WORKSPACE_ROOT / "logs" / "webgui.log"
+SYSTEM_DB_PATH = WORKSPACE_ROOT / ".runtime" / "system" / "system.db"
 UNSAFE_HTTP_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 CSRF_EXEMPT_PATHS = frozenset({"/api/auth/login", "/api/auth/setup"})
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -228,6 +236,20 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+identity_repository = IdentityRepository(SYSTEM_DB_PATH)
+identity_repository.seed_defaults()
+identity_password_service = PasswordService()
+identity_session_service = SessionService(identity_repository)
+identity_permission_service = PermissionService(
+    identity_repository, identity_session_service
+)
+audit_service = AuditService(identity_repository)
+app.state.identity_repository = identity_repository
+app.state.identity_password_service = identity_password_service
+app.state.identity_session_service = identity_session_service
+app.state.identity_permission_service = identity_permission_service
+app.state.audit_service = audit_service
+
 
 @app.middleware("http")
 async def log_backend_requests(request, call_next):
@@ -254,8 +276,18 @@ async def log_backend_requests(request, call_next):
     )
     return response
 
-install_security_middleware(app)
+install_security_middleware(app, identity_session_service)
 configure_cors(app)
+app.include_router(
+    build_identity_router(
+        identity_repository,
+        identity_session_service,
+        audit_service,
+        password_service=identity_password_service,
+        permission_service=identity_permission_service,
+    )
+)
+app.include_router(build_audit_router(audit_service))
 register_rag_routes(app, root=Path(__file__).resolve().parent, runtime_dir=Path(__file__).resolve().parent / ".runtime")
 register_analytics_routes(app, root=Path(__file__).resolve().parent, runtime_dir=Path(__file__).resolve().parent / ".runtime")
 register_today_rank_routes(app, root=Path(__file__).resolve().parent)

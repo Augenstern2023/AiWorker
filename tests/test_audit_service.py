@@ -20,6 +20,7 @@ from audit.api import build_audit_router
 from audit.service import AuditService
 from identity.api import build_identity_router
 from identity.password_service import PasswordService
+from identity.permission_catalog import PERMISSIONS
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.schema import Principal
@@ -329,3 +330,80 @@ def test_logout_and_password_changes_are_audited(repository: IdentityRepository)
     assert logged_out.status_code == 204
     assert len(audit_service.query(action="auth.password.change")) == 1
     assert len(audit_service.query(action="auth.logout")) == 1
+
+
+def test_legacy_resource_id_is_backfilled_as_target_id(
+    repository: IdentityRepository,
+):
+    with repository.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO audit_logs (
+                id, action, resource_type, resource_id, details_json
+            ) VALUES ('legacy-event', 'legacy.update', 'legacy_resource', 'legacy-42', '{}')
+            """
+        )
+
+    event = AuditService(repository).get("legacy-event")
+
+    assert event is not None
+    assert event["target_type"] == "legacy_resource"
+    assert event["target_id"] == "legacy-42"
+
+
+def test_audit_read_permission_is_seeded_and_assignable(
+    repository: IdentityRepository,
+):
+    role = repository.create_role("auditor", "Auditor", "")
+
+    grants = repository.replace_role_permissions(
+        role["id"], [("audit.read", "all")]
+    )
+
+    assert "audit.read" in PERMISSIONS
+    assert grants == [{"permission_code": "audit.read", "data_scope": "all"}]
+
+
+def test_user_mutation_rolls_back_when_atomic_audit_insert_fails(
+    repository: IdentityRepository, monkeypatch: pytest.MonkeyPatch
+):
+    audit_service = AuditService(repository)
+    app = FastAPI()
+    app.include_router(
+        build_identity_router(
+            repository,
+            SessionService(repository, secure_cookie=False),
+            audit_service,
+        )
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    setup = client.post(
+        "/api/auth/setup",
+        json={
+            "username": "admin",
+            "display_name": "Admin",
+            "password": "Admin-Strong-123!",
+        },
+    )
+    csrf_token = setup.json()["csrf_token"]
+    user = repository.create_user(
+        "rollback-user",
+        "Rollback User",
+        PasswordService().hash("Rollback-Strong-123!"),
+    )
+
+    def fail_insert(event, *, connection=None):
+        del event
+        assert connection is not None
+        raise RuntimeError("forced audit insert failure")
+
+    monkeypatch.setattr(audit_service.repository, "insert", fail_insert)
+    response = client.patch(
+        f"/api/admin/users/{user['id']}",
+        headers={"X-CSRF-Token": csrf_token},
+        json={"status": "disabled"},
+    )
+
+    assert response.status_code == 500
+    assert repository.get_user(user["id"])["status"] == "active"
+    assert audit_service.query(action="user.update") == []

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -54,6 +55,7 @@ class AuditService:
         result: str,
         request: Request | None = None,
         project_id: str | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> str:
         event_id = str(uuid.uuid4())
         request_id, ip_address, user_agent = self._request_metadata(request)
@@ -77,7 +79,8 @@ class AuditService:
                 "user_agent": user_agent,
                 "reason": reason,
                 "result": result,
-            }
+            },
+            connection=connection,
         )
         return event_id
 

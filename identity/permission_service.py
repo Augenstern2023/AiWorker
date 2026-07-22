@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 from .permission_catalog import PERMISSION_DEPENDENCIES
 from .repository import IdentityRepository
 from .schema import DATA_SCOPE_ORDER, Principal
@@ -35,9 +37,15 @@ class PermissionService:
             context.principal.user_id, context.principal.session_id
         )
 
-    def principal_for_user(self, user_id: str, session_id: str) -> Principal | None:
-        with self.repository.connect() as connection:
-            user = connection.execute(
+    def principal_for_user(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> Principal | None:
+        with self.repository.connection_scope(connection) as active_connection:
+            user = active_connection.execute(
                 """
                 SELECT id, username, display_name, status, is_deleted
                 FROM users WHERE id = ?
@@ -46,7 +54,7 @@ class PermissionService:
             ).fetchone()
             if user is None or user["status"] != "active" or user["is_deleted"]:
                 return None
-            rows = connection.execute(
+            rows = active_connection.execute(
                 """
                 SELECT r.code, rp.permission_code, rp.data_scope
                 FROM user_roles AS ur

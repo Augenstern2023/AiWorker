@@ -17,7 +17,15 @@ from fastapi.testclient import TestClient
 from identity.api import build_identity_router
 from identity.repository import IdentityRepository
 from identity.session_service import SessionService
-from WebGUI import configure_cors, install_security_middleware
+from identity.password_service import PasswordService
+from identity.permission_service import PermissionService
+from WebGUI import (
+    SYSTEM_DB_PATH,
+    app as production_app,
+    configure_cors,
+    install_security_middleware,
+)
+from audit.service import AuditService
 
 
 def _secured_app(tmp_path: Path) -> tuple[FastAPI, SessionService]:
@@ -146,3 +154,28 @@ def test_cors_defaults_to_same_origin_and_uses_explicit_origin_list():
     )
     assert allowed.headers["access-control-allow-origin"] == "https://review.example"
     assert "access-control-allow-origin" not in rejected.headers
+
+
+def test_production_webgui_wires_shared_identity_security_and_routes():
+    repository = production_app.state.identity_repository
+
+    assert repository.db_path == SYSTEM_DB_PATH
+    assert SYSTEM_DB_PATH.parts[-3:] == (".runtime", "system", "system.db")
+    assert isinstance(production_app.state.identity_password_service, PasswordService)
+    assert isinstance(production_app.state.identity_session_service, SessionService)
+    assert isinstance(production_app.state.identity_permission_service, PermissionService)
+    assert isinstance(production_app.state.audit_service, AuditService)
+    assert production_app.state.identity_session_service.repository is repository
+    assert production_app.state.identity_permission_service.repository is repository
+
+    routes = {
+        (route.path, method)
+        for route in production_app.routes
+        for method in (getattr(route, "methods", None) or ())
+    }
+    assert ("/api/auth/login", "POST") in routes
+    assert ("/api/admin/audit", "GET") in routes
+
+    client = TestClient(production_app)
+    assert client.get("/api/auth/me").status_code == 401
+    assert client.get("/api/admin/audit").status_code == 401

@@ -176,6 +176,23 @@ class IdentityRepository:
         finally:
             connection.close()
 
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """Open a serialized transaction shared by identity and audit writes."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            yield connection
+
+    @contextmanager
+    def connection_scope(
+        self, connection: sqlite3.Connection | None
+    ) -> Iterator[sqlite3.Connection]:
+        if connection is not None:
+            yield connection
+            return
+        with self.connect() as owned_connection:
+            yield owned_connection
+
     def _init_schema(self) -> None:
         with self.connect() as connection:
             connection.executescript(SCHEMA_SQL)
@@ -275,26 +292,34 @@ class IdentityRepository:
             ).fetchone()
         return self._role_dict(row) if row else None
 
-    def get_role(self, role_id: str) -> dict[str, Any] | None:
-        with self.connect() as connection:
-            row = connection.execute(
+    def get_role(
+        self, role_id: str, *, connection: sqlite3.Connection | None = None
+    ) -> dict[str, Any] | None:
+        with self.connection_scope(connection) as active_connection:
+            row = active_connection.execute(
                 "SELECT * FROM roles WHERE id = ?", (role_id,)
             ).fetchone()
         return self._role_dict(row) if row else None
 
     def create_role(
-        self, code: str, name: str, description: str, *, is_system: bool = False
+        self,
+        code: str,
+        name: str,
+        description: str,
+        *,
+        is_system: bool = False,
+        connection: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
         role_id = str(uuid.uuid4())
-        with self.connect() as connection:
-            connection.execute(
+        with self.connection_scope(connection) as active_connection:
+            active_connection.execute(
                 """
                 INSERT INTO roles (id, code, name, description, is_system)
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (role_id, code, name, description, int(is_system)),
             )
-        role = self.get_role(role_id)
+        role = self.get_role(role_id, connection=connection)
         assert role is not None
         return role
 
@@ -305,10 +330,12 @@ class IdentityRepository:
         name: str | None = None,
         description: str | None = None,
         is_enabled: bool | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
-        with self.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            role = connection.execute(
+        with self.connection_scope(connection) as active_connection:
+            if connection is None:
+                active_connection.execute("BEGIN IMMEDIATE")
+            role = active_connection.execute(
                 "SELECT * FROM roles WHERE id = ?", (role_id,)
             ).fetchone()
             if role is None:
@@ -318,7 +345,7 @@ class IdentityRepository:
                 and role["is_enabled"]
                 and is_enabled is False
             ):
-                active_admins = connection.execute(
+                active_admins = active_connection.execute(
                     """
                     SELECT COUNT(DISTINCT u.id)
                     FROM users AS u
@@ -329,7 +356,7 @@ class IdentityRepository:
                 ).fetchone()[0]
                 if active_admins:
                     raise ValueError("系统必须至少保留一个启用的系统管理员")
-            connection.execute(
+            active_connection.execute(
                 """
                 UPDATE roles
                 SET name = COALESCE(?, name),
@@ -345,13 +372,15 @@ class IdentityRepository:
                     role_id,
                 ),
             )
-        updated = self.get_role(role_id)
+        updated = self.get_role(role_id, connection=connection)
         assert updated is not None
         return updated
 
-    def list_role_permissions(self, role_id: str) -> list[dict[str, str]]:
-        with self.connect() as connection:
-            rows = connection.execute(
+    def list_role_permissions(
+        self, role_id: str, *, connection: sqlite3.Connection | None = None
+    ) -> list[dict[str, str]]:
+        with self.connection_scope(connection) as active_connection:
+            rows = active_connection.execute(
                 """
                 SELECT permission_code, data_scope
                 FROM role_permissions
@@ -363,35 +392,40 @@ class IdentityRepository:
         return [dict(row) for row in rows]
 
     def replace_role_permissions(
-        self, role_id: str, permissions: list[tuple[str, str]]
+        self,
+        role_id: str,
+        permissions: list[tuple[str, str]],
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> list[dict[str, str]]:
         expanded = self._expanded_permissions(tuple(permissions))
-        with self.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            if connection.execute(
+        with self.connection_scope(connection) as active_connection:
+            if connection is None:
+                active_connection.execute("BEGIN IMMEDIATE")
+            if active_connection.execute(
                 "SELECT 1 FROM roles WHERE id = ?", (role_id,)
             ).fetchone() is None:
                 raise KeyError(role_id)
             known_permissions = {
                 row["code"]
-                for row in connection.execute(
+                for row in active_connection.execute(
                     "SELECT code FROM permissions"
                 ).fetchall()
             }
             unknown = {code for code, _ in expanded} - known_permissions
             if unknown:
                 raise ValueError(f"未知权限: {', '.join(sorted(unknown))}")
-            connection.execute(
+            active_connection.execute(
                 "DELETE FROM role_permissions WHERE role_id = ?", (role_id,)
             )
-            connection.executemany(
+            active_connection.executemany(
                 """
                 INSERT INTO role_permissions (role_id, permission_code, data_scope)
                 VALUES (?, ?, ?)
                 """,
                 [(role_id, code, scope) for code, scope in expanded],
             )
-        return self.list_role_permissions(role_id)
+        return self.list_role_permissions(role_id, connection=connection)
 
     def list_users(self) -> list[dict[str, Any]]:
         with self.connect() as connection:
@@ -400,19 +434,26 @@ class IdentityRepository:
             ).fetchall()
         return [self._user_dict(row) for row in rows]
 
-    def get_user(self, user_id: str) -> dict[str, Any] | None:
-        with self.connect() as connection:
-            row = connection.execute(
+    def get_user(
+        self, user_id: str, *, connection: sqlite3.Connection | None = None
+    ) -> dict[str, Any] | None:
+        with self.connection_scope(connection) as active_connection:
+            row = active_connection.execute(
                 "SELECT * FROM users WHERE id = ? AND is_deleted = 0", (user_id,)
             ).fetchone()
-        return self._user_dict(row) if row else None
+        return self._user_dict(row, connection=connection) if row else None
 
     def create_user(
-        self, username: str, display_name: str, password_hash: str
+        self,
+        username: str,
+        display_name: str,
+        password_hash: str,
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
         user_id = str(uuid.uuid4())
-        with self.connect() as connection:
-            connection.execute(
+        with self.connection_scope(connection) as active_connection:
+            active_connection.execute(
                 """
                 INSERT INTO users
                     (id, username, normalized_username, display_name, password_hash)
@@ -420,7 +461,7 @@ class IdentityRepository:
                 """,
                 (user_id, username, username.casefold(), display_name, password_hash),
             )
-        user = self.get_user(user_id)
+        user = self.get_user(user_id, connection=connection)
         assert user is not None
         return user
 
@@ -431,13 +472,15 @@ class IdentityRepository:
         display_name: str | None = None,
         status: str | None = None,
         role_ids: list[str] | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
         unique_role_ids = (
             list(dict.fromkeys(role_ids)) if role_ids is not None else None
         )
-        with self.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            user = connection.execute(
+        with self.connection_scope(connection) as active_connection:
+            if connection is None:
+                active_connection.execute("BEGIN IMMEDIATE")
+            user = active_connection.execute(
                 "SELECT status, is_deleted FROM users WHERE id = ?", (user_id,)
             ).fetchone()
             if user is None or user["is_deleted"]:
@@ -446,7 +489,7 @@ class IdentityRepository:
             roles: list[sqlite3.Row] | None = None
             if unique_role_ids is not None:
                 role_placeholders = ",".join("?" for _ in unique_role_ids)
-                roles = connection.execute(
+                roles = active_connection.execute(
                     f"SELECT id, code, is_enabled FROM roles "
                     f"WHERE id IN ({role_placeholders})"
                     if unique_role_ids
@@ -456,7 +499,7 @@ class IdentityRepository:
                 if len(roles) != len(unique_role_ids):
                     raise ValueError("角色不存在")
 
-            currently_admin = connection.execute(
+            currently_admin = active_connection.execute(
                 """
                 SELECT 1 FROM user_roles AS ur
                 JOIN roles AS r ON r.id = ur.role_id
@@ -477,7 +520,7 @@ class IdentityRepository:
                 and user["status"] == "active"
                 and (resulting_status != "active" or not remains_admin)
             ):
-                other_admins = connection.execute(
+                other_admins = active_connection.execute(
                     """
                     SELECT COUNT(DISTINCT u.id)
                     FROM users AS u
@@ -492,7 +535,7 @@ class IdentityRepository:
                 if other_admins < 1:
                     raise ValueError("系统必须至少保留一个启用的系统管理员")
 
-            connection.execute(
+            active_connection.execute(
                 """
                 UPDATE users
                 SET display_name = COALESCE(?, display_name),
@@ -503,32 +546,40 @@ class IdentityRepository:
                 (display_name, status, user_id),
             )
             if unique_role_ids is not None:
-                connection.execute(
+                active_connection.execute(
                     "DELETE FROM user_roles WHERE user_id = ?", (user_id,)
                 )
-                connection.executemany(
+                active_connection.executemany(
                     "INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)",
                     [(user_id, role_id) for role_id in unique_role_ids],
                 )
             if resulting_status == "disabled":
-                connection.execute(
+                active_connection.execute(
                     "UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP "
                     "WHERE user_id = ? AND revoked_at IS NULL",
                     (user_id,),
                 )
-        user = self.get_user(user_id)
+        user = self.get_user(user_id, connection=connection)
         assert user is not None
         return user
 
     def replace_user_roles(
-        self, user_id: str, role_ids: list[str]
+        self,
+        user_id: str,
+        role_ids: list[str],
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> list[str]:
-        user = self.update_user(user_id, role_ids=role_ids)
+        user = self.update_user(
+            user_id, role_ids=role_ids, connection=connection
+        )
         return user["role_codes"]
 
-    def user_role_codes(self, user_id: str) -> list[str]:
-        with self.connect() as connection:
-            rows = connection.execute(
+    def user_role_codes(
+        self, user_id: str, *, connection: sqlite3.Connection | None = None
+    ) -> list[str]:
+        with self.connection_scope(connection) as active_connection:
+            rows = active_connection.execute(
                 """
                 SELECT r.code FROM user_roles AS ur
                 JOIN roles AS r ON r.id = ur.role_id
@@ -591,9 +642,13 @@ class IdentityRepository:
         role["is_enabled"] = bool(role["is_enabled"])
         return role
 
-    def _user_dict(self, row: sqlite3.Row) -> dict[str, Any]:
+    def _user_dict(
+        self, row: sqlite3.Row, *, connection: sqlite3.Connection | None = None
+    ) -> dict[str, Any]:
         user = dict(row)
-        user["role_codes"] = self.user_role_codes(user["id"])
+        user["role_codes"] = self.user_role_codes(
+            user["id"], connection=connection
+        )
         user.pop("password_hash", None)
         user.pop("normalized_username", None)
         user.pop("is_deleted", None)

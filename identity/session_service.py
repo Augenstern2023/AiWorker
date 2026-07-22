@@ -13,6 +13,7 @@ import base64
 import hashlib
 import hmac
 import secrets
+import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -48,9 +49,15 @@ class SessionService:
         self.secure_cookie = secure_cookie
         self._csrf_secret = csrf_secret or _CSRF_DERIVATION_KEY
 
-    def create_session(self, user_id: str, request: Request) -> tuple[str, str]:
-        with self.repository.connect() as connection:
-            user = connection.execute(
+    def create_session(
+        self,
+        user_id: str,
+        request: Request,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> tuple[str, str]:
+        with self.repository.connection_scope(connection) as active_connection:
+            user = active_connection.execute(
                 "SELECT status, is_deleted FROM users WHERE id = ?", (user_id,)
             ).fetchone()
             if user is None or user["status"] != "active" or user["is_deleted"]:
@@ -59,7 +66,7 @@ class SessionService:
             raw_token = secrets.token_urlsafe(32)
             csrf_token = self._csrf_for_token(raw_token)
             now = datetime.now(timezone.utc)
-            connection.execute(
+            active_connection.execute(
                 """
                 INSERT INTO sessions
                     (id, user_id, token_hash, csrf_token_hash, expires_at,
@@ -79,12 +86,17 @@ class SessionService:
             )
         return raw_token, csrf_token
 
-    def resolve_session(self, raw_token: str | None) -> SessionContext | None:
+    def resolve_session(
+        self,
+        raw_token: str | None,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> SessionContext | None:
         if not raw_token:
             return None
         token_hash = self._hash_token(raw_token)
-        with self.repository.connect() as connection:
-            row = connection.execute(
+        with self.repository.connection_scope(connection) as active_connection:
+            row = active_connection.execute(
                 """
                 SELECT s.id AS session_id, s.user_id, s.csrf_token_hash,
                        s.expires_at, s.revoked_at, u.username, u.display_name,
@@ -99,7 +111,7 @@ class SessionService:
                 return None
 
             if row["status"] != "active" or row["is_deleted"]:
-                connection.execute(
+                active_connection.execute(
                     "UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP "
                     "WHERE user_id = ? AND revoked_at IS NULL",
                     (row["user_id"],),
@@ -107,13 +119,13 @@ class SessionService:
                 return None
 
             if self._parse_datetime(row["expires_at"]) <= datetime.now(timezone.utc):
-                connection.execute(
+                active_connection.execute(
                     "UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?",
                     (row["session_id"],),
                 )
                 return None
 
-            role_rows = connection.execute(
+            role_rows = active_connection.execute(
                 """
                 SELECT r.code, rp.permission_code, rp.data_scope
                 FROM user_roles AS ur
@@ -124,7 +136,7 @@ class SessionService:
                 """,
                 (row["user_id"],),
             ).fetchall()
-            connection.execute(
+            active_connection.execute(
                 "UPDATE sessions SET last_seen_at = ? WHERE id = ?",
                 (datetime.now(timezone.utc).isoformat(), row["session_id"]),
             )
@@ -165,17 +177,27 @@ class SessionService:
         expected = self._csrf_for_token(raw_token)
         return hmac.compare_digest(expected, supplied_token)
 
-    def revoke_session(self, raw_token: str) -> None:
-        with self.repository.connect() as connection:
-            connection.execute(
+    def revoke_session(
+        self,
+        raw_token: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        with self.repository.connection_scope(connection) as active_connection:
+            active_connection.execute(
                 "UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP "
                 "WHERE token_hash = ? AND revoked_at IS NULL",
                 (self._hash_token(raw_token),),
             )
 
-    def revoke_user_sessions(self, user_id: str) -> None:
-        with self.repository.connect() as connection:
-            connection.execute(
+    def revoke_user_sessions(
+        self,
+        user_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        with self.repository.connection_scope(connection) as active_connection:
+            active_connection.execute(
                 "UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP "
                 "WHERE user_id = ? AND revoked_at IS NULL",
                 (user_id,),

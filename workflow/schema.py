@@ -23,6 +23,13 @@ TaskStatus = Literal[
     "completed",
     "cancelled",
 ]
+SubmissionStatus = Literal[
+    "draft",
+    "submitted",
+    "approved",
+    "returned",
+    "superseded",
+]
 ProjectMemberStatus = Literal["active", "inactive"]
 
 

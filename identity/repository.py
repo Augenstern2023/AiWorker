@@ -129,6 +129,28 @@ CREATE TABLE IF NOT EXISTS workflow_task_events (
     details_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS workflow_submissions (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    resource_type TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    parent_submission_id TEXT,
+    status TEXT NOT NULL CHECK (
+        status IN ('draft', 'submitted', 'approved', 'returned', 'superseded')
+    ),
+    content_snapshot_json TEXT NOT NULL,
+    content_fingerprint TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    submitted_by TEXT,
+    submitted_at REAL,
+    reviewed_by TEXT,
+    reviewed_at REAL,
+    review_comment TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE(resource_type, resource_id, version)
+);
 CREATE TABLE IF NOT EXISTS approval_records (
     id TEXT PRIMARY KEY,
     workflow_id TEXT REFERENCES workflow_instances(id) ON DELETE SET NULL,
@@ -155,6 +177,8 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_project_members_project_id ON project_members(project_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_tasks_pool ON workflow_tasks(role_code, status);
+CREATE INDEX IF NOT EXISTS idx_workflow_submissions_task
+ON workflow_submissions(task_id, status);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
 """
 

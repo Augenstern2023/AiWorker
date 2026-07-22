@@ -128,6 +128,95 @@ class WorkflowRepository:
         with self.identity_repository.connect() as connection:
             return self._get_task(connection, task_id)
 
+    def get_submission(
+        self,
+        submission_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        with self.identity_repository.connection_scope(connection) as active_connection:
+            row = active_connection.execute(
+                "SELECT * FROM workflow_submissions WHERE id = ?",
+                (submission_id,),
+            ).fetchone()
+        return self._submission_dict(row) if row is not None else None
+
+    def transition_task_in_transaction(
+        self,
+        task_id: str,
+        action: str,
+        actor: Principal | dict[str, Any],
+        *,
+        connection: sqlite3.Connection,
+        assignee_user_id: str | None = None,
+        details: dict[str, Any] | None = None,
+        event_type: str | None = None,
+    ) -> dict[str, Any]:
+        actor_id = self._actor_id(actor)
+        task = self._require_task(connection, task_id)
+        live_actor = self._live_actor(connection, actor_id)
+        to_status = self.state_machine.transition(task, action, live_actor)
+        if assignee_user_id is None:
+            cursor = connection.execute(
+                """
+                UPDATE workflow_tasks SET status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND status = ?
+                """,
+                (to_status, task_id, task["status"]),
+            )
+        else:
+            self._live_actor(connection, assignee_user_id)
+            cursor = connection.execute(
+                """
+                UPDATE workflow_tasks
+                SET status = ?, assignee_id = ?, assigned_by = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND status = ?
+                """,
+                (to_status, assignee_user_id, actor_id, task_id, task["status"]),
+            )
+        if cursor.rowcount != 1:
+            raise ValueError("task state changed concurrently")
+        transitioned = self._require_task(connection, task_id)
+        event_details = dict(details or {})
+        event_details["task_before"] = task
+        event_details["task_after"] = transitioned
+        self._record_event(
+            connection,
+            task_id,
+            event_type or action,
+            actor_id,
+            task["status"],
+            to_status,
+            event_details,
+        )
+        return transitioned
+
+    def record_task_event_in_transaction(
+        self,
+        task_id: str,
+        event_type: str,
+        actor: Principal | dict[str, Any],
+        *,
+        connection: sqlite3.Connection,
+        details: dict[str, Any],
+    ) -> None:
+        actor_id = self._actor_id(actor)
+        self._live_actor(connection, actor_id)
+        task = self._require_task(connection, task_id)
+        event_details = dict(details)
+        event_details["task_before"] = task
+        event_details["task_after"] = task
+        self._record_event(
+            connection,
+            task_id,
+            event_type,
+            actor_id,
+            task["status"],
+            task["status"],
+            event_details,
+        )
+
     def list_tasks(
         self, actor: Principal | dict[str, Any]
     ) -> list[dict[str, Any]]:
@@ -643,10 +732,22 @@ class WorkflowRepository:
                 (user_id,),
             )
         }
+        permissions = {
+            row["permission_code"]
+            for row in connection.execute(
+                """
+                SELECT rp.permission_code FROM user_roles AS ur
+                JOIN roles AS r ON r.id = ur.role_id AND r.is_enabled = 1
+                JOIN role_permissions AS rp ON rp.role_id = r.id
+                WHERE ur.user_id = ?
+                """,
+                (user_id,),
+            )
+        }
         return {
             "user_id": user_id,
             "role_codes": roles,
-            "permissions": {"*"} if "system_admin" in roles else set(),
+            "permissions": {"*"} if "system_admin" in roles else permissions,
             "is_system_admin": "system_admin" in roles,
         }
 
@@ -730,6 +831,14 @@ class WorkflowRepository:
         task["assignee_user_id"] = task.pop("assignee_id")
         task["assigned_by_user_id"] = task.pop("assigned_by")
         return task
+
+    @staticmethod
+    def _submission_dict(row: sqlite3.Row) -> dict[str, Any]:
+        submission = dict(row)
+        submission["content_snapshot"] = json.loads(
+            submission["content_snapshot_json"]
+        )
+        return submission
 
     @staticmethod
     def _record_event(

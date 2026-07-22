@@ -1,6 +1,6 @@
 # 壹凡短剧选品平台 PRD 实施文档
 
-**版本**：V1.0  
+**版本**：V1.1（角色工作流已实施）
 **适用阶段**：Phase 3 - Phase 6  
 **目标读者**：产品、研发、算法/LLM、数据、内容运营、制作运营  
 **关联方案**：[壹凡短剧选品平台改进方案.md](壹凡短剧选品平台改进方案.md)
@@ -33,15 +33,29 @@
 
 ### 1.3 用户与权限
 
-| 角色 | 核心诉求 | 主要权限 |
+| 角色代码 | 角色 | 已实施职责 |
 | --- | --- | --- |
-| 内容运营 | 发现值得跟进的趋势和选题 | 查看榜单、创建/维护选题、生成拆解 |
-| 编剧/策划 | 将选题推进为可写可拍方案 | 编辑并锁定 brief、人物、大纲、剧本、分镜 |
-| 制作运营 | 获得可执行的拍摄或 AI 预演资料 | 查看已锁定版本、导出制作包 |
-| 数据运营 | 校验数据质量与评分逻辑 | 查看来源、指标、异常和评分明细 |
-| 管理员 | 管理配置、模型、导出与权限 | 全部权限；维护外部服务凭证 |
+| `selection_operator` | 选品运营 | 榜单、选题、剧目素材与拆解草稿；提交拆解审批 |
+| `creative_planner` | 创意策划 | 仿写方向、Brief、人物与关系；提交策划版本审批 |
+| `screenwriter` | 编剧 | 分集大纲与单集 Beats；提交写作版本审批 |
+| `project_owner` | 项目负责人 | 项目成员、任务指派、版本批准或退回 |
+| `system_admin` | 系统管理员 | 本地用户与角色、系统运维、审计和批准成果交付 |
 
-首期采用现有本地单用户模式时，上述权限以功能边界记录；多用户部署前不得假定已有鉴权能力。
+系统已经使用本地账号、密码哈希、会话 Cookie 和 CSRF 校验，不依赖企业微信、飞书或 OIDC。用户通过角色获得权限，多角色权限取并集；系统管理员为唯一全局最高权限角色。系统始终保留至少一个启用的系统管理员。
+
+人员工作采用角色任务池。上游批准后系统只创建目标角色的池任务，不按工作量自动挑选人员；角色成员可领取，项目负责人或系统管理员可指派、改派、收回和取消。页面导航按权限生成，直接访问无权限页面或 API 返回 `403`。
+
+主要页面路由如下：
+
+```text
+/tasks
+/selection/dashboard|ranks|topics|dramas|breakdowns
+/planning/projects/{project_id}/directions|brief|characters
+/writing/projects/{project_id}/outlines
+/writing/projects/{project_id}/episodes/{episode_number}/beats
+/review/projects|tasks|approvals
+/admin/users|roles|config|data|analytics|jobs|deliveries|audit
+```
 
 ## 2. 数据与可追溯性
 
@@ -77,19 +91,22 @@
 2. 内容运营在“今日爆款”查看新上榜、排名上升和热度增长的剧目。
 3. 选择剧目后生成或编辑爆款拆解卡，确认来源与风险。
 4. 系统计算候选选题评分，运营将候选项采纳为创作项目。
-5. 仿制工坊生成 3-5 个差异化方向；用户选择一个并锁定为 brief。
-6. 剧本工坊按顺序生成并锁定人物、关系、分集大纲、beats、单集正文。
-7. 分镜工坊将锁定的单集版本转为镜头表，导出制作包。
-8. Phase 6 的适配器可将已导出的镜头或配音任务发往外部服务；外部结果仍回写为项目资产。
+5. 创意策划生成 3-5 个差异化方向，提交 Brief 和人物关系版本，由项目负责人批准。
+6. 编剧基于已批准上游创建分集大纲和单集 Beats，提交后冻结，由项目负责人批准。
+7. 系统管理员在“成果交付”中选择批准版本，生成 Markdown 或 JSON 交付记录。
+8. 单集正文、分镜、ZIP 制作包和外部生成服务仍属于 Phase 5-6，不在当前实现范围。
 
 ### 3.2 创意项目状态
 
+业务生命周期标签继续表示项目进度，人员任务和内容版本使用独立状态机。所有受审批内容统一为：
+
 ```text
-待评估 -> 已采纳 -> 方向生成中 -> Brief 已锁定 -> 大纲已锁定
--> 单集开发中 -> 分镜已锁定 -> 已导出 -> 已归档
+draft -> submitted -> approved
+                   -> returned -> 新 draft
+approved -> superseded（后续版本获批时）
 ```
 
-状态只能前进；允许回退到前一已锁定节点创建新版本，不覆盖历史版本。`已归档`项目只读，管理员可恢复。
+`submitted`、`approved`、`returned` 和 `superseded` 版本不可原地修改。退回保留原提交及意见，并克隆新草稿；只有批准动作创建下一节点角色池任务。轻量审批注册表保存在系统数据库的 `workflow_submissions`，以规范化 JSON 快照和 SHA-256 指纹校验冻结内容。
 
 ## 4. 功能需求
 
@@ -107,7 +124,7 @@
 
 必填/生成字段：剧名、平台、快照、热度/排名、卖点、题材、目标人群、主角身份、阻力来源、核心冲突、前三集钩子、爽点、情绪曲线、反转节点、评论共鸣点、可仿制元素、风险点、制作难度、来源证据。
 
-用户可逐字段编辑、重新生成、保存草稿、锁定版本。锁定后不能原地修改，只能“基于此版本创建新版本”。未获得转写时，“前三集钩子”和“台词型结论”必须标为推断，不得伪装为事实。
+用户可逐字段编辑、重新生成和保存草稿。提交后不能原地修改；批准或退回版本只能派生新草稿。未获得转写时，“前三集钩子”和“台词型结论”必须标为推断，不得伪装为事实。
 
 ### 4.3 选题评分与选题库
 
@@ -135,7 +152,7 @@
 
 剧本工坊以项目为单位，按以下顺序开放：选题 brief、世界观、人物小传、关系、分集大纲、单集 beats、单集正文、台词润色、爽点/反转增强。
 
-每个步骤具备：输入来源选择、生成、编辑、版本对比、锁定、基于锁定版本继续生成、Markdown/JSON 导出。只有上一步存在锁定版本时才能生成下一步；用户可手动创建空白版本以支持人工创作。
+当前 Brief、人物关系、分集大纲和 Beats 具备生成、编辑、提交、批准、退回和修订版本。只有上一步存在批准版本时才能生成下一步。Markdown/JSON 交付只能由系统管理员从批准的提交版本创建，并记录项目、阶段、资源版本、提交版本、指纹、操作者、格式、文件路径和时间。
 
 首期正文范围限制为单集；系统生成前应显示本集时长、冲突、钩子、反转和结尾悬念目标。
 
@@ -155,7 +172,7 @@
 
 ### 5.1 子系统边界
 
-新增 `creative/` 子系统，不将创意业务继续堆叠在 `WebGUI.py`：
+实现按身份、工作流、创作和审计边界拆分，不将业务继续堆叠在 `WebGUI.py`：
 
 ```text
 creative/
@@ -165,12 +182,16 @@ creative/
   hit_breakdown.py      # 拆解和证据归集
   imitation_service.py  # 差异化方向与风险校验
   script_service.py     # 分步剧本生成、锁定和版本链
-  storyboard_service.py # 镜头表、制作包
+  delivery.py           # 批准阶段的 Markdown/JSON 交付注册表
   prompt_templates.py   # 版本化提示模板
   api.py                # /api/creative 路由
+identity/               # 本地用户、角色、会话和权限
+workflow/               # 角色任务池、审批注册表和流转
+audit/                  # 管理与交付审计
+web/                    # 页面路由和按权限导航
 ```
 
-`WebGUI.py` 仅注册创意路由；前端按模块页面调用 API。耗时 LLM、导出和外部服务任务复用现有 JobManager/事件日志机制。
+`WebGUI.py` 负责组装路由和共享服务；业务逻辑保留在对应模块。耗时 LLM 任务复用现有 JobManager，并关联创建用户、项目和人员任务。
 
 ### 5.2 数据模型
 
@@ -188,6 +209,8 @@ creative/
 | `creative_shots` | 镜头表、prompt、排序和锁定版本 |
 | `creative_exports` | 导出任务、版本快照、文件路径、状态 |
 
+系统数据库 `.runtime/system/system.db` 另含 `users`、`roles`、`sessions`、`workflow_tasks`、`workflow_submissions`、`approval_records` 和 `audit_logs`。当前批准交付元数据位于 `creative_deliveries`；文件位于 `.runtime/deliveries/`，下载时再次执行系统管理员鉴权。
+
 禁止更新锁定版本的业务正文；新版本以 `parent_version_id` 指向来源版本。删除项目采用软删除，导出快照永久引用其生成时版本。
 
 ### 5.3 API 契约
@@ -203,7 +226,12 @@ creative/
 | `POST /api/creative/scenes` | 保存/生成/版本化情节、场景资产 |
 | `POST /api/creative/storyboard` | 由锁定单集生成或更新分镜 |
 | `GET /api/creative/projects/{project_id}` | 返回项目当前版本、来源、状态和可操作节点 |
-| `POST /api/creative/exports` | 创建制作包导出任务 |
+| `POST /api/creative/workflow/submit` | 提交创作资源快照并冻结版本 |
+| `POST /api/workflow/submissions/{id}/approve` | 项目负责人批准并创建下一角色池任务 |
+| `POST /api/workflow/submissions/{id}/return` | 退回提交并创建修订草稿 |
+| `GET /api/admin/deliveries/options` | 系统管理员查看可交付批准版本 |
+| `POST /api/admin/deliveries` | 创建 Markdown/JSON 交付记录和审计 |
+| `GET /api/admin/deliveries/{id}/download` | 下载受保护交付文件 |
 
 写接口返回资源版本或标准异步 Job；LLM/ZIP/外部服务操作不得阻塞 HTTP 请求。响应中的证据统一返回 `source_type`、`job_id`、`source_path`、`captured_at`、`excerpt`。
 
@@ -217,9 +245,9 @@ creative/
 
 ### Phase 4：仿制与剧本大纲
 
-交付仿制工坊、风险提示、brief、人物/关系、分集大纲和单集 beats。验收：运营可从一个锁定拆解生成多个方向，选定方向后依赖锁定版本生成可编辑大纲；高相似度风险不能直接进入后续生成。
+交付仿制工坊、风险提示、Brief、人物/关系、分集大纲、单集 Beats、本地五角色协作、角色任务池、统一审批状态机和批准阶段交付。验收：五类本地用户按页面/API 权限隔离；提交版本不可编辑；批准创建下一任务；系统管理员只能交付批准版本且记录指纹与审计。
 
-不包含完整全集正文、分镜导出和外部生成调用。
+不包含完整全集正文、分镜导出、ZIP 制作包和外部生成调用。
 
 ### Phase 5：分镜与制作包
 

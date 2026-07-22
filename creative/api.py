@@ -1055,33 +1055,32 @@ def build_creative_router(
 
     @router.get("/projects/{project_id}/export")
     async def export_project_stage(
+        request: Request,
         project_id: int,
         stage: str,
         format: str = Query("md", pattern="^(md|json)$"),
+        submission_id: str | None = None,
     ):
-        project = project_or_404(project_id)
-        try:
-            payload = build_stage_export(project, stage)
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
-        if stage == "beats":
-            repository.record_stage_export(
-                project_id,
-                stage,
-                format,
-                content_fingerprint(payload["content"]),
-            )
-        if format == "json":
-            return JSONResponse(payload)
-        if stage == "beats":
-            markdown = build_beats_markdown(project, payload["content"])
-        else:
-            markdown = "\n".join([f"# {project['name']}", "", f"- 阶段：{stage}", ""] + _markdown_value(payload["content"]))
-        filename = f"creative-{project_id}-{stage}.md"
-        return Response(
-            markdown,
-            media_type="text/markdown; charset=utf-8",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        permission_service = getattr(
+            request.app.state, "identity_permission_service", None
+        )
+        if not isinstance(permission_service, PermissionService):
+            raise HTTPException(500, "identity permission service is not configured")
+        principal = optional_principal(request)
+        if principal is None:
+            raise HTTPException(401, "登录已失效，请重新登录")
+        if not principal.is_system_admin:
+            raise HTTPException(403, "only system administrators may export deliveries")
+        if not submission_id:
+            raise HTTPException(409, "approved submission_id is required")
+        submission = workflow_repository.get_submission(submission_id)
+        if submission is None:
+            raise HTTPException(404, "submission not found")
+        if submission["status"] != "approved":
+            raise HTTPException(409, "delivery requires an approved submission")
+        raise HTTPException(
+            410,
+            "use POST /api/admin/deliveries to create an audited delivery",
         )
 
     return router

@@ -15,7 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from core.job import CrawlJob
-from creative.api import register_creative_routes
+from creative.api import build_beats_markdown, register_creative_routes
 from creative.imitation_service import assess_similarity_risk
 from creative.repository import CreativeRepository
 from identity.permission_service import PermissionService
@@ -636,7 +636,7 @@ def test_phase4_generation_api_enqueues_standard_creative_job(tmp_path: Path):
     assert manager.created[0]["extra"]["count"] == 4
 
 
-def test_phase4_export_returns_markdown_and_json(tmp_path: Path):
+def test_phase4_legacy_export_requires_approved_delivery_submission(tmp_path: Path):
     client, repository, _ = build_phase4_client(tmp_path)
     topic, breakdown = seed_adopted_topic(repository)
     project = repository.create_project(topic["id"], breakdown["id"], "导出项目", 20)
@@ -650,15 +650,13 @@ def test_phase4_export_returns_markdown_and_json(tmp_path: Path):
     markdown = client.get(f"/api/creative/projects/{project['id']}/export?stage=brief&format=md")
     json_response = client.get(f"/api/creative/projects/{project['id']}/export?stage=brief&format=json")
 
-    assert markdown.status_code == 200
-    assert "# 导出项目" in markdown.text
-    assert "新的冲突" in markdown.text
-    assert json_response.status_code == 200
-    assert json_response.json()["stage"] == "brief"
+    assert markdown.status_code == 409
+    assert json_response.status_code == 409
+    assert "approved submission_id is required" in markdown.json()["detail"]
 
 
 def test_beats_markdown_export_uses_chinese_fields_and_includes_field_guide(tmp_path: Path):
-    client, repository, _ = build_phase4_client(tmp_path)
+    _, repository, _ = build_phase4_client(tmp_path)
     topic, breakdown = seed_adopted_topic(repository)
     project = repository.create_project(topic["id"], breakdown["id"], "节拍导出", 1)
     blueprint = repository.create_blueprints(project["id"], [{
@@ -669,7 +667,7 @@ def test_beats_markdown_export_uses_chinese_fields_and_includes_field_guide(tmp_
     repository.lock_character_batch(project["id"], characters["batch_id"])
     outlines = repository.create_outline_batch(project["id"], [{"episode": 1}], "单集弧线")
     repository.lock_outline_batch(project["id"], outlines["batch_id"])
-    repository.create_episode_beats(project["id"], 1, {"beats": [{
+    beats = repository.create_episode_beats(project["id"], 1, {"beats": [{
         "order": 1,
         "scene": "早餐店",
         "characters": ["主角"],
@@ -680,16 +678,17 @@ def test_beats_markdown_export_uses_chinese_fields_and_includes_field_guide(tmp_
         "hook": "陌生通知到达",
     }]})
 
-    response = client.get(f"/api/creative/projects/{project['id']}/export?stage=beats&format=md")
+    markdown = build_beats_markdown(
+        repository.get_project(project["id"]), [beats]
+    )
 
-    assert response.status_code == 200
-    assert "## 字段说明" in response.text
-    assert "**节拍序号**" in response.text
-    assert "**场景**" in response.text
-    assert "**出场人物**" in response.text
-    assert "**行动目标**" in response.text
-    assert "**情绪变化**" in response.text
-    assert "**结尾钩子**" in response.text
-    assert "用于说明该节拍发生的具体地点和情境" in response.text
-    assert "**order**" not in response.text
-    assert "**episode number**" not in response.text
+    assert "## 字段说明" in markdown
+    assert "**节拍序号**" in markdown
+    assert "**场景**" in markdown
+    assert "**出场人物**" in markdown
+    assert "**行动目标**" in markdown
+    assert "**情绪变化**" in markdown
+    assert "**结尾钩子**" in markdown
+    assert "用于说明该节拍发生的具体地点和情境" in markdown
+    assert "**order**" not in markdown
+    assert "**episode number**" not in markdown

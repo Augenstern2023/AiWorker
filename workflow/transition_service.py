@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -109,6 +110,23 @@ class TransitionService:
             task = self.repository._require_task(
                 connection, submission["task_id"]
             )
+            if current["status"] == "submitted":
+                connection.execute(
+                    """
+                    INSERT INTO approval_records (
+                        id, workflow_id, task_id, version_id, stage, decision,
+                        reviewer_id, comment
+                    ) VALUES (?, ?, ?, ?, ?, 'approved', ?, '')
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        task["workflow_id"],
+                        task["id"],
+                        submission["id"],
+                        submission["resource_type"],
+                        actor.user_id,
+                    ),
+                )
             node = WORKFLOW_NODES.get(task["task_type"])
             if node is None:
                 raise ValueError(f"unknown workflow node: {task['task_type']}")

@@ -175,6 +175,14 @@ def test_production_webgui_wires_shared_identity_security_and_routes():
     }
     assert ("/api/auth/login", "POST") in routes
     assert ("/api/admin/audit", "GET") in routes
+    assert sum(
+        route.path == "/api/admin/deliveries"
+        for route in production_app.routes
+    ) == 2
+    assert sum(
+        route.path == "/api/admin/deliveries/options"
+        for route in production_app.routes
+    ) == 1
 
     client = TestClient(production_app)
     assert client.get("/api/auth/me").status_code == 401

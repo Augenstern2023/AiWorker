@@ -193,6 +193,19 @@ def test_admin_identity_pages_expose_complete_management_flows():
     assert "toggleRoleStatus" in roles_js
 
 
+def test_admin_delivery_page_uses_approved_delivery_registry():
+    html = _read("templates/admin/deliveries.html")
+    source = _read("static/js/admin/deliveries.js")
+
+    assert 'id="delivery-create-form"' in html
+    assert 'id="delivery-submission"' in html
+    assert 'id="delivery-history"' in html
+    assert "/api/admin/deliveries" in source
+    assert "/download`" in source
+    assert "method: 'POST'" in source
+    assert "/api/creative/projects/" not in html
+
+
 def test_base_layout_globally_surfaces_permission_denials_without_rejection():
     base = _read("templates/layouts/base.html")
     session = _read("static/js/common/session.js")

@@ -3,6 +3,22 @@
 ## 项目文档
 
 - [项目架构文档](项目架构文档.md) - 系统架构、模块设计、数据流向（含 Mermaid 图表）
+- [短剧选品平台 PRD 实施文档](../improve/壹凡短剧选品平台PRD实施文档.md) - 已实施的五角色、本地认证、任务池、审批和交付边界
+- [角色职能工作流设计](superpowers/specs/2026-07-22-role-responsibility-workflow-design.md) - 角色权限、页面路由、状态机与数据迁移设计
+- [角色职能工作流实施计划](superpowers/plans/2026-07-22-role-responsibility-workflow.md) - 分阶段实现和验证清单
+
+## 本地协作入口
+
+Web GUI 使用本地账号登录。五个默认角色为选品运营、创意策划、编剧、项目负责人和系统管理员。人员任务从 `/tasks` 领取；业务页面分别位于 `/selection/*`、`/planning/*`、`/writing/*`、`/review/*` 和 `/admin/*`。提交版本进入轻量审批注册表，批准后才创建下一角色池任务；系统管理员在 `/admin/deliveries` 交付批准的 Brief、人物关系、大纲或 Beats 的 Markdown/JSON 快照。
+
+历史 `locked` / `brief_locked` 数据可使用以下迁移命令预检或迁移。写模式会先备份系统与创作数据库，重复运行不会创建重复版本或任务。
+
+```shell
+uv run python scripts/migrate_role_workflow.py --admin-user-id <bootstrap-admin-user-id> --dry-run
+uv run python scripts/migrate_role_workflow.py --admin-user-id <bootstrap-admin-user-id>
+```
+
+当前范围不包含完整剧本、分镜或 ZIP 制作包。
 
 ## 推荐：使用 uv 管理依赖
 

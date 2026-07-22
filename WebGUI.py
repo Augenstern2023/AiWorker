@@ -57,6 +57,8 @@ from analysis.asr import (
 from analysis.llm import LLMError, create_llm_provider_from_config
 from analysis.today_rank_api import register_today_rank_routes
 from creative.api import register_creative_routes
+from creative.delivery import DeliveryService, build_delivery_router
+from creative.repository import CreativeRepository
 from identity.api import build_identity_router
 from identity.password_service import PasswordService
 from identity.dependencies import current_principal
@@ -254,6 +256,15 @@ identity_permission_service = PermissionService(
 audit_service = AuditService(identity_repository)
 workflow_repository = WorkflowRepository(identity_repository)
 workflow_transition_service = TransitionService(workflow_repository)
+creative_repository = CreativeRepository(
+    WORKSPACE_ROOT / ".runtime" / "creative" / "creative.db"
+)
+delivery_service = DeliveryService(
+    root=WORKSPACE_ROOT,
+    creative_repository=creative_repository,
+    workflow_repository=workflow_repository,
+    audit_service=audit_service,
+)
 app.state.identity_repository = identity_repository
 app.state.identity_password_service = identity_password_service
 app.state.identity_session_service = identity_session_service
@@ -301,6 +312,7 @@ app.include_router(
     )
 )
 app.include_router(build_audit_router(audit_service))
+app.include_router(build_delivery_router(delivery_service))
 app.include_router(
     build_workflow_router(workflow_repository, workflow_transition_service)
 )

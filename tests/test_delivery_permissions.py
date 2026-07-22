@@ -1,0 +1,284 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) 2025 relakkes@gmail.com
+#
+# This file is part of MediaCrawler project.
+# Repository: https://github.com/NanmiCoder/MediaCrawler
+# GitHub: https://github.com/NanmiCoder
+# Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
+
+from audit.service import AuditService
+from creative.api import build_creative_router
+from creative.delivery import DeliveryService, build_delivery_router
+from creative.repository import CreativeRepository
+from creative.workflow_adapter import CreativeWorkflowAdapter
+from identity.permission_service import PermissionService
+from identity.repository import IdentityRepository
+from identity.session_service import SessionService
+from workflow import SYSTEM_ACTOR
+from workflow.repository import WorkflowRepository
+from workflow.transition_service import TransitionService
+
+
+def _login_client(
+    app: FastAPI,
+    sessions: SessionService,
+    user_id: str,
+) -> TestClient:
+    session_app = FastAPI()
+
+    @session_app.get("/session")
+    async def create_session(request: Request):
+        return sessions.create_session(user_id, request)
+
+    token, csrf = TestClient(session_app).get("/session").json()
+    client = TestClient(app)
+    client.cookies.set(sessions.cookie_name, token)
+    client.headers["X-CSRF-Token"] = csrf
+    return client
+
+
+def _seed_environment(tmp_path: Path):
+    runtime = tmp_path / ".runtime"
+    identity = IdentityRepository(runtime / "system/system.db")
+    identity.seed_defaults()
+    sessions = SessionService(identity, secure_cookie=False)
+    permissions = PermissionService(identity, sessions)
+    audit = AuditService(identity)
+    workflow = WorkflowRepository(identity)
+    creative = CreativeRepository(runtime / "creative/creative.db")
+    adapter = CreativeWorkflowAdapter(creative, workflow)
+    transitions = TransitionService(workflow, creative_adapter=adapter)
+
+    users = {}
+    for username, role_code in (
+        ("administrator", "system_admin"),
+        ("planner", "creative_planner"),
+        ("writer", "screenwriter"),
+    ):
+        role = identity.get_role_by_code(role_code)
+        assert role is not None
+        user = identity.create_user(username, username.title(), "hash")
+        identity.replace_user_roles(user["id"], [role["id"]])
+        users[username] = user
+    admin = permissions.principal_for_user(users["administrator"]["id"], "admin")
+    planner = permissions.principal_for_user(users["planner"]["id"], "planner")
+    assert admin is not None and planner is not None
+
+    topic = creative.upsert_topics(
+        [
+            {
+                "platform": "dy",
+                "job_id": "delivery-rank",
+                "source_path": "delivery.json",
+                "captured_at": "2026-07-22",
+                "title": "Delivery drama",
+                "description": "",
+                "category": "urban",
+                "rank_type": "hot",
+                "score": 90,
+                "confidence": "high",
+                "score_details": {},
+                "recommendation": "adopt",
+                "evidence": [],
+            }
+        ]
+    )[0]
+    creative.update_topic(topic["id"], "adopted")
+    breakdown = creative.create_breakdown(topic["id"], {"hook": "strong"}, {}, [])
+    creative.lock_breakdown(breakdown["id"])
+    project = creative.create_project(topic["id"], breakdown["id"], "Delivery", 1)
+    brief = creative.create_blueprints(
+        project["id"], [{"content": {"premise": "approved"}, "risk_level": "low"}]
+    )[0]
+    workflow.add_project_member(str(project["id"]), planner.user_id, "creative_planner", admin)
+    task = workflow.create_task(
+        "workflow-delivery",
+        "brief",
+        "creative_planner",
+        project_id=str(project["id"]),
+        actor=SYSTEM_ACTOR,
+    )
+    workflow.assign_task(task["id"], planner.user_id, admin)
+    workflow.start_task(task["id"], planner)
+    approved = transitions.approve(
+        adapter.submit(task["id"], "brief", str(brief["id"]), planner)["id"],
+        admin,
+    )["submission"]
+
+    draft_task = workflow.create_task(
+        "workflow-delivery-draft",
+        "brief",
+        "creative_planner",
+        project_id=str(project["id"]),
+        actor=SYSTEM_ACTOR,
+    )
+    workflow.assign_task(draft_task["id"], planner.user_id, admin)
+    workflow.start_task(draft_task["id"], planner)
+    draft_brief = creative.create_blueprint_version(brief["id"], draft_task["id"])
+    draft = adapter.create_draft(
+        draft_task["id"], "brief", str(draft_brief["id"]), planner
+    )
+
+    app = FastAPI()
+    app.state.identity_permission_service = permissions
+    app.state.audit_service = audit
+    delivery_service = DeliveryService(
+        root=tmp_path,
+        creative_repository=creative,
+        workflow_repository=workflow,
+        audit_service=audit,
+    )
+    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(build_delivery_router(delivery_service))
+    clients = {
+        name: _login_client(app, sessions, user["id"])
+        for name, user in users.items()
+    }
+    return runtime, identity, sessions, audit, project, approved, draft, clients
+
+
+def test_only_system_admin_can_create_list_and_download_approved_delivery(
+    tmp_path: Path,
+):
+    runtime, _, _, audit, project, approved, _, clients = _seed_environment(tmp_path)
+
+    for name in ("planner", "writer"):
+        assert clients[name].get("/api/admin/deliveries").status_code == 403
+        assert clients[name].post(
+            "/api/admin/deliveries",
+            json={
+                "project_id": project["id"],
+                "stage": "brief",
+                "submission_id": approved["id"],
+                "format": "md",
+            },
+        ).status_code == 403
+        assert clients[name].get(
+            f"/api/creative/projects/{project['id']}/export",
+            params={"stage": "brief", "format": "md", "submission_id": approved["id"]},
+        ).status_code == 403
+
+    created = clients["administrator"].post(
+        "/api/admin/deliveries",
+        json={
+            "project_id": project["id"],
+            "stage": "brief",
+            "submission_id": approved["id"],
+            "format": "md",
+        },
+    )
+
+    assert created.status_code == 201, created.text
+    delivery = created.json()["delivery"]
+    assert delivery["project_id"] == str(project["id"])
+    assert delivery["stage"] == "brief"
+    assert delivery["submission_id"] == approved["id"]
+    assert delivery["submission_version"] == approved["version"]
+    assert delivery["actor_user_id"]
+    assert delivery["format"] == "md"
+    assert Path(delivery["path"]).is_file()
+    downloaded = clients["administrator"].get(
+        f"/api/admin/deliveries/{delivery['id']}/download"
+    )
+    assert downloaded.status_code == 200
+    assert hashlib.sha256(downloaded.content).hexdigest() == delivery["fingerprint"]
+    listed = clients["administrator"].get("/api/admin/deliveries").json()["deliveries"]
+    assert [item["id"] for item in listed] == [delivery["id"]]
+    event = audit.query(action="delivery.create", target_id=delivery["id"])[0]
+    assert event["project_id"] == str(project["id"])
+    assert event["after_summary"]["submission_version"] == approved["version"]
+    assert event["after_summary"]["fingerprint"] == delivery["fingerprint"]
+    assert str(runtime / "deliveries") in delivery["path"]
+
+
+def test_delivery_rejects_draft_mismatch_and_unsupported_scope(tmp_path: Path):
+    runtime, identity, _, _, project, approved, draft, clients = _seed_environment(tmp_path)
+    admin = clients["administrator"]
+
+    assert admin.post(
+        "/api/admin/deliveries",
+        json={
+            "project_id": project["id"],
+            "stage": "brief",
+            "submission_id": draft["id"],
+            "format": "json",
+        },
+    ).status_code == 409
+    assert admin.post(
+        "/api/admin/deliveries",
+        json={
+            "submission_id": approved["id"],
+            "project_id": int(project["id"]) + 1,
+            "stage": "brief",
+            "format": "json",
+        },
+    ).status_code == 409
+    assert admin.post(
+        "/api/admin/deliveries",
+        json={
+            "project_id": project["id"],
+            "stage": "brief",
+            "submission_id": approved["id"],
+            "format": "zip",
+        },
+    ).status_code == 422
+    with identity.transaction() as connection:
+        connection.execute(
+            "UPDATE workflow_submissions SET content_snapshot_json = ? WHERE id = ?",
+            ('{"project_id":1,"content":{}}', approved["id"]),
+        )
+    assert admin.post(
+        "/api/admin/deliveries",
+        json={
+            "project_id": project["id"],
+            "stage": "brief",
+            "submission_id": approved["id"],
+            "format": "json",
+        },
+    ).status_code == 409
+    assert list((runtime / "deliveries").glob("*")) == []
+
+
+def test_delivery_registry_and_download_persist_across_app_restart(tmp_path: Path):
+    runtime, identity, sessions, _, _, approved, _, clients = _seed_environment(tmp_path)
+    response = clients["administrator"].post(
+        "/api/admin/deliveries",
+        json={
+            "project_id": 1,
+            "stage": "brief",
+            "submission_id": approved["id"],
+            "format": "json",
+        },
+    )
+    assert response.status_code == 201
+    delivery_id = response.json()["delivery"]["id"]
+
+    restarted = FastAPI()
+    restarted.state.identity_permission_service = PermissionService(identity, sessions)
+    restarted_audit = AuditService(identity)
+    restarted.state.audit_service = restarted_audit
+    restarted.include_router(
+        build_delivery_router(
+            DeliveryService(
+                root=tmp_path,
+                creative_repository=CreativeRepository(runtime / "creative/creative.db"),
+                workflow_repository=WorkflowRepository(identity),
+                audit_service=restarted_audit,
+            )
+        )
+    )
+    admin_id = identity.list_users()[0]["id"]
+    client = _login_client(restarted, sessions, admin_id)
+
+    assert client.get("/api/admin/deliveries").json()["deliveries"][0]["id"] == delivery_id
+    assert client.get(
+        f"/api/admin/deliveries/{delivery_id}/download"
+    ).status_code == 200

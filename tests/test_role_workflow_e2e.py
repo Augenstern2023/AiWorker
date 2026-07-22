@@ -1,0 +1,328 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) 2025 relakkes@gmail.com
+#
+# This file is part of MediaCrawler project.
+# Repository: https://github.com/NanmiCoder/MediaCrawler
+# GitHub: https://github.com/NanmiCoder
+# Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
+from fastapi.templating import Jinja2Templates
+
+from audit.service import AuditService
+from creative.api import build_creative_router
+from creative.delivery import DeliveryService, build_delivery_router
+from creative.repository import CreativeRepository
+from creative.workflow_adapter import CreativeWorkflowAdapter
+from identity.permission_service import PermissionService
+from identity.repository import IdentityRepository
+from identity.session_service import SessionService
+from web.navigation_service import NavigationService
+from web.page_router import build_page_router
+from workflow import SYSTEM_ACTOR
+from workflow.api import build_workflow_router
+from workflow.repository import WorkflowRepository
+from workflow.transition_service import TransitionService
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _client(app: FastAPI, sessions: SessionService, user_id: str) -> TestClient:
+    session_app = FastAPI()
+
+    @session_app.get("/session")
+    def create_session(request: Request):
+        return sessions.create_session(user_id, request)
+
+    token, csrf = TestClient(session_app).get("/session").json()
+    client = TestClient(app)
+    client.cookies.set(sessions.cookie_name, token)
+    client.headers["X-CSRF-Token"] = csrf
+    return client
+
+
+def _claim_start(client: TestClient, task_id: str) -> None:
+    assert client.post(f"/api/workflow/tasks/{task_id}/claim").status_code == 200
+    assert client.post(f"/api/workflow/tasks/{task_id}/start").status_code == 200
+
+
+def _submit(
+    client: TestClient, task_id: str, resource_type: str, resource_id: str
+) -> dict:
+    response = client.post(
+        "/api/creative/workflow/submit",
+        json={
+            "workflow_task_id": task_id,
+            "resource_type": resource_type,
+            "resource_id": resource_id,
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _approve(client: TestClient, submission_id: str) -> dict:
+    response = client.post(
+        f"/api/workflow/submissions/{submission_id}/approve"
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
+    runtime = tmp_path / ".runtime"
+    identity = IdentityRepository(runtime / "system/system.db")
+    identity.seed_defaults()
+    sessions = SessionService(identity, secure_cookie=False)
+    permissions = PermissionService(identity, sessions)
+    audit = AuditService(identity)
+    workflow = WorkflowRepository(identity)
+    creative = CreativeRepository(runtime / "creative/creative.db")
+    adapter = CreativeWorkflowAdapter(creative, workflow)
+    transitions = TransitionService(workflow, creative_adapter=adapter)
+
+    users = {}
+    for role_code in (
+        "selection_operator",
+        "creative_planner",
+        "screenwriter",
+        "project_owner",
+        "system_admin",
+    ):
+        role = identity.get_role_by_code(role_code)
+        assert role is not None
+        user = identity.create_user(role_code, role_code, "hash")
+        identity.replace_user_roles(user["id"], [role["id"]])
+        users[role_code] = user
+    principals = {
+        role: permissions.principal_for_user(user["id"], role)
+        for role, user in users.items()
+    }
+    assert all(principals.values())
+    admin = principals["system_admin"]
+    assert admin is not None
+
+    topic = creative.upsert_topics(
+        [
+            {
+                "platform": "dy",
+                "job_id": "e2e-rank",
+                "source_path": "e2e.json",
+                "captured_at": "2026-07-22",
+                "title": "Five role drama",
+                "description": "",
+                "category": "urban",
+                "rank_type": "hot",
+                "score": 95,
+                "confidence": "high",
+                "score_details": {},
+                "recommendation": "adopt",
+                "evidence": [],
+            }
+        ]
+    )[0]
+    creative.update_topic(topic["id"], "adopted")
+    breakdown = creative.create_breakdown(topic["id"], {"hook": "strong"}, {}, [])
+    creative.lock_breakdown(breakdown["id"])
+    project = creative.create_project(topic["id"], breakdown["id"], "Five Roles", 1)
+    with creative._connect() as connection:
+        connection.execute(
+            "UPDATE creative_breakdowns SET status = 'draft', locked_at = NULL WHERE id = ?",
+            (breakdown["id"],),
+        )
+    project_id = str(project["id"])
+    for role_code, user in users.items():
+        project_role = "project_owner" if role_code == "project_owner" else role_code
+        workflow.add_project_member(
+            project_id, user["id"], project_role, admin
+        )
+
+    first_task = workflow.create_task(
+        "five-role-workflow",
+        "breakdown",
+        "selection_operator",
+        project_id=project_id,
+        topic_id=topic["id"],
+        actor=SYSTEM_ACTOR,
+    )
+
+    app = FastAPI()
+    app.state.identity_permission_service = permissions
+    app.state.audit_service = audit
+    app.include_router(build_workflow_router(workflow, transitions))
+    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(
+        build_delivery_router(
+            DeliveryService(
+                root=tmp_path,
+                creative_repository=creative,
+                workflow_repository=workflow,
+                audit_service=audit,
+            )
+        )
+    )
+    app.include_router(
+        build_page_router(
+            Jinja2Templates(directory=str(ROOT / "templates")), NavigationService()
+        )
+    )
+    clients = {
+        role: _client(app, sessions, user["id"])
+        for role, user in users.items()
+    }
+
+    assert clients["selection_operator"].get("/selection/breakdowns").status_code == 200
+    assert clients["selection_operator"].get("/writing/projects").status_code == 403
+    assert clients["creative_planner"].get("/planning/projects").status_code == 200
+    assert clients["creative_planner"].get("/admin/deliveries").status_code == 403
+    assert clients["screenwriter"].get("/writing/projects").status_code == 200
+    assert clients["project_owner"].get("/review/approvals").status_code == 200
+    assert clients["system_admin"].get("/admin/deliveries").status_code == 200
+    assert clients["screenwriter"].post(
+        f"/api/workflow/tasks/{first_task['id']}/claim"
+    ).status_code == 403
+
+    _claim_start(clients["selection_operator"], first_task["id"])
+    breakdown_submission = _submit(
+        clients["selection_operator"],
+        first_task["id"],
+        "breakdown",
+        str(breakdown["id"]),
+    )
+    frozen = clients["selection_operator"].patch(
+        f"/api/creative/breakdowns/{breakdown['id']}",
+        json={"content": {"hook": "changed"}},
+    )
+    assert frozen.status_code == 409
+    assert clients["creative_planner"].post(
+        f"/api/workflow/submissions/{breakdown_submission['id']}/approve"
+    ).status_code == 404
+    brief_task = _approve(
+        clients["project_owner"], breakdown_submission["id"]
+    )["next_task"]
+    assert (brief_task["task_type"], brief_task["role_code"], brief_task["status"]) == (
+        "brief",
+        "creative_planner",
+        "pool",
+    )
+
+    brief = creative.create_blueprints(
+        project["id"], [{"content": {"premise": "approved"}, "risk_level": "low"}]
+    )[0]
+    _claim_start(clients["creative_planner"], brief_task["id"])
+    brief_submission = _submit(
+        clients["creative_planner"], brief_task["id"], "brief", str(brief["id"])
+    )
+    characters_task = _approve(
+        clients["project_owner"], brief_submission["id"]
+    )["next_task"]
+    assert characters_task["role_code"] == "creative_planner"
+
+    characters = creative.create_character_batch(
+        project["id"],
+        [{"name": "Lead"}],
+        [{"from": "Lead", "to": "Rival", "relation": "conflict"}],
+    )
+    character_resource_id = f"{project_id}:{characters['batch_id']}"
+    _claim_start(clients["creative_planner"], characters_task["id"])
+    character_submission = _submit(
+        clients["creative_planner"],
+        characters_task["id"],
+        "characters",
+        character_resource_id,
+    )
+    outline_task = _approve(
+        clients["project_owner"], character_submission["id"]
+    )["next_task"]
+    assert outline_task["role_code"] == "screenwriter"
+
+    outline = creative.create_outline_batch(
+        project["id"], [{"episode": 1, "hook": "cliffhanger"}], "series arc"
+    )
+    outline_resource_id = f"{project_id}:{outline['batch_id']}"
+    _claim_start(clients["screenwriter"], outline_task["id"])
+    outline_submission = _submit(
+        clients["screenwriter"],
+        outline_task["id"],
+        "outline",
+        outline_resource_id,
+    )
+    beats_task = _approve(
+        clients["project_owner"], outline_submission["id"]
+    )["next_task"]
+    assert beats_task["role_code"] == "screenwriter"
+
+    beats = creative.create_episode_beats(
+        project["id"],
+        1,
+        {
+            "beats": [
+                {
+                    "order": 1,
+                    "scene": "office",
+                    "characters": ["Lead"],
+                    "goal": "win",
+                    "obstacle": "Rival",
+                    "emotion_change": "fear to resolve",
+                    "turn": "new evidence",
+                    "hook": "door opens",
+                }
+            ]
+        },
+    )
+    _claim_start(clients["screenwriter"], beats_task["id"])
+    beats_submission = _submit(
+        clients["screenwriter"], beats_task["id"], "beats", str(beats["id"])
+    )
+    delivery_task = _approve(
+        clients["project_owner"], beats_submission["id"]
+    )["next_task"]
+    assert (delivery_task["task_type"], delivery_task["role_code"]) == (
+        "delivery",
+        "system_admin",
+    )
+
+    delivered = clients["system_admin"].post(
+        "/api/admin/deliveries",
+        json={
+            "project_id": project["id"],
+            "stage": "beats",
+            "submission_id": beats_submission["id"],
+            "format": "json",
+        },
+    )
+    assert delivered.status_code == 201, delivered.text
+    delivery = delivered.json()["delivery"]
+    assert clients["system_admin"].get(
+        f"/api/admin/deliveries/{delivery['id']}/download"
+    ).status_code == 200
+
+    with identity.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM approval_records WHERE decision = 'approved'"
+        ).fetchone()[0] == 5
+        assert connection.execute(
+            "SELECT COUNT(*) FROM workflow_task_events WHERE event_type = 'approve'"
+        ).fetchone()[0] == 5
+    assert audit.query(action="delivery.create", target_id=delivery["id"])
+
+    restarted_identity = IdentityRepository(runtime / "system/system.db")
+    restarted_workflow = WorkflowRepository(restarted_identity)
+    restarted_creative = CreativeRepository(runtime / "creative/creative.db")
+    restarted_delivery = DeliveryService(
+        root=tmp_path,
+        creative_repository=restarted_creative,
+        workflow_repository=restarted_workflow,
+        audit_service=AuditService(restarted_identity),
+    )
+    assert restarted_workflow.get_submission(beats_submission["id"])["status"] == (
+        "approved"
+    )
+    assert restarted_workflow.get_task(delivery_task["id"])["status"] == "pool"
+    assert restarted_delivery.download_path(delivery["id"]).is_file()

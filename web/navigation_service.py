@@ -63,7 +63,7 @@ NAVIGATION_CATALOG = (
     {
         "label": "系统管理",
         "icon": "bi-gear",
-        "permission": "page.admin.delivery",
+        "permission": "*",
         "route": "/admin/users",
         "items": (
             {"label": "用户管理", "route": "/admin/users", "permission": "*"},
@@ -75,7 +75,7 @@ NAVIGATION_CATALOG = (
             {
                 "label": "成果交付",
                 "route": "/admin/deliveries",
-                "permission": "page.admin.delivery",
+                "permission": "*",
             },
             {"label": "审计日志", "route": "/admin/audit", "permission": "*"},
         ),
@@ -114,7 +114,7 @@ PAGE_ROUTES = (
     ("/admin/data", "*", "数据管理"),
     ("/admin/analytics", "*", "数据分析"),
     ("/admin/jobs", "*", "机器任务"),
-    ("/admin/deliveries", "page.admin.delivery", "成果交付"),
+    ("/admin/deliveries", "*", "成果交付"),
     ("/admin/audit", "*", "审计日志"),
 )
 

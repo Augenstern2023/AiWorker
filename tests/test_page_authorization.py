@@ -211,7 +211,7 @@ def test_forbidden_page_uses_html_error_template(writer_client: TestClient):
     assert "无权访问" in response.text
 
 
-def test_delivery_only_role_cannot_open_other_admin_pages(
+def test_delivery_only_permission_does_not_grant_system_admin_delivery_page(
     page_app: tuple[FastAPI, IdentityRepository],
 ):
     repository = page_app[1]
@@ -223,8 +223,8 @@ def test_delivery_only_role_cannot_open_other_admin_pages(
 
     delivery = client.get("/admin/deliveries")
 
-    assert delivery.status_code == 200
-    assert "成果交付" in delivery.text
+    assert delivery.status_code == 403
+    assert "成果交付" not in delivery.text
     for route in (
         "/admin/users",
         "/admin/roles",

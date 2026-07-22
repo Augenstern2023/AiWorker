@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS workflow_tasks (
     project_id TEXT,
     assignee_id TEXT REFERENCES users(id) ON DELETE SET NULL,
     assigned_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    predecessor_task_id TEXT REFERENCES workflow_tasks(id) ON DELETE SET NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     due_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -220,6 +221,21 @@ class IdentityRepository:
     def _init_schema(self) -> None:
         with self.connect() as connection:
             connection.executescript(SCHEMA_SQL)
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(workflow_tasks)")
+            }
+            if "predecessor_task_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE workflow_tasks ADD COLUMN predecessor_task_id TEXT"
+                )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_task_transition
+                ON workflow_tasks(workflow_id, task_type, predecessor_task_id)
+                WHERE predecessor_task_id IS NOT NULL
+                """
+            )
 
     def seed_defaults(self) -> None:
         with self.connect() as connection:

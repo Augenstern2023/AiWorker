@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -41,3 +41,13 @@ class ProjectMemberCreateRequest(BaseModel):
     user_id: str = Field(min_length=1)
     project_role: str = Field(min_length=1, max_length=128)
     status: ProjectMemberStatus = "active"
+
+
+class SubmissionCreateRequest(BaseModel):
+    resource_type: str = Field(min_length=1, max_length=128)
+    resource_id: str = Field(min_length=1, max_length=256)
+    content: Any
+
+
+class SubmissionReturnRequest(BaseModel):
+    review_comment: str = Field(min_length=1)

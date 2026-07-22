@@ -8,6 +8,8 @@ function localDateString(date = new Date()) {
         function appData() {
             const workspace = {
                 page: document.body.dataset.workspacePage || '',
+                workflowTasks: [],
+                workflowTaskError: '',
                 isRunning: false,
                 jobs: [],
                 selectedJobId: '',
@@ -144,6 +146,14 @@ function localDateString(date = new Date()) {
                     this.breakdownGenerationProgressModal = this.modal('breakdownGenerationProgressModal');
                     this.creativeGenerationProgressModal = this.modal('creativeGenerationProgressModal');
 
+                    if (this.page === 'review-tasks') {
+                        await this.fetchWorkflowTasks();
+                        document.getElementById('refresh-review-tasks')?.addEventListener(
+                            'click',
+                            () => this.fetchWorkflowTasks()
+                        );
+                    }
+
                     await this.fetchJobs();
                     if (this.page === 'selection-ranks') {
                         this.parseTodayRankHash(false);
@@ -192,6 +202,147 @@ function localDateString(date = new Date()) {
                     document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(element => {
                         bootstrap.Tooltip.getOrCreateInstance(element);
                     });
+                },
+
+                async fetchWorkflowTasks() {
+                    const container = document.getElementById('review-task-list');
+                    if (!container) return;
+                    container.className = 'alert alert-light border';
+                    container.textContent = '正在加载任务...';
+                    this.workflowTaskError = '';
+                    try {
+                        const response = await aiworkerApi.request('/api/workflow/tasks');
+                        if (!response.ok) throw new Error('任务加载失败');
+                        this.workflowTasks = await response.json();
+                        await Promise.all(this.workflowTasks.map(async task => {
+                            if (task.status !== 'waiting_review' || (!task.can_approve && !task.can_return)) return;
+                            const submissionsResponse = await aiworkerApi.request(`/api/workflow/tasks/${task.id}/submissions`);
+                            if (!submissionsResponse.ok) return;
+                            const submissions = await submissionsResponse.json();
+                            const submitted = submissions.filter(item => item.status === 'submitted').at(-1);
+                            task.submission_id = submitted?.id || '';
+                        }));
+                        this.renderWorkflowTaskRows(container);
+                    } catch (error) {
+                        this.workflowTaskError = error.message || '任务加载失败';
+                        container.className = 'alert alert-danger';
+                        container.textContent = this.workflowTaskError;
+                    }
+                },
+
+                renderWorkflowTaskRows(container) {
+                    container.className = '';
+                    container.replaceChildren();
+                    const groups = [
+                        {title: '待领取', states: ['pool']},
+                        {title: '处理中', states: ['assigned', 'in_progress', 'returned']},
+                        {title: '待审批', states: ['waiting_review']},
+                    ];
+                    let visibleRows = 0;
+                    groups.forEach(group => {
+                        const tasks = this.workflowTasks.filter(task => group.states.includes(task.status));
+                        if (!tasks.length) return;
+                        visibleRows += tasks.length;
+                        const section = document.createElement('section');
+                        section.className = 'mb-4';
+                        const heading = document.createElement('h2');
+                        heading.className = 'h6 mb-2';
+                        heading.textContent = `${group.title} (${tasks.length})`;
+                        section.appendChild(heading);
+                        const tableWrap = document.createElement('div');
+                        tableWrap.className = 'table-responsive border';
+                        const table = document.createElement('table');
+                        table.className = 'table table-sm align-middle mb-0';
+                        const body = document.createElement('tbody');
+                        tasks.forEach(task => body.appendChild(this.workflowTaskRow(task)));
+                        table.appendChild(body);
+                        tableWrap.appendChild(table);
+                        section.appendChild(tableWrap);
+                        container.appendChild(section);
+                    });
+                    if (!visibleRows) {
+                        container.className = 'alert alert-light border';
+                        container.textContent = '暂无待处理审批任务。';
+                    }
+                },
+
+                workflowTaskRow(task) {
+                    const row = document.createElement('tr');
+                    row.className = 'workflow-task-row';
+                    const identity = document.createElement('td');
+                    const title = document.createElement('div');
+                    title.className = 'fw-semibold';
+                    title.textContent = task.task_type;
+                    const context = document.createElement('div');
+                    context.className = 'small text-muted';
+                    context.textContent = [task.project_id, task.role_code].filter(Boolean).join(' · ');
+                    identity.append(title, context);
+                    const statusCell = document.createElement('td');
+                    statusCell.className = 'text-nowrap';
+                    statusCell.textContent = task.status;
+                    const actions = document.createElement('td');
+                    actions.className = 'text-end text-nowrap';
+                    if (task.status === 'pool' && task.can_claim) {
+                        actions.appendChild(this.workflowTaskButton('bi-person-check', '领取', () => this.claimWorkflowTask(task)));
+                    }
+                    if (['assigned', 'returned'].includes(task.status) && task.can_start) {
+                        actions.appendChild(this.workflowTaskButton('bi-play-fill', '开始', () => this.startWorkflowTask(task)));
+                    }
+                    if (task.status === 'waiting_review' && task.submission_id && task.can_approve) {
+                        actions.appendChild(this.workflowTaskButton('bi-check-lg', '通过', () => this.approveWorkflowSubmission(task)));
+                    }
+                    if (task.status === 'waiting_review' && task.submission_id && task.can_return) {
+                        actions.appendChild(this.workflowTaskButton('bi-arrow-return-left', '退回', () => this.returnWorkflowSubmission(task)));
+                    }
+                    row.append(identity, statusCell, actions);
+                    return row;
+                },
+
+                workflowTaskButton(icon, label, action) {
+                    const button = document.createElement('button');
+                    button.type = 'button';
+                    button.className = 'btn btn-sm btn-outline-secondary ms-1';
+                    button.title = label;
+                    button.setAttribute('aria-label', label);
+                    const iconElement = document.createElement('i');
+                    iconElement.className = `bi ${icon}`;
+                    iconElement.setAttribute('aria-hidden', 'true');
+                    button.appendChild(iconElement);
+                    button.addEventListener('click', action);
+                    return button;
+                },
+
+                async claimWorkflowTask(task) {
+                    await this.runWorkflowTaskWrite(`/api/workflow/tasks/${task.id}/claim`);
+                },
+
+                async startWorkflowTask(task) {
+                    await this.runWorkflowTaskWrite(`/api/workflow/tasks/${task.id}/start`);
+                },
+
+                async approveWorkflowSubmission(task) {
+                    await this.runWorkflowTaskWrite(`/api/workflow/submissions/${task.submission_id}/approve`);
+                },
+
+                async returnWorkflowSubmission(task) {
+                    const reviewComment = window.prompt('请输入退回原因');
+                    if (!reviewComment?.trim()) return;
+                    await this.runWorkflowTaskWrite(
+                        `/api/workflow/submissions/${task.submission_id}/return`,
+                        {
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({review_comment: reviewComment.trim()}),
+                        }
+                    );
+                },
+
+                async runWorkflowTaskWrite(url, options = {}) {
+                    const response = await aiworkerApi.request(url, {method: 'POST', ...options});
+                    if (!response.ok) {
+                        const payload = await response.json().catch(() => ({}));
+                        throw new Error(payload.detail || '任务操作失败');
+                    }
+                    await this.fetchWorkflowTasks();
                 },
 
                 async fetchServerIp() {

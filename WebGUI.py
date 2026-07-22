@@ -72,6 +72,9 @@ from rag.api import register_rag_routes
 from runtime.job_manager import JobConflictError, JobManager, JobNotFoundError
 from web.navigation_service import NavigationService
 from web.page_router import build_page_router
+from workflow.api import build_workflow_router
+from workflow.repository import WorkflowRepository
+from workflow.transition_service import TransitionService
 
 
 WORKSPACE_ROOT = Path(__file__).resolve().parent
@@ -247,11 +250,15 @@ identity_permission_service = PermissionService(
     identity_repository, identity_session_service
 )
 audit_service = AuditService(identity_repository)
+workflow_repository = WorkflowRepository(identity_repository)
+workflow_transition_service = TransitionService(workflow_repository)
 app.state.identity_repository = identity_repository
 app.state.identity_password_service = identity_password_service
 app.state.identity_session_service = identity_session_service
 app.state.identity_permission_service = identity_permission_service
 app.state.audit_service = audit_service
+app.state.workflow_repository = workflow_repository
+app.state.workflow_transition_service = workflow_transition_service
 templates = Jinja2Templates(directory=str(WORKSPACE_ROOT / "templates"))
 
 
@@ -292,6 +299,9 @@ app.include_router(
     )
 )
 app.include_router(build_audit_router(audit_service))
+app.include_router(
+    build_workflow_router(workflow_repository, workflow_transition_service)
+)
 app.include_router(build_page_router(templates, NavigationService()))
 register_rag_routes(app, root=Path(__file__).resolve().parent, runtime_dir=Path(__file__).resolve().parent / ".runtime")
 register_analytics_routes(app, root=Path(__file__).resolve().parent, runtime_dir=Path(__file__).resolve().parent / ".runtime")

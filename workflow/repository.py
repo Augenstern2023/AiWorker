@@ -141,6 +141,83 @@ class WorkflowRepository:
             ).fetchone()
         return self._submission_dict(row) if row is not None else None
 
+    def list_task_submissions(self, task_id: str) -> list[dict[str, Any]]:
+        with self.identity_repository.connect() as connection:
+            self._require_task(connection, task_id)
+            rows = connection.execute(
+                """
+                SELECT * FROM workflow_submissions
+                WHERE task_id = ? ORDER BY version, created_at, id
+                """,
+                (task_id,),
+            ).fetchall()
+        return [self._submission_dict(row) for row in rows]
+
+    def create_next_task(
+        self,
+        predecessor_task_id: str,
+        task_type: str,
+        role_code: str,
+        *,
+        actor: Principal | dict[str, Any],
+    ) -> dict[str, Any]:
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.transaction() as connection:
+            predecessor = self._require_task(connection, predecessor_task_id)
+            existing = connection.execute(
+                """
+                SELECT * FROM workflow_tasks
+                WHERE workflow_id = ? AND task_type = ?
+                  AND predecessor_task_id = ?
+                """,
+                (
+                    predecessor["workflow_id"],
+                    task_type,
+                    predecessor_task_id,
+                ),
+            ).fetchone()
+            if existing is not None:
+                return self._task_dict(existing)
+            self._ensure_system_actor(connection, actor_id)
+            role = connection.execute(
+                "SELECT 1 FROM roles WHERE code = ? COLLATE NOCASE AND is_enabled = 1",
+                (role_code,),
+            ).fetchone()
+            if role is None:
+                raise ValueError(f"unknown or disabled role: {role_code}")
+            task_id = str(uuid.uuid4())
+            connection.execute(
+                """
+                INSERT INTO workflow_tasks
+                    (id, workflow_id, task_type, role_code, topic_id, project_id,
+                     assignee_id, assigned_by, predecessor_task_id, status, due_at)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, 'pool', NULL)
+                """,
+                (
+                    task_id,
+                    predecessor["workflow_id"],
+                    task_type,
+                    role_code,
+                    predecessor["topic_id"],
+                    predecessor["project_id"],
+                    predecessor_task_id,
+                ),
+            )
+            self._record_event(
+                connection,
+                task_id,
+                "create",
+                actor_id,
+                None,
+                "pool",
+                {
+                    "role_code": role_code,
+                    "predecessor_task_id": predecessor_task_id,
+                },
+            )
+            task = self._require_task(connection, task_id)
+        return task
+
     def transition_task_in_transaction(
         self,
         task_id: str,
@@ -499,6 +576,36 @@ class WorkflowRepository:
         with self.identity_repository.connect() as connection:
             live_actor = self._live_actor(connection, actor_id)
             self._assert_project_manager(connection, project_id, live_actor)
+
+    def can_review_task(
+        self,
+        task_id: str,
+        actor: Principal | dict[str, Any],
+        permission: str,
+    ) -> bool:
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.connect() as connection:
+            try:
+                live_actor = self._live_actor(connection, actor_id)
+                task = self._require_task(connection, task_id)
+                if live_actor["is_system_admin"]:
+                    return True
+                if permission not in live_actor["permissions"]:
+                    return False
+                if live_actor["permission_scopes"].get(permission) not in {
+                    "managed_projects",
+                    "all",
+                }:
+                    return False
+                project_id = task.get("project_id")
+                if project_id is None:
+                    return False
+                self._assert_managed_project_membership(
+                    connection, project_id, live_actor
+                )
+            except (KeyError, PermissionError):
+                return False
+        return True
 
     def remove_project_member(
         self,

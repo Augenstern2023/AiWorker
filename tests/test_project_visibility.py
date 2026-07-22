@@ -207,6 +207,22 @@ def test_project_author_owns_drafts_and_managed_reader_sees_approved_only(
         for member in workflow.list_project_members(str(project["id"]))
     )
 
+    retried = clients["author"].post("/api/creative/projects", json={
+        "topic_id": topic["id"], "breakdown_id": breakdown["id"],
+        "name": "Owned draft", "target_episode_count": 2,
+        "workflow_task_id": brief_task["id"],
+    })
+
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["id"] == project["id"]
+    assert all(
+        member["user_id"] != users["author"]["id"]
+        for member in workflow.list_project_members(str(project["id"]))
+    )
+    assert clients["author"].get(
+        f"/api/creative/projects/{project['id']}"
+    ).status_code == 403
+
     listed = clients["author"].get("/api/creative/projects")
 
     assert listed.status_code == 200

@@ -1034,9 +1034,10 @@ def build_creative_router(
             project = repository.get_project_by_creation_workflow_task_id(
                 workflow_task_id
             )
-            if task.get("project_id") is not None:
+            bound_id = task.get("project_id")
+            if bound_id is not None:
                 try:
-                    bound_project_id = int(task["project_id"])
+                    bound_project_id = int(bound_id)
                 except (TypeError, ValueError) as exc:
                     raise HTTPException(
                         409, "workflow task has an invalid project binding"
@@ -1072,16 +1073,18 @@ def build_creative_router(
                     workflow_task_id=workflow_task_id,
                     created_by=principal.user_id,
                 )
-            try:
-                workflow_repository.bind_workflow_project(
-                    workflow_task_id,
-                    str(project["id"]),
-                    principal,
-                )
-            except Exception as exc:
-                raise HTTPException(
-                    503, "project created but workflow binding requires reconciliation"
-                ) from exc
+            if bound_id is None:
+                try:
+                    workflow_repository.bind_workflow_project(
+                        workflow_task_id,
+                        str(project["id"]),
+                        principal,
+                    )
+                except Exception as exc:
+                    raise HTTPException(
+                        503,
+                        "project created but workflow binding requires reconciliation",
+                    ) from exc
             return repository.get_project(int(project["id"])) or project
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc

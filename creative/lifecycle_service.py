@@ -218,7 +218,10 @@ class TopicLifecycleService:
     def _project_status(self, project: dict[str, Any]) -> str:
         beats = current_beats_content(project)
         if beats:
-            if all(
+            legacy_aggregate_exported = self.repository.has_stage_export(
+                int(project["id"]), "beats", content_fingerprint(beats)
+            )
+            resource_exports_complete = all(
                 item.get("status") == "approved"
                 and self.repository.has_stage_export(
                     int(project["id"]),
@@ -226,7 +229,8 @@ class TopicLifecycleService:
                     beats_resource_fingerprint(item),
                 )
                 for item in beats
-            ):
+            )
+            if legacy_aggregate_exported or resource_exports_complete:
                 return "beats_exported"
             return "beats_generated"
         if project.get("outline_batch_id"):

@@ -76,3 +76,9 @@ The SQLAlchemy `declarative_base()` deprecation warning remains pre-existing and
 - Beats stage-export markers now fingerprint each approved Beats resource snapshot rather than the whole project aggregate.
 - Lifecycle resolution selects the latest Beats version for every current episode and reports `beats_exported` only when each is approved and has its own delivery marker. Partial multi-episode delivery remains `beats_generated` until the final current episode is delivered.
 - Re-review verification: `62 passed`; full `tests/`: `471 passed`, `1 failed` only for the accepted pre-existing XHS Excel store assertion.
+
+## Legacy Export Compatibility Follow-up
+
+- Beats lifecycle resolution now accepts either a legacy full-stage aggregate marker for `content_fingerprint(current_beats_content(project))` or complete per-resource markers for every current approved Beats version.
+- Legacy aggregate markers continue to represent a prior full-stage export, while new per-resource delivery still keeps partial multi-episode delivery at `beats_generated` until every current resource is delivered.
+- Compatibility verification: `12 passed`; full `tests/`: `471 passed`, `1 failed` only for the accepted pre-existing XHS Excel store assertion.

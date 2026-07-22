@@ -37,7 +37,7 @@ from logging.handlers import RotatingFileHandler
 
 import uvicorn
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -59,8 +59,10 @@ from analysis.today_rank_api import register_today_rank_routes
 from creative.api import register_creative_routes
 from identity.api import build_identity_router
 from identity.password_service import PasswordService
+from identity.dependencies import current_principal
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
+from identity.schema import Principal
 from identity.session_service import SessionService
 from agents.douyin_analysis_agent import AnalyzeOptions as DouyinAnalyzeOptions
 from agents.douyin_analysis_agent import analyze_rank_file as analyze_douyin_rank_file
@@ -367,6 +369,7 @@ class HongguoDramaJobRequest(BaseModel):
     title: str
     book_id: str
     episode: int
+    workflow_task_id: str | None = None
 
 
 class HongguoDramaDownloadJobRequest(BaseModel):
@@ -374,6 +377,7 @@ class HongguoDramaDownloadJobRequest(BaseModel):
     book_id: str
     episodes: List[int] = []
     all_episodes: bool = False
+    workflow_task_id: str | None = None
 
 
 class DouyinFallbackDramaJobRequest(BaseModel):
@@ -381,6 +385,7 @@ class DouyinFallbackDramaJobRequest(BaseModel):
     aweme_id: str = ""
     aweme_ids: List[str] = []
     fallback_reason: str = ""
+    workflow_task_id: str | None = None
 
 
 class ConfigContent(BaseModel):
@@ -447,6 +452,105 @@ class JobCreateRequest(BaseModel):
     project_map: Dict[str, List[str]] = {}
     project_name: str = ""
     extra: Dict[str, Any] = {}
+
+
+def _require_permission(principal: Principal, code: str) -> None:
+    if not principal.is_system_admin and code not in principal.permissions:
+        raise HTTPException(403, "没有执行此操作的权限")
+
+
+def _job_task_context(
+    workflow_task_id: str | None, principal: Principal
+) -> tuple[str | None, str | None]:
+    if not workflow_task_id:
+        return None, None
+    task = workflow_repository.get_visible_task(workflow_task_id, principal)
+    if task is None:
+        raise HTTPException(403, "没有访问此工作流任务的权限")
+    if not principal.is_system_admin and task.get("assignee_user_id") != principal.user_id:
+        raise HTTPException(403, "只能为自己负责的工作流任务创建机器任务")
+    return workflow_task_id, task.get("project_id")
+
+
+def _public_created_job(job_state) -> dict[str, Any]:
+    return job_manager.get_job(job_state.job_id)
+
+
+def _record_job_audit(
+    request: Request | None,
+    principal: Principal,
+    action: str,
+    job: dict[str, Any],
+    *,
+    before: Any = None,
+) -> None:
+    audit_service.record(
+        actor=principal,
+        action=action,
+        target_type="job",
+        target_id=job.get("job_id"),
+        project_id=(str(job["project_id"]) if job.get("project_id") is not None else None),
+        before=before,
+        after=job,
+        reason=None,
+        result="success",
+        request=request,
+    )
+
+
+def _job_creation_permission(job: dict[str, Any]) -> str:
+    payload = job.get("job") if isinstance(job.get("job"), dict) else job
+    extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
+    if payload.get("platform") == "creative":
+        action = str(extra.get("action") or "")
+        if action in {"outlines", "beats"}:
+            return "job.create.writing"
+        if action in {"blueprints", "characters"}:
+            return "job.create.creative"
+    return "job.create.selection"
+
+
+def _can_read_job(job: dict[str, Any], principal: Principal) -> bool:
+    if principal.is_system_admin:
+        return True
+    creator_id = job.get("created_by_user_id")
+    project_id = job.get("project_id")
+    if creator_id == principal.user_id and "job.read.own" in principal.permissions:
+        return True
+    if project_id is None or "job.read.project" not in principal.permissions:
+        return False
+    return any(
+        member["user_id"] == principal.user_id and member["status"] == "active"
+        for member in workflow_repository.list_project_members(str(project_id))
+    )
+
+
+def _assert_can_read_job(job: dict[str, Any], principal: Principal) -> None:
+    if not _can_read_job(job, principal):
+        raise HTTPException(403, "没有访问此机器任务的权限")
+
+
+def _assert_can_control_job(job: dict[str, Any], principal: Principal) -> None:
+    if principal.is_system_admin:
+        return
+    creator_id = job.get("created_by_user_id")
+    project_id = job.get("project_id")
+    if creator_id is None and project_id is None:
+        raise HTTPException(403, "历史机器任务只能由系统管理员控制")
+    if creator_id == principal.user_id:
+        required = _job_creation_permission(job)
+        if (
+            "job.cancel.own" in principal.permissions
+            and required in principal.permissions
+        ):
+            return
+    if project_id is not None:
+        try:
+            workflow_repository.assert_can_manage_project(str(project_id), principal)
+            return
+        except PermissionError:
+            pass
+    raise HTTPException(403, "没有控制此机器任务的权限")
 
 DATA_ROOT = (WORKSPACE_ROOT / "data").resolve()
 CONFIG_ITEM_FIELDS = [
@@ -1251,7 +1355,11 @@ def _apply_project_selection(config: CrawlerConfig) -> str:
     return project_map_json
 
 
-async def run_crawler_as_job(config: CrawlerConfig):
+async def run_crawler_as_job(
+    config: CrawlerConfig,
+    principal: Principal | None = None,
+    request: Request | None = None,
+):
     project_map_json = _apply_project_selection(config)
     platform = config.platform.split()[0]
     crawler_type = config.crawler_type.split()[0]
@@ -1259,8 +1367,20 @@ async def run_crawler_as_job(config: CrawlerConfig):
         return JSONResponse({"status": "error", "message": "missing keywords or ids"}, status_code=400)
     try:
         job = create_job_from_config(config, project_map_json)
-        job_state = job_manager.start_job(job)
-        return {"status": "success", "message": "crawler started", "job": job_state.to_dict()}
+        job_state = job_manager.create_job(
+            job,
+            created_by_user_id=(
+                principal.user_id if isinstance(principal, Principal) else None
+            ),
+        )
+        public_job = _public_created_job(job_state)
+        if isinstance(principal, Principal):
+            _record_job_audit(request, principal, "job.create", public_job)
+        return {
+            "status": "success",
+            "message": "crawler started",
+            "job": public_job,
+        }
     except JobConflictError as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=409)
     except Exception as e:
@@ -1531,7 +1651,18 @@ async def search_hongguo_drama_for_download(payload: HongguoDramaSearchRequest):
 
 
 @app.post("/api/hongguo/drama/jobs")
-async def create_hongguo_drama_job(payload: HongguoDramaJobRequest):
+async def create_hongguo_drama_job(
+    payload: HongguoDramaJobRequest,
+    principal: Principal = Depends(current_principal),
+):
+    actor = principal if isinstance(principal, Principal) else None
+    if actor is not None:
+        _require_permission(actor, "job.create.selection")
+    task_id, project_id = (
+        _job_task_context(payload.workflow_task_id, actor)
+        if actor is not None
+        else (None, None)
+    )
     if not payload.title.strip() or not payload.book_id.strip() or payload.episode < 1:
         raise HTTPException(400, "剧名、book_id 和集数必须有效")
     job = CrawlJob(
@@ -1545,8 +1676,18 @@ async def create_hongguo_drama_job(payload: HongguoDramaJobRequest):
         },
     )
     try:
-        job_state = job_manager.create_job(job)
-        return {"status": "success", "job": job_state.to_dict()}
+        job_state = job_manager.create_job(
+            job,
+            created_by_user_id=actor.user_id if actor is not None else None,
+            workflow_task_id=task_id,
+            project_id=project_id,
+        )
+        public_job = _public_created_job(job_state)
+        if task_id:
+            workflow_repository.link_task_job(task_id, job_state.job_id)
+        if actor is not None:
+            _record_job_audit(None, actor, "job.create", public_job)
+        return {"status": "success", "job": public_job}
     except JobConflictError as exc:
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=409)
     except Exception as exc:
@@ -1554,7 +1695,18 @@ async def create_hongguo_drama_job(payload: HongguoDramaJobRequest):
 
 
 @app.post("/api/hongguo/drama/download/jobs")
-async def create_hongguo_drama_download_job(payload: HongguoDramaDownloadJobRequest):
+async def create_hongguo_drama_download_job(
+    payload: HongguoDramaDownloadJobRequest,
+    principal: Principal = Depends(current_principal),
+):
+    actor = principal if isinstance(principal, Principal) else None
+    if actor is not None:
+        _require_permission(actor, "job.create.selection")
+    task_id, project_id = (
+        _job_task_context(payload.workflow_task_id, actor)
+        if actor is not None
+        else (None, None)
+    )
     episodes = sorted({int(item) for item in payload.episodes if int(item) > 0})
     if not payload.title.strip() or not payload.book_id.strip() or (not payload.all_episodes and not episodes):
         raise HTTPException(400, "剧名、book_id 和至少一个集数必须有效")
@@ -1572,8 +1724,18 @@ async def create_hongguo_drama_download_job(payload: HongguoDramaDownloadJobRequ
         },
     )
     try:
-        job_state = job_manager.create_job(job)
-        return {"status": "success", "job": job_state.to_dict()}
+        job_state = job_manager.create_job(
+            job,
+            created_by_user_id=actor.user_id if actor is not None else None,
+            workflow_task_id=task_id,
+            project_id=project_id,
+        )
+        public_job = _public_created_job(job_state)
+        if task_id:
+            workflow_repository.link_task_job(task_id, job_state.job_id)
+        if actor is not None:
+            _record_job_audit(None, actor, "job.create", public_job)
+        return {"status": "success", "job": public_job}
     except JobConflictError as exc:
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=409)
     except Exception as exc:
@@ -1581,7 +1743,18 @@ async def create_hongguo_drama_download_job(payload: HongguoDramaDownloadJobRequ
 
 
 @app.post("/api/hongguo/drama/douyin-fallback/jobs")
-async def create_douyin_fallback_drama_job(payload: DouyinFallbackDramaJobRequest):
+async def create_douyin_fallback_drama_job(
+    payload: DouyinFallbackDramaJobRequest,
+    principal: Principal = Depends(current_principal),
+):
+    actor = principal if isinstance(principal, Principal) else None
+    if actor is not None:
+        _require_permission(actor, "job.create.selection")
+    task_id, project_id = (
+        _job_task_context(payload.workflow_task_id, actor)
+        if actor is not None
+        else (None, None)
+    )
     aweme_ids: List[str] = []
     for value in [*payload.aweme_ids, payload.aweme_id]:
         aweme_id = str(value or "").strip()
@@ -1605,8 +1778,18 @@ async def create_douyin_fallback_drama_job(payload: DouyinFallbackDramaJobReques
         },
     )
     try:
-        job_state = job_manager.create_job(job)
-        return {"status": "success", "job": job_state.to_dict()}
+        job_state = job_manager.create_job(
+            job,
+            created_by_user_id=actor.user_id if actor is not None else None,
+            workflow_task_id=task_id,
+            project_id=project_id,
+        )
+        public_job = _public_created_job(job_state)
+        if task_id:
+            workflow_repository.link_task_job(task_id, job_state.job_id)
+        if actor is not None:
+            _record_job_audit(None, actor, "job.create", public_job)
+        return {"status": "success", "job": public_job}
     except JobConflictError as exc:
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=409)
     except Exception as exc:
@@ -1755,8 +1938,13 @@ async def delete_backup(action: BackupAction):
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 @app.post("/api/run")
-async def run_crawler(config: CrawlerConfig):
-    return await run_crawler_as_job(config)
+async def run_crawler(
+    config: CrawlerConfig,
+    request: Request,
+    principal: Principal = Depends(current_principal),
+):
+    _require_permission(principal, "job.create.selection")
+    return await run_crawler_as_job(config, principal, request)
 
     if state.is_running:
         return JSONResponse({"status": "error", "message": "crawler is running"}, status_code=400)
@@ -1807,7 +1995,11 @@ async def run_crawler(config: CrawlerConfig):
     return {"status": "success", "message": "crawler started"}
 
 @app.post("/api/jobs")
-async def create_job(request: JobCreateRequest):
+async def create_job(
+    request: JobCreateRequest,
+    principal: Principal = Depends(current_principal),
+):
+    _require_permission(principal, "job.create.selection")
     data = {
         "platform": request.platform,
         "login_type": request.login_type,
@@ -1825,9 +2017,20 @@ async def create_job(request: JobCreateRequest):
         "project_name": request.project_name,
         "extra": request.extra,
     }
+    workflow_task_id = str(request.extra.get("workflow_task_id") or "") or None
+    task_id, project_id = _job_task_context(workflow_task_id, principal)
     try:
-        job_state = job_manager.create_job(data)
-        return {"status": "success", "job": job_state.to_dict()}
+        job_state = job_manager.create_job(
+            data,
+            created_by_user_id=principal.user_id,
+            workflow_task_id=task_id,
+            project_id=project_id,
+        )
+        public_job = _public_created_job(job_state)
+        if task_id:
+            workflow_repository.link_task_job(task_id, job_state.job_id)
+        _record_job_audit(None, principal, "job.create", public_job)
+        return {"status": "success", "job": public_job}
     except JobConflictError as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=409)
     except Exception as e:
@@ -1835,37 +2038,54 @@ async def create_job(request: JobCreateRequest):
 
 
 @app.get("/api/jobs")
-async def list_jobs():
-    return {"jobs": job_manager.list_jobs()}
+async def list_jobs(principal: Principal = Depends(current_principal)):
+    return {
+        "jobs": [
+            job for job in job_manager.list_jobs() if _can_read_job(job, principal)
+        ]
+    }
 
 
 @app.get("/api/jobs/{job_id}")
-async def get_job(job_id: str):
+async def get_job(job_id: str, principal: Principal = Depends(current_principal)):
     try:
-        return job_manager.get_job(job_id)
+        job = job_manager.get_job(job_id)
+        _assert_can_read_job(job, principal)
+        return job
     except JobNotFoundError:
         raise HTTPException(404, "Job not found")
 
 
 @app.get("/api/jobs/{job_id}/logs")
-async def get_job_logs(job_id: str):
+async def get_job_logs(
+    job_id: str, principal: Principal = Depends(current_principal)
+):
     try:
+        job = job_manager.get_job(job_id)
+        _assert_can_read_job(job, principal)
         return {"logs": job_manager.get_logs(job_id)}
     except JobNotFoundError:
-        latest_job_id = job_manager.latest_job_id()
-        if latest_job_id:
-            return {
-                "logs": job_manager.get_logs(latest_job_id),
-                "job_id": latest_job_id,
-                "missing_job_id": job_id,
-            }
         raise HTTPException(404, "Job not found")
 
 
 @app.post("/api/jobs/{job_id}/stop")
-async def stop_job(job_id: str):
+async def stop_job(
+    job_id: str,
+    request: Request,
+    principal: Principal = Depends(current_principal),
+):
     try:
+        before = job_manager.get_job(job_id)
+        _assert_can_control_job(before, principal)
         stopped = job_manager.stop(job_id)
+        if stopped:
+            _record_job_audit(
+                request,
+                principal,
+                "job.stop",
+                job_manager.get_job(job_id),
+                before=before,
+            )
         return {
             "status": "success" if stopped else "error",
             "message": "stop signal sent" if stopped else "job is not running",
@@ -1875,28 +2095,69 @@ async def stop_job(job_id: str):
 
 
 @app.post("/api/jobs/{job_id}/pause")
-async def pause_job(job_id: str):
+async def pause_job(
+    job_id: str,
+    request: Request,
+    principal: Principal = Depends(current_principal),
+):
     try:
+        before = job_manager.get_job(job_id)
+        _assert_can_control_job(before, principal)
         paused = job_manager.pause(job_id)
+        if paused:
+            _record_job_audit(
+                request,
+                principal,
+                "job.pause",
+                job_manager.get_job(job_id),
+                before=before,
+            )
         return {"status": "success" if paused else "error", "message": "pause signal sent" if paused else "job is not running"}
     except JobNotFoundError:
         raise HTTPException(404, "Job not found")
 
 
 @app.post("/api/jobs/{job_id}/resume")
-async def resume_job(job_id: str):
+async def resume_job(
+    job_id: str,
+    request: Request,
+    principal: Principal = Depends(current_principal),
+):
     try:
+        before = job_manager.get_job(job_id)
+        _assert_can_control_job(before, principal)
         resumed = job_manager.resume(job_id)
+        if resumed:
+            _record_job_audit(
+                request,
+                principal,
+                "job.resume",
+                job_manager.get_job(job_id),
+                before=before,
+            )
         return {"status": "success" if resumed else "error", "message": "resume signal sent" if resumed else "job is not paused"}
     except JobNotFoundError:
         raise HTTPException(404, "Job not found")
 
 
 @app.post("/api/jobs/{job_id}/retry")
-async def retry_job(job_id: str):
+async def retry_job(
+    job_id: str,
+    request: Request,
+    principal: Principal = Depends(current_principal),
+):
     try:
+        before = job_manager.get_job(job_id)
+        _assert_can_control_job(before, principal)
         retried = job_manager.retry(job_id)
-        return {"status": "success", "job": retried.to_dict()}
+        retried_job = job_manager.get_job(retried.job_id)
+        task_id = retried_job.get("workflow_task_id")
+        if task_id:
+            workflow_repository.link_task_job(str(task_id), retried.job_id)
+        _record_job_audit(
+            request, principal, "job.retry", retried_job, before=before
+        )
+        return {"status": "success", "job": retried_job}
     except JobNotFoundError:
         raise HTTPException(404, "Job not found")
     except JobConflictError as exc:
@@ -1904,9 +2165,32 @@ async def retry_job(job_id: str):
 
 
 @app.delete("/api/jobs/{job_id}")
-async def delete_job(job_id: str):
+async def delete_job(
+    job_id: str,
+    request: Request,
+    principal: Principal = Depends(current_principal),
+):
+    if not principal.is_system_admin:
+        raise HTTPException(403, "只有系统管理员可以删除机器任务历史")
     try:
+        before = job_manager.get_job(job_id)
         job_manager.delete_job(job_id, force_missing=True)
+        audit_service.record(
+            actor=principal,
+            action="job.delete",
+            target_type="job",
+            target_id=job_id,
+            project_id=(
+                str(before["project_id"])
+                if before.get("project_id") is not None
+                else None
+            ),
+            before=before,
+            after={"deleted": True},
+            reason=None,
+            result="success",
+            request=request,
+        )
         return {"status": "success", "message": "job deleted"}
     except JobNotFoundError:
         raise HTTPException(404, "Job not found")
@@ -1915,16 +2199,39 @@ async def delete_job(job_id: str):
 
 
 @app.post("/api/jobs/{job_id}/delete")
-async def delete_job_post(job_id: str):
-    return await delete_job(job_id)
+async def delete_job_post(
+    job_id: str,
+    request: Request,
+    principal: Principal = Depends(current_principal),
+):
+    return await delete_job(job_id, request, principal)
 
 
 @app.post("/api/stop")
-async def stop_crawler():
+async def stop_crawler(
+    request: Request,
+    principal: Principal = Depends(current_principal),
+):
     state.stop_requested = True
-    if job_manager.stop_latest_running():
-        return {"status": "success", "message": "stop signal sent"}
+    for job in job_manager.list_jobs():
+        if job["status"] not in {"pending", "running", "stopping"}:
+            continue
+        try:
+            _assert_can_control_job(job, principal)
+        except HTTPException:
+            continue
+        if job_manager.stop(job["job_id"]):
+            _record_job_audit(
+                request,
+                principal,
+                "job.stop",
+                job_manager.get_job(job["job_id"]),
+                before=job,
+            )
+            return {"status": "success", "message": "stop signal sent"}
     if state.process:
+        if not principal.is_system_admin:
+            raise HTTPException(403, "历史运行进程只能由系统管理员控制")
         state.log("正在停止...", "info")
 
         # 使用 taskkill 强制结束进程树
@@ -1938,19 +2245,35 @@ async def stop_crawler():
     return {"status": "error", "message": "没有运行中的爬虫"}
 
 @app.get("/api/logs")
-async def get_logs():
-    latest_job_id = job_manager.latest_job_id()
-    if latest_job_id:
+async def get_logs(principal: Principal = Depends(current_principal)):
+    visible_jobs = [
+        job for job in job_manager.list_jobs() if _can_read_job(job, principal)
+    ]
+    if visible_jobs:
+        latest_job_id = visible_jobs[0]["job_id"]
+        is_running = any(
+            job["status"] in {"pending", "running", "stopping"}
+            for job in visible_jobs
+        )
         return {
             "logs": job_manager.get_logs(latest_job_id),
-            "is_running": state.is_running or job_manager.has_running_jobs(),
+            "is_running": is_running,
             "batch_progress": f"{state.batch_current}/{state.batch_total}" if state.batch_total > 0 else "",
             "job_id": latest_job_id,
         }
     logs = []
-    while not state.log_queue.empty():
-        logs.append(state.log_queue.get())
-    return {"logs": logs, "is_running": state.is_running, "batch_progress": f"{state.batch_current}/{state.batch_total}" if state.batch_total > 0 else ""}
+    if principal.is_system_admin:
+        while not state.log_queue.empty():
+            logs.append(state.log_queue.get())
+    return {
+        "logs": logs,
+        "is_running": state.is_running if principal.is_system_admin else False,
+        "batch_progress": (
+            f"{state.batch_current}/{state.batch_total}"
+            if principal.is_system_admin and state.batch_total > 0
+            else ""
+        ),
+    }
 
 @app.get("/api/files")
 async def list_files(filter: str = "all"):

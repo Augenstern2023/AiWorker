@@ -131,6 +131,24 @@ class WorkflowRepository:
         with self.identity_repository.connect() as connection:
             return self._get_task(connection, task_id)
 
+    def link_task_job(self, task_id: str, job_id: str) -> None:
+        with self.identity_repository.transaction() as connection:
+            self._require_task(connection, task_id)
+            connection.execute(
+                "INSERT OR IGNORE INTO workflow_task_jobs (task_id, job_id) VALUES (?, ?)",
+                (task_id, job_id),
+            )
+
+    def list_task_job_ids(self, task_id: str) -> list[str]:
+        with self.identity_repository.connect() as connection:
+            self._require_task(connection, task_id)
+            rows = connection.execute(
+                "SELECT job_id FROM workflow_task_jobs "
+                "WHERE task_id = ? ORDER BY created_at, job_id",
+                (task_id,),
+            ).fetchall()
+        return [str(row["job_id"]) for row in rows]
+
     def get_submission(
         self,
         submission_id: str,

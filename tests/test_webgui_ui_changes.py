@@ -602,7 +602,7 @@ def test_hongguo_drama_routes_replace_legacy_proxy_routes():
     assert "episode.download_status?.status === 'downloaded'" in html
 
 
-def test_job_logs_missing_selection_falls_back_to_latest(tmp_path, monkeypatch):
+def test_job_logs_require_authentication_before_falling_back(tmp_path, monkeypatch):
     manager = WebGUI.JobManager(runtime_dir=tmp_path / "runtime", cwd=tmp_path)
     job = CrawlJob(job_id="job-latest", platform="dy", crawler_type="rank")
     state = JobState(job=job)
@@ -623,11 +623,7 @@ def test_job_logs_missing_selection_falls_back_to_latest(tmp_path, monkeypatch):
 
     response = TestClient(WebGUI.app).get("/api/jobs/job-missing/logs")
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["job_id"] == "job-latest"
-    assert payload["missing_job_id"] == "job-missing"
-    assert payload["logs"][-1].endswith("latest log")
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio

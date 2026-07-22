@@ -69,6 +69,30 @@ def test_job_manager_create_job(monkeypatch, tmp_path):
     assert (tmp_path / "jobs" / "job-1.json").exists()
 
 
+def test_job_manager_normalizes_job_ownership_in_extra_and_public_state(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "runtime.job_manager.launch_worker", lambda *_args, **_kwargs: FakeProcess()
+    )
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+
+    state = manager.create_job(
+        {"job_id": "job-owned", "platform": "dy", "crawler_type": "search"},
+        created_by_user_id="user-1",
+        workflow_task_id="task-1",
+        project_id="project-1",
+    )
+
+    assert state.job.extra["created_by_user_id"] == "user-1"
+    assert state.job.extra["workflow_task_id"] == "task-1"
+    assert state.job.extra["project_id"] == "project-1"
+    public = manager.get_job("job-owned")
+    assert public["created_by_user_id"] == "user-1"
+    assert public["workflow_task_id"] == "task-1"
+    assert public["project_id"] == "project-1"
+
+
 def test_job_manager_delete_terminal_job(tmp_path):
     manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
     job = CrawlJob(job_id="job-delete", platform="dy", crawler_type="search")

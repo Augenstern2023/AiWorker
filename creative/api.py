@@ -37,6 +37,7 @@ from creative.schema import (
 )
 from creative.topic_service import TopicService
 from creative.transcript_assets import find_downloaded_video_assets, find_transcript_bundle
+from audit.service import AuditService
 from runtime.job_manager import JobConflictError
 from identity.dependencies import current_principal
 from identity.permission_service import PermissionService
@@ -287,6 +288,17 @@ def build_creative_router(
         token = request.cookies.get(permission_service.session_service.cookie_name)
         return permission_service.principal_for_session(token)
 
+    def creative_job_principal(request: Request) -> Principal | None:
+        permission_service = getattr(
+            request.app.state, "identity_permission_service", None
+        )
+        if not isinstance(permission_service, PermissionService):
+            return None
+        principal = optional_principal(request)
+        if principal is None:
+            raise HTTPException(401, "登录已失效，请重新登录")
+        return principal
+
     def project_or_404(project_id: int) -> dict[str, Any]:
         workflow_adapter.reconcile_project(project_id)
         project = repository.get_project(project_id)
@@ -294,10 +306,28 @@ def build_creative_router(
             raise HTTPException(404, "creative project not found")
         return project
 
-    def create_generation_job(project_id: int, action: str, **extra: Any) -> dict[str, Any]:
+    def create_generation_job(
+        project_id: int,
+        action: str,
+        principal: Principal | None,
+        request: Request,
+        **extra: Any,
+    ) -> dict[str, Any]:
         project_or_404(project_id)
         if job_manager is None:
             raise HTTPException(503, "creative job manager is unavailable")
+        required_permission = (
+            "job.create.writing"
+            if action in {"outlines", "beats"}
+            else "job.create.creative"
+        )
+        if (
+            principal is not None
+            and not principal.is_system_admin
+            and required_permission not in principal.permissions
+        ):
+            raise HTTPException(403, "没有创建此机器任务的权限")
+        workflow_task_id = str(extra.get("workflow_task_id") or "") or None
         payload = {
             "platform": "creative",
             "crawler_type": "phase4_generate",
@@ -308,6 +338,10 @@ def build_creative_router(
             "extra": {
                 "action": action,
                 "project_id": project_id,
+                "created_by_user_id": (
+                    principal.user_id if principal is not None else None
+                ),
+                "workflow_task_id": workflow_task_id,
                 "db_path": str(repository.db_path.resolve()),
                 "runtime_dir": str(Path(runtime_dir).resolve()),
                 **extra,
@@ -317,7 +351,33 @@ def build_creative_router(
             state = job_manager.create_job(payload)
         except JobConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
-        return {"status": "success", "job": state.to_dict()}
+        if workflow_task_id:
+            workflow_repository.link_task_job(workflow_task_id, state.job_id)
+        job = state.to_dict()
+        job.update(
+            {
+                "job_id": state.job_id,
+                "platform": state.platform,
+                "created_by_user_id": state.job.extra.get("created_by_user_id"),
+                "workflow_task_id": state.job.extra.get("workflow_task_id"),
+                "project_id": state.job.extra.get("project_id"),
+            }
+        )
+        audit_service = getattr(request.app.state, "audit_service", None)
+        if principal is not None and isinstance(audit_service, AuditService):
+            audit_service.record(
+                actor=principal,
+                action="job.create",
+                target_type="job",
+                target_id=state.job_id,
+                project_id=str(project_id),
+                before=None,
+                after=job,
+                reason=None,
+                result="success",
+                request=request,
+            )
+        return {"status": "success", "job": job}
 
     def validate_task(
         task_id: str | None,
@@ -479,8 +539,15 @@ def build_creative_router(
     @router.post("/breakdowns")
     async def create_breakdown(
         payload: BreakdownCreateRequest,
-        principal: Principal | None = Depends(optional_principal),
+        request: Request,
+        principal: Principal | None = Depends(creative_job_principal),
     ):
+        if (
+            principal is not None
+            and not principal.is_system_admin
+            and "job.create.selection" not in principal.permissions
+        ):
+            raise HTTPException(403, "没有创建此机器任务的权限")
         topic = repository.get_topic(payload.topic_id)
         if not topic:
             raise HTTPException(404, "topic not found")
@@ -511,6 +578,12 @@ def build_creative_router(
             *[int(item["episode_number"]) for item in episodes],
             *[int(item["episode_number"]) for item in video_assets],
         })
+        task = (
+            workflow_repository.get_task(payload.workflow_task_id)
+            if payload.workflow_task_id
+            else None
+        )
+        project_id = task.get("project_id") if task else None
         job_payload = {
             "platform": "creative",
             "crawler_type": "breakdown_generate",
@@ -525,15 +598,45 @@ def build_creative_router(
                 "workspace_root": str(workspace_root),
                 "transcript_coverage": coverage,
                 "workflow_task_id": payload.workflow_task_id,
+                "created_by_user_id": (
+                    principal.user_id if principal is not None else None
+                ),
+                "project_id": project_id,
             },
         }
         try:
             state = job_manager.create_job(job_payload)
         except JobConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
+        if payload.workflow_task_id:
+            workflow_repository.link_task_job(payload.workflow_task_id, state.job_id)
+        job = state.to_dict()
+        job.update(
+            {
+                "job_id": state.job_id,
+                "platform": state.platform,
+                "created_by_user_id": state.job.extra.get("created_by_user_id"),
+                "workflow_task_id": state.job.extra.get("workflow_task_id"),
+                "project_id": state.job.extra.get("project_id"),
+            }
+        )
+        audit_service = getattr(request.app.state, "audit_service", None)
+        if principal is not None and isinstance(audit_service, AuditService):
+            audit_service.record(
+                actor=principal,
+                action="job.create",
+                target_type="job",
+                target_id=state.job_id,
+                project_id=(str(project_id) if project_id is not None else None),
+                before=None,
+                after=job,
+                reason=None,
+                result="success",
+                request=request,
+            )
         return {
             "status": "success",
-            "job": state.to_dict(),
+            "job": job,
             "coverage": coverage,
             "requires_transcription": bool(video_assets),
         }
@@ -631,12 +734,15 @@ def build_creative_router(
     async def generate_project_blueprints(
         project_id: int,
         payload: BlueprintGenerateRequest,
-        principal: Principal | None = Depends(optional_principal),
+        request: Request,
+        principal: Principal | None = Depends(creative_job_principal),
     ):
         validate_task(payload.workflow_task_id, "brief", principal, project_id=project_id)
         return create_generation_job(
             project_id,
             "blueprints",
+            principal,
+            request,
             count=payload.count,
             workflow_task_id=payload.workflow_task_id,
         )
@@ -703,15 +809,22 @@ def build_creative_router(
     @router.post("/projects/{project_id}/characters/generate")
     async def generate_project_characters(
         project_id: int,
+        request: Request,
         payload: WorkflowLinkRequest | None = None,
-        principal: Principal | None = Depends(optional_principal),
+        principal: Principal | None = Depends(creative_job_principal),
     ):
         project = project_or_404(project_id)
         if not project.get("locked_brief_id"):
             raise HTTPException(409, "必须先锁定 Brief")
         workflow_task_id = payload.workflow_task_id if payload else None
         validate_task(workflow_task_id, "characters", principal, project_id=project_id)
-        return create_generation_job(project_id, "characters", workflow_task_id=workflow_task_id)
+        return create_generation_job(
+            project_id,
+            "characters",
+            principal,
+            request,
+            workflow_task_id=workflow_task_id,
+        )
 
     @router.post("/projects/{project_id}/characters")
     async def create_project_characters(
@@ -778,15 +891,22 @@ def build_creative_router(
     @router.post("/projects/{project_id}/outlines/generate")
     async def generate_project_outlines(
         project_id: int,
+        request: Request,
         payload: WorkflowLinkRequest | None = None,
-        principal: Principal | None = Depends(optional_principal),
+        principal: Principal | None = Depends(creative_job_principal),
     ):
         project = project_or_404(project_id)
         if not project.get("character_batch_id"):
             raise HTTPException(409, "必须先锁定人物关系版本")
         workflow_task_id = payload.workflow_task_id if payload else None
         validate_task(workflow_task_id, "outline", principal, project_id=project_id)
-        return create_generation_job(project_id, "outlines", workflow_task_id=workflow_task_id)
+        return create_generation_job(
+            project_id,
+            "outlines",
+            principal,
+            request,
+            workflow_task_id=workflow_task_id,
+        )
 
     @router.post("/projects/{project_id}/outlines")
     async def create_project_outlines(
@@ -841,8 +961,9 @@ def build_creative_router(
     async def generate_episode_beats(
         project_id: int,
         episode_number: int,
+        request: Request,
         payload: WorkflowLinkRequest | None = None,
-        principal: Principal | None = Depends(optional_principal),
+        principal: Principal | None = Depends(creative_job_principal),
     ):
         project = project_or_404(project_id)
         if not project.get("outline_batch_id"):
@@ -854,6 +975,8 @@ def build_creative_router(
         return create_generation_job(
             project_id,
             "beats",
+            principal,
+            request,
             episode_number=episode_number,
             workflow_task_id=workflow_task_id,
         )

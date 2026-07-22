@@ -52,13 +52,30 @@ class JobManager:
     def generate_job_id(self, platform: str) -> str:
         return f"{time.strftime('%Y%m%d-%H%M%S')}-{platform}-{int(time.time() * 1000) % 100000}"
 
-    def create_job(self, data: dict[str, Any] | CrawlJob) -> JobState:
+    def create_job(
+        self,
+        data: dict[str, Any] | CrawlJob,
+        *,
+        created_by_user_id: str | None = None,
+        workflow_task_id: str | None = None,
+        project_id: str | int | None = None,
+    ) -> JobState:
         if isinstance(data, CrawlJob):
             job = data
         else:
             payload = dict(data)
             payload.setdefault("job_id", self.generate_job_id(str(payload.get("platform", "job"))))
             job = CrawlJob.from_dict(payload)
+        ownership = {
+            "created_by_user_id": created_by_user_id,
+            "workflow_task_id": workflow_task_id,
+            "project_id": str(project_id) if project_id is not None else None,
+        }
+        if any(value is not None for value in ownership.values()):
+            job.extra = dict(job.extra)
+            for field, value in ownership.items():
+                if value is not None:
+                    job.extra[field] = value
         return self.start_job(job)
 
     def start_job(self, job: CrawlJob) -> JobState:
@@ -401,6 +418,7 @@ class JobManager:
             return any(state.status in {"pending", "running", "stopping"} for state in self.jobs.values())
 
     def _public_state(self, state: JobState, include_events: bool = False) -> dict[str, Any]:
+        extra = state.job.extra
         data = {
             "job_id": state.job_id,
             "platform": state.platform,
@@ -416,6 +434,9 @@ class JobManager:
             "paused": self._pause_marker(state.job_id).exists(),
             "artifacts": state.artifacts,
             "job": state.job.to_dict(),
+            "created_by_user_id": extra.get("created_by_user_id"),
+            "workflow_task_id": extra.get("workflow_task_id"),
+            "project_id": extra.get("project_id"),
         }
         if include_events:
             data["events"] = state.events

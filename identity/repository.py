@@ -322,6 +322,52 @@ class IdentityRepository:
         ):
             raise ValueError("系统必须至少保留一个启用的系统管理员")
 
+    def disable_user(self, user_id: str) -> None:
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            user = connection.execute(
+                "SELECT status, is_deleted FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            if user is None:
+                raise KeyError(user_id)
+            if user["status"] == "disabled":
+                return
+
+            is_system_admin = connection.execute(
+                """
+                SELECT 1
+                FROM user_roles AS ur
+                JOIN roles AS r ON r.id = ur.role_id
+                WHERE ur.user_id = ? AND r.code = 'system_admin' AND r.is_enabled = 1
+                """,
+                (user_id,),
+            ).fetchone()
+            if is_system_admin is not None:
+                surviving_admins = connection.execute(
+                    """
+                    SELECT COUNT(DISTINCT u.id)
+                    FROM users AS u
+                    JOIN user_roles AS ur ON ur.user_id = u.id
+                    JOIN roles AS r ON r.id = ur.role_id
+                    WHERE u.status = 'active' AND u.is_deleted = 0
+                      AND r.code = 'system_admin' AND r.is_enabled = 1
+                      AND u.id <> ?
+                    """,
+                    (user_id,),
+                ).fetchone()[0]
+                if surviving_admins < 1:
+                    raise ValueError("系统必须至少保留一个启用的系统管理员")
+            connection.execute(
+                "UPDATE users SET status = 'disabled', updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = ?",
+                (user_id,),
+            )
+            connection.execute(
+                "UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP "
+                "WHERE user_id = ? AND revoked_at IS NULL",
+                (user_id,),
+            )
+
     @staticmethod
     def _role_dict(row: sqlite3.Row) -> dict[str, Any]:
         role = dict(row)

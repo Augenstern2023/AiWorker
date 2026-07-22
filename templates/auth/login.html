@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 - AiWorker</title>
+</head>
+<body>
+  <main>
+    <h1>登录</h1>
+    <form id="login-form">
+      <label>用户名 <input name="username" autocomplete="username" required></label>
+      <label>密码 <input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">登录</button>
+      <p id="error" role="alert"></p>
+    </form>
+  </main>
+  <script>
+    document.getElementById('login-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const values = new FormData(event.currentTarget);
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(Object.fromEntries(values)),
+      });
+      const result = await response.json();
+      if (response.ok) window.location.assign(result.landing_route);
+      else document.getElementById('error').textContent = result.detail || '登录失败';
+    });
+  </script>
+</body>
+</html>

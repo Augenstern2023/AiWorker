@@ -1,0 +1,9 @@
+{% extends "layouts/base.html" %}
+
+{% block content %}
+<h3 class="mb-1">全剧大纲</h3><div class="small text-muted mb-3">项目 {{ project_id }} · 全剧阶段弧线与分集大纲</div>
+{% include "common/workspace/project_progress.html" %}
+<template x-if="creativeWorkspace.project"><div>{% include "common/workspace/project_outlines.html" %}</div></template>
+{% include "common/workspace/creative_progress_modal.html" %}
+{% endblock %}
+{% block scripts %}<script src="/static/js/common/creative.js"></script><script src="/static/js/writing/outlines.js"></script>{% endblock %}

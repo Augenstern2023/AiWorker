@@ -1,0 +1,59 @@
+<div class="modal fade" id="projectModal" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" x-text="modalMode === 'crawl' ? '选择爬评论项目' : '选择导出项目'"></h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-check mb-3" x-show="modalMode === 'export'">
+                        <input class="form-check-input" type="checkbox" id="autoUploadCheck" x-model="autoUpload">
+                        <label class="form-check-label" for="autoUploadCheck">导出后自动上传</label>
+                    </div>
+                    <template x-for="(item, index) in modalProjects" :key="item.name">
+                        <div class="d-flex align-items-center justify-content-between border border-secondary rounded p-2 mb-2">
+                            <label class="form-check-label">
+                                <input class="form-check-input me-2" type="checkbox" :value="item.name" x-model="selectedModalProjects">
+                                <span x-text="item.name"></span>
+                                <span class="badge bg-secondary ms-2" x-text="item.count"></span>
+                            </label>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-secondary" @click="moveProjectUp(index)" :disabled="index === 0"><i class="bi bi-arrow-up"></i></button>
+                                <button class="btn btn-outline-secondary" @click="moveProjectDown(index)" :disabled="index === modalProjects.length - 1"><i class="bi bi-arrow-down"></i></button>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary" @click="confirmBatchAction">确认</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="filePreviewModal" tabindex="-1">
+        <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <div>
+                        <h5 class="modal-title"><i class="bi bi-eye me-2"></i><span x-text="previewFile.file?.name || '文件预览'"></span></h5>
+                        <div class="small text-muted mt-1"><span x-text="previewFile.file?.drama_name || ''"></span><span x-show="previewFile.file?.episode_label" x-text="` · ${previewFile.file?.episode_label}`"></span><span x-show="previewFile.file" x-text="` · ${formatSize(previewFile.file?.size || 0)}`"></span></div>
+                    </div>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div x-show="previewFile.status === 'loading'" class="py-5 text-center"><span class="spinner-border"></span></div>
+                    <div x-show="previewFile.status === 'error'" class="alert alert-warning" x-text="previewFile.message"></div>
+                    <video class="file-preview-media" x-show="previewFile.status === 'success' && previewFile.kind === 'video'" :src="previewFile.url" controls preload="metadata" @error="previewFile.status = 'error'; previewFile.message = '浏览器无法播放该视频编码，请下载后查看。'"></video>
+                    <audio class="w-100" x-show="previewFile.status === 'success' && previewFile.kind === 'audio'" :src="previewFile.url" controls preload="metadata" @error="previewFile.status = 'error'; previewFile.message = '浏览器无法播放该音频格式，请下载后查看。'"></audio>
+                    <pre class="file-preview-text" x-show="previewFile.status === 'success' && ['text', 'json'].includes(previewFile.kind)" x-text="previewFile.content"></pre>
+                    <div class="small text-muted mt-3" x-show="previewFile.file" x-text="previewFile.file?.path"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                    <button type="button" class="btn btn-outline-light" x-show="previewFile.file" @click="downloadFile(previewFile.file.path)"><i class="bi bi-download me-1"></i>下载</button>
+                </div>
+            </div>
+        </div>
+    </div>

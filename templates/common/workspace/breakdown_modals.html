@@ -1,0 +1,63 @@
+<div class="modal fade" id="breakdownGenerationProgressModal" tabindex="-1" data-bs-backdrop="static" aria-labelledby="breakdownGenerationProgressModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <div>
+                        <h5 class="modal-title" id="breakdownGenerationProgressModalLabel"><i class="bi bi-diagram-3 me-2"></i>生成剧目拆解</h5>
+                        <div class="small text-muted" x-text="breakdownGeneration.topic?.title || ''"></div>
+                    </div>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="small text-info mb-2" x-show="breakdownGeneration.coverage.length" x-text="breakdownGeneration.requiresTranscription ? `已发现第 ${breakdownGeneration.coverage.join('、')} 集下载视频` : `已加载第 ${breakdownGeneration.coverage.join('、')} 集剧目脚本`"></div>
+                    <div class="d-flex justify-content-between small mb-1"><span x-text="breakdownGeneration.message || '正在创建生成任务'"></span><strong x-text="breakdownGenerationProgressLabel()"></strong></div>
+                    <div class="progress" role="progressbar" aria-label="拆解生成进度">
+                        <div class="progress-bar progress-bar-striped" :class="{'progress-bar-animated': breakdownGenerationRunning(), 'bg-danger': breakdownGeneration.status === 'failed'}" :style="`width: ${breakdownGenerationIndeterminate() ? 100 : breakdownGenerationProgressPercent()}%`"></div>
+                    </div>
+                    <div class="alert alert-danger py-2 mt-3 mb-0" x-show="breakdownGeneration.error" x-text="breakdownGeneration.error"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">后台运行</button>
+                    <button type="button" class="btn btn-outline-light" x-show="breakdownGeneration.jobId" @click="openBreakdownTaskLog"><i class="bi bi-list-ul me-1"></i>任务日志</button>
+                    <button type="button" class="btn btn-primary" x-show="breakdownGenerationRetryable()" @click="startTranscriptBreakdown(breakdownGeneration.topic, breakdownGeneration.source)"><i class="bi bi-arrow-clockwise me-1"></i>重试</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="breakdownEditorModal" tabindex="-1" aria-labelledby="breakdownEditorModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <div>
+                        <h5 class="modal-title" id="breakdownEditorModalLabel">爆款拆解编辑</h5>
+                        <div class="small text-muted"><span x-text="breakdownEditor.title || '未命名选题'"></span><span class="ms-2" x-text="`v${breakdownEditor.record?.version || 1} · ${breakdownEditor.record?.status || 'draft'}`"></span></div>
+                    </div>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-danger py-2" x-show="breakdownEditor.error" x-text="breakdownEditor.error"></div>
+                    <div class="row g-3">
+                        <template x-for="item in breakdownEditor.fieldGuide" :key="item.key">
+                            <div class="col-12 border-bottom border-secondary-subtle pb-3">
+                                <div class="d-flex align-items-center justify-content-between gap-2 mb-2"><label class="form-label fw-semibold mb-0" x-text="item.label"></label><span class="badge bg-secondary" x-text="item.type"></span></div>
+                                <template x-if="item.type !== '数组'"><textarea class="form-control" rows="3" x-model="breakdownEditor.content[item.key]" :disabled="breakdownEditor.record?.status === 'locked'"></textarea></template>
+                                <template x-if="item.type === '数组'"><div class="vstack gap-2"><template x-for="(entry, index) in breakdownEditor.content[item.key]" :key="`${item.key}-${index}`"><div class="input-group"><textarea class="form-control" rows="2" x-model="breakdownEditor.content[item.key][index]" :disabled="breakdownEditor.record?.status === 'locked'"></textarea><button type="button" class="btn btn-outline-danger" @click="removeBreakdownArrayItem(item.key, index)" :disabled="breakdownEditor.record?.status === 'locked'" title="删除此项" aria-label="删除此项"><i class="bi bi-trash"></i></button></div></template><button type="button" class="btn btn-sm btn-outline-light align-self-start" @click="addBreakdownArrayItem(item.key)" :disabled="breakdownEditor.record?.status === 'locked'" title="添加一项" aria-label="添加一项"><i class="bi bi-plus-lg"></i></button></div></template>
+                                <div class="small text-muted mt-2" x-text="item.description"></div>
+                                <div class="small text-info mt-1"><span>写法：</span><span x-text="item.writing_prompt"></span></div>
+                                <div class="small text-warning mt-1"><span>示例：</span><span x-text="item.example"></span></div>
+                                <div class="small text-success mt-1"><span>证据：</span><span x-text="item.evidence_rule"></span></div>
+                            </div>
+                        </template>
+                    </div>
+                    <div class="small text-muted mt-2">内容字段来源和风险信息保留在拆解版本中。锁定后不可覆盖，只能创建新版本。</div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">关闭</button>
+                    <button type="button" class="btn btn-outline-info" @click="regenerateCurrentBreakdown" :disabled="breakdownEditor.saving || breakdownGenerationRunning()"><i class="bi bi-arrow-clockwise me-1"></i>重新生成</button>
+                    <button type="button" class="btn btn-outline-light" @click="saveBreakdownEditor" :disabled="breakdownEditor.saving || breakdownEditor.record?.status === 'locked'"><i class="bi bi-save me-1"></i>保存草稿</button>
+                    <button type="button" class="btn btn-warning" @click="lockBreakdownEditor" :disabled="breakdownEditor.saving || breakdownEditor.record?.status === 'locked'"><i class="bi bi-lock me-1"></i>锁定版本</button>
+                </div>
+            </div>
+        </div>
+    </div>

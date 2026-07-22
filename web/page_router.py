@@ -21,6 +21,35 @@ from identity.schema import Principal
 from .navigation_service import PAGE_ROUTES, NavigationService
 
 
+PAGE_TEMPLATES = {
+    "/selection/dashboard": "selection/dashboard.html",
+    "/selection/ranks": "selection/ranks.html",
+    "/selection/topics": "selection/topics.html",
+    "/selection/dramas": "selection/dramas.html",
+    "/selection/breakdowns": "selection/breakdowns.html",
+    "/planning/projects": "planning/projects.html",
+    "/planning/projects/{project_id}/directions": "planning/directions.html",
+    "/planning/projects/{project_id}/brief": "planning/brief.html",
+    "/planning/projects/{project_id}/characters": "planning/characters.html",
+    "/writing/projects": "writing/projects.html",
+    "/writing/projects/{project_id}/outlines": "writing/outlines.html",
+    "/writing/projects/{project_id}/episodes/{episode_number}/beats": "writing/beats.html",
+    "/review/projects": "review/projects.html",
+    "/review/tasks": "review/tasks.html",
+    "/review/approvals": "review/approvals.html",
+    "/review/projects/{project_id}/members": "review/projects.html",
+    "/review/projects/{project_id}/versions": "review/versions.html",
+    "/admin/users": "admin/users.html",
+    "/admin/roles": "admin/roles.html",
+    "/admin/config": "admin/config.html",
+    "/admin/data": "admin/data.html",
+    "/admin/analytics": "admin/analytics.html",
+    "/admin/jobs": "admin/jobs.html",
+    "/admin/deliveries": "admin/deliveries.html",
+    "/admin/audit": "admin/audit.html",
+}
+
+
 def build_page_router(
     templates: Jinja2Templates, navigation_service: NavigationService
 ) -> APIRouter:
@@ -79,7 +108,7 @@ def build_page_router(
             page_title="我的任务",
         )
 
-    def page_endpoint(page_title: str, permission: str):
+    def page_endpoint(page_title: str, permission: str, template_name: str):
         def endpoint(
             request: Request,
             principal: Principal = Depends(require_page(permission)),
@@ -90,6 +119,7 @@ def build_page_router(
                 request,
                 principal,
                 page_title=page_title,
+                template_name=template_name,
             )
 
         return endpoint
@@ -97,7 +127,7 @@ def build_page_router(
     for route, permission, title in PAGE_ROUTES:
         router.add_api_route(
             route,
-            page_endpoint(title, permission),
+            page_endpoint(title, permission, PAGE_TEMPLATES[route]),
             methods=["GET"],
             response_class=HTMLResponse,
             name=f"page_{permission}_{title}",
@@ -114,15 +144,21 @@ def _page_response(
     principal: Principal,
     *,
     page_title: str,
+    template_name: str = "common/tasks.html",
 ) -> Response:
     response = templates.TemplateResponse(
         request,
-        "common/tasks.html",
+        template_name,
         _template_context(
             request,
             principal,
             navigation_service,
             page_title=page_title,
+            workspace_page=(
+                ""
+                if template_name == "common/tasks.html"
+                else template_name.removesuffix(".html").replace("/", "-")
+            ),
         ),
     )
     navigation_service.remember_route(principal, request.url.path)
@@ -135,13 +171,23 @@ def _template_context(
     navigation_service: NavigationService,
     *,
     page_title: str,
+    workspace_page: str = "",
 ) -> dict:
+    csrf_token = ""
+    service = getattr(request.app.state, "identity_permission_service", None)
+    if principal is not None and service is not None:
+        raw_token = request.cookies.get(service.session_service.cookie_name)
+        session = service.session_service.resolve_session(raw_token)
+        csrf_token = session.csrf_token if session is not None else ""
     return {
         "request": request,
         "principal": principal,
         "navigation": navigation_service.items_for(principal) if principal else [],
         "current_route": request.url.path,
         "page_title": page_title,
+        "workspace_page": workspace_page,
+        "csrf_token": csrf_token,
+        **request.path_params,
     }
 
 

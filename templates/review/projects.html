@@ -1,0 +1,6 @@
+{% extends "layouts/base.html" %}
+
+{% block content %}
+<div class="d-flex align-items-center justify-content-between border-bottom pb-3 mb-4"><div><h3 class="mb-1">负责项目</h3><div class="small text-muted">{% if project_id %}项目 {{ project_id }} 的成员与职责{% else %}当前账号负责的项目范围{% endif %}</div></div></div>
+<div class="alert alert-light border" role="status">项目成员与分工将在任务流启用后显示。</div>
+{% endblock %}

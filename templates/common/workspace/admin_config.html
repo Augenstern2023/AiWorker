@@ -1,0 +1,117 @@
+<section id="configEditor">
+            <div class="d-flex align-items-center justify-content-between mb-3">
+                <h3 class="mb-0">配置编辑</h3>
+                <div>
+                    <button class="btn btn-outline-secondary me-2" @click="fetchConfigForm">重新加载</button>
+                    <button class="btn btn-success" @click="saveConfigForm">保存修改</button>
+                </div>
+            </div>
+            <div class="row g-3">
+                <div class="col-xl-8">
+                    <div class="card">
+                        <div class="card-header">基础参数</div>
+                        <div class="card-body">
+                            <div class="row g-3">
+                                <template x-for="field in configRootFields" :key="field.key">
+                                    <div class="col-md-6">
+                                        <label class="form-label" x-text="field.label"></label>
+                                        <template x-if="field.type === 'checkbox'">
+                                            <div class="form-check form-switch mt-2">
+                                                <input class="form-check-input" type="checkbox" x-model="configForm.root[field.key]">
+                                            </div>
+                                        </template>
+                                        <template x-if="field.type === 'number'">
+                                            <input type="number" class="form-control" x-model.number="configForm.root[field.key]">
+                                        </template>
+                                        <template x-if="field.type === 'text'">
+                                            <input type="text" class="form-control" x-model="configForm.root[field.key]">
+                                        </template>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card mt-3">
+                        <div class="card-header d-flex align-items-center justify-content-between">
+                            <span>项目配置</span>
+                            <button class="btn btn-outline-success btn-sm" @click="addConfigItem">项目添加</button>
+                        </div>
+                        <div class="card-body">
+                            <template x-for="(item, index) in configForm.items" :key="index">
+                                <div class="border border-secondary rounded p-3 mb-3">
+                                    <div class="d-flex align-items-center justify-content-between mb-3">
+                                        <strong x-text="item.project || `项目 ${index + 1}`"></strong>
+                                        <button class="btn btn-outline-danger btn-sm" @click="removeConfigItem(index)">删除</button>
+                                    </div>
+                                    <div class="row g-3">
+                                        <div class="col-md-6">
+                                            <label class="form-label">project</label>
+                                            <input class="form-control" x-model="item.project">
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label">评论不少于</label>
+                                            <input type="number" class="form-control" x-model.number="item['评论不少于']">
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label">作品天数</label>
+                                            <input type="number" class="form-control" x-model.number="item['作品天数']">
+                                        </div>
+                                        <div class="col-12">
+                                            <label class="form-label">搜索关键词</label>
+                                            <textarea class="form-control" rows="2" x-model="item['搜索关键词']"></textarea>
+                                        </div>
+                                        <div class="col-12">
+                                            <label class="form-label">屏蔽关键词</label>
+                                            <textarea class="form-control" rows="2" x-model="item['屏蔽关键词']"></textarea>
+                                        </div>
+                                        <div class="col-12">
+                                            <label class="form-label">有关视频判定</label>
+                                            <textarea class="form-control" rows="3" x-model="item['有关视频判定']"></textarea>
+                                        </div>
+                                        <div class="col-12">
+                                            <label class="form-label">黑名单视频判定</label>
+                                            <textarea class="form-control" rows="3" x-model="item['黑名单视频判定']"></textarea>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label">白名单地区</label>
+                                            <input class="form-control" x-model="item['白名单地区']">
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label">黑名单地区</label>
+                                            <input class="form-control" x-model="item['黑名单地区']">
+                                        </div>
+                                    </div>
+                                </div>
+                            </template>
+                            <div x-show="configForm.items.length === 0" class="text-center text-muted py-4">暂无项目配置</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-xl-4">
+                    <div class="card">
+                        <div class="card-header d-flex align-items-center justify-content-between">
+                            <span>备份</span>
+                            <button class="btn btn-outline-success btn-sm" @click="createBackup">创建</button>
+                        </div>
+                        <div class="list-group list-group-flush">
+                            <template x-for="backup in backups" :key="backup.name">
+                                <div class="list-group-item bg-transparent text-light border-secondary">
+                                    <div class="d-flex justify-content-between">
+                                        <span x-text="formatDate(backup.created)"></span>
+                                        <span class="badge bg-secondary" x-text="formatSize(backup.size)"></span>
+                                    </div>
+                                    <div class="small text-muted my-2" x-text="backup.name"></div>
+                                    <div class="d-flex gap-2">
+                                        <button class="btn btn-sm btn-outline-warning flex-fill" @click="restoreBackup(backup.name)">恢复</button>
+                                        <button class="btn btn-sm btn-outline-danger flex-fill" @click="deleteBackup(backup.name)">删除</button>
+                                    </div>
+                                </div>
+                            </template>
+                            <div x-show="backups.length === 0" class="text-center text-muted py-4">暂无备份</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>

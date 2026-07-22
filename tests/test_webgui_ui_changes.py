@@ -29,6 +29,23 @@ from core.job import CrawlJob
 from runtime.job_state import JobState
 
 
+def _source(*relative_paths: str) -> str:
+    return "\n".join(
+        Path(path).read_text(encoding="utf-8") for path in relative_paths
+    )
+
+
+def _workspace_source() -> str:
+    templates = sorted(Path("templates").glob("**/*.html"))
+    scripts = sorted(Path("static/js").glob("**/*.js"))
+    styles = sorted(Path("static/css").glob("*.css"))
+    artifacts = [path for path in templates if path.name != "index.html"]
+    return "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (*artifacts, *scripts, *styles)
+    )
+
+
 def test_webgui_registers_rag_routes():
     paths = {route.path for route in WebGUI.app.routes}
 
@@ -56,7 +73,7 @@ def test_webgui_registers_today_rank_route():
 
 def test_webgui_registers_creative_phase3_routes_and_page():
     paths = {route.path for route in WebGUI.app.routes}
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+    html = _workspace_source()
 
     assert "/api/creative/topics/generate" in paths
     assert "/api/creative/breakdowns" in paths
@@ -67,7 +84,7 @@ def test_webgui_registers_creative_phase3_routes_and_page():
 
 def test_webgui_registers_phase4_routes_and_flat_project_workspace():
     paths = {route.path for route in WebGUI.app.routes}
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+    html = _workspace_source()
 
     assert "/api/creative/projects" in paths
     assert "/api/creative/projects/{project_id}" in paths
@@ -78,7 +95,8 @@ def test_webgui_registers_phase4_routes_and_flat_project_workspace():
     assert "/api/creative/projects/{project_id}/episodes/{episode_number}/beats/generate" in paths
     assert "/api/jobs/{job_id}/retry" in paths
     assert "创作项目" in html
-    assert "currentTab === 'creative-projects'" in html
+    assert "currentTab" not in html
+    assert "/planning/projects" in _source("web/navigation_service.py")
     assert "fetchCreativeProjects" in html
     assert "generateProjectBlueprints" in html
     assert "lockProjectBrief" in html
@@ -95,8 +113,8 @@ def test_webgui_registers_phase4_routes_and_flat_project_workspace():
 
 
 def test_project_table_uses_name_navigation_without_redundant_action_column():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
-    section = html.split('<section class="creative-project-workspace" x-show="currentTab === \'creative-projects\'">', 1)[1].split("</section>", 1)[0]
+    section = _source("templates/common/workspace/project_list.html")
+    html = section + _source("static/css/workspaces.css")
     project_table = section.split('<table class="table table-sm align-middle mb-4">', 1)[1].split("</table>", 1)[0]
 
     assert ">操作</th>" not in project_table
@@ -111,7 +129,7 @@ def test_project_table_uses_name_navigation_without_redundant_action_column():
 
 
 def test_creative_project_creation_supports_selecting_a_locked_breakdown_version():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+    html = _workspace_source()
 
     assert "creativeWorkspace.lockedBreakdowns" in html
     assert "loadCreativeProjectBreakdowns" in html
@@ -121,21 +139,21 @@ def test_creative_project_creation_supports_selecting_a_locked_breakdown_version
 
 
 def test_draft_breakdowns_are_visible_but_not_project_eligible():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+    html = _workspace_source()
 
     assert "breakdownStatusLabel(topic)" in html
     assert "breakdownStatusClass(topic)" in html
     assert "草稿${version} · 待锁定" in html
     assert "草稿${version} · 已有锁定版" in html
     assert "继续拆解" in html
-    assert "fetch('/api/creative/topics?status=adopted&limit=500')" in html
+    assert "aiworkerApi.request('/api/creative/topics?status=adopted&limit=500')" in html
     assert ':disabled="!topic.locked_breakdown_id"' in html
     assert 'x-text="creativeTopicOptionLabel(topic)"' in html
 
 
 def test_today_hit_actions_follow_topic_status_without_conflicting_commands():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
-    section = html.split('<section x-show="currentTab === \'creative\'">', 1)[1].split("</section>", 1)[0]
+    html = _source("templates/common/workspace/selection_topics.html")
+    section = html.split('<h3 class="mb-0">今日爆款</h3>', 1)[1].split('<h3 class="mb-1">选题库</h3>', 1)[0]
 
     assert 'x-show="!topic.latest_breakdown_id && topic.status === \'pending_review\'" @click="updateCreativeTopic(topic, \'adopted\')"' in section
     assert 'x-show="!topic.latest_breakdown_id && topic.status === \'pending_review\'" @click="updateCreativeTopic(topic, \'rejected\')"' in section
@@ -145,8 +163,8 @@ def test_today_hit_actions_follow_topic_status_without_conflicting_commands():
 
 
 def test_today_hit_actions_distinguish_existing_breakdowns():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
-    section = html.split('<section x-show="currentTab === \'creative\'">', 1)[1].split("</section>", 1)[0]
+    html = _source("templates/common/workspace/selection_topics.html")
+    section = html.split('<h3 class="mb-0">今日爆款</h3>', 1)[1].split('<h3 class="mb-1">选题库</h3>', 1)[0]
 
     assert 'x-show="!topic.latest_breakdown_id && topic.status === \'pending_review\'"' in section
     assert "!topic.latest_breakdown_id && ['pending_review', 'adopted'].includes(topic.status)" in section
@@ -155,8 +173,37 @@ def test_today_hit_actions_distinguish_existing_breakdowns():
     assert '@click="updateCreativeTopic(topic, \'archived\')">归档</button>' in section
 
 
+def test_topic_library_shows_full_lifecycle_and_breakdown_version_column():
+    html = _workspace_source()
+    section = _source("templates/common/workspace/selection_topics.html").split(
+        '<h3 class="mb-1">选题库</h3>', 1
+    )[1]
+
+    assert "lifecycle_status" in html
+    assert "已下载 X 集" in section
+    assert "人物关系待生成" in section
+    assert "分集大纲已生成" in section
+    assert "Beats脚本已导出" in section
+    assert "<th>状态</th><th>拆解版本</th><th>操作</th>" in section
+    assert "breakdown-version-badge" in section
+    assert "lifecycle-adopted" in html
+    assert "lifecycle-beats-generated" in html
+    assert "lifecycle-beats-exported" in html
+
+
+def test_download_modal_restores_running_job_and_explains_progress():
+    html = _workspace_source()
+
+    assert "findDramaDownloadJob" in html
+    assert "restoreDramaDownloadJob" in html
+    assert "scrollDramaDownloadToTop" in html
+    assert "dramaDownload.jobStatus" in html
+    assert "当前处理" in html
+    assert "关闭窗口不会中断下载任务" in html
+
+
 def test_blueprint_core_conflict_uses_the_expandable_description_cell_pattern():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+    html = _workspace_source()
 
     assert "blueprint-conflict-cell" in html
     assert ".blueprint-conflict-cell:hover" in html
@@ -164,9 +211,16 @@ def test_blueprint_core_conflict_uses_the_expandable_description_cell_pattern():
 
 
 def test_character_editor_expands_long_values_and_confirms_row_save():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+    html = _workspace_source()
 
     assert "creative-inline-textarea" in html
+
+
+def test_blueprint_editor_exposes_generated_direction_audience():
+    html = _workspace_source()
+
+    assert 'x-model="selectedProjectBlueprint().content.audience"' in html
+    assert "方向目标受众" in html
     assert "textareaRows(" in html
     assert "creativeWorkspace.saveState" in html
     assert "人物卡已保存" in html
@@ -176,7 +230,7 @@ def test_character_editor_expands_long_values_and_confirms_row_save():
 
 
 def test_beats_generation_shows_local_start_and_progress_feedback():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+    html = _workspace_source()
 
     assert "creativeActionRunning('beats')" in html
     assert "正在创建生成任务" in html
@@ -184,7 +238,7 @@ def test_beats_generation_shows_local_start_and_progress_feedback():
 
 
 def test_blueprint_generation_shows_immediate_and_live_progress_feedback():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+    html = _workspace_source()
 
     assert 'x-show="creativeWorkspace.startingAction || creativeWorkspace.jobId"' in html
     assert 'role="status" aria-live="polite"' in html
@@ -198,7 +252,7 @@ def test_blueprint_generation_shows_immediate_and_live_progress_feedback():
 
 
 def test_character_and_outline_generation_show_the_same_button_progress_feedback():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+    html = _workspace_source()
 
     assert "creativeActionRunning('characters')" in html
     assert "creativeWorkspace.startingAction === 'characters' ? '正在启动' : '生成中'" in html
@@ -207,8 +261,33 @@ def test_character_and_outline_generation_show_the_same_button_progress_feedback
     assert html.count(':disabled="creativeActionDisabled(') >= 3
 
 
+def test_creative_generation_opens_progress_modal_with_retry_controls():
+    html = _workspace_source()
+
+    assert 'id="creativeGenerationProgressModal"' in html
+    assert "this.modal('creativeGenerationProgressModal')" in html
+    assert "this.creativeGenerationProgressModal.show()" in html
+    assert "人物关系生成任务已发起" in html
+    assert "关闭弹窗不会中断生成任务" in html
+    assert '@click="retryCreativeJob"' in html
+
+
+def test_downloaded_topic_action_opens_episode_transcript_preview():
+    html = _workspace_source()
+
+    assert 'x-show="Number(topic.downloaded_episode_count || 0) > 0"' in html
+    assert '@click="openTopicTranscriptPreview(topic)"' in html
+    assert 'title="预览剧目转写"' in html
+    assert 'id="topicTranscriptPreviewModal"' in html
+    assert "this.modal('topicTranscriptPreviewModal')" in html
+    assert "/api/creative/topics/${topic.id}/transcripts" in html
+    assert "selectedTopicTranscript()" in html
+    assert "上一集" in html
+    assert "下一集" in html
+
+
 def test_next_stage_generation_is_not_blocked_by_a_stale_previous_action():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+    html = _workspace_source()
 
     assert "creativeActionDisabled(action)" in html
     assert "this.creativeWorkspace.activeAction === action && this.creativeJobRunning()" in html
@@ -218,7 +297,7 @@ def test_next_stage_generation_is_not_blocked_by_a_stale_previous_action():
 
 
 def test_saved_creative_results_reconcile_a_stale_running_indicator():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+    html = _workspace_source()
 
     assert "creativeProjectHasJobResult(project, action, jobId)" in html
     assert "item.generation_meta?.job_id === jobId" in html
@@ -229,16 +308,25 @@ def test_saved_creative_results_reconcile_a_stale_running_indicator():
 
 
 def test_creative_running_state_stops_as_soon_as_its_saved_result_is_visible():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+    html = _workspace_source()
 
     assert "creativeJobStatusRunning()" in html
     assert "if (!this.creativeJobStatusRunning()) return false" in html
     assert "!this.creativeProjectHasJobResult(" in html
-    assert "if (!this.creativeJobStatusRunning() || !this.creativeProjectHasJobResult" in html
+    assert "if (!this.creativeProjectHasJobResult(project, action, jobId)) return false" in html
+
+
+def test_terminal_creative_job_always_clears_the_action_even_if_result_matching_lags():
+    html = _workspace_source()
+
+    assert "finishCreativeGeneration()" in html
+    assert "this.finishCreativeGeneration();" in html
+    assert "this.creativeWorkspace.activeAction = ''" in html
+    assert "this.creativeWorkspace.startingAction = ''" in html
 
 
 def test_breakdown_editor_opens_in_modal_instead_of_page_bottom():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+    html = _workspace_source()
 
     assert 'id="breakdownEditorModal"' in html
     assert 'x-model="breakdownEditor.content[item.key]"' in html
@@ -251,7 +339,7 @@ def test_breakdown_editor_opens_in_modal_instead_of_page_bottom():
     assert "openBreakdownEditor" in html
     assert "saveBreakdownEditor" in html
     assert "lockBreakdownEditor" in html
-    assert "new bootstrap.Modal(document.getElementById('breakdownEditorModal'))" in html
+    assert "this.modal('breakdownEditorModal')" in html
     assert "normalizeBreakdownEditorContent" in html
     assert "breakdownEditor.draft" not in html
     assert 'class="card mt-3" x-show="topicLibrary.breakdown"' not in html
@@ -259,7 +347,7 @@ def test_breakdown_editor_opens_in_modal_instead_of_page_bottom():
 
 
 def test_breakdown_generation_requires_transcript_and_shows_progress():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+    html = _workspace_source()
 
     assert 'id="transcriptRequiredModal"' in html
     assert "请先下载剧目脚本再拆解" in html
@@ -269,7 +357,7 @@ def test_breakdown_generation_requires_transcript_and_shows_progress():
     assert "openTopicDownload(breakdownGeneration.topic)" in html
     assert "breakdownGeneration.coverage" in html
     assert "payload?.breakdown_id" in html
-    assert "fetch(`/api/jobs/${job.job_id}`)" in html
+    assert "aiworkerApi.request(`/api/jobs/${job.job_id}`)" in html
     assert "createTopicLibraryBreakdown(topic) {" in html
     assert "return this.startTranscriptBreakdown(topic, 'topic-library')" in html
     assert "createCreativeBreakdown(topic) {" in html
@@ -281,10 +369,12 @@ def test_breakdown_generation_requires_transcript_and_shows_progress():
     assert "tickBreakdownGenerationElapsed" in html
     assert "formatBreakdownGenerationElapsed" in html
     assert "`已等待 ${this.formatBreakdownGenerationElapsed(seconds)}`" in html
+    assert "已发现下载视频，正在生成剧本转写" in html
+    assert "已发现第 ${breakdownGeneration.coverage.join('、')} 集下载视频" in html
 
 
 def test_existing_breakdown_opens_without_generation_and_regeneration_is_explicit():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+    html = _workspace_source()
 
     assert "data.status === 'existing'" in html
     assert "data.breakdown" in html
@@ -337,11 +427,17 @@ def test_webgui_python_source_contains_no_mojibake_text():
     assert reversible_lines == []
 
 
-def test_index_template_has_today_rank_page():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+def test_selection_rank_template_has_today_rank_page():
+    html = _source(
+        "templates/selection/ranks.html",
+        "templates/common/workspace/selection_ranks.html",
+        "static/js/selection/ranks.js",
+        "static/js/common/tasks.js",
+        "static/css/workspaces.css",
+    )
 
-    assert "currentTab === 'today-rank'" in html
-    assert "currentTab === 'today-rank'" in html
+    assert "currentTab" not in html
+    assert "/static/js/selection/ranks.js" in html
     assert "fetchTodayRank" in html
     assert "async fetchJobs" in html
     assert "async stopCrawler" in html
@@ -350,7 +446,7 @@ def test_index_template_has_today_rank_page():
     assert "数据质量提示" not in html
     assert "validationText" not in html
     assert "排名变动剧目" in html
-    assert "题材" in html
+    assert "{key: 'subject', label: '标签'" in html
     assert "item.subject" in html
     assert "topic_tags" in html
     assert "shortTags" in html
@@ -395,7 +491,7 @@ def test_index_template_has_today_rank_page():
 
 
 def test_today_rank_duration_column_is_after_hot_comment_and_formats_both_day_counts():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+    html = _workspace_source()
 
     hot_comment = html.index("{key: 'hot_comment', label: '热评'")
     rank_duration = html.index("{key: 'rank_duration', label: '在榜时长'")
@@ -407,8 +503,8 @@ def test_today_rank_duration_column_is_after_hot_comment_and_formats_both_day_co
 
 
 def test_removed_assets_and_rag_pages_are_not_in_sidebar():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
-    sidebar = html.split("<nav class=\"nav flex-column py-3\">", 1)[1].split("</nav>", 1)[0]
+    html = _source("templates/layouts/base.html")
+    sidebar = html.split('<nav class="nav flex-column py-3"', 1)[1].split("</nav>", 1)[0]
 
     assert "数据资产" not in sidebar
     assert "RAG 问答" not in sidebar
@@ -448,7 +544,7 @@ def test_hongguo_rank_job_uses_csv_without_interface_extra():
 
 def test_hongguo_drama_routes_replace_legacy_proxy_routes():
     paths = {route.path for route in WebGUI.app.routes}
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+    html = _workspace_source()
 
     assert "/api/hongguo/detail-monitor/status" not in paths
     assert "/hongguo/health" not in paths
@@ -664,7 +760,7 @@ async def test_delete_files_removes_multiple_selected_data_files(tmp_path, monke
 
 
 def test_data_management_template_supports_multi_file_deletion():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+    html = _workspace_source()
 
     assert "selectedFilePaths: []" in html
     assert "batchDeleteMode: false" in html
@@ -677,7 +773,7 @@ def test_data_management_template_supports_multi_file_deletion():
 
 
 def test_data_management_template_supports_grouped_online_preview():
-    html = Path("templates/index.html").read_text(encoding="utf-8")
+    html = _workspace_source()
 
     assert "groupedFiles()" in html
     assert "group.file_groups" in html

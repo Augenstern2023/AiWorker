@@ -1,0 +1,9 @@
+{% extends "layouts/base.html" %}
+
+{% block content %}
+<h3 class="mb-1">创作任务书</h3><div class="small text-muted mb-3">项目 {{ project_id }} · 编辑方向与 Brief，保留版本历史</div>
+{% include "common/workspace/project_progress.html" %}
+<template x-if="creativeWorkspace.project"><div>{% include "common/workspace/project_blueprints.html" %}</div></template>
+{% include "common/workspace/creative_progress_modal.html" %}
+{% endblock %}
+{% block scripts %}<script src="/static/js/common/creative.js"></script><script src="/static/js/planning/brief.js"></script>{% endblock %}

@@ -1,0 +1,7 @@
+{% extends "layouts/base.html" %}
+
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-3"><div><h3 class="mb-1">审计日志</h3><div class="small text-muted">查询关键操作、操作者和结果</div></div><button class="btn btn-outline-secondary btn-sm" id="refresh-audit" title="刷新"><i class="bi bi-arrow-clockwise"></i></button></div>
+<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>资源</th><th>结果</th></tr></thead><tbody id="audit-list"><tr><td colspan="5" class="text-center text-muted py-4">正在加载审计日志...</td></tr></tbody></table></div>
+{% endblock %}
+{% block scripts %}<script src="/static/js/admin/audit.js"></script>{% endblock %}

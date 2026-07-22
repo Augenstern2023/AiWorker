@@ -1,0 +1,6 @@
+{% extends "layouts/base.html" %}
+
+{% block content %}
+<div class="d-flex align-items-center justify-content-between border-bottom pb-3 mb-4"><div><h3 class="mb-1">项目版本</h3><div class="small text-muted">项目 {{ project_id }} · 已提交与已批准版本历史</div></div><a class="btn btn-outline-secondary btn-sm" href="/review/approvals"><i class="bi bi-arrow-left me-1"></i>返回审批</a></div>
+<div class="alert alert-light border" role="status">版本记录将在审批任务产生后显示。</div>
+{% endblock %}

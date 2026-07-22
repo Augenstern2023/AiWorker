@@ -1,0 +1,18 @@
+<div class="border-top border-bottom py-3 mb-3">
+                <div class="row g-2 align-items-end">
+                    <div class="col-lg-3"><label class="form-label small">已采纳选题</label><select class="form-select form-select-sm" x-model.number="creativeWorkspace.create.topic_id" @change="syncCreativeProjectSource()"><option value="">选择已采纳选题</option><template x-for="topic in creativeWorkspace.eligibleTopics" :key="topic.id"><option :value="topic.id" :disabled="!topic.locked_breakdown_id" x-text="creativeTopicOptionLabel(topic)"></option></template></select></div>
+                    <div class="col-lg-2"><label class="form-label small">拆解版本</label><select class="form-select form-select-sm" x-model.number="creativeWorkspace.create.breakdown_id" :disabled="!creativeWorkspace.create.topic_id"><option value="">选择拆解版本</option><template x-for="breakdown in creativeWorkspace.lockedBreakdowns" :key="breakdown.id"><option :value="breakdown.id" x-text="`v${breakdown.version} · 已锁定`"></option></template></select></div>
+                    <div class="col-lg-3"><label class="form-label small">项目名称</label><input class="form-control form-control-sm" x-model="creativeWorkspace.create.name" placeholder="例如：都市女性成长方向"></div>
+                    <div class="col-lg-1"><label class="form-label small">目标平台</label><select class="form-select form-select-sm" x-model="creativeWorkspace.create.target_platform"><option value="">待定</option><option value="dy">抖音</option><option value="hg">红果</option></select></div>
+                    <div class="col-lg-1"><label class="form-label small">目标集数</label><input class="form-control form-control-sm" type="number" min="1" max="100" x-model.number="creativeWorkspace.create.target_episode_count"></div>
+                    <div class="col-lg-2 d-grid"><button class="btn btn-primary btn-sm" @click="createCreativeProject" :disabled="!creativeWorkspace.create.topic_id || !creativeWorkspace.create.breakdown_id"><i class="bi bi-plus-lg me-1"></i>创建项目</button></div>
+                </div>
+            </div>
+
+            <table class="table table-sm align-middle mb-4">
+                <thead><tr><th>项目</th><th>来源选题</th><th>目标集数</th><th>当前阶段</th><th>更新时间</th></tr></thead>
+                <tbody>
+                    <template x-for="project in creativeWorkspace.projects" :key="project.id"><tr class="creative-project-row" :class="{'table-active': creativeWorkspace.project?.id === project.id}" @click="selectCreativeProject(project.id)"><td><button type="button" class="project-name-button" @click.stop="selectCreativeProject(project.id)" :aria-current="creativeWorkspace.project?.id === project.id ? 'page' : null" x-text="project.name"></button></td><td x-text="project.topic_title"></td><td x-text="project.target_episode_count"></td><td><span class="badge bg-secondary" x-text="creativeProjectStatusLabel(project.status)"></span></td><td x-text="formatDate(project.updated_at)"></td></tr></template>
+                    <tr x-show="!creativeWorkspace.projects.length"><td colspan="5" class="text-center text-muted py-4">暂无创作项目，请先从已采纳且已锁定拆解的选题创建</td></tr>
+                </tbody>
+            </table>

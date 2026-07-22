@@ -1,0 +1,115 @@
+<section>
+            <div class="d-flex align-items-center justify-content-between mb-3">
+                <h3 class="mb-0">剧目检索下载</h3>
+                <button class="btn btn-outline-secondary btn-sm" @click="fetchDramaSettings">
+                    <i class="bi bi-arrow-clockwise me-1"></i>刷新设置
+                </button>
+            </div>
+            <div class="row g-3">
+                <div class="col-xl-4">
+                    <div class="card">
+                        <div class="card-header">接口设置</div>
+                        <div class="card-body">
+                            <label class="form-label">配置中心地址</label>
+                            <input class="form-control mb-3" x-model="dramaAnalysis.settings.config_url">
+                            <label class="form-label">激活码</label>
+                            <input class="form-control mb-2" type="password" x-model="dramaAnalysis.activationCode" placeholder="留空则保留已保存的激活码">
+                            <div class="small text-muted mb-3" x-text="dramaAnalysis.settings.has_activation_code ? '已保存激活码' : '未保存激活码'"></div>
+                            <div class="d-flex gap-2">
+                                <button class="btn btn-outline-info flex-fill" @click="testDramaInterface" :disabled="dramaAnalysis.loading">
+                                    <i class="bi bi-plug me-1"></i>测试接口
+                                </button>
+                                <button class="btn btn-outline-light flex-fill" @click="saveDramaSettings" :disabled="dramaAnalysis.loading">
+                                    <i class="bi bi-save me-1"></i>保存设置
+                                </button>
+                            </div>
+                            <div class="alert mt-3 mb-0 py-2" x-show="dramaAnalysis.interfaceTest" :class="dramaAnalysis.interfaceTest?.status === 'success' ? 'alert-success' : 'alert-danger'" x-text="dramaAnalysis.interfaceTest?.message"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-xl-8">
+                    <div class="card mb-3">
+                        <div class="card-header">检索并选择剧集</div>
+                        <div class="card-body">
+                            <div class="position-relative mb-3">
+                                <div class="input-group">
+                                    <input class="form-control" x-model="dramaAnalysis.title" @input="onDramaTitleInput" @keydown.enter="searchDrama" autocomplete="off" placeholder="输入剧名，自动联想红果剧目">
+                                    <button class="btn btn-primary" @click="searchDrama" :disabled="dramaAnalysis.loading || !dramaAnalysis.title.trim()">
+                                        <i class="bi bi-search me-1"></i>搜索
+                                    </button>
+                                </div>
+                                <div class="list-group position-absolute w-100 shadow" style="top: calc(100% + 2px); z-index: 20;" x-show="dramaAnalysis.suggestionLoading || dramaAnalysis.suggestions.length" @click.outside="dramaAnalysis.suggestions = []">
+                                    <div class="list-group-item bg-dark text-muted border-secondary py-2" x-show="dramaAnalysis.suggestionLoading">
+                                        <i class="bi bi-search me-1"></i>正在联想剧目…
+                                    </div>
+                                    <template x-for="suggestion in dramaAnalysis.suggestions" :key="suggestion.book_id">
+                                        <button type="button" class="list-group-item list-group-item-action bg-dark text-light border-secondary text-start" @click="chooseDramaSuggestion(suggestion)">
+                                            <span class="fw-semibold" x-text="suggestion.title || '未命名剧目'"></span>
+                                            <span class="small text-muted ms-2" x-text="`${suggestion.episode_count || '-'} 集 · ${suggestion.summary || '暂无简介'}`"></span>
+                                        </button>
+                                    </template>
+                                </div>
+                            </div>
+                            <div class="alert alert-danger" x-show="dramaAnalysis.error" x-text="dramaAnalysis.error"></div>
+                            <div class="alert alert-warning" x-show="dramaAnalysis.searchSource === 'douyin_fallback'">
+                                <div class="fw-semibold">红果检索已降级至抖音</div>
+                                <div class="small" x-text="dramaAnalysis.fallbackReason"></div>
+                                <div class="small mt-1">请手动确认视频。候选可能是推广或片段，并非完整剧集。</div>
+                            </div>
+                            <div class="list-group mb-3" x-show="dramaAnalysis.candidates.length">
+                                <template x-for="candidate in dramaAnalysis.candidates" :key="candidate.book_id || candidate.aweme_id">
+                                    <button type="button" class="list-group-item list-group-item-action bg-transparent text-light border-secondary" :class="{active: (candidate.book_id && dramaAnalysis.selected?.book_id === candidate.book_id) || (candidate.aweme_id && dramaAnalysis.selected?.aweme_id === candidate.aweme_id)}" @click="selectDramaCandidate(candidate)" :disabled="dramaAnalysis.loading">
+                                        <div class="d-flex gap-3 align-items-center">
+                                            <img x-show="candidate.cover" :src="candidate.cover" alt="" style="width: 42px; height: 56px; object-fit: cover;">
+                                            <div class="text-start">
+                                                <div class="fw-semibold" x-text="candidate.title || '未命名剧目'"></div>
+                                                <div class="small text-muted" x-show="dramaAnalysis.searchSource !== 'douyin_fallback'" x-text="`${candidate.episode_count || '-'} 集 · ${candidate.summary || '暂无简介'}`"></div>
+                                                <div class="small text-muted" x-show="dramaAnalysis.searchSource === 'douyin_fallback'" x-text="`${candidate.author || '未知作者'} · 时长 ${formatDramaDuration(candidate.duration)} · 点赞 ${candidate.like_count || 0} · 评论 ${candidate.comment_count || 0}`"></div>
+                                            </div>
+                                        </div>
+                                    </button>
+                                </template>
+                            </div>
+                            <div x-show="dramaAnalysis.selected" class="border border-secondary p-3">
+                                <div class="fw-semibold mb-3" x-text="dramaAnalysis.selected?.title"></div>
+                                <div x-show="dramaAnalysis.searchSource !== 'douyin_fallback'" class="row g-3 align-items-end">
+                                    <div class="col-md-8">
+                                        <label class="form-label">集数</label>
+                                        <select class="form-select" x-model.number="dramaAnalysis.episode">
+                                            <template x-for="episode in dramaAnalysis.episodes" :key="episode.episode">
+                                                <option :value="episode.episode" x-text="`${episode.episode}. ${episode.title}`"></option>
+                                            </template>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-4 d-grid">
+                                        <button class="btn btn-success" @click="startDramaAnalysis" :disabled="dramaAnalysis.loading || !dramaAnalysis.episode">
+                                            <i class="bi bi-download me-1"></i>下载剧集
+                                        </button>
+                                    </div>
+                                </div>
+                                <div x-show="dramaAnalysis.searchSource === 'douyin_fallback'">
+                                    <div class="alert alert-warning py-2">
+                                        <span x-text="`来源：抖音 · 作者：${dramaAnalysis.selected?.author || '未知作者'} · 视频：${dramaAnalysis.selected?.title || ''}`"></span>
+                                        <div class="small mt-1">该视频可能是推广或片段，非完整剧集；确认后仅下载这一个视频。</div>
+                                    </div>
+                                    <button class="btn btn-success" @click="startDramaAnalysis" :disabled="dramaAnalysis.loading || !dramaAnalysis.selected?.aweme_id">
+                                        <i class="bi bi-download me-1"></i>下载抖音视频并解析
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card" x-show="dramaAnalysis.jobId">
+                        <div class="card-header">下载产物</div>
+                        <div class="card-body">
+                            <div class="mb-2">任务：<span x-text="dramaAnalysis.jobId"></span></div>
+                            <div class="d-flex gap-2 flex-wrap">
+                                <template x-for="item in dramaJobArtifacts()" :key="item.path">
+                                    <button class="btn btn-sm btn-outline-light" @click="downloadFile(item.path)" x-text="item.path.replace(/\\/g, '/').split('/').pop()"></button>
+                                </template>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>

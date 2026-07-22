@@ -1,0 +1,263 @@
+<section>
+            <div class="d-flex align-items-center justify-content-between mb-3">
+                <h3 class="mb-0">爬虫控制</h3>
+                <button class="btn btn-outline-secondary btn-sm" @click="fetchJobs">
+                    <i class="bi bi-arrow-clockwise me-1"></i>刷新
+                </button>
+            </div>
+
+            <div class="card mb-3">
+                <div class="card-header d-flex align-items-center justify-content-between">
+                    <span><i class="bi bi-list-task me-2"></i>任务列表</span>
+                    <span class="badge bg-primary" x-show="batchProgress" x-text="'批量：' + batchProgress"></span>
+                </div>
+                <div class="table-responsive scroll-pane">
+                    <table class="table table-sm table-hover align-middle mb-0">
+                        <thead>
+                            <tr>
+                                <th>Job</th>
+                                <th style="width: 90px;">平台</th>
+                                <th style="width: 100px;">类型</th>
+                                <th style="width: 110px;">状态</th>
+                                <th style="width: 110px;">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="job in jobs" :key="job.job_id">
+                                <tr class="job-row" :class="{active: selectedJobId === job.job_id}" @click="selectJob(job.job_id)">
+                                    <td>
+                                        <div class="fw-semibold" x-text="job.job_id"></div>
+                                        <small class="text-muted" x-text="job.message || ''"></small>
+                                    </td>
+                                    <td x-text="job.platform"></td>
+                                    <td x-text="job.crawler_type"></td>
+                                    <td><span class="badge" :class="jobStatusClass(job.status)" x-text="job.status"></span></td>
+                                    <td>
+                                        <button class="btn btn-sm btn-outline-danger btn-icon" @click.stop="stopJob(job.job_id)" :disabled="!isJobRunning(job)" title="停止">
+                                            <i class="bi bi-stop-circle"></i>
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-secondary btn-icon ms-1" @click.stop="deleteJob(job.job_id)" :disabled="isJobRunning(job)" title="删除">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
+                                    </td>
+                                </tr>
+                            </template>
+                            <tr x-show="jobs.length === 0">
+                                <td colspan="5" class="text-center text-muted py-4">暂无任务</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="row g-3">
+                <div class="col-xl-8">
+                    <div class="card">
+                        <div class="card-header d-flex align-items-center justify-content-between">
+                            <span><i class="bi bi-terminal me-2"></i>运行日志</span>
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-light" @click="copyLogs" :disabled="logs.length === 0" title="复制日志">
+                                    <i class="bi bi-clipboard me-1"></i>复制
+                                </button>
+                                <button class="btn btn-outline-light" @click="downloadLogs" :disabled="logs.length === 0" title="下载日志">
+                                    <i class="bi bi-download me-1"></i>下载
+                                </button>
+                                <button class="btn btn-outline-secondary" @click="logs = []">清空</button>
+                            </div>
+                        </div>
+                        <div class="log-pane" id="logConsole">
+                            <template x-for="(log, index) in logs" :key="index">
+                                <div class="log-line" :class="logClass(log)" x-text="log"></div>
+                            </template>
+                            <div x-show="logs.length === 0" class="text-muted p-3">暂无日志</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-xl-4">
+                    <div class="card mb-3">
+                        <div class="card-header">快捷操作</div>
+                        <div class="card-body d-grid gap-2">
+                            <button class="btn btn-primary btn-lg" @click="runCrawler">
+                                <i class="bi bi-play-circle-fill me-1"></i>开始爬取
+                            </button>
+                            <button class="btn btn-outline-light" @click="scrollToCrawlerSettings">
+                                <i class="bi bi-sliders me-1"></i>修改配置
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header">系统状态</div>
+                        <div class="card-body">
+                            <p class="mb-2">平台：<span x-text="config.platform"></span></p>
+                            <p class="mb-0">配置项目：<span x-text="configForm.items.length"></span></p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="crawlerSettings">
+            <h3 class="mb-3">参数配置</h3>
+            <form @submit.prevent="runCrawler">
+                <div class="row g-3">
+                    <div class="col-xl-6">
+                        <div class="card">
+                            <div class="card-header">基础配置</div>
+                            <div class="card-body">
+                                <div class="mb-3">
+                                    <label class="form-label">媒体平台</label>
+                                    <select class="form-select" x-model="config.platform" @change="onPlatformChange">
+                                        <option value="dy">抖音 (dy)</option>
+                                        <option value="xhs">小红书 (xhs)</option>
+                                        <option value="ks">快手 (ks)</option>
+                                        <option value="bili">哔哩哔哩 (bili)</option>
+                                        <option value="wb">微博 (wb)</option>
+                                        <option value="tieba">百度贴吧 (tieba)</option>
+                                        <option value="zhihu">知乎 (zhihu)</option>
+                                        <option value="hg">红果短剧 (hg)</option>
+                                    </select>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">爬取类型</label>
+                                    <select class="form-select" x-model="config.crawler_type">
+                                        <option value="search">搜索 (search)</option>
+                                        <option value="detail">详情 (detail)</option>
+                                        <option value="creator">创作者 (creator)</option>
+                                        <option value="rank" :disabled="!['dy', 'hg'].includes(config.platform)">榜单 (rank)</option>
+                                    </select>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">登录方式</label>
+                                    <select class="form-select" x-model="config.login_type" @change="onLoginTypeChange">
+                                        <option value="qrcode">二维码 (qrcode)</option>
+                                        <option value="phone">手机号 (phone)</option>
+                                        <option value="cookie">Cookie</option>
+                                    </select>
+                                </div>
+                                <div x-show="config.login_type === 'qrcode'" class="mb-3 p-3 border border-secondary rounded">
+                                    <div class="d-flex gap-2 align-items-center flex-wrap">
+                                        <button type="button" class="btn btn-primary btn-sm" @click="startQrcodeLogin" :disabled="isRunning || qrcodeLoggingIn">
+                                            <i class="bi bi-camera me-1"></i>扫码登录
+                                        </button>
+                                        <span x-show="qrcodeLoggingIn" class="spinner-border spinner-border-sm"></span>
+                                        <span class="badge" :class="qrcodeStatus.has_state ? 'bg-success' : 'bg-secondary'" x-text="qrcodeStatus.message || '未登录'"></span>
+                                        <button type="button" x-show="qrcodeStatus.has_state" class="btn btn-outline-danger btn-sm" @click="clearQrcodeLogin">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">Cookie</label>
+                                    <input type="text" class="form-control" x-model="config.cookie" placeholder="可选">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card mt-3">
+                            <div class="card-header">运行配置</div>
+                            <div class="card-body">
+                                <div class="row g-3">
+                                    <div class="col-md-6">
+                                        <label class="form-label">起始页</label>
+                                        <input type="number" class="form-control" x-model.number="config.start_page" min="1">
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label">保存方式</label>
+                                        <select class="form-select" x-model="config.save_option">
+                                            <option value="json">JSON</option>
+                                            <option value="csv">CSV</option>
+                                            <option value="sqlite">SQLite</option>
+                                            <option value="db">MySQL</option>
+                                            <option value="mongodb">MongoDB</option>
+                                            <option value="excel">Excel</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="form-check form-switch mt-3">
+                                    <input class="form-check-input" type="checkbox" x-model="config.headless" id="headlessSwitch">
+                                    <label class="form-check-label" for="headlessSwitch">无头模式</label>
+                                </div>
+                                <div class="form-check form-switch mt-2">
+                                    <input class="form-check-input" type="checkbox" x-model="config.get_comment" id="commentSwitch">
+                                    <label class="form-check-label" for="commentSwitch">爬取一级评论</label>
+                                </div>
+                                <div class="form-check form-switch mt-2">
+                                    <input class="form-check-input" type="checkbox" x-model="config.get_sub_comment" id="subCommentSwitch">
+                                    <label class="form-check-label" for="subCommentSwitch">爬取二级评论</label>
+                                </div>
+                                <div class="form-check form-switch mt-2">
+                                    <input class="form-check-input" type="checkbox" x-model="config.autoRun" id="autoRunSwitch">
+                                    <label class="form-check-label" for="autoRunSwitch">自动托管</label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-xl-6">
+                        <div class="card" x-show="config.platform === 'dy'">
+                            <div class="card-header">抖音专用配置</div>
+                            <div class="card-body">
+                                <div class="mb-3">
+                                    <label class="form-label">搜索频道</label>
+                                    <select class="form-select" x-model="config.dy_channel">
+                                        <option value="general">综合</option>
+                                        <option value="video">视频</option>
+                                        <option value="user">用户</option>
+                                        <option value="live">直播</option>
+                                    </select>
+                                </div>
+                                <div class="row g-3">
+                                    <div class="col-md-6">
+                                        <label class="form-label">排序</label>
+                                        <select class="form-select" x-model="config.dy_sort">
+                                            <option value="latest">最新发布</option>
+                                            <option value="most_like">最多点赞</option>
+                                            <option value="general">综合排序</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <label class="form-label">发布时间</label>
+                                        <select class="form-select" x-model="config.dy_publish_time">
+                                            <option value="unlimited">不限</option>
+                                            <option value="1_day">一天内</option>
+                                            <option value="1_week">一周内</option>
+                                            <option value="6_months">半年内</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="row g-3 mt-1">
+                                    <div class="col-md-4">
+                                        <label class="form-label">榜单数量</label>
+                                        <input type="number" class="form-control" x-model.number="config.dy_rank_limit" min="1">
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label">评论数量</label>
+                                        <input type="number" class="form-control" x-model.number="config.dy_rank_comment_limit" min="1">
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label">登录等待秒数</label>
+                                        <input type="number" class="form-control" x-model.number="config.dy_rank_login_wait_seconds" min="0">
+                                    </div>
+                                </div>
+                                <button type="button" class="btn btn-outline-light mt-3" @click="runRankCrawler('dy')">
+                                    <i class="bi bi-trophy me-1"></i>抓取短剧榜单
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="card mt-3" x-show="config.platform === 'hg'">
+                            <div class="card-header">红果短剧抓取</div>
+                            <div class="card-body">
+                                <div class="form-text mb-2">榜单从本地 CSV 导入：固定读取 E:\hg\exports 最新的 top10_rankings.csv。</div>
+                                <div class="d-flex gap-2 flex-wrap">
+                                    <button type="button" class="btn btn-primary mt-3" @click="runRankCrawler('hg')">
+                                        <i class="bi bi-trophy me-1"></i>抓取红果榜单
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            </form>
+        </section>

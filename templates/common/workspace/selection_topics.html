@@ -1,0 +1,109 @@
+<section>
+            <div class="d-flex align-items-center justify-content-between mb-3">
+                <h3 class="mb-0">今日爆款</h3>
+                <div class="d-flex gap-2">
+                    <select class="form-select form-select-sm" style="width: 110px;" x-model="creative.platform" @change="generateCreativeTopics">
+                        <option value="dy">抖音</option><option value="hg">红果</option>
+                    </select>
+                    <button class="btn btn-outline-light btn-sm" onclick="window.location.assign('/selection/topics')" title="打开选题库"><i class="bi bi-journal-bookmark me-1"></i>选题库</button>
+                    <button class="btn btn-primary btn-sm" @click="generateCreativeTopics" :disabled="creative.loading">
+                        <i class="bi bi-lightning-charge me-1"></i>生成 Top10
+                    </button>
+                </div>
+            </div>
+            <div class="alert alert-danger" x-show="creative.error" x-text="creative.error"></div>
+            <div class="creative-topic-table">
+                <table class="table table-sm table-hover align-middle mb-0">
+                    <thead><tr><th>剧目</th><th>平台</th><th>题材</th><th>推荐分 <button type="button" class="btn btn-link btn-sm p-0 text-muted score-help" data-bs-toggle="tooltip" data-bs-placement="top" title="由热度、增长、新鲜度和平台适配加权计算；数据缺失时会动态归一化" aria-label="推荐分计算说明"><i class="bi bi-info-circle"></i></button></th><th>状态</th><th style="width: 270px;">操作</th></tr></thead>
+                    <tbody>
+                        <template x-for="topic in creative.items" :key="topic.id">
+                            <tr>
+                                <td><div class="fw-semibold" x-text="topic.title"></div><small class="text-muted" x-text="topic.recommendation"></small></td>
+                                <td x-text="topic.platform"></td><td x-text="topic.category || '-' "></td>
+                                <td x-text="topic.score.toFixed(1)"></td>
+                                <td>
+                                    <span class="badge lifecycle-badge" :class="topicLifecycleClass(topic.lifecycle_status)" x-text="topic.lifecycle_label || topicLifecycleLabel(topic)"></span>
+                                    <span class="badge d-block mt-1" :class="breakdownStatusClass(topic)" x-text="breakdownStatusLabel(topic)"></span>
+                                </td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-success me-1" x-show="!topic.latest_breakdown_id && topic.status === 'pending_review'" @click="updateCreativeTopic(topic, 'adopted')">采纳</button>
+                                    <button class="btn btn-sm btn-outline-light me-1" x-show="!topic.latest_breakdown_id && ['pending_review', 'adopted'].includes(topic.status)" @click="createCreativeBreakdown(topic)">拆解</button>
+                                    <button class="btn btn-sm btn-outline-secondary" x-show="!topic.latest_breakdown_id && topic.status === 'pending_review'" @click="updateCreativeTopic(topic, 'rejected')">不跟进</button>
+                                    <button class="btn btn-sm btn-outline-success" x-show="!topic.latest_breakdown_id && topic.status === 'rejected'" @click="updateCreativeTopic(topic, 'adopted')"><i class="bi bi-arrow-counterclockwise me-1"></i>重新采纳</button>
+                                    <button class="btn btn-sm btn-outline-light me-1" x-show="topic.latest_breakdown_id && topic.latest_breakdown_status === 'draft' && topic.status !== 'archived'" @click="createCreativeBreakdown(topic)">继续拆解</button>
+                                    <button class="btn btn-sm btn-outline-light me-1" x-show="topic.latest_breakdown_id && topic.latest_breakdown_status !== 'draft' && topic.status !== 'archived'" @click="createCreativeBreakdown(topic)">再次拆解</button>
+                                    <button class="btn btn-sm btn-outline-warning" x-show="topic.latest_breakdown_id && topic.status !== 'archived'" @click="updateCreativeTopic(topic, 'archived')">归档</button>
+                                </td>
+                            </tr>
+                        </template>
+                        <tr x-show="!creative.loading && creative.items.length === 0"><td colspan="6" class="text-center text-muted py-4">暂无候选选题，先生成 Top10</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section>
+            <div class="d-flex align-items-center justify-content-between mb-3">
+                <div>
+                    <h3 class="mb-1">选题库</h3>
+                    <div class="small text-muted">沉淀榜单候选与人工决策，作为后续创作的唯一选题入口</div>
+                </div>
+                <button class="btn btn-outline-secondary btn-sm" @click="fetchTopicLibrary()" :disabled="topicLibrary.loading">
+                    <i class="bi bi-arrow-clockwise me-1"></i>刷新
+                </button>
+            </div>
+            <div class="card mb-3">
+                <div class="card-body">
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-2"><label class="form-label small">平台</label><select class="form-select form-select-sm" x-model="topicLibrary.platform"><option value="">全部平台</option><option value="dy">抖音</option><option value="hg">红果</option></select></div>
+                        <div class="col-md-2"><label class="form-label small">状态</label><select class="form-select form-select-sm" x-model="topicLibrary.lifecycleStatus"><option value="">全部状态</option><option value="pending_review">待评估</option><option value="adopted">已采纳</option><option value="pending_download">待下载</option><option value="downloaded">已下载 X 集</option><option value="pending_breakdown">待拆解</option><option value="breakdown_completed">已拆解</option><option value="pending_imitation">待仿制</option><option value="imitation_generated">已仿制</option><option value="pending_character_relationships">人物关系待生成</option><option value="character_relationships_generated">人物关系已生成</option><option value="pending_episode_outlines">分集大纲待生成</option><option value="episode_outlines_generated">分集大纲已生成</option><option value="pending_beats">Beats脚本待生成</option><option value="beats_generated">Beats脚本已生成</option><option value="beats_exported">Beats脚本已导出</option><option value="rejected">不跟进</option><option value="archived">已归档</option></select></div>
+                        <div class="col-md-2"><label class="form-label small">题材</label><input class="form-control form-control-sm" x-model="topicLibrary.category" placeholder="筛选题材"></div>
+                        <div class="col-md-2"><label class="form-label small">最低推荐分</label><input class="form-control form-control-sm" type="number" min="0" max="100" x-model="topicLibrary.minScore" placeholder="0"></div>
+                        <div class="col-md-2"><label class="form-label small">拆解版本</label><select class="form-select form-select-sm" x-model="topicLibrary.hasLocked"><option value="">全部</option><option value="true">已有锁定拆解</option><option value="false">无锁定拆解</option></select></div>
+                        <div class="col-md-2 d-grid"><button class="btn btn-primary btn-sm" @click="fetchTopicLibrary()"><i class="bi bi-funnel me-1"></i>应用筛选</button></div>
+                    </div>
+                </div>
+            </div>
+            <div class="alert alert-danger" x-show="topicLibrary.error" x-text="topicLibrary.error"></div>
+            <div class="d-flex justify-content-between align-items-center mb-2 small text-muted"><span x-text="`共 ${topicLibrary.items.length} 条选题`"></span><span>评分、来源和状态会持续保留</span></div>
+            <div class="creative-topic-table">
+                <table class="table table-sm table-hover align-middle mb-0">
+                    <colgroup>
+                        <col class="col-topic">
+                        <col class="col-desc">
+                        <col class="col-source">
+                        <col class="col-rank">
+                        <col class="col-category">
+                        <col class="col-score">
+                        <col class="col-status">
+                        <col class="col-breakdown">
+                        <col class="col-actions">
+                    </colgroup>
+                    <thead><tr><th>选题</th><th>简介</th><th>来源</th><th>榜单</th><th>题材</th><th>推荐分 <button type="button" class="btn btn-link btn-sm p-0 text-muted score-help" data-bs-toggle="tooltip" data-bs-placement="top" title="由热度、增长、新鲜度和平台适配加权计算；数据缺失时会动态归一化" aria-label="推荐分计算说明"><i class="bi bi-info-circle"></i></button></th><th>状态</th><th>拆解版本</th><th>操作</th></tr></thead>
+                    <tbody>
+                        <template x-for="topic in topicLibrary.items" :key="topic.id">
+                            <tr>
+                                <td><div class="fw-semibold" x-text="topic.title"></div><small class="text-muted" x-text="topic.recommendation || '暂无推荐理由'"></small></td>
+                                <td class="topic-desc-cell" style="overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;" :title="topic.description">
+                                    <span x-text="topic.description || '暂无简介'"></span>
+                                </td>
+                                <td><span x-text="(topic.source_platforms || [topic.platform]).join('、')"></span><small class="d-block text-muted" x-text="topic.captured_at || '-' "></small></td>
+                                <td x-text="topic.rank_type || '-' "></td>
+                                <td x-text="topic.category || '-' "></td>
+                                <td><span class="fw-semibold" x-text="Number(topic.score || 0).toFixed(1)"></span></td>
+                                <td><span class="badge lifecycle-badge" :class="topicLifecycleClass(topic.lifecycle_status)" x-text="topic.lifecycle_label || topicLifecycleLabel(topic)"></span></td>
+                                <td><span class="badge breakdown-version-badge" :class="breakdownStatusClass(topic)" x-text="breakdownStatusLabel(topic)"></span></td>
+                                <td class="text-nowrap">
+                                    <button class="btn btn-sm btn-outline-light me-1" @click="createTopicLibraryBreakdown(topic)" title="生成拆解" aria-label="生成拆解"><i class="bi bi-diagram-3"></i></button>
+                                    <button class="btn btn-sm btn-outline-primary me-1" @click="openTopicDownload(topic)" title="下载剧集" aria-label="下载剧集"><i class="bi bi-download"></i></button>
+                                    <button class="btn btn-sm btn-outline-info me-1" x-show="Number(topic.downloaded_episode_count || 0) > 0" @click="openTopicTranscriptPreview(topic)" title="预览剧目转写" aria-label="预览剧目转写"><i class="bi bi-eye"></i></button>
+                                    <button class="btn btn-sm btn-outline-success me-1" x-show="topic.status !== 'adopted'" @click="updateTopicLibrary(topic, 'adopted')" title="采纳" aria-label="采纳"><i class="bi bi-check2"></i></button>
+                                    <button class="btn btn-sm btn-outline-warning" x-show="topic.status === 'adopted'" @click="updateTopicLibrary(topic, 'archived')" title="归档" aria-label="归档"><i class="bi bi-archive"></i></button>
+                                </td>
+                            </tr>
+                        </template>
+                        <tr x-show="!topicLibrary.loading && topicLibrary.items.length === 0"><td colspan="9" class="text-center text-muted py-5">暂无符合条件的选题，请先在“今日爆款”生成候选</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>

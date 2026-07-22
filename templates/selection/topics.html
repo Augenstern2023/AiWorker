@@ -1,0 +1,9 @@
+{% extends "layouts/base.html" %}
+
+{% block content %}
+<h1 class="visually-hidden">今日爆款与选题库</h1>
+{% include "common/workspace/selection_topics.html" %}
+{% include "common/workspace/selection_modals.html" %}
+{% include "common/workspace/breakdown_modals.html" %}
+{% endblock %}
+{% block scripts %}<script src="/static/js/selection/topics.js"></script><script src="/static/js/selection/breakdowns.js"></script>{% endblock %}

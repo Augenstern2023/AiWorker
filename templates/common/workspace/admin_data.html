@@ -1,0 +1,73 @@
+<section class="data-section">
+            <div class="d-flex align-items-center justify-content-between mb-3">
+                <h3 class="mb-0">数据管理</h3>
+                <div class="d-flex gap-2 flex-wrap">
+                    <button class="btn btn-outline-danger btn-sm" x-show="!batchDeleteMode" @click="startBatchDelete">
+                        <i class="bi bi-trash me-1"></i>批量删除
+                    </button>
+                    <button class="btn btn-outline-secondary btn-sm" x-show="batchDeleteMode" @click="cancelBatchDelete" title="退出批量删除">
+                        <i class="bi bi-x-lg"></i><span class="visually-hidden">退出批量删除</span>
+                    </button>
+                    <button class="btn btn-outline-danger btn-sm" x-show="batchDeleteMode && selectedFilePaths.length > 0" @click="deleteSelectedFiles" :title="`删除已选 ${selectedFilePaths.length} 个文件`">
+                        <i class="bi bi-trash me-1"></i><span x-text="`删除 (${selectedFilePaths.length})`"></span>
+                    </button>
+                    <input class="form-control form-control-sm" style="width: 260px;" x-model="fileSearch" @input="applyFileSearch" placeholder="搜索文件名或路径">
+                    <select class="form-select form-select-sm" style="width: 150px;" x-model="fileFilter" @change="fetchFiles">
+                        <option value="all">全部</option>
+                        <option value="内容数据">内容数据</option>
+                        <option value="媒体文件">媒体文件</option>
+                        <option value="任务文件">任务文件</option>
+                        <option value="audio">音频</option>
+                        <option value="video">视频</option>
+                        <option value="json">JSON</option>
+                        <option value="md">Markdown</option>
+                        <option value="剧本与文稿">剧本与文稿</option>
+                        <option value="转写数据">转写数据</option>
+                        <option value="元数据">元数据</option>
+                        <option value="Comments">评论</option>
+                        <option value="Contents">内容</option>
+                    </select>
+                    <button class="btn btn-outline-light btn-sm" @click="fetchFiles">刷新</button>
+                </div>
+            </div>
+            <div class="d-flex justify-content-end" x-show="batchDeleteMode && filteredFiles.length">
+                <label class="form-check small"><input class="form-check-input me-1" type="checkbox" :checked="allVisibleFilesSelected()" @change="toggleAllVisibleFiles($event.target.checked)">全选当前结果</label>
+            </div>
+            <template x-for="group in groupedFiles()" :key="group.drama_name">
+                <section class="data-drama-group">
+                    <div class="data-drama-heading d-flex align-items-center justify-content-between">
+                        <h5 class="mb-0"><i class="bi bi-collection-play me-2"></i><span x-text="group.drama_name"></span></h5>
+                        <span class="badge bg-secondary" x-text="`${group.count} 个文件`"></span>
+                    </div>
+                    <template x-for="typeGroup in group.file_groups" :key="`${group.drama_name}:${typeGroup.name}`">
+                        <div>
+                            <div class="data-type-heading d-flex justify-content-between"><span x-text="typeGroup.name"></span><span x-text="typeGroup.files.length"></span></div>
+                            <div class="table-responsive">
+                                <table class="table table-sm table-hover align-middle mb-0">
+                                    <tbody>
+                                        <template x-for="file in typeGroup.files" :key="file.path">
+                                            <tr>
+                                                <td x-show="batchDeleteMode" style="width: 44px;"><input class="form-check-input" type="checkbox" :checked="isFileSelected(file.path)" @change="toggleFileSelection(file.path, $event.target.checked)" :aria-label="`选择 ${file.name}`"></td>
+                                                <td><div class="fw-semibold"><span x-text="file.name"></span><span class="badge bg-secondary ms-2" x-show="file.episode_label" x-text="file.episode_label"></span></div><small class="text-muted" x-text="file.path"></small></td>
+                                                <td style="width: 110px;" x-text="formatSize(file.size)"></td>
+                                                <td style="width: 180px;" x-text="formatDate(file.modified)"></td>
+                                                <td style="width: 110px;"><span class="badge" :class="file.media_type ? 'bg-primary' : 'bg-success'" x-text="file.file_group"></span></td>
+                                                <td style="width: 220px;">
+                                                    <button class="btn btn-sm btn-outline-primary me-1" x-show="file.preview_kind !== 'none'" @click="openFilePreview(file)" title="在线预览" aria-label="在线预览"><i class="bi bi-eye"></i></button>
+                                                    <button class="btn btn-sm btn-outline-light me-1" @click="downloadFile(file.path)" title="下载" aria-label="下载"><i class="bi bi-download"></i></button>
+                                                    <button class="btn btn-sm btn-outline-info me-1" x-show="file.media_type === 'audio'" @click="analyzeAudio(file)" title="分析音频"><i class="bi bi-soundwave"></i></button>
+                                                    <button class="btn btn-sm btn-outline-warning me-1" x-show="file.legacy_category === 'Contents' && file.type === 'json'" @click="openProjectModal(file.path, 'crawl')">爬评论</button>
+                                                    <button class="btn btn-sm btn-outline-success" x-show="file.legacy_category === 'Comments' && file.type === 'json'" @click="openProjectModal(file.path, 'export')">导出</button>
+                                                    <button class="btn btn-sm btn-outline-danger ms-1" @click="deleteFiles([file.path])" title="删除文件" aria-label="删除文件"><i class="bi bi-trash"></i></button>
+                                                </td>
+                                            </tr>
+                                        </template>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </template>
+                </section>
+            </template>
+            <div x-show="filteredFiles.length === 0" class="text-center text-muted py-5">暂无文件</div>
+        </section>

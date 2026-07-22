@@ -151,6 +151,22 @@ class CreativeRepository:
                     FOREIGN KEY(project_id) REFERENCES creative_projects(id)
                 )
             """)
+            for table in (
+                "creative_projects",
+                "creative_breakdowns",
+                "creative_blueprints",
+                "creative_characters",
+                "creative_relationships",
+                "creative_episodes",
+            ):
+                columns = {
+                    row[1]
+                    for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+                if "workflow_task_id" not in columns:
+                    conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN workflow_task_id TEXT"
+                    )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_creative_stage_exports_lookup "
                 "ON creative_stage_exports(project_id, stage, content_fingerprint, exported_at)"
@@ -222,7 +238,7 @@ class CreativeRepository:
         if captured_date:
             clauses.append("captured_at LIKE ?")
             params.append(f"{captured_date}%")
-        locked_expr = "(SELECT id FROM creative_breakdowns b WHERE b.topic_id = creative_topics.id AND b.status = 'locked' ORDER BY b.version DESC, b.id DESC LIMIT 1)"
+        locked_expr = "(SELECT id FROM creative_breakdowns b WHERE b.topic_id = creative_topics.id AND b.status IN ('locked', 'approved') ORDER BY b.version DESC, b.id DESC LIMIT 1)"
         latest_id_expr = "(SELECT id FROM creative_breakdowns b WHERE b.topic_id = creative_topics.id ORDER BY b.version DESC, b.id DESC LIMIT 1)"
         latest_version_expr = "(SELECT version FROM creative_breakdowns b WHERE b.topic_id = creative_topics.id ORDER BY b.version DESC, b.id DESC LIMIT 1)"
         latest_status_expr = "(SELECT status FROM creative_breakdowns b WHERE b.topic_id = creative_topics.id ORDER BY b.version DESC, b.id DESC LIMIT 1)"
@@ -270,21 +286,22 @@ class CreativeRepository:
         sources: dict[str, Any],
         risks: list[str],
         parent_version_id: int | None = None,
+        workflow_task_id: str | None = None,
     ) -> dict[str, Any]:
         with self._connect() as conn:
             row = conn.execute("SELECT COALESCE(MAX(version), 0) AS version, MAX(id) AS parent_id FROM creative_breakdowns WHERE topic_id = ?", (topic_id,)).fetchone()
             version = int(row["version"]) + 1
             now = time.time()
             cursor = conn.execute("""
-                INSERT INTO creative_breakdowns (topic_id, version, parent_version_id, content_json, field_sources_json, risks_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (topic_id, version, parent_version_id if parent_version_id is not None else row["parent_id"], json.dumps(content, ensure_ascii=False), json.dumps(sources, ensure_ascii=False), json.dumps(risks, ensure_ascii=False), now, now))
+                INSERT INTO creative_breakdowns (topic_id, version, parent_version_id, content_json, field_sources_json, risks_json, workflow_task_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (topic_id, version, parent_version_id if parent_version_id is not None else row["parent_id"], json.dumps(content, ensure_ascii=False), json.dumps(sources, ensure_ascii=False), json.dumps(risks, ensure_ascii=False), workflow_task_id, now, now))
         return self.get_breakdown(cursor.lastrowid) or {}
 
     def get_latest_locked_breakdown(self, topic_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT * FROM creative_breakdowns WHERE topic_id = ? AND status = 'locked' ORDER BY version DESC LIMIT 1",
+                "SELECT * FROM creative_breakdowns WHERE topic_id = ? AND status IN ('locked', 'approved') ORDER BY version DESC LIMIT 1",
                 (topic_id,),
             ).fetchone()
         return self._breakdown(dict(row)) if row else None
@@ -300,7 +317,7 @@ class CreativeRepository:
     def list_locked_breakdowns(self, topic_id: int) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM creative_breakdowns WHERE topic_id = ? AND status = 'locked' ORDER BY version DESC, id DESC",
+                "SELECT * FROM creative_breakdowns WHERE topic_id = ? AND status IN ('locked', 'approved') ORDER BY version DESC, id DESC",
                 (topic_id,),
             ).fetchall()
         return [self._breakdown(dict(row)) for row in rows]
@@ -315,8 +332,8 @@ class CreativeRepository:
             row = conn.execute("SELECT status FROM creative_breakdowns WHERE id = ?", (breakdown_id,)).fetchone()
             if not row:
                 return None
-            if row["status"] == "locked":
-                raise ValueError("locked breakdown cannot be edited")
+            if row["status"] != "draft":
+                raise ValueError("immutable breakdown cannot be edited")
             conn.execute("UPDATE creative_breakdowns SET content_json = ?, updated_at = ? WHERE id = ?", (json.dumps(content, ensure_ascii=False), time.time(), breakdown_id))
         return self.get_breakdown(breakdown_id)
 
@@ -336,6 +353,7 @@ class CreativeRepository:
         target_platform: str = "",
         target_audience: str = "",
         episode_duration_seconds: int = 120,
+        workflow_task_id: str | None = None,
     ) -> dict[str, Any]:
         if not 1 <= int(target_episode_count) <= 100:
             raise ValueError("目标集数必须在 1-100 之间")
@@ -361,8 +379,8 @@ class CreativeRepository:
                 breakdown_topic
                 and self._title_key(topic["title"]) == self._title_key(breakdown_topic["title"])
             )
-            if not breakdown or breakdown["status"] != "locked" or not same_title:
-                raise ValueError("创建项目需要该选题的已锁定拆解卡")
+            if not breakdown or breakdown["status"] not in {"locked", "approved"} or not same_title:
+                raise ValueError("创建项目需要该选题的已锁定或已批准拆解卡")
             resolved_target_audience = (
                 target_audience.strip()
                 or self._breakdown_target_audience(breakdown["content_json"])
@@ -372,14 +390,14 @@ class CreativeRepository:
                 """
                 INSERT INTO creative_projects (
                     topic_id, breakdown_id, name, genre, target_platform, target_audience,
-                    target_episode_count, episode_duration_seconds, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    target_episode_count, episode_duration_seconds, workflow_task_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     topic_id, breakdown_id, name.strip() or f"{topic['title']}创作项目",
                     genre.strip() or str(topic["category"] or ""), target_platform.strip(),
                     resolved_target_audience, int(target_episode_count),
-                    int(episode_duration_seconds), now, now,
+                    int(episode_duration_seconds), workflow_task_id, now, now,
                 ),
             )
         return self.get_project(int(cursor.lastrowid)) or {}
@@ -425,6 +443,15 @@ class CreativeRepository:
         content_updates = set(updates) - {"status"}
         if project.get("locked_brief_id") and content_updates:
             raise ValueError("锁定 Brief 后不能修改项目 Brief 参数")
+        if content_updates:
+            with self._connect() as conn:
+                pending_brief = conn.execute(
+                    "SELECT 1 FROM creative_blueprints WHERE project_id = ? "
+                    "AND status = 'submitted' LIMIT 1",
+                    (project_id,),
+                ).fetchone()
+            if pending_brief:
+                raise ValueError("Brief 待审批期间不能修改项目 Brief 参数")
         if "target_episode_count" in updates:
             count = int(updates["target_episode_count"])
             if not 1 <= count <= 100:
@@ -498,12 +525,22 @@ class CreativeRepository:
         breakdown = self.get_breakdown(int(project["breakdown_id"]))
         return {"project": project, "topic": topic or {}, "breakdown": breakdown or {}}
 
+    def link_project_workflow_task(self, project_id: int, workflow_task_id: str) -> None:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE creative_projects SET workflow_task_id = ?, updated_at = ? WHERE id = ?",
+                (workflow_task_id, time.time(), project_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("创作项目不存在")
+
     def create_blueprints(
         self,
         project_id: int,
         items: list[dict[str, Any]],
         job_id: str = "",
         generation_meta: dict[str, Any] | None = None,
+        workflow_task_id: str | None = None,
     ) -> list[dict[str, Any]]:
         if not 1 <= len(items) <= 5:
             raise ValueError("仿制方向数量必须在 1-5 之间")
@@ -522,15 +559,15 @@ class CreativeRepository:
                     """
                     INSERT INTO creative_blueprints (
                         project_id, candidate_group_id, content_json, risk_score, risk_level,
-                        difference_note, source_refs_json, generation_meta_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        difference_note, source_refs_json, generation_meta_json, workflow_task_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         project_id, uuid.uuid4().hex,
                         json.dumps(item.get("content") or item, ensure_ascii=False),
                         float(item.get("risk_score") or 0), str(item.get("risk_level") or "low"),
                         str(item.get("difference_note") or ""), json.dumps(refs, ensure_ascii=False),
-                        json.dumps(meta, ensure_ascii=False), now, now,
+                        json.dumps(meta, ensure_ascii=False), workflow_task_id or project.get("workflow_task_id"), now, now,
                     ),
                 )
                 ids.append(int(cursor.lastrowid))
@@ -557,8 +594,8 @@ class CreativeRepository:
         current = self.get_blueprint(blueprint_id)
         if not current:
             return None
-        if current["status"] == "brief_locked":
-            raise ValueError("已锁定 Brief 不能原地修改")
+        if current["status"] != "draft":
+            raise ValueError("已锁定或审批中的 Brief 不能原地修改")
         with self._connect() as conn:
             conn.execute(
                 """
@@ -575,7 +612,9 @@ class CreativeRepository:
             )
         return self.get_blueprint(blueprint_id)
 
-    def create_blueprint_version(self, blueprint_id: int) -> dict[str, Any]:
+    def create_blueprint_version(
+        self, blueprint_id: int, workflow_task_id: str | None = None
+    ) -> dict[str, Any]:
         current = self.get_blueprint(blueprint_id)
         if not current:
             raise ValueError("仿制方向不存在")
@@ -590,15 +629,16 @@ class CreativeRepository:
                 INSERT INTO creative_blueprints (
                     project_id, candidate_group_id, version, parent_version_id, content_json,
                     risk_score, risk_level, difference_note, source_refs_json,
-                    generation_meta_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    generation_meta_json, workflow_task_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     current["project_id"], current["candidate_group_id"], int(version_row["version"]) + 1,
                     blueprint_id, json.dumps(current["content"], ensure_ascii=False),
                     current["risk_score"], current["risk_level"], current["difference_note"],
                     json.dumps(current["source_refs"], ensure_ascii=False),
-                    json.dumps(current["generation_meta"], ensure_ascii=False), now, now,
+                    json.dumps(current["generation_meta"], ensure_ascii=False),
+                    workflow_task_id or current.get("workflow_task_id"), now, now,
                 ),
             )
         return self.get_blueprint(int(cursor.lastrowid)) or {}
@@ -643,6 +683,7 @@ class CreativeRepository:
         relationships: list[dict[str, Any]],
         job_id: str = "",
         generation_meta: dict[str, Any] | None = None,
+        workflow_task_id: str | None = None,
     ) -> dict[str, Any]:
         project = self.get_project(project_id)
         if not project:
@@ -667,11 +708,11 @@ class CreativeRepository:
                     """
                     INSERT INTO creative_characters (
                         project_id, batch_id, version, parent_version_id, character_key, content_json,
-                        source_refs_json, generation_meta_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        source_refs_json, generation_meta_json, workflow_task_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (project_id, batch_id, version, parent["id"] if parent else None, key, json.dumps(content, ensure_ascii=False),
-                     json.dumps(refs, ensure_ascii=False), json.dumps(meta, ensure_ascii=False), now, now),
+                     json.dumps(refs, ensure_ascii=False), json.dumps(meta, ensure_ascii=False), workflow_task_id or project.get("workflow_task_id"), now, now),
                 )
             for index, content in enumerate(relationships, start=1):
                 key = f"{content.get('from') or ''}>{content.get('to') or ''}:{index}"
@@ -683,11 +724,11 @@ class CreativeRepository:
                     """
                     INSERT INTO creative_relationships (
                         project_id, batch_id, version, parent_version_id, relationship_key, content_json,
-                        source_refs_json, generation_meta_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        source_refs_json, generation_meta_json, workflow_task_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (project_id, batch_id, version, parent["id"] if parent else None, key, json.dumps(content, ensure_ascii=False),
-                     json.dumps(refs, ensure_ascii=False), json.dumps(meta, ensure_ascii=False), now, now),
+                     json.dumps(refs, ensure_ascii=False), json.dumps(meta, ensure_ascii=False), workflow_task_id or project.get("workflow_task_id"), now, now),
                 )
             conn.execute(
                 "UPDATE creative_projects SET status = 'characters_draft', updated_at = ? WHERE id = ?",
@@ -738,6 +779,7 @@ class CreativeRepository:
         series_arc: str,
         job_id: str = "",
         generation_meta: dict[str, Any] | None = None,
+        workflow_task_id: str | None = None,
     ) -> dict[str, Any]:
         project = self.get_project(project_id)
         if not project:
@@ -772,13 +814,13 @@ class CreativeRepository:
                     """
                     INSERT INTO creative_episodes (
                         project_id, stage, episode_number, batch_id, version, parent_version_id, content_json,
-                        upstream_refs_json, generation_meta_json, created_at, updated_at
-                    ) VALUES (?, 'outline', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        upstream_refs_json, generation_meta_json, workflow_task_id, created_at, updated_at
+                    ) VALUES (?, 'outline', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         project_id, int(content["episode"]), batch_id, version, parent["id"] if parent else None,
                         json.dumps(content, ensure_ascii=False), json.dumps(refs, ensure_ascii=False),
-                        json.dumps(meta, ensure_ascii=False), now, now,
+                        json.dumps(meta, ensure_ascii=False), workflow_task_id or project.get("workflow_task_id"), now, now,
                     ),
                 )
             conn.execute(
@@ -823,6 +865,7 @@ class CreativeRepository:
         content: dict[str, Any],
         job_id: str = "",
         generation_meta: dict[str, Any] | None = None,
+        workflow_task_id: str | None = None,
     ) -> dict[str, Any]:
         project = self.get_project(project_id)
         if not project:
@@ -858,13 +901,13 @@ class CreativeRepository:
                 """
                 INSERT INTO creative_episodes (
                     project_id, stage, episode_number, batch_id, version, parent_version_id, content_json,
-                    upstream_refs_json, generation_meta_json, created_at, updated_at
-                ) VALUES (?, 'beats', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    upstream_refs_json, generation_meta_json, workflow_task_id, created_at, updated_at
+                ) VALUES (?, 'beats', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id, int(episode_number), uuid.uuid4().hex, version, parent_id,
                     json.dumps(content, ensure_ascii=False), json.dumps(refs, ensure_ascii=False),
-                    json.dumps(meta, ensure_ascii=False), now, now,
+                    json.dumps(meta, ensure_ascii=False), workflow_task_id or project.get("workflow_task_id"), now, now,
                 ),
             )
             conn.execute(
@@ -933,8 +976,8 @@ class CreativeRepository:
             row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (item_id,)).fetchone()
             if not row:
                 return None
-            if row["status"] == "locked":
-                raise ValueError("已锁定版本不能原地修改")
+            if row["status"] != "draft":
+                raise ValueError("审批中的版本不能原地修改")
             conn.execute(
                 f"UPDATE {table} SET content_json = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(content, ensure_ascii=False), time.time(), item_id),

@@ -11,13 +11,16 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from identity.repository import IdentityRepository
 from identity.schema import Principal
 
 from .approval_service import ApprovalService
 from .repository import SYSTEM_ACTOR, WorkflowRepository
+
+if TYPE_CHECKING:
+    from creative.workflow_adapter import CreativeWorkflowAdapter
 
 
 WORKFLOW_NODES = {
@@ -35,6 +38,7 @@ class TransitionService:
     def __init__(
         self,
         repository: WorkflowRepository | IdentityRepository | str | Path,
+        creative_adapter: CreativeWorkflowAdapter | None = None,
     ) -> None:
         self.repository = (
             repository
@@ -42,6 +46,7 @@ class TransitionService:
             else WorkflowRepository(repository)
         )
         self.approval_service = ApprovalService(self.repository)
+        self.creative_adapter = creative_adapter or self._default_creative_adapter()
 
     def create_submission(
         self,
@@ -96,11 +101,21 @@ class TransitionService:
                     actor=SYSTEM_ACTOR,
                     connection=connection,
                 )
-        return {
+        result = {
             "submission": submission,
             "task": task,
             "next_task": next_task,
         }
+        if self.creative_adapter is not None and submission["resource_type"] in {
+            "breakdown", "brief", "characters", "outline", "beats"
+        }:
+            try:
+                self.creative_adapter.on_approved(submission, actor)
+            except Exception as exc:
+                self.repository.record_mirror_error(
+                    submission["task_id"], submission, str(exc)
+                )
+        return result
 
     def return_submission(
         self,
@@ -108,13 +123,32 @@ class TransitionService:
         actor: Principal,
         review_comment: str,
     ) -> dict[str, Any]:
-        submission, draft = self.approval_service.return_submission(
-            submission_id, actor, review_comment
-        )
+        with self.repository.identity_repository.transaction() as connection:
+            submission, draft = self.approval_service.return_submission(
+                submission_id, actor, review_comment, connection=connection
+            )
+            if self.creative_adapter is not None and submission["resource_type"] in {
+                "breakdown", "brief", "characters", "outline", "beats"
+            }:
+                draft = self.creative_adapter.on_returned(
+                    submission, draft, actor, conn=connection
+                )
         task = self.repository.get_task(submission["task_id"])
         if task is None:
             raise KeyError(submission["task_id"])
         return {"submission": submission, "task": task, "draft": draft}
+
+    def _default_creative_adapter(self) -> CreativeWorkflowAdapter | None:
+        system_path = self.repository.identity_repository.db_path
+        if system_path.parent.name != "system":
+            return None
+        creative_path = system_path.parent.parent / "creative" / "creative.db"
+        from creative.repository import CreativeRepository
+        from creative.workflow_adapter import CreativeWorkflowAdapter
+
+        return CreativeWorkflowAdapter(
+            CreativeRepository(creative_path), self.repository
+        )
 
     def fork(self, submission_id: str, actor: Principal) -> dict[str, Any]:
         return self.approval_service.fork(submission_id, actor)

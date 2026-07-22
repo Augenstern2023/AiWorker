@@ -176,6 +176,7 @@ async def run(job: CrawlJob) -> None:
         sources,
         risks,
         parent_version_id=locked["id"] if locked else None,
+        workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
     )
 
     target_dir = workspace_root / "data" / "creative" / "jobs" / job.job_id

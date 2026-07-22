@@ -247,20 +247,27 @@ class ApprovalService:
         submission_id: str,
         actor: Principal,
         review_comment: str,
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         comment = review_comment.strip()
         if not comment:
             raise ValueError("a non-empty review comment is required")
         actor_id = self.repository._actor_id(actor)
-        with self.repository.identity_repository.transaction() as connection:
-            before = self._require_submission(connection, submission_id)
+        transaction = (
+            nullcontext(connection)
+            if connection is not None
+            else self.repository.identity_repository.transaction()
+        )
+        with transaction as active_connection:
+            before = self._require_submission(active_connection, submission_id)
             if before["status"] != "submitted":
                 raise ValueError("only a submitted submission can be returned")
-            live_actor = self.repository._live_actor(connection, actor_id)
-            task = self.repository._require_task(connection, before["task_id"])
-            self._assert_reviewer(connection, task, live_actor, "version.return")
+            live_actor = self.repository._live_actor(active_connection, actor_id)
+            task = self.repository._require_task(active_connection, before["task_id"])
+            self._assert_reviewer(active_connection, task, live_actor, "version.return")
             now = time.time()
-            cursor = connection.execute(
+            cursor = active_connection.execute(
                 """
                 UPDATE workflow_submissions
                 SET status = 'returned', reviewed_by = ?, reviewed_at = ?,
@@ -270,9 +277,9 @@ class ApprovalService:
                 (actor_id, now, comment, now, submission_id),
             )
             self._assert_updated(cursor)
-            returned = self._require_submission(connection, submission_id)
+            returned = self._require_submission(active_connection, submission_id)
             draft = self._insert_draft(
-                connection,
+                active_connection,
                 task_id=before["task_id"],
                 resource_type=before["resource_type"],
                 resource_id=before["resource_id"],
@@ -284,7 +291,7 @@ class ApprovalService:
                 before["task_id"],
                 "return",
                 actor,
-                connection=connection,
+                connection=active_connection,
                 assignee_user_id=before["submitted_by"],
                 details={
                     "before": before,

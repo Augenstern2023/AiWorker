@@ -3,9 +3,9 @@ window.aiworkerModules.push(() => ({
                 creativeTopicOptionLabel(topic) {
                     if (!topic?.latest_breakdown_id) return `${topic.title}（未拆解）`;
                     const version = topic.latest_breakdown_version ? ` v${topic.latest_breakdown_version}` : '';
-                    if (!topic.locked_breakdown_id) return `${topic.title}（草稿${version}，需先锁定）`;
-                    if (topic.latest_breakdown_status === 'draft') return `${topic.title}（已有锁定版，最新草稿${version}）`;
-                    return `${topic.title}（已锁定${version}）`;
+                    if (!topic.locked_breakdown_id) return `${topic.title}（草稿${version}，需先提交审批）`;
+                    if (topic.latest_breakdown_status === 'draft') return `${topic.title}（已有批准版，最新草稿${version}）`;
+                    return `${topic.title}（${this.creativeWorkflowStatusLabel(topic.latest_breakdown_status)}${version}）`;
                 },
 
                 async fetchCreativeProjects(selectId = null) {
@@ -65,7 +65,7 @@ window.aiworkerModules.push(() => ({
 
                 async openCreativeProjectFromTopic(topic) {
                     if (topic.status !== 'adopted' || !topic.locked_breakdown_id) {
-                        this.topicLibrary.error = '请先采纳选题并锁定拆解版本';
+                        this.topicLibrary.error = '请先采纳选题并批准拆解版本';
                         return;
                     }
                     window.location.assign(`/planning/projects?topic_id=${encodeURIComponent(topic.id)}`);
@@ -139,6 +139,49 @@ window.aiworkerModules.push(() => ({
                     }, 3000);
                 },
 
+                creativeWorkflowStatusLabel(status) {
+                    return {
+                        draft: '草稿', submitted: '待审批', approved: '已批准',
+                        returned: '已退回', superseded: '已替代',
+                        locked: '已批准', brief_locked: '已批准'
+                    }[status] || status || '草稿';
+                },
+
+                creativeResourceEditable(item) {
+                    return !item || item.status === 'draft';
+                },
+
+                async resolveCreativeWorkflowTask(resourceType, projectId = null, topicId = null) {
+                    const response = await aiworkerApi.request('/api/workflow/tasks');
+                    const tasks = await response.json();
+                    if (!response.ok) throw new Error(tasks.detail || '读取审批任务失败');
+                    const open = ['assigned', 'in_progress', 'returned'];
+                    const task = (tasks || []).find(item =>
+                        item.task_type === resourceType
+                        && open.includes(item.status)
+                        && (projectId === null || String(item.project_id || '') === String(projectId))
+                        && (topicId === null || Number(item.topic_id) === Number(topicId))
+                    );
+                    if (!task) throw new Error('当前没有可提交的创作任务，请先领取或开始对应任务');
+                    return task;
+                },
+
+                async submitCreativeResource(resourceType, resourceId, projectId = null, topicId = null) {
+                    const task = await this.resolveCreativeWorkflowTask(resourceType, projectId, topicId);
+                    const response = await aiworkerApi.request('/api/creative/workflow/submit', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({
+                            workflow_task_id: task.id,
+                            resource_type: resourceType,
+                            resource_id: String(resourceId),
+                        }),
+                    });
+                    const data = await response.json();
+                    if (!response.ok) throw new Error(data.detail || '提交审批失败');
+                    return data;
+                },
+
                 latestProjectBlueprints() {
                     const items = this.creativeWorkspace.project?.blueprints || [];
                     const latest = new Map();
@@ -156,6 +199,10 @@ window.aiworkerModules.push(() => ({
                 latestCharacterBatchId() {
                     const project = this.creativeWorkspace.project;
                     if (!project) return '';
+                    const drafts = (project.characters || [])
+                        .filter(item => item.status === 'draft')
+                        .sort((a, b) => Number(b.version) - Number(a.version));
+                    if (drafts.length) return drafts[0].batch_id;
                     if (project.character_batch_id) return project.character_batch_id;
                     const items = project.characters || [];
                     return items.length ? items[items.length - 1].batch_id : '';
@@ -174,6 +221,10 @@ window.aiworkerModules.push(() => ({
                 latestOutlineBatchId() {
                     const project = this.creativeWorkspace.project;
                     if (!project) return '';
+                    const drafts = (project.episodes || [])
+                        .filter(item => item.stage === 'outline' && item.status === 'draft')
+                        .sort((a, b) => Number(b.version) - Number(a.version));
+                    if (drafts.length) return drafts[0].batch_id;
                     if (project.outline_batch_id) return project.outline_batch_id;
                     const items = (project.episodes || []).filter(item => item.stage === 'outline');
                     return items.length ? items[items.length - 1].batch_id : '';
@@ -230,25 +281,29 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
-                generateProjectBlueprints() {
+                async generateProjectBlueprints() {
+                    const task = await this.resolveCreativeWorkflowTask('brief', this.creativeWorkspace.project.id);
                     return this.startCreativeGeneration(
                         `/api/creative/projects/${this.creativeWorkspace.project.id}/blueprints/generate`,
-                        {count: Number(this.creativeWorkspace.directionCount || 3)},
+                        {count: Number(this.creativeWorkspace.directionCount || 3), workflow_task_id: task.id},
                         'blueprints'
                     );
                 },
 
-                generateProjectCharacters() {
-                    return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/characters/generate`, {}, 'characters');
+                async generateProjectCharacters() {
+                    const task = await this.resolveCreativeWorkflowTask('characters', this.creativeWorkspace.project.id);
+                    return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/characters/generate`, {workflow_task_id: task.id}, 'characters');
                 },
 
-                generateProjectOutlines() {
-                    return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/outlines/generate`, {}, 'outlines');
+                async generateProjectOutlines() {
+                    const task = await this.resolveCreativeWorkflowTask('outline', this.creativeWorkspace.project.id);
+                    return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/outlines/generate`, {workflow_task_id: task.id}, 'outlines');
                 },
 
-                generateProjectBeats() {
+                async generateProjectBeats() {
                     const episode = Number(this.creativeWorkspace.selectedEpisode || 0);
-                    return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/episodes/${episode}/beats/generate`, {}, 'beats');
+                    const task = await this.resolveCreativeWorkflowTask('beats', this.creativeWorkspace.project.id);
+                    return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/episodes/${episode}/beats/generate`, {workflow_task_id: task.id}, 'beats');
                 },
 
                 creativeActionLabel(action) {
@@ -455,21 +510,28 @@ window.aiworkerModules.push(() => ({
                 async createProjectBlueprintVersion() {
                     const item = this.selectedProjectBlueprint();
                     if (!item) return;
-                    const res = await aiworkerApi.request(`/api/creative/blueprints/${item.id}/versions`, {method: 'POST'});
+                    const task = await this.resolveCreativeWorkflowTask('brief', this.creativeWorkspace.project.id);
+                    const res = await aiworkerApi.request(`/api/creative/blueprints/${item.id}/versions`, {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({workflow_task_id: task.id})
+                    });
                     const data = await res.json();
                     if (!res.ok) { this.creativeWorkspace.error = data.detail || '创建新版本失败'; return; }
                     await this.selectCreativeProject(this.creativeWorkspace.project.id);
                     this.creativeWorkspace.selectedBlueprintId = data.id;
                 },
 
-                async lockProjectBrief() {
+                async submitProjectBrief() {
                     const item = this.selectedProjectBlueprint();
                     if (!item) return;
-                    const res = await aiworkerApi.request(`/api/creative/blueprints/${item.id}/lock-brief`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({difference_note: item.difference_note || ''})});
-                    const data = await res.json();
-                    if (!res.ok) { this.creativeWorkspace.error = data.detail || '锁定 Brief 失败'; return; }
-                    await this.selectCreativeProject(this.creativeWorkspace.project.id);
-                    this.creativeWorkspace.step = 'characters';
+                    try {
+                        await this.saveProjectBlueprint();
+                        await this.submitCreativeResource('brief', item.id, this.creativeWorkspace.project.id);
+                        await this.selectCreativeProject(this.creativeWorkspace.project.id);
+                        this.showCreativeNotice('Brief 已提交审批');
+                    } catch (error) {
+                        this.creativeWorkspace.error = error.message || '提交 Brief 失败';
+                    }
                 },
 
                 async createBlankCharacterBatch() {
@@ -504,35 +566,36 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
-                async lockProjectCharacters() {
+                async submitProjectCharacters() {
                     const projectId = this.creativeWorkspace.project.id;
                     const batchId = this.latestCharacterBatchId();
                     if (!batchId) return;
-                    const res = await aiworkerApi.request(`/api/creative/projects/${projectId}/characters/${batchId}/lock`, {method: 'POST'});
-                    const data = await res.json();
-                    if (!res.ok) { this.creativeWorkspace.error = data.detail || '锁定人物关系失败'; return; }
-                    await this.selectCreativeProject(projectId);
-                    this.creativeWorkspace.step = 'outlines';
+                    try {
+                        await this.submitCreativeResource('characters', `${projectId}:${batchId}`, projectId);
+                        await this.selectCreativeProject(projectId);
+                        this.showCreativeNotice('人物关系已提交审批');
+                    } catch (error) { this.creativeWorkspace.error = error.message || '提交人物关系失败'; }
                 },
 
-                async lockProjectOutlines() {
+                async submitProjectOutlines() {
                     const projectId = this.creativeWorkspace.project.id;
                     const batchId = this.latestOutlineBatchId();
                     if (!batchId) return;
-                    const res = await aiworkerApi.request(`/api/creative/projects/${projectId}/outlines/${batchId}/lock`, {method: 'POST'});
-                    const data = await res.json();
-                    if (!res.ok) { this.creativeWorkspace.error = data.detail || '锁定分集大纲失败'; return; }
-                    await this.selectCreativeProject(projectId);
-                    this.showCreativeNotice('分集大纲已锁定，可从每集操作进入单集节拍表');
+                    try {
+                        await this.submitCreativeResource('outline', `${projectId}:${batchId}`, projectId);
+                        await this.selectCreativeProject(projectId);
+                        this.showCreativeNotice('分集大纲已提交审批');
+                    } catch (error) { this.creativeWorkspace.error = error.message || '提交分集大纲失败'; }
                 },
 
-                async lockProjectBeats() {
+                async submitProjectBeats() {
                     const item = this.selectedProjectBeats();
                     if (!item) return;
-                    const res = await aiworkerApi.request(`/api/creative/episodes/${item.id}/lock`, {method: 'POST'});
-                    const data = await res.json();
-                    if (!res.ok) { this.creativeWorkspace.error = data.detail || '锁定 Beats 失败'; return; }
-                    await this.selectCreativeProject(this.creativeWorkspace.project.id);
+                    try {
+                        await this.submitCreativeResource('beats', item.id, this.creativeWorkspace.project.id);
+                        await this.selectCreativeProject(this.creativeWorkspace.project.id);
+                        this.showCreativeNotice('Beats 已提交审批');
+                    } catch (error) { this.creativeWorkspace.error = error.message || '提交 Beats 失败'; }
                 },
 
                 creativeExportUrl(stage, format = 'md') {

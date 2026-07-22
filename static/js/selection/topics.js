@@ -67,23 +67,28 @@ window.aiworkerModules.push(() => ({
                     if (!topic?.latest_breakdown_id) return '未拆解';
                     const version = topic.latest_breakdown_version ? ` v${topic.latest_breakdown_version}` : '';
                     if (topic.latest_breakdown_status === 'locked') return `已锁定${version}`;
+                    if (topic.latest_breakdown_status === 'submitted') return `待审批${version}`;
+                    if (topic.latest_breakdown_status === 'approved') return `已批准${version}`;
+                    if (topic.latest_breakdown_status === 'returned') return `已退回${version}`;
                     return topic.locked_breakdown_id
-                        ? `草稿${version} · 已有锁定版`
-                        : `草稿${version} · 待锁定`;
+                        ? `草稿${version} · 已有批准版`
+                        : `草稿${version} · 待提交`;
                 },
 
                 breakdownStatusClass(topic) {
                     if (!topic?.latest_breakdown_id) return 'bg-secondary';
-                    if (topic.latest_breakdown_status === 'locked') return 'bg-success';
+                    if (['locked', 'approved'].includes(topic.latest_breakdown_status)) return 'bg-success';
+                    if (topic.latest_breakdown_status === 'returned') return 'bg-danger';
+                    if (topic.latest_breakdown_status === 'submitted') return 'bg-warning text-dark';
                     return topic.locked_breakdown_id ? 'bg-info text-dark' : 'bg-warning text-dark';
                 },
 
                 creativeTopicOptionLabel(topic) {
                     if (!topic?.latest_breakdown_id) return `${topic.title}（未拆解）`;
                     const version = topic.latest_breakdown_version ? ` v${topic.latest_breakdown_version}` : '';
-                    if (!topic.locked_breakdown_id) return `${topic.title}（草稿${version}，需先锁定）`;
-                    if (topic.latest_breakdown_status === 'draft') return `${topic.title}（已有锁定版，最新草稿${version}）`;
-                    return `${topic.title}（已锁定${version}）`;
+                    if (!topic.locked_breakdown_id) return `${topic.title}（草稿${version}，需先提交审批）`;
+                    if (topic.latest_breakdown_status === 'draft') return `${topic.title}（已有批准版，最新草稿${version}）`;
+                    return `${topic.title}（${this.breakdownStatusLabel(topic)}）`;
                 },
 
 }));

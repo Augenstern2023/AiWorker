@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 import uuid
 from contextlib import nullcontext
 from pathlib import Path
@@ -154,6 +155,105 @@ class WorkflowRepository:
                 (task_id,),
             ).fetchall()
         return [self._submission_dict(row) for row in rows]
+
+    def get_latest_resource_submission(
+        self,
+        resource_type: str,
+        resource_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        with self.identity_repository.connection_scope(connection) as active_connection:
+            row = active_connection.execute(
+                """
+                SELECT * FROM workflow_submissions
+                WHERE resource_type = ? AND resource_id = ?
+                ORDER BY version DESC, created_at DESC, id DESC LIMIT 1
+                """,
+                (resource_type, resource_id),
+            ).fetchone()
+        return self._submission_dict(row) if row is not None else None
+
+    def update_submission_resource_id(
+        self,
+        submission_id: str,
+        resource_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        with self.identity_repository.connection_scope(connection) as active_connection:
+            cursor = active_connection.execute(
+                "UPDATE workflow_submissions SET resource_id = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = ? AND status = 'draft'",
+                (resource_id, submission_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("only a draft registry entry may change resource")
+            updated = self.get_submission(submission_id, connection=active_connection)
+        assert updated is not None
+        return updated
+
+    def record_mirror_error(
+        self, task_id: str, submission: dict[str, Any], message: str
+    ) -> None:
+        with self.identity_repository.transaction() as connection:
+            self._record_event(
+                connection,
+                task_id,
+                "creative.mirror_error",
+                SYSTEM_ACTOR.user_id,
+                None,
+                None,
+                {"submission_id": submission["id"], "error": message},
+            )
+
+    def record_legacy_force(
+        self,
+        task_id: str,
+        actor: Principal,
+        resource_type: str,
+        resource_id: str,
+    ) -> None:
+        with self.identity_repository.transaction() as connection:
+            task = self._require_task(connection, task_id)
+            self._record_event(
+                connection,
+                task_id,
+                "creative.legacy_force_lock",
+                actor.user_id,
+                task["status"],
+                task["status"],
+                {"resource_type": resource_type, "resource_id": resource_id},
+            )
+
+    def supersede_resource_approvals(
+        self,
+        resource_type: str,
+        resource_id: str,
+        actor: Principal,
+    ) -> None:
+        with self.identity_repository.transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM workflow_submissions WHERE resource_type = ? "
+                "AND resource_id = ? AND status = 'approved'",
+                (resource_type, resource_id),
+            ).fetchall()
+            for row in rows:
+                before = self._submission_dict(row)
+                connection.execute(
+                    "UPDATE workflow_submissions SET status = 'superseded', updated_at = ? WHERE id = ?",
+                    (time.time(), before["id"]),
+                )
+                after = self.get_submission(before["id"], connection=connection)
+                self._record_event(
+                    connection,
+                    before["task_id"],
+                    "submission.supersede",
+                    actor.user_id,
+                    "approved",
+                    "superseded",
+                    {"before": before, "after": after},
+                )
 
     def create_next_task(
         self,

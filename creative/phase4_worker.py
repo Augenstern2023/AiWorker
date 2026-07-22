@@ -57,8 +57,9 @@ def _locked_characters(project: dict[str, Any]) -> tuple[list[dict[str, Any]], l
     batch_id = project.get("character_batch_id")
     if not batch_id:
         raise ValueError("项目尚未锁定人物关系")
-    characters = [item for item in project["characters"] if item["batch_id"] == batch_id and item["status"] == "locked"]
-    relationships = [item for item in project["relationships"] if item["batch_id"] == batch_id and item["status"] == "locked"]
+    readable_statuses = {"locked", "approved"}
+    characters = [item for item in project["characters"] if item["batch_id"] == batch_id and item["status"] in readable_statuses]
+    relationships = [item for item in project["relationships"] if item["batch_id"] == batch_id and item["status"] in readable_statuses]
     return characters, relationships
 
 

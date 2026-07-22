@@ -530,7 +530,7 @@ window.aiworkerModules.push(() => ({
 
                 async saveBreakdownEditor() {
                     const record = this.breakdownEditor.record;
-                    if (!record || record.status === 'locked') return false;
+                    if (!record || record.status !== 'draft') return false;
                     const content = this.normalizeBreakdownEditorContent(this.breakdownEditor.content, this.breakdownEditor.fieldGuide);
                     this.breakdownEditor.saving = true;
                     this.breakdownEditor.error = '';
@@ -550,21 +550,38 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
-                async lockBreakdownEditor() {
+                async submitBreakdownEditor() {
                     const record = this.breakdownEditor.record;
-                    if (!record || record.status === 'locked') return;
+                    if (!record || record.status !== 'draft') return;
                     if (!await this.saveBreakdownEditor()) return;
                     this.breakdownEditor.saving = true;
                     try {
-                        const res = await aiworkerApi.request(`/api/creative/breakdowns/${record.id}/lock`, {method: 'POST'});
+                        const tasksResponse = await aiworkerApi.request('/api/workflow/tasks');
+                        const tasks = await tasksResponse.json();
+                        if (!tasksResponse.ok) throw new Error(tasks.detail || '读取审批任务失败');
+                        const task = (tasks || []).find(item =>
+                            item.task_type === 'breakdown'
+                            && ['assigned', 'in_progress', 'returned'].includes(item.status)
+                            && Number(item.topic_id) === Number(record.topic_id)
+                        );
+                        if (!task) throw new Error('当前没有可提交的拆解任务，请先领取或开始任务');
+                        const res = await aiworkerApi.request('/api/creative/workflow/submit', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({
+                                workflow_task_id: task.id,
+                                resource_type: 'breakdown',
+                                resource_id: String(record.id),
+                            }),
+                        });
                         const data = await res.json();
-                        if (!res.ok) throw new Error(data.detail || '锁定拆解失败');
-                        this.syncBreakdownEditorRecord(data);
+                        if (!res.ok) throw new Error(data.detail || '提交拆解失败');
+                        record.status = 'submitted';
                         if (this.breakdownEditor.source === 'topic-library') await this.fetchTopicLibrary();
                         if (this.breakdownEditor.source === 'creative') await this.fetchCreativeTopics();
-                        alert('拆解版本已锁定，后续修改需要创建新版本。');
+                        alert('拆解版本已提交审批。');
                     } catch (e) {
-                        this.breakdownEditor.error = e.message || '锁定拆解失败';
+                        this.breakdownEditor.error = e.message || '提交拆解失败';
                     } finally {
                         this.breakdownEditor.saving = false;
                     }
@@ -575,7 +592,7 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async lockTopicLibraryBreakdown() {
-                    return this.lockBreakdownEditor();
+                    return this.submitBreakdownEditor();
                 },
 
                 async generateCreativeTopics() {
@@ -609,8 +626,8 @@ window.aiworkerModules.push(() => ({
                     return this.startTranscriptBreakdown(topic, 'creative');
                 },
 
-                async lockCreativeBreakdown() {
-                    return this.lockBreakdownEditor();
+                async submitCreativeBreakdown() {
+                    return this.submitBreakdownEditor();
                 },
 
 }));

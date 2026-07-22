@@ -236,3 +236,38 @@ def test_selection_drama_page_only_references_loaded_methods():
 
     assert "selection_modals.html" not in page
     assert calls - definitions - {"Number", "calc"} == set()
+
+
+def test_creative_workflow_ui_submits_and_reviews_without_direct_locks():
+    creative = _read("static/js/common/creative.js")
+    breakdowns = _read("static/js/selection/breakdowns.js")
+    approvals = _read("static/js/review/approvals.js")
+    workspace = "\n".join(
+        _read(f"templates/common/workspace/{name}")
+        for name in (
+            "breakdown_modals.html",
+            "project_blueprints.html",
+            "project_characters.html",
+            "project_outlines.html",
+            "project_beats.html",
+        )
+    )
+
+    assert "提交审批" in workspace
+    assert "待审批" in workspace
+    assert "已批准" in workspace
+    assert "已退回" in workspace
+    for direct_lock in (
+        "/lock-brief",
+        "/characters/${batchId}/lock",
+        "/outlines/${batchId}/lock",
+        "/episodes/${item.id}/lock",
+    ):
+        assert direct_lock not in creative
+    assert "/breakdowns/${" not in breakdowns or "/lock" not in breakdowns
+    assert "/api/creative/workflow/submit" in creative + breakdowns
+    assert "/api/workflow/submissions/${submission.id}/${action}" in approvals
+    assert "writeReview(submission, 'approve')" in approvals
+    assert "writeReview(submission, 'return'" in approvals
+    assert "review_comment" in approvals
+    assert "trim()" in approvals

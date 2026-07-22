@@ -50,13 +50,13 @@
                             </div>
                         </template>
                     </div>
-                    <div class="small text-muted mt-2">内容字段来源和风险信息保留在拆解版本中。锁定后不可覆盖，只能创建新版本。</div>
+                    <div class="small text-muted mt-2">内容字段来源和风险信息保留在拆解版本中。提交后不可覆盖；状态：待审批、已批准或已退回。</div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">关闭</button>
                     <button type="button" class="btn btn-outline-info" @click="regenerateCurrentBreakdown" :disabled="breakdownEditor.saving || breakdownGenerationRunning()"><i class="bi bi-arrow-clockwise me-1"></i>重新生成</button>
                     <button type="button" class="btn btn-outline-light" @click="saveBreakdownEditor" :disabled="breakdownEditor.saving || breakdownEditor.record?.status === 'locked'"><i class="bi bi-save me-1"></i>保存草稿</button>
-                    <button type="button" class="btn btn-warning" @click="lockBreakdownEditor" :disabled="breakdownEditor.saving || breakdownEditor.record?.status === 'locked'"><i class="bi bi-lock me-1"></i>锁定版本</button>
+                    <button type="button" class="btn btn-warning" @click="submitBreakdownEditor" :disabled="breakdownEditor.saving || breakdownEditor.record?.status !== 'draft'"><i class="bi bi-send me-1"></i>提交审批</button>
                 </div>
             </div>
         </div>

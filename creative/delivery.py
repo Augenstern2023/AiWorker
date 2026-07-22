@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import time
 import uuid
 from pathlib import Path
@@ -29,6 +30,10 @@ from identity.schema import Principal
 from workflow.repository import WorkflowRepository
 
 from .api import _markdown_value, build_beats_markdown
+from .lifecycle_service import (
+    content_fingerprint as stage_content_fingerprint,
+    current_beats_content,
+)
 from .repository import CreativeRepository
 
 
@@ -45,6 +50,7 @@ class DeliveryCreateRequest(BaseModel):
     stage: str = Field(pattern="^(brief|characters|outline|beats)$")
     submission_id: str = Field(min_length=1)
     format: str = Field(pattern="^(md|json)$")
+    workflow_task_id: str | None = None
 
 
 class DeliveryService:
@@ -80,6 +86,11 @@ class DeliveryService:
                     format TEXT NOT NULL,
                     content_fingerprint TEXT NOT NULL,
                     actor_id TEXT NOT NULL,
+                    workflow_task_id TEXT,
+                    stage_content_fingerprint TEXT NOT NULL DEFAULT '',
+                    stage_export_recorded_at REAL,
+                    workflow_completed_at REAL,
+                    audit_recorded_at REAL,
                     path TEXT NOT NULL,
                     created_at REAL NOT NULL,
                     FOREIGN KEY(project_id) REFERENCES creative_projects(id)
@@ -89,6 +100,33 @@ class DeliveryService:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_creative_deliveries_created "
                 "ON creative_deliveries(created_at DESC, id)"
+            )
+            columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(creative_deliveries)"
+                ).fetchall()
+            }
+            additions = {
+                "workflow_task_id": "TEXT",
+                "stage_content_fingerprint": "TEXT NOT NULL DEFAULT ''",
+                "stage_export_recorded_at": "REAL",
+                "workflow_completed_at": "REAL",
+                "audit_recorded_at": "REAL",
+            }
+            for column, definition in additions.items():
+                if column not in columns:
+                    connection.execute(
+                        f"ALTER TABLE creative_deliveries ADD COLUMN {column} {definition}"
+                    )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_creative_delivery_request "
+                "ON creative_deliveries(project_id, stage, submission_id, format)"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_creative_delivery_task "
+                "ON creative_deliveries(workflow_task_id) "
+                "WHERE workflow_task_id IS NOT NULL"
             )
 
     def create(
@@ -100,6 +138,7 @@ class DeliveryService:
         format: str,
         actor: Principal,
         request: Request | None = None,
+        workflow_task_id: str | None = None,
     ) -> dict[str, Any]:
         if not actor.is_system_admin:
             raise PermissionError("only system administrators may create deliveries")
@@ -126,6 +165,21 @@ class DeliveryService:
         payload = self._payload(project, stage, snapshot)
         content = self._serialize(project, payload, stage, format)
         fingerprint = hashlib.sha256(content).hexdigest()
+        lifecycle_fingerprint = stage_content_fingerprint(
+            current_beats_content(project) if stage == "beats" else payload["content"]
+        )
+        existing = self._find_existing(
+            project_id, stage, submission_id, format
+        )
+        if existing is not None:
+            if (
+                workflow_task_id
+                and existing.get("workflow_task_id")
+                and existing["workflow_task_id"] != workflow_task_id
+            ):
+                raise ValueError("delivery already belongs to another workflow task")
+            return self._reconcile_delivery(existing)
+        task = self._resolve_delivery_task(project_id, workflow_task_id)
         delivery_id = str(uuid.uuid4())
         extension = "json" if format == "json" else "md"
         path = (self.delivery_dir / f"{delivery_id}.{extension}").resolve()
@@ -156,8 +210,9 @@ class DeliveryService:
                     INSERT INTO creative_deliveries (
                         id, project_id, stage, resource_type, resource_id,
                         resource_version, submission_id, submission_version,
-                        format, content_fingerprint, actor_id, path, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        format, content_fingerprint, actor_id, workflow_task_id,
+                        stage_content_fingerprint, path, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         delivery_id,
@@ -171,30 +226,33 @@ class DeliveryService:
                         format,
                         fingerprint,
                         actor.user_id,
+                        task["id"],
+                        lifecycle_fingerprint,
                         str(path),
                         created_at,
                     ),
                 )
-            self.audit_service.record(
-                actor=actor,
-                action="delivery.create",
-                target_type="delivery",
-                target_id=delivery_id,
-                project_id=str(project_id),
-                before=None,
-                after=record,
-                reason=None,
-                result="success",
-                request=request,
+        except sqlite3.IntegrityError:
+            path.unlink(missing_ok=True)
+            existing = self._find_existing(
+                project_id, stage, submission_id, format
             )
+            if existing is None:
+                raise
+            return self._reconcile_delivery(existing)
         except BaseException:
             path.unlink(missing_ok=True)
-            with self.creative_repository._connect() as connection:
-                connection.execute(
-                    "DELETE FROM creative_deliveries WHERE id = ?", (delivery_id,)
-                )
             raise
-        return record
+        record.update(
+            {
+                "workflow_task_id": task["id"],
+                "stage_content_fingerprint": lifecycle_fingerprint,
+                "stage_export_recorded_at": None,
+                "workflow_completed_at": None,
+                "audit_recorded_at": None,
+            }
+        )
+        return self._reconcile_delivery(record, request=request)
 
     def list(self) -> list[dict[str, Any]]:
         with self.creative_repository._connect() as connection:
@@ -206,7 +264,10 @@ class DeliveryService:
                 ORDER BY d.created_at DESC, d.id DESC
                 """
             ).fetchall()
-        return [self._public_record(dict(row)) for row in rows]
+        return [
+            self._reconcile_delivery(self._public_record(dict(row)))
+            for row in rows
+        ]
 
     def options(self) -> list[dict[str, Any]]:
         with self.workflow_repository.identity_repository.connect() as connection:
@@ -228,16 +289,264 @@ class DeliveryService:
             project = self.creative_repository.get_project(int(row["project_id"]))
             if project is None:
                 continue
+            try:
+                task = self._resolve_delivery_task(int(row["project_id"]), None)
+            except (KeyError, ValueError):
+                continue
             options.append(
                 {
                     **dict(row),
                     "project_id": str(row["project_id"]),
                     "project_name": project["name"],
+                    "workflow_task_id": task["id"],
                 }
             )
         return options
 
     def get(self, delivery_id: str) -> dict[str, Any] | None:
+        with self.creative_repository._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT d.*, p.name AS project_name
+                FROM creative_deliveries d
+                JOIN creative_projects p ON p.id = d.project_id
+                WHERE d.id = ?
+                """,
+                (delivery_id,),
+            ).fetchone()
+        return (
+            self._reconcile_delivery(self._public_record(dict(row)))
+            if row is not None
+            else None
+        )
+
+    def _find_existing(
+        self, project_id: int, stage: str, submission_id: str, format: str
+    ) -> dict[str, Any] | None:
+        with self.creative_repository._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT d.*, p.name AS project_name
+                FROM creative_deliveries d
+                JOIN creative_projects p ON p.id = d.project_id
+                WHERE d.project_id = ? AND d.stage = ?
+                  AND d.submission_id = ? AND d.format = ?
+                """,
+                (project_id, stage, submission_id, format),
+            ).fetchone()
+        return self._public_record(dict(row)) if row is not None else None
+
+    def _resolve_delivery_task(
+        self, project_id: int, workflow_task_id: str | None
+    ) -> dict[str, Any]:
+        with self.workflow_repository.identity_repository.connect() as connection:
+            if workflow_task_id:
+                row = connection.execute(
+                    "SELECT * FROM workflow_tasks WHERE id = ?",
+                    (workflow_task_id,),
+                ).fetchone()
+                rows = [row] if row is not None else []
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM workflow_tasks
+                    WHERE project_id = ? AND task_type = 'delivery'
+                      AND role_code = 'system_admin'
+                      AND status IN ('pool', 'assigned', 'in_progress')
+                    ORDER BY created_at, id
+                    """,
+                    (str(project_id),),
+                ).fetchall()
+        if not rows:
+            raise ValueError("an active terminal delivery workflow task is required")
+        if len(rows) != 1:
+            raise ValueError("workflow_task_id is required when delivery tasks are ambiguous")
+        task = self.workflow_repository._task_dict(rows[0])
+        if task["task_type"] != "delivery":
+            raise ValueError("workflow task must be the terminal delivery node")
+        if task["role_code"] != "system_admin":
+            raise ValueError("delivery workflow task must belong to system_admin")
+        if str(task["project_id"] or "") != str(project_id):
+            raise ValueError("delivery workflow task belongs to another project")
+        if task["status"] not in {"pool", "assigned", "in_progress"}:
+            raise ValueError("delivery workflow task is not active")
+        return task
+
+    def _reconcile_delivery(
+        self, record: dict[str, Any], *, request: Request | None = None
+    ) -> dict[str, Any]:
+        path = Path(record["path"]).resolve()
+        if path.parent != self.delivery_dir.resolve() or not path.is_file():
+            raise FileNotFoundError(path)
+        if not record.get("workflow_task_id"):
+            task = self._resolve_delivery_task(int(record["project_id"]), None)
+            self._mark_reconciled(
+                record["id"], "workflow_task_id", task["id"]
+            )
+            record["workflow_task_id"] = task["id"]
+        if not record.get("stage_content_fingerprint"):
+            submission = self.workflow_repository.get_submission(
+                record["submission_id"]
+            )
+            project = self.creative_repository.get_project(
+                int(record["project_id"])
+            )
+            if submission is None or project is None:
+                raise ValueError("delivery source is no longer available")
+            snapshot = submission["content_snapshot"]
+            payload = self._payload(project, record["stage"], snapshot)
+            fingerprint = stage_content_fingerprint(
+                current_beats_content(project)
+                if record["stage"] == "beats"
+                else payload["content"]
+            )
+            self._mark_reconciled(
+                record["id"], "stage_content_fingerprint", fingerprint
+            )
+            record["stage_content_fingerprint"] = fingerprint
+        self._record_stage_export(record)
+        self._complete_workflow_task(record)
+        self._record_audit(record, request=request)
+        refreshed = self._get_unreconciled(record["id"])
+        assert refreshed is not None
+        return refreshed
+
+    def _record_stage_export(self, record: dict[str, Any]) -> None:
+        if record.get("stage_export_recorded_at") is not None:
+            return
+        if record["stage"] == "beats":
+            fingerprint = record["stage_content_fingerprint"]
+            if not self.creative_repository.has_stage_export(
+                int(record["project_id"]), "beats", fingerprint
+            ):
+                self.creative_repository.record_stage_export(
+                    int(record["project_id"]),
+                    "beats",
+                    record["format"],
+                    fingerprint,
+                )
+        self._mark_reconciled(
+            record["id"], "stage_export_recorded_at", time.time()
+        )
+
+    def _complete_workflow_task(self, record: dict[str, Any]) -> None:
+        if record.get("workflow_completed_at") is not None:
+            return
+        repository = self.workflow_repository.identity_repository
+        with repository.transaction() as connection:
+            task = self.workflow_repository._require_task(
+                connection, record["workflow_task_id"]
+            )
+            if (
+                task["task_type"] != "delivery"
+                or task["role_code"] != "system_admin"
+                or str(task["project_id"] or "") != str(record["project_id"])
+            ):
+                raise ValueError("delivery registry references a mismatched workflow task")
+            if task["status"] != "completed":
+                if task["status"] not in {"pool", "assigned", "in_progress"}:
+                    raise ValueError("delivery workflow task cannot be completed")
+                actor = self.workflow_repository._live_actor(
+                    connection, record["actor_user_id"]
+                )
+                if not actor["is_system_admin"]:
+                    raise PermissionError(
+                        "delivery actor is no longer a system administrator"
+                    )
+                self.workflow_repository.transition_task_in_transaction(
+                    task["id"],
+                    "deliver",
+                    actor,
+                    connection=connection,
+                    event_type="delivery.complete",
+                    details={
+                        "delivery_id": record["id"],
+                        "stage": record["stage"],
+                        "submission_id": record["submission_id"],
+                    },
+                )
+            else:
+                event = connection.execute(
+                    "SELECT 1 FROM workflow_task_events "
+                    "WHERE task_id = ? AND event_type = 'delivery.complete' LIMIT 1",
+                    (task["id"],),
+                ).fetchone()
+                if event is None:
+                    actor = self.workflow_repository._live_actor(
+                        connection, record["actor_user_id"]
+                    )
+                    self.workflow_repository.record_task_event_in_transaction(
+                        task["id"],
+                        "delivery.complete",
+                        actor,
+                        connection=connection,
+                        details={
+                            "delivery_id": record["id"],
+                            "stage": record["stage"],
+                            "submission_id": record["submission_id"],
+                            "reconciled": True,
+                        },
+                    )
+        self._mark_reconciled(
+            record["id"], "workflow_completed_at", time.time()
+        )
+
+    def _record_audit(
+        self, record: dict[str, Any], *, request: Request | None
+    ) -> None:
+        if record.get("audit_recorded_at") is not None:
+            return
+        existing = self.audit_service.query(
+            action="delivery.create", target_id=record["id"]
+        )
+        if not existing:
+            repository = self.workflow_repository.identity_repository
+            with repository.connect() as connection:
+                actor_data = self.workflow_repository._live_actor(
+                    connection, record["actor_user_id"]
+                )
+            actor = Principal(
+                user_id=actor_data["user_id"],
+                username="delivery-actor",
+                display_name="Delivery Actor",
+                role_codes=tuple(actor_data["role_codes"]),
+                permissions=frozenset(actor_data["permissions"]),
+                data_scope="all",
+                session_id="delivery-reconciliation",
+            )
+            self.audit_service.record(
+                actor=actor,
+                action="delivery.create",
+                target_type="delivery",
+                target_id=record["id"],
+                project_id=str(record["project_id"]),
+                before=None,
+                after=record,
+                reason=None,
+                result="success",
+                request=request,
+            )
+        self._mark_reconciled(record["id"], "audit_recorded_at", time.time())
+
+    def _mark_reconciled(
+        self, delivery_id: str, column: str, value: Any
+    ) -> None:
+        allowed = {
+            "workflow_task_id",
+            "stage_content_fingerprint",
+            "stage_export_recorded_at",
+            "workflow_completed_at",
+            "audit_recorded_at",
+        }
+        if column not in allowed:
+            raise ValueError("invalid delivery reconciliation column")
+        with self.creative_repository._connect() as connection:
+            connection.execute(
+                f"UPDATE creative_deliveries SET {column} = ? WHERE id = ?",
+                (value, delivery_id),
+            )
+
+    def _get_unreconciled(self, delivery_id: str) -> dict[str, Any] | None:
         with self.creative_repository._connect() as connection:
             row = connection.execute(
                 """
@@ -368,6 +677,7 @@ def build_delivery_router(service: DeliveryService) -> APIRouter:
                 format=payload.format,
                 actor=principal,
                 request=request,
+                workflow_task_id=payload.workflow_task_id,
             )
         except KeyError as exc:
             raise HTTPException(404, "project or submission not found") from exc

@@ -33,6 +33,7 @@
             option.value = item.submission_id;
             option.dataset.projectId = item.project_id;
             option.dataset.stage = item.stage;
+            option.dataset.workflowTaskId = item.workflow_task_id;
             option.textContent = `${item.project_name} / ${stageLabels[item.stage] || item.stage} / v${item.submission_version}`;
             submissionSelect.appendChild(option);
         }
@@ -93,6 +94,7 @@
                 project_id: Number(option.dataset.projectId),
                 stage: option.dataset.stage,
                 format: formatSelect.value,
+                workflow_task_id: option.dataset.workflowTaskId,
             }),
         });
         if (!response.ok) {

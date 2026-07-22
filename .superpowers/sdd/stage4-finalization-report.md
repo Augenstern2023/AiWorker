@@ -60,3 +60,11 @@
 - `git diff --check`: clean.
 
 The SQLAlchemy `declarative_base()` deprecation warning remains pre-existing and is unrelated to Stage 4.
+
+## Review Follow-up
+
+- Delivery creation now requires or resolves the active terminal `delivery` task for the same project, validates its `system_admin` role and `pool`/`assigned`/`in_progress` state, stores `workflow_task_id`, and completes it through a dedicated audited state-machine transition.
+- Repeated delivery requests return the existing registry record and do not duplicate the delivery file, terminal-task completion event, audit event, or Beats export marker.
+- The creative delivery registry is the reconciliation source across the creative and system databases. Registry reads and retries idempotently repair the task completion, audit record, and stage-export marker after a partial cross-database failure.
+- Beats delivery now records the current Beats content fingerprint through `CreativeRepository.record_stage_export`, so production delivery advances the topic lifecycle to `beats_exported`. The former test-only marker was removed.
+- Review-focused verification: `96 passed`; full `tests/`: `470 passed`, `1 failed` only for the accepted pre-existing XHS Excel store assertion; all `24` JavaScript files passed `node --check`.

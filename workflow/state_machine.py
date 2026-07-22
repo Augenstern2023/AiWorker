@@ -42,6 +42,11 @@ TRANSITIONS = {
     "complete": TransitionRule(
         frozenset({"in_progress", "waiting_review"}), "completed", "manager"
     ),
+    "deliver": TransitionRule(
+        frozenset({"pool", "assigned", "in_progress"}),
+        "completed",
+        "system_admin",
+    ),
     "cancel": TransitionRule(
         frozenset(
             {"pool", "assigned", "in_progress", "waiting_review", "returned"}
@@ -97,6 +102,8 @@ class WorkflowStateMachine:
             if not is_admin and actor_id != task.get("assignee_user_id"):
                 raise PermissionError("only the task assignee may perform this action")
             return
+        if requirement == "system_admin" and not is_admin:
+            raise PermissionError("only a system administrator may deliver")
         if requirement == "manager" and not (
             is_admin or "project_owner" in role_codes or can_manage_task
         ):

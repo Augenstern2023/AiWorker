@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
@@ -126,6 +127,13 @@ def _seed_environment(tmp_path: Path):
     draft = adapter.create_draft(
         draft_task["id"], "brief", str(draft_brief["id"]), planner
     )
+    delivery_task = workflow.create_task(
+        "workflow-delivery-terminal",
+        "delivery",
+        "system_admin",
+        project_id=str(project["id"]),
+        actor=SYSTEM_ACTOR,
+    )
 
     app = FastAPI()
     app.state.identity_permission_service = permissions
@@ -142,13 +150,39 @@ def _seed_environment(tmp_path: Path):
         name: _login_client(app, sessions, user["id"])
         for name, user in users.items()
     }
-    return runtime, identity, sessions, audit, project, approved, draft, clients
+    return (
+        runtime,
+        identity,
+        sessions,
+        audit,
+        workflow,
+        project,
+        approved,
+        draft,
+        delivery_task,
+        delivery_service,
+        clients,
+        admin,
+    )
 
 
 def test_only_system_admin_can_create_list_and_download_approved_delivery(
     tmp_path: Path,
 ):
-    runtime, _, _, audit, project, approved, _, clients = _seed_environment(tmp_path)
+    (
+        runtime,
+        identity,
+        _,
+        audit,
+        workflow,
+        project,
+        approved,
+        _,
+        delivery_task,
+        _,
+        clients,
+        _,
+    ) = _seed_environment(tmp_path)
 
     for name in ("planner", "writer"):
         assert clients[name].get("/api/admin/deliveries").status_code == 403
@@ -182,6 +216,7 @@ def test_only_system_admin_can_create_list_and_download_approved_delivery(
     assert delivery["stage"] == "brief"
     assert delivery["submission_id"] == approved["id"]
     assert delivery["submission_version"] == approved["version"]
+    assert delivery["workflow_task_id"] == delivery_task["id"]
     assert delivery["actor_user_id"]
     assert delivery["format"] == "md"
     assert Path(delivery["path"]).is_file()
@@ -197,10 +232,48 @@ def test_only_system_admin_can_create_list_and_download_approved_delivery(
     assert event["after_summary"]["submission_version"] == approved["version"]
     assert event["after_summary"]["fingerprint"] == delivery["fingerprint"]
     assert str(runtime / "deliveries") in delivery["path"]
+    assert workflow.get_task(delivery_task["id"])["status"] == "completed"
+    with identity.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM workflow_task_events "
+            "WHERE task_id = ? AND event_type = 'delivery.complete'",
+            (delivery_task["id"],),
+        ).fetchone()[0] == 1
+
+    repeated = clients["administrator"].post(
+        "/api/admin/deliveries",
+        json={
+            "project_id": project["id"],
+            "stage": "brief",
+            "submission_id": approved["id"],
+            "format": "md",
+        },
+    )
+    assert repeated.status_code == 201
+    assert repeated.json()["delivery"]["id"] == delivery["id"]
+    with identity.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM workflow_task_events "
+            "WHERE task_id = ? AND event_type = 'delivery.complete'",
+            (delivery_task["id"],),
+        ).fetchone()[0] == 1
 
 
 def test_delivery_rejects_draft_mismatch_and_unsupported_scope(tmp_path: Path):
-    runtime, identity, _, _, project, approved, draft, clients = _seed_environment(tmp_path)
+    (
+        runtime,
+        identity,
+        _,
+        _,
+        _,
+        project,
+        approved,
+        draft,
+        _,
+        _,
+        clients,
+        _,
+    ) = _seed_environment(tmp_path)
     admin = clients["administrator"]
 
     assert admin.post(
@@ -248,7 +321,20 @@ def test_delivery_rejects_draft_mismatch_and_unsupported_scope(tmp_path: Path):
 
 
 def test_delivery_registry_and_download_persist_across_app_restart(tmp_path: Path):
-    runtime, identity, sessions, _, _, approved, _, clients = _seed_environment(tmp_path)
+    (
+        runtime,
+        identity,
+        sessions,
+        _,
+        _,
+        _,
+        approved,
+        _,
+        _,
+        _,
+        clients,
+        _,
+    ) = _seed_environment(tmp_path)
     response = clients["administrator"].post(
         "/api/admin/deliveries",
         json={
@@ -282,3 +368,76 @@ def test_delivery_registry_and_download_persist_across_app_restart(tmp_path: Pat
     assert client.get(
         f"/api/admin/deliveries/{delivery_id}/download"
     ).status_code == 200
+
+
+def test_delivery_registry_reconciles_task_after_cross_database_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    (
+        _,
+        _,
+        _,
+        _,
+        workflow,
+        project,
+        approved,
+        _,
+        delivery_task,
+        service,
+        _,
+        admin,
+    ) = _seed_environment(tmp_path)
+    original = service._complete_workflow_task
+    attempts = 0
+
+    def fail_once(record):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("system database unavailable")
+        return original(record)
+
+    monkeypatch.setattr(service, "_complete_workflow_task", fail_once)
+    with pytest.raises(RuntimeError, match="system database unavailable"):
+        service.create(
+            project_id=project["id"],
+            stage="brief",
+            submission_id=approved["id"],
+            format="json",
+            actor=admin,
+        )
+
+    assert len(service.list()) == 1
+    assert workflow.get_task(delivery_task["id"])["status"] == "completed"
+
+
+def test_delivery_rejects_inactive_or_mismatched_terminal_task(tmp_path: Path):
+    (
+        _,
+        _,
+        _,
+        _,
+        workflow,
+        project,
+        approved,
+        _,
+        delivery_task,
+        service,
+        clients,
+        admin,
+    ) = _seed_environment(tmp_path)
+    workflow.cancel_task(delivery_task["id"], admin)
+
+    response = clients["administrator"].post(
+        "/api/admin/deliveries",
+        json={
+            "project_id": project["id"],
+            "stage": "brief",
+            "submission_id": approved["id"],
+            "format": "json",
+            "workflow_task_id": delivery_task["id"],
+        },
+    )
+
+    assert response.status_code == 409
+    assert service.list() == []

@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from core.job import CrawlJob
-from creative.api import build_stage_export, content_fingerprint, register_creative_routes
+from creative.api import register_creative_routes
 from creative.repository import CreativeRepository
 from runtime.job_state import JobState
 
@@ -128,12 +128,6 @@ def test_topic_lifecycle_follows_the_complete_creation_flow(tmp_path: Path):
     assert topic_payload(client)["lifecycle_status"] == "pending_beats"
     beats = repository.create_episode_beats(project["id"], 1, {"beats": [{"order": 1, "scene": "大厅"}]})
     assert topic_payload(client)["lifecycle_status"] == "beats_generated"
-
-    export = build_stage_export(repository.get_project(project["id"]), "beats")
-    repository.record_stage_export(
-        project["id"], "beats", "json", content_fingerprint(export["content"])
-    )
-    assert topic_payload(client)["lifecycle_status"] == "beats_exported"
 
     repository.update_episode(beats["id"], {"beats": [{"order": 1, "scene": "天台"}]})
     assert topic_payload(client)["lifecycle_status"] == "beats_generated"

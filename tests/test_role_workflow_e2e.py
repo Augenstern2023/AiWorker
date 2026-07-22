@@ -17,6 +17,7 @@ from fastapi.templating import Jinja2Templates
 from audit.service import AuditService
 from creative.api import build_creative_router
 from creative.delivery import DeliveryService, build_delivery_router
+from creative.lifecycle_service import TopicLifecycleService
 from creative.repository import CreativeRepository
 from creative.workflow_adapter import CreativeWorkflowAdapter
 from identity.permission_service import PermissionService
@@ -299,9 +300,24 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
     )
     assert delivered.status_code == 201, delivered.text
     delivery = delivered.json()["delivery"]
+    assert delivery["workflow_task_id"] == delivery_task["id"]
     assert clients["system_admin"].get(
         f"/api/admin/deliveries/{delivery['id']}/download"
     ).status_code == 200
+    assert TopicLifecycleService(creative, tmp_path).enrich_topic(topic["id"])[
+        "lifecycle_status"
+    ] == "beats_exported"
+    repeated_delivery = clients["system_admin"].post(
+        "/api/admin/deliveries",
+        json={
+            "project_id": project["id"],
+            "stage": "beats",
+            "submission_id": beats_submission["id"],
+            "format": "json",
+        },
+    )
+    assert repeated_delivery.status_code == 201
+    assert repeated_delivery.json()["delivery"]["id"] == delivery["id"]
 
     with identity.connect() as connection:
         assert connection.execute(
@@ -310,6 +326,17 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
         assert connection.execute(
             "SELECT COUNT(*) FROM workflow_task_events WHERE event_type = 'approve'"
         ).fetchone()[0] == 5
+        assert connection.execute(
+            "SELECT COUNT(*) FROM workflow_task_events "
+            "WHERE task_id = ? AND event_type = 'delivery.complete'",
+            (delivery_task["id"],),
+        ).fetchone()[0] == 1
+    with creative._connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM creative_stage_exports "
+            "WHERE project_id = ? AND stage = 'beats'",
+            (project["id"],),
+        ).fetchone()[0] == 1
     assert audit.query(action="delivery.create", target_id=delivery["id"])
 
     restarted_identity = IdentityRepository(runtime / "system/system.db")
@@ -324,5 +351,5 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
     assert restarted_workflow.get_submission(beats_submission["id"])["status"] == (
         "approved"
     )
-    assert restarted_workflow.get_task(delivery_task["id"])["status"] == "pool"
+    assert restarted_workflow.get_task(delivery_task["id"])["status"] == "completed"
     assert restarted_delivery.download_path(delivery["id"]).is_file()

@@ -143,6 +143,33 @@ class CreativeRepository:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_creative_projects_topic ON creative_projects(topic_id, deleted)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_creative_blueprints_project ON creative_blueprints(project_id, status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_creative_episodes_project ON creative_episodes(project_id, stage, episode_number)")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS creative_stage_exports (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL, stage TEXT NOT NULL, format TEXT NOT NULL,
+                    content_fingerprint TEXT NOT NULL, exported_at REAL NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES creative_projects(id)
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_creative_stage_exports_lookup "
+                "ON creative_stage_exports(project_id, stage, content_fingerprint, exported_at)"
+            )
+            empty_audience_projects = conn.execute(
+                """
+                SELECT p.id, b.content_json
+                FROM creative_projects p
+                JOIN creative_breakdowns b ON b.id = p.breakdown_id
+                WHERE TRIM(p.target_audience) = ''
+                """
+            ).fetchall()
+            for project in empty_audience_projects:
+                inherited_audience = self._breakdown_target_audience(project["content_json"])
+                if inherited_audience:
+                    conn.execute(
+                        "UPDATE creative_projects SET target_audience = ? WHERE id = ?",
+                        (inherited_audience, project["id"]),
+                    )
 
     def upsert_topics(self, topics: list[dict[str, Any]]) -> list[dict[str, Any]]:
         now = time.time()
@@ -336,6 +363,10 @@ class CreativeRepository:
             )
             if not breakdown or breakdown["status"] != "locked" or not same_title:
                 raise ValueError("创建项目需要该选题的已锁定拆解卡")
+            resolved_target_audience = (
+                target_audience.strip()
+                or self._breakdown_target_audience(breakdown["content_json"])
+            )
             now = time.time()
             cursor = conn.execute(
                 """
@@ -347,11 +378,21 @@ class CreativeRepository:
                 (
                     topic_id, breakdown_id, name.strip() or f"{topic['title']}创作项目",
                     genre.strip() or str(topic["category"] or ""), target_platform.strip(),
-                    target_audience.strip(), int(target_episode_count),
+                    resolved_target_audience, int(target_episode_count),
                     int(episode_duration_seconds), now, now,
                 ),
             )
         return self.get_project(int(cursor.lastrowid)) or {}
+
+    @staticmethod
+    def _breakdown_target_audience(content_json: str) -> str:
+        try:
+            content = json.loads(content_json)
+        except (TypeError, json.JSONDecodeError):
+            return ""
+        if not isinstance(content, dict):
+            return ""
+        return str(content.get("target_audience") or "").strip()
 
     def list_projects(self, topic_id: int | None = None) -> list[dict[str, Any]]:
         clauses = ["p.deleted = 0"]
@@ -849,6 +890,35 @@ class CreativeRepository:
             )
         return self.get_episode(episode_id) or {}
 
+    def record_stage_export(
+        self,
+        project_id: int,
+        stage: str,
+        format: str,
+        content_fingerprint: str,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO creative_stage_exports (
+                    project_id, stage, format, content_fingerprint, exported_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (project_id, stage, format, content_fingerprint, time.time()),
+            )
+
+    def has_stage_export(self, project_id: int, stage: str, content_fingerprint: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM creative_stage_exports
+                WHERE project_id = ? AND stage = ? AND content_fingerprint = ?
+                LIMIT 1
+                """,
+                (project_id, stage, content_fingerprint),
+            ).fetchone()
+        return bool(row)
+
     def _update_creative_item(
         self,
         table: str,
@@ -929,6 +999,10 @@ class CreativeRepository:
                 current = dict(topic)
                 current["source_platforms"] = sorted(set(current.get("source_platforms") or [current.get("platform", "")]))
                 current["source_paths"] = [current["source_path"]] if current.get("source_path") else []
+                current["_decision_updated_at"] = (
+                    float(current.get("updated_at") or 0)
+                    if current.get("status") != "pending_review" else -1.0
+                )
                 merged[key] = current
                 continue
             current["source_platforms"] = sorted(set(current.get("source_platforms", [])) | set(topic.get("source_platforms", [])) | {str(topic.get("platform") or "")})
@@ -940,8 +1014,14 @@ class CreativeRepository:
                 if marker not in seen:
                     evidence.append(item)
                     seen.add(marker)
-            if current.get("status") != "adopted" and topic.get("status") == "adopted":
-                current["status"] = "adopted"
+            decision_updated_at = (
+                float(topic.get("updated_at") or 0)
+                if topic.get("status") != "pending_review" else -1.0
+            )
+            if decision_updated_at >= float(current.get("_decision_updated_at") or -1.0):
+                current["status"] = topic.get("status") or "pending_review"
+                current["decision_note"] = topic.get("decision_note") or ""
+                current["_decision_updated_at"] = decision_updated_at
             if current.get("confidence") != "high" and topic.get("confidence") == "high":
                 current["confidence"] = "high"
             if not current.get("locked_breakdown_id") and topic.get("locked_breakdown_id"):
@@ -951,6 +1031,8 @@ class CreativeRepository:
                 current["latest_breakdown_id"] = topic["latest_breakdown_id"]
                 current["latest_breakdown_version"] = topic.get("latest_breakdown_version")
                 current["latest_breakdown_status"] = topic.get("latest_breakdown_status")
+        for topic in merged.values():
+            topic.pop("_decision_updated_at", None)
         return list(merged.values())
 
     @staticmethod

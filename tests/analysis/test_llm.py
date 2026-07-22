@@ -19,6 +19,8 @@
 
 import asyncio
 
+import httpx
+
 from analysis.llm import (
     LLMError,
     OpenAICompatibleLLMProvider,
@@ -110,6 +112,39 @@ def test_responses_provider_falls_back_to_chat_completions_when_gateway_returns_
     monkeypatch.setattr(provider, "_complete_chat_completions_text", chat_fallback)
 
     assert asyncio.run(provider.complete_text([{"role": "user", "content": "test"}], json_mode=True)) == '{"ok": true}'
+
+
+def test_chat_completions_retries_transient_gateway_errors_before_succeeding():
+    attempts = 0
+    retries = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return httpx.Response(502, request=request, text="Bad Gateway")
+        return httpx.Response(
+            200,
+            request=request,
+            json={"choices": [{"message": {"content": '{"ok": true}'}}]},
+        )
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://example.test/v1",
+        api_key="key",
+        model="test-model",
+        max_retries=2,
+        retry_base_delay=0,
+        transport=httpx.MockTransport(handler),
+        retry_callback=lambda number, total, reason: retries.append((number, total, reason)),
+    )
+
+    result = asyncio.run(provider.complete_text([{"role": "user", "content": "test"}], json_mode=True))
+
+    assert result == '{"ok": true}'
+    assert attempts == 3
+    assert [(number, total) for number, total, _ in retries] == [(1, 2), (2, 2)]
+    assert all("502" in reason for _, _, reason in retries)
 
 
 def test_build_responses_request_body_sets_reasoning_effort():

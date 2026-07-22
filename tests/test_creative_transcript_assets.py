@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from creative import transcript_assets
 from creative.transcript_assets import find_transcript_bundle
 
 
@@ -80,6 +81,20 @@ def test_video_without_transcript_is_not_valid(tmp_path: Path):
 
     assert bundle["episodes"] == []
     assert bundle["searched_paths"]
+
+
+def test_finds_downloaded_video_for_transcript_materialization(tmp_path: Path):
+    episode = tmp_path / "data" / "hg" / "jobs" / "job-1" / "dramas" / "目标剧" / "episode_03"
+    _write_source(episode, "目标剧", 3)
+    video = episode / "video.mp4"
+    video.write_bytes(b"video")
+
+    assets = transcript_assets.find_downloaded_video_assets(tmp_path, "目标剧")
+
+    assert len(assets) == 1
+    assert assets[0]["episode_number"] == 3
+    assert assets[0]["video_path"] == str(video)
+    assert assets[0]["source_path"].endswith("source.json")
 
 
 def test_latest_non_empty_asset_wins_per_episode(tmp_path: Path):

@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from creative.hit_breakdown import breakdown_field_guide, personalize_breakdown_field_guide
 from creative.imitation_service import assess_similarity_risk
+from creative.lifecycle_service import TopicLifecycleService, content_fingerprint
 from creative.repository import CreativeRepository
 from creative.schema import (
     BlueprintGenerateRequest,
@@ -32,7 +33,7 @@ from creative.schema import (
     ProjectUpdateRequest,
 )
 from creative.topic_service import TopicService
-from creative.transcript_assets import find_transcript_bundle
+from creative.transcript_assets import find_downloaded_video_assets, find_transcript_bundle
 from runtime.job_manager import JobConflictError
 
 
@@ -258,6 +259,7 @@ def build_creative_router(
     repository = CreativeRepository(Path(runtime_dir) / "creative" / "creative.db")
     service = TopicService(str(root))
     workspace_root = Path(root).resolve()
+    lifecycle_service = TopicLifecycleService(repository, workspace_root, job_manager)
 
     def project_or_404(project_id: int) -> dict[str, Any]:
         project = repository.get_project(project_id)
@@ -296,7 +298,8 @@ def build_creative_router(
             raise HTTPException(400, "platform must be dy or hg")
         try:
             repository.upsert_topics(service.generate(payload.platform, payload.date, payload.limit))
-            return {"status": "success", "items": repository.list_topics(platform=payload.platform, limit=payload.limit)}
+            topics = repository.list_topics(platform=payload.platform, limit=payload.limit)
+            return {"status": "success", "items": lifecycle_service.enrich_topics(topics)}
         except Exception as exc:
             raise HTTPException(500, str(exc)) from exc
 
@@ -309,27 +312,55 @@ def build_creative_router(
         max_score: float | None = Query(None, ge=0, le=100),
         captured_date: str = "",
         has_locked_breakdown: bool | None = None,
+        lifecycle_status: str = "",
         limit: int = Query(50, ge=1, le=500),
     ):
-        return {
-            "items": repository.list_topics(
-                platform=platform,
-                status=status,
-                category=category,
-                min_score=min_score,
-                max_score=max_score,
-                captured_date=captured_date,
-                has_locked_breakdown=has_locked_breakdown,
-                limit=limit,
-            )
-        }
+        topics = repository.list_topics(
+            platform=platform,
+            status=status,
+            category=category,
+            min_score=min_score,
+            max_score=max_score,
+            captured_date=captured_date,
+            has_locked_breakdown=has_locked_breakdown,
+            limit=500 if lifecycle_status else limit,
+        )
+        items = lifecycle_service.enrich_topics(topics)
+        if lifecycle_status:
+            items = [item for item in items if item.get("lifecycle_status") == lifecycle_status]
+        return {"items": items[:limit]}
 
     @router.get("/topics/{topic_id}")
     async def get_topic(topic_id: int):
-        topic = repository.get_topic(topic_id)
+        topic = lifecycle_service.enrich_topic(topic_id)
         if not topic:
             raise HTTPException(404, "topic not found")
         return topic
+
+    @router.get("/topics/{topic_id}/transcripts")
+    async def preview_topic_transcripts(topic_id: int):
+        topic = repository.get_topic(topic_id)
+        if not topic:
+            raise HTTPException(404, "topic not found")
+        bundle = find_transcript_bundle(workspace_root, topic["title"], topic.get("platform") or "")
+        episodes = bundle.get("episodes") or []
+        if not episodes:
+            raise HTTPException(404, "该剧目暂无可预览的转写")
+        return {
+            "topic_id": topic_id,
+            "title": topic["title"],
+            "episode_count": len(episodes),
+            "episodes": [
+                {
+                    "episode_number": int(item["episode_number"]),
+                    "text": str(item.get("text") or ""),
+                    "character_count": len(str(item.get("text") or "")),
+                    "transcript_source": str(item.get("transcript_source") or "transcript"),
+                    "modified_at": float(item.get("modified_at") or 0),
+                }
+                for item in episodes
+            ],
+        }
 
     @router.get("/topics/{topic_id}/breakdowns")
     async def list_topic_breakdowns(topic_id: int, status: str = "locked"):
@@ -351,7 +382,7 @@ def build_creative_router(
             raise HTTPException(400, str(exc)) from exc
         if not topic:
             raise HTTPException(404, "topic not found")
-        return topic
+        return lifecycle_service.enrich_topic(topic_id)
 
     @router.post("/breakdowns")
     async def create_breakdown(payload: BreakdownCreateRequest):
@@ -365,7 +396,8 @@ def build_creative_router(
                 return {"status": "existing", "breakdown": existing}
         bundle = find_transcript_bundle(workspace_root, topic["title"], topic.get("platform") or "")
         episodes = bundle.get("episodes") or []
-        if not episodes:
+        video_assets = find_downloaded_video_assets(workspace_root, topic["title"])
+        if not episodes and not video_assets:
             raise HTTPException(409, detail={
                 "code": "transcript_required",
                 "message": "请先下载剧目脚本再拆解",
@@ -374,6 +406,10 @@ def build_creative_router(
             })
         if job_manager is None:
             raise HTTPException(503, "creative job manager is unavailable")
+        coverage = sorted({
+            *[int(item["episode_number"]) for item in episodes],
+            *[int(item["episode_number"]) for item in video_assets],
+        })
         job_payload = {
             "platform": "creative",
             "crawler_type": "breakdown_generate",
@@ -386,7 +422,7 @@ def build_creative_router(
                 "db_path": str(repository.db_path.resolve()),
                 "runtime_dir": str(Path(runtime_dir).resolve()),
                 "workspace_root": str(workspace_root),
-                "transcript_coverage": [int(item["episode_number"]) for item in episodes],
+                "transcript_coverage": coverage,
             },
         }
         try:
@@ -396,7 +432,8 @@ def build_creative_router(
         return {
             "status": "success",
             "job": state.to_dict(),
-            "coverage": [int(item["episode_number"]) for item in episodes],
+            "coverage": coverage,
+            "requires_transcription": bool(video_assets),
         }
 
     @router.get("/breakdowns/template")
@@ -607,6 +644,13 @@ def build_creative_router(
             payload = build_stage_export(project, stage)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+        if stage == "beats":
+            repository.record_stage_export(
+                project_id,
+                stage,
+                format,
+                content_fingerprint(payload["content"]),
+            )
         if format == "json":
             return JSONResponse(payload)
         if stage == "beats":

@@ -91,29 +91,42 @@ def _resolve_manifest_path(root: Path, manifest_path: Path, value: Any) -> Path:
     return workspace_candidate if workspace_candidate.exists() else manifest_path.parent / candidate
 
 
-def find_transcript_bundle(root: str | Path, title: str, platform: str = "") -> dict[str, Any]:
+def index_transcript_bundles(root: str | Path) -> dict[str, dict[str, Any]]:
     workspace = Path(root).resolve()
     data_root = workspace / "data"
-    title_key = normalize_title(title)
     searched_paths: list[str] = []
-    assets: list[dict[str, Any]] = []
-    if not title_key or not data_root.exists():
-        return {"title": str(title or ""), "platform": platform, "episodes": [], "searched_paths": []}
+    assets_by_title: dict[str, list[dict[str, Any]]] = {}
+    display_titles: dict[str, str] = {}
+    if not data_root.exists():
+        return {}
+
+    def ensure_title(title: Any) -> str:
+        title_key = normalize_title(title)
+        if title_key:
+            display_titles.setdefault(title_key, str(title or ""))
+            assets_by_title.setdefault(title_key, [])
+        return title_key
+
+    def add_asset(title: Any, asset: dict[str, Any]) -> None:
+        title_key = ensure_title(title)
+        if not title_key:
+            return
+        assets_by_title[title_key].append(asset)
 
     for source_path in data_root.glob("*/jobs/**/source.json"):
         searched_paths.append(str(source_path))
         payload = _read_json(source_path)
-        if normalize_title(payload.get("title")) != title_key:
-            continue
+        ensure_title(payload.get("title"))
         asset = _asset_from_episode_dir(source_path.parent, _episode_number(payload, 1))
         if asset:
             asset["metadata_path"] = str(source_path)
-            assets.append(asset)
+            add_asset(payload.get("title"), asset)
 
     for manifest_path in data_root.glob("*/jobs/**/manifest.json"):
         searched_paths.append(str(manifest_path))
         payload = _read_json(manifest_path)
-        if normalize_title(payload.get("title")) != title_key:
+        title = payload.get("title")
+        if not ensure_title(title):
             continue
         for index, item in enumerate(payload.get("items") or [], start=1):
             if not isinstance(item, dict) or item.get("status") not in {None, "succeeded"}:
@@ -125,7 +138,7 @@ def find_transcript_bundle(root: str | Path, title: str, platform: str = "") -> 
             text = _script_text(script_path) if script_path.exists() else ""
             if not text:
                 continue
-            assets.append({
+            add_asset(title, {
                 "episode_number": _episode_number(item, int(item.get("index") or index)),
                 "text": text,
                 "transcript_source": "script",
@@ -135,22 +148,68 @@ def find_transcript_bundle(root: str | Path, title: str, platform: str = "") -> 
                 "modified_at": script_path.stat().st_mtime,
             })
 
-    latest_by_episode: dict[int, dict[str, Any]] = {}
-    for asset in assets:
-        episode_number = int(asset["episode_number"])
-        current = latest_by_episode.get(episode_number)
-        asset_order = (float(asset.get("modified_at") or 0), str(asset.get("script_path") or asset.get("transcript_path") or ""))
-        current_order = (
-            float(current.get("modified_at") or 0),
-            str(current.get("script_path") or current.get("transcript_path") or ""),
-        ) if current else (-1.0, "")
-        if current is None or asset_order >= current_order:
-            latest_by_episode[episode_number] = asset
+    bundles: dict[str, dict[str, Any]] = {}
+    for title_key, assets in assets_by_title.items():
+        latest_by_episode: dict[int, dict[str, Any]] = {}
+        for asset in assets:
+            episode_number = int(asset["episode_number"])
+            current = latest_by_episode.get(episode_number)
+            asset_order = (
+                float(asset.get("modified_at") or 0),
+                str(asset.get("script_path") or asset.get("transcript_path") or ""),
+            )
+            current_order = (
+                float(current.get("modified_at") or 0),
+                str(current.get("script_path") or current.get("transcript_path") or ""),
+            ) if current else (-1.0, "")
+            if current is None or asset_order >= current_order:
+                latest_by_episode[episode_number] = asset
+        bundles[title_key] = {
+            "title": display_titles[title_key],
+            "episodes": [latest_by_episode[number] for number in sorted(latest_by_episode)],
+            "searched_paths": sorted(set(searched_paths)),
+        }
+    return bundles
 
-    episodes = [latest_by_episode[number] for number in sorted(latest_by_episode)]
-    return {
-        "title": str(title or ""),
-        "platform": str(platform or ""),
-        "episodes": episodes,
-        "searched_paths": sorted(set(searched_paths)),
-    }
+
+def find_transcript_bundle(root: str | Path, title: str, platform: str = "") -> dict[str, Any]:
+    title_key = normalize_title(title)
+    bundle = index_transcript_bundles(root).get(title_key)
+    if not bundle:
+        return {"title": str(title or ""), "platform": platform, "episodes": [], "searched_paths": []}
+    return {**bundle, "title": str(title or bundle["title"]), "platform": str(platform or "")}
+
+
+def find_downloaded_video_assets(root: str | Path, title: str) -> list[dict[str, Any]]:
+    workspace = Path(root).resolve()
+    data_root = workspace / "data"
+    title_key = normalize_title(title)
+    if not title_key or not data_root.exists():
+        return []
+    latest_by_episode: dict[int, dict[str, Any]] = {}
+    for source_path in data_root.glob("*/jobs/**/source.json"):
+        payload = _read_json(source_path)
+        if normalize_title(payload.get("title")) != title_key:
+            continue
+        if _asset_from_episode_dir(source_path.parent, _episode_number(payload, 1)):
+            continue
+        videos = [
+            path for path in source_path.parent.glob("video.*")
+            if path.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".flv"}
+        ]
+        if not videos:
+            continue
+        video_path = max(videos, key=lambda path: (path.stat().st_mtime, str(path)))
+        episode_number = max(1, _episode_number(payload, 1))
+        asset = {
+            "episode_number": episode_number,
+            "video_path": str(video_path),
+            "source_path": str(source_path),
+            "modified_at": video_path.stat().st_mtime,
+        }
+        current = latest_by_episode.get(episode_number)
+        if not current or (asset["modified_at"], asset["video_path"]) >= (
+            current["modified_at"], current["video_path"],
+        ):
+            latest_by_episode[episode_number] = asset
+    return [latest_by_episode[number] for number in sorted(latest_by_episode)]

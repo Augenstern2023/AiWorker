@@ -74,6 +74,24 @@ async def run(job: CrawlJob) -> None:
     inputs = repository.get_project_inputs(project_id)
     project = inputs["project"]
     provider = create_provider()
+
+    def report_retry(retry_number: int, max_retries: int, reason: str) -> None:
+        emit(
+            job,
+            "progress",
+            f"模型服务暂时不可用，正在进行第 {retry_number}/{max_retries} 次自动重试：{reason}",
+            "warning",
+            {
+                "stage": action,
+                "completed": 0,
+                "total": 1,
+                "indeterminate": True,
+                "retry_attempt": retry_number,
+                "max_retries": max_retries,
+            },
+        )
+
+    setattr(provider, "retry_callback", report_retry)
     emit(job, "job_started", f"开始生成：{action}")
     emit(job, "progress", "准备模型请求", payload={"stage": action, "completed": 0, "total": 1})
     await wait_if_paused(job)

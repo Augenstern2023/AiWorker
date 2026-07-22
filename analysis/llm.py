@@ -17,10 +17,11 @@
 # 详细许可条款请参阅项目根目录下的LICENSE文件。
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
+import asyncio
 import os
 import json
 import re
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 import httpx
 
@@ -44,6 +45,10 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         wire_api: str = "chat_completions",
         reasoning_effort: str = "",
         timeout: int = 180,
+        max_retries: int = 2,
+        retry_base_delay: float = 1.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+        retry_callback: Callable[[int, int, str], Any] | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -52,6 +57,10 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         self.wire_api = wire_api
         self.reasoning_effort = reasoning_effort
         self.timeout = timeout
+        self.max_retries = max(0, min(5, int(max_retries)))
+        self.retry_base_delay = max(0.0, float(retry_base_delay))
+        self.transport = transport
+        self.retry_callback = retry_callback
 
     async def analyze_video(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         result = await self.complete_json(build_video_analysis_messages(payload))
@@ -89,9 +98,7 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             reasoning_effort=self.reasoning_effort,
         )
         endpoint = f"{self.base_url}/responses"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(endpoint, headers=headers, json=request_body)
-        response.raise_for_status()
+        response = await self._post_with_retry(endpoint, headers, request_body)
         try:
             payload = response.json()
         except ValueError as exc:
@@ -111,10 +118,41 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         if json_mode:
             request_body["response_format"] = {"type": "json_object"}
         endpoint = f"{self.base_url}/chat/completions"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(endpoint, headers=headers, json=request_body)
-        response.raise_for_status()
+        response = await self._post_with_retry(endpoint, headers, request_body)
         return parse_chat_completion_text(response.json())
+
+    async def _post_with_retry(
+        self,
+        endpoint: str,
+        headers: Dict[str, str],
+        request_body: Dict[str, Any],
+    ) -> httpx.Response:
+        async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
+            for attempt in range(self.max_retries + 1):
+                try:
+                    response = await client.post(endpoint, headers=headers, json=request_body)
+                    response.raise_for_status()
+                    return response
+                except Exception as exc:
+                    if not is_retryable_llm_exception(exc) or attempt >= self.max_retries:
+                        raise
+                    retry_number = attempt + 1
+                    if self.retry_callback:
+                        try:
+                            self.retry_callback(retry_number, self.max_retries, str(exc))
+                        except Exception:
+                            pass
+                    delay = self.retry_base_delay * (2 ** (retry_number - 1))
+                    if delay:
+                        await asyncio.sleep(delay)
+        raise LLMError("LLM request retry loop exited unexpectedly.")
+
+
+def is_retryable_llm_exception(exc: Exception) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = int(exc.response.status_code)
+        return status in {408, 409, 425, 429} or 500 <= status <= 599
+    return isinstance(exc, httpx.RequestError)
 
 
 def provider_defaults(provider: str) -> Dict[str, str]:

@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
 import pytest
 
 from core.job import CrawlJob
 from creative import phase4_worker
 from creative.imitation_service import generate_blueprints
+from creative.imitation_service import complete_with_one_repair
 from creative.repository import CreativeRepository
 from creative.script_service import (
     generate_character_bundle,
@@ -83,6 +85,19 @@ async def test_blueprint_generation_repairs_invalid_response_once():
     assert len(blueprints) == 3
     assert len(provider.calls) == 2
     assert meta["repair_attempted"] is True
+
+
+@pytest.mark.asyncio
+async def test_structured_content_repair_does_not_repeat_exhausted_gateway_errors():
+    request = httpx.Request("POST", "https://example.test/v1/chat/completions")
+    response = httpx.Response(502, request=request)
+    gateway_error = httpx.HTTPStatusError("Bad Gateway", request=request, response=response)
+    provider = SequentialProvider([gateway_error])
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await complete_with_one_repair(provider, [], lambda payload: payload)
+
+    assert len(provider.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -225,3 +240,43 @@ def test_phase4_worker_does_not_persist_partial_blueprints_after_llm_failure(tmp
         asyncio.run(phase4_worker.run(job))
 
     assert repository.get_project(project["id"])["blueprints"] == []
+
+
+def test_phase4_worker_surfaces_provider_retry_progress(tmp_path, monkeypatch):
+    class ProviderWithRetryNotice(SequentialProvider):
+        retry_callback = None
+
+        async def complete_json(self, messages):
+            if self.retry_callback:
+                self.retry_callback(1, 2, "502 Bad Gateway")
+            return await super().complete_json(messages)
+
+    db_path = tmp_path / ".runtime" / "creative" / "creative.db"
+    repository = CreativeRepository(db_path)
+    project = seed_worker_project(repository)
+    provider = ProviderWithRetryNotice([blueprint_payload()])
+    events = []
+    monkeypatch.setattr(phase4_worker, "create_provider", lambda: provider)
+    monkeypatch.setattr(
+        phase4_worker,
+        "emit",
+        lambda job, event, message, level="info", payload=None: events.append(
+            {"event": event, "message": message, "level": level, "payload": payload or {}},
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+    job = CrawlJob(
+        job_id="creative-worker-retry-progress",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "blueprints", "project_id": project["id"], "count": 3,
+            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+        },
+    )
+
+    asyncio.run(phase4_worker.run(job))
+
+    retry_event = next(item for item in events if item["payload"].get("retry_attempt") == 1)
+    assert retry_event["level"] == "warning"
+    assert "第 1/2 次自动重试" in retry_event["message"]

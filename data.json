@@ -101,6 +101,15 @@
         "默认爬取一级评论": false,
         "默认爬取二级评论": false,
         "默认无头模式": false,
-        "默认保存方式": "json (JSON文件)"
+        "默认保存方式": "json (JSON文件)",
+        "红果接口Code": "YQR1YDBMB9HU",
+        "hongguo_pages": 0,
+        "hongguo_detail_limit": 10,
+        "hongguo_max_records": 50,
+        "dy_rank_limit": 50,
+        "dy_rank_comment_limit": 10,
+        "dy_rank_login_wait_seconds": 0,
+        "hongguo_skip_meta": true,
+        "hongguo_skip_details": true
     }
 ]

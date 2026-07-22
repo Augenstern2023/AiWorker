@@ -21,7 +21,8 @@ from core.events import emit_event
 from core.job import CrawlJob
 from creative.breakdown_service import generate_breakdown
 from creative.repository import CreativeRepository
-from creative.transcript_assets import find_transcript_bundle
+from creative.transcript_assets import find_downloaded_video_assets, find_transcript_bundle
+from creative.transcript_materializer import materialize_video_transcripts
 
 
 HEARTBEAT_SECONDS = 15.0
@@ -87,10 +88,67 @@ async def run(job: CrawlJob) -> None:
 
     bundle = find_transcript_bundle(workspace_root, topic["title"], topic.get("platform") or "")
     episodes = bundle.get("episodes") or []
-    if not episodes:
+    video_assets = find_downloaded_video_assets(workspace_root, topic["title"])
+    if not episodes and not video_assets:
         raise ValueError("请先下载剧目脚本再拆解")
+    planned_coverage = sorted({
+        *[int(item["episode_number"]) for item in episodes],
+        *[int(item["episode_number"]) for item in video_assets],
+    })
+    emit(
+        job,
+        "job_started",
+        "开始生成剧目脚本并拆解" if video_assets else "开始根据剧目脚本生成拆解",
+        payload={"coverage": planned_coverage},
+    )
+    if video_assets:
+        emit(
+            job,
+            "progress",
+            f"发现 {len(video_assets)} 集已下载视频，正在生成剧本转写",
+            payload={
+                "stage": "transcript_materialization",
+                "completed": 0,
+                "total": len(video_assets),
+                "coverage": planned_coverage,
+            },
+        )
+
+        def report_transcript_progress(payload: dict[str, Any]) -> None:
+            emit(
+                job,
+                "progress",
+                str(payload.get("message") or "正在生成剧本转写"),
+                payload={**payload, "coverage": planned_coverage},
+            )
+
+        materialized = await materialize_video_transcripts(
+            video_assets,
+            topic["title"],
+            on_progress=report_transcript_progress,
+        )
+        for item in materialized["created"]:
+            for key, artifact_type in (
+                ("audio_path", "audio"),
+                ("transcript_path", "json"),
+                ("script_path", "md"),
+            ):
+                path = str(item.get(key) or "")
+                if path:
+                    emit(job, "artifact", Path(path).name, payload={"path": path, "artifact_type": artifact_type})
+        for failure in materialized["failed"]:
+            emit(
+                job,
+                "log",
+                f"第 {failure['episode_number']} 集转写失败：{failure['error']}",
+                "warning",
+            )
+        bundle = find_transcript_bundle(workspace_root, topic["title"], topic.get("platform") or "")
+        episodes = bundle.get("episodes") or []
+        if not episodes:
+            detail = materialized["failed"][0]["error"] if materialized["failed"] else "未生成有效文本"
+            raise ValueError(f"视频已下载，但剧本转写生成失败：{detail}")
     coverage = [int(item["episode_number"]) for item in episodes]
-    emit(job, "job_started", "开始根据剧目脚本生成拆解", payload={"coverage": coverage})
     emit(
         job,
         "progress",

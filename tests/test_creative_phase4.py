@@ -46,6 +46,7 @@ def seed_adopted_topic(repository: CreativeRepository) -> tuple[dict, dict]:
             "protagonist": "林小满",
             "core_conflict": "林小满被家族排斥后依靠特殊能力翻身",
             "hooks": ["当众退婚", "隐藏身份曝光"],
+            "target_audience": "偏好都市逆袭题材的女性观众",
         },
         {"core_conflict": [{"source_type": "asr", "excerpt": "当众退婚"}]},
         [],
@@ -75,6 +76,46 @@ def test_project_requires_adopted_topic_and_locked_breakdown(tmp_path: Path):
     assert first["status"] == "created"
     assert first["target_episode_count"] == 20
     assert len(repository.list_projects(topic_id=topic["id"])) == 2
+
+
+def test_project_inherits_target_audience_from_locked_breakdown_when_omitted(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+
+    project = repository.create_project(topic["id"], breakdown["id"], "继承受众", 20)
+
+    assert project["target_audience"] == "偏好都市逆袭题材的女性观众"
+
+
+def test_project_keeps_explicit_target_audience_over_breakdown_value(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+
+    project = repository.create_project(
+        topic["id"], breakdown["id"], "指定受众", 20,
+        target_audience="18-24 岁男性观众",
+    )
+
+    assert project["target_audience"] == "18-24 岁男性观众"
+
+
+def test_repository_backfills_empty_project_audience_from_breakdown(tmp_path: Path):
+    db_path = tmp_path / "creative.db"
+    repository = CreativeRepository(db_path)
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(
+        topic["id"], breakdown["id"], "历史项目", 20,
+        target_audience="临时受众",
+    )
+    with repository._connect() as conn:
+        conn.execute(
+            "UPDATE creative_projects SET target_audience = '' WHERE id = ?",
+            (project["id"],),
+        )
+
+    reopened = CreativeRepository(db_path)
+
+    assert reopened.get_project(project["id"])["target_audience"] == "偏好都市逆袭题材的女性观众"
 
 
 def test_project_accepts_one_and_one_hundred_episode_boundaries(tmp_path: Path):
@@ -347,6 +388,18 @@ def write_episode_script(root: Path, title: str, episode_number: int, text: str)
     return script
 
 
+def write_episode_video(root: Path, title: str, episode_number: int) -> Path:
+    episode = root / "data" / "hg" / "jobs" / "job-video" / "dramas" / title / f"episode_{episode_number:02d}"
+    episode.mkdir(parents=True, exist_ok=True)
+    (episode / "source.json").write_text(
+        '{"title":"' + title + '","episode":{"episode":' + str(episode_number) + "}}",
+        encoding="utf-8",
+    )
+    video = episode / "video.mp4"
+    video.write_bytes(b"video")
+    return video
+
+
 def test_phase4_api_creates_multiple_projects_and_lists_them(tmp_path: Path):
     client, repository, _ = build_phase4_client(tmp_path)
     topic, breakdown = seed_adopted_topic(repository)
@@ -476,6 +529,45 @@ def test_breakdown_api_enqueues_job_when_transcript_exists(tmp_path: Path):
     assert manager.created[0]["crawler_type"] == "breakdown_generate"
     assert manager.created[0]["extra"]["topic_id"] == topic["id"]
     assert manager.created[0]["extra"]["workspace_root"] == str(tmp_path.resolve())
+
+
+def test_topic_transcript_preview_returns_all_downloaded_episode_scripts(tmp_path: Path):
+    client, repository, _ = build_phase4_client(tmp_path)
+    topic = seed_topic_without_breakdown(repository, "转写预览短剧")
+    write_episode_script(tmp_path, topic["title"], 2, "第二集：主角发现新的线索。")
+    write_episode_script(tmp_path, topic["title"], 1, "第一集：主角进入宴会厅。")
+
+    response = client.get(f"/api/creative/topics/{topic['id']}/transcripts")
+
+    assert response.status_code == 200
+    assert response.json()["title"] == topic["title"]
+    assert response.json()["episode_count"] == 2
+    assert [item["episode_number"] for item in response.json()["episodes"]] == [1, 2]
+    assert response.json()["episodes"][0]["text"] == "第一集：主角进入宴会厅。"
+    assert response.json()["episodes"][0]["character_count"] == len("第一集：主角进入宴会厅。")
+
+
+def test_topic_transcript_preview_reports_when_no_transcript_exists(tmp_path: Path):
+    client, repository, _ = build_phase4_client(tmp_path)
+    topic = seed_topic_without_breakdown(repository, "没有转写的短剧")
+
+    response = client.get(f"/api/creative/topics/{topic['id']}/transcripts")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "该剧目暂无可预览的转写"
+
+
+def test_breakdown_api_enqueues_transcription_when_only_video_exists(tmp_path: Path):
+    client, repository, manager = build_phase4_client(tmp_path)
+    topic = seed_topic_without_breakdown(repository)
+    write_episode_video(tmp_path, topic["title"], 1)
+
+    response = client.post("/api/creative/breakdowns", json={"topic_id": topic["id"]})
+
+    assert response.status_code == 200
+    assert response.json()["requires_transcription"] is True
+    assert response.json()["coverage"] == [1]
+    assert manager.created[0]["crawler_type"] == "breakdown_generate"
 
 
 def test_breakdown_api_force_regenerate_enqueues_job_for_existing_version(tmp_path: Path):

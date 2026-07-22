@@ -56,6 +56,19 @@ def write_script(root: Path) -> Path:
     return path
 
 
+def write_video(root: Path) -> tuple[Path, Path]:
+    episode = root / "data/hg/jobs/job-video/dramas/目标剧/episode_01"
+    episode.mkdir(parents=True)
+    source = episode / "source.json"
+    source.write_text(
+        json.dumps({"title": "目标剧", "episode": {"episode": 1}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    video = episode / "video.mp4"
+    video.write_bytes(b"video")
+    return video, source
+
+
 def generated_payload(script_path: Path) -> dict:
     content = {
         "title": "目标剧", "one_line_selling_point": "苏软认错顾宴后改写命运。",
@@ -160,3 +173,36 @@ def test_breakdown_worker_emits_model_analysis_heartbeats(tmp_path, monkeypatch)
     assert heartbeats
     assert heartbeats[-1][6]["stage"] == "model_analysis"
     assert heartbeats[-1][6]["elapsed_seconds"] >= 0
+
+
+def test_breakdown_worker_materializes_downloaded_video_before_generation(tmp_path, monkeypatch):
+    db_path = tmp_path / ".runtime/creative/creative.db"
+    repository = CreativeRepository(db_path)
+    topic, locked = seed_topic(repository)
+    video, source = write_video(tmp_path)
+    script_path = video.with_name("script.md")
+    events = []
+
+    async def fake_materialize(assets, title, **kwargs):
+        assert assets[0]["video_path"] == str(video)
+        script_path.write_text("## 转写内容\n\n苏软穿书后认错顾宴，并被迫与他同行。", encoding="utf-8")
+        return {"created": [{"episode_number": 1, "script_path": str(script_path)}], "failed": []}
+
+    monkeypatch.setattr(breakdown_worker, "materialize_video_transcripts", fake_materialize)
+    monkeypatch.setattr(breakdown_worker, "create_provider", lambda: Provider(generated_payload(script_path)))
+    monkeypatch.setattr(breakdown_worker, "emit_event", lambda *args, **kwargs: events.append((args, kwargs)))
+    job = CrawlJob(
+        job_id="breakdown-video", platform="creative", crawler_type="breakdown_generate",
+        extra={
+            "topic_id": topic["id"], "db_path": str(db_path),
+            "runtime_dir": str(tmp_path / ".runtime"), "workspace_root": str(tmp_path),
+        },
+    )
+
+    asyncio.run(breakdown_worker.run(job))
+
+    latest = repository.get_latest_breakdown(topic["id"])
+    assert latest["id"] != locked["id"]
+    assert latest["content"]["protagonist_identity"] == "苏软，穿书炮灰。"
+    progress = [args for args, _ in events if args[0] == "progress"]
+    assert any(args[6].get("stage") == "transcript_materialization" for args in progress)

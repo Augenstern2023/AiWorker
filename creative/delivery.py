@@ -31,8 +31,8 @@ from workflow.repository import WorkflowRepository
 
 from .api import _markdown_value, build_beats_markdown
 from .lifecycle_service import (
+    beats_resource_fingerprint,
     content_fingerprint as stage_content_fingerprint,
-    current_beats_content,
 )
 from .repository import CreativeRepository
 
@@ -124,9 +124,7 @@ class DeliveryService:
                 "ON creative_deliveries(project_id, stage, submission_id, format)"
             )
             connection.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS uq_creative_delivery_task "
-                "ON creative_deliveries(workflow_task_id) "
-                "WHERE workflow_task_id IS NOT NULL"
+                "DROP INDEX IF EXISTS uq_creative_delivery_task"
             )
 
     def create(
@@ -166,8 +164,10 @@ class DeliveryService:
         content = self._serialize(project, payload, stage, format)
         fingerprint = hashlib.sha256(content).hexdigest()
         lifecycle_fingerprint = stage_content_fingerprint(
-            current_beats_content(project) if stage == "beats" else payload["content"]
+            payload["content"]
         )
+        if stage == "beats":
+            lifecycle_fingerprint = beats_resource_fingerprint(snapshot)
         existing = self._find_existing(
             project_id, stage, submission_id, format
         )
@@ -357,6 +357,22 @@ class DeliveryService:
                     """,
                     (str(project_id),),
                 ).fetchall()
+                if not rows:
+                    rows = connection.execute(
+                        """
+                        SELECT t.* FROM workflow_tasks AS t
+                        WHERE t.project_id = ? AND t.task_type = 'delivery'
+                          AND t.role_code = 'system_admin'
+                          AND t.status = 'completed'
+                          AND EXISTS (
+                              SELECT 1 FROM workflow_task_events AS e
+                              WHERE e.task_id = t.id
+                                AND e.event_type = 'delivery.complete'
+                          )
+                        ORDER BY t.updated_at DESC, t.id DESC
+                        """,
+                        (str(project_id),),
+                    ).fetchall()
         if not rows:
             raise ValueError("an active terminal delivery workflow task is required")
         if len(rows) != 1:
@@ -368,8 +384,17 @@ class DeliveryService:
             raise ValueError("delivery workflow task must belong to system_admin")
         if str(task["project_id"] or "") != str(project_id):
             raise ValueError("delivery workflow task belongs to another project")
-        if task["status"] not in {"pool", "assigned", "in_progress"}:
+        if task["status"] not in {"pool", "assigned", "in_progress", "completed"}:
             raise ValueError("delivery workflow task is not active")
+        if task["status"] == "completed":
+            with self.workflow_repository.identity_repository.connect() as connection:
+                completed_by_delivery = connection.execute(
+                    "SELECT 1 FROM workflow_task_events "
+                    "WHERE task_id = ? AND event_type = 'delivery.complete' LIMIT 1",
+                    (task["id"],),
+                ).fetchone()
+            if completed_by_delivery is None:
+                raise ValueError("completed task was not consumed by delivery")
         return task
 
     def _reconcile_delivery(
@@ -396,10 +421,10 @@ class DeliveryService:
             snapshot = submission["content_snapshot"]
             payload = self._payload(project, record["stage"], snapshot)
             fingerprint = stage_content_fingerprint(
-                current_beats_content(project)
-                if record["stage"] == "beats"
-                else payload["content"]
+                payload["content"]
             )
+            if record["stage"] == "beats":
+                fingerprint = beats_resource_fingerprint(snapshot)
             self._mark_reconciled(
                 record["id"], "stage_content_fingerprint", fingerprint
             )

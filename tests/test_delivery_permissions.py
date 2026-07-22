@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import time
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,7 @@ from fastapi.testclient import TestClient
 from audit.service import AuditService
 from creative.api import build_creative_router
 from creative.delivery import DeliveryService, build_delivery_router
+from creative.lifecycle_service import TopicLifecycleService
 from creative.repository import CreativeRepository
 from creative.workflow_adapter import CreativeWorkflowAdapter
 from identity.permission_service import PermissionService
@@ -109,8 +112,24 @@ def _seed_environment(tmp_path: Path):
     )
     workflow.assign_task(task["id"], planner.user_id, admin)
     workflow.start_task(task["id"], planner)
-    approved = transitions.approve(
+    approved_result = transitions.approve(
         adapter.submit(task["id"], "brief", str(brief["id"]), planner)["id"],
+        admin,
+    )
+    approved = approved_result["submission"]
+    characters_task = approved_result["next_task"]
+    characters = creative.create_character_batch(
+        project["id"], [{"name": "Lead"}], []
+    )
+    workflow.assign_task(characters_task["id"], planner.user_id, admin)
+    workflow.start_task(characters_task["id"], planner)
+    approved_characters = transitions.approve(
+        adapter.submit(
+            characters_task["id"],
+            "characters",
+            f"{project['id']}:{characters['batch_id']}",
+            planner,
+        )["id"],
         admin,
     )["submission"]
 
@@ -158,6 +177,7 @@ def _seed_environment(tmp_path: Path):
         workflow,
         project,
         approved,
+        approved_characters,
         draft,
         delivery_task,
         delivery_service,
@@ -177,6 +197,7 @@ def test_only_system_admin_can_create_list_and_download_approved_delivery(
         workflow,
         project,
         approved,
+        approved_characters,
         _,
         delivery_task,
         _,
@@ -239,6 +260,43 @@ def test_only_system_admin_can_create_list_and_download_approved_delivery(
             "WHERE task_id = ? AND event_type = 'delivery.complete'",
             (delivery_task["id"],),
         ).fetchone()[0] == 1
+    json_delivery = clients["administrator"].post(
+        "/api/admin/deliveries",
+        json={
+            "project_id": project["id"],
+            "stage": "brief",
+            "submission_id": approved["id"],
+            "format": "json",
+        },
+    )
+    characters_delivery = clients["administrator"].post(
+        "/api/admin/deliveries",
+        json={
+            "project_id": project["id"],
+            "stage": "characters",
+            "submission_id": approved_characters["id"],
+            "format": "json",
+        },
+    )
+    assert json_delivery.status_code == 201
+    assert characters_delivery.status_code == 201
+    assert {
+        delivery["id"],
+        json_delivery.json()["delivery"]["id"],
+        characters_delivery.json()["delivery"]["id"],
+    } == {
+        item["id"]
+        for item in clients["administrator"].get(
+            "/api/admin/deliveries"
+        ).json()["deliveries"]
+    }
+    with identity.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM workflow_task_events "
+            "WHERE task_id = ? AND event_type = 'delivery.complete'",
+            (delivery_task["id"],),
+        ).fetchone()[0] == 1
+    assert len(audit.query(action="delivery.create")) == 3
 
     repeated = clients["administrator"].post(
         "/api/admin/deliveries",
@@ -251,6 +309,7 @@ def test_only_system_admin_can_create_list_and_download_approved_delivery(
     )
     assert repeated.status_code == 201
     assert repeated.json()["delivery"]["id"] == delivery["id"]
+    assert len(audit.query(action="delivery.create")) == 3
     with identity.connect() as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM workflow_task_events "
@@ -268,6 +327,7 @@ def test_delivery_rejects_draft_mismatch_and_unsupported_scope(tmp_path: Path):
         _,
         project,
         approved,
+        _,
         draft,
         _,
         _,
@@ -332,6 +392,7 @@ def test_delivery_registry_and_download_persist_across_app_restart(tmp_path: Pat
         _,
         _,
         _,
+        _,
         clients,
         _,
     ) = _seed_environment(tmp_path)
@@ -382,6 +443,7 @@ def test_delivery_registry_reconciles_task_after_cross_database_failure(
         project,
         approved,
         _,
+        _,
         delivery_task,
         service,
         _,
@@ -421,6 +483,7 @@ def test_delivery_rejects_inactive_or_mismatched_terminal_task(tmp_path: Path):
         project,
         approved,
         _,
+        _,
         delivery_task,
         service,
         clients,
@@ -441,3 +504,116 @@ def test_delivery_rejects_inactive_or_mismatched_terminal_task(tmp_path: Path):
 
     assert response.status_code == 409
     assert service.list() == []
+
+
+def test_beats_lifecycle_requires_each_current_episode_delivery(tmp_path: Path):
+    (
+        _,
+        identity,
+        _,
+        _,
+        workflow,
+        project,
+        _,
+        _,
+        _,
+        _,
+        service,
+        _,
+        admin,
+    ) = _seed_environment(tmp_path)
+    creative = service.creative_repository
+    with creative._connect() as connection:
+        connection.execute(
+            "UPDATE creative_projects SET target_episode_count = 2 WHERE id = ?",
+            (project["id"],),
+        )
+    outline = creative.create_outline_batch(
+        project["id"],
+        [{"episode": 1}, {"episode": 2}],
+        "two episode arc",
+    )
+    creative.lock_outline_batch(project["id"], outline["batch_id"])
+    with creative._connect() as connection:
+        connection.execute(
+            "UPDATE creative_episodes SET status = 'approved' "
+            "WHERE project_id = ? AND stage = 'outline' AND batch_id = ?",
+            (project["id"], outline["batch_id"]),
+        )
+    beats = [
+        creative.create_episode_beats(
+            project["id"], episode, {"beats": [{"order": 1, "scene": scene}]}
+        )
+        for episode, scene in ((1, "office"), (2, "street"))
+    ]
+    with creative._connect() as connection:
+        connection.execute(
+            "UPDATE creative_episodes SET status = 'approved' "
+            "WHERE id IN (?, ?)",
+            (beats[0]["id"], beats[1]["id"]),
+        )
+    adapter = CreativeWorkflowAdapter(creative, workflow)
+    submission_ids = []
+    now = time.time()
+    with identity.transaction() as connection:
+        for index, item in enumerate(beats, start=1):
+            snapshot = adapter.snapshot("beats", str(item["id"]), reconcile=False)
+            serialized = json.dumps(
+                snapshot,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            submission_id = f"approved-beats-{index}"
+            submission_ids.append(submission_id)
+            connection.execute(
+                """
+                INSERT INTO workflow_submissions (
+                    id, task_id, resource_type, resource_id, version, status,
+                    content_snapshot_json, content_fingerprint, created_by,
+                    submitted_by, submitted_at, reviewed_by, reviewed_at,
+                    created_at, updated_at
+                ) VALUES (?, ?, 'beats', ?, 1, 'approved', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    submission_id,
+                    f"source-beats-{index}",
+                    str(item["id"]),
+                    serialized,
+                    hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+                    admin.user_id,
+                    admin.user_id,
+                    now,
+                    admin.user_id,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+    lifecycle = TopicLifecycleService(creative, tmp_path)
+    topic_id = creative.get_project(project["id"])["topic_id"]
+    assert lifecycle.enrich_topic(topic_id)["lifecycle_status"] == "beats_generated"
+
+    service.create(
+        project_id=project["id"],
+        stage="beats",
+        submission_id=submission_ids[0],
+        format="json",
+        actor=admin,
+    )
+    assert lifecycle.enrich_topic(topic_id)["lifecycle_status"] == "beats_generated"
+
+    service.create(
+        project_id=project["id"],
+        stage="beats",
+        submission_id=submission_ids[1],
+        format="json",
+        actor=admin,
+    )
+    assert lifecycle.enrich_topic(topic_id)["lifecycle_status"] == "beats_exported"
+    with creative._connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM creative_stage_exports "
+            "WHERE project_id = ? AND stage = 'beats'",
+            (project["id"],),
+        ).fetchone()[0] == 2

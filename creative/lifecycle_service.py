@@ -54,16 +54,43 @@ def current_beats_content(project: dict[str, Any]) -> list[dict[str, Any]]:
     outline_batch_id = project.get("outline_batch_id")
     if not outline_batch_id:
         return []
-    return [
+    candidates = [
         item for item in project.get("episodes") or []
         if item.get("stage") == "beats"
         and (item.get("upstream_refs") or {}).get("outline_batch_id") == outline_batch_id
     ]
+    current: dict[int, dict[str, Any]] = {}
+    for item in candidates:
+        episode_number = int(item.get("episode_number") or 0)
+        previous = current.get(episode_number)
+        if previous is None or (
+            int(item.get("version") or 0), int(item.get("id") or 0)
+        ) > (
+            int(previous.get("version") or 0), int(previous.get("id") or 0)
+        ):
+            current[episode_number] = item
+    return [current[key] for key in sorted(current)]
 
 
 def content_fingerprint(content: Any) -> str:
     payload = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def beats_resource_fingerprint(item: dict[str, Any]) -> str:
+    keys = (
+        "id",
+        "project_id",
+        "stage",
+        "episode_number",
+        "batch_id",
+        "version",
+        "parent_version_id",
+        "content",
+        "upstream_refs",
+        "generation_meta",
+    )
+    return content_fingerprint({key: item.get(key) for key in keys})
 
 
 class TopicLifecycleService:
@@ -191,8 +218,15 @@ class TopicLifecycleService:
     def _project_status(self, project: dict[str, Any]) -> str:
         beats = current_beats_content(project)
         if beats:
-            fingerprint = content_fingerprint(beats)
-            if self.repository.has_stage_export(int(project["id"]), "beats", fingerprint):
+            if all(
+                item.get("status") == "approved"
+                and self.repository.has_stage_export(
+                    int(project["id"]),
+                    "beats",
+                    beats_resource_fingerprint(item),
+                )
+                for item in beats
+            ):
                 return "beats_exported"
             return "beats_generated"
         if project.get("outline_batch_id"):

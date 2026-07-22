@@ -68,3 +68,11 @@ The SQLAlchemy `declarative_base()` deprecation warning remains pre-existing and
 - The creative delivery registry is the reconciliation source across the creative and system databases. Registry reads and retries idempotently repair the task completion, audit record, and stage-export marker after a partial cross-database failure.
 - Beats delivery now records the current Beats content fingerprint through `CreativeRepository.record_stage_export`, so production delivery advances the topic lifecycle to `beats_exported`. The former test-only marker was removed.
 - Review-focused verification: `96 passed`; full `tests/`: `470 passed`, `1 failed` only for the accepted pre-existing XHS Excel store assertion; all `24` JavaScript files passed `node --check`.
+
+## Re-review Follow-up
+
+- Removed the one-record-per-workflow-task constraint. A completed terminal delivery task can now back multiple distinct artifacts across stages, submissions, and Markdown/JSON formats, while exact `(project, stage, submission, format)` retries remain idempotent.
+- Delivery task completion and `delivery.complete` are still emitted exactly once. Later artifacts receive independent files, registry rows, and `delivery.create` audit events without replaying task completion.
+- Beats stage-export markers now fingerprint each approved Beats resource snapshot rather than the whole project aggregate.
+- Lifecycle resolution selects the latest Beats version for every current episode and reports `beats_exported` only when each is approved and has its own delivery marker. Partial multi-episode delivery remains `beats_generated` until the final current episode is delivered.
+- Re-review verification: `62 passed`; full `tests/`: `471 passed`, `1 failed` only for the accepted pre-existing XHS Excel store assertion.

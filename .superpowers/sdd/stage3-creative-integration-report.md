@@ -73,3 +73,23 @@ uv run pytest tests/ -q
 430 passed; 4 updated UI expectations initially failed and were corrected for the approval workflow.
 1 unrelated pre-existing store-factory assertion remained outside the creative/workflow/UI scope.
 ```
+
+## Retry Ordering Remediation
+
+The P1 reconciliation ordering issue found in re-review is fixed. Reconciliation now derives a logical stage scope before replay:
+
+- breakdown: topic ID
+- Brief, characters, and outline: project ID
+- Beats: project ID plus episode number
+
+For each scope, only the approved workflow submission with the newest `reviewed_at` is authoritative; submission ID is the deterministic tie-break. Reading an older approval reconciles the authoritative newer resource and retries superseding the old workflow entry. It never replays the older resource into creative pointers.
+
+The partial-failure regression covers all five resource types: the newer domain mirror commits, old workflow supersession is injected to fail, both workflow entries remain approved, and reading the old task must preserve the newer approval while superseding the old entry.
+
+```text
+uv run pytest tests/test_creative_workflow_integration.py -q
+21 passed
+
+uv run pytest <all creative tests> <all workflow tests> tests/test_role_page_content.py tests/test_webgui_ui_changes.py -q
+204 passed, 1 pre-existing SQLAlchemy deprecation warning
+```

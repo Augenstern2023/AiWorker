@@ -205,7 +205,21 @@ class CreativeWorkflowAdapter:
         superseded_resources: list[str] = []
         with self.creative_repository._connect() as connection:
             self.set_domain_status(resource_type, resource_id, "approved", conn=connection)
-            if resource_type == "brief":
+            if resource_type == "breakdown":
+                item = self._required(
+                    self.creative_repository.get_breakdown(int(resource_id))
+                )
+                old_rows = connection.execute(
+                    "SELECT id FROM creative_breakdowns WHERE topic_id = ? AND id <> ? AND status = 'approved'",
+                    (item["topic_id"], int(resource_id)),
+                ).fetchall()
+                superseded_resources.extend(str(row["id"]) for row in old_rows)
+                connection.execute(
+                    "UPDATE creative_breakdowns SET status = 'superseded', updated_at = ? "
+                    "WHERE topic_id = ? AND id <> ? AND status = 'approved'",
+                    (now, item["topic_id"], int(resource_id)),
+                )
+            elif resource_type == "brief":
                 item = self._required(self.creative_repository.get_blueprint(int(resource_id)))
                 content = dict(submission["content_snapshot"]["content"])
                 connection.execute(
@@ -276,7 +290,13 @@ class CreativeWorkflowAdapter:
                     "AND id <> ? AND status = 'approved'",
                     (now, episode["project_id"], episode["episode_number"], int(resource_id)),
                 )
-            if resource_type == "brief":
+            if resource_type == "breakdown":
+                rows = connection.execute(
+                    "SELECT id FROM creative_breakdowns WHERE topic_id = ? AND status = 'superseded'",
+                    (item["topic_id"],),
+                ).fetchall()
+                superseded_resources.extend(str(row["id"]) for row in rows)
+            elif resource_type == "brief":
                 rows = connection.execute(
                     "SELECT id FROM creative_blueprints WHERE project_id = ? AND status = 'superseded'",
                     (item["project_id"],),
@@ -374,7 +394,12 @@ class CreativeWorkflowAdapter:
             return
         try:
             if submission["status"] == "approved":
-                self.on_approved(submission, SYSTEM_ACTOR)
+                authoritative = self._authoritative_approved_submission(
+                    resource_type, resource_id
+                )
+                if authoritative is None:
+                    return
+                self.on_approved(authoritative, SYSTEM_ACTOR)
             elif submission["status"] in {
                 "submitted",
                 "returned",
@@ -390,6 +415,69 @@ class CreativeWorkflowAdapter:
                         )
         except Exception as exc:
             self._record_mirror_error(submission, exc)
+
+    def _authoritative_approved_submission(
+        self, resource_type: str, resource_id: str
+    ) -> dict | None:
+        scope = self._logical_scope(resource_type, resource_id)
+        if scope is None:
+            return None
+        candidates = [
+            submission
+            for submission in self.workflow_repository.list_approved_submissions(
+                resource_type
+            )
+            if self._logical_scope(resource_type, submission["resource_id"])
+            == scope
+        ]
+        if not candidates:
+            return None
+        return max(
+            candidates,
+            key=lambda submission: (
+                float(submission.get("reviewed_at") or 0),
+                str(submission["id"]),
+            ),
+        )
+
+    def _logical_scope(
+        self, resource_type: str, resource_id: str
+    ) -> tuple[Any, ...] | None:
+        try:
+            if resource_type == "breakdown":
+                item = self.creative_repository.get_breakdown(int(resource_id))
+                return (resource_type, int(item["topic_id"])) if item else None
+            if resource_type == "brief":
+                item = self.creative_repository.get_blueprint(int(resource_id))
+                return (resource_type, int(item["project_id"])) if item else None
+            if resource_type == "characters":
+                project_id, batch_id = self._batch_key(resource_id)
+                batch = self.creative_repository.get_character_batch(
+                    project_id, batch_id
+                )
+                return (
+                    (resource_type, project_id)
+                    if batch["characters"]
+                    else None
+                )
+            if resource_type == "outline":
+                project_id, batch_id = self._batch_key(resource_id)
+                batch = self.creative_repository.get_outline_batch(
+                    project_id, batch_id
+                )
+                return (
+                    (resource_type, project_id) if batch["episodes"] else None
+                )
+            item = self.creative_repository.get_episode(int(resource_id))
+            if not item or item["stage"] != "beats":
+                return None
+            return (
+                resource_type,
+                int(item["project_id"]),
+                int(item["episode_number"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
 
     def reconcile_submission(self, submission: dict) -> None:
         if submission.get("resource_type") in RESOURCE_TYPES:

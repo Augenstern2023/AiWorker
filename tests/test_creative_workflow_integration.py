@@ -561,3 +561,73 @@ def test_creative_project_get_retries_pending_mirror(tmp_path: Path, monkeypatch
 
     assert response.status_code == 200
     assert creative.get_blueprint(int(resource_id))["status"] == "approved"
+
+
+@pytest.mark.parametrize(
+    "resource_type", ["breakdown", "brief", "characters", "outline", "beats"]
+)
+def test_reading_older_approved_after_partial_supersede_failure_never_reverses_newer(
+    environment, monkeypatch, resource_type: str
+) -> None:
+    _, workflow, creative, adapter, transitions, admin, owner, actors = environment
+    resource_id, _ = _seed_resources(creative)[resource_type]
+    _make_resource_draft(creative, resource_type, resource_id)
+    first_task = _task(
+        workflow,
+        creative,
+        admin,
+        owner,
+        actors[resource_type],
+        resource_type,
+        resource_id,
+    )
+    first = adapter.submit(
+        first_task["id"], resource_type, resource_id, actors[resource_type]
+    )
+    transitions.approve(first["id"], owner)
+    with creative._connect() as connection:
+        newer_resource_id = adapter._clone(
+            resource_type, resource_id, first_task["id"], connection
+        )
+    second_task = _task(
+        workflow,
+        creative,
+        admin,
+        owner,
+        actors[resource_type],
+        resource_type,
+        newer_resource_id,
+    )
+    second = adapter.submit(
+        second_task["id"],
+        resource_type,
+        newer_resource_id,
+        actors[resource_type],
+    )
+    real_supersede = workflow.supersede_resource_approvals
+
+    def fail_old_supersede(kind, old_resource_id, actor):
+        if kind == resource_type and old_resource_id == resource_id:
+            raise RuntimeError("injected workflow supersede outage")
+        return real_supersede(kind, old_resource_id, actor)
+
+    monkeypatch.setattr(workflow, "supersede_resource_approvals", fail_old_supersede)
+    transitions.approve(second["id"], owner)
+    assert workflow.get_submission(first["id"])["status"] == "approved"
+    assert workflow.get_submission(second["id"])["status"] == "approved"
+    monkeypatch.setattr(workflow, "supersede_resource_approvals", real_supersede)
+
+    transitions.list_task_submissions(first_task["id"])
+
+    assert workflow.get_submission(first["id"])["status"] == "superseded"
+    assert workflow.get_submission(second["id"])["status"] == "approved"
+    assert adapter.domain_status(resource_type, newer_resource_id) == "approved"
+    if resource_type == "brief":
+        project_id = creative.get_blueprint(int(newer_resource_id))["project_id"]
+        assert creative.get_project(project_id)["locked_brief_id"] == int(newer_resource_id)
+    elif resource_type == "characters":
+        project_id, batch_id = newer_resource_id.split(":", 1)
+        assert creative.get_project(int(project_id))["character_batch_id"] == batch_id
+    elif resource_type == "outline":
+        project_id, batch_id = newer_resource_id.split(":", 1)
+        assert creative.get_project(int(project_id))["outline_batch_id"] == batch_id

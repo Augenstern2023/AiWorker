@@ -174,6 +174,20 @@ class WorkflowRepository:
             ).fetchone()
         return self._submission_dict(row) if row is not None else None
 
+    def list_approved_submissions(
+        self, resource_type: str
+    ) -> list[dict[str, Any]]:
+        with self.identity_repository.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM workflow_submissions
+                WHERE resource_type = ? AND status = 'approved'
+                ORDER BY reviewed_at DESC, id DESC
+                """,
+                (resource_type,),
+            ).fetchall()
+        return [self._submission_dict(row) for row in rows]
+
     def update_submission_resource_id(
         self,
         submission_id: str,

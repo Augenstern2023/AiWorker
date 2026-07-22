@@ -14,7 +14,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from creative.api import build_creative_router
+from creative.api import build_creative_router, creative_api_principal
 from creative.repository import CreativeRepository
 from creative.workflow_adapter import CreativeWorkflowAdapter
 from identity.dependencies import current_principal
@@ -555,6 +555,7 @@ def test_creative_project_get_retries_pending_mirror(tmp_path: Path, monkeypatch
     project_id = creative.get_blueprint(int(resource_id))["project_id"]
     assert adapter.domain_status("brief", resource_id) == "submitted"
     app = FastAPI()
+    app.dependency_overrides[creative_api_principal] = lambda: admin
     app.include_router(
         build_creative_router(root=tmp_path, runtime_dir=runtime)
     )

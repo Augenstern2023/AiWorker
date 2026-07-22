@@ -11,8 +11,9 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
+from audit.service import AuditService
 from identity.dependencies import current_principal, require_permission
 from identity.schema import Principal
 
@@ -61,17 +62,30 @@ def build_workflow_router(
     @router.post("/api/workflow/tasks/{task_id}/claim")
     def claim_task(
         task_id: str,
+        request: Request,
         principal: Principal = Depends(require_permission("workflow.claim")),
     ) -> dict[str, Any]:
-        return _call(repository.claim_task, task_id, principal)
+        return _audited_call(
+            repository,
+            request,
+            principal,
+            "workflow.claim",
+            "task",
+            task_id,
+            repository.claim_task,
+            task_id,
+            principal,
+        )
 
     @router.post("/api/workflow/tasks/{task_id}/assign")
     def assign_task(
         task_id: str,
         payload: TaskAssignmentRequest,
+        request: Request,
         principal: Principal = Depends(require_permission("workflow.assign")),
     ) -> dict[str, Any]:
-        return _call(
+        return _audited_call(
+            repository, request, principal, "workflow.assign", "task", task_id,
             repository.assign_task, task_id, payload.assignee_user_id, principal
         )
 
@@ -79,27 +93,37 @@ def build_workflow_router(
     def reassign_task(
         task_id: str,
         payload: TaskAssignmentRequest,
+        request: Request,
         principal: Principal = Depends(require_permission("workflow.reassign")),
     ) -> dict[str, Any]:
-        return _call(
+        return _audited_call(
+            repository, request, principal, "workflow.reassign", "task", task_id,
             repository.reassign_task, task_id, payload.assignee_user_id, principal
         )
 
     @router.post("/api/workflow/tasks/{task_id}/start")
     def start_task(
         task_id: str,
+        request: Request,
         principal: Principal = Depends(
             require_permission("workflow.task.update")
         ),
     ) -> dict[str, Any]:
-        return _call(repository.start_task, task_id, principal)
+        return _audited_call(
+            repository, request, principal, "workflow.start", "task", task_id,
+            repository.start_task, task_id, principal
+        )
 
     @router.post("/api/workflow/tasks/{task_id}/cancel")
     def cancel_task(
         task_id: str,
+        request: Request,
         principal: Principal = Depends(require_permission("workflow.cancel")),
     ) -> dict[str, Any]:
-        return _call(repository.cancel_task, task_id, principal)
+        return _audited_call(
+            repository, request, principal, "workflow.cancel", "task", task_id,
+            repository.cancel_task, task_id, principal
+        )
 
     member_manager = require_permission("project.member.manage")
 
@@ -183,6 +207,7 @@ def build_workflow_router(
     @router.post("/api/workflow/submissions/{submission_id}/submit")
     def submit_submission(
         submission_id: str,
+        request: Request,
         principal: Principal = Depends(current_principal),
     ) -> dict[str, Any]:
         submission = _visible_submission(repository, submission_id, principal)
@@ -193,11 +218,15 @@ def build_workflow_router(
             raise HTTPException(
                 status_code=503, detail="creative workflow adapter is unavailable"
             )
-        return _call(transitions.submit, submission_id, principal)
+        return _audited_call(
+            repository, request, principal, "workflow.submit", "submission",
+            submission_id, transitions.submit, submission_id, principal
+        )
 
     @router.post("/api/workflow/submissions/{submission_id}/approve")
     def approve_submission(
         submission_id: str,
+        request: Request,
         principal: Principal = Depends(current_principal),
     ) -> dict[str, Any]:
         submission = _visible_submission(repository, submission_id, principal)
@@ -208,12 +237,16 @@ def build_workflow_router(
             raise HTTPException(
                 status_code=503, detail="creative workflow adapter is unavailable"
             )
-        return _call(transitions.approve, submission_id, principal)
+        return _audited_call(
+            repository, request, principal, "workflow.approve", "submission",
+            submission_id, transitions.approve, submission_id, principal
+        )
 
     @router.post("/api/workflow/submissions/{submission_id}/return")
     def return_submission(
         submission_id: str,
         payload: SubmissionReturnRequest,
+        request: Request,
         principal: Principal = Depends(current_principal),
     ) -> dict[str, Any]:
         submission = _visible_submission(repository, submission_id, principal)
@@ -224,8 +257,9 @@ def build_workflow_router(
             raise HTTPException(
                 status_code=503, detail="creative workflow adapter is unavailable"
             )
-        return _call(
-            transitions.return_submission,
+        return _audited_call(
+            repository, request, principal, "workflow.return", "submission",
+            submission_id, transitions.return_submission,
             submission_id,
             principal,
             payload.review_comment,
@@ -234,6 +268,7 @@ def build_workflow_router(
     @router.post("/api/workflow/submissions/{submission_id}/fork")
     def fork_submission(
         submission_id: str,
+        request: Request,
         principal: Principal = Depends(current_principal),
     ) -> dict[str, Any]:
         submission = _visible_submission(repository, submission_id, principal)
@@ -244,7 +279,10 @@ def build_workflow_router(
             raise HTTPException(
                 status_code=503, detail="creative workflow adapter is unavailable"
             )
-        return _call(transitions.fork, submission_id, principal)
+        return _audited_call(
+            repository, request, principal, "workflow.fork", "submission",
+            submission_id, transitions.fork, submission_id, principal
+        )
 
     return router
 
@@ -270,7 +308,7 @@ def _task_view(
             principal.is_system_admin
             or (
                 "workflow.claim" in principal.permissions
-                and task["role_code"] in principal.role_codes
+                and repository.can_claim_task(task["id"], principal)
             )
         )
     )
@@ -316,3 +354,56 @@ def _call(operation: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except TypeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _audited_call(
+    repository: WorkflowRepository,
+    request: Request,
+    principal: Principal,
+    action: str,
+    target_type: str,
+    target_id: str,
+    operation: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    audit = getattr(request.app.state, "audit_service", None)
+    task = (
+        repository.get_task(target_id)
+        if target_type == "task"
+        else None
+    )
+    if target_type == "submission":
+        submission = repository.get_submission(target_id)
+        task = repository.get_task(submission["task_id"]) if submission else None
+    try:
+        result = _call(operation, *args, **kwargs)
+    except HTTPException as exc:
+        if isinstance(audit, AuditService):
+            audit.record(
+                actor=principal,
+                action=action,
+                target_type=target_type,
+                target_id=target_id,
+                project_id=str(task["project_id"]) if task and task["project_id"] else None,
+                before=task,
+                after={"detail": exc.detail},
+                reason=None,
+                result="failure",
+                request=request,
+            )
+        raise
+    if isinstance(audit, AuditService):
+        audit.record(
+            actor=principal,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            project_id=str(task["project_id"]) if task and task["project_id"] else None,
+            before=task,
+            after=result,
+            reason=None,
+            result="success",
+            request=request,
+        )
+    return result

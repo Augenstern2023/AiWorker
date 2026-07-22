@@ -440,16 +440,32 @@ class DeliveryService:
         if record.get("stage_export_recorded_at") is not None:
             return
         if record["stage"] == "beats":
-            fingerprint = record["stage_content_fingerprint"]
-            if not self.creative_repository.has_stage_export(
-                int(record["project_id"]), "beats", fingerprint
-            ):
-                self.creative_repository.record_stage_export(
-                    int(record["project_id"]),
-                    "beats",
-                    record["format"],
-                    fingerprint,
+            fingerprints = {record["stage_content_fingerprint"]}
+            with self.workflow_repository.identity_repository.connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT s.content_snapshot_json
+                    FROM workflow_submissions AS s
+                    JOIN workflow_tasks AS t ON t.id = s.task_id
+                    WHERE t.project_id = ? AND s.resource_type = 'beats'
+                      AND s.status = 'approved'
+                    """,
+                    (str(record["project_id"]),),
+                ).fetchall()
+            for row in rows:
+                fingerprints.add(
+                    beats_resource_fingerprint(json.loads(row["content_snapshot_json"]))
                 )
+            for fingerprint in sorted(fingerprints):
+                if not self.creative_repository.has_stage_export(
+                    int(record["project_id"]), "beats", fingerprint
+                ):
+                    self.creative_repository.record_stage_export(
+                        int(record["project_id"]),
+                        "beats",
+                        record["format"],
+                        fingerprint,
+                    )
         self._mark_reconciled(
             record["id"], "stage_export_recorded_at", time.time()
         )

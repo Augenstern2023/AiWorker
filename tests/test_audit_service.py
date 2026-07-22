@@ -19,12 +19,14 @@ from fastapi.testclient import TestClient
 from audit.api import build_audit_router
 from audit.service import AuditService
 from identity.api import build_identity_router
+from identity.dependencies import current_principal
 from identity.password_service import PasswordService
 from identity.permission_catalog import PERMISSIONS
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.schema import Principal
 from identity.session_service import SessionService
+from workflow.repository import WorkflowRepository
 
 
 @pytest.fixture
@@ -407,3 +409,47 @@ def test_user_mutation_rolls_back_when_atomic_audit_insert_fails(
     assert response.status_code == 500
     assert repository.get_user(user["id"])["status"] == "active"
     assert audit_service.query(action="user.update") == []
+
+
+def test_project_audit_reader_is_limited_to_managed_project(
+    repository: IdentityRepository, audit_service: AuditService
+):
+    role = repository.get_role_by_code("project_owner")
+    assert role is not None
+    user = repository.create_user("audit-owner", "Audit Owner", "hash")
+    repository.replace_user_roles(user["id"], [role["id"]])
+    owner = PermissionService(repository, SessionService(repository)).principal_for_user(
+        user["id"], "audit-owner-session"
+    )
+    assert owner is not None
+    WorkflowRepository(repository).add_project_member(
+        "managed-project", owner.user_id, "project_owner", owner
+    )
+    audit_service.record(
+        actor=owner,
+        action="workflow.claim",
+        target_type="task",
+        target_id="task-1",
+        project_id="managed-project",
+        before=None,
+        after={"status": "assigned"},
+        reason=None,
+        result="success",
+    )
+    app = FastAPI()
+    app.state.identity_permission_service = PermissionService(
+        repository, SessionService(repository)
+    )
+    app.dependency_overrides[current_principal] = lambda: owner
+    app.include_router(build_audit_router(audit_service))
+    client = TestClient(app)
+
+    assert client.get("/api/admin/audit").status_code == 403
+    assert client.get(
+        "/api/admin/audit", params={"project_id": "other-project"}
+    ).status_code == 403
+    managed = client.get(
+        "/api/admin/audit", params={"project_id": "managed-project"}
+    )
+    assert managed.status_code == 200
+    assert [event["target_id"] for event in managed.json()] == ["task-1"]

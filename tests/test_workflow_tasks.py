@@ -407,7 +407,7 @@ def test_create_task_requires_actor_and_system_actor_is_recorded(
     assert user_event["actor_user_id"] == selection_user.user_id
 
 
-def test_system_admin_claim_requires_matching_target_role(
+def test_system_admin_can_claim_any_target_role(
     repository: WorkflowRepository,
     identity_repository: IdentityRepository,
     admin_user: Principal,
@@ -419,8 +419,8 @@ def test_system_admin_claim_requires_matching_target_role(
         "selection_operator",
         actor=SYSTEM_ACTOR,
     )
-    with pytest.raises(PermissionError, match="task pool role"):
-        repository.claim_task(task["id"], admin_user)
+    claimed = repository.claim_task(task["id"], admin_user)
+    assert claimed["assignee_user_id"] == admin_user.user_id
 
     assigned_to_admin = repository.create_task(
         "wf-admin-assign-self",
@@ -449,7 +449,13 @@ def test_system_admin_claim_requires_matching_target_role(
         admin_user.user_id, [admin_role["id"], selection_role["id"]]
     )
 
-    assert repository.claim_task(task["id"], admin_user)["status"] == "assigned"
+    another = repository.create_task(
+        "wf-admin-claim-with-extra-role",
+        "topic.prepare",
+        "selection_operator",
+        actor=SYSTEM_ACTOR,
+    )
+    assert repository.claim_task(another["id"], admin_user)["status"] == "assigned"
 
 
 def test_claim_uses_state_machine_target_status_in_update_and_event(
@@ -501,3 +507,34 @@ def test_state_machine_declares_all_states_and_rejects_invalid_transition(
     )
     with pytest.raises(ValueError):
         machine.transition(task, "start", selection_user)
+
+
+def test_custom_role_claims_configured_task_type(
+    identity_repository: IdentityRepository,
+    repository: WorkflowRepository,
+):
+    role = identity_repository.create_role(
+        "dialogue_specialist", "Dialogue specialist", ""
+    )
+    identity_repository.replace_role_permissions(
+        role["id"], [("workflow.claim", "task")]
+    )
+    identity_repository.replace_role_claimable_task_types(role["id"], ["beats"])
+    user = identity_repository.create_user("dialogue", "Dialogue", "hash")
+    identity_repository.replace_user_roles(user["id"], [role["id"]])
+    principal = PermissionService(
+        identity_repository, SessionService(identity_repository)
+    ).principal_for_user(user["id"], "custom-role-session")
+    assert principal is not None
+    beats = repository.create_task(
+        "custom-claim", "beats", "screenwriter", actor=SYSTEM_ACTOR
+    )
+    outline = repository.create_task(
+        "custom-reject", "outline", "screenwriter", actor=SYSTEM_ACTOR
+    )
+
+    claimed = repository.claim_task(beats["id"], principal)
+
+    assert claimed["assignee_user_id"] == user["id"]
+    with pytest.raises(PermissionError, match="task type"):
+        repository.claim_task(outline["id"], principal)

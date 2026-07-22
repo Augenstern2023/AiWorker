@@ -131,6 +131,66 @@ class WorkflowRepository:
         with self.identity_repository.connect() as connection:
             return self._get_task(connection, task_id)
 
+    def ensure_topic_task(
+        self,
+        topic_id: int,
+        *,
+        task_type: str,
+        role_code: str,
+        actor: Principal | dict[str, Any],
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        workflow_id = f"topic:{topic_id}"
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.transaction() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM workflow_tasks
+                WHERE workflow_id = ? AND task_type = ? AND topic_id = ?
+                ORDER BY created_at, id LIMIT 1
+                """,
+                (workflow_id, task_type, topic_id),
+            ).fetchone()
+            if existing is not None:
+                if project_id is not None and existing["project_id"] != project_id:
+                    connection.execute(
+                        "UPDATE workflow_instances SET project_id = ?, resource_type = 'project', "
+                        "resource_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (project_id, project_id, workflow_id),
+                    )
+                    connection.execute(
+                        "UPDATE workflow_tasks SET project_id = ?, updated_at = CURRENT_TIMESTAMP "
+                        "WHERE workflow_id = ? AND project_id IS NULL",
+                        (project_id, workflow_id),
+                    )
+                    existing = connection.execute(
+                        "SELECT * FROM workflow_tasks WHERE id = ?", (existing["id"],)
+                    ).fetchone()
+                return self._task_dict(existing)
+            self._ensure_workflow(
+                connection, workflow_id, task_type, project_id, topic_id, actor_id
+            )
+            task_id = str(uuid.uuid4())
+            connection.execute(
+                """
+                INSERT INTO workflow_tasks
+                    (id, workflow_id, task_type, role_code, topic_id, project_id,
+                     assignee_id, assigned_by, status, due_at)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 'pool', NULL)
+                """,
+                (task_id, workflow_id, task_type, role_code, topic_id, project_id),
+            )
+            self._record_event(
+                connection,
+                task_id,
+                "create",
+                actor_id,
+                None,
+                "pool",
+                {"role_code": role_code, "bootstrap": True},
+            )
+            return self._require_task(connection, task_id)
+
     def link_task_job(self, task_id: str, job_id: str) -> None:
         with self.identity_repository.transaction() as connection:
             self._require_task(connection, task_id)
@@ -462,7 +522,10 @@ class WorkflowRepository:
                     if row["assignee_id"] == actor_id
                     or (
                         row["status"] == "pool"
-                        and row["role_code"] in role_codes
+                        and (
+                            row["role_code"] in role_codes
+                            or row["task_type"] in live_actor["claimable_task_types"]
+                        )
                         and (
                             row["project_id"] is None
                             or (
@@ -485,6 +548,29 @@ class WorkflowRepository:
         return next(
             (task for task in self.list_tasks(actor) if task["id"] == task_id), None
         )
+
+    def can_claim_task(
+        self, task_id: str, actor: Principal | dict[str, Any]
+    ) -> bool:
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.connect() as connection:
+            try:
+                task = self._require_task(connection, task_id)
+                live_actor = self._live_actor(connection, actor_id)
+            except (KeyError, PermissionError):
+                return False
+            if task["status"] != "pool":
+                return False
+            if live_actor["is_system_admin"]:
+                return True
+            if (
+                task["role_code"] not in live_actor["role_codes"]
+                and task["task_type"] not in live_actor["claimable_task_types"]
+            ):
+                return False
+            return task["project_id"] is None or self._is_active_project_member(
+                connection, task["project_id"], actor_id
+            )
 
     def claim_task(
         self, task_id: str, actor: Principal | dict[str, Any]
@@ -1017,12 +1103,25 @@ class WorkflowRepository:
                 permission_scopes[row["permission_code"]] = row["data_scope"]
         if "system_admin" in roles:
             permission_scopes = {"*": "all"}
+        claimable_task_types = {
+            row["task_type"]
+            for row in connection.execute(
+                """
+                SELECT rct.task_type FROM user_roles AS ur
+                JOIN roles AS r ON r.id = ur.role_id AND r.is_enabled = 1
+                JOIN role_claimable_task_types AS rct ON rct.role_id = r.id
+                WHERE ur.user_id = ?
+                """,
+                (user_id,),
+            )
+        }
         return {
             "user_id": user_id,
             "role_codes": roles,
             "permissions": set(permission_scopes),
             "permission_scopes": permission_scopes,
             "is_system_admin": "system_admin" in roles,
+            "claimable_task_types": claimable_task_types,
         }
 
     @staticmethod

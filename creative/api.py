@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
@@ -22,6 +23,7 @@ from creative.imitation_service import assess_similarity_risk
 from creative.lifecycle_service import TopicLifecycleService, content_fingerprint
 from creative.repository import CreativeRepository
 from creative.workflow_adapter import CreativeWorkflowAdapter
+from creative.workflow_bootstrap import WorkflowBootstrapService
 from creative.schema import (
     BlueprintGenerateRequest,
     BlueprintUpdateRequest,
@@ -57,6 +59,10 @@ class TopicUpdateRequest(BaseModel):
     decision_note: str = ""
 
 
+class TopicWorkflowBootstrapRequest(BaseModel):
+    project_id: str | None = None
+
+
 class BreakdownCreateRequest(BaseModel):
     topic_id: int
     force_regenerate: bool = False
@@ -65,6 +71,88 @@ class BreakdownCreateRequest(BaseModel):
 
 class BreakdownUpdateRequest(BaseModel):
     content: dict[str, Any]
+
+
+def creative_api_principal(request: Request) -> Principal:
+    permission_service = getattr(request.app.state, "identity_permission_service", None)
+    if not isinstance(permission_service, PermissionService):
+        raise HTTPException(401, "登录已失效，请重新登录")
+    token = request.cookies.get(permission_service.session_service.cookie_name)
+    principal = permission_service.principal_for_session(token)
+    if principal is None:
+        raise HTTPException(401, "登录已失效，请重新登录")
+    return principal
+
+
+def creative_api_authorization(
+    request: Request,
+    principal: Principal = Depends(creative_api_principal),
+) -> Principal:
+    path = request.url.path.removeprefix("/api/creative")
+    method = request.method.upper()
+    permission: str | None
+    if path.startswith("/topics"):
+        if path.endswith("/workflow"):
+            permission = "project.manage"
+        elif method == "GET":
+            permission = "topic.read"
+        elif path == "/topics/generate":
+            permission = "topic.generate"
+        else:
+            permission = "topic.edit"
+    elif path.startswith("/breakdowns"):
+        permission = (
+            "breakdown.read" if method == "GET"
+            else "breakdown.generate" if path == "/breakdowns" and method == "POST"
+            else "breakdown.edit"
+        )
+    elif path.startswith("/projects"):
+        if method == "GET":
+            permission = "project.read.assigned"
+        elif path == "/projects":
+            permission = "project.create"
+        elif "/blueprints/generate" in path:
+            permission = "blueprint.generate"
+        elif "/characters" in path:
+            permission = "character.generate" if path.endswith("/generate") else "character.edit"
+        elif "/outlines" in path:
+            permission = "outline.generate" if path.endswith("/generate") else "outline.edit"
+        elif "/beats" in path:
+            permission = "beats.generate" if path.endswith("/generate") else "beats.edit"
+        else:
+            permission = "project.edit.own_draft"
+    elif path.startswith("/blueprints"):
+        permission = "brief.edit"
+    elif path.startswith("/characters"):
+        permission = "character.edit"
+    elif path.startswith("/relationships"):
+        permission = "relationship.edit"
+    elif path.startswith("/episodes"):
+        permission = "beats.edit" if path.endswith("/lock") else "outline.edit"
+    elif path == "/workflow/submit":
+        permission = None
+    else:
+        permission = "*"
+    if (
+        permission is not None
+        and not principal.is_system_admin
+        and permission not in principal.permissions
+    ):
+        raise HTTPException(403, "没有执行此操作的权限")
+    match = re.match(r"/projects/(\d+)(?:/|$)", path)
+    if match and not principal.is_system_admin:
+        permission_service = getattr(
+            request.app.state, "identity_permission_service", None
+        )
+        if not isinstance(permission_service, PermissionService):
+            raise HTTPException(500, "identity permission service is not configured")
+        project_id = match.group(1)
+        if not (
+            permission_service.can_access_assigned_project(principal, project_id)
+            or permission_service.can_access_managed_project(principal, project_id)
+        ):
+            raise HTTPException(403, "只能访问当前分配或管理的项目")
+    return principal
 
 
 def _markdown_value(value: Any, level: int = 2) -> list[str]:
@@ -269,7 +357,11 @@ def build_creative_router(
     runtime_dir: str | Path = ".runtime",
     job_manager: Any | None = None,
 ) -> APIRouter:
-    router = APIRouter(prefix="/api/creative", tags=["creative"])
+    router = APIRouter(
+        prefix="/api/creative",
+        tags=["creative"],
+        dependencies=[Depends(creative_api_authorization)],
+    )
     repository = CreativeRepository(Path(runtime_dir) / "creative" / "creative.db")
     workflow_repository = WorkflowRepository(
         IdentityRepository(Path(runtime_dir) / "system" / "system.db")
@@ -278,6 +370,65 @@ def build_creative_router(
     service = TopicService(str(root))
     workspace_root = Path(root).resolve()
     lifecycle_service = TopicLifecycleService(repository, workspace_root, job_manager)
+    bootstrap_service = WorkflowBootstrapService(repository, workflow_repository)
+
+    def creative_resource_scope(
+        request: Request,
+        principal: Principal = Depends(creative_api_principal),
+    ) -> None:
+        if principal.is_system_admin:
+            return
+        path = request.url.path.removeprefix("/api/creative")
+        project_id: int | None = None
+        task_id: str | None = None
+        match = re.match(r"/projects/(\d+)(?:/|$)", path)
+        if match:
+            project_id = int(match.group(1))
+        else:
+            resource_patterns = (
+                (r"/blueprints/(\d+)", repository.get_blueprint),
+                (r"/characters/(\d+)", repository.get_character),
+                (r"/relationships/(\d+)", repository.get_relationship),
+                (r"/episodes/(\d+)", repository.get_episode),
+            )
+            for pattern, getter in resource_patterns:
+                resource_match = re.match(pattern, path)
+                if resource_match:
+                    item = getter(int(resource_match.group(1)))
+                    if item is None:
+                        return
+                    project_id = int(item["project_id"])
+                    task_id = str(item.get("workflow_task_id") or "") or None
+                    break
+            breakdown_match = re.match(r"/breakdowns/(\d+)", path)
+            if breakdown_match:
+                item = repository.get_breakdown(int(breakdown_match.group(1)))
+                if item is None:
+                    return
+                task_id = str(item.get("workflow_task_id") or "") or None
+        if task_id is not None:
+            task = workflow_repository.get_visible_task(task_id, principal)
+            if task is None:
+                raise HTTPException(403, "只能访问当前任务范围内的创作资源")
+            if request.method.upper() != "GET" and task.get("assignee_user_id") != principal.user_id:
+                raise HTTPException(403, "只有当前任务执行人可以修改创作资源")
+        if project_id is not None:
+            permission_service = getattr(
+                request.app.state, "identity_permission_service", None
+            )
+            if not isinstance(permission_service, PermissionService):
+                raise HTTPException(500, "identity permission service is not configured")
+            if not (
+                permission_service.can_access_assigned_project(
+                    principal, str(project_id)
+                )
+                or permission_service.can_access_managed_project(
+                    principal, str(project_id)
+                )
+            ):
+                raise HTTPException(403, "只能访问当前分配或管理的项目")
+
+    router.dependencies.append(Depends(creative_resource_scope))
 
     def optional_principal(request: Request) -> Principal | None:
         permission_service = getattr(
@@ -548,7 +699,11 @@ def build_creative_router(
         return {"items": items}
 
     @router.patch("/topics/{topic_id}")
-    async def update_topic(topic_id: int, payload: TopicUpdateRequest):
+    async def update_topic(
+        topic_id: int,
+        payload: TopicUpdateRequest,
+        principal: Principal = Depends(current_principal),
+    ):
         try:
             topic = repository.update_topic(topic_id, payload.status, payload.decision_note)
         except ValueError as exc:
@@ -556,6 +711,26 @@ def build_creative_router(
         if not topic:
             raise HTTPException(404, "topic not found")
         return lifecycle_service.enrich_topic(topic_id)
+
+    @router.post("/topics/{topic_id}/workflow")
+    async def bootstrap_topic_workflow(
+        topic_id: int,
+        request: Request,
+        payload: TopicWorkflowBootstrapRequest | None = None,
+        principal: Principal = Depends(current_principal),
+    ):
+        bootstrap_service.audit_service = getattr(request.app.state, "audit_service", None)
+        try:
+            return bootstrap_service.adopt_topic(
+                topic_id,
+                principal,
+                request,
+                project_id=payload.project_id if payload else None,
+            )
+        except KeyError as exc:
+            raise HTTPException(404, "topic not found") from exc
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
 
     @router.post("/breakdowns")
     async def create_breakdown(
@@ -734,11 +909,33 @@ def build_creative_router(
             raise HTTPException(409, str(exc)) from exc
 
     @router.get("/projects")
-    async def list_projects(topic_id: int | None = None):
+    async def list_projects(
+        request: Request,
+        topic_id: int | None = None,
+        principal: Principal = Depends(current_principal),
+    ):
         items = repository.list_projects(topic_id=topic_id)
         for item in items:
             workflow_adapter.reconcile_project(int(item["id"]))
-        return {"items": repository.list_projects(topic_id=topic_id)}
+        items = repository.list_projects(topic_id=topic_id)
+        if not principal.is_system_admin:
+            permission_service = getattr(
+                request.app.state, "identity_permission_service", None
+            )
+            items = [
+                item
+                for item in items
+                if isinstance(permission_service, PermissionService)
+                and (
+                    permission_service.can_access_assigned_project(
+                        principal, str(item["id"])
+                    )
+                    or permission_service.can_access_managed_project(
+                        principal, str(item["id"])
+                    )
+                )
+            ]
+        return {"items": items}
 
     @router.get("/projects/{project_id}")
     async def get_project(project_id: int):
@@ -1039,6 +1236,15 @@ def build_creative_router(
         payload: CreativeSubmitRequest,
         principal: Principal = Depends(current_principal),
     ):
+        permission_prefix = {
+            "characters": "character",
+        }.get(payload.resource_type, payload.resource_type)
+        required_permission = f"{permission_prefix}.submit"
+        if (
+            not principal.is_system_admin
+            and required_permission not in principal.permissions
+        ):
+            raise HTTPException(403, "没有提交此创作阶段的权限")
         try:
             return workflow_adapter.submit(
                 payload.workflow_task_id,

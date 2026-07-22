@@ -25,7 +25,6 @@ from identity.repository import IdentityRepository
 from identity.session_service import SessionService
 from web.navigation_service import NavigationService
 from web.page_router import build_page_router
-from workflow import SYSTEM_ACTOR
 from workflow.api import build_workflow_router
 from workflow.repository import WorkflowRepository
 from workflow.transition_service import TransitionService
@@ -131,7 +130,7 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
     creative.update_topic(topic["id"], "adopted")
     breakdown = creative.create_breakdown(topic["id"], {"hook": "strong"}, {}, [])
     creative.lock_breakdown(breakdown["id"])
-    project = creative.create_project(topic["id"], breakdown["id"], "Five Roles", 1)
+    project = creative.create_project(topic["id"], breakdown["id"], "Five Roles", 2)
     with creative._connect() as connection:
         connection.execute(
             "UPDATE creative_breakdowns SET status = 'draft', locked_at = NULL WHERE id = ?",
@@ -143,15 +142,6 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
         workflow.add_project_member(
             project_id, user["id"], project_role, admin
         )
-
-    first_task = workflow.create_task(
-        "five-role-workflow",
-        "breakdown",
-        "selection_operator",
-        project_id=project_id,
-        topic_id=topic["id"],
-        actor=SYSTEM_ACTOR,
-    )
 
     app = FastAPI()
     app.state.identity_permission_service = permissions
@@ -177,6 +167,33 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
         role: _client(app, sessions, user["id"])
         for role, user in users.items()
     }
+    bootstrapped = clients["project_owner"].post(
+        f"/api/creative/topics/{topic['id']}/workflow",
+        json={"project_id": project_id},
+    )
+    assert bootstrapped.status_code == 200, bootstrapped.text
+    topic_decision_task = bootstrapped.json()["task"]
+
+    def approve_generic(task: dict, resource_type: str) -> dict:
+        _claim_start(clients["selection_operator"], task["id"])
+        draft = clients["selection_operator"].post(
+            f"/api/workflow/tasks/{task['id']}/submissions",
+            json={
+                "resource_type": resource_type,
+                "resource_id": str(topic["id"]),
+                "content": {"topic_id": topic["id"]},
+            },
+        )
+        assert draft.status_code == 201, draft.text
+        submitted = clients["selection_operator"].post(
+            f"/api/workflow/submissions/{draft.json()['id']}/submit"
+        )
+        assert submitted.status_code == 200, submitted.text
+        return _approve(clients["project_owner"], submitted.json()["id"])["next_task"]
+
+    source_package_task = approve_generic(topic_decision_task, "topic_decision")
+    first_task = approve_generic(source_package_task, "source_package")
+    assert first_task["task_type"] == "breakdown"
 
     assert clients["selection_operator"].get("/selection/breakdowns").status_code == 200
     assert clients["selection_operator"].get("/writing/projects").status_code == 403
@@ -244,7 +261,12 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
     assert outline_task["role_code"] == "screenwriter"
 
     outline = creative.create_outline_batch(
-        project["id"], [{"episode": 1, "hook": "cliffhanger"}], "series arc"
+        project["id"],
+        [
+            {"episode": 1, "hook": "cliffhanger"},
+            {"episode": 2, "hook": "reversal"},
+        ],
+        "series arc",
     )
     outline_resource_id = f"{project_id}:{outline['batch_id']}"
     _claim_start(clients["screenwriter"], outline_task["id"])
@@ -281,8 +303,35 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
     beats_submission = _submit(
         clients["screenwriter"], beats_task["id"], "beats", str(beats["id"])
     )
-    delivery_task = _approve(
+    first_beats_result = _approve(
         clients["project_owner"], beats_submission["id"]
+    )
+    assert first_beats_result["next_task"] is None
+    assert first_beats_result["task"]["status"] == "in_progress"
+
+    beats_two = creative.create_episode_beats(
+        project["id"],
+        2,
+        {
+            "beats": [
+                {
+                    "order": 1,
+                    "scene": "station",
+                    "characters": ["Lead"],
+                    "goal": "escape",
+                    "obstacle": "Rival",
+                    "emotion_change": "hope to fear",
+                    "turn": "train stops",
+                    "hook": "lights fail",
+                }
+            ]
+        },
+    )
+    beats_two_submission = _submit(
+        clients["screenwriter"], beats_task["id"], "beats", str(beats_two["id"])
+    )
+    delivery_task = _approve(
+        clients["project_owner"], beats_two_submission["id"]
     )["next_task"]
     assert (delivery_task["task_type"], delivery_task["role_code"]) == (
         "delivery",
@@ -294,7 +343,7 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
         json={
             "project_id": project["id"],
             "stage": "beats",
-            "submission_id": beats_submission["id"],
+            "submission_id": beats_two_submission["id"],
             "format": "json",
         },
     )
@@ -312,7 +361,7 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
         json={
             "project_id": project["id"],
             "stage": "beats",
-            "submission_id": beats_submission["id"],
+            "submission_id": beats_two_submission["id"],
             "format": "json",
         },
     )
@@ -322,10 +371,10 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
     with identity.connect() as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM approval_records WHERE decision = 'approved'"
-        ).fetchone()[0] == 5
+        ).fetchone()[0] == 8
         assert connection.execute(
             "SELECT COUNT(*) FROM workflow_task_events WHERE event_type = 'approve'"
-        ).fetchone()[0] == 5
+        ).fetchone()[0] == 8
         assert connection.execute(
             "SELECT COUNT(*) FROM workflow_task_events "
             "WHERE task_id = ? AND event_type = 'delivery.complete'",
@@ -336,7 +385,7 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
             "SELECT COUNT(*) FROM creative_stage_exports "
             "WHERE project_id = ? AND stage = 'beats'",
             (project["id"],),
-        ).fetchone()[0] == 1
+        ).fetchone()[0] == 2
     assert audit.query(action="delivery.create", target_id=delivery["id"])
 
     restarted_identity = IdentityRepository(runtime / "system/system.db")
@@ -348,7 +397,7 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
         workflow_repository=restarted_workflow,
         audit_service=AuditService(restarted_identity),
     )
-    assert restarted_workflow.get_submission(beats_submission["id"])["status"] == (
+    assert restarted_workflow.get_submission(beats_two_submission["id"])["status"] == (
         "approved"
     )
     assert restarted_workflow.get_task(delivery_task["id"])["status"] == "completed"

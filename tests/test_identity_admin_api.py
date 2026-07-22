@@ -131,6 +131,7 @@ def test_admin_can_create_and_list_users_and_roles(
         json={
             "code": "custom_writer",
             "name": "定制编剧",
+            "claimable_task_types": ["beats", "outline"],
             "permissions": [
                 {"permission_code": "beats.edit", "data_scope": "project"}
             ],
@@ -148,6 +149,7 @@ def test_admin_can_create_and_list_users_and_roles(
         grant["permission_code"] for grant in created_role.json()["permissions"]
     }
     assert {"beats.edit", "beats.read", "outline.read.approved", "page.writing"} <= grants
+    assert created_role.json()["claimable_task_types"] == ["beats", "outline"]
     assert any(
         role["code"] == "custom_writer"
         for role in client.get("/api/admin/roles").json()

@@ -83,6 +83,17 @@ window.aiworkerModules.push(() => ({
                     return topic.locked_breakdown_id ? 'bg-info text-dark' : 'bg-warning text-dark';
                 },
 
+                async bootstrapTopicWorkflow(topic) {
+                    const response = await aiworkerApi.request(`/api/creative/topics/${topic.id}/workflow`, {method: 'POST'});
+                    const data = await response.json();
+                    if (!response.ok) {
+                        this.topicLibrary.error = data.detail || '创建工作流失败';
+                        return;
+                    }
+                    topic.status = 'adopted';
+                    topic.workflow_task_id = data.task?.id || '';
+                },
+
                 creativeTopicOptionLabel(topic) {
                     if (!topic?.latest_breakdown_id) return `${topic.title}（未拆解）`;
                     const version = topic.latest_breakdown_version ? ` v${topic.latest_breakdown_version}` : '';

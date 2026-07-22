@@ -664,5 +664,5 @@ def test_creative_generation_fails_closed_without_identity_configuration(
         json={"count": 3},
     )
 
-    assert response.status_code == 500
+    assert response.status_code == 401
     assert manager.payloads == []

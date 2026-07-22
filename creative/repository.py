@@ -746,6 +746,12 @@ class CreativeRepository:
             "relationships": [item for item in project["relationships"] if item["batch_id"] == batch_id],
         }
 
+    def get_character(self, character_id: int) -> dict[str, Any] | None:
+        return self._get_creative_item("creative_characters", character_id)
+
+    def get_relationship(self, relationship_id: int) -> dict[str, Any] | None:
+        return self._get_creative_item("creative_relationships", relationship_id)
+
     def update_character(self, character_id: int, content: dict[str, Any]) -> dict[str, Any] | None:
         return self._update_creative_item("creative_characters", character_id, content)
 
@@ -984,6 +990,17 @@ class CreativeRepository:
             )
             updated = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (item_id,)).fetchone()
         return self._episode(dict(updated)) if episode else self._creative_item(dict(updated))
+
+    def _get_creative_item(
+        self, table: str, item_id: int
+    ) -> dict[str, Any] | None:
+        if table not in {"creative_characters", "creative_relationships"}:
+            raise ValueError("invalid creative table")
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT * FROM {table} WHERE id = ?", (item_id,)
+            ).fetchone()
+        return self._creative_item(dict(row)) if row else None
 
     @staticmethod
     def _allowed_project_actions(project: dict[str, Any]) -> list[str]:

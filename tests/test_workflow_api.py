@@ -15,6 +15,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from audit.service import AuditService
 from identity.dependencies import current_principal
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
@@ -59,6 +60,7 @@ def _client(
     app.state.identity_permission_service = PermissionService(
         identity_repository, SessionService(identity_repository)
     )
+    app.state.audit_service = AuditService(identity_repository)
     app.dependency_overrides[current_principal] = lambda: principal
     app.include_router(build_workflow_router(repository))
     return TestClient(app)
@@ -142,6 +144,9 @@ def test_claim_start_cancel_api_and_conflict_statuses(
     assert started.json()["status"] == "in_progress"
     assert cancelled.status_code == 200
     assert cancelled.json()["status"] == "cancelled"
+    app_audit = selector_client.app.state.audit_service
+    claim_events = app_audit.query(action="workflow.claim", target_id=task["id"])
+    assert {event["result"] for event in claim_events} == {"success", "failure"}
 
 
 def test_assign_and_reassign_api_require_manager_scope(

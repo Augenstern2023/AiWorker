@@ -70,6 +70,7 @@ class RoleCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     description: str = ""
     permissions: list[RolePermissionRequest] = Field(default_factory=list)
+    claimable_task_types: list[str] = Field(default_factory=list)
 
 
 class RoleUpdateRequest(BaseModel):
@@ -77,6 +78,7 @@ class RoleUpdateRequest(BaseModel):
     description: str | None = None
     is_enabled: bool | None = None
     permissions: list[RolePermissionRequest] | None = None
+    claimable_task_types: list[str] | None = None
 
 
 class RoleResponse(BaseModel):
@@ -89,3 +91,4 @@ class RoleResponse(BaseModel):
     is_system: bool
     is_enabled: bool
     permissions: list[RolePermissionRequest] = Field(default_factory=list)
+    claimable_task_types: list[str] = Field(default_factory=list)

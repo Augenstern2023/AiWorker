@@ -132,7 +132,33 @@ class TransitionService:
                 raise ValueError(f"unknown workflow node: {task['task_type']}")
             next_node = node[2]
             next_task = None
-            if next_node is not None:
+            beats_progress = None
+            if (
+                submission["resource_type"] == "beats"
+                and self.creative_adapter is not None
+            ):
+                beats_progress = self.creative_adapter.beats_episode_progress(
+                    submission["resource_id"]
+                )
+            if beats_progress is not None and not beats_progress["complete"]:
+                completed_task = self.repository._require_task(connection, task["id"])
+                if completed_task["status"] == "completed":
+                    connection.execute(
+                        "UPDATE workflow_tasks SET status = 'in_progress', "
+                        "updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'completed'",
+                        (task["id"],),
+                    )
+                    self.repository._record_event(
+                        connection,
+                        task["id"],
+                        "beats.remaining",
+                        actor.user_id,
+                        "completed",
+                        "in_progress",
+                        beats_progress,
+                    )
+                task = self.repository._require_task(connection, task["id"])
+            elif next_node is not None:
                 next_role = WORKFLOW_NODES[next_node][0]
                 next_task = self.repository.create_next_task(
                     task["id"],
@@ -146,6 +172,8 @@ class TransitionService:
             "task": task,
             "next_task": next_task,
         }
+        if beats_progress is not None:
+            result["beats_progress"] = beats_progress
         if self.creative_adapter is not None and submission["resource_type"] in {
             "breakdown", "brief", "characters", "outline", "beats"
         }:

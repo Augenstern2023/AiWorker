@@ -59,6 +59,11 @@ CREATE TABLE IF NOT EXISTS role_permissions (
     data_scope TEXT NOT NULL CHECK (data_scope IN ('task', 'project', 'managed_projects', 'all')),
     PRIMARY KEY (role_id, permission_code)
 );
+CREATE TABLE IF NOT EXISTS role_claimable_task_types (
+    role_id TEXT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+    task_type TEXT NOT NULL,
+    PRIMARY KEY (role_id, task_type)
+);
 CREATE TABLE IF NOT EXISTS permission_dependencies (
     permission_code TEXT NOT NULL REFERENCES permissions(code) ON DELETE CASCADE,
     depends_on_code TEXT NOT NULL REFERENCES permissions(code) ON DELETE RESTRICT,
@@ -430,6 +435,36 @@ class IdentityRepository:
                 (role_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def list_role_claimable_task_types(
+        self, role_id: str, *, connection: sqlite3.Connection | None = None
+    ) -> list[str]:
+        with self.connection_scope(connection) as active_connection:
+            rows = active_connection.execute(
+                "SELECT task_type FROM role_claimable_task_types "
+                "WHERE role_id = ? ORDER BY task_type",
+                (role_id,),
+            ).fetchall()
+        return [str(row["task_type"]) for row in rows]
+
+    def replace_role_claimable_task_types(
+        self,
+        role_id: str,
+        task_types: list[str] | tuple[str, ...],
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        normalized = sorted({str(item).strip() for item in task_types if str(item).strip()})
+        with self.connection_scope(connection) as active_connection:
+            if self.get_role(role_id, connection=active_connection) is None:
+                raise KeyError(role_id)
+            active_connection.execute(
+                "DELETE FROM role_claimable_task_types WHERE role_id = ?", (role_id,)
+            )
+            active_connection.executemany(
+                "INSERT INTO role_claimable_task_types (role_id, task_type) VALUES (?, ?)",
+                [(role_id, task_type) for task_type in normalized],
+            )
 
     def replace_role_permissions(
         self,

@@ -14,9 +14,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from core.job import CrawlJob
-from creative.api import register_creative_routes
+from creative.api import creative_api_principal, register_creative_routes
 from creative.lifecycle_service import content_fingerprint, current_beats_content
 from creative.repository import CreativeRepository
+from identity.dependencies import current_principal
+from identity.schema import Principal
 from runtime.job_state import JobState
 
 
@@ -39,6 +41,17 @@ def build_client(tmp_path: Path) -> tuple[TestClient, CreativeRepository, Lifecy
     runtime_dir = tmp_path / ".runtime"
     manager = LifecycleJobManager()
     app = FastAPI()
+    principal = Principal(
+        user_id="lifecycle-admin",
+        username="lifecycle-admin",
+        display_name="Lifecycle Admin",
+        role_codes=("system_admin",),
+        permissions=frozenset({"*"}),
+        data_scope="all",
+        session_id="lifecycle-session",
+    )
+    app.dependency_overrides[creative_api_principal] = lambda: principal
+    app.dependency_overrides[current_principal] = lambda: principal
     register_creative_routes(app, root=tmp_path, runtime_dir=runtime_dir, job_manager=manager)
     return TestClient(app), CreativeRepository(runtime_dir / "creative" / "creative.db"), manager
 

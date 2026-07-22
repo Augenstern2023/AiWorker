@@ -11,6 +11,7 @@
         code: document.getElementById('role-code'),
         name: document.getElementById('role-name'),
         description: document.getElementById('role-description'),
+        claimableTaskTypes: document.getElementById('role-claimable-task-types'),
         permissions: document.getElementById('permission-list'),
     };
     if (!elements.body) return;
@@ -98,6 +99,7 @@
         elements.code.disabled = Boolean(role);
         elements.name.value = role?.name || '';
         elements.description.value = role?.description || '';
+        elements.claimableTaskTypes.value = (role?.claimable_task_types || []).join(', ');
         renderPermissionEditor(role?.permissions || []);
         editor.show();
     }
@@ -193,6 +195,7 @@
             name: elements.name.value.trim(),
             description: elements.description.value.trim(),
             permissions: selectedPermissions(),
+            claimable_task_types: elements.claimableTaskTypes.value.split(',').map((value) => value.trim()).filter(Boolean),
         };
         if (!roleId) payload.code = elements.code.value.trim();
         try {

@@ -61,7 +61,7 @@ from creative.delivery import DeliveryService, build_delivery_router
 from creative.repository import CreativeRepository
 from identity.api import build_identity_router
 from identity.password_service import PasswordService
-from identity.dependencies import current_principal
+from identity.dependencies import current_principal, require_permission
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.schema import Principal
@@ -90,6 +90,72 @@ SYSTEM_DB_PATH = WORKSPACE_ROOT / ".runtime" / "system" / "system.db"
 UNSAFE_HTTP_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 CSRF_EXEMPT_PATHS = frozenset({"/api/auth/login", "/api/auth/setup"})
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+BACKUP_FILENAME_PATTERN = re.compile(r"^data_backup_[A-Za-z0-9_-]+\.json$")
+
+
+def resolve_backup_path(filename: str, backup_dir: str | Path = "backups") -> Path:
+    """Resolve one generated config backup without allowing directory escape."""
+    if Path(filename).name != filename or not BACKUP_FILENAME_PATTERN.fullmatch(filename):
+        raise ValueError("invalid backup filename")
+    root = Path(backup_dir).resolve()
+    candidate = (root / filename).resolve()
+    if candidate.parent != root:
+        raise ValueError("backup path escapes backup directory")
+    return candidate
+
+
+def _api_permission(method: str, path: str) -> str | None:
+    """Return the coarse permission for legacy routes without route dependencies."""
+    if path.startswith(("/api/auth/", "/api/admin/", "/api/workflow/", "/api/jobs")):
+        return None
+    if path.startswith("/api/creative/"):
+        return None
+    if path.startswith(("/api/rank/", "/api/hongguo/analyze-rank", "/api/douyin/analyze-rank")):
+        return "rank.read"
+    if path.startswith("/api/analytics/"):
+        return "analytics.read"
+    if path.startswith("/api/creative/topics"):
+        if method == "GET":
+            return "topic.read"
+        return "topic.generate" if path.endswith("/generate") else "topic.edit"
+    creative_permissions = {
+        "/api/creative/breakdowns": "breakdown.read" if method == "GET" else "breakdown.edit",
+        "/api/creative/projects": "project.read.assigned" if method == "GET" else "project.create",
+        "/api/creative/blueprints": "brief.read" if method == "GET" else "brief.edit",
+        "/api/creative/characters": "character.read" if method == "GET" else "character.edit",
+        "/api/creative/relationships": "relationship.read" if method == "GET" else "relationship.edit",
+        "/api/creative/episodes": "outline.read" if method == "GET" else "outline.edit",
+        "/api/creative/workflow": None,
+    }
+    for prefix, permission in creative_permissions.items():
+        if path.startswith(prefix):
+            return permission
+    if path.startswith("/api/hongguo/drama"):
+        if path.startswith("/api/hongguo/drama/settings") or path.endswith("/test"):
+            return "*"
+        return "drama.download" if "job" in path or "download" in path else "drama.search"
+    if path.startswith(("/api/file/analyze", "/api/audio/analyze", "/api/qrcode/")):
+        return "job.create.selection"
+    if path.startswith(("/api/files", "/api/file/", "/api/media/")):
+        return "data.media.preview"
+    if path.startswith(("/api/run", "/api/batch/", "/api/stop")):
+        return "job.create.selection"
+    if path.startswith("/api/logs"):
+        return "job.read.own"
+    return "*"
+
+
+def _api_audit_action(method: str, path: str) -> str:
+    suffix = path.rsplit("/", 1)[-1]
+    if path.startswith("/api/workflow/tasks/") and suffix in {
+        "claim", "assign", "reassign", "start", "cancel"
+    }:
+        return f"workflow.{suffix}"
+    if path.startswith("/api/workflow/submissions/") and suffix in {
+        "submit", "approve", "return", "fork"
+    }:
+        return f"workflow.{suffix}"
+    return f"api.{method.lower()}"
 
 
 def configure_backend_logging(log_path: Path = WEB_LOG_PATH, log_level: str = WEB_LOG_LEVEL) -> logging.Logger:
@@ -147,25 +213,98 @@ def install_security_middleware(target_app: FastAPI, session_service=None) -> No
     """Install authenticated-write CSRF and outer request-ID middleware."""
     if session_service is not None:
         target_app.state.identity_session_service = session_service
+        if not isinstance(
+            getattr(target_app.state, "identity_permission_service", None),
+            PermissionService,
+        ):
+            target_app.state.identity_permission_service = PermissionService(
+                session_service.repository, session_service
+            )
 
     async def enforce_csrf(request: Request, call_next):
+        principal = None
         if (
-            request.method.upper() in UNSAFE_HTTP_METHODS
+            request.url.path.startswith("/api/")
             and request.url.path not in CSRF_EXEMPT_PATHS
         ):
             service = getattr(request.app.state, "identity_session_service", None)
             cookie_name = getattr(service, "cookie_name", "aiworker_session")
             raw_token = request.cookies.get(cookie_name)
+            context = service.resolve_session(raw_token) if service is not None else None
+            if context is None:
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "登录已失效，请重新登录"},
+                )
+            principal = context.principal
+            permission_service = getattr(
+                request.app.state, "identity_permission_service", None
+            )
+            if isinstance(permission_service, PermissionService):
+                principal = permission_service.principal_for_session(raw_token)
+            if principal is None:
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "登录已失效，请重新登录"},
+                )
+            request.state.principal = principal
+            required = _api_permission(request.method.upper(), request.url.path)
             if (
-                service is not None
-                and raw_token
-                and service.resolve_session(raw_token) is not None
+                required is not None
+                and not principal.is_system_admin
+                and required not in principal.permissions
+            ):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "没有执行此操作的权限"},
+                )
+            if (
+                request.method.upper() in UNSAFE_HTTP_METHODS
                 and not service.verify_csrf(
                     raw_token, request.headers.get("X-CSRF-Token")
                 )
             ):
                 return JSONResponse(status_code=403, content={"detail": "CSRF 校验失败"})
-        return await call_next(request)
+        response = await call_next(request)
+        if (
+            principal is not None
+            and request.method.upper() in UNSAFE_HTTP_METHODS
+            and request.url.path not in CSRF_EXEMPT_PATHS
+            and not request.url.path.startswith("/api/workflow/")
+        ):
+            audit = getattr(request.app.state, "audit_service", None)
+            if isinstance(audit, AuditService):
+                target_id = request.url.path.rstrip("/").rsplit("/", 1)[-1]
+                path_parts = request.url.path.strip("/").split("/")
+                if (
+                    len(path_parts) >= 5
+                    and path_parts[:3] == ["api", "workflow", "tasks"]
+                ):
+                    target_id = path_parts[3]
+                elif (
+                    len(path_parts) >= 5
+                    and path_parts[:3] == ["api", "workflow", "submissions"]
+                ):
+                    target_id = path_parts[3]
+                project_id = request.path_params.get("project_id")
+                task_id = request.path_params.get("task_id")
+                workflow = getattr(request.app.state, "workflow_repository", None)
+                if project_id is None and task_id and isinstance(workflow, WorkflowRepository):
+                    task = workflow.get_task(str(task_id))
+                    project_id = task.get("project_id") if task else None
+                audit.record(
+                    actor=principal,
+                    action=_api_audit_action(request.method.upper(), request.url.path),
+                    target_type="api_route",
+                    target_id=str(target_id),
+                    project_id=str(project_id) if project_id is not None else None,
+                    before=None,
+                    after={"status_code": response.status_code},
+                    reason=None,
+                    result="success" if response.status_code < 400 else "failure",
+                    request=request,
+                )
+        return response
 
     async def attach_request_id(request: Request, call_next):
         supplied = request.headers.get("X-Request-ID", "")
@@ -1952,8 +2091,10 @@ async def save_config_raw(config: ConfigContent):
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 @app.get("/api/config/backups")
-async def get_backups():
-    backup_dir = Path("backups")
+async def get_backups(
+    _: Principal = Depends(require_permission("*")),
+):
+    backup_dir = WORKSPACE_ROOT / "backups"
     if not backup_dir.exists():
         return []
 
@@ -1970,11 +2111,13 @@ async def get_backups():
     return backups
 
 @app.post("/api/config/backup/create")
-async def create_backup():
+async def create_backup(
+    _: Principal = Depends(require_permission("*")),
+):
     if not os.path.exists(state.config_file):
         return JSONResponse({"status": "error", "message": "config file not found"}, status_code=404)
 
-    backup_dir = Path("backups")
+    backup_dir = WORKSPACE_ROOT / "backups"
     backup_dir.mkdir(exist_ok=True)
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -1988,8 +2131,14 @@ async def create_backup():
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 @app.post("/api/config/backup/restore")
-async def restore_backup(action: BackupAction):
-    backup_path = Path("backups") / action.filename
+async def restore_backup(
+    action: BackupAction,
+    _: Principal = Depends(require_permission("*")),
+):
+    try:
+        backup_path = resolve_backup_path(action.filename, WORKSPACE_ROOT / "backups")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not backup_path.exists():
         return JSONResponse({"status": "error", "message": "backup file not found"}, status_code=404)
 
@@ -2000,8 +2149,14 @@ async def restore_backup(action: BackupAction):
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 @app.post("/api/config/backup/delete")
-async def delete_backup(action: BackupAction):
-    backup_path = Path("backups") / action.filename
+async def delete_backup(
+    action: BackupAction,
+    _: Principal = Depends(require_permission("*")),
+):
+    try:
+        backup_path = resolve_backup_path(action.filename, WORKSPACE_ROOT / "backups")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not backup_path.exists():
         return JSONResponse({"status": "error", "message": "backup file not found"}, status_code=404)
 

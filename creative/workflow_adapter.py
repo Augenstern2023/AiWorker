@@ -595,6 +595,39 @@ class CreativeWorkflowAdapter:
             raise KeyError(resource_id)
         return str(row["status"])
 
+    def beats_episode_progress(self, resource_id: str) -> dict[str, Any]:
+        """Return current-outline coverage, treating this approval as accepted."""
+        episode = self._required(
+            self.creative_repository.get_episode(int(resource_id))
+        )
+        if episode["stage"] != "beats":
+            raise ValueError("beats resource must reference a beats episode")
+        project = self._required(
+            self.creative_repository.get_project(int(episode["project_id"]))
+        )
+        outline_batch_id = project.get("outline_batch_id")
+        required = {
+            int(item["episode_number"])
+            for item in project.get("episodes", [])
+            if item["stage"] == "outline" and item["batch_id"] == outline_batch_id
+        }
+        approved = {
+            int(item["episode_number"])
+            for item in project.get("episodes", [])
+            if item["stage"] == "beats"
+            and item["status"] == "approved"
+            and (item.get("upstream_refs") or {}).get("outline_batch_id")
+            == outline_batch_id
+        }
+        if (episode.get("upstream_refs") or {}).get("outline_batch_id") == outline_batch_id:
+            approved.add(int(episode["episode_number"]))
+        return {
+            "required_episodes": sorted(required),
+            "approved_episodes": sorted(approved),
+            "remaining_episodes": sorted(required - approved),
+            "complete": bool(required) and required <= approved,
+        }
+
     def set_domain_status(
         self,
         resource_type: str,

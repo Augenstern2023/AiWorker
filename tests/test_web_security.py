@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
@@ -24,6 +25,7 @@ from WebGUI import (
     app as production_app,
     configure_cors,
     install_security_middleware,
+    resolve_backup_path,
 )
 from audit.service import AuditService
 
@@ -60,9 +62,9 @@ def test_request_id_is_available_before_logging_and_returned(tmp_path: Path):
         "/api/public-write", headers={"X-Request-ID": "client-request-123"}
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 401
     assert response.headers["X-Request-ID"] == "client-request-123"
-    assert app.state.seen_request_ids == ["client-request-123"]
+    assert app.state.seen_request_ids == []
 
 
 def test_authenticated_write_requires_matching_csrf_token(tmp_path: Path):
@@ -115,12 +117,12 @@ def test_login_and_first_run_setup_are_csrf_exempt(tmp_path: Path):
     assert login.status_code == 200
 
 
-def test_unauthenticated_write_is_left_to_route_authorization(tmp_path: Path):
+def test_protected_api_rejects_anonymous_write_before_csrf(tmp_path: Path):
     app, _ = _secured_app(tmp_path)
 
     response = TestClient(app).post("/api/public-write")
 
-    assert response.status_code == 200
+    assert response.status_code == 401
 
 
 def test_cors_defaults_to_same_origin_and_uses_explicit_origin_list():
@@ -187,3 +189,38 @@ def test_production_webgui_wires_shared_identity_security_and_routes():
     client = TestClient(production_app)
     assert client.get("/api/auth/me").status_code == 401
     assert client.get("/api/admin/audit").status_code == 401
+
+
+def test_backup_path_rejects_traversal_and_non_backup_names(tmp_path: Path):
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+
+    assert resolve_backup_path(
+        "data_backup_20260722_120000.json", backup_dir
+    ) == (backup_dir / "data_backup_20260722_120000.json").resolve()
+    for filename in ("../data.json", "nested/data_backup_x.json", "other.json"):
+        try:
+            resolve_backup_path(filename, backup_dir)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"unsafe backup filename accepted: {filename}")
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("get", "/api/config"),
+        ("get", "/api/config/backups"),
+        ("post", "/api/config/backup/restore"),
+        ("get", "/api/files"),
+        ("get", "/api/media/list"),
+        ("get", "/api/creative/topics"),
+        ("post", "/api/creative/topics/generate"),
+        ("get", "/api/workflow/tasks"),
+        ("post", "/api/jobs"),
+    ],
+)
+def test_production_api_surface_fails_closed_for_anonymous(method: str, path: str):
+    response = TestClient(production_app).request(method, path)
+    assert response.status_code == 401

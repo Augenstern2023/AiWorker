@@ -543,6 +543,9 @@ def build_identity_router(
                 repository.replace_role_permissions(
                     role["id"], grants, connection=connection
                 )
+                repository.replace_role_claimable_task_types(
+                    role["id"], payload.claimable_task_types, connection=connection
+                )
                 created = _role_response(role, connection=connection)
                 record_audit(
                     actor=principal,
@@ -579,6 +582,12 @@ def build_identity_router(
                 if payload.permissions is not None:
                     _replace_permissions(
                         role_id, payload.permissions, connection=connection
+                    )
+                if payload.claimable_task_types is not None:
+                    repository.replace_role_claimable_task_types(
+                        role_id,
+                        payload.claimable_task_types,
+                        connection=connection,
                     )
                 role = repository.update_role(
                     role_id,
@@ -639,6 +648,13 @@ def build_identity_router(
                         (item["permission_code"], item["data_scope"])
                         for item in source_permissions
                     ],
+                    connection=connection,
+                )
+                repository.replace_role_claimable_task_types(
+                    role["id"],
+                    repository.list_role_claimable_task_types(
+                        role_id, connection=connection
+                    ),
                     connection=connection,
                 )
                 cloned = _role_response(role, connection=connection)
@@ -728,6 +744,9 @@ def build_identity_router(
         return {
             **role,
             "permissions": repository.list_role_permissions(
+                role["id"], connection=connection
+            ),
+            "claimable_task_types": repository.list_role_claimable_task_types(
                 role["id"], connection=connection
             ),
         }

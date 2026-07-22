@@ -598,16 +598,12 @@ def test_webgui_registers_today_rank_route():
     assert "/api/rank/today" in paths
 
 
-def test_today_rank_api_returns_current_data():
+def test_today_rank_api_requires_authentication():
     client = TestClient(WebGUI.app)
 
     response = client.get("/api/rank/today?platform=dy")
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["platform"] == "dy"
-    assert "summary" in payload
-    assert "new_entries" in payload
+    assert response.status_code == 401
 
 
 def write_json(path, payload):

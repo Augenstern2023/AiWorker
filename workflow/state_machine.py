@@ -95,8 +95,15 @@ class WorkflowStateMachine:
         is_admin = "system_admin" in role_codes or "*" in permissions
         can_manage_task = bool(_actor_value(actor, "can_manage_task"))
         if requirement == "matching_role":
-            if task.get("role_code") not in role_codes:
-                raise PermissionError("actor does not have the task pool role")
+            claimable_task_types = set(
+                _actor_value(actor, "claimable_task_types") or ()
+            )
+            if (
+                not is_admin
+                and task.get("role_code") not in role_codes
+                and task.get("task_type") not in claimable_task_types
+            ):
+                raise PermissionError("actor cannot claim this task type")
             return
         if requirement == "assignee":
             if not is_admin and actor_id != task.get("assignee_user_id"):

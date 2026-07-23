@@ -27,6 +27,7 @@
         }
         .sidebar nav {
             min-height: 0;
+            flex-wrap: nowrap;
             overflow-y: auto;
         }
         .main-content {

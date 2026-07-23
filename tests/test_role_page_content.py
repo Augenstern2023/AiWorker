@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 ROLE_TEMPLATES = (
     "selection/dashboard.html",
+    "selection/hits.html",
     "selection/ranks.html",
     "selection/topics.html",
     "selection/dramas.html",
@@ -54,11 +55,15 @@ def test_role_templates_are_standalone_pages_with_external_scripts():
 
 
 def test_role_templates_do_not_share_unrelated_workspaces():
-    selection = _read("templates/selection/topics.html")
+    hits = _read("templates/common/workspace/selection_hits.html")
+    selection = _read("templates/common/workspace/selection_topics.html")
     writing = _read("templates/writing/beats.html")
     admin = _read("templates/admin/users.html")
 
-    assert "今日爆款" in selection
+    assert '<h3 class="mb-0">今日爆款</h3>' in hits
+    assert '<h3 class="mb-1">选题库</h3>' not in hits
+    assert '<h3 class="mb-1">选题库</h3>' in selection
+    assert '<h3 class="mb-0">今日爆款</h3>' not in selection
     assert "单集节拍表" not in selection
     assert "用户管理" not in selection
     assert "单集节拍表" in writing
@@ -69,6 +74,7 @@ def test_role_templates_do_not_share_unrelated_workspaces():
 
 def test_each_operational_domain_loads_only_external_javascript():
     expected_scripts = {
+        "templates/selection/hits.html": "/static/js/selection/topics.js",
         "templates/selection/ranks.html": "/static/js/selection/ranks.js",
         "templates/selection/topics.html": "/static/js/selection/topics.js",
         "templates/selection/dramas.html": "/static/js/selection/dramas.js",
@@ -113,6 +119,7 @@ def test_workspace_sidebar_navigation_can_scroll_on_short_viewports():
     css = _read("static/css/workspaces.css")
 
     assert re.search(r"\.sidebar\s+nav\s*\{[^}]*overflow-y:\s*auto", css, re.S)
+    assert re.search(r"\.sidebar\s+nav\s*\{[^}]*flex-wrap:\s*nowrap", css, re.S)
 
 
 def test_legacy_index_is_only_a_compatibility_redirect():
@@ -255,6 +262,16 @@ def test_selection_drama_page_only_references_loaded_methods():
 
     assert "selection_modals.html" not in page
     assert calls - definitions - {"Number", "calc"} == set()
+
+
+def test_selection_download_modal_gets_byte_formatter_from_loaded_module():
+    modal = _read("templates/common/workspace/selection_modals.html")
+    breakdowns = _read("static/js/selection/breakdowns.js")
+    dramas = _read("static/js/selection/dramas.js")
+
+    assert "formatDramaBytes(" in modal
+    assert "formatDramaBytes(value)" in breakdowns
+    assert "formatDramaBytes(value)" not in dramas
 
 
 def test_creative_workflow_ui_submits_and_reviews_without_direct_locks():

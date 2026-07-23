@@ -26,6 +26,7 @@ NAVIGATION_CATALOG = (
         "items": (
             {"label": "工作概览", "route": "/selection/dashboard"},
             {"label": "今日榜单", "route": "/selection/ranks"},
+            {"label": "今日爆款", "route": "/selection/hits"},
             {"label": "选题库", "route": "/selection/topics"},
             {"label": "剧目素材", "route": "/selection/dramas"},
             {"label": "剧目拆解", "route": "/selection/breakdowns"},
@@ -85,6 +86,7 @@ NAVIGATION_CATALOG = (
 PAGE_ROUTES = (
     ("/selection/dashboard", "page.selection", "工作概览"),
     ("/selection/ranks", "page.selection", "今日榜单"),
+    ("/selection/hits", "page.selection", "今日爆款"),
     ("/selection/topics", "page.selection", "选题库"),
     ("/selection/dramas", "page.selection", "剧目素材"),
     ("/selection/breakdowns", "page.selection", "剧目拆解"),

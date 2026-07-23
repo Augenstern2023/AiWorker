@@ -149,13 +149,6 @@ window.aiworkerModules.push(() => ({
                     return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
                 },
 
-                formatDramaBytes(value) {
-                    const bytes = Math.max(0, Number(value || 0));
-                    if (bytes < 1024) return `${bytes} B`;
-                    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-                    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-                },
-
                 notifyDramaJobCompletion() {
                     const job = this.jobs.find(item => item.job_id === this.dramaAnalysis.jobId);
                     if (!job || !['succeeded', 'failed', 'cancelled'].includes(job.status)) return;

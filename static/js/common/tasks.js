@@ -160,9 +160,15 @@ function localDateString(date = new Date()) {
                         window.addEventListener('hashchange', () => this.parseTodayRankHash(true));
                         await this.fetchTodayRank();
                     }
-                    if (['selection-dashboard', 'selection-topics', 'selection-breakdowns'].includes(this.page)) {
+                    if (this.page === 'selection-dashboard') {
                         await this.fetchCreativeTopics();
                         await this.fetchTopicLibrary();
+                    } else if (this.page === 'selection-hits') {
+                        await this.fetchCreativeTopics();
+                    } else if (['selection-topics', 'selection-breakdowns'].includes(this.page)) {
+                        await this.fetchTopicLibrary();
+                    }
+                    if (['selection-hits', 'selection-topics', 'selection-breakdowns'].includes(this.page)) {
                         this.restoreLatestActiveDramaDownload?.();
                     }
                     if (this.page.startsWith('planning-') || this.page.startsWith('writing-') || this.page === 'admin-deliveries') {

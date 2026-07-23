@@ -148,6 +148,24 @@ def test_system_admin_sees_all_navigation(admin_client: TestClient):
         assert label in html
 
 
+def test_today_hits_and_topic_library_are_distinct_pages(
+    page_app: tuple[FastAPI, IdentityRepository],
+):
+    client = _create_role_client(page_app, "selection_operator")
+
+    hits = client.get("/selection/hits")
+    library = client.get("/selection/topics")
+
+    assert hits.status_code == 200
+    assert '<h3 class="mb-0">今日爆款</h3>' in hits.text
+    assert '<h3 class="mb-1">选题库</h3>' not in hits.text
+    assert library.status_code == 200
+    assert '<h3 class="mb-1">选题库</h3>' in library.text
+    assert '<h3 class="mb-0">今日爆款</h3>' not in library.text
+    assert 'href="/selection/hits"' in library.text
+    assert 'href="/selection/topics"' in hits.text
+
+
 def test_root_uses_role_priority_then_last_authorized_page(
     page_app: tuple[FastAPI, IdentityRepository],
 ):

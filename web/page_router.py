@@ -24,6 +24,7 @@ from .navigation_service import PAGE_ROUTES, NavigationService
 PAGE_TEMPLATES = {
     "/selection/dashboard": "selection/dashboard.html",
     "/selection/ranks": "selection/ranks.html",
+    "/selection/hits": "selection/hits.html",
     "/selection/topics": "selection/topics.html",
     "/selection/dramas": "selection/dramas.html",
     "/selection/breakdowns": "selection/breakdowns.html",

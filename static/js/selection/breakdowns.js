@@ -309,6 +309,13 @@ window.aiworkerModules.push(() => ({
                     return total > 0 ? `已完成 ${completed} / ${total}` : '';
                 },
 
+                formatDramaBytes(value) {
+                    const bytes = Math.max(0, Number(value || 0));
+                    if (bytes < 1024) return `${bytes} B`;
+                    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+                    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+                },
+
                 async openTopicDownload(topic) {
                     await this.fetchJobs();
                     const runningJob = this.findDramaDownloadJob(topic?.title || '');

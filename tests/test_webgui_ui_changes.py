@@ -202,8 +202,7 @@ def test_draft_breakdowns_are_visible_but_not_project_eligible():
 
 
 def test_today_hit_actions_follow_topic_status_without_conflicting_commands():
-    html = _source("templates/common/workspace/selection_topics.html")
-    section = html.split('<h3 class="mb-0">今日爆款</h3>', 1)[1].split('<h3 class="mb-1">选题库</h3>', 1)[0]
+    section = _source("templates/common/workspace/selection_hits.html")
 
     assert "updateCreativeTopic(topic, 'adopted')" not in section
     assert 'x-show="!topic.latest_breakdown_id && topic.status === \'pending_review\'" @click="updateCreativeTopic(topic, \'rejected\')"' in section
@@ -213,8 +212,7 @@ def test_today_hit_actions_follow_topic_status_without_conflicting_commands():
 
 
 def test_today_hit_actions_distinguish_existing_breakdowns():
-    html = _source("templates/common/workspace/selection_topics.html")
-    section = html.split('<h3 class="mb-0">今日爆款</h3>', 1)[1].split('<h3 class="mb-1">选题库</h3>', 1)[0]
+    section = _source("templates/common/workspace/selection_hits.html")
 
     assert 'x-show="!topic.latest_breakdown_id && topic.status === \'pending_review\'"' in section
     assert "!topic.latest_breakdown_id && topic.status === 'adopted'" in section

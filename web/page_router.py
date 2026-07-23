@@ -44,7 +44,6 @@ PAGE_TEMPLATES = {
     "/admin/roles": "admin/roles.html",
     "/admin/config": "admin/config.html",
     "/admin/data": "admin/data.html",
-    "/admin/analytics": "admin/analytics.html",
     "/admin/jobs": "admin/jobs.html",
     "/admin/deliveries": "admin/deliveries.html",
     "/admin/audit": "admin/audit.html",

@@ -148,6 +148,16 @@ def test_system_admin_sees_all_navigation(admin_client: TestClient):
         assert label in html
 
 
+def test_data_analytics_page_is_removed_from_admin_navigation(
+    admin_client: TestClient,
+):
+    html = admin_client.get("/admin/users").text
+
+    assert 'href="/admin/analytics"' not in html
+    assert "数据分析" not in html
+    assert admin_client.get("/admin/analytics").status_code == 404
+
+
 def test_today_hits_and_topic_library_are_distinct_pages(
     page_app: tuple[FastAPI, IdentityRepository],
 ):
@@ -259,11 +269,11 @@ def test_delivery_only_permission_does_not_grant_system_admin_delivery_page(
         "/admin/roles",
         "/admin/config",
         "/admin/data",
-        "/admin/analytics",
         "/admin/jobs",
         "/admin/audit",
     ):
         assert client.get(route).status_code == 403
+    assert client.get("/admin/analytics").status_code == 404
     for label in (
         "用户管理",
         "角色权限",

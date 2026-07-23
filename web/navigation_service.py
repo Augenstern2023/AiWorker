@@ -71,7 +71,6 @@ NAVIGATION_CATALOG = (
             {"label": "角色权限", "route": "/admin/roles", "permission": "*"},
             {"label": "系统配置", "route": "/admin/config", "permission": "*"},
             {"label": "数据管理", "route": "/admin/data", "permission": "*"},
-            {"label": "数据分析", "route": "/admin/analytics", "permission": "*"},
             {"label": "机器任务", "route": "/admin/jobs", "permission": "*"},
             {
                 "label": "成果交付",
@@ -114,7 +113,6 @@ PAGE_ROUTES = (
     ("/admin/roles", "*", "角色权限"),
     ("/admin/config", "*", "系统配置"),
     ("/admin/data", "*", "数据管理"),
-    ("/admin/analytics", "*", "数据分析"),
     ("/admin/jobs", "*", "机器任务"),
     ("/admin/deliveries", "*", "成果交付"),
     ("/admin/audit", "*", "审计日志"),

@@ -71,7 +71,7 @@ NAVIGATION_CATALOG = (
             {"label": "角色权限", "route": "/admin/roles", "permission": "*"},
             {"label": "系统配置", "route": "/admin/config", "permission": "*"},
             {"label": "数据管理", "route": "/admin/data", "permission": "*"},
-            {"label": "机器任务", "route": "/admin/jobs", "permission": "*"},
+            {"label": "系统后台", "route": "/admin/jobs", "permission": "*"},
             {
                 "label": "成果交付",
                 "route": "/admin/deliveries",

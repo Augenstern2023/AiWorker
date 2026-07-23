@@ -10,7 +10,11 @@ window.aiworkerModules.push(() => ({
                 },
 
                 createTopicLibraryBreakdown(topic) {
-                    return this.startTranscriptBreakdown(topic, 'topic-library');
+                    return this.startTranscriptBreakdown(
+                        topic,
+                        'topic-library',
+                        Boolean(topic?.locked_breakdown_id)
+                    );
                 },
 
                 async openTopicTranscriptPreview(topic) {
@@ -59,6 +63,8 @@ window.aiworkerModules.push(() => ({
 
                 async startTranscriptBreakdown(topic, source, forceRegenerate = false) {
                     if (!topic?.id) return;
+                    if (source === 'topic-library') this.topicLibrary.error = '';
+                    if (source === 'creative') this.creative.error = '';
                     this.breakdownGeneration = {
                         topic,
                         source,
@@ -74,11 +80,10 @@ window.aiworkerModules.push(() => ({
                         elapsedSeconds: 0
                     };
                     try {
-                        const task = await this.resolveCreativeWorkflowTask('breakdown', null, topic.id);
                         const res = await aiworkerApi.request('/api/creative/breakdowns', {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({topic_id: topic.id, force_regenerate: forceRegenerate, workflow_task_id: task.id})
+                            body: JSON.stringify({topic_id: topic.id, force_regenerate: forceRegenerate})
                         });
                         const data = await res.json();
                         const detail = data.detail;
@@ -111,6 +116,12 @@ window.aiworkerModules.push(() => ({
                         this.breakdownGeneration.startedAt = Number(data.job.started_at || 0) > 0
                             ? Number(data.job.started_at) * 1000
                             : Date.now();
+                        this.breakdownGenerationJobs[data.job.job_id] = {
+                            topic,
+                            source,
+                            notifiedStatus: ''
+                        };
+                        this.breakdownJobStatuses[data.job.job_id] = this.breakdownGeneration.status;
                         this.breakdownGenerationProgressModal.show();
                         if (source === 'topic-library') await this.fetchTopicLibrary();
                         if (source === 'creative') await this.fetchCreativeTopics();
@@ -127,6 +138,7 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async syncBreakdownGenerationProgress() {
+                    await this.syncBackgroundBreakdownJobs();
                     if (!this.breakdownGeneration.jobId) return;
                     const job = this.jobs.find(item => item.job_id === this.breakdownGeneration.jobId);
                     if (!job) return;
@@ -176,6 +188,46 @@ window.aiworkerModules.push(() => ({
                     } catch (e) {
                         this.breakdownGeneration.error = e.message || '读取生成结果失败';
                     }
+                },
+
+                breakdownJobTopicId(job) {
+                    return Number(job?.job?.extra?.topic_id || job?.extra?.topic_id || 0);
+                },
+
+                breakdownJobRunningForTopic(topicId) {
+                    return this.jobs.some(job =>
+                        (job.crawler_type || job.job?.crawler_type) === 'breakdown_generate'
+                        && this.breakdownJobTopicId(job) === Number(topicId)
+                        && ['pending', 'running', 'stopping'].includes(job.status)
+                    );
+                },
+
+                async syncBackgroundBreakdownJobs() {
+                    let refreshTopics = false;
+                    let refreshCandidates = false;
+                    for (const job of this.jobs) {
+                        if ((job.crawler_type || job.job?.crawler_type) !== 'breakdown_generate') continue;
+                        const previousStatus = this.breakdownJobStatuses[job.job_id];
+                        this.breakdownJobStatuses[job.job_id] = job.status;
+                        if (
+                            job.job_id === this.breakdownGeneration.jobId
+                            || !['pending', 'running', 'stopping'].includes(previousStatus)
+                            || !['succeeded', 'failed', 'cancelled'].includes(job.status)
+                        ) continue;
+                        const topicId = this.breakdownJobTopicId(job);
+                        const topic = this.topicLibrary.items.find(item => Number(item.id) === topicId)
+                            || this.creative.items.find(item => Number(item.id) === topicId);
+                        const title = topic?.title || `选题 ${topicId}`;
+                        if (job.status === 'succeeded') {
+                            this.showCreativeNotice?.(`${title}拆解生成完成`, 'success');
+                        } else {
+                            this.showCreativeNotice?.(`${title}拆解生成${job.status === 'cancelled' ? '已取消' : '失败'}`, 'danger');
+                        }
+                        refreshTopics = refreshTopics || ['selection-topics', 'selection-breakdowns'].includes(this.page);
+                        refreshCandidates = refreshCandidates || this.page === 'selection-hits';
+                    }
+                    if (refreshTopics) await this.fetchTopicLibrary();
+                    if (refreshCandidates) await this.fetchCreativeTopics();
                 },
 
                 breakdownGenerationRunning() {
@@ -247,15 +299,52 @@ window.aiworkerModules.push(() => ({
                     return String(value || '').normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
                 },
 
-                findDramaDownloadJob(title = '') {
+                isDramaDownloadJob(job) {
+                    return ['drama_download', 'douyin_fallback_analysis'].includes(
+                        job?.crawler_type || job?.job?.crawler_type || ''
+                    );
+                },
+
+                dramaDownloadJobTopicId(job) {
+                    return Number(job?.job?.extra?.topic_id || job?.extra?.topic_id || 0);
+                },
+
+                dramaDownloadRunningForTopic(topicId) {
+                    return this.jobs.some(job =>
+                        this.isDramaDownloadJob(job)
+                        && this.dramaDownloadJobTopicId(job) === Number(topicId)
+                        && ['pending', 'running', 'stopping'].includes(job.status)
+                    );
+                },
+
+                findDramaDownloadJob(title = '', topicId = null) {
                     const titleKey = this.dramaDownloadTitleKey(title);
                     return this.jobs.find(job => {
-                        const crawlerType = job.crawler_type || job.job?.crawler_type || '';
                         const jobTitle = job.job?.extra?.title || '';
-                        return ['drama_download', 'douyin_fallback_analysis'].includes(crawlerType)
+                        const sameTopic = Number(topicId || 0) > 0
+                            && this.dramaDownloadJobTopicId(job) === Number(topicId);
+                        return this.isDramaDownloadJob(job)
                             && ['pending', 'running', 'stopping'].includes(job.status)
-                            && (!titleKey || this.dramaDownloadTitleKey(jobTitle) === titleKey);
+                            && (sameTopic || (!topicId && (!titleKey || this.dramaDownloadTitleKey(jobTitle) === titleKey)));
                     }) || null;
+                },
+
+                activeDramaDownloadJobs() {
+                    return this.jobs.filter(job => {
+                        if (!this.isDramaDownloadJob(job)) return false;
+                        if (!['pending', 'running', 'stopping'].includes(job.status)) return false;
+                        if (this.hiddenDramaDownloadJobs[job.job_id]) return false;
+                        return job.job_id !== this.dramaDownload.jobId || this.dramaDownload.background;
+                    });
+                },
+
+                openDramaDownloadJob(job) {
+                    this.hiddenDramaDownloadJobs = {...this.hiddenDramaDownloadJobs, [job.job_id]: false};
+                    this.restoreDramaDownloadJob(null, job, true);
+                },
+
+                hideDramaDownloadJob(job) {
+                    this.hiddenDramaDownloadJobs = {...this.hiddenDramaDownloadJobs, [job.job_id]: true};
                 },
 
                 restoreDramaDownloadJob(topic, job, showModal = true) {
@@ -266,11 +355,13 @@ window.aiworkerModules.push(() => ({
                     this.dramaDownload = {
                         title: topic?.title || extra.title || '', topic: topic || null, source,
                         fallbackReason: extra.fallback_reason || '', candidates: [], selectedCandidate: null,
-                        selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], selectedEpisodes: [],
+                        selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], relatedVideos: [],
+                        missingEpisodes: [], seriesRangeLabel: '', seriesWarnings: [], selectedEpisodes: [],
                         allEpisodes: Boolean(extra.all_episodes), searching: false, episodesLoading: false,
                         starting: false, error: '', jobId: job.job_id, jobStatus: job.status || 'running',
                         progress: job.progress || {}, progressMessage: job.message || '下载任务正在运行',
-                        paused: Boolean(job.paused), finished: false, background: !showModal
+                        paused: Boolean(job.paused), finished: false, background: !showModal, showFiles: false,
+                        logs: [], logCount: Number(job.log_count || 0)
                     };
                     if (showModal) this.dramaDownloadModal.show();
                     this.scrollDramaDownloadToTop();
@@ -316,28 +407,40 @@ window.aiworkerModules.push(() => ({
                     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
                 },
 
+                formatDramaDuration(value) {
+                    const seconds = Math.max(0, Math.round(Number(value) / 1000));
+                    if (!seconds) return '未知';
+                    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+                },
+
+                async parseDramaDownloadResponse(response) {
+                    const body = await response.text();
+                    try {
+                        return body ? JSON.parse(body) : {};
+                    } catch (_) {
+                        return {
+                            status: 'error',
+                            message: body.trim() || `服务器返回错误（${response.status}）`
+                        };
+                    }
+                },
+
                 async openTopicDownload(topic) {
                     await this.fetchJobs();
-                    const runningJob = this.findDramaDownloadJob(topic?.title || '');
+                    const runningJob = this.findDramaDownloadJob(topic?.title || '', topic?.id);
                     if (runningJob) {
                         this.restoreDramaDownloadJob(topic, runningJob, true);
                         return;
                     }
-                    this.dramaDownload = {title: topic.title || '', topic, source: 'hongguo', fallbackReason: '', candidates: [], selectedCandidate: null, selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], selectedEpisodes: [], allEpisodes: false, searching: true, episodesLoading: false, starting: false, error: '', jobId: '', jobStatus: '', progress: {}, progressMessage: '', paused: false, finished: false, background: false};
+                    this.dramaDownload = {title: topic.title || '', topic, source: 'hongguo', fallbackReason: '', candidates: [], selectedCandidate: null, selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], relatedVideos: [], missingEpisodes: [], seriesRangeLabel: '', seriesWarnings: [], selectedEpisodes: [], allEpisodes: false, searching: true, episodesLoading: false, starting: false, error: '', jobId: '', jobStatus: '', progress: {}, progressMessage: '', paused: false, finished: false, background: false, showFiles: false};
                     this.dramaDownloadModal.show();
                     try {
                         const res = await aiworkerApi.request('/api/hongguo/drama/download/search', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title: this.dramaDownload.title})});
-                        const data = await res.json();
+                        const data = await this.parseDramaDownloadResponse(res);
                         this.dramaDownload.source = data.source || 'hongguo';
                         this.dramaDownload.fallbackReason = data.fallback_reason || '';
                         if (!res.ok || data.status === 'error') throw new Error(data.message || '剧目检索失败');
                         this.dramaDownload.candidates = data.candidates || [];
-                        if (this.dramaDownload.source === 'douyin_fallback' && this.dramaDownload.candidates.length) {
-                            this.dramaDownload.selectedCandidate = this.dramaDownload.candidates[0];
-                            const firstDownloadable = this.dramaDownload.candidates.find(candidate => !candidate.is_paid);
-                            this.dramaDownload.selectedAwemeIds = firstDownloadable ? [firstDownloadable.aweme_id] : [];
-                            this.syncDouyinDownloadSelection();
-                        }
                         if (!this.dramaDownload.candidates.length) this.dramaDownload.error = this.dramaDownload.source === 'douyin_fallback' ? '红果和抖音都没有找到可用视频，请确认剧名后重试' : '没有找到剧名完全匹配的红果剧目，请确认剧名后重试';
                         this.dramaDownload.searching = false;
                         // Hongguo has a book/episode flow, but Douyin fallback always
@@ -354,11 +457,38 @@ window.aiworkerModules.push(() => ({
                 async selectDramaDownloadCandidate(candidate) {
                     this.dramaDownload.selectedCandidate = candidate;
                     this.dramaDownload.episodes = [];
+                    this.dramaDownload.relatedVideos = [];
+                    this.dramaDownload.missingEpisodes = [];
+                    this.dramaDownload.seriesRangeLabel = '';
+                    this.dramaDownload.seriesWarnings = [];
                     this.dramaDownload.selectedEpisodes = [];
+                    this.dramaDownload.selectedAwemeIds = [];
                     this.dramaDownload.allEpisodes = false;
+                    this.dramaDownload.allDouyinCandidates = false;
                     if (this.dramaDownload.source === 'douyin_fallback') {
-                        this.dramaDownload.episodesLoading = false;
+                        this.dramaDownload.episodesLoading = true;
                         this.dramaDownload.error = '';
+                        try {
+                            const res = await aiworkerApi.request('/api/hongguo/drama/douyin-fallback/series', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({title: this.dramaDownload.title || candidate.title, aweme_id: candidate.aweme_id})
+                            });
+                            const data = await this.parseDramaDownloadResponse(res);
+                            if (!res.ok || data.status === 'error') throw new Error(data.message || '解析抖音剧集失败');
+                            this.dramaDownload.episodes = data.episodes || [];
+                            this.dramaDownload.relatedVideos = data.related_videos || [];
+                            this.dramaDownload.missingEpisodes = data.missing_episodes || [];
+                            this.dramaDownload.seriesRangeLabel = data.range_label || '';
+                            this.dramaDownload.seriesWarnings = data.warnings || [];
+                            const first = this.douyinDownloadItems().find(item => !item.is_paid);
+                            this.dramaDownload.selectedAwemeIds = first ? [first.aweme_id] : [];
+                            this.syncDouyinDownloadSelection();
+                        } catch (e) {
+                            this.dramaDownload.error = e.message || '解析抖音剧集失败';
+                        } finally {
+                            this.dramaDownload.episodesLoading = false;
+                        }
                         return;
                     }
                     this.dramaDownload.episodesLoading = true;
@@ -394,21 +524,29 @@ window.aiworkerModules.push(() => ({
                 },
 
                 toggleAllDouyinDownloadCandidates() {
-                    const downloadableIds = this.dramaDownload.candidates.filter(candidate => !candidate.is_paid).map(candidate => candidate.aweme_id);
+                    const downloadableIds = this.dramaDownload.episodes.filter(item => !item.is_paid).map(item => item.aweme_id);
                     this.dramaDownload.selectedAwemeIds = this.dramaDownload.allDouyinCandidates ? downloadableIds : [];
                 },
 
                 syncDouyinDownloadSelection() {
-                    const downloadableIds = this.dramaDownload.candidates.filter(candidate => !candidate.is_paid).map(candidate => candidate.aweme_id);
+                    const downloadableIds = this.dramaDownload.episodes.filter(item => !item.is_paid).map(item => item.aweme_id);
                     this.dramaDownload.allDouyinCandidates = downloadableIds.length > 0 && downloadableIds.every(id => this.dramaDownload.selectedAwemeIds.includes(id));
                 },
 
+                douyinDownloadItems() {
+                    return [...(this.dramaDownload.episodes || []), ...(this.dramaDownload.relatedVideos || [])];
+                },
+
                 selectedDouyinEpisodeSummary() {
-                    const labels = this.dramaDownload.candidates
-                        .filter(candidate => this.dramaDownload.selectedAwemeIds.includes(candidate.aweme_id) && candidate.episode_label)
-                        .map(candidate => candidate.episode_label);
+                    const labels = this.douyinDownloadItems()
+                        .filter(item => this.dramaDownload.selectedAwemeIds.includes(item.aweme_id) && item.episode_label)
+                        .map(item => item.episode_label);
                     const unique = [...new Set(labels)];
                     return unique.length ? `集数：${unique.join('、')}` : '';
+                },
+
+                dramaSeriesSourceLabel(source) {
+                    return {collection: '合集', author: '作者作品', search: '搜索结果'}[source] || '相关视频';
                 },
 
                 async startDramaDownload() {
@@ -420,16 +558,17 @@ window.aiworkerModules.push(() => ({
                     this.dramaDownload.progressMessage = '正在创建下载任务…';
                     this.dramaDownload.progress = {completed: 0, total: isDouyinFallback ? this.dramaDownload.selectedAwemeIds.length : episodeNumbers.length, percent: 0, downloaded: 0, skipped_paid: 0, failed: 0};
                     try {
-                        const task = await this.resolveCreativeWorkflowTask('source_package', null, this.dramaDownload.topic?.id || null);
                         const endpoint = isDouyinFallback ? '/api/hongguo/drama/douyin-fallback/jobs' : '/api/hongguo/drama/download/jobs';
                         const payload = isDouyinFallback
-                            ? {topic_id: this.dramaDownload.topic.id, title: this.dramaDownload.title, aweme_ids: this.dramaDownload.selectedAwemeIds, fallback_reason: this.dramaDownload.fallbackReason || '', workflow_task_id: task.id}
-                            : {topic_id: this.dramaDownload.topic.id, title: this.dramaDownload.title, book_id: this.dramaDownload.selectedCandidate.book_id, episodes: episodeNumbers, all_episodes: this.dramaDownload.allEpisodes && episodeNumbers.length === this.dramaDownload.episodes.length, workflow_task_id: task.id};
+                            ? {topic_id: this.dramaDownload.topic.id, title: this.dramaDownload.title, aweme_ids: this.dramaDownload.selectedAwemeIds, fallback_reason: this.dramaDownload.fallbackReason || ''}
+                            : {topic_id: this.dramaDownload.topic.id, title: this.dramaDownload.title, book_id: this.dramaDownload.selectedCandidate.book_id, episodes: episodeNumbers, all_episodes: this.dramaDownload.allEpisodes && episodeNumbers.length === this.dramaDownload.episodes.length};
                         const res = await aiworkerApi.request(endpoint, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
                         const data = await res.json();
                         if (!res.ok || data.status === 'error') throw new Error(data.message || '创建下载任务失败');
                         this.dramaDownload.jobId = data.job.job_id;
                         this.dramaDownload.jobStatus = data.job.status || 'pending';
+                        this.dramaDownloadJobStatuses[data.job.job_id] = this.dramaDownload.jobStatus;
+                        this.hiddenDramaDownloadJobs = {...this.hiddenDramaDownloadJobs, [data.job.job_id]: false};
                         this.dramaDownload.progress = {...this.dramaDownload.progress, ...(data.job.progress || {})};
                         this.dramaDownload.progressMessage = isDouyinFallback ? '抖音降级下载任务已开始' : '下载任务已开始';
                         this.scrollDramaDownloadToTop();
@@ -452,6 +591,7 @@ window.aiworkerModules.push(() => ({
                     this.dramaDownload.progress = {...(this.dramaDownload.progress || {}), ...(job.progress || {})};
                     this.dramaDownload.progressMessage = job.message || this.dramaDownload.progressMessage;
                     if (job.status === 'succeeded') {
+                        this.dramaDownload.background = false;
                         if (!this.dramaDownload.finished) {
                             alert(`${job.message || (this.dramaDownload.source === 'douyin_fallback' ? '抖音降级视频解析完成' : '剧集下载完成')}，文件已保存到数据管理。`);
                             this.fetchTopicLibrary();
@@ -464,31 +604,99 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
+                async syncBackgroundDramaDownloadJobs() {
+                    let refreshTopics = false;
+                    for (const job of this.jobs) {
+                        if (!this.isDramaDownloadJob(job)) continue;
+                        const previousStatus = this.dramaDownloadJobStatuses[job.job_id];
+                        this.dramaDownloadJobStatuses[job.job_id] = job.status;
+                        if (
+                            job.job_id === this.dramaDownload.jobId
+                            || !['pending', 'running', 'stopping'].includes(previousStatus)
+                            || !['succeeded', 'failed', 'cancelled'].includes(job.status)
+                        ) continue;
+                        const title = job.job?.extra?.title || '剧目';
+                        if (job.status === 'succeeded') {
+                            this.showCreativeNotice?.(`《${title}》下载与解析完成`, 'success');
+                        } else {
+                            this.showCreativeNotice?.(
+                                `《${title}》下载${job.status === 'cancelled' ? '已取消' : '失败'}`,
+                                'danger'
+                            );
+                        }
+                        refreshTopics = true;
+                    }
+                    if (refreshTopics) {
+                        await this.fetchTopicLibrary();
+                        await this.fetchCreativeTopics();
+                    }
+                },
+
+                async pauseDramaDownloadJob(job) {
+                    const res = await aiworkerApi.request(`/api/jobs/${job.job_id}/pause`, {method: 'POST'});
+                    const data = await res.json();
+                    if (!res.ok || data.status === 'error') {
+                        this.showCreativeNotice?.(data.message || '暂停失败', 'danger');
+                        return;
+                    }
+                    await this.fetchJobs();
+                },
+
+                async resumeDramaDownloadJob(job) {
+                    const res = await aiworkerApi.request(`/api/jobs/${job.job_id}/resume`, {method: 'POST'});
+                    const data = await res.json();
+                    if (!res.ok || data.status === 'error') {
+                        this.showCreativeNotice?.(data.message || '继续失败', 'danger');
+                        return;
+                    }
+                    await this.fetchJobs();
+                },
+
+                async cancelDramaDownloadJob(job) {
+                    const title = job.job?.extra?.title || '当前剧目';
+                    if (!confirm(`确定取消《${title}》的下载任务吗？已完成的集数会保留。`)) return;
+                    await aiworkerApi.request(`/api/jobs/${job.job_id}/stop`, {method: 'POST'});
+                    await this.fetchJobs();
+                },
+
                 async pauseDramaDownload() {
                     if (!this.dramaDownload.jobId) return;
-                    const res = await aiworkerApi.request(`/api/jobs/${this.dramaDownload.jobId}/pause`, {method: 'POST'});
-                    const data = await res.json();
-                    if (!res.ok || data.status === 'error') { this.dramaDownload.error = data.message || '暂停失败'; return; }
-                    this.dramaDownload.paused = true;
+                    const job = this.jobs.find(item => item.job_id === this.dramaDownload.jobId);
+                    if (!job) return;
+                    await this.pauseDramaDownloadJob(job);
+                    this.syncDramaDownloadProgress();
                 },
 
                 async resumeDramaDownload() {
                     if (!this.dramaDownload.jobId) return;
-                    const res = await aiworkerApi.request(`/api/jobs/${this.dramaDownload.jobId}/resume`, {method: 'POST'});
-                    const data = await res.json();
-                    if (!res.ok || data.status === 'error') { this.dramaDownload.error = data.message || '继续失败'; return; }
-                    this.dramaDownload.paused = false;
+                    const job = this.jobs.find(item => item.job_id === this.dramaDownload.jobId);
+                    if (!job) return;
+                    await this.resumeDramaDownloadJob(job);
+                    this.syncDramaDownloadProgress();
                 },
 
                 async cancelDramaDownload() {
                     if (!this.dramaDownload.jobId) return;
-                    if (!confirm('确定取消当前下载任务吗？已完成的集数会保留。')) return;
-                    await aiworkerApi.request(`/api/jobs/${this.dramaDownload.jobId}/stop`, {method: 'POST'});
+                    const job = this.jobs.find(item => item.job_id === this.dramaDownload.jobId);
+                    if (!job) return;
+                    await this.cancelDramaDownloadJob(job);
+                },
+
+                dramaDownloadArtifacts() {
+                    if (!this.dramaDownload.jobId) return [];
+                    return this.jobs.find(item => item.job_id === this.dramaDownload.jobId)?.artifacts || [];
+                },
+
+                dramaDownloadArtifactName(item) {
+                    return String(item?.path || '').replace(/\\/g, '/').split('/').pop() || '未命名文件';
                 },
 
                 async openDramaDownloadFiles() {
-                    this.dramaDownloadModal.hide();
-                    window.location.assign('/selection/dramas');
+                    await this.fetchJobs();
+                    this.dramaDownload.showFiles = true;
+                    this.$nextTick(() => {
+                        document.getElementById('dramaDownloadArtifacts')?.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+                    });
                 },
 
                 openBreakdownEditor(source, title, record) {
@@ -562,7 +770,7 @@ window.aiworkerModules.push(() => ({
                 breakdownRecordStatusLabel(status) {
                     return {
                         draft: '草稿', submitted: '待审批', approved: '已批准',
-                        returned: '已退回', superseded: '已替代', locked: '已批准'
+                        returned: '已退回', superseded: '已替代', locked: '已完成'
                     }[status] || status || '草稿';
                 },
 
@@ -570,40 +778,19 @@ window.aiworkerModules.push(() => ({
                     const record = this.breakdownEditor.record;
                     if (!record || record.status !== 'draft') return;
                     if (!await this.saveBreakdownEditor()) return;
+                    if (!confirm('完成后该拆解版本将锁定且不可修改，确定继续吗？')) return;
                     this.breakdownEditor.saving = true;
                     try {
-                        const tasksResponse = await aiworkerApi.request('/api/workflow/tasks');
-                        const tasks = await tasksResponse.json();
-                        if (!tasksResponse.ok) throw new Error(tasks.detail || '读取审批任务失败');
-                        const task = (tasks || []).find(item =>
-                            item.task_type === 'breakdown'
-                            && ['assigned', 'in_progress', 'returned'].includes(item.status)
-                            && Number(item.topic_id) === Number(record.topic_id)
-                        );
-                        if (!task) throw new Error('当前没有可提交的拆解任务，请先领取或开始任务');
-                        if (['assigned', 'returned'].includes(task.status)) {
-                            const startResponse = await aiworkerApi.request(`/api/workflow/tasks/${task.id}/start`, {method: 'POST'});
-                            const started = await startResponse.json();
-                            if (!startResponse.ok) throw new Error(started.detail || '开始拆解任务失败');
-                            task.status = started.status;
-                        }
-                        const res = await aiworkerApi.request('/api/creative/workflow/submit', {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({
-                                workflow_task_id: task.id,
-                                resource_type: 'breakdown',
-                                resource_id: String(record.id),
-                            }),
-                        });
+                        const res = await aiworkerApi.request(`/api/creative/breakdowns/${record.id}/lock`, {method: 'POST'});
                         const data = await res.json();
-                        if (!res.ok) throw new Error(data.detail || '提交拆解失败');
-                        record.status = 'submitted';
+                        if (!res.ok) throw new Error(data.detail || '完成拆解失败');
+                        Object.assign(record, data);
+                        record.status = data.status || 'locked';
                         if (this.breakdownEditor.source === 'topic-library') await this.fetchTopicLibrary();
                         if (this.breakdownEditor.source === 'creative') await this.fetchCreativeTopics();
-                        alert('拆解版本已提交审批。');
+                        alert('拆解已完成并锁定，可以创建策划项目。');
                     } catch (e) {
-                        this.breakdownEditor.error = e.message || '提交拆解失败';
+                        this.breakdownEditor.error = e.message || '完成拆解失败';
                     } finally {
                         this.breakdownEditor.saving = false;
                     }
@@ -645,7 +832,11 @@ window.aiworkerModules.push(() => ({
                 },
 
                 createCreativeBreakdown(topic) {
-                    return this.startTranscriptBreakdown(topic, 'creative');
+                    return this.startTranscriptBreakdown(
+                        topic,
+                        'creative',
+                        Boolean(topic?.locked_breakdown_id)
+                    );
                 },
 
                 async submitCreativeBreakdown() {

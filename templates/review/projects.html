@@ -1,12 +1,34 @@
 {% extends "layouts/base.html" %}
 
 {% block content %}
-<div class="d-flex align-items-center justify-content-between border-bottom pb-3 mb-4"><div><h3 class="mb-1">负责项目</h3><div class="small text-muted">{% if project_id %}项目 {{ project_id }} 的成员与职责{% else %}当前账号负责的项目范围{% endif %}</div></div></div>
-{% if principal and (principal.is_system_admin or 'project.manage' in principal.permissions) %}
-<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>待决策选题</th><th>状态</th><th class="text-end">操作</th></tr></thead><tbody id="workflow-bootstrap-topics"><tr><td colspan="3" class="text-center text-muted py-4">正在加载...</td></tr></tbody></table></div>
-<div class="alert alert-danger d-none" id="workflow-bootstrap-error" role="alert"></div>
-{% else %}
-<div class="alert alert-light border" role="status">当前账号没有创建项目工作流的权限。</div>
-{% endif %}
+<div class="d-flex align-items-center justify-content-between border-bottom pb-3 mb-4">
+    <div>
+        <h3 class="mb-1">负责项目</h3>
+        <div class="small text-muted">已从选题库分配给创意策划的项目</div>
+    </div>
+    <a class="btn btn-outline-light btn-sm" href="/selection/topics" title="前往选题库分配策划任务">
+        <i class="bi bi-funnel me-1" aria-hidden="true"></i>选题库
+    </a>
+</div>
+<div id="managed-project-error" class="alert alert-danger d-none" role="alert"></div>
+<div id="managed-projects" data-project-id="{{ project_id or '' }}">
+    <div class="table-responsive">
+        <table class="table table-sm align-middle">
+            <thead>
+                <tr>
+                    <th>项目</th>
+                    <th>来源选题</th>
+                    <th>创意策划</th>
+                    <th>Brief 任务</th>
+                    <th>项目状态</th>
+                    <th class="text-end">操作</th>
+                </tr>
+            </thead>
+            <tbody id="managed-project-list">
+                <tr><td colspan="6" class="text-center text-muted py-4">正在加载负责项目...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
 {% endblock %}
-{% block scripts %}<script src="/static/js/review/projects.js"></script>{% endblock %}
+{% block scripts %}<script src="/static/js/review/projects.js?v={{ asset_version }}"></script>{% endblock %}

@@ -28,7 +28,7 @@ NAVIGATION_CATALOG = (
             {"label": "今日榜单", "route": "/selection/ranks"},
             {"label": "今日爆款", "route": "/selection/hits"},
             {"label": "选题库", "route": "/selection/topics"},
-            {"label": "剧目素材", "route": "/selection/dramas"},
+            {"label": "剧目检索下载", "route": "/selection/dramas"},
             {"label": "剧目拆解", "route": "/selection/breakdowns"},
         ),
     },
@@ -58,7 +58,18 @@ NAVIGATION_CATALOG = (
         "items": (
             {"label": "负责项目", "route": "/review/projects"},
             {"label": "审批任务", "route": "/review/tasks"},
-            {"label": "版本审批", "route": "/review/approvals"},
+            {"label": "审批详情", "route": "/review/approvals"},
+        ),
+    },
+    {
+        "label": "团队管理",
+        "icon": "bi-people",
+        "permission": "page.team_management",
+        "route": "/review/users",
+        "hide_for_system_admin": True,
+        "items": (
+            {"label": "团队账号", "route": "/review/users"},
+            {"label": "角色授权", "route": "/review/roles"},
         ),
     },
     {
@@ -87,14 +98,9 @@ PAGE_ROUTES = (
     ("/selection/ranks", "page.selection", "今日榜单"),
     ("/selection/hits", "page.selection", "今日爆款"),
     ("/selection/topics", "page.selection", "选题库"),
-    ("/selection/dramas", "page.selection", "剧目素材"),
+    ("/selection/dramas", "page.selection", "剧目检索下载"),
     ("/selection/breakdowns", "page.selection", "剧目拆解"),
     ("/planning/projects", "page.planning", "策划项目"),
-    (
-        "/planning/projects/{project_id}/directions",
-        "page.planning",
-        "仿写方向",
-    ),
     ("/planning/projects/{project_id}/brief", "page.planning", "创作任务书"),
     ("/planning/projects/{project_id}/characters", "page.planning", "人物关系"),
     ("/writing/projects", "page.writing", "编剧项目"),
@@ -106,7 +112,9 @@ PAGE_ROUTES = (
     ),
     ("/review/projects", "page.review", "负责项目"),
     ("/review/tasks", "page.review", "审批任务"),
-    ("/review/approvals", "page.review", "版本审批"),
+    ("/review/approvals", "page.review", "审批详情"),
+    ("/review/users", "page.team_management", "团队账号"),
+    ("/review/roles", "page.team_management", "角色授权"),
     ("/review/projects/{project_id}/members", "page.review", "项目成员"),
     ("/review/projects/{project_id}/versions", "page.review", "项目版本"),
     ("/admin/users", "*", "用户管理"),
@@ -133,6 +141,8 @@ class NavigationService:
     def items_for(self, principal: Principal) -> list[dict[str, Any]]:
         visible_groups = []
         for group in NAVIGATION_CATALOG:
+            if principal.is_system_admin and group.get("hide_for_system_admin"):
+                continue
             items = [
                 deepcopy(item)
                 for item in group["items"]

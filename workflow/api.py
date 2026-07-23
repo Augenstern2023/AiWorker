@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from pydantic import BaseModel
 
 from audit.service import AuditService
 from identity.dependencies import current_principal, require_permission
@@ -25,6 +26,13 @@ from .schema import (
     TaskAssignmentRequest,
 )
 from .transition_service import TransitionService
+
+
+class CreateAssignmentRequest(BaseModel):
+    topic_id: int
+    assignee_user_id: str
+    role_code: str
+    task_type: str
 
 
 def build_workflow_router(
@@ -46,6 +54,31 @@ def build_workflow_router(
             for task in repository.list_tasks(principal)
         ]
 
+    @router.get("/api/workflow/approval-flow")
+    def list_approval_flow(
+        principal: Principal = Depends(current_principal),
+    ) -> list[dict[str, Any]]:
+        return repository.list_approval_flow(principal)
+
+    @router.get("/api/workflow/my-submissions")
+    def list_my_submissions(
+        principal: Principal = Depends(current_principal),
+    ) -> list[dict[str, Any]]:
+        return _call(repository.list_my_submissions, principal)
+
+    @router.get("/api/workflow/assignment-candidates")
+    def list_role_assignment_candidates(
+        role_code: str,
+        task_type: str,
+        principal: Principal = Depends(require_permission("workflow.assign")),
+    ) -> list[dict[str, Any]]:
+        return _call(
+            repository.list_role_assignment_candidates,
+            role_code,
+            task_type,
+            principal,
+        )
+
     @router.get("/api/workflow/tasks/{task_id}")
     def get_task(
         task_id: str,
@@ -58,6 +91,13 @@ def build_workflow_router(
         task = repository.get_visible_task(task_id, principal)
         assert task is not None
         return _task_view(repository, task, principal)
+
+    @router.get("/api/workflow/tasks/{task_id}/assignment-candidates")
+    def list_assignment_candidates(
+        task_id: str,
+        principal: Principal = Depends(require_permission("workflow.assign")),
+    ) -> list[dict[str, Any]]:
+        return _call(repository.list_task_assignment_candidates, task_id, principal)
 
     @router.post("/api/workflow/tasks/{task_id}/claim")
     def claim_task(
@@ -88,6 +128,14 @@ def build_workflow_router(
             repository, request, principal, "workflow.assign", "task", task_id,
             repository.assign_task, task_id, payload.assignee_user_id, principal
         )
+
+    @router.post("/api/workflow/create-assignment")
+    def create_assignment(
+        payload: CreateAssignmentRequest,
+        request: Request,
+        principal: Principal = Depends(require_permission("workflow.assign")),
+    ) -> dict[str, Any]:
+        return _call(repository.create_and_assign_task, payload.topic_id, payload.assignee_user_id, payload.role_code, payload.task_type, principal)
 
     @router.post("/api/workflow/tasks/{task_id}/reassign")
     def reassign_task(
@@ -330,6 +378,15 @@ def _task_view(
     principal: Principal,
 ) -> dict[str, Any]:
     viewed = dict(task)
+    assignee_id = task.get("assignee_user_id")
+    assignee = (
+        repository.identity_repository.get_user(str(assignee_id))
+        if assignee_id
+        else None
+    )
+    viewed["assignee_display_name"] = (
+        assignee.get("display_name") if assignee else None
+    )
     viewed["can_claim"] = (
         task["status"] == "pool"
         and (
@@ -346,6 +403,16 @@ def _task_view(
         and (
             principal.is_system_admin
             or "workflow.task.update" in principal.permissions
+        )
+    )
+    viewed["can_assign"] = (
+        task["status"] == "pool"
+        and (
+            principal.is_system_admin
+            or (
+                "workflow.assign" in principal.permissions
+                and repository.can_assign_task(task["id"], principal)
+            )
         )
     )
     viewed["can_approve"] = (

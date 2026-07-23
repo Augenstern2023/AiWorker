@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+import json
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -27,6 +28,9 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
     is_deleted INTEGER NOT NULL DEFAULT 0 CHECK (is_deleted IN (0, 1)),
+    created_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+    deleted_at TEXT,
+    deleted_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
     last_login_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -38,6 +42,10 @@ CREATE TABLE IF NOT EXISTS roles (
     description TEXT NOT NULL DEFAULT '',
     is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
     is_enabled INTEGER NOT NULL DEFAULT 1 CHECK (is_enabled IN (0, 1)),
+    is_deleted INTEGER NOT NULL DEFAULT 0 CHECK (is_deleted IN (0, 1)),
+    created_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+    deleted_at TEXT,
+    deleted_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -226,6 +234,7 @@ class IdentityRepository:
     def _init_schema(self) -> None:
         with self.connect() as connection:
             connection.executescript(SCHEMA_SQL)
+            self._ensure_team_management_schema(connection)
             columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(workflow_tasks)")
@@ -241,6 +250,99 @@ class IdentityRepository:
                 WHERE predecessor_task_id IS NOT NULL
                 """
             )
+
+    @staticmethod
+    def _ensure_team_management_schema(connection: sqlite3.Connection) -> None:
+        migrations = {
+            "users": (
+                ("created_by_user_id", "TEXT REFERENCES users(id) ON DELETE SET NULL"),
+                ("deleted_at", "TEXT"),
+                ("deleted_by_user_id", "TEXT REFERENCES users(id) ON DELETE SET NULL"),
+            ),
+            "roles": (
+                ("is_deleted", "INTEGER NOT NULL DEFAULT 0 CHECK (is_deleted IN (0, 1))"),
+                ("created_by_user_id", "TEXT REFERENCES users(id) ON DELETE SET NULL"),
+                ("deleted_at", "TEXT"),
+                ("deleted_by_user_id", "TEXT REFERENCES users(id) ON DELETE SET NULL"),
+            ),
+        }
+        for table, definitions in migrations.items():
+            existing = {
+                row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+            for column, definition in definitions:
+                if column not in existing:
+                    connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                    )
+
+        owner_role = connection.execute(
+            "SELECT id FROM roles WHERE code = 'project_owner' COLLATE NOCASE"
+        ).fetchone()
+        if owner_role is not None:
+            bindings = connection.execute(
+                """
+                SELECT ur.user_id
+                FROM user_roles AS ur
+                JOIN users AS u ON u.id = ur.user_id
+                WHERE ur.role_id = ?
+                ORDER BY u.created_at, u.id
+                """,
+                (owner_role["id"],),
+            ).fetchall()
+            if len(bindings) > 1:
+                retained = bindings[0]["user_id"]
+                removed = [row["user_id"] for row in bindings[1:]]
+                connection.executemany(
+                    "DELETE FROM user_roles WHERE user_id = ? AND role_id = ?",
+                    [(user_id, owner_role["id"]) for user_id in removed],
+                )
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO audit_logs
+                        (id, action, resource_type, resource_id, details_json)
+                    VALUES (?, 'role.project_owner.uniqueness_migration',
+                            'role', ?, ?)
+                    """,
+                    (
+                        "migration:project_owner_uniqueness",
+                        owner_role["id"],
+                        json.dumps(
+                            {"retained_user_id": retained, "removed_user_ids": removed},
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                    ),
+                )
+
+        connection.executescript(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_single_project_owner_insert
+            BEFORE INSERT ON user_roles
+            WHEN (SELECT code FROM roles WHERE id = NEW.role_id) = 'project_owner'
+              AND EXISTS (
+                  SELECT 1 FROM user_roles AS ur
+                  JOIN roles AS r ON r.id = ur.role_id
+                  WHERE r.code = 'project_owner'
+              )
+            BEGIN
+                SELECT RAISE(ABORT, '项目负责人只能有一名');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_single_project_owner_update
+            BEFORE UPDATE OF role_id ON user_roles
+            WHEN (SELECT code FROM roles WHERE id = NEW.role_id) = 'project_owner'
+              AND EXISTS (
+                  SELECT 1 FROM user_roles AS ur
+                  JOIN roles AS r ON r.id = ur.role_id
+                  WHERE r.code = 'project_owner'
+                    AND NOT (ur.user_id = OLD.user_id AND ur.role_id = OLD.role_id)
+              )
+            BEGIN
+                SELECT RAISE(ABORT, '项目负责人只能有一名');
+            END;
+            """
+        )
 
     def seed_defaults(self) -> None:
         with self.connect() as connection:
@@ -327,13 +429,16 @@ class IdentityRepository:
 
     def list_roles(self) -> list[dict[str, Any]]:
         with self.connect() as connection:
-            rows = connection.execute("SELECT * FROM roles ORDER BY code").fetchall()
+            rows = connection.execute(
+                "SELECT * FROM roles WHERE is_deleted = 0 ORDER BY code"
+            ).fetchall()
         return [self._role_dict(row) for row in rows]
 
     def get_role_by_code(self, code: str) -> dict[str, Any] | None:
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM roles WHERE code = ? COLLATE NOCASE", (code,)
+                "SELECT * FROM roles WHERE code = ? COLLATE NOCASE AND is_deleted = 0",
+                (code,),
             ).fetchone()
         return self._role_dict(row) if row else None
 
@@ -342,7 +447,7 @@ class IdentityRepository:
     ) -> dict[str, Any] | None:
         with self.connection_scope(connection) as active_connection:
             row = active_connection.execute(
-                "SELECT * FROM roles WHERE id = ?", (role_id,)
+                "SELECT * FROM roles WHERE id = ? AND is_deleted = 0", (role_id,)
             ).fetchone()
         return self._role_dict(row) if row else None
 
@@ -353,16 +458,25 @@ class IdentityRepository:
         description: str,
         *,
         is_system: bool = False,
+        created_by_user_id: str | None = None,
         connection: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
         role_id = str(uuid.uuid4())
         with self.connection_scope(connection) as active_connection:
             active_connection.execute(
                 """
-                INSERT INTO roles (id, code, name, description, is_system)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO roles
+                    (id, code, name, description, is_system, created_by_user_id)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (role_id, code, name, description, int(is_system)),
+                (
+                    role_id,
+                    code,
+                    name,
+                    description,
+                    int(is_system),
+                    created_by_user_id,
+                ),
             )
         role = self.get_role(role_id, connection=connection)
         assert role is not None
@@ -524,6 +638,7 @@ class IdentityRepository:
         display_name: str,
         password_hash: str,
         *,
+        created_by_user_id: str | None = None,
         connection: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
         user_id = str(uuid.uuid4())
@@ -531,10 +646,18 @@ class IdentityRepository:
             active_connection.execute(
                 """
                 INSERT INTO users
-                    (id, username, normalized_username, display_name, password_hash)
-                VALUES (?, ?, ?, ?, ?)
+                    (id, username, normalized_username, display_name, password_hash,
+                     created_by_user_id)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (user_id, username, username.casefold(), display_name, password_hash),
+                (
+                    user_id,
+                    username,
+                    username.casefold(),
+                    display_name,
+                    password_hash,
+                    created_by_user_id,
+                ),
             )
         user = self.get_user(user_id, connection=connection)
         assert user is not None
@@ -645,10 +768,147 @@ class IdentityRepository:
         *,
         connection: sqlite3.Connection | None = None,
     ) -> list[str]:
-        user = self.update_user(
-            user_id, role_ids=role_ids, connection=connection
-        )
+        try:
+            user = self.update_user(
+                user_id, role_ids=role_ids, connection=connection
+            )
+        except sqlite3.IntegrityError as exc:
+            if "项目负责人只能有一名" in str(exc):
+                raise ValueError("项目负责人只能有一名") from exc
+            raise
         return user["role_codes"]
+
+    def assign_project_owner(
+        self,
+        user_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        with self.connection_scope(connection) as active_connection:
+            if connection is None:
+                active_connection.execute("BEGIN IMMEDIATE")
+            target = active_connection.execute(
+                "SELECT status, is_deleted FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            if target is None or target["is_deleted"]:
+                raise KeyError(user_id)
+            if target["status"] != "active":
+                raise ValueError("只能指定启用中的账号为项目负责人")
+            role = active_connection.execute(
+                "SELECT id FROM roles WHERE code = 'project_owner' COLLATE NOCASE "
+                "AND is_enabled = 1 AND is_deleted = 0"
+            ).fetchone()
+            if role is None:
+                raise ValueError("项目负责人角色不可用")
+            current = active_connection.execute(
+                """
+                SELECT u.id, u.status, u.is_deleted
+                FROM user_roles AS ur
+                JOIN users AS u ON u.id = ur.user_id
+                WHERE ur.role_id = ?
+                """,
+                (role["id"],),
+            ).fetchone()
+            if current is not None and current["id"] == user_id:
+                result = self.get_user(user_id, connection=active_connection)
+                assert result is not None
+                return result
+            if (
+                current is not None
+                and current["status"] == "active"
+                and not current["is_deleted"]
+            ):
+                raise ValueError("请先停用当前项目负责人")
+            active_connection.execute(
+                "DELETE FROM user_roles WHERE role_id = ?", (role["id"],)
+            )
+            active_connection.execute(
+                "INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)",
+                (user_id, role["id"]),
+            )
+        result = self.get_user(user_id, connection=connection)
+        assert result is not None
+        return result
+
+    def soft_delete_user(
+        self,
+        user_id: str,
+        *,
+        deleted_by_user_id: str | None = None,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        with self.connection_scope(connection) as active_connection:
+            if connection is None:
+                active_connection.execute("BEGIN IMMEDIATE")
+            user = active_connection.execute(
+                "SELECT status, is_deleted FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            if user is None or user["is_deleted"]:
+                raise KeyError(user_id)
+            self.update_user(user_id, status="disabled", connection=active_connection)
+            active_connection.execute(
+                """
+                UPDATE users
+                SET is_deleted = 1, deleted_at = CURRENT_TIMESTAMP,
+                    deleted_by_user_id = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (deleted_by_user_id, user_id),
+            )
+            active_connection.execute(
+                "DELETE FROM user_roles WHERE user_id = ?", (user_id,)
+            )
+            active_connection.execute(
+                "UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP "
+                "WHERE user_id = ? AND revoked_at IS NULL",
+                (user_id,),
+            )
+            active_connection.execute(
+                "UPDATE project_members SET status = 'inactive', "
+                "updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND status = 'active'",
+                (user_id,),
+            )
+            active_connection.execute(
+                """
+                UPDATE workflow_tasks
+                SET assignee_id = NULL, assigned_by = NULL, status = 'pool',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE assignee_id = ?
+                  AND status IN ('assigned', 'in_progress', 'returned')
+                """,
+                (user_id,),
+            )
+
+    def soft_delete_role(
+        self,
+        role_id: str,
+        *,
+        deleted_by_user_id: str | None = None,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        with self.connection_scope(connection) as active_connection:
+            if connection is None:
+                active_connection.execute("BEGIN IMMEDIATE")
+            role = active_connection.execute(
+                "SELECT is_system, is_deleted FROM roles WHERE id = ?", (role_id,)
+            ).fetchone()
+            if role is None or role["is_deleted"]:
+                raise KeyError(role_id)
+            if role["is_system"]:
+                raise ValueError("系统角色不能删除")
+            active_connection.execute(
+                "DELETE FROM user_roles WHERE role_id = ?", (role_id,)
+            )
+            active_connection.execute(
+                """
+                UPDATE roles
+                SET is_enabled = 0, is_deleted = 1,
+                    deleted_at = CURRENT_TIMESTAMP, deleted_by_user_id = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (deleted_by_user_id, role_id),
+            )
 
     def user_role_codes(
         self, user_id: str, *, connection: sqlite3.Connection | None = None
@@ -715,6 +975,7 @@ class IdentityRepository:
         role = dict(row)
         role["is_system"] = bool(role["is_system"])
         role["is_enabled"] = bool(role["is_enabled"])
+        role["is_deleted"] = bool(role.get("is_deleted", 0))
         return role
 
     def _user_dict(

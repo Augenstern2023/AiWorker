@@ -110,6 +110,34 @@
             border-radius: 6px;
             box-shadow: 0 10px 28px rgba(0, 0, 0, .32);
         }
+        .approval-readonly-field {
+            min-height: 38px;
+            padding: 8px 10px;
+            background: #151722;
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            line-height: 1.5;
+            white-space: pre-line;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+        .approval-value-list {
+            padding-left: 18px;
+        }
+        .approval-value-list li + li {
+            margin-top: 4px;
+        }
+        .approval-table {
+            width: 100%;
+            table-layout: fixed;
+        }
+        .approval-table th,
+        .approval-table td {
+            white-space: normal;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
         .table {
             --bs-table-bg: transparent;
             --bs-table-color: var(--text);
@@ -440,12 +468,16 @@
             overflow-wrap: anywhere;
             line-height: 1.5;
         }
-        .download-progress-toast {
+        .download-progress-stack {
             position: fixed;
             right: 24px;
             bottom: 24px;
             z-index: 1060;
             width: min(360px, calc(100vw - 32px));
+            display: grid;
+            gap: 10px;
+        }
+        .download-progress-toast {
             padding: 14px;
             background: var(--bg-panel);
             border: 1px solid var(--border);
@@ -512,6 +544,16 @@
         .topic-desc-cell,
         .blueprint-conflict-cell {
             transition: all 0.15s ease;
+        }
+        .topic-desc-clamp {
+            display: -webkit-box;
+            overflow: hidden;
+            -webkit-box-orient: vertical;
+            -webkit-line-clamp: 2;
+        }
+        .topic-desc-cell:hover .topic-desc-clamp {
+            overflow: visible;
+            -webkit-line-clamp: unset;
         }
         .topic-desc-cell:hover,
         .blueprint-conflict-cell:hover {

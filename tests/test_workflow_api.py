@@ -115,6 +115,25 @@ def test_task_api_lists_claimable_owned_and_managed_tasks_only(
     assert {task["id"] for task in owner_tasks.json()} == {managed["id"]}
 
 
+def test_assignment_candidates_api_lists_active_eligible_users(
+    identity_repository: IdentityRepository,
+    repository: WorkflowRepository,
+):
+    owner = _principal(identity_repository, "owner_candidates", "project_owner")
+    planner = _principal(identity_repository, "planner_candidates", "creative_planner")
+    _principal(identity_repository, "writer_candidates", "screenwriter")
+
+    response = _client(identity_repository, repository, owner).get(
+        "/api/workflow/assignment-candidates",
+        params={"role_code": "creative_planner", "task_type": "brief"},
+    )
+
+    assert response.status_code == 200
+    assert {item["user_id"] for item in response.json()} == {planner.user_id}
+    assert response.json()[0]["display_name"] == planner.display_name
+    assert response.json()[0]["role_codes"] == ["creative_planner"]
+
+
 def test_claim_start_cancel_api_and_conflict_statuses(
     identity_repository: IdentityRepository,
     repository: WorkflowRepository,

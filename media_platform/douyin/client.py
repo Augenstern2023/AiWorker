@@ -206,6 +206,15 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         res = await self.get("/aweme/v1/web/aweme/detail/", params, headers)
         return res.get("aweme_detail", {})
 
+    async def get_mix_aweme_list(
+        self, mix_id: str, cursor: str = "", count: int = 20
+    ) -> Dict:
+        """Return one page of videos from a Douyin collection (合集)."""
+        return await self.get(
+            "/aweme/v1/web/mix/aweme/",
+            {"mix_id": mix_id, "cursor": cursor, "count": count},
+        )
+
     async def get_aweme_comments(self, aweme_id: str, cursor: int = 0):
         """get note comments
 

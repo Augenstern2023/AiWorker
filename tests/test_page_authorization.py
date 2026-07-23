@@ -28,7 +28,7 @@ ROLE_CASES = (
     ("selection_operator", "/selection/ranks", {"选品工作台"}),
     ("creative_planner", "/planning/projects", {"创意策划"}),
     ("screenwriter", "/writing/projects", {"编剧工作台"}),
-    ("project_owner", "/review/tasks", {"审批中心"}),
+    ("project_owner", "/review/tasks", {"审批中心", "团队管理"}),
     (
         "system_admin",
         "/admin/users",
@@ -40,6 +40,7 @@ PROBE_ROUTES = {
     "创意策划": "/planning/projects",
     "编剧工作台": "/writing/projects",
     "审批中心": "/review/tasks",
+    "团队管理": "/review/users",
     "系统管理": "/admin/users",
 }
 PAGE_PERMISSION_BY_GROUP = {
@@ -47,6 +48,7 @@ PAGE_PERMISSION_BY_GROUP = {
     "创意策划": "page.planning",
     "编剧工作台": "page.writing",
     "审批中心": "page.review",
+    "团队管理": "page.team_management",
     "系统管理": "page.admin.delivery",
 }
 
@@ -176,6 +178,19 @@ def test_today_hits_and_topic_library_are_distinct_pages(
     assert 'href="/selection/topics"' in hits.text
 
 
+def test_removed_directions_page_redirects_to_brief(
+    page_app: tuple[FastAPI, IdentityRepository],
+):
+    client = _create_role_client(page_app, "creative_planner")
+
+    response = client.get(
+        "/planning/projects/project-1/directions", follow_redirects=False
+    )
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/planning/projects/project-1/brief"
+
+
 def test_root_uses_role_priority_then_last_authorized_page(
     page_app: tuple[FastAPI, IdentityRepository],
 ):
@@ -197,6 +212,23 @@ def test_root_uses_role_priority_then_last_authorized_page(
     assert role is not None
     page_app[1].replace_role_permissions(role["id"], [])
     assert client.get("/", follow_redirects=False).headers["location"] == "/tasks"
+
+
+def test_global_task_page_replaces_role_specific_task_pages(
+    page_app: tuple[FastAPI, IdentityRepository],
+):
+    planner = _create_role_client(page_app, "creative_planner")
+    writer = _create_role_client(page_app, "screenwriter")
+
+    task_page = planner.get("/tasks")
+
+    assert task_page.status_code == 200
+    assert 'id="my-submission-list"' in task_page.text
+    assert 'id="my-project-list"' in task_page.text
+    assert '/static/js/common/my_tasks.js' in task_page.text
+    assert 'href="/planning/tasks"' not in task_page.text
+    assert planner.get("/planning/tasks", follow_redirects=False).headers["location"] == "/tasks"
+    assert writer.get("/writing/tasks", follow_redirects=False).headers["location"] == "/tasks"
 
 
 def test_last_page_is_isolated_between_login_sessions(

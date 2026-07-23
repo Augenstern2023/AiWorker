@@ -12,7 +12,7 @@
             <table class="table table-sm align-middle mb-4">
                 <thead><tr><th>项目</th><th>来源选题</th><th>目标集数</th><th>当前阶段</th><th>更新时间</th></tr></thead>
                 <tbody>
-                    <template x-for="project in creativeWorkspace.projects" :key="project.id"><tr class="creative-project-row"><td><a class="project-name-button" :href="`/planning/projects/${project.id}/directions`" x-text="project.name"></a></td><td x-text="project.topic_title"></td><td x-text="project.target_episode_count"></td><td><span class="badge bg-secondary" x-text="creativeProjectStatusLabel(project.status)"></span></td><td x-text="formatDate(project.updated_at)"></td></tr></template>
+                    <template x-for="project in creativeWorkspace.projects" :key="project.id"><tr class="creative-project-row"><td><a class="project-name-button" :href="`/planning/projects/${project.id}/brief`" x-text="project.name"></a></td><td x-text="project.topic_title"></td><td x-text="project.target_episode_count"></td><td><span class="badge bg-secondary" x-text="creativeProjectStatusLabel(project.status)"></span></td><td x-text="formatDate(project.updated_at)"></td></tr></template>
                     <tr x-show="!creativeWorkspace.projects.length"><td colspan="5" class="text-center text-muted py-4">暂无创作项目，请先从已采纳且拆解已批准的选题创建</td></tr>
                 </tbody>
             </table>

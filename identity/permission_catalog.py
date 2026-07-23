@@ -18,6 +18,7 @@ _PERMISSION_CODES = (
     "page.planning",
     "page.writing",
     "page.review",
+    "page.team_management",
     "page.admin.delivery",
     "rank.read",
     "analytics.read",
@@ -91,6 +92,12 @@ _PERMISSION_CODES = (
     "audit.read.project",
     "approved_content.read",
     "export.create",
+    "identity.user.read",
+    "identity.user.create",
+    "identity.user.manage_created",
+    "identity.role.read",
+    "identity.role.create",
+    "identity.role.manage_created",
 )
 
 # The catalog is intentionally a mapping: membership checks use permission codes,
@@ -112,6 +119,41 @@ PERMISSION_DEPENDENCIES = {
     "workflow.assign": {"workflow.read.managed", "project.read.managed", "page.review"},
     "export.create": {"approved_content.read", "page.admin.delivery"},
 }
+
+
+# Project owners may build execution roles, but cannot delegate identity,
+# project governance, approval, audit, delivery, or unrestricted data access.
+_NON_DELEGABLE_PERMISSIONS = {
+    "*",
+    "page.review",
+    "page.team_management",
+    "page.admin.delivery",
+    "project.read.managed",
+    "project.manage",
+    "project.member.manage",
+    "project.archive",
+    "workflow.read.managed",
+    "workflow.assign",
+    "workflow.reassign",
+    "workflow.reclaim",
+    "workflow.cancel",
+    "version.read.managed",
+    "version.compare",
+    "version.approve",
+    "version.return",
+    "audit.read",
+    "audit.read.project",
+    "approved_content.read",
+    "export.create",
+    "identity.user.read",
+    "identity.user.create",
+    "identity.user.manage_created",
+    "identity.role.read",
+    "identity.role.create",
+    "identity.role.manage_created",
+}
+DELEGABLE_PERMISSIONS = frozenset(PERMISSIONS) - _NON_DELEGABLE_PERMISSIONS
+DELEGABLE_TASK_TYPES = frozenset({"brief", "characters", "outline", "beats"})
 
 
 @dataclass(frozen=True)
@@ -177,10 +219,12 @@ DEFAULT_ROLES = (
         description="负责项目组织、任务分配、版本审批和阶段流转。",
         is_system=True,
         permissions=_scoped(
-            """page.review project.read.managed project.manage project.member.manage
+            """page.review page.team_management project.read.managed project.manage project.member.manage
             project.archive workflow.read.managed workflow.assign workflow.reassign
             workflow.reclaim workflow.cancel version.read.managed version.compare
-            version.approve version.return job.read.project audit.read.project""",
+            version.approve version.return job.read.project audit.read.project
+            identity.user.read identity.user.create identity.user.manage_created
+            identity.role.read identity.role.create identity.role.manage_created""",
             "managed_projects",
         ),
     ),

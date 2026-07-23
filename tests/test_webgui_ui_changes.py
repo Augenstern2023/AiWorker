@@ -108,7 +108,7 @@ def test_webgui_registers_phase4_routes_and_flat_project_workspace():
     assert "creative-workspace-scroll" not in html
     assert 'class="table table-sm table-hover align-middle mb-4"' not in html
     assert "creativeWorkspace.projects[0]?.id" in html
-    assert ':href="`/planning/projects/${project.id}/directions`"' in html
+    assert ':href="`/planning/projects/${project.id}/brief`"' in html
     assert "--bs-table-active-color: var(--text);" in html
 
 
@@ -170,7 +170,7 @@ def test_project_table_uses_name_navigation_without_redundant_action_column():
     assert 'title="打开项目"' not in project_table
     assert "bi-arrow-right" not in project_table
     assert 'class="project-name-button"' in project_table
-    assert ':href="`/planning/projects/${project.id}/directions`"' in project_table
+    assert ':href="`/planning/projects/${project.id}/brief`"' in project_table
     assert '@click.stop="selectCreativeProject(project.id)"' not in project_table
     assert ':aria-current="creativeWorkspace.project?.id === project.id ? \'page\' : null"' not in project_table
     assert ".creative-project-row.table-active" in html
@@ -195,7 +195,10 @@ def test_draft_breakdowns_are_visible_but_not_project_eligible():
     assert "breakdownStatusClass(topic)" in html
     assert "草稿${version} · 待提交" in html
     assert "草稿${version} · 已有批准版" in html
-    assert "继续拆解" in html
+    assert "更新拆解" in html
+    assert "继续拆解" not in _source("templates/selection/breakdowns.html")
+    breakdowns = _source("static/js/selection/breakdowns.js")
+    assert "Boolean(topic?.locked_breakdown_id)" in breakdowns
     assert "aiworkerApi.request('/api/creative/topics?status=adopted&limit=500')" in html
     assert ':disabled="!topic.locked_breakdown_id"' in html
     assert 'x-text="creativeTopicOptionLabel(topic)"' in html
@@ -237,6 +240,31 @@ def test_topic_library_shows_full_lifecycle_and_breakdown_version_column():
     assert "lifecycle-adopted" in html
     assert "lifecycle-beats-generated" in html
     assert "lifecycle-beats-exported" in html
+
+
+def test_topic_library_assigns_each_pending_stage_to_its_workflow_role():
+    topics = _source("static/js/selection/topics.js")
+    table = _source("templates/common/workspace/selection_topics.html")
+    task_modal = _source("templates/common/workspace/workflow_task_modal.html")
+
+    assert "workflowAssignmentForStage(topic)" in topics
+    assert "pending_character_relationships" in topics
+    assert "task_type: 'characters'" in topics
+    assert "role_code: 'creative_planner'" in topics
+    assert "pending_episode_outlines" in topics
+    assert "task_type: 'outline'" in topics
+    assert "pending_beats" in topics
+    assert "task_type: 'beats'" in topics
+    assert "role_code: 'screenwriter'" in topics
+    assert '@click="openStageWorkflowAssignment(topic)"' in table
+    assert "stageWorkflowAssignmentLabel" in task_modal
+
+
+def test_my_task_tables_append_rows_instead_of_stringifying_them():
+    script = _source("static/js/common/my_tasks.js")
+
+    assert "submissionList.replaceChildren(...rows)" in script
+    assert "projectList.replaceChildren(...rows)" in script
 
 
 def test_download_modal_restores_running_job_and_explains_progress():
@@ -615,6 +643,12 @@ def test_hongguo_drama_routes_replace_legacy_proxy_routes():
     assert "完成后会弹窗提醒" in html
     assert "openTopicDownload" in html
     assert "/api/hongguo/drama/download/search" in html
+    download_search = _source("static/js/selection/breakdowns.js").split(
+        "async openTopicDownload", 1
+    )[1].split("async selectDramaDownloadCandidate", 1)[0]
+    assert "parseDramaDownloadResponse(res)" in download_search
+    assert "async parseDramaDownloadResponse(response)" in html
+    assert "await response.text()" in html
     assert "全剧下载" in html
     assert "后台下载" in html
     assert "breakdownEditor.record?.status !== 'draft'" in html

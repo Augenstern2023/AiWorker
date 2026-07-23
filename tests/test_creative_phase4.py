@@ -793,6 +793,18 @@ def test_breakdown_api_enqueues_job_when_transcript_exists(tmp_path: Path):
     assert manager.created[0]["extra"]["workspace_root"] == str(tmp_path.resolve())
 
 
+def test_breakdown_api_enqueues_without_workflow_task(tmp_path: Path):
+    client, repository, manager = build_phase4_client(tmp_path)
+    topic = seed_topic_without_breakdown(repository, "免任务拆解")
+    write_episode_script(tmp_path, topic["title"], 1, "第一集剧情正文")
+
+    response = client.post("/api/creative/breakdowns", json={"topic_id": topic["id"]})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["job"]["workflow_task_id"] is None
+    assert manager.created[0]["extra"]["workflow_task_id"] is None
+
+
 def test_topic_transcript_preview_returns_all_downloaded_episode_scripts(tmp_path: Path):
     client, repository, _ = build_phase4_client(tmp_path)
     topic = seed_topic_without_breakdown(repository, "转写预览短剧")
@@ -915,6 +927,48 @@ def test_phase4_legacy_export_requires_approved_delivery_submission(tmp_path: Pa
     assert markdown.status_code == 409
     assert json_response.status_code == 409
     assert "approved submission_id is required" in markdown.json()["detail"]
+
+
+def test_generated_content_preview_uses_latest_version_and_supports_local_download(
+    tmp_path: Path,
+):
+    client, repository, _ = build_phase4_client(tmp_path)
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "预览项目", 1)
+    first = repository.create_blueprints(project["id"], [{
+        "content": {"title": "初版 Brief"}, "risk_score": 10, "risk_level": "low",
+    }])[0]
+    latest = repository.create_blueprints(project["id"], [{
+        "content": {"title": "新版 Brief"}, "risk_score": 8, "risk_level": "low",
+    }])[0]
+
+    response = client.get(
+        f"/api/creative/projects/{project['id']}/generated-content",
+        params={"stage": "brief"},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["selected_resource_id"] == str(latest["id"])
+    assert [item["resource_id"] for item in payload["versions"]] == [
+        str(latest["id"]), str(first["id"])
+    ]
+    assert payload["snapshot"]["content"]["title"] == "新版 Brief"
+
+    historic = client.get(
+        f"/api/creative/projects/{project['id']}/generated-content",
+        params={"stage": "brief", "resource_id": str(first["id"])},
+    )
+    assert historic.status_code == 200
+    assert historic.json()["snapshot"]["content"]["title"] == "初版 Brief"
+
+    download = client.get(
+        f"/api/creative/projects/{project['id']}/generated-content/download",
+        params={"stage": "brief", "resource_id": str(latest["id"]), "format": "md"},
+    )
+    assert download.status_code == 200
+    assert download.headers["content-disposition"].startswith("attachment;")
+    assert "新版 Brief" in download.text
 
 
 def test_beats_markdown_export_uses_chinese_fields_and_includes_field_guide(tmp_path: Path):

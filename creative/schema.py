@@ -23,6 +23,15 @@ class ProjectCreateRequest(BaseModel):
     target_episode_count: int = Field(20, ge=1, le=100)
     episode_duration_seconds: int = Field(120, ge=30, le=1800)
     workflow_task_id: str | None = None
+    creation_request_id: str = ""
+
+
+class PlanningAssignmentRequest(BaseModel):
+    assignee_user_id: str = Field(min_length=1)
+    name: str = Field(min_length=1, max_length=200)
+    target_platform: str = ""
+    target_episode_count: int = Field(20, ge=1, le=100)
+    creation_request_id: str = Field(min_length=1, max_length=200)
 
 
 class ProjectUpdateRequest(BaseModel):

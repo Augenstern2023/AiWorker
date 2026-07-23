@@ -191,6 +191,71 @@ class WorkflowRepository:
             )
             return self._require_task(connection, task_id)
 
+    def ensure_project_task(
+        self,
+        project_id: str,
+        topic_id: int,
+        *,
+        task_type: str,
+        role_code: str,
+        actor: Principal | dict[str, Any],
+    ) -> dict[str, Any]:
+        workflow_id = f"project:{project_id}"
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.transaction() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM workflow_tasks
+                WHERE workflow_id = ? AND task_type = ? AND project_id = ?
+                ORDER BY created_at, id LIMIT 1
+                """,
+                (workflow_id, task_type, project_id),
+            ).fetchone()
+            if existing is not None:
+                return self._task_dict(existing)
+            self._ensure_workflow(
+                connection,
+                workflow_id,
+                task_type,
+                project_id,
+                topic_id,
+                actor_id,
+            )
+            role = connection.execute(
+                "SELECT 1 FROM roles WHERE code = ? COLLATE NOCASE "
+                "AND is_enabled = 1 AND is_deleted = 0",
+                (role_code,),
+            ).fetchone()
+            if role is None:
+                raise ValueError(f"unknown or disabled role: {role_code}")
+            task_id = str(uuid.uuid4())
+            connection.execute(
+                """
+                INSERT INTO workflow_tasks
+                    (id, workflow_id, task_type, role_code, topic_id, project_id,
+                     assignee_id, assigned_by, status, due_at)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 'pool', NULL)
+                """,
+                (
+                    task_id,
+                    workflow_id,
+                    task_type,
+                    role_code,
+                    topic_id,
+                    project_id,
+                ),
+            )
+            self._record_event(
+                connection,
+                task_id,
+                "create",
+                actor_id,
+                None,
+                "pool",
+                {"role_code": role_code, "project_bootstrap": True},
+            )
+            return self._require_task(connection, task_id)
+
     def link_task_job(self, task_id: str, job_id: str) -> None:
         with self.identity_repository.transaction() as connection:
             self._require_task(connection, task_id)
@@ -634,6 +699,23 @@ class WorkflowRepository:
             (task for task in self.list_tasks(actor) if task["id"] == task_id), None
         )
 
+    def list_my_submissions(
+        self, actor: Principal | dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT s.*, t.task_type, t.project_id, t.role_code
+                FROM workflow_submissions s
+                JOIN workflow_tasks t ON s.task_id = t.id
+                WHERE s.created_by = ?
+                ORDER BY s.created_at DESC
+                """,
+                (actor_id,),
+            ).fetchall()
+        return [self._submission_dict(row) for row in rows]
+
     def can_claim_task(
         self, task_id: str, actor: Principal | dict[str, Any]
     ) -> bool:
@@ -656,6 +738,19 @@ class WorkflowRepository:
             return task["project_id"] is None or self._is_active_project_member(
                 connection, task["project_id"], actor_id
             )
+
+    def can_assign_task(
+        self, task_id: str, actor: Principal | dict[str, Any]
+    ) -> bool:
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.connect() as connection:
+            try:
+                task = self._require_task(connection, task_id)
+                live_actor = self._live_actor(connection, actor_id)
+                self._assert_task_manager(connection, task, live_actor)
+            except (KeyError, PermissionError):
+                return False
+        return task["status"] == "pool"
 
     def claim_task(
         self, task_id: str, actor: Principal | dict[str, Any]
@@ -769,6 +864,55 @@ class WorkflowRepository:
             )
             cancelled = self._require_task(connection, task_id)
         return cancelled
+
+    def list_role_assignment_candidates(
+        self,
+        role_code: str,
+        task_type: str,
+        actor: Principal | dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        normalized_role = role_code.strip()
+        normalized_task = task_type.strip()
+        if not normalized_role or not normalized_task:
+            raise ValueError("role_code and task_type are required")
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.connect() as connection:
+            live_actor = self._live_actor(connection, actor_id)
+            if not live_actor["is_system_admin"] and "workflow.assign" not in live_actor["permissions"]:
+                raise PermissionError("workflow.assign permission is required")
+            rows = connection.execute(
+                """
+                SELECT DISTINCT u.id, u.username, u.display_name
+                FROM users AS u
+                JOIN user_roles AS ur ON ur.user_id = u.id
+                JOIN roles AS r ON r.id = ur.role_id
+                LEFT JOIN role_claimable_task_types AS rct ON rct.role_id = r.id
+                WHERE u.status = 'active' AND u.is_deleted = 0
+                  AND r.is_enabled = 1
+                  AND (r.code = ? OR rct.task_type = ?)
+                ORDER BY u.display_name COLLATE NOCASE, u.username COLLATE NOCASE, u.id
+                """,
+                (normalized_role, normalized_task),
+            ).fetchall()
+            candidates = []
+            for row in rows:
+                candidate = self._live_actor(connection, str(row["id"]))
+                if (
+                    not candidate["is_system_admin"]
+                    and normalized_role not in candidate["role_codes"]
+                    and normalized_task not in candidate["claimable_task_types"]
+                ):
+                    continue
+                candidates.append(
+                    {
+                        "user_id": str(row["id"]),
+                        "username": str(row["username"]),
+                        "display_name": str(row["display_name"]),
+                        "role_codes": sorted(candidate["role_codes"]),
+                        "claimable_task_types": sorted(candidate["claimable_task_types"]),
+                    }
+                )
+        return candidates
 
     def list_task_events(self, task_id: str) -> list[dict[str, Any]]:
         with self.identity_repository.connect() as connection:

@@ -64,12 +64,108 @@ def test_douyin_search_normalization_expands_mix_items_and_preserves_order():
     assert candidates[2]["is_paid"] is True
 
 
+def test_douyin_search_marks_matching_mix_as_collection():
+    from agents.douyin_drama_fallback import normalize_search_candidates
+
+    payload = {
+        "data": [{
+            "aweme_info": {
+                "aweme_id": "episode-1",
+                "desc": "《第一集》 #龙头 #短剧推荐",
+                "author": {"nickname": "明兰剧场", "sec_uid": "author-1"},
+                "mix_info": {
+                    "mix_id": "mix-1",
+                    "mix_name": "《龙头》",
+                    "statis": {"current_episode": 1, "updated_to_episode": 71},
+                },
+                "statistics": {},
+            }
+        }]
+    }
+
+    candidate = normalize_search_candidates(payload, "龙头")[0]
+
+    assert candidate["is_collection"] is True
+    assert candidate["collection_matches_title"] is True
+    assert candidate["collection_name"] == "《龙头》"
+    assert candidate["collection_episode_count"] == 71
+    assert candidate["episode_label"] == "第 1 集"
+    assert candidate["sec_uid"] == "author-1"
+
+
+@pytest.mark.asyncio
+async def test_douyin_resolve_series_expands_collection_and_reports_gaps(monkeypatch):
+    from agents.douyin_drama_fallback import DouyinDramaFallbackClient
+
+    selected = {
+        "aweme_id": "episode-1",
+        "desc": "《第一集》 #龙头",
+        "author": {"nickname": "明兰剧场", "sec_uid": "author-1"},
+        "mix_info": {"mix_id": "mix-1", "mix_name": "《龙头》"},
+        "statistics": {},
+    }
+    collection = [
+        selected,
+        {"aweme_id": "episode-3", "desc": "《第三集》 #龙头", "author": selected["author"], "statistics": {}},
+    ]
+
+    class FakeApi:
+        async def get_video_by_id(self, aweme_id):
+            return selected
+
+        async def search_info_by_keyword(self, **kwargs):
+            return {"data": []}
+
+        async def get_mix_aweme_list(self, mix_id, cursor="", count=20):
+            return {"aweme_list": collection, "has_more": 0, "cursor": 0, "item_id_to_episode": {"episode-1": 1, "episode-3": 3}}
+
+    class FakeCrawler:
+        dy_client = FakeApi()
+
+    client = DouyinDramaFallbackClient()
+
+    async def fake_client():
+        return FakeCrawler(), object()
+
+    async def fake_close(crawler, playwright):
+        return None
+
+    monkeypatch.setattr(client, "_client", fake_client)
+    monkeypatch.setattr(client, "_close", fake_close)
+
+    result = await client.resolve_series("龙头", "episode-1")
+
+    assert [item["aweme_id"] for item in result["episodes"]] == ["episode-1", "episode-3"]
+    assert all(item["source_kind"] == "collection" for item in result["episodes"])
+    assert result["missing_episodes"] == [2]
+    assert result["range_label"] == "合集《龙头》 · 已识别第 1-3 集"
+
+
 def test_douyin_episode_metadata_parses_ranges_and_single_episodes():
     from agents.douyin_drama_fallback import parse_episode_metadata
 
     assert parse_episode_metadata("短剧 1-68集完整版") == {"episode_start": 1, "episode_end": 68, "episode_count": 68, "episode_label": "1-68 集"}
     assert parse_episode_metadata("短剧 第12集") == {"episode_start": 12, "episode_end": 12, "episode_count": 1, "episode_label": "第 12 集"}
     assert parse_episode_metadata("没有集数标识") == {"episode_start": None, "episode_end": None, "episode_count": None, "episode_label": ""}
+
+
+def test_douyin_fallback_uses_local_playwright_browser_when_runtime_path_is_overridden(
+    tmp_path, monkeypatch
+):
+    from agents.douyin_drama_fallback import local_playwright_chromium_executable
+
+    executable = (
+        tmp_path
+        / "ms-playwright"
+        / "chromium-1124"
+        / "chrome-win"
+        / "chrome.exe"
+    )
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+
+    assert local_playwright_chromium_executable() == executable
 
 
 def test_hongguo_drama_settings_hide_activation_code(tmp_path):
@@ -729,6 +825,32 @@ async def test_download_search_reports_douyin_fallback_when_douyin_is_unavailabl
 
     assert response.status_code == 502
     assert response.body and b'"source":"douyin_fallback"' in response.body
+
+
+@pytest.mark.asyncio
+async def test_download_search_returns_json_when_douyin_browser_startup_crashes(tmp_path, monkeypatch):
+    class EmptyHongguoClient:
+        def __init__(self, settings):
+            pass
+
+        def search_exact(self, title):
+            return []
+
+    class CrashedFallbackClient:
+        async def search(self, title):
+            raise RuntimeError("Playwright chromium executable is missing")
+
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI, "HongguoDramaClient", EmptyHongguoClient)
+    monkeypatch.setattr(WebGUI, "DouyinDramaFallbackClient", CrashedFallbackClient)
+
+    response = await WebGUI.search_hongguo_drama_for_download(
+        WebGUI.HongguoDramaSearchRequest(title="测试短剧")
+    )
+
+    assert response.status_code == 502
+    assert b'"status":"error"' in response.body
+    assert b"Playwright chromium executable is missing" in response.body
 
 
 @pytest.mark.asyncio

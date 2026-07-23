@@ -1,0 +1,60 @@
+<div class="d-flex align-items-center justify-content-between border-bottom pb-3 mb-4">
+    <div>
+        <h3 class="mb-1">我的任务</h3>
+        <div class="small text-muted">查看发起的审批、被分配的项目及项目状态</div>
+    </div>
+    <button class="btn btn-outline-secondary btn-sm" id="refresh-my-tasks" title="刷新">
+        <i class="bi bi-arrow-clockwise"></i>
+    </button>
+</div>
+<div id="my-tasks-error" class="alert alert-danger d-none" role="alert"></div>
+
+<div class="row g-4">
+    <div class="col-lg-7">
+        <div class="d-flex align-items-center justify-content-between mb-3">
+            <h5 class="mb-0">我发起的审批</h5>
+            <span class="badge bg-secondary" id="submission-count">0</span>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th>资源类型</th>
+                        <th>项目</th>
+                        <th>任务类型</th>
+                        <th>审批状态</th>
+                        <th>提交时间</th>
+                        <th>审批人</th>
+                        <th>审批时间</th>
+                        <th>审批意见</th>
+                    </tr>
+                </thead>
+                <tbody id="my-submission-list">
+                    <tr><td colspan="8" class="text-center text-muted py-4">正在加载审批记录...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <div class="col-lg-5">
+        <div class="d-flex align-items-center justify-content-between mb-3">
+            <h5 class="mb-0">我被分配的项目</h5>
+            <span class="badge bg-secondary" id="project-count">0</span>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th>项目</th>
+                        <th>来源选题</th>
+                        <th>项目状态</th>
+                        <th>更新时间</th>
+                        <th class="text-end">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="my-project-list">
+                    <tr><td colspan="5" class="text-center text-muted py-4">正在加载项目...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>

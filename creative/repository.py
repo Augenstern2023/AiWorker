@@ -84,6 +84,7 @@ class CreativeRepository:
                     status TEXT NOT NULL DEFAULT 'created',
                     locked_brief_id INTEGER, character_batch_id TEXT, outline_batch_id TEXT,
                     workflow_task_id TEXT, creation_workflow_task_id TEXT,
+                    creation_request_id TEXT,
                     created_by TEXT NOT NULL DEFAULT 'local', deleted INTEGER NOT NULL DEFAULT 0,
                     created_at REAL NOT NULL, updated_at REAL NOT NULL,
                     FOREIGN KEY(topic_id) REFERENCES creative_topics(id),
@@ -184,6 +185,11 @@ class CreativeRepository:
                     "SET creation_workflow_task_id = workflow_task_id "
                     "WHERE workflow_task_id IS NOT NULL"
                 )
+            if "creation_request_id" not in project_columns:
+                conn.execute(
+                    "ALTER TABLE creative_projects "
+                    "ADD COLUMN creation_request_id TEXT"
+                )
             duplicate_project_tasks = conn.execute(
                 """
                 SELECT workflow_task_id
@@ -236,6 +242,39 @@ class CreativeRepository:
                 "uq_creative_projects_creation_workflow_task "
                 "ON creative_projects(creation_workflow_task_id) "
                 "WHERE creation_workflow_task_id IS NOT NULL"
+            )
+            duplicate_creation_requests = conn.execute(
+                """
+                SELECT created_by, creation_request_id
+                FROM creative_projects
+                WHERE creation_request_id IS NOT NULL
+                  AND TRIM(creation_request_id) <> ''
+                GROUP BY created_by, creation_request_id HAVING COUNT(*) > 1
+                """
+            ).fetchall()
+            for duplicate in duplicate_creation_requests:
+                keep = conn.execute(
+                    "SELECT id FROM creative_projects "
+                    "WHERE created_by = ? AND creation_request_id = ? "
+                    "ORDER BY deleted, id LIMIT 1",
+                    (duplicate["created_by"], duplicate["creation_request_id"]),
+                ).fetchone()
+                assert keep is not None
+                conn.execute(
+                    "UPDATE creative_projects SET creation_request_id = NULL "
+                    "WHERE created_by = ? AND creation_request_id = ? AND id <> ?",
+                    (
+                        duplicate["created_by"],
+                        duplicate["creation_request_id"],
+                        keep["id"],
+                    ),
+                )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "uq_creative_projects_creation_request "
+                "ON creative_projects(created_by, creation_request_id) "
+                "WHERE creation_request_id IS NOT NULL "
+                "AND TRIM(creation_request_id) <> ''"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_creative_stage_exports_lookup "
@@ -424,6 +463,7 @@ class CreativeRepository:
         target_audience: str = "",
         episode_duration_seconds: int = 120,
         workflow_task_id: str | None = None,
+        creation_request_id: str = "",
         created_by: str = "local",
     ) -> dict[str, Any]:
         if not 1 <= int(target_episode_count) <= 100:
@@ -431,6 +471,16 @@ class CreativeRepository:
         if not 30 <= int(episode_duration_seconds) <= 1800:
             raise ValueError("单集时长必须在 30-1800 秒之间")
         with self._connect() as conn:
+            normalized_request_id = creation_request_id.strip()
+            if normalized_request_id:
+                existing = conn.execute(
+                    "SELECT id FROM creative_projects "
+                    "WHERE created_by = ? AND creation_request_id = ? "
+                    "AND deleted = 0",
+                    (created_by, normalized_request_id),
+                ).fetchone()
+                if existing is not None:
+                    return self.get_project(int(existing["id"])) or {}
             if workflow_task_id:
                 existing = conn.execute(
                     "SELECT id FROM creative_projects "
@@ -471,18 +521,27 @@ class CreativeRepository:
                     INSERT INTO creative_projects (
                         topic_id, breakdown_id, name, genre, target_platform, target_audience,
                         target_episode_count, episode_duration_seconds, workflow_task_id,
-                        creation_workflow_task_id, created_by, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        creation_workflow_task_id, creation_request_id, created_by,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         topic_id, breakdown_id, name.strip() or f"{topic['title']}创作项目",
                         genre.strip() or str(topic["category"] or ""), target_platform.strip(),
                         resolved_target_audience, int(target_episode_count),
                         int(episode_duration_seconds), workflow_task_id, workflow_task_id,
-                        created_by, now, now,
+                        normalized_request_id or None, created_by, now, now,
                     ),
                 )
             except sqlite3.IntegrityError:
+                if normalized_request_id:
+                    existing = conn.execute(
+                        "SELECT id FROM creative_projects "
+                        "WHERE created_by = ? AND creation_request_id = ?",
+                        (created_by, normalized_request_id),
+                    ).fetchone()
+                    if existing is not None:
+                        return self.get_project(int(existing["id"])) or {}
                 if not workflow_task_id:
                     raise
                 existing = conn.execute(
@@ -494,6 +553,17 @@ class CreativeRepository:
                     raise
                 return self.get_project(int(existing["id"])) or {}
         return self.get_project(int(cursor.lastrowid)) or {}
+
+    def get_project_by_creation_request_id(
+        self, created_by: str, creation_request_id: str
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM creative_projects "
+                "WHERE created_by = ? AND creation_request_id = ? AND deleted = 0",
+                (created_by, creation_request_id.strip()),
+            ).fetchone()
+        return self.get_project(int(row["id"])) if row is not None else None
 
     @staticmethod
     def _breakdown_target_audience(content_json: str) -> str:

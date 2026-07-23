@@ -66,6 +66,7 @@ from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.schema import Principal
 from identity.session_service import SessionService
+from identity.team_api import build_team_management_router
 from agents.douyin_analysis_agent import AnalyzeOptions as DouyinAnalyzeOptions
 from agents.douyin_analysis_agent import analyze_rank_file as analyze_douyin_rank_file
 from agents.hongguo_analysis_agent import AnalyzeOptions, analyze_rank_file
@@ -106,7 +107,9 @@ def resolve_backup_path(filename: str, backup_dir: str | Path = "backups") -> Pa
 
 def _api_permission(method: str, path: str) -> str | None:
     """Return the coarse permission for legacy routes without route dependencies."""
-    if path.startswith(("/api/auth/", "/api/admin/", "/api/workflow/", "/api/jobs")):
+    if path.startswith(
+        ("/api/auth/", "/api/admin/", "/api/team/", "/api/workflow/", "/api/jobs")
+    ):
         return None
     if path.startswith("/api/creative/"):
         return None
@@ -452,6 +455,14 @@ app.include_router(
         permission_service=identity_permission_service,
     )
 )
+app.include_router(
+    build_team_management_router(
+        identity_repository,
+        identity_session_service,
+        audit_service,
+        permission_service=identity_permission_service,
+    )
+)
 app.include_router(build_audit_router(audit_service))
 app.include_router(build_delivery_router(delivery_service))
 app.include_router(
@@ -542,6 +553,11 @@ class DouyinFallbackDramaJobRequest(BaseModel):
     aweme_ids: List[str] = []
     fallback_reason: str = ""
     workflow_task_id: str | None = None
+
+
+class DouyinFallbackSeriesRequest(BaseModel):
+    title: str
+    aweme_id: str
 
 
 class ConfigContent(BaseModel):
@@ -654,6 +670,17 @@ def _job_task_context(
         != CreativeRepository._title_key(topic_title)
     ):
         raise HTTPException(409, "machine job title does not match creative topic")
+    if expected_task_type == "source_package":
+        if topic is None or topic.get("status") != "adopted":
+            raise HTTPException(409, "只有已采纳选题可以下载素材")
+        if not resolved_task_id:
+            return None, None
+        legacy_task = workflow_repository.get_visible_task(
+            resolved_task_id, principal
+        )
+        if legacy_task is None:
+            raise HTTPException(403, "没有访问此历史工作流任务的权限")
+        return None, None
     if expected_task_type and not resolved_task_id:
         candidates = [
             task
@@ -1817,11 +1844,12 @@ async def suggest_hongguo_drama(payload: HongguoDramaSearchRequest):
 
 def downloaded_hongguo_episode_statuses(book_id: str) -> dict[int, dict[str, str]]:
     statuses: dict[int, dict[str, str]] = {}
+    _DOWNLOAD_TYPES = frozenset({"drama_download", "drama_analysis", "douyin_fallback_analysis"})
     for job in job_manager.list_jobs():
-        if job.get("crawler_type") != "drama_download":
+        if job.get("crawler_type") not in _DOWNLOAD_TYPES:
             continue
-        extra = (job.get("job") or {}).get("extra") or {}
-        if str(extra.get("book_id") or "").strip() != book_id:
+        job_dir = WORKSPACE_ROOT / "data" / "hg" / "jobs" / str(job.get("job_id") or "")
+        if not job_dir.exists():
             continue
         manifest_paths = []
         for artifact in job.get("artifacts") or []:
@@ -1829,9 +1857,29 @@ def downloaded_hongguo_episode_statuses(book_id: str) -> dict[int, dict[str, str
             if artifact_path.name == "manifest.json":
                 manifest_paths.append(artifact_path if artifact_path.is_absolute() else WORKSPACE_ROOT / artifact_path)
         if not manifest_paths:
-            job_dir = WORKSPACE_ROOT / "data" / "hg" / "jobs" / str(job.get("job_id") or "")
-            if job_dir.exists():
-                manifest_paths.extend(job_dir.rglob("manifest.json"))
+            manifest_paths.extend(job_dir.rglob("manifest.json"))
+        # Fallback: scan episode dirs for source.json when no manifest exists
+        if not manifest_paths:
+            for drama_dir in job_dir.glob("dramas/*"):
+                for source_file in drama_dir.rglob("source.json"):
+                    try:
+                        source = json.loads(source_file.read_text(encoding="utf-8"))
+                        if str(source.get("book_id") or "").strip() != book_id:
+                            continue
+                        ep = source.get("episode")
+                        if isinstance(ep, dict):
+                            ep = ep.get("episode")
+                        episode = int(ep) if ep is not None else None
+                        if episode is None:
+                            continue
+                        statuses[episode] = {
+                            "status": "downloaded",
+                            "job_id": str(job.get("job_id") or ""),
+                            "path": str(source_file.parent),
+                        }
+                    except (OSError, ValueError, TypeError):
+                        continue
+            continue
         for manifest_path in manifest_paths:
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1913,6 +1961,19 @@ async def search_hongguo_drama_for_download(payload: HongguoDramaSearchRequest):
             },
             status_code=502,
         )
+    except Exception as exc:
+        backend_logger.exception(
+            "Douyin fallback search crashed: title=%s", payload.title.strip()
+        )
+        return JSONResponse(
+            {
+                "status": "error",
+                "source": "douyin_fallback",
+                "fallback_reason": fallback_reason,
+                "message": f"{fallback_reason}；抖音浏览器启动失败：{exc}",
+            },
+            status_code=502,
+        )
 
 
 @app.post("/api/hongguo/drama/jobs")
@@ -1924,6 +1985,7 @@ async def create_hongguo_drama_job(
         raise HTTPException(401, "登录已失效，请重新登录")
     actor = principal
     _require_permission(actor, "job.create.selection")
+    _require_permission(actor, "drama.download")
     task_id, project_id = _job_task_context(
         payload.workflow_task_id,
         actor,
@@ -1942,6 +2004,10 @@ async def create_hongguo_drama_job(
             "title": payload.title.strip(),
             "book_id": payload.book_id.strip(),
             "episode": payload.episode,
+            "creative_db_path": str(creative_repository.db_path.resolve()),
+            "workspace_root": str(WORKSPACE_ROOT.resolve()),
+            "created_by_user_id": actor.user_id,
+            "legacy_workflow_task_id": payload.workflow_task_id,
         },
     )
     try:
@@ -1963,6 +2029,42 @@ async def create_hongguo_drama_job(
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
 
+@app.post("/api/hongguo/drama/douyin-fallback/series")
+async def resolve_douyin_fallback_series(payload: DouyinFallbackSeriesRequest):
+    title = payload.title.strip()
+    aweme_id = payload.aweme_id.strip()
+    if not title or not aweme_id:
+        raise HTTPException(400, "剧名和用户确认的 aweme_id 必须有效")
+    try:
+        result = await DouyinDramaFallbackClient().resolve_series(title, aweme_id)
+        return {"status": "success", "source": "douyin_fallback", **result}
+    except DouyinFallbackError as exc:
+        backend_logger.warning(
+            "Douyin fallback series resolution failed: title=%s aweme_id=%s error=%s",
+            title,
+            aweme_id,
+            exc,
+        )
+        return JSONResponse(
+            {"status": "error", "source": "douyin_fallback", "message": str(exc)},
+            status_code=502,
+        )
+    except Exception as exc:
+        backend_logger.exception(
+            "Douyin fallback series resolution crashed: title=%s aweme_id=%s",
+            title,
+            aweme_id,
+        )
+        return JSONResponse(
+            {
+                "status": "error",
+                "source": "douyin_fallback",
+                "message": f"抖音合集解析失败：{exc}",
+            },
+            status_code=502,
+        )
+
+
 @app.post("/api/hongguo/drama/download/jobs")
 async def create_hongguo_drama_download_job(
     payload: HongguoDramaDownloadJobRequest,
@@ -1972,6 +2074,7 @@ async def create_hongguo_drama_download_job(
         raise HTTPException(401, "登录已失效，请重新登录")
     actor = principal
     _require_permission(actor, "job.create.selection")
+    _require_permission(actor, "drama.download")
     task_id, project_id = _job_task_context(
         payload.workflow_task_id,
         actor,
@@ -1994,6 +2097,10 @@ async def create_hongguo_drama_download_job(
             "episodes": episodes,
             "all_episodes": payload.all_episodes,
             "pause_path": str(job_manager.jobs_dir / f"{job_id}.pause"),
+            "creative_db_path": str(creative_repository.db_path.resolve()),
+            "workspace_root": str(WORKSPACE_ROOT.resolve()),
+            "created_by_user_id": actor.user_id,
+            "legacy_workflow_task_id": payload.workflow_task_id,
         },
     )
     try:
@@ -2024,6 +2131,7 @@ async def create_douyin_fallback_drama_job(
         raise HTTPException(401, "登录已失效，请重新登录")
     actor = principal
     _require_permission(actor, "job.create.selection")
+    _require_permission(actor, "drama.download")
     task_id, project_id = _job_task_context(
         payload.workflow_task_id,
         actor,
@@ -2038,8 +2146,8 @@ async def create_douyin_fallback_drama_job(
             aweme_ids.append(aweme_id)
     if not payload.title.strip() or not aweme_ids:
         raise HTTPException(400, "剧名和用户确认的 aweme_id 必须有效")
-    if len(aweme_ids) > 50:
-        raise HTTPException(400, "单次最多下载 50 个抖音视频")
+    if len(aweme_ids) > 100:
+        raise HTTPException(400, "单次最多下载 100 个抖音视频")
     job_id = job_manager.generate_job_id("hg")
     job = CrawlJob(
         job_id=job_id,
@@ -2052,6 +2160,10 @@ async def create_douyin_fallback_drama_job(
             "aweme_ids": aweme_ids,
             "fallback_reason": payload.fallback_reason.strip(),
             "pause_path": str(job_manager.jobs_dir / f"{job_id}.pause"),
+            "creative_db_path": str(creative_repository.db_path.resolve()),
+            "workspace_root": str(WORKSPACE_ROOT.resolve()),
+            "created_by_user_id": actor.user_id,
+            "legacy_workflow_task_id": payload.workflow_task_id,
         },
     )
     try:

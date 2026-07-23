@@ -1,0 +1,9 @@
+{% extends "layouts/base.html" %}
+
+{% block content %}
+{% include "common/workspace/my_tasks.html" %}
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/common/my_tasks.js?v={{ asset_version }}"></script>
+<script src="/static/js/planning/tasks.js?v={{ asset_version }}"></script>
+{% endblock %}

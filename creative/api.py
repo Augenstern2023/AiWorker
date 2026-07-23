@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from pathlib import Path
 import re
 from typing import Any
@@ -33,6 +34,7 @@ from creative.schema import (
     CreativeSubmitRequest,
     EpisodeBeatsRequest,
     OutlineBatchRequest,
+    PlanningAssignmentRequest,
     ProjectCreateRequest,
     ProjectUpdateRequest,
     WorkflowLinkRequest,
@@ -92,7 +94,9 @@ def creative_api_authorization(
     method = request.method.upper()
     permissions: tuple[str, ...] | None
     if path.startswith("/topics"):
-        if path == "/topics/workflow-candidates":
+        if path.endswith("/planning-assignment"):
+            permissions = ("project.manage", "workflow.assign")
+        elif path == "/topics/workflow-candidates":
             permissions = ("project.manage",)
         elif path.endswith("/transcripts"):
             permissions = ("drama.transcript.read",)
@@ -113,7 +117,7 @@ def creative_api_authorization(
         permissions = (
             ("breakdown.read", "breakdown.read.approved") if method == "GET"
             else ("breakdown.generate",) if path == "/breakdowns" and method == "POST"
-            else ("breakdown.edit",)
+            else ("breakdown.edit", "project.manage")
         )
     elif path.startswith("/projects"):
         if method == "GET":
@@ -506,6 +510,139 @@ def build_creative_router(
         ):
             raise HTTPException(403, "只能访问当前分配或管理的项目")
 
+    def assert_project_owner_preview_access(
+        request: Request, project_id: int, principal: Principal
+    ) -> None:
+        if principal.is_system_admin:
+            return
+        permission_service = getattr(
+            request.app.state, "identity_permission_service", None
+        )
+        if not isinstance(permission_service, PermissionService):
+            raise HTTPException(500, "identity permission service is not configured")
+        if not permission_service.can_access_managed_project(principal, str(project_id)):
+            raise HTTPException(403, "只有项目负责人可以预览已生成内容")
+
+    def generated_stage_versions(
+        project: dict[str, Any], stage: str
+    ) -> tuple[str, list[dict[str, Any]]]:
+        def updated_at(item: dict[str, Any]) -> float:
+            return float(item.get("updated_at") or item.get("created_at") or 0)
+
+        if stage == "brief":
+            versions = [
+                {
+                    "resource_id": str(item["id"]),
+                    "label": f"Brief v{item.get('version') or 1}",
+                    "updated_at": updated_at(item),
+                    "version": int(item.get("version") or 1),
+                }
+                for item in project["blueprints"]
+            ]
+            resource_type = "brief"
+        elif stage == "characters":
+            groups: dict[str, list[dict[str, Any]]] = {}
+            for item in [*project["characters"], *project["relationships"]]:
+                groups.setdefault(str(item.get("batch_id") or ""), []).append(item)
+            versions = [
+                {
+                    "resource_id": f"{project['id']}:{batch_id}",
+                    "label": f"人物关系 v{max(int(item.get('version') or 1) for item in items)}",
+                    "updated_at": max(updated_at(item) for item in items),
+                    "version": max(int(item.get("version") or 1) for item in items),
+                }
+                for batch_id, items in groups.items()
+                if batch_id and any(item in project["characters"] for item in items)
+            ]
+            resource_type = "characters"
+        elif stage == "outline":
+            groups: dict[str, list[dict[str, Any]]] = {}
+            for item in project["episodes"]:
+                if item.get("stage") == "outline":
+                    groups.setdefault(str(item.get("batch_id") or ""), []).append(item)
+            versions = [
+                {
+                    "resource_id": f"{project['id']}:{batch_id}",
+                    "label": f"分集大纲 v{max(int(item.get('version') or 1) for item in items)}",
+                    "updated_at": max(updated_at(item) for item in items),
+                    "version": max(int(item.get("version") or 1) for item in items),
+                }
+                for batch_id, items in groups.items()
+                if batch_id
+            ]
+            resource_type = "outline"
+        elif stage == "beats":
+            versions = [
+                {
+                    "resource_id": str(item["id"]),
+                    "label": f"第 {item.get('episode_number')} 集 Beats v{item.get('version') or 1}",
+                    "updated_at": updated_at(item),
+                    "version": int(item.get("version") or 1),
+                }
+                for item in project["episodes"]
+                if item.get("stage") == "beats"
+            ]
+            resource_type = "beats"
+        else:
+            raise HTTPException(400, "stage 必须是 brief、characters、outline 或 beats")
+        return resource_type, sorted(
+            versions,
+            key=lambda item: (item["updated_at"], item["version"], item["resource_id"]),
+            reverse=True,
+        )
+
+    def generated_stage_snapshot(
+        project: dict[str, Any], stage: str, resource_id: str | None
+    ) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+        resource_type, versions = generated_stage_versions(project, stage)
+        if not versions:
+            raise HTTPException(404, "该项目尚未生成此阶段内容")
+        selected_resource_id = resource_id or versions[0]["resource_id"]
+        if selected_resource_id not in {item["resource_id"] for item in versions}:
+            raise HTTPException(404, "请求的历史版本不属于该项目或阶段")
+        try:
+            snapshot = workflow_adapter.snapshot(resource_type, selected_resource_id)
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(404, "已生成内容不存在") from exc
+        if int(snapshot.get("project_id") or 0) != int(project["id"]):
+            raise HTTPException(404, "请求的历史版本不属于该项目")
+        return versions, selected_resource_id, snapshot
+
+    def serialize_generated_stage(
+        project: dict[str, Any], stage: str, snapshot: dict[str, Any], format: str
+    ) -> tuple[bytes, str]:
+        if format not in {"md", "json"}:
+            raise HTTPException(400, "format 必须是 md 或 json")
+        content: Any
+        if stage == "beats":
+            content = [snapshot]
+        elif stage == "characters":
+            content = {
+                "batch_id": snapshot.get("batch_id"),
+                "characters": snapshot.get("characters") or [],
+                "relationships": snapshot.get("relationships") or [],
+            }
+        elif stage == "outline":
+            content = snapshot.get("episodes") or []
+        else:
+            content = snapshot
+        payload = {
+            "project_id": project["id"],
+            "project_name": project["name"],
+            "stage": stage,
+            "content": content,
+        }
+        if format == "json":
+            return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"), "application/json"
+        if stage == "beats":
+            markdown = build_beats_markdown(project, content)
+        else:
+            markdown = "\n".join(
+                [f"# {project['name']}", "", f"- 阶段：{stage}", ""]
+                + _markdown_value(content)
+            )
+        return markdown.encode("utf-8"), "text/markdown; charset=utf-8"
+
     def project_view(project: dict[str, Any], principal: Principal) -> dict[str, Any]:
         if principal.is_system_admin:
             return project
@@ -797,6 +934,110 @@ def build_creative_router(
             raise HTTPException(403, "只能读取已批准的选题上下文")
         return topic
 
+    @router.post("/topics/{topic_id}/planning-assignment")
+    async def create_planning_assignment(
+        topic_id: int,
+        payload: PlanningAssignmentRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        topic = repository.get_topic(topic_id)
+        if topic is None:
+            raise HTTPException(404, "选题不存在")
+        if topic.get("status") != "adopted":
+            raise HTTPException(409, "只有已采纳选题可以分配策划任务")
+        breakdown = repository.get_latest_locked_breakdown(topic_id)
+        if breakdown is None:
+            raise HTTPException(409, "请先完成并锁定剧目拆解")
+        try:
+            candidates = workflow_repository.list_role_assignment_candidates(
+                "creative_planner", "brief", principal
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if payload.assignee_user_id not in {
+            item["user_id"] for item in candidates
+        }:
+            raise HTTPException(422, "所选账号不是可用的创意策划")
+
+        existing = repository.get_project_by_creation_request_id(
+            principal.user_id, payload.creation_request_id
+        )
+        if existing is not None and (
+            int(existing["topic_id"]) != topic_id
+            or int(existing["breakdown_id"]) != int(breakdown["id"])
+        ):
+            raise HTTPException(409, "该创建请求已用于其他策划项目")
+        try:
+            project = existing or repository.create_project(
+                topic_id,
+                int(breakdown["id"]),
+                payload.name.strip(),
+                payload.target_episode_count,
+                target_platform=payload.target_platform.strip(),
+                creation_request_id=payload.creation_request_id,
+                created_by=principal.user_id,
+            )
+            project_id = str(project["id"])
+            task = workflow_repository.ensure_project_task(
+                project_id,
+                topic_id,
+                task_type="brief",
+                role_code="creative_planner",
+                actor=principal,
+            )
+            repository.reconcile_project_workflow_task(task["id"], int(project_id))
+            workflow_repository.add_project_member(
+                project_id,
+                principal.user_id,
+                "project_owner",
+                principal,
+            )
+            workflow_repository.add_project_member(
+                project_id,
+                payload.assignee_user_id,
+                "creative_planner",
+                principal,
+            )
+            task = workflow_repository.get_task(task["id"]) or task
+            if task.get("assignee_user_id") is None and task["status"] == "pool":
+                task = workflow_repository.assign_task(
+                    task["id"], payload.assignee_user_id, principal
+                )
+            elif task.get("assignee_user_id") != payload.assignee_user_id:
+                raise ValueError("该创建请求已经分配给其他策划用户")
+            project = repository.get_project(int(project_id)) or project
+        except KeyError as exc:
+            raise HTTPException(404, "策划项目或任务不存在") from exc
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+        audit_service = getattr(request.app.state, "audit_service", None)
+        if isinstance(audit_service, AuditService):
+            audit_service.record(
+                actor=principal,
+                action="project.planning.assign",
+                target_type="project",
+                target_id=project_id,
+                project_id=project_id,
+                before=None,
+                after={
+                    "topic_id": topic_id,
+                    "breakdown_id": breakdown["id"],
+                    "task_id": task["id"],
+                    "assignee_user_id": payload.assignee_user_id,
+                    "creation_request_id": payload.creation_request_id,
+                },
+                reason=None,
+                result="success",
+                request=request,
+            )
+        return {"project": project, "task": task}
+
     @router.get("/topics/{topic_id}/transcripts")
     async def preview_topic_transcripts(
         topic_id: int,
@@ -899,12 +1140,14 @@ def build_creative_router(
         topic = repository.get_topic(payload.topic_id)
         if not topic:
             raise HTTPException(404, "topic not found")
-        workflow_task_id = validate_task(
-            payload.workflow_task_id,
-            "breakdown",
-            principal,
-            topic_id=payload.topic_id,
-        )
+        workflow_task_id = None
+        if payload.workflow_task_id:
+            workflow_task_id = validate_task(
+                payload.workflow_task_id,
+                "breakdown",
+                principal,
+                topic_id=payload.topic_id,
+            )
         if not payload.force_regenerate:
             existing = repository.get_latest_breakdown(payload.topic_id)
             if existing:
@@ -954,7 +1197,8 @@ def build_creative_router(
             state = job_manager.create_job(job_payload)
         except JobConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
-        workflow_repository.link_task_job(workflow_task_id, state.job_id)
+        if workflow_task_id:
+            workflow_repository.link_task_job(workflow_task_id, state.job_id)
         job = state.to_dict()
         job.update(
             {
@@ -1014,20 +1258,40 @@ def build_creative_router(
     @router.post("/breakdowns/{breakdown_id}/lock")
     async def lock_breakdown(
         breakdown_id: int,
+        request: Request,
         force: bool = False,
         principal: Principal = Depends(current_principal),
     ):
-        if not principal.is_system_admin or not force:
+        owner_direct_lock = "project_owner" in principal.role_codes
+        if not owner_direct_lock and (not principal.is_system_admin or not force):
             raise HTTPException(410, "请提交版本并由项目负责人审批")
-        try:
-            workflow_adapter.audit_legacy_force(
-                "breakdown", str(breakdown_id), principal
-            )
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
+        before = repository.get_breakdown(breakdown_id)
+        if before is None:
+            raise HTTPException(404, "breakdown not found")
+        if not owner_direct_lock:
+            try:
+                workflow_adapter.audit_legacy_force(
+                    "breakdown", str(breakdown_id), principal
+                )
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
         breakdown = repository.lock_breakdown(breakdown_id)
         if not breakdown:
             raise HTTPException(404, "breakdown not found")
+        audit_service = getattr(request.app.state, "audit_service", None)
+        if isinstance(audit_service, AuditService):
+            audit_service.record(
+                actor=principal,
+                action="selection.breakdown_complete",
+                target_type="breakdown",
+                target_id=str(breakdown_id),
+                project_id=None,
+                before=before,
+                after=breakdown,
+                reason=None,
+                result="success",
+                request=request,
+            )
         breakdown["field_guide"] = personalize_breakdown_field_guide(breakdown["content"])
         return breakdown
 
@@ -1178,6 +1442,48 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         return project_view(project_or_404(project_id), principal)
+
+    @router.get("/projects/{project_id}/generated-content")
+    async def get_generated_content(
+        project_id: int,
+        request: Request,
+        stage: str = Query(...),
+        resource_id: str | None = Query(None),
+        principal: Principal = Depends(current_principal),
+    ):
+        assert_project_owner_preview_access(request, project_id, principal)
+        project = project_or_404(project_id)
+        versions, selected_resource_id, snapshot = generated_stage_snapshot(
+            project, stage, resource_id
+        )
+        return {
+            "project": {"id": project["id"], "name": project["name"]},
+            "stage": stage,
+            "versions": versions,
+            "selected_resource_id": selected_resource_id,
+            "snapshot": snapshot,
+        }
+
+    @router.get("/projects/{project_id}/generated-content/download")
+    async def download_generated_content(
+        project_id: int,
+        request: Request,
+        stage: str = Query(...),
+        resource_id: str = Query(..., min_length=1),
+        format: str = Query("md"),
+        principal: Principal = Depends(current_principal),
+    ):
+        assert_project_owner_preview_access(request, project_id, principal)
+        project = project_or_404(project_id)
+        _, _, snapshot = generated_stage_snapshot(project, stage, resource_id)
+        body, media_type = serialize_generated_stage(project, stage, snapshot, format)
+        return Response(
+            content=body,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="project-{project_id}-{stage}.{format}"'
+            },
+        )
 
     @router.patch("/projects/{project_id}")
     async def update_project(

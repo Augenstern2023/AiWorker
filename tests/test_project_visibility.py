@@ -34,6 +34,51 @@ def _client(app: FastAPI, sessions: SessionService, user_id: str) -> TestClient:
     return client
 
 
+def test_global_project_owner_can_access_projects_without_membership(tmp_path: Path):
+    identity = IdentityRepository(tmp_path / "system.db")
+    identity.seed_defaults()
+    owner_role = identity.get_role_by_code("project_owner")
+    assert owner_role is not None
+    owner = identity.create_user("global-owner", "Global Owner", "hash")
+    identity.replace_user_roles(owner["id"], [owner_role["id"]])
+    permissions = PermissionService(identity, SessionService(identity, secure_cookie=False))
+    principal = permissions.principal_for_user(owner["id"], "global-owner-session")
+    assert principal is not None
+
+    assert permissions.can_access_assigned_project(principal, "unassigned-project")
+    assert permissions.can_access_managed_project(principal, "unassigned-project")
+
+
+def test_global_project_owner_locks_breakdown_without_approval(tmp_path: Path):
+    runtime = tmp_path / ".runtime"
+    identity = IdentityRepository(runtime / "system/system.db")
+    identity.seed_defaults()
+    owner_role = identity.get_role_by_code("project_owner")
+    assert owner_role is not None
+    owner = identity.create_user("breakdown-owner", "Breakdown Owner", "hash")
+    identity.replace_user_roles(owner["id"], [owner_role["id"]])
+    sessions = SessionService(identity, secure_cookie=False)
+    permissions = PermissionService(identity, sessions)
+    creative = CreativeRepository(runtime / "creative/creative.db")
+    topic = creative.upsert_topics([{
+        "platform": "hg", "job_id": "owner-lock", "source_path": "rank.json",
+        "captured_at": "2026-07-23", "title": "负责人直接锁定",
+        "score": 90, "confidence": "high", "score_details": {},
+        "recommendation": "adopt", "evidence": [],
+    }])[0]
+    creative.update_topic(topic["id"], "adopted")
+    breakdown = creative.create_breakdown(topic["id"], {"title": topic["title"]}, {}, [])
+    app = FastAPI()
+    app.state.identity_permission_service = permissions
+    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    client = _client(app, sessions, owner["id"])
+
+    response = client.post(f"/api/creative/breakdowns/{breakdown['id']}/lock")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "locked"
+
+
 def test_project_author_owns_drafts_and_managed_reader_sees_approved_only(
     tmp_path: Path,
 ):
@@ -190,6 +235,17 @@ def test_project_author_owns_drafts_and_managed_reader_sees_approved_only(
     writer_view = clients["writer"].get(f"/api/creative/projects/{project['id']}")
     author_view = clients["author"].get(f"/api/creative/projects/{project['id']}")
     assert owner_view.status_code == 200
+    owner_preview = clients["owner"].get(
+        f"/api/creative/projects/{project['id']}/generated-content",
+        params={"stage": "brief"},
+    )
+    writer_preview = clients["writer"].get(
+        f"/api/creative/projects/{project['id']}/generated-content",
+        params={"stage": "brief"},
+    )
+    assert owner_preview.status_code == 200
+    assert owner_preview.json()["snapshot"]["content"]["name"] == "author draft"
+    assert writer_preview.status_code == 403
     assert [item["content"]["name"] for item in writer_view.json()["blueprints"]] == [
         "approved"
     ]

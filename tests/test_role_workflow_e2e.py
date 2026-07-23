@@ -204,7 +204,7 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
     assert clients["creative_planner"].get("/admin/deliveries").status_code == 403
     assert clients["screenwriter"].get("/writing/projects").status_code == 200
     assert clients["project_owner"].get("/review/approvals").status_code == 200
-    assert "workflow-bootstrap-topics" in clients["project_owner"].get(
+    assert "managed-project-list" in clients["project_owner"].get(
         "/review/projects"
     ).text
     assert clients["system_admin"].get("/admin/deliveries").status_code == 200

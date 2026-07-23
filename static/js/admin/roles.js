@@ -17,6 +17,9 @@
     if (!elements.body) return;
 
     const editor = bootstrap.Modal.getOrCreateInstance(document.getElementById('role-editor-modal'));
+    const teamMode = window.location.pathname.startsWith('/review/');
+    const rolesApi = teamMode ? '/api/team/roles' : '/api/admin/roles';
+    const permissionsApi = teamMode ? '/api/team/permissions' : '/api/admin/permissions';
     let roles = [];
     let permissionCatalog = [];
 
@@ -68,7 +71,10 @@
             const scope = document.createElement('select');
             scope.className = 'form-select form-select-sm permission-scope';
             scope.dataset.permissionCode = permission.code;
-            for (const [value, label] of [['task', '本人任务'], ['project', '所在项目'], ['managed_projects', '负责项目'], ['all', '全部数据']]) {
+            const scopeLabels = {task: '本人任务', project: '所在项目', managed_projects: '负责项目', all: '全部数据'};
+            const allowedScopes = permission.allowed_scopes || ['task', 'project', 'managed_projects', 'all'];
+            for (const value of allowedScopes) {
+                const label = scopeLabels[value] || value;
                 const option = document.createElement('option');
                 option.value = value;
                 option.textContent = label;
@@ -121,17 +127,24 @@
             const actions = document.createElement('td');
             const group = document.createElement('div');
             group.className = 'd-flex gap-1';
-            group.append(
-                actionButton('bi-pencil', '编辑权限', 'btn-outline-light', () => openRoleEditor(role)),
-                actionButton('bi-copy', '克隆角色', 'btn-outline-info', () => cloneRole(role)),
-                actionButton(
+            if (role.can_edit !== false) {
+                group.append(
+                    actionButton('bi-pencil', '编辑权限', 'btn-outline-light', () => openRoleEditor(role)),
+                    actionButton(
                     role.is_enabled ? 'bi-toggle-off' : 'bi-toggle-on',
                     role.is_enabled ? '停用角色' : '启用角色',
                     role.is_enabled ? 'btn-outline-warning' : 'btn-outline-success',
                     () => window.toggleRoleStatus(role),
-                    role.is_system,
-                ),
-            );
+                        role.is_system,
+                    ),
+                );
+            }
+            if (role.can_assign !== false) {
+                group.append(actionButton('bi-copy', '克隆角色', 'btn-outline-info', () => cloneRole(role)));
+            }
+            if (role.can_delete) {
+                group.append(actionButton('bi-trash', '删除角色', 'btn-outline-danger', () => deleteRole(role)));
+            }
             actions.appendChild(group);
             row.appendChild(actions);
             return row;
@@ -142,8 +155,8 @@
         showError(elements.error);
         try {
             const [rolesResponse, permissionsResponse] = await Promise.all([
-                window.aiworkerApi.request('/api/admin/roles'),
-                window.aiworkerApi.request('/api/admin/permissions'),
+                window.aiworkerApi.request(rolesApi),
+                window.aiworkerApi.request(permissionsApi),
             ]);
             if (!rolesResponse.ok) throw new Error(await responseError(rolesResponse, '角色加载失败'));
             if (!permissionsResponse.ok) throw new Error(await responseError(permissionsResponse, '权限目录加载失败'));
@@ -157,7 +170,7 @@
 
     window.toggleRoleStatus = async function toggleRoleStatus(role) {
         try {
-            const response = await window.aiworkerApi.request(`/api/admin/roles/${role.id}`, {
+            const response = await window.aiworkerApi.request(`${rolesApi}/${role.id}`, {
                 method: 'PATCH',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({is_enabled: !role.is_enabled}),
@@ -175,7 +188,8 @@
         const name = window.prompt('新角色名称', `${role.name}副本`);
         if (!name) return;
         try {
-            const response = await window.aiworkerApi.request(`/api/admin/roles/${role.id}/clone`, {
+            // Admin equivalent: /api/admin/roles/${role.id}/clone
+            const response = await window.aiworkerApi.request(`${rolesApi}/${role.id}/clone`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({code: code.trim(), name: name.trim()}),
@@ -184,6 +198,17 @@
             await loadRolesAndPermissions();
         } catch (error) {
             showError(elements.error, error.message || '角色克隆失败');
+        }
+    }
+
+    async function deleteRole(role) {
+        if (!window.confirm(`确定删除角色 ${role.name}？`)) return;
+        try {
+            const response = await window.aiworkerApi.request(`${rolesApi}/${role.id}`, {method: 'DELETE'});
+            if (!response.ok) throw new Error(await responseError(response, '角色删除失败'));
+            await loadRolesAndPermissions();
+        } catch (error) {
+            showError(elements.error, error.message || '角色删除失败');
         }
     }
 
@@ -200,7 +225,7 @@
         if (!roleId) payload.code = elements.code.value.trim();
         try {
             const response = await window.aiworkerApi.request(
-                roleId ? `/api/admin/roles/${roleId}` : '/api/admin/roles',
+                roleId ? `${rolesApi}/${roleId}` : rolesApi,
                 {
                     method: roleId ? 'PATCH' : 'POST',
                     headers: {'Content-Type': 'application/json'},

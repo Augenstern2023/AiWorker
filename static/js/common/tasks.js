@@ -10,6 +10,27 @@ function localDateString(date = new Date()) {
                 page: document.body.dataset.workspacePage || '',
                 workflowTasks: [],
                 workflowTaskError: '',
+                workflowTaskWindow: {
+                    task: null,
+                    candidates: [],
+                    selectedAssigneeId: '',
+                    loading: false,
+                    saving: false,
+                    error: ''
+                },
+                planningAssignment: {
+                    topic: null,
+                    candidates: [],
+                    assigneeUserId: '',
+                    name: '',
+                    targetPlatform: '',
+                    targetEpisodeCount: 20,
+                    creationRequestId: '',
+                    loading: false,
+                    saving: false,
+                    error: '',
+                    result: null
+                },
                 isRunning: false,
                 jobs: [],
                 selectedJobId: '',
@@ -44,6 +65,7 @@ function localDateString(date = new Date()) {
                 qrcodeLoggingIn: false,
                 audioModal: null,
                 dramaDownloadModal: null,
+                assignment: { topic: null, role: '', candidates: [], selectedUserId: '', saving: false, error: '' },
                 audioAnalysis: {status: 'idle'},
                 dramaAnalysis: {
                     title: '',
@@ -57,6 +79,13 @@ function localDateString(date = new Date()) {
                     suggestionRequestId: 0,
                     searchSource: '',
                     fallbackReason: '',
+                    selectedAwemeIds: [],
+                    allEpisodes: false,
+                    relatedVideos: [],
+                    missingEpisodes: [],
+                    seriesRangeLabel: '',
+                    seriesWarnings: [],
+                    seriesLoading: false,
                     loading: false,
                     error: '',
                     jobId: '',
@@ -67,18 +96,23 @@ function localDateString(date = new Date()) {
                 },
                 creative: {platform: 'dy', items: [], loading: false, error: '', breakdown: null},
                 topicLibrary: {platform: '', lifecycleStatus: '', category: '', minScore: '', hasLocked: '', items: [], loading: false, error: '', breakdown: null},
+                generatedContentPreview: {topic: null, project: null, stage: '', versions: [], selectedResourceId: '', snapshot: null, loading: false, error: ''},
                 breakdownEditor: {source: '', title: '', record: null, content: {}, fieldGuide: [], saving: false, error: ''},
                 breakdownGeneration: {topic: null, source: '', jobId: '', status: '', message: '', progress: {}, coverage: [], requiresTranscription: false, notifiedStatus: '', error: '', startedAt: 0, elapsedSeconds: 0},
+                breakdownGenerationJobs: {},
+                breakdownJobStatuses: {},
+                dramaDownloadJobStatuses: {},
+                hiddenDramaDownloadJobs: {},
                 creativeWorkspace: {
                     projects: [], eligibleTopics: [], lockedBreakdowns: [], project: null, loading: false, error: '', step: 'blueprints',
-                    create: {topic_id: '', breakdown_id: '', name: '', target_platform: '', target_episode_count: 20},
+                    create: {topic_id: '', breakdown_id: '', name: '', target_platform: '', target_episode_count: 20, creation_request_id: ''},
                     directionCount: 3, selectedBlueprintId: null, selectedEpisode: 1,
                     jobId: '', jobMessage: '', jobProgress: {}, jobStatus: '', paused: false, notifiedStatus: '',
                     jobStartedAt: 0, jobElapsedSeconds: 0,
                     startingAction: '', activeAction: '',
                     saveState: {}, notice: '', noticeType: 'success', noticeTimer: null
                 },
-                dramaDownload: {title: '', topic: null, source: 'hongguo', fallbackReason: '', candidates: [], selectedCandidate: null, selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], selectedEpisodes: [], allEpisodes: false, searching: false, episodesLoading: false, starting: false, error: '', jobId: '', jobStatus: '', progress: {}, progressMessage: '', paused: false, finished: false, background: false},
+                dramaDownload: {title: '', topic: null, source: 'hongguo', fallbackReason: '', candidates: [], selectedCandidate: null, selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], relatedVideos: [], missingEpisodes: [], seriesRangeLabel: '', seriesWarnings: [], selectedEpisodes: [], allEpisodes: false, searching: false, episodesLoading: false, starting: false, error: '', jobId: '', jobStatus: '', progress: {}, progressMessage: '', paused: false, finished: false, background: false, showFiles: false, logs: [], logCount: 0},
                 analyticsOverview: {},
                 analyticsTags: {categories: [], selling_points: [], hooks: [], plot_tags: []},
                 analyticsTrends: {points: []},
@@ -139,14 +173,16 @@ function localDateString(date = new Date()) {
                     this.topicTranscriptPreviewModal = this.modal('topicTranscriptPreviewModal');
                     this.dramaDownloadModal = this.modal('dramaDownloadModal');
                     document.getElementById('dramaDownloadModal')?.addEventListener('hidden.bs.modal', () => {
-                        if (this.dramaDownload.jobId) this.dramaDownload.background = true;
+                        if (this.dramaDownload.jobId && !this.dramaDownload.finished) this.dramaDownload.background = true;
                     });
                     this.breakdownEditorModal = this.modal('breakdownEditorModal');
                     this.transcriptRequiredModal = this.modal('transcriptRequiredModal');
                     this.breakdownGenerationProgressModal = this.modal('breakdownGenerationProgressModal');
                     this.creativeGenerationProgressModal = this.modal('creativeGenerationProgressModal');
+                    this.workflowTaskModal = this.modal('workflowTaskModal');
+                    this.planningAssignmentModal = this.modal('planningAssignmentModal');
 
-                    if (this.page === 'review-tasks') {
+                    if (['tasks', 'review-tasks'].includes(this.page)) {
                         await this.fetchWorkflowTasks();
                         document.getElementById('refresh-review-tasks')?.addEventListener(
                             'click',
@@ -166,6 +202,9 @@ function localDateString(date = new Date()) {
                     } else if (this.page === 'selection-hits') {
                         await this.fetchCreativeTopics();
                     } else if (['selection-topics', 'selection-breakdowns'].includes(this.page)) {
+                        if (typeof this.fetchTopicLibrary !== 'function') {
+                            throw new Error('选题模块加载失败，请刷新页面后重试');
+                        }
                         await this.fetchTopicLibrary();
                     }
                     if (['selection-hits', 'selection-topics', 'selection-breakdowns'].includes(this.page)) {
@@ -182,6 +221,12 @@ function localDateString(date = new Date()) {
                         }
                         const episode = window.location.pathname.match(/\/episodes\/(\d+)\/beats/)?.[1];
                         if (episode) this.creativeWorkspace.selectedEpisode = Number(episode);
+                        if (
+                            this.page === 'planning-brief'
+                            && new URLSearchParams(window.location.search).get('task_setup') === '1'
+                        ) {
+                            await this.openCreativeTaskSetup();
+                        }
                     }
                     if (this.page === 'admin-config') {
                         await this.loadConfig();
@@ -219,7 +264,8 @@ function localDateString(date = new Date()) {
                     try {
                         const response = await aiworkerApi.request('/api/workflow/tasks');
                         if (!response.ok) throw new Error('任务加载失败');
-                        this.workflowTasks = await response.json();
+                        const approvalStages = new Set(['brief', 'characters', 'outline', 'beats', 'delivery']);
+                        this.workflowTasks = (await response.json()).filter(task => approvalStages.has(task.task_type));
                         await Promise.all(this.workflowTasks.map(async task => {
                             if (task.status !== 'waiting_review' || (!task.can_approve && !task.can_return)) return;
                             const submissionsResponse = await aiworkerApi.request(`/api/workflow/tasks/${task.id}/submissions`);
@@ -291,14 +337,22 @@ function localDateString(date = new Date()) {
                     if (task.status === 'pool' && task.can_claim) {
                         actions.appendChild(this.workflowTaskButton('bi-person-check', '领取', () => this.claimWorkflowTask(task)));
                     }
+                    if (task.status === 'pool' && task.can_assign) {
+                        actions.appendChild(this.workflowTaskButton('bi-person-plus', '分配', () => this.openWorkflowTaskWindow(task)));
+                    }
                     if (['assigned', 'returned'].includes(task.status) && task.can_start) {
                         actions.appendChild(this.workflowTaskButton('bi-play-fill', '开始', () => this.startWorkflowTask(task)));
                     }
-                    if (task.status === 'waiting_review' && task.submission_id && task.can_approve) {
-                        actions.appendChild(this.workflowTaskButton('bi-check-lg', '通过', () => this.approveWorkflowSubmission(task)));
-                    }
-                    if (task.status === 'waiting_review' && task.submission_id && task.can_return) {
-                        actions.appendChild(this.workflowTaskButton('bi-arrow-return-left', '退回', () => this.returnWorkflowSubmission(task)));
+                    if (
+                        task.status === 'waiting_review'
+                        && task.submission_id
+                        && (task.can_approve || task.can_return)
+                    ) {
+                        actions.appendChild(this.workflowTaskButton(
+                            'bi-clipboard-check',
+                            '去审批',
+                            () => this.openWorkflowReview(task)
+                        ));
                     }
                     row.append(identity, statusCell, actions);
                     return row;
@@ -319,7 +373,169 @@ function localDateString(date = new Date()) {
                 },
 
                 async claimWorkflowTask(task) {
+                    if (this.workflowTaskWindow.task?.id === task.id) {
+                        await this.runWorkflowTaskWindowAction(
+                            `/api/workflow/tasks/${task.id}/claim`,
+                            '任务已领取'
+                        );
+                        return;
+                    }
                     await this.runWorkflowTaskWrite(`/api/workflow/tasks/${task.id}/claim`);
+                },
+
+                workflowTaskStatusLabel(status) {
+                    return {
+                        pool: '待领取', assigned: '已分配', in_progress: '处理中',
+                        waiting_review: '待审批', returned: '已退回', completed: '已完成',
+                        cancelled: '已取消'
+                    }[status] || status || '-';
+                },
+
+                stageWorkflowAssignmentLabel(task) {
+                    return {
+                        brief: '创作 Brief',
+                        characters: '人物关系',
+                        outline: '分集大纲',
+                        beats: 'Beats 脚本'
+                    }[task?.task_type] || task?.task_type || '工作流';
+                },
+
+                workflowTaskRoleLabel(task) {
+                    return {
+                        creative_planner: '创意策划',
+                        screenwriter: '编剧'
+                    }[task?.role_code] || task?.role_code || '执行人';
+                },
+
+                async openProjectTaskWindow(projectId, taskType = 'brief') {
+                    this.workflowTaskWindow = {
+                        task: null,
+                        candidates: [],
+                        selectedAssigneeId: '',
+                        loading: true,
+                        saving: false,
+                        error: ''
+                    };
+                    this.workflowTaskModal = this.modal('workflowTaskModal');
+                    this.workflowTaskModal?.show();
+                    try {
+                        const response = await aiworkerApi.request('/api/workflow/tasks');
+                        const payload = await response.json();
+                        if (!response.ok) throw new Error(payload.detail || '读取项目任务失败');
+                        const task = (payload || []).find(item =>
+                            item.task_type === taskType
+                            && String(item.project_id || '') === String(projectId)
+                            && !['completed', 'cancelled'].includes(item.status)
+                        );
+                        if (!task) throw new Error('当前账号没有可操作的 Brief 任务');
+                        await this.openWorkflowTaskWindow(task, false);
+                    } catch (error) {
+                        this.workflowTaskWindow.error = error.message || '读取项目任务失败';
+                    } finally {
+                        this.workflowTaskWindow.loading = false;
+                    }
+                },
+
+                async openWorkflowTaskWindow(task, showModal = true) {
+                    this.workflowTaskWindow.task = task;
+                    this.workflowTaskWindow.candidates = [];
+                    this.workflowTaskWindow.selectedAssigneeId = '';
+                    this.workflowTaskWindow.error = '';
+                    this.workflowTaskWindow.loading = Boolean(task.can_assign);
+                    if (showModal) {
+                        this.workflowTaskModal = this.modal('workflowTaskModal');
+                        this.workflowTaskModal?.show();
+                    }
+                    if (!task.can_assign) {
+                        this.workflowTaskWindow.loading = false;
+                        return;
+                    }
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/workflow/tasks/${task.id}/assignment-candidates`
+                        );
+                        const payload = await response.json();
+                        if (!response.ok) throw new Error(payload.detail || '读取可分配用户失败');
+                        this.workflowTaskWindow.candidates = payload || [];
+                        this.workflowTaskWindow.selectedAssigneeId = payload[0]?.user_id || '';
+                    } catch (error) {
+                        this.workflowTaskWindow.error = error.message || '读取可分配用户失败';
+                    } finally {
+                        this.workflowTaskWindow.loading = false;
+                    }
+                },
+
+                selectedWorkflowTaskCandidate() {
+                    return this.workflowTaskWindow.candidates.find(
+                        item => item.user_id === this.workflowTaskWindow.selectedAssigneeId
+                    ) || null;
+                },
+
+                async assignWorkflowTask() {
+                    const task = this.workflowTaskWindow.task;
+                    const candidate = this.selectedWorkflowTaskCandidate();
+                    if (!task || !candidate || this.workflowTaskWindow.saving) return;
+                    this.workflowTaskWindow.saving = true;
+                    this.workflowTaskWindow.error = '';
+                    try {
+                        if (!candidate.is_project_member && task.project_id) {
+                            const memberResponse = await aiworkerApi.request(
+                                `/api/workflow/projects/${task.project_id}/members`,
+                                {
+                                    method: 'POST',
+                                    headers: {'Content-Type': 'application/json'},
+                                    body: JSON.stringify({
+                                        user_id: candidate.user_id,
+                                        project_role: task.role_code,
+                                        status: 'active'
+                                    })
+                                }
+                            );
+                            const memberPayload = await memberResponse.json().catch(() => ({}));
+                            if (!memberResponse.ok) throw new Error(memberPayload.detail || '添加项目成员失败');
+                        }
+                        await this.runWorkflowTaskWindowAction(
+                            `/api/workflow/tasks/${task.id}/assign`,
+                            '任务已分配',
+                            {
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({assignee_user_id: candidate.user_id})
+                            }
+                        );
+                    } catch (error) {
+                        this.workflowTaskWindow.error = error.message || '分配任务失败';
+                    } finally {
+                        this.workflowTaskWindow.saving = false;
+                    }
+                },
+
+                async startWorkflowTaskFromWindow() {
+                    const task = this.workflowTaskWindow.task;
+                    if (!task) return;
+                    await this.runWorkflowTaskWindowAction(
+                        `/api/workflow/tasks/${task.id}/start`,
+                        '任务已开始'
+                    );
+                },
+
+                async runWorkflowTaskWindowAction(url, message, options = {}) {
+                    this.workflowTaskWindow.saving = true;
+                    this.workflowTaskWindow.error = '';
+                    try {
+                        const response = await aiworkerApi.request(url, {method: 'POST', ...options});
+                        const payload = await response.json().catch(() => ({}));
+                        if (!response.ok) throw new Error(payload.detail || '任务操作失败');
+                        this.workflowTaskWindow.task = payload;
+                        this.workflowTaskWindow.candidates = [];
+                        if (this.fetchWorkflowTasks && ['tasks', 'review-tasks'].includes(this.page)) {
+                            await this.fetchWorkflowTasks();
+                        }
+                        this.showCreativeNotice?.(message, 'success');
+                    } catch (error) {
+                        this.workflowTaskWindow.error = error.message || '任务操作失败';
+                    } finally {
+                        this.workflowTaskWindow.saving = false;
+                    }
                 },
 
                 async startWorkflowTask(task) {
@@ -328,6 +544,13 @@ function localDateString(date = new Date()) {
 
                 async approveWorkflowSubmission(task) {
                     await this.runWorkflowTaskWrite(`/api/workflow/submissions/${task.submission_id}/approve`);
+                },
+
+                openWorkflowReview(task) {
+                    if (!task?.id) return;
+                    window.location.assign(
+                        `/review/approvals?task_id=${encodeURIComponent(task.id)}`
+                    );
                 },
 
                 async returnWorkflowSubmission(task) {
@@ -396,13 +619,25 @@ function localDateString(date = new Date()) {
                             if (!this.selectedJobId) this.logs = [];
                         }
                         this.notifyDramaJobCompletion?.();
+                        await this.syncBackgroundDramaDownloadJobs?.();
                         this.syncDramaDownloadProgress?.();
+                        this.syncDramaDownloadLogs?.();
                         if (this.syncCreativeJobProgress) await this.syncCreativeJobProgress();
                         this.syncBreakdownGenerationProgress?.();
                     } catch (e) {
                         this.jobs = [];
                         this.isRunning = false;
                     }
+                },
+
+                syncDramaDownloadLogs() {
+                    const jobId = this.dramaDownload?.jobId;
+                    if (!jobId) return;
+                    const job = this.jobs.find(j => j.job_id === jobId);
+                    if (job) this.dramaDownload.logCount = job.log_count || 0;
+                    aiworkerApi.request(`/api/jobs/${jobId}/logs`).then(res => res.json()).then(data => {
+                        this.dramaDownload.logs = data.logs || [];
+                    }).catch(() => {});
                 },
 
                 async fetchLogs() {
@@ -613,5 +848,13 @@ function localDateString(date = new Date()) {
 
             };
             const modules = window.aiworkerModules || [];
-            return Object.assign(workspace, ...modules.map((factory) => factory()));
+            const moduleCapabilities = Object.assign({}, ...modules.map((factory) => factory()));
+            Object.assign(workspace, moduleCapabilities);
+            if (
+                ['selection-dashboard', 'selection-hits', 'selection-topics', 'selection-breakdowns'].includes(workspace.page)
+                && typeof workspace.fetchTopicLibrary !== 'function'
+            ) {
+                throw new Error('选题模块加载失败，请刷新页面后重试');
+            }
+            return workspace;
         }

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -21,6 +22,9 @@ from identity.schema import Principal
 from .navigation_service import PAGE_ROUTES, NavigationService
 
 
+ASSET_VERSION = str(time.time_ns())
+
+
 PAGE_TEMPLATES = {
     "/selection/dashboard": "selection/dashboard.html",
     "/selection/ranks": "selection/ranks.html",
@@ -29,7 +33,6 @@ PAGE_TEMPLATES = {
     "/selection/dramas": "selection/dramas.html",
     "/selection/breakdowns": "selection/breakdowns.html",
     "/planning/projects": "planning/projects.html",
-    "/planning/projects/{project_id}/directions": "planning/directions.html",
     "/planning/projects/{project_id}/brief": "planning/brief.html",
     "/planning/projects/{project_id}/characters": "planning/characters.html",
     "/writing/projects": "writing/projects.html",
@@ -38,6 +41,8 @@ PAGE_TEMPLATES = {
     "/review/projects": "review/projects.html",
     "/review/tasks": "review/tasks.html",
     "/review/approvals": "review/approvals.html",
+    "/review/users": "admin/users.html",
+    "/review/roles": "admin/roles.html",
     "/review/projects/{project_id}/members": "review/projects.html",
     "/review/projects/{project_id}/versions": "review/versions.html",
     "/admin/users": "admin/users.html",
@@ -106,7 +111,20 @@ def build_page_router(
             request,
             principal,
             page_title="我的任务",
+            template_name="common/my_tasks.html",
         )
+
+    @router.get("/planning/tasks", response_class=HTMLResponse)
+    def planning_tasks_redirect(
+        principal: Principal = Depends(require_page("page.planning")),
+    ) -> RedirectResponse:
+        return RedirectResponse("/tasks", status_code=307)
+
+    @router.get("/writing/tasks", response_class=HTMLResponse)
+    def writing_tasks_redirect(
+        principal: Principal = Depends(require_page("page.writing")),
+    ) -> RedirectResponse:
+        return RedirectResponse("/tasks", status_code=307)
 
     def page_endpoint(page_title: str, permission: str, template_name: str):
         def endpoint(
@@ -123,6 +141,18 @@ def build_page_router(
             )
 
         return endpoint
+
+    @router.get(
+        "/planning/projects/{project_id}/directions",
+        include_in_schema=False,
+    )
+    def legacy_directions_page(
+        project_id: str,
+        principal: Principal = Depends(require_page("page.planning")),
+    ) -> RedirectResponse:
+        return RedirectResponse(
+            f"/planning/projects/{project_id}/brief", status_code=307
+        )
 
     for route, permission, title in PAGE_ROUTES:
         router.add_api_route(
@@ -156,13 +186,23 @@ def _page_response(
             page_title=page_title,
             workspace_page=(
                 "tasks"
-                if template_name == "common/tasks.html"
+                if template_name in {"common/tasks.html", "common/my_tasks.html"}
                 else template_name.removesuffix(".html").replace("/", "-")
             ),
         ),
     )
     navigation_service.remember_route(principal, request.url.path)
     return response
+
+
+def _show_tasks(principal: Principal | None) -> bool:
+    if principal is None:
+        return False
+    if principal.is_system_admin:
+        return True
+    # Only hide tasks for users whose sole page permission is selection
+    visible_pages = {p for p in principal.permissions if p.startswith("page.")}
+    return visible_pages != {"page.selection"}
 
 
 def _template_context(
@@ -186,7 +226,9 @@ def _template_context(
         "current_route": request.url.path,
         "page_title": page_title,
         "workspace_page": workspace_page,
+        "asset_version": ASSET_VERSION,
         "csrf_token": csrf_token,
+        "show_tasks": _show_tasks(principal),
         **request.path_params,
     }
 

@@ -5,5 +5,7 @@
 {% include "common/workspace/selection_topics.html" %}
 {% include "common/workspace/selection_modals.html" %}
 {% include "common/workspace/breakdown_modals.html" %}
+{% include "common/workspace/planning_assignment_modal.html" %}
+{% include "common/workspace/workflow_task_modal.html" %}
 {% endblock %}
-{% block scripts %}<script src="/static/js/common/creative.js"></script><script src="/static/js/selection/topics.js"></script><script src="/static/js/selection/breakdowns.js"></script>{% endblock %}
+{% block scripts %}<script src="/static/js/common/creative.js?v={{ asset_version }}"></script><script src="/static/js/selection/topics.js?v={{ asset_version }}"></script><script src="/static/js/selection/breakdowns.js?v={{ asset_version }}"></script>{% endblock %}

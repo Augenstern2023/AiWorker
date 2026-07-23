@@ -381,6 +381,7 @@ def build_identity_router(
                     username,
                     display_name,
                     password_hash,
+                    created_by_user_id=principal.user_id,
                     connection=connection,
                 )
                 repository.replace_user_roles(
@@ -412,6 +413,8 @@ def build_identity_router(
         principal: Principal = Depends(admin_write),
     ) -> dict[str, Any]:
         try:
+            if payload.role_ids is not None:
+                _validate_role_ids(payload.role_ids)
             with repository.transaction() as connection:
                 before = repository.get_user(user_id, connection=connection)
                 repository.update_user(
@@ -443,6 +446,41 @@ def build_identity_router(
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return updated
+
+    @router.delete("/api/admin/users/{user_id}", status_code=204)
+    def delete_user(
+        user_id: str,
+        request: Request,
+        principal: Principal = Depends(admin_write),
+    ) -> Response:
+        try:
+            with repository.transaction() as connection:
+                before = repository.get_user(user_id, connection=connection)
+                if before is None:
+                    raise KeyError(user_id)
+                if user_id == principal.user_id:
+                    raise ValueError("不能删除当前登录账号")
+                repository.soft_delete_user(
+                    user_id,
+                    deleted_by_user_id=principal.user_id,
+                    connection=connection,
+                )
+                record_audit(
+                    actor=principal,
+                    action="user.delete",
+                    target_type="user",
+                    target_id=user_id,
+                    before=before,
+                    after={"is_deleted": True},
+                    result="success",
+                    request=request,
+                    connection=connection,
+                )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="用户不存在") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return Response(status_code=204)
 
     @router.post("/api/admin/users/{user_id}/reset-password", status_code=204)
     def reset_password(
@@ -538,6 +576,7 @@ def build_identity_router(
                     payload.code,
                     payload.name.strip(),
                     payload.description,
+                    created_by_user_id=principal.user_id,
                     connection=connection,
                 )
                 repository.replace_role_permissions(
@@ -637,6 +676,7 @@ def build_identity_router(
                         if payload.description is None
                         else payload.description
                     ),
+                    created_by_user_id=principal.user_id,
                     connection=connection,
                 )
                 source_permissions = repository.list_role_permissions(
@@ -674,6 +714,40 @@ def build_identity_router(
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="角色编码已存在") from exc
         return cloned
+
+    @router.delete("/api/admin/roles/{role_id}", status_code=204)
+    def delete_role(
+        role_id: str,
+        request: Request,
+        principal: Principal = Depends(admin_write),
+    ) -> Response:
+        try:
+            with repository.transaction() as connection:
+                before_role = repository.get_role(role_id, connection=connection)
+                if before_role is None:
+                    raise KeyError(role_id)
+                before = _role_response(before_role, connection=connection)
+                repository.soft_delete_role(
+                    role_id,
+                    deleted_by_user_id=principal.user_id,
+                    connection=connection,
+                )
+                record_audit(
+                    actor=principal,
+                    action="role.delete",
+                    target_type="role",
+                    target_id=role_id,
+                    before=before,
+                    after={"is_deleted": True},
+                    result="success",
+                    request=request,
+                    connection=connection,
+                )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="角色不存在") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return Response(status_code=204)
 
     @router.put("/api/admin/roles/{role_id}/permissions")
     def replace_role_permissions(
@@ -726,9 +800,15 @@ def build_identity_router(
         ]
 
     def _validate_role_ids(role_ids: list[str]) -> None:
-        known = {role["id"] for role in repository.list_roles()}
+        roles = {role["id"]: role for role in repository.list_roles()}
+        known = set(roles)
         if not set(role_ids) <= known:
             raise HTTPException(status_code=422, detail="角色不存在")
+        if any(roles[role_id]["code"] == "project_owner" for role_id in role_ids):
+            raise HTTPException(
+                status_code=422,
+                detail="项目负责人角色只能通过专用接任操作变更",
+            )
 
     def _user_response(
         user_id: str, *, connection: sqlite3.Connection | None = None

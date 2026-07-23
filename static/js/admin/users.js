@@ -17,6 +17,9 @@
     if (!elements.body) return;
 
     const editor = bootstrap.Modal.getOrCreateInstance(document.getElementById('user-editor-modal'));
+    const teamMode = window.location.pathname.startsWith('/review/');
+    const usersApi = teamMode ? '/api/team/users' : '/api/admin/users';
+    const rolesApi = teamMode ? '/api/team/roles' : '/api/admin/roles';
     let users = [];
     let roles = [];
 
@@ -47,7 +50,8 @@
 
     function renderRoleOptions(selectedCodes = []) {
         const selected = new Set(selectedCodes);
-        elements.roles.replaceChildren(...roles.map((role) => {
+        const availableRoles = teamMode ? roles.filter((role) => role.can_assign) : roles;
+        elements.roles.replaceChildren(...availableRoles.map((role) => {
             const option = document.createElement('option');
             option.value = role.id;
             option.textContent = `${role.name} (${role.code})`;
@@ -94,16 +98,23 @@
             const actions = document.createElement('td');
             const group = document.createElement('div');
             group.className = 'd-flex gap-1';
-            group.append(
-                actionButton('bi-pencil', '编辑用户', 'btn-outline-light', () => openUserEditor(user)),
-                actionButton(
+            if (user.can_edit !== false) {
+                group.append(
+                    actionButton('bi-pencil', '编辑用户', 'btn-outline-light', () => openUserEditor(user)),
+                    actionButton(
                     user.status === 'active' ? 'bi-person-dash' : 'bi-person-check',
                     user.status === 'active' ? '停用用户' : '启用用户',
                     user.status === 'active' ? 'btn-outline-warning' : 'btn-outline-success',
                     () => window.toggleUserStatus(user),
-                ),
-                actionButton('bi-key', '重置密码', 'btn-outline-info', () => resetUserPassword(user)),
-            );
+                    ),
+                );
+            }
+            if (user.can_reset_password !== false) {
+                group.append(actionButton('bi-key', '重置密码', 'btn-outline-info', () => resetUserPassword(user)));
+            }
+            if (user.can_delete) {
+                group.append(actionButton('bi-trash', '删除用户', 'btn-outline-danger', () => deleteUser(user)));
+            }
             actions.appendChild(group);
             row.appendChild(actions);
             return row;
@@ -114,8 +125,8 @@
         showError(elements.error);
         try {
             const [usersResponse, rolesResponse] = await Promise.all([
-                window.aiworkerApi.request('/api/admin/users'),
-                window.aiworkerApi.request('/api/admin/roles'),
+                window.aiworkerApi.request(usersApi),
+                window.aiworkerApi.request(rolesApi),
             ]);
             if (!usersResponse.ok) throw new Error(await responseError(usersResponse, '用户加载失败'));
             if (!rolesResponse.ok) throw new Error(await responseError(rolesResponse, '角色加载失败'));
@@ -130,7 +141,7 @@
     window.toggleUserStatus = async function toggleUserStatus(user) {
         const status = user.status === 'active' ? 'disabled' : 'active';
         try {
-            const response = await window.aiworkerApi.request(`/api/admin/users/${user.id}`, {
+            const response = await window.aiworkerApi.request(`${usersApi}/${user.id}`, {
                 method: 'PATCH',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({status}),
@@ -146,7 +157,8 @@
         const password = window.prompt(`为 ${user.username} 设置新密码`);
         if (!password) return;
         try {
-            const response = await window.aiworkerApi.request(`/api/admin/users/${user.id}/reset-password`, {
+            // Admin equivalent: /api/admin/users/${user.id}/reset-password
+            const response = await window.aiworkerApi.request(`${usersApi}/${user.id}/reset-password`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({password}),
@@ -156,6 +168,17 @@
             window.alert('密码已重置，该用户现有会话已退出');
         } catch (error) {
             showError(elements.error, error.message || '密码重置失败');
+        }
+    }
+
+    async function deleteUser(user) {
+        if (!window.confirm(`确定删除账号 ${user.username}？`)) return;
+        try {
+            const response = await window.aiworkerApi.request(`${usersApi}/${user.id}`, {method: 'DELETE'});
+            if (!response.ok) throw new Error(await responseError(response, '用户删除失败'));
+            await loadUsersAndRoles();
+        } catch (error) {
+            showError(elements.error, error.message || '用户删除失败');
         }
     }
 
@@ -174,7 +197,7 @@
             };
         try {
             const response = await window.aiworkerApi.request(
-                userId ? `/api/admin/users/${userId}` : '/api/admin/users',
+                userId ? `${usersApi}/${userId}` : usersApi,
                 {
                     method: userId ? 'PATCH' : 'POST',
                     headers: {'Content-Type': 'application/json'},

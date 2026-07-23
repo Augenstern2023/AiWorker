@@ -3,7 +3,7 @@ window.aiworkerModules.push(() => ({
                 creativeTopicOptionLabel(topic) {
                     if (!topic?.latest_breakdown_id) return `${topic.title}（未拆解）`;
                     const version = topic.latest_breakdown_version ? ` v${topic.latest_breakdown_version}` : '';
-                    if (!topic.locked_breakdown_id) return `${topic.title}（草稿${version}，需先提交审批）`;
+                    if (!topic.locked_breakdown_id) return `${topic.title}（草稿${version}，需先完成拆解）`;
                     if (topic.latest_breakdown_status === 'draft') return `${topic.title}（已有批准版，最新草稿${version}）`;
                     return `${topic.title}（${this.creativeWorkflowStatusLabel(topic.latest_breakdown_status)}${version}）`;
                 },
@@ -76,18 +76,32 @@ window.aiworkerModules.push(() => ({
                     const source = this.creativeWorkspace.create;
                     if (!source.topic_id || !source.breakdown_id) return;
                     try {
-                        const task = await this.resolveCreativeWorkflowTask('brief', null, source.topic_id);
+                        if (!source.creation_request_id) {
+                            source.creation_request_id = globalThis.crypto?.randomUUID?.()
+                                || `project-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+                        }
                         const res = await aiworkerApi.request('/api/creative/projects', {
                             method: 'POST', headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({...source, workflow_task_id: task.id})
+                            body: JSON.stringify(source)
                         });
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.detail || '创建项目失败');
-                        this.creativeWorkspace.create = {topic_id: '', breakdown_id: '', name: '', target_platform: '', target_episode_count: 20};
-                        window.location.assign(`/planning/projects/${data.id}/directions`);
+                        this.creativeWorkspace.create = {topic_id: '', breakdown_id: '', name: '', target_platform: '', target_episode_count: 20, creation_request_id: ''};
+                        window.location.assign(`/planning/projects/${data.id}/brief?task_setup=1`);
                     } catch (e) {
                         this.creativeWorkspace.error = e.message || '创建项目失败';
                     }
+                },
+
+                openCreativeProject(project) {
+                    if (!project?.id) return;
+                    window.location.assign(`/planning/projects/${project.id}/brief`);
+                },
+
+                async openCreativeTaskSetup() {
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId) return;
+                    await this.openProjectTaskWindow(projectId, 'brief');
                 },
 
                 async selectCreativeProject(projectId) {
@@ -144,7 +158,7 @@ window.aiworkerModules.push(() => ({
                     return {
                         draft: '草稿', submitted: '待审批', approved: '已批准',
                         returned: '已退回', superseded: '已替代',
-                        locked: '已批准', brief_locked: '已批准'
+                        locked: '已完成', brief_locked: '已批准'
                     }[status] || status || '草稿';
                 },
 
@@ -173,34 +187,16 @@ window.aiworkerModules.push(() => ({
                     return task;
                 },
 
-                async resolveSourcePackageWorkflowTask(title) {
-                    const tasksResponse = await aiworkerApi.request('/api/workflow/tasks');
-                    const tasks = await tasksResponse.json();
-                    if (!tasksResponse.ok) throw new Error(tasks.detail || '读取素材任务失败');
+                async resolveSelectionTopicByTitle(title) {
+                    const topicsResponse = await aiworkerApi.request('/api/creative/topics?limit=500');
+                    const payload = await topicsResponse.json();
+                    if (!topicsResponse.ok) throw new Error(payload.detail || '读取选题库失败');
                     const titleKey = value => String(value || '').normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
-                    const open = ['assigned', 'in_progress', 'returned'];
-                    const candidates = (tasks || []).filter(item =>
-                        item.task_type === 'source_package'
-                        && open.includes(item.status)
+                    const matches = (payload.items || []).filter(item =>
+                        item.status === 'adopted' && titleKey(item.title) === titleKey(title)
                     );
-                    const resolved = await Promise.all(candidates.map(async task => {
-                        const response = await aiworkerApi.request(`/api/creative/topics/${task.topic_id}`);
-                        const topic = await response.json();
-                        if (!response.ok) throw new Error(topic.detail || '读取素材任务选题失败');
-                        return {task, topic};
-                    }));
-                    const matches = resolved
-                        .filter(item => titleKey(item.topic.title) === titleKey(title))
-                        .map(item => item.task);
-                    if (matches.length !== 1) throw new Error('当前剧目需要且只能有一个已分配的素材任务');
-                    const task = matches[0];
-                    if (['assigned', 'returned'].includes(task.status)) {
-                        const response = await aiworkerApi.request(`/api/workflow/tasks/${task.id}/start`, {method: 'POST'});
-                        const started = await response.json();
-                        if (!response.ok) throw new Error(started.detail || '开始素材任务失败');
-                        return started;
-                    }
-                    return task;
+                    if (matches.length !== 1) throw new Error('请先在选题库采纳该剧目，再开始下载');
+                    return matches[0];
                 },
 
                 async submitCreativeResource(resourceType, resourceId, projectId = null, topicId = null) {
@@ -327,28 +323,44 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async generateProjectBlueprints() {
-                    const task = await this.resolveCreativeWorkflowTask('brief', this.creativeWorkspace.project.id);
-                    return this.startCreativeGeneration(
-                        `/api/creative/projects/${this.creativeWorkspace.project.id}/blueprints/generate`,
-                        {count: Number(this.creativeWorkspace.directionCount || 3), workflow_task_id: task.id},
-                        'blueprints'
-                    );
+                    try {
+                        const task = await this.resolveCreativeWorkflowTask('brief', this.creativeWorkspace.project.id);
+                        return this.startCreativeGeneration(
+                            `/api/creative/projects/${this.creativeWorkspace.project.id}/blueprints/generate`,
+                            {count: Number(this.creativeWorkspace.directionCount || 3), workflow_task_id: task.id},
+                            'blueprints'
+                        );
+                    } catch (e) {
+                        window.dispatchEvent(new CustomEvent('aiworker:toast', {detail: {message: e.message, type: 'error'}}));
+                    }
                 },
 
                 async generateProjectCharacters() {
-                    const task = await this.resolveCreativeWorkflowTask('characters', this.creativeWorkspace.project.id);
-                    return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/characters/generate`, {workflow_task_id: task.id}, 'characters');
+                    try {
+                        const task = await this.resolveCreativeWorkflowTask('characters', this.creativeWorkspace.project.id);
+                        return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/characters/generate`, {workflow_task_id: task.id}, 'characters');
+                    } catch (e) {
+                        window.dispatchEvent(new CustomEvent('aiworker:toast', {detail: {message: e.message, type: 'error'}}));
+                    }
                 },
 
                 async generateProjectOutlines() {
-                    const task = await this.resolveCreativeWorkflowTask('outline', this.creativeWorkspace.project.id);
-                    return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/outlines/generate`, {workflow_task_id: task.id}, 'outlines');
+                    try {
+                        const task = await this.resolveCreativeWorkflowTask('outline', this.creativeWorkspace.project.id);
+                        return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/outlines/generate`, {workflow_task_id: task.id}, 'outlines');
+                    } catch (e) {
+                        window.dispatchEvent(new CustomEvent('aiworker:toast', {detail: {message: e.message, type: 'error'}}));
+                    }
                 },
 
                 async generateProjectBeats() {
-                    const episode = Number(this.creativeWorkspace.selectedEpisode || 0);
-                    const task = await this.resolveCreativeWorkflowTask('beats', this.creativeWorkspace.project.id);
-                    return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/episodes/${episode}/beats/generate`, {workflow_task_id: task.id}, 'beats');
+                    try {
+                        const episode = Number(this.creativeWorkspace.selectedEpisode || 0);
+                        const task = await this.resolveCreativeWorkflowTask('beats', this.creativeWorkspace.project.id);
+                        return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/episodes/${episode}/beats/generate`, {workflow_task_id: task.id}, 'beats');
+                    } catch (e) {
+                        window.dispatchEvent(new CustomEvent('aiworker:toast', {detail: {message: e.message, type: 'error'}}));
+                    }
                 },
 
                 creativeActionLabel(action) {
@@ -480,7 +492,13 @@ window.aiworkerModules.push(() => ({
                 creativeProgressElapsedText() {
                     const seconds = Number(this.creativeWorkspace.jobElapsedSeconds || 0);
                     const prefix = this.creativeWorkspace.startingAction || this.creativeJobRunning() ? '已等待' : '用时';
-                    return `${prefix} ${this.formatBreakdownGenerationElapsed(seconds)}`;
+                    return `${prefix} ${this.formatCreativeGenerationElapsed(seconds)}`;
+                },
+                formatCreativeGenerationElapsed(seconds) {
+                    const value = Math.max(0, Math.floor(Number(seconds || 0)));
+                    const minutes = Math.floor(value / 60);
+                    const remaining = value % 60;
+                    return minutes ? `${minutes}分${remaining}秒` : `${remaining}秒`;
                 },
                 tickCreativeGenerationElapsed() {
                     if (!this.creativeWorkspace.startingAction && !this.creativeJobRunning()) return;

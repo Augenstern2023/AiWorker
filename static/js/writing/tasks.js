@@ -1,0 +1,1 @@
+document.querySelector('[data-workspace-page="writing-tasks"]')?.setAttribute('data-ready', 'true');

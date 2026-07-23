@@ -125,7 +125,10 @@ class PermissionService:
     def can_access_assigned_project(
         self, principal: Principal, project_id: str
     ) -> bool:
-        if principal.data_scope == "all":
+        # The single global project-owner role is responsible for the complete
+        # portfolio. Membership records still describe local collaborators,
+        # but must not hide a project from that global owner.
+        if principal.data_scope == "all" or "project_owner" in principal.role_codes:
             return True
         if DATA_SCOPE_ORDER[principal.data_scope] < DATA_SCOPE_ORDER["project"]:
             return False
@@ -142,7 +145,7 @@ class PermissionService:
     def can_access_managed_project(
         self, principal: Principal, project_id: str
     ) -> bool:
-        if principal.data_scope == "all":
+        if principal.data_scope == "all" or "project_owner" in principal.role_codes:
             return True
         if DATA_SCOPE_ORDER[principal.data_scope] < DATA_SCOPE_ORDER["managed_projects"]:
             return False

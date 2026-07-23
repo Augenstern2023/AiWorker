@@ -5,7 +5,8 @@
                     <div>
                         <h5 class="modal-title" id="topicTranscriptPreviewModalLabel"><i class="bi bi-file-earmark-text me-2"></i>剧目转写预览</h5>
                         <div class="small text-muted mt-1"><span x-text="topicTranscriptPreview.topic?.title || ''"></span><span x-show="topicTranscriptPreview.episodes.length" x-text="` · 共 ${topicTranscriptPreview.episodes.length} 集`"></span></div>
-                    </div>
+</div>
+
                     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button>
                 </div>
                 <div class="modal-body">
@@ -73,17 +74,29 @@
         </div>
     </div>
 
-    <div class="download-progress-toast" x-show="dramaDownload.background && dramaDownload.jobId" x-cloak>
-        <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
-            <button type="button" class="btn btn-sm btn-link p-0 text-decoration-none text-start flex-grow-1" @click="dramaDownload.background = false; dramaDownloadModal.show()">
-                <span class="fw-semibold text-light" x-text="dramaDownload.title || '剧集下载' "></span>
-                <span class="small text-muted ms-2" x-text="`${Number(dramaDownload.progress?.percent || 0).toFixed(0)}%`"></span>
-            </button>
-            <button type="button" class="btn btn-sm btn-outline-secondary" @click="dramaDownload.background = false" title="关闭下载进度" aria-label="关闭下载进度"><i class="bi bi-x-lg"></i></button>
-        </div>
-        <div class="small text-muted mb-2" x-text="dramaDownload.progressMessage || '正在下载' "></div>
-        <div class="progress mb-2" role="progressbar"><div class="progress-bar progress-bar-striped progress-bar-animated" :class="dramaDownload.paused ? 'bg-warning' : ''" :style="`width: ${dramaDownload.progress?.percent || 0}%`"></div></div>
-        <div class="d-flex justify-content-between align-items-center gap-2"><span class="small text-muted" x-text="`${dramaDownload.progress?.completed || 0} / ${dramaDownload.progress?.total || 0}`"></span><div class="d-flex gap-1"><button type="button" class="btn btn-sm btn-outline-warning" x-show="!dramaDownload.paused && !dramaDownload.finished" @click="pauseDramaDownload" title="暂停下载" aria-label="暂停下载"><i class="bi bi-pause-fill"></i></button><button type="button" class="btn btn-sm btn-outline-success" x-show="dramaDownload.paused && !dramaDownload.finished" @click="resumeDramaDownload" title="继续下载" aria-label="继续下载"><i class="bi bi-play-fill"></i></button><button type="button" class="btn btn-sm btn-outline-primary" @click="dramaDownload.background = false; dramaDownloadModal.show()" title="查看下载详情" aria-label="查看下载详情"><i class="bi bi-arrow-up-right"></i></button></div></div>
+    <div class="download-progress-stack" x-show="activeDramaDownloadJobs().length" x-cloak>
+        <template x-for="job in activeDramaDownloadJobs()" :key="job.job_id">
+            <div class="download-progress-toast">
+                <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                    <button type="button" class="btn btn-sm btn-link p-0 text-decoration-none text-start flex-grow-1" @click="openDramaDownloadJob(job)">
+                        <span class="fw-semibold text-light" x-text="job.job?.extra?.title || '剧集下载'"></span>
+                        <span class="small text-muted ms-2" x-text="`${Number(job.progress?.percent || 0).toFixed(0)}%`"></span>
+                    </button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" @click="hideDramaDownloadJob(job)" title="关闭下载进度" aria-label="关闭下载进度"><i class="bi bi-x-lg"></i></button>
+                </div>
+                <div class="small text-muted mb-2" x-text="job.message || '正在下载'"></div>
+                <div class="progress mb-2" role="progressbar"><div class="progress-bar progress-bar-striped progress-bar-animated" :class="job.paused ? 'bg-warning' : ''" :style="`width: ${job.progress?.percent || 0}%`"></div></div>
+                <div class="d-flex justify-content-between align-items-center gap-2">
+                    <span class="small text-muted" x-text="`${job.progress?.completed || 0} / ${job.progress?.total || 0}`"></span>
+                    <div class="d-flex gap-1">
+                        <button type="button" class="btn btn-sm btn-outline-warning" x-show="!job.paused" @click="pauseDramaDownloadJob(job)" title="暂停下载" aria-label="暂停下载"><i class="bi bi-pause-fill"></i></button>
+                        <button type="button" class="btn btn-sm btn-outline-success" x-show="job.paused" @click="resumeDramaDownloadJob(job)" title="继续下载" aria-label="继续下载"><i class="bi bi-play-fill"></i></button>
+                        <button type="button" class="btn btn-sm btn-outline-danger" @click="cancelDramaDownloadJob(job)" title="取消下载" aria-label="取消下载"><i class="bi bi-x-circle"></i></button>
+                        <button type="button" class="btn btn-sm btn-outline-primary" @click="openDramaDownloadJob(job)" title="查看下载详情" aria-label="查看下载详情"><i class="bi bi-arrow-up-right"></i></button>
+                    </div>
+                </div>
+            </div>
+        </template>
     </div>
 
     <div class="modal fade" id="dramaDownloadModal" tabindex="-1">
@@ -110,43 +123,91 @@
                         <div class="small text-muted mt-1" x-show="dramaDownload.source === 'douyin_fallback'" x-text="`已下载 ${dramaDownload.progress?.downloaded || 0} · 付费跳过 ${dramaDownload.progress?.skipped_paid || 0} · 失败 ${dramaDownload.progress?.failed || 0}`"></div>
                         <div class="small text-muted mt-2"><i class="bi bi-info-circle me-1"></i>关闭窗口不会中断下载任务，右下角会继续显示下载进度。</div>
                     </div>
+                    <div class="mt-3" x-show="dramaDownload.jobId">
+                        <div class="d-flex align-items-center justify-content-between mb-1">
+                            <small class="fw-semibold"><i class="bi bi-terminal me-1"></i>运行日志</small>
+                            <small class="text-muted" x-text="dramaDownload.logCount ? `共 ${dramaDownload.logCount} 条` : ''"></small>
+                        </div>
+                        <div class="log-pane" style="height: 200px; font-size: 12px;" x-ref="downloadLogPane">
+                            <template x-for="(log, i) in dramaDownload.logs" :key="i">
+                                <div class="log-line" :class="log.includes('[ERROR]') ? 'text-danger' : log.includes('[WARNING]') ? 'text-warning' : ''" x-text="log"></div>
+                            </template>
+                            <div x-show="!dramaDownload.logs || dramaDownload.logs.length === 0" class="text-muted p-2">等待日志...</div>
+                        </div>
+                    </div>
+                    <div id="dramaDownloadArtifacts" class="mt-3 border-top border-secondary pt-3" x-show="dramaDownload.finished && dramaDownload.showFiles" x-cloak>
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                            <div class="fw-semibold"><i class="bi bi-folder2-open me-2"></i>下载产物</div>
+                            <span class="badge bg-secondary" x-text="`${dramaDownloadArtifacts().length} 个文件`"></span>
+                        </div>
+                        <div class="text-muted small py-2" x-show="!dramaDownloadArtifacts().length">当前任务没有可查看的文件，请检查任务日志。</div>
+                        <div class="list-group" x-show="dramaDownloadArtifacts().length">
+                            <template x-for="item in dramaDownloadArtifacts()" :key="item.path">
+                                <div class="list-group-item bg-transparent text-light border-secondary d-flex align-items-center gap-3">
+                                    <i class="bi bi-file-earmark flex-shrink-0"></i>
+                                    <div class="flex-grow-1 min-w-0">
+                                        <div class="fw-semibold text-break" x-text="dramaDownloadArtifactName(item)"></div>
+                                        <div class="small text-muted text-break" x-text="item.path"></div>
+                                    </div>
+                                    <button type="button" class="btn btn-sm btn-outline-primary flex-shrink-0" @click="downloadFile(item.path)" title="下载文件" aria-label="下载文件"><i class="bi bi-download"></i></button>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
                     <div x-show="!dramaDownload.searching && !dramaDownload.jobId && dramaDownload.candidates.length">
                         <label class="form-label" x-text="dramaDownload.source === 'douyin_fallback' ? '确认抖音视频' : '确认剧目'"></label>
                         <div x-show="dramaDownload.source !== 'douyin_fallback'">
-                            <template x-for="candidate in dramaDownload.candidates" :key="candidate.book_id">
+                            <template x-for="candidate in dramaDownload.candidates" :key="candidate.book_id || candidate.aweme_id">
                                 <button type="button" class="list-group-item list-group-item-action bg-transparent text-light border-secondary mb-2" :class="{active: dramaDownload.selectedCandidate?.book_id === candidate.book_id}" @click="selectDramaDownloadCandidate(candidate)">
                                     <div class="fw-semibold text-start" x-text="candidate.title"></div><div class="small text-muted text-start" x-text="`${candidate.episode_count || '-'} 集 · ${candidate.summary || '暂无简介'}`"></div>
                                 </button>
                             </template>
                         </div>
                         <div x-show="dramaDownload.source === 'douyin_fallback'">
-                            <div class="d-flex justify-content-between align-items-center mb-2">
-                                <div><span class="small text-muted" x-text="`已选择 ${dramaDownload.selectedAwemeIds.length} 个视频`"></span><span class="small text-info ms-2" x-show="selectedDouyinEpisodeSummary()" x-text="selectedDouyinEpisodeSummary()"></span></div>
-                                <label class="form-check small mb-0"><input class="form-check-input me-1" type="checkbox" x-model="dramaDownload.allDouyinCandidates" @change="toggleAllDouyinDownloadCandidates">全选当前结果</label>
-                            </div>
+                            <div class="small text-muted mb-2">先确认一个属于该剧的种子视频，系统再解析合集与同作者连续剧集。</div>
                             <template x-for="candidate in dramaDownload.candidates" :key="candidate.aweme_id">
-                                <label class="list-group-item bg-transparent text-light border-secondary mb-2" :class="{'border-primary': dramaDownload.selectedAwemeIds.includes(candidate.aweme_id), 'opacity-75': candidate.is_paid}">
+                                <button type="button" class="list-group-item list-group-item-action bg-transparent text-light border-secondary mb-2" :class="{'border-primary': dramaDownload.selectedCandidate?.aweme_id === candidate.aweme_id, 'opacity-75': candidate.is_paid}" @click="selectDramaDownloadCandidate(candidate)">
                                     <div class="d-flex gap-2 align-items-start">
-                                        <input class="form-check-input mt-1" type="checkbox" :value="candidate.aweme_id" x-model="dramaDownload.selectedAwemeIds" :disabled="candidate.is_paid" @change="syncDouyinDownloadSelection">
                                         <div class="flex-grow-1 min-w-0">
-                                            <div class="fw-semibold text-start"><span x-text="candidate.title"></span><span class="badge bg-primary ms-2" x-show="candidate.is_primary">首条</span><span class="badge bg-warning text-dark ms-2" x-show="candidate.is_paid">需付费</span></div>
+                                            <div class="fw-semibold text-start"><span x-text="candidate.title"></span><span class="badge bg-success ms-2" x-show="candidate.is_collection" x-text="candidate.collection_episode_count ? `合集 · ${candidate.collection_episode_count} 集` : '合集'"></span><span class="badge bg-warning text-dark ms-2" x-show="candidate.is_collection && candidate.collection_name && !candidate.collection_matches_title" x-text="`合集：${candidate.collection_name}`"></span><span class="badge bg-primary ms-2" x-show="candidate.is_primary">首条</span><span class="badge bg-warning text-dark ms-2" x-show="candidate.is_paid">需付费</span></div>
                                             <div class="small text-muted text-start"><span x-text="`${candidate.author || '未知作者'} · 时长 ${formatDramaDuration(candidate.duration)} · 点赞 ${candidate.like_count || 0} · 评论 ${candidate.comment_count || 0}`"></span><span class="badge bg-secondary ms-2" x-show="candidate.episode_label" x-text="candidate.episode_label"></span></div>
                                             <div class="small text-warning text-start" x-show="candidate.is_paid" x-text="candidate.paid_reason || '该视频需要付费，下载时将自动跳过'"></div>
                                         </div>
                                     </div>
-                                </label>
+                                </button>
                             </template>
                         </div>
-                        <div class="alert alert-info py-2 mt-2" x-show="dramaDownload.source === 'douyin_fallback' && dramaDownload.candidates.some(candidate => dramaDownload.selectedAwemeIds.includes(candidate.aweme_id) && Number(candidate.episode_count || 0) > 1)">标注多集的抖音结果是一个合集视频，将保存为一个视频文件，并在剧本和清单中记录覆盖集数。</div>
                     </div>
-                    <div class="mt-3" x-show="dramaDownload.episodesLoading"><div class="d-flex align-items-center gap-2"><span class="spinner-border spinner-border-sm"></span><span>正在读取集数…</span></div></div>
-                    <div x-show="dramaDownload.selectedCandidate && dramaDownload.episodes.length" class="mt-3">
+                    <div class="mt-3" x-show="dramaDownload.episodesLoading"><div class="d-flex align-items-center gap-2"><span class="spinner-border spinner-border-sm"></span><span x-text="dramaDownload.source === 'douyin_fallback' ? '正在解析合集与同作者剧集…' : '正在读取集数…'"></span></div></div>
+                    <div x-show="dramaDownload.source !== 'douyin_fallback' && dramaDownload.selectedCandidate && dramaDownload.episodes.length" class="mt-3">
                         <div class="d-flex justify-content-between align-items-center mb-2"><label class="form-label mb-0">选择集数</label><label class="form-check small"><input class="form-check-input me-1" type="checkbox" x-model="dramaDownload.allEpisodes" @change="toggleAllDramaEpisodes">全剧下载</label></div>
                         <div class="row row-cols-2 row-cols-md-4 g-2">
                             <template x-for="episode in dramaDownload.episodes" :key="episode.episode">
                                 <label class="form-check border rounded p-2" :class="isDramaEpisodeDownloaded(episode) ? 'border-success opacity-75' : 'border-secondary'"><template x-if="!isDramaEpisodeDownloaded(episode)"><input class="form-check-input ms-0 me-1" type="checkbox" :value="episode.episode" x-model="dramaDownload.selectedEpisodes" :disabled="dramaDownload.allEpisodes"></template><template x-if="isDramaEpisodeDownloaded(episode)"><i class="bi bi-check-circle-fill text-success me-1" title="已下载"></i></template><span x-text="`${episode.episode}. ${episode.title}`"></span><span class="badge bg-success ms-1" x-show="episode.download_status?.status === 'downloaded'">已下载</span></label>
                             </template>
                         </div>
+                    </div>
+                    <div x-show="dramaDownload.source === 'douyin_fallback' && !dramaDownload.episodesLoading && dramaDownload.episodes.length" class="mt-3">
+                        <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+                            <div><span class="fw-semibold" x-text="dramaDownload.seriesRangeLabel || `已识别 ${dramaDownload.episodes.length} 项`"></span><span class="small text-info ms-2" x-show="dramaDownload.missingEpisodes.length" x-text="`缺少第 ${dramaDownload.missingEpisodes.join('、')} 集`"></span></div>
+                            <label class="form-check small mb-0"><input class="form-check-input me-1" type="checkbox" x-model="dramaDownload.allDouyinCandidates" @change="toggleAllDouyinDownloadCandidates">全剧下载</label>
+                        </div>
+                        <template x-for="warning in dramaDownload.seriesWarnings" :key="warning"><div class="small text-warning mb-2" x-text="warning"></div></template>
+                        <div class="row row-cols-1 row-cols-md-2 g-2">
+                            <template x-for="item in dramaDownload.episodes" :key="item.aweme_id">
+                                <label class="border border-secondary p-2 d-flex gap-2 align-items-start" :class="{'border-primary': dramaDownload.selectedAwemeIds.includes(item.aweme_id), 'opacity-75': item.is_paid}">
+                                    <input class="form-check-input mt-1" type="checkbox" :value="item.aweme_id" x-model="dramaDownload.selectedAwemeIds" :disabled="item.is_paid" @change="syncDouyinDownloadSelection">
+                                    <span class="flex-grow-1"><span class="fw-semibold" x-text="item.episode_label || item.title"></span><span class="badge bg-secondary ms-2" x-text="dramaSeriesSourceLabel(item.source_kind)"></span><span class="badge bg-warning text-dark ms-2" x-show="item.is_paid">需付费</span><span class="d-block small text-muted" x-text="item.title"></span><span class="d-block small text-warning" x-show="item.is_paid" x-text="item.paid_reason"></span></span>
+                                </label>
+                            </template>
+                        </div>
+                        <div class="mt-3" x-show="dramaDownload.relatedVideos.length">
+                            <div class="small fw-semibold mb-2">其他相关视频（不纳入全剧选择）</div>
+                            <template x-for="item in dramaDownload.relatedVideos" :key="item.aweme_id">
+                                <label class="d-flex gap-2 align-items-start py-2 border-bottom border-secondary"><input class="form-check-input mt-1" type="checkbox" :value="item.aweme_id" x-model="dramaDownload.selectedAwemeIds" :disabled="item.is_paid"><span><span x-text="item.title"></span><span class="badge bg-secondary ms-2" x-text="dramaSeriesSourceLabel(item.source_kind)"></span><span class="small text-warning d-block" x-show="item.is_paid" x-text="item.paid_reason"></span></span></label>
+                            </template>
+                        </div>
+                        <div class="alert alert-info py-2 mt-3" x-show="dramaDownload.episodes.some(item => item.is_compilation)">标注多集的抖音结果会保存为一个合集视频，不会伪拆为多个文件。</div>
                     </div>
                     <div class="alert alert-warning mt-3" x-show="dramaDownload.source === 'douyin_fallback' && dramaDownload.selectedAwemeIds.length">来源：抖音降级。将按选择顺序逐个下载和转写，明确需要付费的视频会说明原因并跳过。</div>
                 </div>
@@ -179,4 +240,41 @@
                 </div>
             </div>
         </div>
+    </div>
+
+    <div class="modal fade" id="assignmentModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="bi bi-person-plus me-2"></i>人员分配</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3"><span class="text-muted">剧目：</span><strong x-text="assignment.topic?.title"></strong></div>
+                    <div class="mb-3"><span class="text-muted">分配角色：</span><strong x-text="assignment.role === 'creative_planner' ? '创意策划' : '编剧'"></strong></div>
+                    <div class="alert alert-danger py-2" x-show="assignment.error" x-text="assignment.error"></div>
+                    <label class="form-label">选择用户</label>
+                    <select class="form-select" x-model="assignment.selectedUserId">
+                        <option value="">-- 请选择 --</option>
+                        <template x-for="user in assignment.candidates" :key="user.id">
+                            <option :value="user.id" x-text="user.display_name || user.username"></option>
+                        </template>
+                    </select>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary" @click="submitAssignment" :disabled="!assignment.selectedUserId || assignment.saving">
+                        <span x-show="assignment.saving" class="spinner-border spinner-border-sm me-1"></span>分配任务
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="generatedContentPreviewModal" tabindex="-1" aria-labelledby="generatedContentPreviewModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable"><div class="modal-content">
+            <div class="modal-header"><div><h5 class="modal-title" id="generatedContentPreviewModalLabel"><i class="bi bi-file-earmark-richtext me-2"></i>已生成内容预览</h5><div class="small text-muted mt-1" x-text="generatedContentPreview.project?.name || generatedContentPreview.topic?.title || ''"></div></div><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button></div>
+            <div class="modal-body"><div x-show="generatedContentPreview.loading" class="py-5 text-center"><span class="spinner-border"></span><div class="small text-muted mt-2">正在读取已生成内容</div></div><div x-show="generatedContentPreview.error" class="alert alert-danger" x-text="generatedContentPreview.error"></div><div x-show="!generatedContentPreview.loading && generatedContentPreview.versions.length" class="mb-3"><label class="form-label small">历史版本</label><select class="form-select form-select-sm" x-model="generatedContentPreview.selectedResourceId" @change="loadGeneratedContentVersion(generatedContentPreview.selectedResourceId)"><template x-for="item in generatedContentPreview.versions" :key="item.resource_id"><option :value="item.resource_id" x-text="item.label"></option></template></select></div><div id="generatedContentPreviewBody" x-show="!generatedContentPreview.loading && generatedContentPreview.snapshot"></div></div>
+            <div class="modal-footer"><div class="btn-group btn-group-sm me-auto" x-show="generatedContentPreview.selectedResourceId"><button type="button" class="btn btn-outline-secondary" @click="downloadGeneratedContent('md')"><i class="bi bi-download me-1"></i>下载 Markdown</button><button type="button" class="btn btn-outline-secondary" @click="downloadGeneratedContent('json')"><i class="bi bi-download me-1"></i>下载 JSON</button></div><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button></div>
+        </div></div>
     </div>

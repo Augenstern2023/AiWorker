@@ -280,7 +280,7 @@ class HongguoDramaClient:
         self,
         video_url: str,
         target: str | Path,
-        max_bytes: int = 300 * 1024 * 1024,
+        max_bytes: int = 2 * 1024 * 1024 * 1024,
         on_progress: Callable[[int, int], None] | None = None,
         wait_if_paused: Callable[[], None] | None = None,
     ) -> int:

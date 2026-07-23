@@ -63,6 +63,113 @@ window.aiworkerModules.push(() => ({
                     return `lifecycle-${value.replaceAll('_', '-')}`;
                 },
 
+                generatedLifecycleStage(status) {
+                    return {
+                        imitation_generated: 'brief',
+                        character_relationships_generated: 'characters',
+                        episode_outlines_generated: 'outline',
+                        beats_generated: 'beats',
+                        beats_exported: 'beats'
+                    }[status] || '';
+                },
+
+                workflowAssignmentForStage(topic) {
+                    return {
+                        pending_character_relationships: {
+                            task_type: 'characters',
+                            role_code: 'creative_planner',
+                            role_label: '创意策划',
+                            task_label: '人物关系'
+                        },
+                        pending_episode_outlines: {
+                            task_type: 'outline',
+                            role_code: 'screenwriter',
+                            role_label: '编剧',
+                            task_label: '分集大纲'
+                        },
+                        pending_beats: {
+                            task_type: 'beats',
+                            role_code: 'screenwriter',
+                            role_label: '编剧',
+                            task_label: 'Beats 脚本'
+                        }
+                    }[topic?.lifecycle_status || topic?.status] || null;
+                },
+
+                async openStageWorkflowAssignment(topic) {
+                    const assignment = this.workflowAssignmentForStage(topic);
+                    const projectId = topic?.lifecycle_project_id;
+                    if (!assignment || !projectId) return;
+                    this.topicLibrary.error = '';
+                    try {
+                        const response = await aiworkerApi.request('/api/workflow/tasks');
+                        const tasks = await response.json();
+                        if (!response.ok) throw new Error(tasks.detail || '读取项目任务失败');
+                        const task = (tasks || []).find(item =>
+                            String(item.project_id || '') === String(projectId)
+                            && item.task_type === assignment.task_type
+                            && item.role_code === assignment.role_code
+                            && ['pool', 'assigned', 'returned'].includes(item.status)
+                        );
+                        if (!task) throw new Error(`当前项目未找到可分配的${assignment.task_label}任务，请刷新后重试`);
+                        await this.openWorkflowTaskWindow(task);
+                    } catch (error) {
+                        this.topicLibrary.error = error.message || '读取项目任务失败';
+                    }
+                },
+
+                async openGeneratedContentPreview(topic) {
+                    const stage = this.generatedLifecycleStage(topic?.lifecycle_status);
+                    if (!stage || !topic?.lifecycle_project_id) return;
+                    this.generatedContentPreview = {topic, project: null, stage, versions: [], selectedResourceId: '', snapshot: null, loading: true, error: ''};
+                    this.modal('generatedContentPreviewModal')?.show();
+                    await this.loadGeneratedContentVersion();
+                },
+
+                async loadGeneratedContentVersion(resourceId = '') {
+                    const state = this.generatedContentPreview;
+                    const projectId = state.topic?.lifecycle_project_id;
+                    if (!projectId || !state.stage) return;
+                    state.loading = true;
+                    state.error = '';
+                    try {
+                        const params = new URLSearchParams({stage: state.stage});
+                        if (resourceId) params.set('resource_id', resourceId);
+                        const response = await aiworkerApi.request(`/api/creative/projects/${projectId}/generated-content?${params.toString()}`);
+                        const payload = await response.json();
+                        if (!response.ok) throw new Error(payload.detail || '读取已生成内容失败');
+                        state.project = payload.project;
+                        state.versions = payload.versions || [];
+                        state.selectedResourceId = payload.selected_resource_id || '';
+                        state.snapshot = payload.snapshot || null;
+                        this.renderGeneratedContentPreview();
+                    } catch (error) {
+                        state.error = error.message || '读取已生成内容失败';
+                        state.snapshot = null;
+                    } finally {
+                        state.loading = false;
+                    }
+                },
+
+                renderGeneratedContentPreview() {
+                    this.$nextTick(() => {
+                        const target = document.getElementById('generatedContentPreviewBody');
+                        if (!target) return;
+                        target.replaceChildren();
+                        if (this.generatedContentPreview.snapshot && window.aiworkerApprovalRenderer) {
+                            target.appendChild(window.aiworkerApprovalRenderer.render(this.generatedContentPreview.stage, this.generatedContentPreview.snapshot));
+                        }
+                    });
+                },
+
+                downloadGeneratedContent(format) {
+                    const state = this.generatedContentPreview;
+                    const projectId = state.project?.id || state.topic?.lifecycle_project_id;
+                    if (!projectId || !state.stage || !state.selectedResourceId) return;
+                    const params = new URLSearchParams({stage: state.stage, resource_id: state.selectedResourceId, format});
+                    window.open(`/api/creative/projects/${projectId}/generated-content/download?${params.toString()}`, '_blank', 'noopener');
+                },
+
                 breakdownStatusLabel(topic) {
                     if (!topic?.latest_breakdown_id) return '未拆解';
                     const version = topic.latest_breakdown_version ? ` v${topic.latest_breakdown_version}` : '';
@@ -91,9 +198,123 @@ window.aiworkerModules.push(() => ({
                     return `${topic.title}（${this.breakdownStatusLabel(topic)}）`;
                 },
 
+                async openPlanningAssignment(topic) {
+                    this.planningAssignment = {
+                        topic,
+                        candidates: [],
+                        assigneeUserId: '',
+                        name: `${topic.title}创作项目`,
+                        targetPlatform: (topic.source_platforms || [topic.platform])[0] || '',
+                        targetEpisodeCount: 20,
+                        creationRequestId: globalThis.crypto?.randomUUID?.()
+                            || `planning-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+                        loading: true,
+                        saving: false,
+                        error: '',
+                        result: null
+                    };
+                    this.planningAssignmentModal = this.modal('planningAssignmentModal');
+                    this.planningAssignmentModal?.show();
+                    try {
+                        const params = new URLSearchParams({
+                            role_code: 'creative_planner',
+                            task_type: 'brief'
+                        });
+                        const response = await aiworkerApi.request(
+                            `/api/workflow/assignment-candidates?${params.toString()}`
+                        );
+                        const payload = await response.json();
+                        if (!response.ok) throw new Error(payload.detail || '读取策划用户失败');
+                        this.planningAssignment.candidates = payload || [];
+                        this.planningAssignment.assigneeUserId = payload[0]?.user_id || '';
+                        if (!payload.length) throw new Error('暂无可分配的创意策划用户');
+                    } catch (error) {
+                        this.planningAssignment.error = error.message || '读取策划用户失败';
+                    } finally {
+                        this.planningAssignment.loading = false;
+                    }
+                },
+
+                async submitPlanningAssignment() {
+                    const state = this.planningAssignment;
+                    if (!state.topic || !state.assigneeUserId || state.saving) return;
+                    state.saving = true;
+                    state.error = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/topics/${state.topic.id}/planning-assignment`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    assignee_user_id: state.assigneeUserId,
+                                    name: state.name.trim(),
+                                    target_platform: state.targetPlatform,
+                                    target_episode_count: Number(state.targetEpisodeCount || 20),
+                                    creation_request_id: state.creationRequestId
+                                })
+                            }
+                        );
+                        const payload = await response.json();
+                        if (!response.ok) throw new Error(payload.detail || '分配策划任务失败');
+                        state.result = payload;
+                    } catch (error) {
+                        state.error = error.message || '分配策划任务失败';
+                    } finally {
+                        state.saving = false;
+                    }
+                },
+
+                openManagedPlanningProject() {
+                    const projectId = this.planningAssignment.result?.project?.id;
+                    if (!projectId) return;
+                    window.location.assign(`/review/projects?project_id=${encodeURIComponent(projectId)}`);
+                },
+
+                async openAssignmentModal(topic, role) {
+                    const a = this.assignment;
+                    a.topic = topic;
+                    a.role = role;
+                    a.selectedUserId = "";
+                    a.error = "";
+                    a.candidates = [];
+                    a.saving = false;
+                    this.modal("assignmentModal")?.show();
+                    try {
+                        const params = new URLSearchParams({ role_code: role, task_type: role === "creative_planner" ? "brief" : "outline" });
+                        const response = await aiworkerApi.request("/api/workflow/assignment-candidates?" + params.toString());
+                        const payload = await response.json();
+                        if (!response.ok) throw new Error(payload.detail || "读取用户列表失败");
+                        a.candidates = payload || [];
+                        a.selectedUserId = payload[0]?.user_id || "";
+                        if (!payload.length) throw new Error("暂无可分配的" + (role === "creative_planner" ? "创意策划" : "编剧") + "用户");
+                    } catch (e) {
+                        a.error = e.message;
+                    }
+                },
+
+                async submitAssignment() {
+                    const a = this.assignment;
+                    if (!a?.selectedUserId || !a?.topic) return;
+                    a.saving = true;
+                    a.error = "";
+                    try {
+                        const body = { topic_id: a.topic.id, assignee_user_id: a.selectedUserId, role_code: a.role, task_type: a.role === "creative_planner" ? "brief" : "outline" };
+                        const res = await aiworkerApi.request("/api/workflow/create-assignment", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
+                        const data = await res.json();
+                        if (!res.ok) throw new Error(data.detail || "分配失败");
+                        this.modal("assignmentModal")?.hide();
+                        await this.fetchTopicLibrary();
+                    } catch (e) {
+                        a.error = e.message;
+                    } finally {
+                        a.saving = false;
+                    }
+                },
+
 }));
 
-window.addEventListener('aiworker:permission-denied', (event) => {
-    const target = document.querySelector('[x-data]');
-    if (target) target.setAttribute('data-permission-message', event.detail.message);
+window.addEventListener("aiworker:permission-denied", (event) => {
+    const target = document.querySelector("[x-data]");
+    if (target) target.setAttribute("data-permission-message", event.detail.message);
 });

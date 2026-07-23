@@ -7,6 +7,7 @@
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
 
 import re
+import subprocess
 from pathlib import Path
 
 
@@ -21,7 +22,6 @@ ROLE_TEMPLATES = (
     "selection/dramas.html",
     "selection/breakdowns.html",
     "planning/projects.html",
-    "planning/directions.html",
     "planning/brief.html",
     "planning/characters.html",
     "writing/projects.html",
@@ -115,6 +115,33 @@ def test_role_scripts_do_not_depend_on_legacy_current_tab():
         assert "currentTab" not in script.read_text(encoding="utf-8")
 
 
+def test_all_workspace_javascript_has_valid_syntax():
+    node = Path(r"C:\Users\Administrator\tools\node-v24.16.0-win-x64\node.exe")
+    assert node.exists()
+    scripts = sorted((ROOT / "static/js").glob("**/*.js"))
+    failures = []
+    for script in scripts:
+        result = subprocess.run(
+            [str(node), "--check", str(script)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        if result.returncode:
+            failures.append(f"{script.relative_to(ROOT)}: {result.stderr}")
+    assert failures == []
+
+
+def test_selection_pages_load_topic_capabilities_before_alpine_init():
+    tasks = _read("static/js/common/tasks.js")
+    topics = _read("static/js/selection/topics.js")
+    for page_name in ("topics", "breakdowns"):
+        page = _read(f"templates/selection/{page_name}.html")
+        assert "/static/js/selection/topics.js?v={{ asset_version }}" in page
+    assert "async fetchTopicLibrary()" in topics
+    assert "typeof workspace.fetchTopicLibrary !== 'function'" in tasks
+
+
 def test_workspace_sidebar_navigation_can_scroll_on_short_viewports():
     css = _read("static/css/workspaces.css")
 
@@ -143,12 +170,12 @@ def test_selection_dashboard_loads_every_module_used_by_its_initializer():
 def test_planning_projects_use_real_stage_routes():
     project_list = _read("templates/common/workspace/project_list.html")
     creative = _read("static/js/common/creative.js")
-    directions = _read("templates/planning/directions.html")
     brief = _read("templates/planning/brief.html")
 
-    assert "`/planning/projects/${project.id}/directions`" in project_list
-    assert "`/planning/projects/${data.id}/directions`" in creative
-    assert 'href="/planning/projects/{{ project_id }}/brief"' in directions
+    assert "`/planning/projects/${project.id}/brief`" in project_list
+    assert "`/planning/projects/${data.id}/brief" in creative
+    assert not Path("templates/planning/directions.html").exists()
+    assert "仿写方向" not in brief
     assert 'href="/planning/projects/{{ project_id }}/characters"' in brief
 
 
@@ -204,6 +231,25 @@ def test_admin_identity_pages_expose_complete_management_flows():
     assert "/api/admin/roles/${role.id}/clone" in roles_js
     assert "permissions" in roles_js
     assert "toggleRoleStatus" in roles_js
+
+
+def test_selection_topics_includes_planning_assignment_modal():
+    topics = _read("templates/selection/topics.html")
+
+    assert 'common/workspace/planning_assignment_modal.html' in topics
+
+
+def test_review_projects_lists_assigned_planning_projects_only():
+    page = _read("templates/review/projects.html")
+    script = _read("static/js/review/projects.js")
+
+    assert 'id="managed-project-list"' in page
+    assert "待决策选题" not in page
+    assert "workflow-bootstrap-topics" not in page
+    assert "/api/creative/projects" in script
+    assert "/api/workflow/tasks" in script
+    assert "/api/creative/topics/workflow-candidates" not in script
+    assert "/workflow`" not in script
 
 
 def test_admin_delivery_page_uses_approved_delivery_registry():
@@ -314,7 +360,8 @@ def test_creative_workflow_ui_submits_and_reviews_without_direct_locks():
         "/episodes/${item.id}/lock",
     ):
         assert direct_lock not in creative
-    assert "/breakdowns/${" not in breakdowns or "/lock" not in breakdowns
+    assert "/api/creative/breakdowns/${record.id}/lock" in breakdowns
+    assert "完成并锁定" in workspace
     assert "/api/creative/workflow/submit" in creative + breakdowns
     assert "/api/workflow/submissions/${submission.id}/${action}" in approvals
     assert "writeReview(submission, 'approve')" in approvals

@@ -1,7 +1,8 @@
 {% extends "layouts/base.html" %}
 
 {% block content %}
-<div class="d-flex align-items-center justify-content-between mb-3"><div><h3 class="mb-1">用户管理</h3><div class="small text-muted">管理本地账号、状态与角色分配</div></div><button class="btn btn-primary btn-sm" id="create-user"><i class="bi bi-person-plus me-1"></i>新建用户</button></div>
+{% set team_mode = request.url.path.startswith('/review/') %}
+<div class="d-flex align-items-center justify-content-between mb-3"><div><h3 class="mb-1">{{ '团队账号' if team_mode else '用户管理' }}</h3><div class="small text-muted">{{ '管理自己创建的普通账号及角色绑定' if team_mode else '管理本地账号、状态与角色分配' }}</div></div><button class="btn btn-primary btn-sm" id="create-user"><i class="bi bi-person-plus me-1"></i>新建用户</button></div>
 <div class="alert alert-danger d-none" id="user-error" role="alert"></div>
 <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>用户名</th><th>显示名称</th><th>角色</th><th>状态</th><th>最近登录</th><th>操作</th></tr></thead><tbody id="user-list"><tr><td colspan="6" class="text-center text-muted py-4">正在加载用户...</td></tr></tbody></table></div>
 

@@ -274,6 +274,20 @@ def test_selection_download_modal_gets_byte_formatter_from_loaded_module():
     assert "formatDramaBytes(value)" not in dramas
 
 
+def test_selection_download_pages_load_workflow_task_resolvers():
+    for relative_path, feature_script in (
+        ("templates/selection/hits.html", "/static/js/selection/breakdowns.js"),
+        ("templates/selection/topics.html", "/static/js/selection/breakdowns.js"),
+        ("templates/selection/breakdowns.html", "/static/js/selection/breakdowns.js"),
+        ("templates/selection/dramas.html", "/static/js/selection/dramas.js"),
+    ):
+        html = _read(relative_path)
+        resolver = "/static/js/common/creative.js"
+
+        assert resolver in html
+        assert html.index(resolver) < html.index(feature_script)
+
+
 def test_creative_workflow_ui_submits_and_reviews_without_direct_locks():
     creative = _read("static/js/common/creative.js")
     breakdowns = _read("static/js/selection/breakdowns.js")

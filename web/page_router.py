@@ -155,7 +155,7 @@ def _page_response(
             navigation_service,
             page_title=page_title,
             workspace_page=(
-                ""
+                "tasks"
                 if template_name == "common/tasks.html"
                 else template_name.removesuffix(".html").replace("/", "-")
             ),

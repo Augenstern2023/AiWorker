@@ -109,6 +109,12 @@ def test_role_scripts_do_not_depend_on_legacy_current_tab():
         assert "currentTab" not in script.read_text(encoding="utf-8")
 
 
+def test_workspace_sidebar_navigation_can_scroll_on_short_viewports():
+    css = _read("static/css/workspaces.css")
+
+    assert re.search(r"\.sidebar\s+nav\s*\{[^}]*overflow-y:\s*auto", css, re.S)
+
+
 def test_legacy_index_is_only_a_compatibility_redirect():
     html = _read("templates/index.html")
 

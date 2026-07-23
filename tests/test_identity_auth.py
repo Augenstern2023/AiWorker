@@ -85,6 +85,17 @@ def test_password_service_accepts_unicode_letters():
     assert service.verify(password_hash, "强密码安全-123!") is True
 
 
+def test_login_and_setup_pages_use_the_auth_layout(client: TestClient):
+    for route in ("/login", "/setup"):
+        html = client.get(route).text
+
+        assert '/static/css/bootstrap.min.css' in html
+        assert '/static/css/bootstrap-icons.css' in html
+        assert '/static/css/auth.css' in html
+        assert 'class="auth-shell"' in html
+        assert 'class="auth-panel"' in html
+
+
 @pytest.mark.parametrize(
     "password",
     [

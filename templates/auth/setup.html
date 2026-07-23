@@ -4,30 +4,67 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>初始化 - AiWorker</title>
+  <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+  <link href="/static/css/bootstrap-icons.css" rel="stylesheet">
+  <link href="/static/css/auth.css" rel="stylesheet">
 </head>
-<body>
-  <main>
-    <h1>初始化系统管理员</h1>
-    <form id="setup-form">
-      <label>用户名 <input name="username" autocomplete="username" required></label>
-      <label>显示名称 <input name="display_name" autocomplete="name" required></label>
-      <label>密码 <input name="password" type="password" autocomplete="new-password" required></label>
-      <button type="submit">创建管理员</button>
-      <p id="error" role="alert"></p>
-    </form>
+<body class="auth-page">
+  <main class="auth-shell">
+    <section class="auth-brand" aria-label="AiWorker">
+      <div class="auth-brand-mark"><i class="bi bi-robot" aria-hidden="true"></i></div>
+      <div>
+        <div class="auth-product-name">AiWorker</div>
+        <p class="auth-product-subtitle">壹凡短剧选品平台</p>
+      </div>
+    </section>
+    <section class="auth-panel">
+      <div class="auth-form-wrap">
+        <div class="auth-heading">
+          <span class="auth-kicker">首次使用</span>
+          <h1>初始化管理员</h1>
+          <p>创建本机首个系统管理员账号。</p>
+        </div>
+        <form id="setup-form" class="auth-form">
+          <div>
+            <label class="form-label" for="username">用户名</label>
+            <div class="auth-input-wrap"><i class="bi bi-person" aria-hidden="true"></i><input class="form-control" id="username" name="username" autocomplete="username" required autofocus></div>
+          </div>
+          <div>
+            <label class="form-label" for="display-name">显示名称</label>
+            <div class="auth-input-wrap"><i class="bi bi-person-badge" aria-hidden="true"></i><input class="form-control" id="display-name" name="display_name" autocomplete="name" required></div>
+          </div>
+          <div>
+            <label class="form-label" for="password">密码</label>
+            <div class="auth-input-wrap"><i class="bi bi-lock" aria-hidden="true"></i><input class="form-control" id="password" name="password" type="password" autocomplete="new-password" required></div>
+          </div>
+          <p id="error" class="auth-error" role="alert" aria-live="polite"></p>
+          <button class="btn btn-primary auth-submit" type="submit"><span>创建管理员</span><i class="bi bi-arrow-right" aria-hidden="true"></i></button>
+        </form>
+      </div>
+    </section>
   </main>
   <script>
     document.getElementById('setup-form').addEventListener('submit', async (event) => {
       event.preventDefault();
+      const button = event.currentTarget.querySelector('button[type="submit"]');
+      const error = document.getElementById('error');
+      button.disabled = true;
+      error.textContent = '';
       const values = new FormData(event.currentTarget);
-      const response = await fetch('/api/auth/setup', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(Object.fromEntries(values)),
-      });
-      const result = await response.json();
-      if (response.ok) window.location.assign(result.landing_route);
-      else document.getElementById('error').textContent = result.detail || '初始化失败';
+      try {
+        const response = await fetch('/api/auth/setup', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(Object.fromEntries(values)),
+        });
+        const result = await response.json();
+        if (response.ok) window.location.assign(result.landing_route);
+        else error.textContent = result.detail || '初始化失败';
+      } catch (_) {
+        error.textContent = '暂时无法连接服务，请稍后重试';
+      } finally {
+        button.disabled = false;
+      }
     });
   </script>
 </body>

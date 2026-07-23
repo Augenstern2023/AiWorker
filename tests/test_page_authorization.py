@@ -211,6 +211,17 @@ def test_forbidden_page_uses_html_error_template(writer_client: TestClient):
     assert "无权访问" in response.text
 
 
+def test_tasks_page_uses_the_authenticated_workspace_layout(
+    writer_client: TestClient,
+):
+    html = writer_client.get("/tasks").text
+
+    assert '/static/css/workspaces.css' in html
+    assert 'data-workspace-page="tasks"' in html
+    assert 'class="main-content"' in html
+    assert '/static/js/common/tasks.js' in html
+
+
 def test_delivery_only_permission_does_not_grant_system_admin_delivery_page(
     page_app: tuple[FastAPI, IdentityRepository],
 ):

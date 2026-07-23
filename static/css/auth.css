@@ -1,0 +1,190 @@
+:root {
+  --auth-bg: #0f131a;
+  --auth-brand: #18202b;
+  --auth-panel: #f5f7fa;
+  --auth-border: #d5dbe4;
+  --auth-text: #17202b;
+  --auth-muted: #657184;
+  --auth-accent: #2478d4;
+  --auth-accent-dark: #185da8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body.auth-page {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--auth-bg);
+  color: var(--auth-text);
+  font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+}
+
+.auth-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: minmax(300px, 38%) minmax(420px, 1fr);
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 48px;
+  background: var(--auth-brand);
+  color: #f7f9fc;
+  border-right: 1px solid #2c3745;
+}
+
+.auth-brand-mark {
+  width: 58px;
+  height: 58px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #4c6076;
+  border-radius: 8px;
+  background: #111821;
+  color: #63aaf4;
+  font-size: 30px;
+}
+
+.auth-product-name {
+  font-size: 30px;
+  font-weight: 750;
+}
+
+.auth-product-subtitle {
+  margin: 5px 0 0;
+  color: #9cabbc;
+  font-size: 14px;
+}
+
+.auth-panel {
+  display: grid;
+  place-items: center;
+  padding: 48px 64px;
+  background: var(--auth-panel);
+}
+
+.auth-form-wrap {
+  width: min(100%, 420px);
+}
+
+.auth-heading {
+  margin-bottom: 32px;
+}
+
+.auth-kicker {
+  display: block;
+  margin-bottom: 9px;
+  color: var(--auth-accent);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.auth-heading h1 {
+  margin: 0;
+  color: var(--auth-text);
+  font-size: 30px;
+  font-weight: 750;
+}
+
+.auth-heading p {
+  margin: 10px 0 0;
+  color: var(--auth-muted);
+}
+
+.auth-form {
+  display: grid;
+  gap: 20px;
+}
+
+.auth-form .form-label {
+  margin-bottom: 7px;
+  color: #344154;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.auth-input-wrap {
+  position: relative;
+}
+
+.auth-input-wrap > i {
+  position: absolute;
+  top: 50%;
+  left: 14px;
+  z-index: 2;
+  color: #7a8797;
+  transform: translateY(-50%);
+}
+
+.auth-input-wrap .form-control {
+  min-height: 48px;
+  padding-left: 42px;
+  border-color: var(--auth-border);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--auth-text);
+}
+
+.auth-input-wrap .form-control:focus {
+  border-color: var(--auth-accent);
+  box-shadow: 0 0 0 3px rgba(36, 120, 212, .14);
+}
+
+.auth-submit {
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border-color: var(--auth-accent);
+  border-radius: 6px;
+  background: var(--auth-accent);
+  font-weight: 700;
+}
+
+.auth-submit:hover,
+.auth-submit:focus {
+  border-color: var(--auth-accent-dark);
+  background: var(--auth-accent-dark);
+}
+
+.auth-error {
+  min-height: 21px;
+  margin: -4px 0 0;
+  color: #b4232c;
+  font-size: 14px;
+}
+
+@media (max-width: 760px) {
+  .auth-shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  .auth-brand {
+    justify-content: flex-start;
+    padding: 22px 24px;
+    border-right: 0;
+    border-bottom: 1px solid #2c3745;
+  }
+
+  .auth-brand-mark {
+    width: 44px;
+    height: 44px;
+    font-size: 23px;
+  }
+
+  .auth-product-name {
+    font-size: 22px;
+  }
+
+  .auth-panel {
+    place-items: start center;
+    padding: 42px 24px;
+  }
+}

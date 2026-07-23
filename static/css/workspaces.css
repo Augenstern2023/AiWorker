@@ -25,6 +25,10 @@
             display: flex;
             flex-direction: column;
         }
+        .sidebar nav {
+            min-height: 0;
+            overflow-y: auto;
+        }
         .main-content {
             margin-left: var(--sidebar-width);
             height: 100vh;

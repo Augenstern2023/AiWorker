@@ -17,7 +17,9 @@
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
 import json
+import io
 from pathlib import Path
+from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 
@@ -149,6 +151,46 @@ def test_douyin_episode_metadata_parses_ranges_and_single_episodes():
     assert parse_episode_metadata("没有集数标识") == {"episode_start": None, "episode_end": None, "episode_count": None, "episode_label": ""}
 
 
+def test_douyin_review_worker_exports_comments_as_csv(tmp_path):
+    from agents.douyin_review_worker import write_review_csv
+
+    output = tmp_path / "reviews.csv"
+    count = write_review_csv(
+        output,
+        [
+            {
+                "cid": "comment-1",
+                "user": {"nickname": "评论用户"},
+                "text": "这部剧很精彩",
+                "create_time": 1_700_000_000,
+                "digg_count": 12,
+            }
+        ],
+    )
+
+    assert count == 1
+    with output.open(encoding="utf-8-sig", newline="") as file:
+        rows = list(__import__("csv").DictReader(file))
+    assert rows == [{"评论ID": "comment-1", "用户名": "评论用户", "剧评内容": "这部剧很精彩", "评论时间": "2023-11-15 06:13:20", "点赞数": "12"}]
+
+
+def test_douyin_review_worker_command_is_specialized():
+    from runtime.worker_launcher import build_worker_command
+
+    command = build_worker_command("job.json", platform="dy", crawler_type="drama_reviews")
+
+    assert command[4:6] == ["agents.douyin_review_worker", "--job-file"]
+
+
+def test_douyin_review_jobs_can_run_for_different_dramas_at_once():
+    from runtime.job_manager import JobManager
+
+    first = CrawlJob(job_id="first", platform="dy", crawler_type="drama_reviews", extra={"title": "剧目甲"})
+    second = CrawlJob(job_id="second", platform="dy", crawler_type="drama_reviews", extra={"title": "剧目乙"})
+
+    assert JobManager._can_run_concurrently(first, second) is True
+
+
 def test_douyin_fallback_uses_local_playwright_browser_when_runtime_path_is_overridden(
     tmp_path, monkeypatch
 ):
@@ -208,6 +250,94 @@ def test_hongguo_drama_client_uses_dynamic_interface_config(monkeypatch):
     assert candidates[0]["book_id"] == "book-1"
     assert candidates[0]["episode_count"] == 12
     assert calls[1] == ("https://api.example.test/search", {"name": "测试短剧", "page": 1, "platform": "hg"})
+
+
+def test_hongguo_download_search_checks_all_remote_sources_before_fallback(
+    monkeypatch,
+):
+    client = HongguoDramaClient(
+        {"config_url": "https://config.example.test", "activation_code": ""}
+    )
+    sources = ("hg", "hgmj", "hgzh", "redguo", "hm", "huolong", "xingyadongli")
+    platform_config = [
+        {
+            "value": source,
+            "searchUrl": f"https://api.example.test/{source}/search",
+            "bookUrl": f"https://api.example.test/{source}/book",
+            "playUrl": f"https://api.example.test/{source}/play",
+        }
+        for source in sources
+    ]
+    calls = []
+
+    def fake_json(url, **params):
+        calls.append((url, params))
+        if url == "https://config.example.test":
+            return {"platforms": platform_config}
+        source = url.split("/")[-2]
+        title = "目标短剧" if source in {"hgzh", "hm"} else "相关短剧"
+        return {"code": 200, "data": [{"book_id": f"{source}-1", "title": title}]}
+
+    monkeypatch.setattr(client, "_json", fake_json)
+
+    matches = client.search_exact_all_sources("目标短剧")
+
+    assert [item["book_id"] for item in matches] == ["hgzh-1", "hm-1"]
+    assert [item["source_platform"] for item in matches] == ["hgzh", "hm"]
+    assert [url for url, _ in calls[1:]] == [
+        f"https://api.example.test/{source}/search" for source in sources
+    ]
+    assert [params["platform"] for _, params in calls[1:]] == list(sources)
+
+
+def test_hongguo_request_keeps_config_platform_and_appends_selected_source():
+    client = HongguoDramaClient({"config_url": "", "activation_code": "code-1"})
+
+    request_url = client._request_url(
+        "https://api.example.test/api.php?platform=wpf11&action=search_hg",
+        name="目标短剧",
+        page=1,
+        platform="hg",
+    )
+
+    pairs = parse_qsl(urlsplit(request_url).query, keep_blank_values=True)
+    assert pairs.count(("platform", "wpf11")) == 1
+    assert pairs.count(("platform", "hg")) == 1
+    assert ("code", "code-1") in pairs
+
+
+def test_hongguo_download_uses_the_selected_source_for_episodes_and_playback(
+    monkeypatch,
+):
+    client = HongguoDramaClient({"config_url": "", "activation_code": ""})
+    client.platform_interfaces = {
+        "hm": {
+            "search": "https://api.example.test/hm/search",
+            "book": "https://api.example.test/hm/book",
+            "play": "https://api.example.test/hm/play",
+            "play_requires_book_id": True,
+        }
+    }
+    calls = []
+
+    def fake_json(url, **params):
+        calls.append((url, params))
+        if url.endswith("/book"):
+            return {"code": 200, "data": [{"video_id": "video-1", "title": "第一集"}]}
+        return {"code": 200, "data": {"video_url": "https://video.example.test/1.mp4"}}
+
+    monkeypatch.setattr(client, "_json", fake_json)
+
+    episodes = client.episodes("book-1", source_platform="hm")
+    video_url = client.play_url(
+        episodes[0]["video_id"], book_id="book-1", source_platform="hm"
+    )
+
+    assert video_url == "https://video.example.test/1.mp4"
+    assert calls == [
+        ("https://api.example.test/hm/book", {"book_id": "book-1"}),
+        ("https://api.example.test/hm/play", {"video_id": "video-1", "book_id": "book-1"}),
+    ]
 
 
 def test_hongguo_drama_download_resumes_from_partial_file_and_reports_bytes(tmp_path, monkeypatch):
@@ -662,29 +792,167 @@ async def test_episode_api_marks_previously_downloaded_episodes(tmp_path, monkey
         def __init__(self, settings):
             pass
 
-        def episodes(self, book_id):
+        def episodes(self, book_id, source_platform):
             assert book_id == "book-1"
+            assert source_platform == "hg"
             return [
                 {"episode": 1, "video_id": "video-1", "title": "第一集"},
                 {"episode": 2, "video_id": "video-2", "title": "第二集"},
             ]
 
-    manifest = tmp_path / "data" / "hg" / "jobs" / "job-old" / "dramas" / "测试短剧" / "manifest.json"
-    manifest.parent.mkdir(parents=True)
-    manifest.write_text(json.dumps({"items": [{"episode": 1, "status": "succeeded", "path": "episode_01/video.mp4"}]}), encoding="utf-8")
+    episode_dir = tmp_path / "data" / "hg" / "jobs" / "job-old" / "dramas" / "测试短剧" / "episode_01"
+    episode_dir.mkdir(parents=True)
+    (episode_dir / "video.mp4").write_bytes(b"video")
+    (episode_dir / "source.json").write_text(
+        json.dumps({"title": "测试短剧", "book_id": "another-book", "source_platform": "dy", "episode": 1}),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
     monkeypatch.setattr(WebGUI, "HongguoDramaClient", FakeClient)
     monkeypatch.setattr(WebGUI.job_manager, "list_jobs", lambda: [{
         "job_id": "job-old",
         "crawler_type": "drama_download",
-        "job": {"extra": {"book_id": "book-1"}},
-        "artifacts": [{"path": str(manifest.relative_to(tmp_path))}],
+        "job": {"extra": {"book_id": "another-book", "source_platform": "dy"}},
     }])
 
-    response = await WebGUI.get_hongguo_drama_episodes(WebGUI.HongguoDramaEpisodesRequest(book_id="book-1"))
+    response = await WebGUI.get_hongguo_drama_episodes(
+        WebGUI.HongguoDramaEpisodesRequest(
+            book_id="book-1", source_platform="hg", title="测试短剧"
+        )
+    )
 
-    assert response["episodes"][0]["download_status"] == {"status": "downloaded", "job_id": "job-old", "path": "episode_01/video.mp4"}
+    assert response["episodes"][0]["download_status"]["status"] == "downloaded"
+    assert response["episodes"][0]["download_status"]["job_id"] == "job-old"
     assert "download_status" not in response["episodes"][1]
+
+
+def test_downloaded_episode_statuses_use_local_files_across_books_and_sources(tmp_path, monkeypatch):
+    other_episode = tmp_path / "data" / "hg" / "jobs" / "job-other" / "dramas" / "同名短剧" / "episode_01"
+    match_episode = tmp_path / "data" / "hg" / "jobs" / "job-match" / "dramas" / "同名短剧" / "episode_02"
+    for episode_dir, episode, book_id, source in (
+        (other_episode, 1, "book-other", "dy"),
+        (match_episode, 2, "book-1", "hg"),
+    ):
+        episode_dir.mkdir(parents=True)
+        (episode_dir / "video.mp4").write_bytes(b"video")
+        (episode_dir / "source.json").write_text(
+            json.dumps({"title": "同名短剧", "book_id": book_id, "source_platform": source, "episode": episode}),
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI.job_manager, "list_jobs", lambda: [
+        {
+            "job_id": "job-other", "crawler_type": "drama_download",
+            "job": {"extra": {"book_id": "book-other", "source_platform": "dy"}},
+        },
+        {
+            "job_id": "job-match", "crawler_type": "drama_download",
+            "job": {"extra": {"book_id": "book-1", "source_platform": "hg"}},
+        },
+    ])
+
+    statuses = WebGUI.downloaded_hongguo_episode_statuses("同名短剧")
+
+    assert set(statuses) == {1, 2}
+    assert statuses[1]["job_id"] == "job-other"
+    assert statuses[2]["job_id"] == "job-match"
+
+
+def test_downloaded_episode_statuses_do_not_filter_local_files_by_source(
+    tmp_path, monkeypatch
+):
+    hg_manifest = tmp_path / "data" / "hg" / "jobs" / "job-hg" / "manifest.json"
+    hm_manifest = tmp_path / "data" / "hg" / "jobs" / "job-hm" / "manifest.json"
+    for manifest, source, episode in ((hg_manifest, "hg", 1), (hm_manifest, "hm", 2)):
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        video_path = manifest.parent / f"episode_{episode:02d}" / "video.mp4"
+        video_path.parent.mkdir()
+        video_path.write_bytes(b"video")
+        (video_path.parent / "source.json").write_text(
+            json.dumps({"title": "同源短剧", "book_id": "shared-book", "source_platform": source, "episode": episode}),
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        WebGUI.job_manager,
+        "list_jobs",
+        lambda: [
+            {
+                "job_id": "job-hg",
+                "crawler_type": "drama_download",
+                "job": {"extra": {"book_id": "shared-book", "source_platform": "hg"}},
+            },
+            {
+                "job_id": "job-hm",
+                "crawler_type": "drama_download",
+                "job": {"extra": {"book_id": "shared-book", "source_platform": "hm"}},
+            },
+        ],
+    )
+
+    statuses = WebGUI.downloaded_hongguo_episode_statuses("同源短剧")
+
+    assert statuses[1]["status"] == "downloaded"
+    assert statuses[1]["job_id"] == "job-hg"
+    assert statuses[2]["status"] == "downloaded"
+    assert statuses[2]["job_id"] == "job-hm"
+    assert statuses[2]["path"].replace("\\", "/").endswith("job-hm/episode_02")
+
+
+def test_downloaded_episode_statuses_accept_manifest_backed_local_files(tmp_path, monkeypatch):
+    manifest = tmp_path / "data" / "hg" / "jobs" / "job-manifest" / "dramas" / "只留清单短剧" / "manifest.json"
+    episode_file = manifest.parent / "episode_03" / "video.mp4"
+    episode_file.parent.mkdir(parents=True)
+    episode_file.write_bytes(b"video")
+    manifest.write_text(
+        json.dumps(
+            {
+                "title": "只留清单短剧",
+                "items": [{"episode": 3, "path": "episode_03/video.mp4"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+
+    statuses = WebGUI.downloaded_hongguo_episode_statuses("只留清单短剧")
+
+    assert statuses[3]["status"] == "downloaded"
+    assert statuses[3]["job_id"] == "job-manifest"
+
+
+@pytest.mark.asyncio
+async def test_download_status_reports_a_local_douyin_full_drama(tmp_path, monkeypatch):
+    episode_dir = tmp_path / "data" / "hg" / "jobs" / "job-douyin-full" / "dramas" / "抖音全集短剧" / "douyin_fallback" / "item_001"
+    episode_dir.mkdir(parents=True)
+    (episode_dir / "video.mp4").write_bytes(b"video")
+    (episode_dir / "source.json").write_text(
+        json.dumps(
+            {
+                "title": "抖音全集短剧",
+                "source_platform": "dy",
+                "source": "douyin_fallback",
+                "episode_metadata": {
+                    "episode_start": 1,
+                    "episode_end": 96,
+                    "episode_count": 96,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+
+    response = await WebGUI.get_hongguo_drama_download_status(
+        WebGUI.HongguoDramaDownloadStatusRequest(title="抖音全集短剧")
+    )
+
+    assert response == {
+        "douyin_full_downloaded": True,
+        "episode_start": 1,
+        "episode_end": 96,
+        "episode_count": 96,
+    }
 
 
 @pytest.mark.asyncio
@@ -708,6 +976,204 @@ async def test_drama_search_api_hides_raw_provider_record(tmp_path, monkeypatch)
 
     assert response["status"] == "success"
     assert response["candidates"] == [{"book_id": "book-1", "title": "测试短剧"}]
+
+
+@pytest.mark.asyncio
+async def test_review_capture_proxy_submits_title_and_limit(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        status_code = 202
+
+        def json(self):
+            return {"job_id": "review-job-1", "title": "测试短剧", "limit": 25, "status": "queued"}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, *, json):
+            calls.append((url, json))
+            return FakeResponse()
+
+    monkeypatch.setattr(WebGUI.httpx, "AsyncClient", FakeClient)
+
+    response = await WebGUI.start_hongguo_review_capture(
+        WebGUI.HongguoReviewCaptureRequest(title="测试短剧", limit=25)
+    )
+
+    assert calls == [
+        ("http://127.0.0.1:8766/v1/reviews/capture/limited", {"title": "测试短剧", "limit": 25})
+    ]
+    assert response == {"job": {"job_id": "review-job-1", "title": "测试短剧", "limit": 25, "status": "queued"}, "reviews": []}
+
+
+@pytest.mark.asyncio
+async def test_review_capture_proxy_uses_all_endpoint_when_requested(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        status_code = 202
+
+        def json(self):
+            return {"job_id": "review-job-all", "title": "测试短剧", "limit": None, "status": "queued"}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, *, json):
+            calls.append((url, json))
+            return FakeResponse()
+
+    monkeypatch.setattr(WebGUI.httpx, "AsyncClient", FakeClient)
+
+    await WebGUI.start_hongguo_review_capture(
+        WebGUI.HongguoReviewCaptureRequest(title="测试短剧", all_reviews=True)
+    )
+
+    assert calls == [
+        ("http://127.0.0.1:8766/v1/reviews/capture/all", {"title": "测试短剧"})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_review_capture_status_reads_completed_csv_for_page_rendering(tmp_path, monkeypatch):
+    export_root = tmp_path / "exports"
+    output = export_root / "20260724" / "review_list_1.csv"
+    output.parent.mkdir(parents=True)
+    output.write_text(
+        "剧名,series_id,评论ID,用户名,剧评内容,评论时间,点赞数\n测试短剧,1,comment-1,用户甲,很好看,2026-07-24 12:00:00,8\n",
+        encoding="utf-8-sig",
+    )
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "job_id": "review-job-1", "title": "测试短剧", "limit": 25,
+                "status": "completed", "review_count": 1, "source_total": 1,
+                "output_path": str(output),
+            }
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, _url):
+            return FakeResponse()
+
+    monkeypatch.setattr(WebGUI, "HONGGUO_REVIEW_CAPTURE_EXPORT_ROOT", export_root.resolve())
+    monkeypatch.setattr(WebGUI.httpx, "AsyncClient", FakeClient)
+
+    response = await WebGUI.get_hongguo_review_capture_job("review-job-1")
+
+    assert response["job"]["status"] == "completed"
+    assert response["reviews"] == [{
+        "comment_id": "comment-1", "author": "用户甲", "content": "很好看",
+        "created_at": "2026-07-24 12:00:00", "like_count": "8",
+    }]
+
+
+@pytest.mark.asyncio
+async def test_review_capture_download_converts_completed_csv_to_excel(tmp_path, monkeypatch):
+    export_root = tmp_path / "exports"
+    output = export_root / "20260724" / "review_list_1.csv"
+    output.parent.mkdir(parents=True)
+    output.write_text(
+        "剧名,series_id,评论ID,用户名,剧评内容,评论时间,点赞数\n测试短剧,1,comment-1,用户甲,很好看,2026-07-24 12:00:00,8\n",
+        encoding="utf-8-sig",
+    )
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"job_id": "review-job-1", "status": "completed", "output_path": str(output)}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, _url):
+            return FakeResponse()
+
+    monkeypatch.setattr(WebGUI, "HONGGUO_REVIEW_CAPTURE_EXPORT_ROOT", export_root.resolve())
+    monkeypatch.setattr(WebGUI.httpx, "AsyncClient", FakeClient)
+
+    response = await WebGUI.download_hongguo_review_capture("review-job-1", format="xlsx")
+    body = b"".join([chunk async for chunk in response.body_iterator])
+
+    import openpyxl
+
+    workbook = openpyxl.load_workbook(io.BytesIO(body))
+    sheet = workbook.active
+    assert response.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument")
+    assert sheet.title == "剧评"
+    assert [cell.value for cell in sheet[1]] == ["剧名", "series_id", "评论ID", "用户名", "剧评内容", "评论时间", "点赞数"]
+    assert [cell.value for cell in sheet[2]][:5] == ["测试短剧", "1", "comment-1", "用户甲", "很好看"]
+
+
+@pytest.mark.asyncio
+async def test_review_capture_status_returns_failed_job_without_gateway_error(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "job_id": "review-job-1", "title": "测试短剧", "limit": 25,
+                "status": "failed", "error": "title was not found",
+            }
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, _url):
+            return FakeResponse()
+
+    monkeypatch.setattr(WebGUI.httpx, "AsyncClient", FakeClient)
+
+    response = await WebGUI.get_hongguo_review_capture_job("review-job-1")
+
+    assert response == {
+        "job": {
+            "job_id": "review-job-1", "title": "测试短剧", "limit": 25,
+            "status": "failed", "error": "title was not found",
+        },
+        "reviews": [],
+    }
 
 
 @pytest.mark.asyncio
@@ -763,7 +1229,7 @@ async def test_download_search_calls_douyin_when_no_exact_hongguo_match(tmp_path
         def __init__(self, settings):
             pass
 
-        def search_exact(self, title):
+        def search_exact_all_sources(self, title):
             return []
 
     class FakeFallbackClient:
@@ -777,8 +1243,36 @@ async def test_download_search_calls_douyin_when_no_exact_hongguo_match(tmp_path
     response = await WebGUI.search_hongguo_drama_for_download(WebGUI.HongguoDramaSearchRequest(title="测试短剧"))
 
     assert response["source"] == "douyin_fallback"
-    assert response["fallback_reason"] == "红果接口未返回剧名完全匹配结果"
+    assert response["fallback_reason"] == "七个剧目源均未返回剧名完全匹配结果"
     assert response["candidates"][0]["aweme_id"] == "aweme-9"
+
+
+@pytest.mark.asyncio
+async def test_download_search_waits_for_all_sources_before_douyin_fallback(
+    tmp_path, monkeypatch
+):
+    class HongguoClient:
+        def __init__(self, settings):
+            pass
+
+        def search_exact_all_sources(self, title):
+            return [{"book_id": "book-9", "title": title, "source_platform": "redguo"}]
+
+    async def legacy_timeout_must_not_be_used(*args, **kwargs):
+        raise AssertionError("七个剧目源检索未完成前不能以超时降级到抖音")
+
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI, "HongguoDramaClient", HongguoClient)
+    monkeypatch.setattr(WebGUI.asyncio, "wait_for", legacy_timeout_must_not_be_used)
+
+    response = await WebGUI.search_hongguo_drama_for_download(
+        WebGUI.HongguoDramaSearchRequest(title="测试短剧")
+    )
+
+    assert response["source"] == "hongguo"
+    assert response["candidates"] == [
+        {"book_id": "book-9", "title": "测试短剧", "source_platform": "redguo"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -787,7 +1281,7 @@ async def test_download_search_does_not_call_douyin_when_exact_hongguo_match_exi
         def __init__(self, settings):
             pass
 
-        def search_exact(self, title):
+        def search_exact_all_sources(self, title):
             return [{"book_id": "book-9", "title": title, "raw": {"private": True}}]
 
     class UnexpectedFallbackClient:
@@ -810,7 +1304,7 @@ async def test_download_search_reports_douyin_fallback_when_douyin_is_unavailabl
         def __init__(self, settings):
             pass
 
-        def search_exact(self, title):
+        def search_exact_all_sources(self, title):
             return []
 
     class BrokenFallbackClient:
@@ -833,7 +1327,7 @@ async def test_download_search_returns_json_when_douyin_browser_startup_crashes(
         def __init__(self, settings):
             pass
 
-        def search_exact(self, title):
+        def search_exact_all_sources(self, title):
             return []
 
     class CrashedFallbackClient:

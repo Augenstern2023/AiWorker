@@ -1,4 +1,4 @@
 {% extends "layouts/base.html" %}
 
 {% block content %}{% include "common/workspace/admin_data.html" %}{% include "common/workspace/admin_data_modals.html" %}{% endblock %}
-{% block scripts %}<script src="/static/js/admin/workspace.js"></script>{% endblock %}
+{% block scripts %}<script src="/static/js/admin/workspace.js?v={{ asset_version }}"></script>{% endblock %}

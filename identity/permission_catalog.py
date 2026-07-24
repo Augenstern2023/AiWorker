@@ -20,6 +20,7 @@ _PERMISSION_CODES = (
     "page.review",
     "page.team_management",
     "page.admin.delivery",
+    "page.data_management",
     "rank.read",
     "analytics.read",
     "topic.read",
@@ -30,6 +31,7 @@ _PERMISSION_CODES = (
     "drama.download",
     "drama.transcript.read",
     "data.media.preview",
+    "data.media.delete",
     "breakdown.read",
     "breakdown.read.approved",
     "breakdown.generate",
@@ -80,8 +82,7 @@ _PERMISSION_CODES = (
     "workflow.cancel",
     "version.read.managed",
     "version.compare",
-    "version.approve",
-    "version.return",
+
     "job.create.selection",
     "job.create.creative",
     "job.create.writing",
@@ -115,7 +116,7 @@ PERMISSION_DEPENDENCIES = {
         "page.writing",
     },
     "beats.edit": {"beats.read", "outline.read.approved", "page.writing"},
-    "version.approve": {"version.read.managed", "version.compare", "page.review"},
+
     "workflow.assign": {"workflow.read.managed", "project.read.managed", "page.review"},
     "export.create": {"approved_content.read", "page.admin.delivery"},
 }
@@ -128,6 +129,7 @@ _NON_DELEGABLE_PERMISSIONS = {
     "page.review",
     "page.team_management",
     "page.admin.delivery",
+    "page.data_management",
     "project.read.managed",
     "project.manage",
     "project.member.manage",
@@ -139,8 +141,7 @@ _NON_DELEGABLE_PERMISSIONS = {
     "workflow.cancel",
     "version.read.managed",
     "version.compare",
-    "version.approve",
-    "version.return",
+
     "audit.read",
     "audit.read.project",
     "approved_content.read",
@@ -173,7 +174,7 @@ DEFAULT_ROLES = (
     RoleSeed(
         code="selection_operator",
         name="选品运营",
-        description="整理榜单、选题、素材与剧目拆解，并提交成果审批。",
+        description="整理榜单、选题、素材与剧目拆解，并直接完成阶段成果。",
         is_system=True,
         permissions=_scoped(
             """page.selection rank.read analytics.read topic.read topic.generate topic.edit
@@ -187,7 +188,7 @@ DEFAULT_ROLES = (
     RoleSeed(
         code="creative_planner",
         name="创意策划",
-        description="将批准的拆解转化为创作方案、任务书和人物关系。",
+        description="将已完成的拆解转化为创作方案、任务书和人物关系。",
         is_system=True,
         permissions=_scoped(
             """page.planning project.read.assigned project.create project.edit.own_draft
@@ -202,7 +203,7 @@ DEFAULT_ROLES = (
     RoleSeed(
         code="screenwriter",
         name="编剧",
-        description="依据批准的创作方案完成人物、全剧大纲与单集节拍。",
+        description="依据已完成的创作方案完成人物、全剧大纲与单集节拍。",
         is_system=True,
         permissions=_scoped(
             """page.writing project.read.assigned brief.read.approved character.read.approved
@@ -216,13 +217,13 @@ DEFAULT_ROLES = (
     RoleSeed(
         code="project_owner",
         name="项目负责人",
-        description="负责项目组织、任务分配、版本审批和阶段流转。",
+        description="负责项目组织、任务分配和阶段流转。",
         is_system=True,
         permissions=_scoped(
             """page.review page.team_management project.read.managed project.manage project.member.manage
             project.archive workflow.read.managed workflow.assign workflow.reassign
             workflow.reclaim workflow.cancel version.read.managed version.compare
-            version.approve version.return job.read.project audit.read.project
+            job.read.project audit.read.project page.data_management data.media.preview data.media.delete
             identity.user.read identity.user.create identity.user.manage_created
             identity.role.read identity.role.create identity.role.manage_created""",
             "managed_projects",

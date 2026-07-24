@@ -5,6 +5,14 @@ function localDateString(date = new Date()) {
             return `${year}-${month}-${day}`;
         }
 
+        function creativePlatformPreference() {
+            try {
+                return window.localStorage.getItem('aiworker.selection.hits.platform') === 'hg' ? 'hg' : 'dy';
+            } catch (_) {
+                return 'dy';
+            }
+        }
+
         function appData() {
             const workspace = {
                 page: document.body.dataset.workspacePage || '',
@@ -41,6 +49,7 @@ function localDateString(date = new Date()) {
                 files: [],
                 filteredFiles: [],
                 selectedFilePaths: [],
+                filePage: {total: 0, currentCursor: null, nextCursor: null, cursorHistory: [], loading: false, searchTimer: null, selectionMode: 'explicit', selectionFilter: 'all', selectionQuery: '', excludedPaths: [], operation: null},
                 batchDeleteMode: false,
                 filePreviewModal: null,
                 previewFile: {status: 'idle', file: null, kind: '', url: '', content: '', message: ''},
@@ -69,6 +78,7 @@ function localDateString(date = new Date()) {
                 audioAnalysis: {status: 'idle'},
                 dramaAnalysis: {
                     title: '',
+                    platform: 'hg',
                     candidates: [],
                     selected: null,
                     episodes: [],
@@ -94,7 +104,7 @@ function localDateString(date = new Date()) {
                     settings: {config_url: '', has_activation_code: false},
                     activationCode: ''
                 },
-                creative: {platform: 'dy', items: [], loading: false, error: '', breakdown: null},
+                creative: {platform: creativePlatformPreference(), items: [], loading: false, error: '', breakdown: null},
                 topicLibrary: {platform: '', lifecycleStatus: '', category: '', minScore: '', hasLocked: '', items: [], loading: false, error: '', breakdown: null},
                 generatedContentPreview: {topic: null, project: null, stage: '', versions: [], selectedResourceId: '', snapshot: null, loading: false, error: ''},
                 breakdownEditor: {source: '', title: '', record: null, content: {}, fieldGuide: [], saving: false, error: ''},
@@ -108,11 +118,14 @@ function localDateString(date = new Date()) {
                     create: {topic_id: '', breakdown_id: '', name: '', target_platform: '', target_episode_count: 20, creation_request_id: ''},
                     directionCount: 3, selectedBlueprintId: null, selectedEpisode: 1,
                     jobId: '', jobMessage: '', jobProgress: {}, jobStatus: '', paused: false, notifiedStatus: '',
+                    jobLogs: [], jobLogCount: 0, showJobLogs: false,
                     jobStartedAt: 0, jobElapsedSeconds: 0,
                     startingAction: '', activeAction: '',
                     saveState: {}, notice: '', noticeType: 'success', noticeTimer: null
                 },
                 dramaDownload: {title: '', topic: null, source: 'hongguo', fallbackReason: '', candidates: [], selectedCandidate: null, selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], relatedVideos: [], missingEpisodes: [], seriesRangeLabel: '', seriesWarnings: [], selectedEpisodes: [], allEpisodes: false, searching: false, episodesLoading: false, starting: false, error: '', jobId: '', jobStatus: '', progress: {}, progressMessage: '', paused: false, finished: false, background: false, showFiles: false, logs: [], logCount: 0},
+                dramaReviews: {topic: null, title: '', platform: 'hg', limit: 100, allReviews: false, format: 'csv', jobId: '', status: '', reviewCount: 0, sourceTotal: 0, items: [], loading: false, polling: false, error: ''},
+                dramaReviewJobs: {},
                 analyticsOverview: {},
                 analyticsTags: {categories: [], selling_points: [], hooks: [], plot_tags: []},
                 analyticsTrends: {points: []},
@@ -171,7 +184,15 @@ function localDateString(date = new Date()) {
                     this.filePreviewModal = this.modal('filePreviewModal');
                     document.getElementById('filePreviewModal')?.addEventListener('hidden.bs.modal', () => this.closeFilePreview());
                     this.topicTranscriptPreviewModal = this.modal('topicTranscriptPreviewModal');
+                    this.dramaReviewCaptureModal = this.modal('dramaReviewCaptureModal');
+                    document.getElementById('dramaReviewCaptureModal')?.addEventListener(
+                        'hidden.bs.modal',
+                        () => this.finishDisplayedDramaReviewJob?.()
+                    );
                     this.dramaDownloadModal = this.modal('dramaDownloadModal');
+                    document.getElementById('dramaDownloadModal')?.addEventListener('hide.bs.modal', () => {
+                        document.activeElement?.blur();
+                    });
                     document.getElementById('dramaDownloadModal')?.addEventListener('hidden.bs.modal', () => {
                         if (this.dramaDownload.jobId && !this.dramaDownload.finished) this.dramaDownload.background = true;
                     });
@@ -201,16 +222,16 @@ function localDateString(date = new Date()) {
                         await this.fetchTopicLibrary();
                     } else if (this.page === 'selection-hits') {
                         await this.fetchCreativeTopics();
-                    } else if (['selection-topics', 'selection-breakdowns'].includes(this.page)) {
+                    } else if (this.page === 'selection-topics') {
                         if (typeof this.fetchTopicLibrary !== 'function') {
                             throw new Error('选题模块加载失败，请刷新页面后重试');
                         }
                         await this.fetchTopicLibrary();
                     }
-                    if (['selection-hits', 'selection-topics', 'selection-breakdowns'].includes(this.page)) {
+                    if (['selection-hits', 'selection-topics'].includes(this.page)) {
                         this.restoreLatestActiveDramaDownload?.();
                     }
-                    if (this.page.startsWith('planning-') || this.page.startsWith('writing-') || this.page === 'admin-deliveries') {
+                    if (this.page.startsWith('planning-') || this.page.startsWith('writing-')) {
                         const queryProjectId = new URLSearchParams(window.location.search).get('project_id');
                         const pathProjectId = window.location.pathname.match(/\/projects\/([^/]+)/)?.[1];
                         await this.fetchCreativeProjects(queryProjectId || pathProjectId || null);
@@ -266,14 +287,6 @@ function localDateString(date = new Date()) {
                         if (!response.ok) throw new Error('任务加载失败');
                         const approvalStages = new Set(['brief', 'characters', 'outline', 'beats', 'delivery']);
                         this.workflowTasks = (await response.json()).filter(task => approvalStages.has(task.task_type));
-                        await Promise.all(this.workflowTasks.map(async task => {
-                            if (task.status !== 'waiting_review' || (!task.can_approve && !task.can_return)) return;
-                            const submissionsResponse = await aiworkerApi.request(`/api/workflow/tasks/${task.id}/submissions`);
-                            if (!submissionsResponse.ok) return;
-                            const submissions = await submissionsResponse.json();
-                            const submitted = submissions.filter(item => item.status === 'submitted').at(-1);
-                            task.submission_id = submitted?.id || '';
-                        }));
                         this.renderWorkflowTaskRows(container);
                     } catch (error) {
                         this.workflowTaskError = error.message || '任务加载失败';
@@ -287,8 +300,7 @@ function localDateString(date = new Date()) {
                     container.replaceChildren();
                     const groups = [
                         {title: '待领取', states: ['pool']},
-                        {title: '处理中', states: ['assigned', 'in_progress', 'returned']},
-                        {title: '待审批', states: ['waiting_review']},
+                        {title: '处理中', states: ['assigned', 'in_progress']},
                     ];
                     let visibleRows = 0;
                     groups.forEach(group => {
@@ -314,7 +326,7 @@ function localDateString(date = new Date()) {
                     });
                     if (!visibleRows) {
                         container.className = 'alert alert-light border';
-                        container.textContent = '暂无待处理审批任务。';
+                        container.textContent = '暂无待处理任务。';
                     }
                 },
 
@@ -340,19 +352,8 @@ function localDateString(date = new Date()) {
                     if (task.status === 'pool' && task.can_assign) {
                         actions.appendChild(this.workflowTaskButton('bi-person-plus', '分配', () => this.openWorkflowTaskWindow(task)));
                     }
-                    if (['assigned', 'returned'].includes(task.status) && task.can_start) {
+                    if (task.status === 'assigned' && task.can_start) {
                         actions.appendChild(this.workflowTaskButton('bi-play-fill', '开始', () => this.startWorkflowTask(task)));
-                    }
-                    if (
-                        task.status === 'waiting_review'
-                        && task.submission_id
-                        && (task.can_approve || task.can_return)
-                    ) {
-                        actions.appendChild(this.workflowTaskButton(
-                            'bi-clipboard-check',
-                            '去审批',
-                            () => this.openWorkflowReview(task)
-                        ));
                     }
                     row.append(identity, statusCell, actions);
                     return row;
@@ -386,8 +387,7 @@ function localDateString(date = new Date()) {
                 workflowTaskStatusLabel(status) {
                     return {
                         pool: '待领取', assigned: '已分配', in_progress: '处理中',
-                        waiting_review: '待审批', returned: '已退回', completed: '已完成',
-                        cancelled: '已取消'
+                        completed: '已完成', cancelled: '已取消'
                     }[status] || status || '-';
                 },
 
@@ -542,28 +542,6 @@ function localDateString(date = new Date()) {
                     await this.runWorkflowTaskWrite(`/api/workflow/tasks/${task.id}/start`);
                 },
 
-                async approveWorkflowSubmission(task) {
-                    await this.runWorkflowTaskWrite(`/api/workflow/submissions/${task.submission_id}/approve`);
-                },
-
-                openWorkflowReview(task) {
-                    if (!task?.id) return;
-                    window.location.assign(
-                        `/review/approvals?task_id=${encodeURIComponent(task.id)}`
-                    );
-                },
-
-                async returnWorkflowSubmission(task) {
-                    const reviewComment = window.prompt('请输入退回原因');
-                    if (!reviewComment?.trim()) return;
-                    await this.runWorkflowTaskWrite(
-                        `/api/workflow/submissions/${task.submission_id}/return`,
-                        {
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({review_comment: reviewComment.trim()}),
-                        }
-                    );
-                },
 
                 async runWorkflowTaskWrite(url, options = {}) {
                     const response = await aiworkerApi.request(url, {method: 'POST', ...options});
@@ -851,7 +829,7 @@ function localDateString(date = new Date()) {
             const moduleCapabilities = Object.assign({}, ...modules.map((factory) => factory()));
             Object.assign(workspace, moduleCapabilities);
             if (
-                ['selection-dashboard', 'selection-hits', 'selection-topics', 'selection-breakdowns'].includes(workspace.page)
+                ['selection-dashboard', 'selection-hits', 'selection-topics'].includes(workspace.page)
                 && typeof workspace.fetchTopicLibrary !== 'function'
             ) {
                 throw new Error('选题模块加载失败，请刷新页面后重试');

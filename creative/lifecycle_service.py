@@ -14,7 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from creative.repository import CreativeRepository
-from creative.transcript_assets import index_transcript_bundles, normalize_title
+from creative.transcript_assets import (
+    index_downloaded_video_assets,
+    index_transcript_bundles,
+    normalize_title,
+)
 
 
 LIFECYCLE_LABELS = {
@@ -106,12 +110,15 @@ class TopicLifecycleService:
 
     def enrich_topics(self, topics: list[dict[str, Any]]) -> list[dict[str, Any]]:
         transcript_index = index_transcript_bundles(self.workspace_root)
+        video_index = index_downloaded_video_assets(self.workspace_root)
         jobs = self._jobs_by_title()
         projects = self._projects_by_title()
         enriched = []
         for topic in topics:
             title_key = normalize_title(topic.get("title"))
-            episode_count = len((transcript_index.get(title_key) or {}).get("episodes") or [])
+            transcript_count = len((transcript_index.get(title_key) or {}).get("episodes") or [])
+            video_count = len(video_index.get(title_key) or [])
+            episode_count = max(transcript_count, video_count)
             status, project_id = self._resolve_topic(
                 topic,
                 episode_count,
@@ -210,7 +217,7 @@ class TopicLifecycleService:
         if "breakdown" in jobs:
             return "pending_breakdown", None
         if episode_count:
-            return "downloaded", None
+            return "pending_breakdown", None
         if "download" in jobs:
             return "pending_download", None
         return "adopted", None

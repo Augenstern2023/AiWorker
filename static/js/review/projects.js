@@ -10,8 +10,6 @@
         pool: '待分配',
         assigned: '已分配',
         in_progress: '进行中',
-        waiting_review: '待审批',
-        returned: '已退回',
         completed: '已完成',
         cancelled: '已取消',
     };
@@ -83,13 +81,7 @@
             projectLink.title = '查看项目';
             projectLink.setAttribute('aria-label', '查看项目');
             projectLink.innerHTML = '<i class="bi bi-folder2-open" aria-hidden="true"></i>';
-            const approvalLink = document.createElement('a');
-            approvalLink.className = 'btn btn-sm btn-outline-success';
-            approvalLink.href = `/review/approvals?project_id=${encodeURIComponent(project.id)}`;
-            approvalLink.title = '查看审批';
-            approvalLink.setAttribute('aria-label', '查看审批');
-            approvalLink.innerHTML = '<i class="bi bi-clipboard-check" aria-hidden="true"></i>';
-            actions.append(projectLink, approvalLink);
+            actions.append(projectLink);
             row.appendChild(actions);
             return row;
         }));

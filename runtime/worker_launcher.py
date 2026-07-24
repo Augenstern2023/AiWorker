@@ -16,6 +16,8 @@ from pathlib import Path
 
 
 def build_worker_command(job_file: str | Path, platform: str = "", crawler_type: str = "") -> list[str]:
+    if platform == "data" and crawler_type == "file_operation":
+        return ["uv", "run", "python", "-m", "agents.data_file_operation_worker", "--job-file", str(job_file)]
     if platform == "creative" and crawler_type == "breakdown_generate":
         return ["uv", "run", "python", "-m", "creative.breakdown_worker", "--job-file", str(job_file)]
     if platform == "creative" and crawler_type == "phase4_generate":
@@ -30,6 +32,8 @@ def build_worker_command(job_file: str | Path, platform: str = "", crawler_type:
         return ["uv", "run", "python", "-m", "agents.hongguo_csv_worker", "--job-file", str(job_file)]
     if platform == "dy" and crawler_type == "rank":
         return ["uv", "run", "python", "-m", "agents.douyin_rank_worker", "--job-file", str(job_file)]
+    if platform == "dy" and crawler_type == "drama_reviews":
+        return ["uv", "run", "python", "-m", "agents.douyin_review_worker", "--job-file", str(job_file)]
     return ["uv", "run", "main.py", "--job-file", str(job_file)]
 
 

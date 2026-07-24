@@ -133,12 +133,11 @@ def test_project_author_owns_drafts_and_managed_reader_sees_approved_only(
     direct_adopt = clients["selector"].patch(
         f"/api/creative/topics/{pending['id']}", json={"status": "adopted"}
     )
-    assert direct_adopt.status_code == 409
-    assert creative.get_topic(pending["id"])["status"] == "pending_review"
+    assert direct_adopt.status_code == 200, direct_adopt.text
+    assert creative.get_topic(pending["id"])["status"] == "adopted"
     candidates = clients["owner"].get("/api/creative/topics/workflow-candidates")
     assert candidates.status_code == 200
-    candidate = next(item for item in candidates.json()["items"] if item["id"] == pending["id"])
-    assert set(candidate) == {"id", "title", "platform", "category", "status", "captured_at"}
+    assert pending["id"] not in {item["id"] for item in candidates.json()["items"]}
 
     author_principal = permissions.principal_for_user(users["author"]["id"], "author")
     assert author_principal is not None

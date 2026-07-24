@@ -23,15 +23,17 @@ from creative.hit_breakdown import breakdown_field_guide, personalize_breakdown_
 from creative.imitation_service import assess_similarity_risk
 from creative.lifecycle_service import TopicLifecycleService, content_fingerprint
 from creative.repository import CreativeRepository
+from creative.selection_stage_service import SelectionStageService
 from creative.workflow_adapter import CreativeWorkflowAdapter
-from creative.workflow_bootstrap import WorkflowBootstrapService
+
 from creative.schema import (
     BlueprintGenerateRequest,
     BlueprintUpdateRequest,
     BriefLockRequest,
     CharacterBatchRequest,
+    CreativeLockRequest,
     CreativeItemUpdateRequest,
-    CreativeSubmitRequest,
+
     EpisodeBeatsRequest,
     OutlineBatchRequest,
     PlanningAssignmentRequest,
@@ -47,7 +49,8 @@ from identity.dependencies import current_principal, require_permission
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.schema import Principal
-from workflow.repository import WorkflowRepository
+from workflow.repository import SYSTEM_ACTOR, WorkflowRepository
+from workflow.transition_service import TransitionService
 
 
 class TopicGenerateRequest(BaseModel):
@@ -60,9 +63,6 @@ class TopicUpdateRequest(BaseModel):
     status: str
     decision_note: str = ""
 
-
-class TopicWorkflowBootstrapRequest(BaseModel):
-    project_id: str | None = None
 
 
 class BreakdownCreateRequest(BaseModel):
@@ -222,11 +222,41 @@ def _status_label(value: Any) -> str:
         "draft": "草稿",
         "locked": "已锁定",
         "brief_locked": "Brief 已锁定",
-        "submitted": "待审批",
-        "approved": "已批准",
-        "returned": "已退回",
+        "submitted": "历史待处理",
+        "approved": "历史完成",
+        "returned": "历史退回",
         "superseded": "已替代",
     }.get(str(value or ""), str(value or "-"))
+
+
+def build_breakdown_markdown(breakdown: dict[str, Any]) -> str:
+    content = breakdown.get("content") or {}
+    title = str(content.get("title") or "剧目拆解").strip()
+    lines = [
+        f"# {title}",
+        "",
+        f"- 拆解版本：v{breakdown.get('version') or 1}",
+        f"- 状态：{_status_label(breakdown.get('status'))}",
+        "",
+    ]
+    seen: set[str] = set()
+    for field in personalize_breakdown_field_guide(content):
+        key = str(field.get("key") or "")
+        if not key or key not in content:
+            continue
+        seen.add(key)
+        lines.extend([f"## {field.get('label') or key}", ""])
+        lines.extend(_markdown_value(content[key], 3))
+    for key, value in content.items():
+        if key in seen:
+            continue
+        lines.extend([f"## {str(key).replace('_', ' ')}", ""])
+        lines.extend(_markdown_value(value, 3))
+    risks = breakdown.get("risks") or []
+    if risks:
+        lines.extend(["## 风险提示", ""])
+        lines.extend(_markdown_value(risks, 3))
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def build_beats_markdown(project: dict[str, Any], items: list[dict[str, Any]]) -> str:
@@ -380,10 +410,14 @@ def build_creative_router(
         IdentityRepository(Path(runtime_dir) / "system" / "system.db")
     )
     workflow_adapter = CreativeWorkflowAdapter(repository, workflow_repository)
+    workflow_transitions = TransitionService(
+        workflow_repository, creative_adapter=workflow_adapter
+    )
+    workflow_transitions.migrate_pending_creative_approvals()
     service = TopicService(str(root))
     workspace_root = Path(root).resolve()
     lifecycle_service = TopicLifecycleService(repository, workspace_root, job_manager)
-    bootstrap_service = WorkflowBootstrapService(repository, workflow_repository)
+
 
     def creative_resource_scope(
         request: Request,
@@ -771,6 +805,8 @@ def build_creative_router(
     ) -> str:
         if principal is None:
             raise HTTPException(401, "登录已失效，请重新登录")
+        if resource_type == "brief" and project_id is None and topic_id is not None:
+            return str(task_id or "")
         resolved_task_id = task_id
         if not resolved_task_id:
             candidates = [
@@ -839,7 +875,11 @@ def build_creative_router(
             raise HTTPException(400, "platform must be dy or hg")
         try:
             repository.upsert_topics(service.generate(payload.platform, payload.date, payload.limit))
-            topics = repository.list_topics(platform=payload.platform, limit=payload.limit)
+            topics = repository.list_topics(
+                platform=payload.platform,
+                status="pending_review",
+                limit=payload.limit,
+            )
             return {"status": "success", "items": lifecycle_service.enrich_topics(topics)}
         except Exception as exc:
             raise HTTPException(500, str(exc)) from exc
@@ -855,6 +895,7 @@ def build_creative_router(
         captured_date: str = "",
         has_locked_breakdown: bool | None = None,
         lifecycle_status: str = "",
+        all: bool = False,
         limit: int = Query(50, ge=1, le=500),
     ):
         approved_context_only = (
@@ -863,6 +904,7 @@ def build_creative_router(
         if approved_context_only:
             status = "adopted"
             has_locked_breakdown = True
+        repository_limit = None if all else (500 if lifecycle_status else limit)
         topics = repository.list_topics(
             platform=platform,
             status=status,
@@ -871,7 +913,7 @@ def build_creative_router(
             max_score=max_score,
             captured_date=captured_date,
             has_locked_breakdown=has_locked_breakdown,
-            limit=500 if lifecycle_status else limit,
+            limit=repository_limit,
         )
         items = lifecycle_service.enrich_topics(topics)
         for item in items:
@@ -888,29 +930,13 @@ def build_creative_router(
                 max_score=max_score,
                 captured_date=captured_date,
                 has_locked_breakdown=has_locked_breakdown,
-                limit=500 if lifecycle_status else limit,
+                limit=repository_limit,
             )
             items = lifecycle_service.enrich_topics(topics)
         if lifecycle_status:
             items = [item for item in items if item.get("lifecycle_status") == lifecycle_status]
-        return {"items": items[:limit]}
+        return {"items": items if all else items[:limit]}
 
-    @router.get("/topics/workflow-candidates")
-    async def workflow_candidates(
-        _: Principal = Depends(require_permission("project.manage")),
-    ):
-        topics = repository.list_topics(status="pending_review", limit=500)
-        return {
-            "items": [
-                {
-                    key: topic.get(key)
-                    for key in (
-                        "id", "title", "platform", "category", "status", "captured_at"
-                    )
-                }
-                for topic in topics
-            ]
-        }
 
     @router.get("/topics/{topic_id}")
     async def get_topic(
@@ -931,7 +957,7 @@ def build_creative_router(
             and "topic.read" not in principal.permissions
             and not topic.get("locked_breakdown_id")
         ):
-            raise HTTPException(403, "只能读取已批准的选题上下文")
+            raise HTTPException(403, "只能读取已完成的选题上下文")
         return topic
 
     @router.post("/topics/{topic_id}/planning-assignment")
@@ -1091,39 +1117,34 @@ def build_creative_router(
     async def update_topic(
         topic_id: int,
         payload: TopicUpdateRequest,
+        request: Request,
         principal: Principal = Depends(current_principal),
     ):
-        if payload.status == "adopted":
-            raise HTTPException(
-                409, "topic adoption requires an approved topic_decision workflow"
-            )
         try:
-            topic = repository.update_topic(topic_id, payload.status, payload.decision_note)
+            before = repository.get_topic(topic_id)
+            topic = repository.decide_topic(
+                topic_id, payload.status, payload.decision_note, principal.user_id
+            )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         if not topic:
             raise HTTPException(404, "topic not found")
+        audit_service = getattr(request.app.state, "audit_service", None)
+        if isinstance(audit_service, AuditService):
+            audit_service.record(
+                actor=principal,
+                action="selection.topic_decision",
+                target_type="topic",
+                target_id=str(topic_id),
+                project_id=None,
+                before=before,
+                after=topic,
+                reason=payload.decision_note or None,
+                result="success",
+                request=request,
+            )
         return lifecycle_service.enrich_topic(topic_id)
 
-    @router.post("/topics/{topic_id}/workflow")
-    async def bootstrap_topic_workflow(
-        topic_id: int,
-        request: Request,
-        payload: TopicWorkflowBootstrapRequest | None = None,
-        principal: Principal = Depends(current_principal),
-    ):
-        bootstrap_service.audit_service = getattr(request.app.state, "audit_service", None)
-        try:
-            return bootstrap_service.ensure_topic_workflow(
-                topic_id,
-                principal,
-                request,
-                project_id=payload.project_id if payload else None,
-            )
-        except KeyError as exc:
-            raise HTTPException(404, "topic not found") from exc
-        except PermissionError as exc:
-            raise HTTPException(403, str(exc)) from exc
 
     @router.post("/breakdowns")
     async def create_breakdown(
@@ -1186,6 +1207,11 @@ def build_creative_router(
                 "runtime_dir": str(Path(runtime_dir).resolve()),
                 "workspace_root": str(workspace_root),
                 "transcript_coverage": coverage,
+                "material_snapshot_id": (
+                    repository.get_latest_selection_stage_snapshot(
+                        payload.topic_id, "source_package"
+                    ) or {}
+                ).get("id"),
                 "workflow_task_id": workflow_task_id,
                 "created_by_user_id": (
                     principal.user_id if principal is not None else None
@@ -1243,6 +1269,20 @@ def build_creative_router(
         breakdown["field_guide"] = personalize_breakdown_field_guide(breakdown["content"])
         return breakdown
 
+    @router.get("/breakdowns/{breakdown_id}/download")
+    async def download_breakdown(breakdown_id: int):
+        workflow_adapter.reconcile_resource("breakdown", str(breakdown_id))
+        breakdown = repository.get_breakdown(breakdown_id)
+        if not breakdown:
+            raise HTTPException(404, "breakdown not found")
+        return Response(
+            content=build_breakdown_markdown(breakdown).encode("utf-8"),
+            media_type="text/markdown; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="breakdown-{breakdown_id}.md"'
+            },
+        )
+
     @router.patch("/breakdowns/{breakdown_id}")
     async def update_breakdown(breakdown_id: int, payload: BreakdownUpdateRequest):
         try:
@@ -1259,23 +1299,15 @@ def build_creative_router(
     async def lock_breakdown(
         breakdown_id: int,
         request: Request,
-        force: bool = False,
         principal: Principal = Depends(current_principal),
     ):
-        owner_direct_lock = "project_owner" in principal.role_codes
-        if not owner_direct_lock and (not principal.is_system_admin or not force):
-            raise HTTPException(410, "请提交版本并由项目负责人审批")
         before = repository.get_breakdown(breakdown_id)
         if before is None:
             raise HTTPException(404, "breakdown not found")
-        if not owner_direct_lock:
-            try:
-                workflow_adapter.audit_legacy_force(
-                    "breakdown", str(breakdown_id), principal
-                )
-            except ValueError as exc:
-                raise HTTPException(409, str(exc)) from exc
         breakdown = repository.lock_breakdown(breakdown_id)
+        SelectionStageService(repository, workspace_root).record_breakdown_completion(
+            breakdown_id, principal.user_id
+        )
         if not breakdown:
             raise HTTPException(404, "breakdown not found")
         audit_service = getattr(request.app.state, "audit_service", None)
@@ -1302,24 +1334,20 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         try:
-            workflow_task_id = validate_task(
-                payload.workflow_task_id,
-                "brief",
-                principal,
-                topic_id=payload.topic_id,
-            )
+            workflow_task_id = payload.workflow_task_id or ""
             breakdown = repository.get_breakdown(payload.breakdown_id)
-            if breakdown is None or breakdown.get("status") != "approved":
+            if breakdown is None or breakdown.get("status") not in {"locked", "approved"}:
                 raise HTTPException(
-                    409, "project creation requires an approved breakdown"
+                    409, "project creation requires a completed breakdown"
                 )
-            task = workflow_repository.get_task(workflow_task_id)
-            if task is None:
-                raise HTTPException(404, "workflow task not found")
-            project = repository.get_project_by_creation_workflow_task_id(
-                workflow_task_id
+            task = workflow_repository.get_task(workflow_task_id) if workflow_task_id else None
+            project = (
+                repository.get_project_by_creation_workflow_task_id(workflow_task_id)
+                if workflow_task_id else repository.get_project_by_creation_request_id(
+                    principal.user_id, payload.creation_request_id
+                )
             )
-            bound_id = task.get("project_id")
+            bound_id = task.get("project_id") if task else None
             is_existing_project = project is not None or bound_id is not None
             if bound_id is not None:
                 try:
@@ -1342,7 +1370,7 @@ def build_creative_router(
                 raise HTTPException(
                     409, "workflow task is already linked to another project request"
                 )
-            if project is None and task.get("project_id") is not None:
+            if project is None and task is not None and task.get("project_id") is not None:
                 raise HTTPException(
                     409, "brief workflow task is already linked to a project"
                 )
@@ -1356,10 +1384,11 @@ def build_creative_router(
                     target_platform=payload.target_platform,
                     target_audience=payload.target_audience,
                     episode_duration_seconds=payload.episode_duration_seconds,
-                    workflow_task_id=workflow_task_id,
+                    workflow_task_id=workflow_task_id or None,
+                    creation_request_id=payload.creation_request_id,
                     created_by=principal.user_id,
                 )
-            if bound_id is None:
+            if workflow_task_id and bound_id is None:
                 try:
                     workflow_repository.bind_workflow_project(
                         workflow_task_id,
@@ -1372,6 +1401,12 @@ def build_creative_router(
                         "project created but workflow binding requires reconciliation",
                     ) from exc
             resolved_project = repository.get_project(int(project["id"])) or project
+            if not workflow_task_id:
+                task = workflow_repository.ensure_project_task(
+                    str(project["id"]), payload.topic_id,
+                    task_type="brief", role_code="creative_planner",
+                    actor=principal,
+                )
             if is_existing_project:
                 assert_project_read_access(
                     request, int(resolved_project["id"]), principal
@@ -1567,16 +1602,20 @@ def build_creative_router(
     async def lock_blueprint_brief(
         blueprint_id: int,
         payload: BriefLockRequest,
-        force: bool = False,
         principal: Principal = Depends(current_principal),
     ):
-        if not principal.is_system_admin or not force:
-            raise HTTPException(410, "请提交版本并由项目负责人审批")
         try:
-            workflow_adapter.audit_legacy_force(
-                "brief", str(blueprint_id), principal
+            return workflow_transitions.complete_creative_without_review(
+                payload.workflow_task_id,
+                "brief",
+                str(blueprint_id),
+                principal,
+                difference_note=payload.difference_note,
             )
-            return repository.lock_brief(blueprint_id, payload.difference_note)
+        except KeyError as exc:
+            raise HTTPException(404, "creative resource or workflow task not found") from exc
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -1656,16 +1695,20 @@ def build_creative_router(
     async def lock_project_characters(
         project_id: int,
         batch_id: str,
-        force: bool = False,
+        payload: CreativeLockRequest,
         principal: Principal = Depends(current_principal),
     ):
-        if not principal.is_system_admin or not force:
-            raise HTTPException(410, "请提交版本并由项目负责人审批")
         try:
-            workflow_adapter.audit_legacy_force(
-                "characters", f"{project_id}:{batch_id}", principal
+            return workflow_transitions.complete_creative_without_review(
+                payload.workflow_task_id,
+                "characters",
+                f"{project_id}:{batch_id}",
+                principal,
             )
-            return repository.lock_character_batch(project_id, batch_id)
+        except KeyError as exc:
+            raise HTTPException(404, "creative resource or workflow task not found") from exc
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -1732,16 +1775,20 @@ def build_creative_router(
     async def lock_project_outlines(
         project_id: int,
         batch_id: str,
-        force: bool = False,
+        payload: CreativeLockRequest,
         principal: Principal = Depends(current_principal),
     ):
-        if not principal.is_system_admin or not force:
-            raise HTTPException(410, "请提交版本并由项目负责人审批")
         try:
-            workflow_adapter.audit_legacy_force(
-                "outline", f"{project_id}:{batch_id}", principal
+            return workflow_transitions.complete_creative_without_review(
+                payload.workflow_task_id,
+                "outline",
+                f"{project_id}:{batch_id}",
+                principal,
             )
-            return repository.lock_outline_batch(project_id, batch_id)
+        except KeyError as exc:
+            raise HTTPException(404, "creative resource or workflow task not found") from exc
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -1797,37 +1844,12 @@ def build_creative_router(
     @router.post("/episodes/{episode_id}/lock")
     async def lock_episode_beats(
         episode_id: int,
-        force: bool = False,
+        payload: CreativeLockRequest,
         principal: Principal = Depends(current_principal),
     ):
-        if not principal.is_system_admin or not force:
-            raise HTTPException(410, "请提交版本并由项目负责人审批")
         try:
-            workflow_adapter.audit_legacy_force("beats", str(episode_id), principal)
-            return repository.lock_episode_beats(episode_id)
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
-
-    @router.post("/workflow/submit")
-    async def submit_creative_resource(
-        payload: CreativeSubmitRequest,
-        principal: Principal = Depends(current_principal),
-    ):
-        permission_prefix = {
-            "characters": "character",
-        }.get(payload.resource_type, payload.resource_type)
-        required_permission = f"{permission_prefix}.submit"
-        if (
-            not principal.is_system_admin
-            and required_permission not in principal.permissions
-        ):
-            raise HTTPException(403, "没有提交此创作阶段的权限")
-        try:
-            return workflow_adapter.submit(
-                payload.workflow_task_id,
-                payload.resource_type,
-                payload.resource_id,
-                principal,
+            return workflow_transitions.complete_creative_without_review(
+                payload.workflow_task_id, "beats", str(episode_id), principal
             )
         except KeyError as exc:
             raise HTTPException(404, "creative resource or workflow task not found") from exc
@@ -1835,6 +1857,7 @@ def build_creative_router(
             raise HTTPException(403, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+
 
     @router.get("/projects/{project_id}/export")
     async def export_project_stage(

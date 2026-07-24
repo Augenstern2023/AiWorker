@@ -129,6 +129,43 @@ def test_selection_stage_snapshots_are_versioned_idempotent_and_immutable(
         )
 
 
+def test_legacy_integer_snapshot_ids_are_migrated_before_topic_decision(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "creative.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE selection_stage_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stage TEXT NOT NULL,
+                topic_id INTEGER NOT NULL,
+                version INTEGER NOT NULL,
+                outcome TEXT NOT NULL,
+                resource_type TEXT NOT NULL DEFAULT '',
+                resource_id TEXT NOT NULL DEFAULT '',
+                snapshot_json TEXT NOT NULL,
+                content_fingerprint TEXT NOT NULL,
+                actor_user_id TEXT NOT NULL DEFAULT '',
+                source_job_id TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                UNIQUE(stage, topic_id, version)
+            )
+            """
+        )
+
+    repository = CreativeRepository(db_path)
+    topic = _topic(repository)
+
+    decided = repository.decide_topic(topic["id"], "adopted", "", "selector-1")
+
+    assert decided is not None
+    assert decided["status"] == "adopted"
+    snapshot = repository.get_latest_selection_stage_snapshot(topic["id"], "topic_decision")
+    assert snapshot is not None
+    assert isinstance(snapshot["id"], str)
+
+
 def test_topic_decisions_keep_each_append_even_when_content_matches(tmp_path: Path) -> None:
     repository = CreativeRepository(tmp_path / "creative.db")
     topic = _topic(repository)

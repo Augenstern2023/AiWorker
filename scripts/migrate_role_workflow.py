@@ -22,7 +22,8 @@ from typing import Any
 
 
 MIGRATION_KEY = "role_workflow_v1"
-_ACTIVE_TASK_STATUSES = ("pool", "assigned", "in_progress", "waiting_review", "returned")
+SELECTION_MIGRATION_KEY = "approval_free_selection_v1"
+_ACTIVE_TASK_STATUSES = ("pool", "assigned", "in_progress")
 _RESOURCE_ROLES = {
     "breakdown": "selection_operator",
     "brief": "creative_planner",
@@ -54,6 +55,88 @@ class MigrationReport:
     next_tasks: int
     reassigned_projects: int
     backups: tuple[Path, ...] = ()
+
+
+@dataclass(frozen=True)
+class SelectionMigrationReport:
+    dry_run: bool
+    already_applied: bool
+    cancelled_tasks: int
+    snapshots: int
+    backups: tuple[Path, ...] = ()
+
+
+def migrate_selection_stages(
+    root: str | Path, admin_user_id: str, dry_run: bool = False
+) -> SelectionMigrationReport:
+    workspace = Path(root).resolve()
+    system_db = workspace / ".runtime" / "system" / "system.db"
+    creative_db = workspace / ".runtime" / "creative" / "creative.db"
+    _require_database(system_db)
+    _require_database(creative_db)
+    _validate_admin(system_db, admin_user_id)
+    with _connect(system_db) as connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS role_workflow_migrations ("
+            "migration_key TEXT PRIMARY KEY, applied_at REAL NOT NULL, details_json TEXT NOT NULL)"
+        )
+        applied = connection.execute(
+            "SELECT 1 FROM role_workflow_migrations WHERE migration_key = ?",
+            (SELECTION_MIGRATION_KEY,),
+        ).fetchone()
+        rows = connection.execute(
+            "SELECT id FROM workflow_tasks WHERE task_type IN "
+            "('topic_decision','source_package','breakdown') "
+            "AND status IN ('pool','assigned','in_progress','waiting_review','returned')"
+        ).fetchall()
+    if applied:
+        return SelectionMigrationReport(dry_run, True, 0, 0)
+    if dry_run:
+        return SelectionMigrationReport(True, False, len(rows), 0)
+    backups = _create_backups(system_db, creative_db)
+    try:
+        from creative.repository import CreativeRepository
+        from creative.selection_stage_service import SelectionStageService
+
+        creative = CreativeRepository(creative_db)
+        stages = SelectionStageService(creative, workspace)
+        snapshots = 0
+        for topic in creative.list_topics(limit=500):
+            if topic["status"] in {"adopted", "rejected", "archived"}:
+                stages.record_topic_decision(
+                    int(topic["id"]), topic["status"],
+                    str(topic.get("decision_note") or ""), admin_user_id,
+                )
+                snapshots += 1
+            breakdown = creative.get_latest_locked_breakdown(int(topic["id"]))
+            if breakdown is not None:
+                stages.record_breakdown_completion(int(breakdown["id"]), admin_user_id)
+                snapshots += 1
+        with _connect(system_db) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.executemany(
+                "UPDATE workflow_tasks SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                [(row["id"],) for row in rows],
+            )
+            connection.execute(
+                "INSERT INTO role_workflow_migrations VALUES (?, ?, ?)",
+                (SELECTION_MIGRATION_KEY, time.time(), _canonical({"cancelled_tasks": len(rows), "snapshots": snapshots})),
+            )
+            connection.commit()
+        with _connect(creative_db) as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS role_workflow_migrations ("
+                "migration_key TEXT PRIMARY KEY, applied_at REAL NOT NULL, details_json TEXT NOT NULL)"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO role_workflow_migrations VALUES (?, ?, ?)",
+                (SELECTION_MIGRATION_KEY, time.time(), _canonical({"snapshots": snapshots})),
+            )
+        return SelectionMigrationReport(False, False, len(rows), snapshots, backups)
+    except BaseException:
+        _restore_database(backups[0], system_db)
+        _restore_database(backups[1], creative_db)
+        raise
 
 
 @dataclass(frozen=True)

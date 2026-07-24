@@ -60,6 +60,10 @@
         }));
     }
 
+    function roleDisplayName(roleCode) {
+        return roles.find((role) => role.code === roleCode)?.name || roleCode;
+    }
+
     function openUserEditor(user = null) {
         elements.form.reset();
         showError(elements.formError);
@@ -86,7 +90,7 @@
             const values = [
                 user.username,
                 user.display_name,
-                (user.role_codes || []).join('、') || '-',
+                (user.role_codes || []).map(roleDisplayName).join('、') || '-',
                 user.status === 'active' ? '启用' : '停用',
                 user.last_login_at || '-',
             ];

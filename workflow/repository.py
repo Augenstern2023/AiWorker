@@ -195,14 +195,15 @@ class WorkflowRepository:
         self,
         project_id: str,
         topic_id: int,
+        task_type: str = "brief",
+        role_code: str = "creative_planner",
         *,
-        task_type: str,
-        role_code: str,
         actor: Principal | dict[str, Any],
     ) -> dict[str, Any]:
         workflow_id = f"project:{project_id}"
         actor_id = self._actor_id(actor)
         with self.identity_repository.transaction() as connection:
+            self._ensure_system_actor(connection, actor_id)
             existing = connection.execute(
                 """
                 SELECT * FROM workflow_tasks
@@ -678,16 +679,6 @@ class WorkflowRepository:
                     or (
                         row["project_id"] is not None
                         and row["project_id"] in managed_projects
-                    )
-                    or (
-                        row["project_id"] is None
-                        and row["topic_id"] is not None
-                        and row["status"] == "waiting_review"
-                        and "project.manage" in live_actor["permissions"]
-                        and (
-                            "version.approve" in live_actor["permissions"]
-                            or "version.return" in live_actor["permissions"]
-                        )
                     )
                 ]
         return [self._task_dict(row) for row in rows]

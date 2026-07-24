@@ -211,7 +211,7 @@ def test_backup_path_rejects_traversal_and_non_backup_names(tmp_path: Path):
 def test_legacy_permissions_are_method_specific_for_destructive_routes():
     assert _api_permission("GET", "/api/files") == "data.media.preview"
     assert _api_permission("GET", "/api/file/preview") == "data.media.preview"
-    assert _api_permission("DELETE", "/api/files") == "*"
+    assert _api_permission("DELETE", "/api/files") == "data.media.delete"
     assert _api_permission("GET", "/api/analytics/overview") == "analytics.read"
     assert _api_permission("POST", "/api/analytics/sync") == "*"
 

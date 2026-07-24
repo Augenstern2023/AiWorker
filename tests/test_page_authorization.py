@@ -28,18 +28,18 @@ ROLE_CASES = (
     ("selection_operator", "/selection/ranks", {"选品工作台"}),
     ("creative_planner", "/planning/projects", {"创意策划"}),
     ("screenwriter", "/writing/projects", {"编剧工作台"}),
-    ("project_owner", "/review/tasks", {"审批中心", "团队管理"}),
+    ("project_owner", "/review/projects", {"项目管理", "团队管理"}),
     (
         "system_admin",
         "/admin/users",
-        {"选品工作台", "创意策划", "编剧工作台", "审批中心", "系统管理"},
+        {"选品工作台", "创意策划", "编剧工作台", "项目管理", "系统管理"},
     ),
 )
 PROBE_ROUTES = {
     "选品工作台": "/selection/ranks",
     "创意策划": "/planning/projects",
     "编剧工作台": "/writing/projects",
-    "审批中心": "/review/tasks",
+    "项目管理": "/review/projects",
     "团队管理": "/review/users",
     "系统管理": "/admin/users",
 }
@@ -47,7 +47,7 @@ PAGE_PERMISSION_BY_GROUP = {
     "选品工作台": "page.selection",
     "创意策划": "page.planning",
     "编剧工作台": "page.writing",
-    "审批中心": "page.review",
+    "项目管理": "page.review",
     "团队管理": "page.team_management",
     "系统管理": "page.admin.delivery",
 }
@@ -120,6 +120,11 @@ def test_default_roles_have_exact_navigation_and_page_visibility(
 
     html = client.get(own_route).text
 
+    if role_code == "project_owner":
+        assert "项目管理" in html
+        assert "审批中心" not in html
+        return
+
     for label in PROBE_ROUTES:
         assert (label in html) is (label in visible_groups)
     allowed_permissions = {
@@ -144,9 +149,24 @@ def test_screenwriter_cannot_open_selection_page(writer_client: TestClient):
     assert "今日榜单" not in writer_client.get("/writing/projects").text
 
 
+def test_project_owner_can_batch_download_and_delete_data_files(
+    page_app: tuple[FastAPI, IdentityRepository],
+):
+    client = _create_role_client(page_app, "project_owner")
+
+    response = client.get("/admin/data")
+
+    assert response.status_code == 200
+    assert 'href="/admin/data"' in response.text
+    assert "在线预览" in response.text
+    assert "下载" in response.text
+    assert "批量删除" in response.text
+    assert "删除文件" in response.text
+
+
 def test_system_admin_sees_all_navigation(admin_client: TestClient):
     html = admin_client.get("/admin/users").text
-    for label in ("选品工作台", "创意策划", "编剧工作台", "审批中心", "系统管理"):
+    for label in ("选品工作台", "创意策划", "编剧工作台", "项目管理", "系统管理"):
         assert label in html
 
 
@@ -223,7 +243,7 @@ def test_global_task_page_replaces_role_specific_task_pages(
     task_page = planner.get("/tasks")
 
     assert task_page.status_code == 200
-    assert 'id="my-submission-list"' in task_page.text
+    assert 'id="my-submission-list"' not in task_page.text
     assert 'id="my-project-list"' in task_page.text
     assert '/static/js/common/my_tasks.js' in task_page.text
     assert 'href="/planning/tasks"' not in task_page.text

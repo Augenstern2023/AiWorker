@@ -17,7 +17,11 @@
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
 import json
+import os
+import time
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -27,6 +31,7 @@ import WebGUI
 from core.events import WorkerEvent
 from core.job import CrawlJob
 from runtime.job_state import JobState
+from identity.schema import Principal
 
 
 def _source(*relative_paths: str) -> str:
@@ -79,7 +84,13 @@ def test_webgui_registers_creative_phase3_routes_and_page():
     assert "/api/creative/breakdowns" in paths
     assert "今日爆款" in html
     assert "generateCreativeTopics" in html
-    assert '@change="generateCreativeTopics"' in html
+    assert '@change="changeCreativePlatform"' in html
+
+
+def test_webgui_does_not_register_a_standalone_breakdown_page():
+    paths = {route.path for route in WebGUI.app.routes}
+
+    assert "/selection/breakdowns" not in paths
 
 
 def test_webgui_registers_phase4_routes_and_flat_project_workspace():
@@ -99,7 +110,17 @@ def test_webgui_registers_phase4_routes_and_flat_project_workspace():
     assert "/planning/projects" in _source("web/navigation_service.py")
     assert "fetchCreativeProjects" in html
     assert "generateProjectBlueprints" in html
-    assert "submitProjectBrief" in html
+    assert "completeProjectBrief" in html
+    creative_stage_templates = "\n".join(
+        _source(f"templates/common/workspace/{name}")
+        for name in (
+            "project_blueprints.html",
+            "project_characters.html",
+            "project_outlines.html",
+            "project_beats.html",
+        )
+    )
+    assert "提交审批" not in creative_stage_templates
     assert "generateProjectCharacters" in html
     assert "generateProjectOutlines" in html
     assert "generateProjectBeats" in html
@@ -122,26 +143,20 @@ def test_blank_character_batch_links_the_active_workflow_task():
     assert "workflow_task_id: task.id" in method
 
 
-def test_workflow_governed_creation_actions_send_active_task_ids():
+def test_selection_adoption_download_and_breakdown_do_not_send_workflow_tasks():
     selection = _source("static/js/selection/breakdowns.js")
-    creative = _source("static/js/common/creative.js")
     breakdown = selection.split("async startTranscriptBreakdown", 1)[1].split(
         "syncBreakdownGenerationProgress", 1
     )[0]
     download = selection.split("async startDramaDownload", 1)[1].split(
         "syncDramaDownloadProgress", 1
     )[0]
-    project = creative.split("async createCreativeProject", 1)[1].split(
-        "async selectCreativeProject", 1
-    )[0]
 
-    assert "resolveCreativeWorkflowTask('breakdown'" in breakdown
-    assert "workflow_task_id: task.id" in breakdown
-    assert "resolveCreativeWorkflowTask('source_package'" in download
-    assert "workflow_task_id: task.id" in download
+    assert "resolveCreativeWorkflowTask('breakdown'" not in breakdown
+    assert "workflow_task_id: task.id" not in breakdown
+    assert "resolveCreativeWorkflowTask('source_package'" not in download
+    assert "workflow_task_id: task.id" not in download
     assert "topic_id: this.dramaDownload.topic.id" in download
-    assert "resolveCreativeWorkflowTask('brief'" in project
-    assert "workflow_task_id: task.id" in project
 
 
 def test_drama_material_jobs_send_exact_source_topic_and_task():
@@ -155,7 +170,7 @@ def test_drama_material_jobs_send_exact_source_topic_and_task():
     assert "workflow_task_id: task.id" in method
     resolver = _source("static/js/common/creative.js").split(
         "async resolveSourcePackageWorkflowTask", 1
-    )[1].split("async submitCreativeResource", 1)[0]
+    )[1]
     assert "/api/creative/topics?limit=500" not in resolver
     assert "/api/creative/topics/${task.topic_id}" in resolver
     assert "Promise.all" in resolver
@@ -196,7 +211,7 @@ def test_draft_breakdowns_are_visible_but_not_project_eligible():
     assert "草稿${version} · 待提交" in html
     assert "草稿${version} · 已有批准版" in html
     assert "更新拆解" in html
-    assert "继续拆解" not in _source("templates/selection/breakdowns.html")
+    assert "继续拆解" not in _source("templates/common/workspace/selection_topics.html")
     breakdowns = _source("static/js/selection/breakdowns.js")
     assert "Boolean(topic?.locked_breakdown_id)" in breakdowns
     assert "aiworkerApi.request('/api/creative/topics?status=adopted&limit=500')" in html
@@ -204,24 +219,28 @@ def test_draft_breakdowns_are_visible_but_not_project_eligible():
     assert 'x-text="creativeTopicOptionLabel(topic)"' in html
 
 
-def test_today_hit_actions_follow_topic_status_without_conflicting_commands():
+def test_today_hits_only_load_unadopted_recommendations_and_adoption_moves_them_to_library():
+    topics = _source("static/js/selection/topics.js")
+    breakdowns = _source("static/js/selection/breakdowns.js")
     section = _source("templates/common/workspace/selection_hits.html")
 
-    assert "updateCreativeTopic(topic, 'adopted')" not in section
-    assert 'x-show="!topic.latest_breakdown_id && topic.status === \'pending_review\'" @click="updateCreativeTopic(topic, \'rejected\')"' in section
-    assert "!topic.latest_breakdown_id && topic.status === 'adopted'" in section
-    assert "updateTopicLibrary(topic, 'adopted')" not in section
-    assert "重新采纳" not in section
+    assert "&status=pending_review" in topics.split("async fetchCreativeTopics", 1)[1].split("async fetchTopicLibrary", 1)[0]
+    assert "new URLSearchParams({status: 'adopted', all: 'true'})" in topics
+    assert "await this.fetchCreativeTopics();" in breakdowns.split("async updateCreativeTopic", 1)[1].split("createCreativeBreakdown", 1)[0]
+    assert "updateCreativeTopic(topic, 'adopted')" in section
+    assert "createCreativeBreakdown(topic)" not in section
+    assert "topic.status === 'adopted'" not in section
 
 
-def test_today_hit_actions_distinguish_existing_breakdowns():
+def test_today_hits_restores_the_last_selected_platform_after_refresh():
+    tasks = _source("static/js/common/tasks.js")
+    topics = _source("static/js/selection/topics.js")
     section = _source("templates/common/workspace/selection_hits.html")
 
-    assert 'x-show="!topic.latest_breakdown_id && topic.status === \'pending_review\'"' in section
-    assert "!topic.latest_breakdown_id && topic.status === 'adopted'" in section
-    assert 'x-show="topic.latest_breakdown_id && topic.status !== \'archived\'"' in section
-    assert '@click="createCreativeBreakdown(topic)">再次拆解</button>' in section
-    assert '@click="updateCreativeTopic(topic, \'archived\')">归档</button>' in section
+    assert "aiworker.selection.hits.platform" in tasks
+    assert "creativePlatformPreference()" in tasks
+    assert "rememberCreativePlatform()" in topics
+    assert "@change=\"changeCreativePlatform\"" in section
 
 
 def test_topic_library_shows_full_lifecycle_and_breakdown_version_column():
@@ -242,6 +261,59 @@ def test_topic_library_shows_full_lifecycle_and_breakdown_version_column():
     assert "lifecycle-beats-exported" in html
 
 
+def test_topic_library_keeps_review_download_jobs_by_drama_for_parallel_captures():
+    tasks = _source("static/js/common/tasks.js")
+    creative = _source("static/js/common/creative.js")
+    topics = _source("templates/common/workspace/selection_topics.html")
+
+    assert "dramaReviewJobs: {}" in tasks
+    assert "dramaReviewJobForTopic(topic)" in creative
+    assert "persistDramaReviewJob(state)" in creative
+    assert "this.pollDramaReviewCapture(state)" in creative
+    assert "dramaReviewRunningForTopic(topic)" in topics
+
+
+def test_topic_library_offers_review_download_for_douyin_topics():
+    paths = {route.path for route in WebGUI.app.routes}
+    topics = _source("templates/common/workspace/selection_topics.html")
+    creative = _source("static/js/common/creative.js")
+
+    assert "/api/douyin/reviews/jobs" in paths
+    assert "/api/douyin/reviews/jobs/{job_id}" in paths
+    assert "/api/douyin/reviews/jobs/{job_id}/download" in paths
+    assert "includes('dy')" in topics
+    assert "isDouyinDramaReview(state)" in creative
+    assert "'/api/douyin/reviews/jobs'" in creative
+
+
+def test_drama_search_can_target_douyin_directly():
+    paths = {route.path for route in WebGUI.app.routes}
+    drama_page = _source("templates/common/workspace/selection_dramas.html")
+    script = _source("static/js/selection/dramas.js")
+
+    assert "/api/douyin/drama/search" in paths
+    assert 'x-model="dramaAnalysis.platform"' in drama_page
+    assert '<option value="dy">抖音</option>' in drama_page
+    assert "'/api/douyin/drama/search'" in script
+    assert "isDouyinDramaSearch()" in script
+
+
+def test_completed_review_capture_only_shows_the_local_download_action():
+    modal = _source("templates/common/workspace/selection_modals.html")
+
+    assert 'x-show="dramaReviews.status !== \'completed\'"' in modal
+    assert "dramaReviews.status === 'failed' ? '重新下载' : '开始下载'" in modal
+
+
+def test_closing_a_completed_review_modal_syncs_its_row_action_state():
+    tasks = _source("static/js/common/tasks.js")
+    creative = _source("static/js/common/creative.js")
+
+    assert "finishDisplayedDramaReviewJob?.()" in tasks
+    assert "finishDisplayedDramaReviewJob()" in creative
+    assert "['completed', 'failed'].includes(state.status)" in creative
+
+
 def test_topic_library_assigns_each_pending_stage_to_its_workflow_role():
     topics = _source("static/js/selection/topics.js")
     table = _source("templates/common/workspace/selection_topics.html")
@@ -257,13 +329,54 @@ def test_topic_library_assigns_each_pending_stage_to_its_workflow_role():
     assert "task_type: 'beats'" in topics
     assert "role_code: 'screenwriter'" in topics
     assert '@click="openStageWorkflowAssignment(topic)"' in table
+    assert ":title=\"workflowAssignmentForStage(topic)?.role_label" in table
     assert "stageWorkflowAssignmentLabel" in task_modal
+
+
+def test_planning_assignment_refreshes_the_topic_library_after_success():
+    topics = _source("static/js/selection/topics.js")
+    submit_method = topics.split("async submitPlanningAssignment()", 1)[1].split(
+        "openManagedPlanningProject()", 1
+    )[0]
+
+    assert "await this.fetchTopicLibrary();" in submit_method
+
+
+def test_topic_library_adoption_handles_non_json_server_errors():
+    breakdowns = _source("static/js/selection/breakdowns.js")
+
+    assert "async updateTopicLibrary(topic, status)" in breakdowns
+    assert "const data = await res.json().catch(() => ({}));" in breakdowns
+
+
+def test_download_click_notifies_when_a_douyin_full_drama_is_already_local():
+    breakdowns = _source("static/js/selection/breakdowns.js")
+    open_download = breakdowns.split("async openTopicDownload", 1)[1].split(
+        "async selectDramaDownloadCandidate", 1
+    )[0]
+
+    assert "/api/hongguo/drama/download/status" in open_download
+    assert "抖音全剧已下载" in open_download
+
+
+def test_topic_library_can_capture_and_export_hongguo_reviews():
+    topics = _source("templates/common/workspace/selection_topics.html")
+    modal = _source("templates/common/workspace/selection_modals.html")
+    creative = _source("static/js/common/creative.js")
+
+    assert '@click="openTopicReviewCapture(topic)"' in topics
+    assert 'id="dramaReviewCaptureModal"' in modal
+    assert "dramaReviews.allReviews" in modal
+    assert "CSV" in modal and "Excel" in modal
+    assert "async openTopicReviewCapture(topic)" in creative
+    assert "all_reviews: Boolean(state.allReviews)" in creative
+    assert "format=${encodeURIComponent(state.format || 'csv')}" in creative
 
 
 def test_my_task_tables_append_rows_instead_of_stringifying_them():
     script = _source("static/js/common/my_tasks.js")
 
-    assert "submissionList.replaceChildren(...rows)" in script
+    assert "submissionList.replaceChildren(...rows)" not in script
     assert "projectList.replaceChildren(...rows)" in script
 
 
@@ -415,6 +528,8 @@ def test_breakdown_editor_opens_in_modal_instead_of_page_bottom():
     assert "openBreakdownEditor" in html
     assert "saveBreakdownEditor" in html
     assert "submitBreakdownEditor" in html
+    assert "downloadBreakdown" in html
+    assert "下载到本地" in html
     assert "this.modal('breakdownEditorModal')" in html
     assert "normalizeBreakdownEditorContent" in html
     assert "breakdownEditor.draft" not in html
@@ -435,9 +550,9 @@ def test_breakdown_generation_requires_transcript_and_shows_progress():
     assert "payload?.breakdown_id" in html
     assert "aiworkerApi.request(`/api/jobs/${job.job_id}`)" in html
     assert "createTopicLibraryBreakdown(topic) {" in html
-    assert "return this.startTranscriptBreakdown(topic, 'topic-library')" in html
+    assert "'topic-library'" in html
     assert "createCreativeBreakdown(topic) {" in html
-    assert "return this.startTranscriptBreakdown(topic, 'creative')" in html
+    assert "'creative'" in html
     assert "breakdownGenerationProgressLabel" in html
     assert "breakdownGenerationIndeterminate" in html
     assert "elapsed_seconds" in html
@@ -459,7 +574,51 @@ def test_existing_breakdown_opens_without_generation_and_regeneration_is_explici
     assert "regenerateCurrentBreakdown" in html
     assert "force_regenerate: forceRegenerate" in html
     assert "startTranscriptBreakdown(topic, source, true)" in html
-    assert ">重新生成</button>" in html
+    assert "Boolean(topic?.locked_breakdown_id)" not in html
+    assert "return this.startTranscriptBreakdown(\n                        topic,\n                        'topic-library'\n                    );" in html
+    assert "return this.startTranscriptBreakdown(\n                        topic,\n                        'creative'\n                    );" in html
+    assert ">更新拆解</button>" in html
+
+
+def test_breakdown_task_log_opens_inside_the_generation_modal():
+    html = _workspace_source()
+    script = _source("static/js/selection/breakdowns.js")
+
+    assert 'id="breakdownGenerationLogPane"' in html
+    assert "breakdownGeneration.logs" in html
+    assert "syncBreakdownGenerationLogs" in script
+    assert "aiworkerApi.request(`/api/jobs/${jobId}/logs`)" in script
+    assert "window.location.assign(`/tasks" not in script
+
+
+def test_creative_generation_task_log_opens_inside_the_progress_modal():
+    modal = _source("templates/common/workspace/creative_progress_modal.html")
+    progress = _source("templates/common/workspace/project_progress.html")
+    script = _source("static/js/common/creative.js")
+
+    assert 'id="creativeGenerationLogPane"' in modal
+    assert "creativeWorkspace.jobLogs" in modal
+    assert '@click="openCreativeTaskLog"' in modal
+    assert '@click="openCreativeTaskLog"' in progress
+    assert "syncCreativeJobLogs" in script
+    assert "aiworkerApi.request(`/api/jobs/${jobId}/logs`)" in script
+    assert "/tasks?job_id=" not in modal
+    assert "/tasks?job_id=" not in progress
+
+
+def test_drama_download_fallback_candidates_use_stable_unique_alpine_keys():
+    modal = _source("templates/common/workspace/selection_modals.html")
+
+    assert 'x-for="(candidate, index) in dramaDownload.candidates"' in modal
+    assert 'candidate.aweme_id || \'candidate\'}:${index}`' in modal
+    assert ':key="candidate.aweme_id"' not in modal
+
+
+def test_download_modal_blurs_focused_controls_before_bootstrap_hides_it():
+    script = _source("static/js/common/tasks.js")
+
+    assert "dramaDownloadModal')?.addEventListener('hide.bs.modal'" in script
+    assert "document.activeElement?.blur()" in script
 
 
 def test_webgui_python_source_contains_no_mojibake_text():
@@ -634,10 +793,21 @@ def test_hongguo_drama_routes_replace_legacy_proxy_routes():
     assert "/api/hongguo/drama/jobs" in paths
     assert "/api/hongguo/drama/download/jobs" in paths
     assert "/api/hongguo/drama/download/search" in paths
+    assert "/api/hongguo/reviews/capture" in paths
+    assert "/api/hongguo/reviews/jobs/{job_id}" in paths
+    assert "/api/hongguo/reviews/jobs/{job_id}/download" in paths
     assert "/api/jobs/{job_id}/pause" in paths
     assert "/api/jobs/{job_id}/resume" in paths
     assert "/api/hongguo/drama/douyin-fallback/jobs" in paths
     assert "剧目检索下载" in html
+    drama_page = _source("templates/common/workspace/selection_dramas.html")
+    review_actions = _source("static/js/common/creative.js")
+    assert "剧评检索下载" in drama_page
+    assert "startDramaReviewCapture" in drama_page
+    assert "dramaReviews.limit" in drama_page
+    assert "/api/hongguo/reviews/capture" in review_actions
+    assert "pollDramaReviewCapture" in review_actions
+    assert "state.error = job.status === 'failed' ? String(job.error || '剧评采集失败') : '';" in review_actions
     assert "searchDrama" in html
     assert "notifyDramaJobCompletion" in html
     assert "完成后会弹窗提醒" in html
@@ -759,6 +929,28 @@ async def test_list_files_groups_drama_outputs_by_drama_and_type(tmp_path, monke
     assert by_name["report.json"]["drama_name"] == "其他数据"
 
 
+@pytest.mark.asyncio
+async def test_list_files_page_returns_a_bounded_cursor_page(tmp_path, monkeypatch):
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    for index in range(5):
+        (data_root / f"item-{index}.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI, "DATA_ROOT", data_root.resolve())
+
+    first = await WebGUI.list_files_page(limit=2)
+    second = await WebGUI.list_files_page(limit=2, cursor=first["next_cursor"])
+
+    assert first["total"] == 5
+    assert len(first["items"]) == 2
+    assert first["next_cursor"]
+    assert len(second["items"]) == 2
+    assert {item["path"] for item in first["items"]}.isdisjoint(
+        item["path"] for item in second["items"]
+    )
+
+
 def test_text_preview_enforces_five_megabyte_limit(tmp_path, monkeypatch):
     data_root = tmp_path / "data"
     data_root.mkdir()
@@ -831,6 +1023,37 @@ async def test_delete_files_removes_multiple_selected_data_files(tmp_path, monke
     assert retained.exists()
 
 
+@pytest.mark.asyncio
+async def test_batch_download_archives_multiple_selected_data_files(tmp_path, monkeypatch):
+    data_root = tmp_path / "data"
+    selected_dir = data_root / "jobs" / "demo"
+    selected_dir.mkdir(parents=True)
+    first = selected_dir / "first.json"
+    second = selected_dir / "second.md"
+    first.write_text('{"first": true}', encoding="utf-8")
+    second.write_text("# second", encoding="utf-8")
+
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI, "DATA_ROOT", data_root.resolve())
+
+    handler = getattr(WebGUI, "download_files_archive", None)
+    assert handler is not None
+    response = await handler(
+        WebGUI.FileBatchDownloadRequest(
+            paths=["data/jobs/demo/first.json", "data/jobs/demo/second.md"]
+        )
+    )
+
+    assert response.media_type == "application/zip"
+    with zipfile.ZipFile(response.path) as archive:
+        assert archive.namelist() == ["jobs/demo/first.json", "jobs/demo/second.md"]
+        assert archive.read("jobs/demo/first.json") == b'{"first": true}'
+        assert archive.read("jobs/demo/second.md") == b"# second"
+    await response.background()
+    assert first.exists()
+    assert second.exists()
+
+
 def test_data_management_template_supports_multi_file_deletion():
     html = _workspace_source()
 
@@ -842,6 +1065,192 @@ def test_data_management_template_supports_multi_file_deletion():
     assert "deleteSelectedFiles" in html
     assert "method: 'DELETE'" in html
     assert "bi bi-trash" in html
+
+
+def test_data_management_template_supports_multi_file_download():
+    html = _workspace_source()
+
+    assert "downloadSelectedFiles" in html
+    assert "/api/files/operations" in html
+    assert '@click="downloadSelectedFiles"' in html
+    assert "bi bi-file-earmark-zip" in html
+
+
+def test_data_management_file_checkboxes_follow_the_selected_path_array():
+    html = _source("templates/common/workspace/admin_data.html")
+
+    assert 'x-effect="$el.checked = isFileSelected(file.path)"' in html
+    assert '@change="toggleFileSelection(file.path, $event.target.checked)"' in html
+
+
+@pytest.mark.asyncio
+async def test_data_operation_snapshot_uses_all_matching_selection_and_exclusions(tmp_path, monkeypatch):
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    for name in ("keep.json", "skip.json", "other.md"):
+        (data_root / name).write_text(name, encoding="utf-8")
+
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI, "DATA_ROOT", data_root.resolve())
+
+    snapshot_path, total = WebGUI.create_data_operation_snapshot(
+        WebGUI.FileOperationSelection(
+            mode="all_matching",
+            filter="json",
+            excluded_paths=["data/skip.json"],
+        ),
+        "snapshot-test",
+    )
+
+    assert total == 1
+    assert [json.loads(line) for line in snapshot_path.read_text(encoding="utf-8").splitlines()] == [
+        "data/keep.json"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_data_operation_snapshot_rejects_invalid_explicit_path(tmp_path, monkeypatch):
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI, "DATA_ROOT", data_root.resolve())
+
+    with pytest.raises(HTTPException) as exc:
+        WebGUI.create_data_operation_snapshot(
+            WebGUI.FileOperationSelection(mode="explicit", paths=["data/missing.json"]),
+            "invalid-snapshot",
+        )
+    assert exc.value.status_code == 404
+
+
+def test_data_operation_cleanup_expires_old_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    operation_dir = tmp_path / ".runtime" / "data_operations"
+    operation_dir.mkdir(parents=True)
+    old_archive = operation_dir / "expired.zip"
+    current_archive = operation_dir / "current.zip"
+    old_archive.write_bytes(b"old")
+    current_archive.write_bytes(b"current")
+    expired_at = time.time() - 25 * 60 * 60
+    os.utime(old_archive, (expired_at, expired_at))
+
+    WebGUI.cleanup_data_operation_artifacts()
+
+    assert not old_archive.exists()
+    assert current_archive.exists()
+
+
+@pytest.mark.asyncio
+async def test_file_operation_creates_a_background_job_from_snapshot(tmp_path, monkeypatch):
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    (data_root / "selected.json").write_text("{}", encoding="utf-8")
+    captured = {}
+    principal = Principal(
+        user_id="operator",
+        username="operator",
+        display_name="Operator",
+        role_codes=(),
+        permissions=frozenset({"data.media.preview"}),
+        data_scope="all",
+        session_id="session",
+    )
+
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI, "DATA_ROOT", data_root.resolve())
+    monkeypatch.setattr(WebGUI.job_manager, "generate_job_id", lambda platform: "data-operation-test")
+    monkeypatch.setattr(
+        WebGUI.job_manager,
+        "create_job",
+        lambda job, **kwargs: captured.update(job=job, kwargs=kwargs) or SimpleNamespace(job_id=job.job_id),
+    )
+    monkeypatch.setattr(WebGUI, "_public_created_job", lambda _: {"job_id": "data-operation-test"})
+    monkeypatch.setattr(WebGUI, "_record_job_audit", lambda *args, **kwargs: None)
+
+    result = await WebGUI.create_file_operation(
+        WebGUI.FileOperationRequest(
+            operation="archive",
+            selection=WebGUI.FileOperationSelection(mode="explicit", paths=["data/selected.json"]),
+        ),
+        principal,
+    )
+
+    assert result == {"job_id": "data-operation-test", "total": 1}
+    assert captured["job"].platform == "data"
+    assert captured["job"].crawler_type == "file_operation"
+    assert json.loads(Path(captured["job"].extra["snapshot_path"]).read_text(encoding="utf-8")) == "data/selected.json"
+
+
+@pytest.mark.asyncio
+async def test_file_operation_requires_the_matching_permission():
+    principal = Principal(
+        user_id="operator",
+        username="operator",
+        display_name="Operator",
+        role_codes=(),
+        permissions=frozenset(),
+        data_scope="all",
+        session_id="session",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await WebGUI.create_file_operation(
+            WebGUI.FileOperationRequest(
+                operation="archive",
+                selection=WebGUI.FileOperationSelection(mode="explicit", paths=["data/example.json"]),
+            ),
+            principal,
+        )
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_file_operation_download_returns_its_completed_archive(tmp_path, monkeypatch):
+    operation_dir = tmp_path / ".runtime" / "data_operations"
+    operation_dir.mkdir(parents=True)
+    archive = operation_dir / "data-operation-test.zip"
+    archive.write_bytes(b"zip")
+    principal = Principal(
+        user_id="operator",
+        username="operator",
+        display_name="Operator",
+        role_codes=(),
+        permissions=frozenset({"data.media.preview", "job.read.own"}),
+        data_scope="all",
+        session_id="session",
+    )
+    job = {
+        "job_id": "data-operation-test",
+        "platform": "data",
+        "crawler_type": "file_operation",
+        "created_by_user_id": "operator",
+        "project_id": None,
+        "job": {
+            "platform": "data",
+            "crawler_type": "file_operation",
+            "extra": {"operation": "archive", "output_path": str(archive)},
+        },
+    }
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI.job_manager, "get_job", lambda _: job)
+
+    response = await WebGUI.download_file_operation("data-operation-test", principal)
+
+    assert response.path == str(archive)
+    assert response.media_type == "application/zip"
+
+
+def test_file_operation_creation_defers_permission_to_the_operation_handler():
+    assert WebGUI._api_permission("POST", "/api/files/operations") is None
+
+
+def test_data_management_uses_paged_file_requests_and_operation_jobs():
+    html = _workspace_source()
+
+    assert "/api/files/page" in html
+    assert "/api/files/operations" in html
+    assert "nextFilePage" in html
+    assert "toggleAllMatchingFiles" in html
 
 
 def test_data_management_template_supports_grouped_online_preview():

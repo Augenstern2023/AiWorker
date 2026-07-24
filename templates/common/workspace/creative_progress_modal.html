@@ -16,12 +16,24 @@
                     </div>
                     <div class="small text-muted mt-2" x-text="creativeProgressElapsedText()"></div>
                     <div class="small text-warning mt-2" x-show="creativeWorkspace.jobProgress?.retry_attempt" x-text="`模型服务波动，正在自动重试 ${creativeWorkspace.jobProgress?.retry_attempt}/${creativeWorkspace.jobProgress?.max_retries}`"></div>
+                    <div class="mt-3 border-top border-secondary pt-3" x-show="creativeWorkspace.showJobLogs" x-cloak>
+                        <div class="d-flex align-items-center justify-content-between mb-1">
+                            <small class="fw-semibold"><i class="bi bi-terminal me-1"></i>任务日志</small>
+                            <small class="text-muted" x-text="creativeWorkspace.jobLogCount ? `共 ${creativeWorkspace.jobLogCount} 条` : ''"></small>
+                        </div>
+                        <div id="creativeGenerationLogPane" class="log-pane" style="height: 220px; font-size: 12px;" x-ref="creativeGenerationLogPane">
+                            <template x-for="(log, i) in creativeWorkspace.jobLogs" :key="i">
+                                <div class="log-line" :class="log.includes('[ERROR]') ? 'text-danger' : log.includes('[WARNING]') ? 'text-warning' : ''" x-text="log"></div>
+                            </template>
+                            <div x-show="!creativeWorkspace.jobLogs || creativeWorkspace.jobLogs.length === 0" class="text-muted p-2">等待日志...</div>
+                        </div>
+                    </div>
                     <div class="alert alert-danger py-2 mt-3 mb-0" x-show="creativeWorkspace.jobStatus === 'failed' || creativeWorkspace.error" x-text="creativeWorkspace.error || creativeWorkspace.jobMessage"></div>
                     <div class="small text-muted mt-3"><i class="bi bi-info-circle me-1"></i>关闭弹窗不会中断生成任务。</div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">后台运行</button>
-                    <button type="button" class="btn btn-outline-light" x-show="creativeWorkspace.jobId" @click="creativeGenerationProgressModal.hide(); window.location.assign('/tasks?job_id=' + encodeURIComponent(creativeWorkspace.jobId))"><i class="bi bi-list-ul me-1"></i>任务日志</button>
+                    <button type="button" class="btn btn-outline-light" x-show="creativeWorkspace.jobId" @click="openCreativeTaskLog"><i class="bi bi-list-ul me-1"></i>任务日志</button>
                     <button type="button" class="btn btn-primary" x-show="creativeJobRetryable()" @click="retryCreativeJob"><i class="bi bi-arrow-clockwise me-1"></i>重试</button>
                 </div>
             </div>

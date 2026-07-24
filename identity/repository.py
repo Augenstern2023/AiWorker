@@ -346,6 +346,19 @@ class IdentityRepository:
 
     def seed_defaults(self) -> None:
         with self.connect() as connection:
+            retired_permissions = ("version." + "approve", "version." + "return")
+            connection.executemany(
+                "DELETE FROM role_permissions WHERE permission_code = ?",
+                [(code,) for code in retired_permissions],
+            )
+            connection.executemany(
+                "DELETE FROM permission_dependencies WHERE permission_code = ? OR depends_on_code = ?",
+                [(code, code) for code in retired_permissions],
+            )
+            connection.executemany(
+                "DELETE FROM permissions WHERE code = ?",
+                [(code,) for code in retired_permissions],
+            )
             for code, label in PERMISSIONS.items():
                 connection.execute(
                     """

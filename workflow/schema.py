@@ -18,8 +18,7 @@ TaskStatus = Literal[
     "pool",
     "assigned",
     "in_progress",
-    "waiting_review",
-    "returned",
+
     "completed",
     "cancelled",
 ]

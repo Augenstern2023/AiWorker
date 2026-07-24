@@ -180,16 +180,16 @@ def find_transcript_bundle(root: str | Path, title: str, platform: str = "") -> 
     return {**bundle, "title": str(title or bundle["title"]), "platform": str(platform or "")}
 
 
-def find_downloaded_video_assets(root: str | Path, title: str) -> list[dict[str, Any]]:
+def index_downloaded_video_assets(root: str | Path) -> dict[str, list[dict[str, Any]]]:
     workspace = Path(root).resolve()
     data_root = workspace / "data"
-    title_key = normalize_title(title)
-    if not title_key or not data_root.exists():
-        return []
-    latest_by_episode: dict[int, dict[str, Any]] = {}
+    assets_by_title: dict[str, dict[int, dict[str, Any]]] = {}
+    if not data_root.exists():
+        return {}
     for source_path in data_root.glob("*/jobs/**/source.json"):
         payload = _read_json(source_path)
-        if normalize_title(payload.get("title")) != title_key:
+        title_key = normalize_title(payload.get("title"))
+        if not title_key:
             continue
         if _asset_from_episode_dir(source_path.parent, _episode_number(payload, 1)):
             continue
@@ -207,9 +207,17 @@ def find_downloaded_video_assets(root: str | Path, title: str) -> list[dict[str,
             "source_path": str(source_path),
             "modified_at": video_path.stat().st_mtime,
         }
+        latest_by_episode = assets_by_title.setdefault(title_key, {})
         current = latest_by_episode.get(episode_number)
         if not current or (asset["modified_at"], asset["video_path"]) >= (
             current["modified_at"], current["video_path"],
         ):
             latest_by_episode[episode_number] = asset
-    return [latest_by_episode[number] for number in sorted(latest_by_episode)]
+    return {
+        title_key: [items[number] for number in sorted(items)]
+        for title_key, items in assets_by_title.items()
+    }
+
+
+def find_downloaded_video_assets(root: str | Path, title: str) -> list[dict[str, Any]]:
+    return index_downloaded_video_assets(root).get(normalize_title(title), [])

@@ -20,7 +20,11 @@ import sys
 import os
 import time
 import json
+import csv
+import io
+import base64
 import asyncio
+import heapq
 import logging
 import mimetypes
 import re
@@ -29,20 +33,24 @@ import subprocess
 import webbrowser
 import queue
 import shutil
+import tempfile
 import uuid
+import zipfile
 from pathlib import Path
-from typing import List, Dict, Optional, Any
-from contextlib import asynccontextmanager
+from typing import List, Dict, Optional, Any, Literal
+from contextlib import asynccontextmanager, suppress
 from logging.handlers import RotatingFileHandler
 
 import uvicorn
 import httpx
+from openpyxl import Workbook
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 import config
 from audit.api import build_audit_router
@@ -59,6 +67,7 @@ from analysis.today_rank_api import register_today_rank_routes
 from creative.api import register_creative_routes
 from creative.delivery import DeliveryService, build_delivery_router
 from creative.repository import CreativeRepository
+from creative.transcript_assets import normalize_title
 from identity.api import build_identity_router
 from identity.password_service import PasswordService
 from identity.dependencies import current_principal, require_permission
@@ -83,6 +92,12 @@ from workflow.transition_service import TransitionService
 
 
 WORKSPACE_ROOT = Path(__file__).resolve().parent
+HONGGUO_REVIEW_CAPTURE_SERVICE_URL = os.getenv(
+    "HONGGUO_REVIEW_CAPTURE_SERVICE_URL", "http://127.0.0.1:8766"
+).rstrip("/")
+HONGGUO_REVIEW_CAPTURE_EXPORT_ROOT = Path(
+    os.getenv("HONGGUO_REVIEW_CAPTURE_EXPORT_ROOT", r"E:\hg\exports")
+).resolve()
 WEB_LOG_LEVEL = os.getenv("AIWORKER_WEB_LOG_LEVEL", "INFO").strip().upper()
 WEB_LOG_MAX_BYTES = 5 * 1024 * 1024
 WEB_LOG_BACKUP_COUNT = 5
@@ -133,14 +148,23 @@ def _api_permission(method: str, path: str) -> str | None:
     for prefix, permission in creative_permissions.items():
         if path.startswith(prefix):
             return permission
+    if path.startswith("/api/hongguo/reviews"):
+        return "drama.search"
+    if path.startswith("/api/douyin/reviews"):
+        return "drama.download"
+    if path.startswith("/api/douyin/drama"):
+        return "drama.search"
     if path.startswith("/api/hongguo/drama"):
         if path.startswith("/api/hongguo/drama/settings") or path.endswith("/test"):
             return "*"
         return "drama.download" if "job" in path or "download" in path else "drama.search"
     if path.startswith(("/api/file/analyze", "/api/audio/analyze", "/api/qrcode/")):
         return "job.create.selection"
+    if path == "/api/files/operations" and method == "POST":
+        # Archive and delete operations have different permissions, checked by the handler.
+        return None
     if path == "/api/files" and method == "DELETE":
-        return "*"
+        return "data.media.delete"
     if path.startswith(("/api/files", "/api/file/", "/api/media/")):
         return "data.media.preview"
     if path.startswith(("/api/run", "/api/batch/", "/api/stop")):
@@ -377,16 +401,22 @@ job_manager = JobManager(cwd=Path(__file__).resolve().parent)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     backend_logger.info("Web GUI started")
-    yield
-    backend_logger.info("Web GUI shutting down")
-    for job in job_manager.list_jobs():
-        if job["status"] in {"pending", "running", "stopping"}:
-            try:
-                job_manager.stop(job["job_id"])
-            except Exception:
-                pass
-    if state.process:
-        state.process.terminate()
+    cleanup_task = asyncio.create_task(_periodic_data_operation_cleanup())
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await cleanup_task
+        backend_logger.info("Web GUI shutting down")
+        for job in job_manager.list_jobs():
+            if job["status"] in {"pending", "running", "stopping"}:
+                try:
+                    job_manager.stop(job["job_id"])
+                except Exception:
+                    pass
+        if state.process:
+            state.process.terminate()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -516,6 +546,23 @@ class FileDeleteRequest(BaseModel):
     paths: List[str]
 
 
+class FileBatchDownloadRequest(BaseModel):
+    paths: List[str] = Field(min_length=1, max_length=1000)
+
+
+class FileOperationSelection(BaseModel):
+    mode: Literal["explicit", "all_matching"]
+    paths: List[str] = Field(default_factory=list, max_length=100_000)
+    filter: str = "all"
+    query: str = ""
+    excluded_paths: List[str] = Field(default_factory=list, max_length=100_000)
+
+
+class FileOperationRequest(BaseModel):
+    operation: Literal["archive", "delete"]
+    selection: FileOperationSelection
+
+
 class HongguoDramaSettingsRequest(BaseModel):
     config_url: Optional[str] = None
     activation_code: Optional[str] = None
@@ -525,8 +572,27 @@ class HongguoDramaSearchRequest(BaseModel):
     title: str
 
 
+class HongguoReviewCaptureRequest(BaseModel):
+    title: str
+    limit: int = Field(100, ge=1, le=10_000)
+    all_reviews: bool = False
+
+
+class DouyinReviewCaptureRequest(BaseModel):
+    topic_id: int = 0
+    title: str
+    limit: int = Field(100, ge=1, le=10_000)
+    all_reviews: bool = False
+
+
 class HongguoDramaEpisodesRequest(BaseModel):
     book_id: str
+    source_platform: str = "hg"
+    title: str = ""
+
+
+class HongguoDramaDownloadStatusRequest(BaseModel):
+    title: str
 
 
 class HongguoDramaJobRequest(BaseModel):
@@ -534,6 +600,7 @@ class HongguoDramaJobRequest(BaseModel):
     title: str
     book_id: str
     episode: int
+    source_platform: str = "hg"
     workflow_task_id: str | None = None
 
 
@@ -543,6 +610,7 @@ class HongguoDramaDownloadJobRequest(BaseModel):
     book_id: str
     episodes: List[int] = []
     all_episodes: bool = False
+    source_platform: str = "hg"
     workflow_task_id: str | None = None
 
 
@@ -1816,6 +1884,21 @@ async def search_hongguo_drama(payload: HongguoDramaSearchRequest):
         )
 
 
+@app.post("/api/douyin/drama/search")
+async def search_douyin_drama(payload: HongguoDramaSearchRequest):
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(400, "请输入剧名")
+    try:
+        candidates = await DouyinDramaFallbackClient().search(title)
+        return {"status": "success", "source": "douyin", "candidates": candidates}
+    except DouyinFallbackError as exc:
+        return JSONResponse(
+            {"status": "error", "source": "douyin", "message": str(exc)},
+            status_code=502,
+        )
+
+
 @app.post("/api/hongguo/drama/suggest")
 async def suggest_hongguo_drama(payload: HongguoDramaSearchRequest):
     """Return lightweight Hongguo title suggestions while the user is typing.
@@ -1842,70 +1925,361 @@ async def suggest_hongguo_drama(payload: HongguoDramaSearchRequest):
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=502)
 
 
-def downloaded_hongguo_episode_statuses(book_id: str) -> dict[int, dict[str, str]]:
-    statuses: dict[int, dict[str, str]] = {}
-    _DOWNLOAD_TYPES = frozenset({"drama_download", "drama_analysis", "douyin_fallback_analysis"})
-    for job in job_manager.list_jobs():
-        if job.get("crawler_type") not in _DOWNLOAD_TYPES:
+async def _review_capture_request(
+    method: str, path: str, payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    url = f"{HONGGUO_REVIEW_CAPTURE_SERVICE_URL}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = (
+                await client.post(url, json=payload or {})
+                if method == "POST" else await client.get(url)
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(503, f"剧评采集服务不可用：{exc}") from exc
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise HTTPException(502, "剧评采集服务返回了无效响应") from exc
+    if not isinstance(data, dict):
+        raise HTTPException(502, "剧评采集服务返回了无效数据")
+    failed_job = method == "GET" and path.startswith("/v1/jobs/") and data.get("status") == "failed"
+    if response.status_code >= 400 or (data.get("error") and not failed_job):
+        raise HTTPException(response.status_code if response.status_code >= 400 else 502, data.get("error") or "剧评采集服务请求失败")
+    return data
+
+
+def _review_capture_output_path(output_path: str) -> Path:
+    path = Path(output_path).resolve()
+    try:
+        path.relative_to(HONGGUO_REVIEW_CAPTURE_EXPORT_ROOT)
+    except ValueError as exc:
+        raise HTTPException(502, "剧评采集服务返回了无效导出路径") from exc
+    if path.suffix.lower() != ".csv" or not path.is_file():
+        raise HTTPException(404, "剧评导出文件尚不可用")
+    return path
+
+
+def _read_review_capture_rows(output_path: str) -> list[dict[str, Any]]:
+    path = _review_capture_output_path(output_path)
+    with path.open("r", encoding="utf-8-sig", newline="") as file:
+        return [
+            {
+                "comment_id": row.get("评论ID", ""),
+                "author": row.get("用户名", ""),
+                "content": row.get("剧评内容", ""),
+                "created_at": row.get("评论时间", ""),
+                "like_count": row.get("点赞数", "0"),
+            }
+            for row in csv.DictReader(file)
+        ]
+
+
+async def _review_capture_job_payload(job: dict[str, Any]) -> dict[str, Any]:
+    reviews: list[dict[str, Any]] = []
+    if job.get("status") == "completed" and job.get("output_path"):
+        reviews = await asyncio.to_thread(_read_review_capture_rows, str(job["output_path"]))
+    return {"job": job, "reviews": reviews}
+
+
+@app.post("/api/hongguo/reviews/capture")
+async def start_hongguo_review_capture(payload: HongguoReviewCaptureRequest):
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(400, "请输入剧名")
+    path = "/v1/reviews/capture/all" if payload.all_reviews else "/v1/reviews/capture/limited"
+    request_payload = {"title": title}
+    if not payload.all_reviews:
+        request_payload["limit"] = payload.limit
+    job = await _review_capture_request(
+        "POST", path, request_payload
+    )
+    return await _review_capture_job_payload(job)
+
+
+@app.get("/api/hongguo/reviews/jobs/{job_id}")
+async def get_hongguo_review_capture_job(job_id: str):
+    job = await _review_capture_request("GET", f"/v1/jobs/{job_id}")
+    return await _review_capture_job_payload(job)
+
+
+@app.get("/api/hongguo/reviews/jobs/{job_id}/download")
+async def download_hongguo_review_capture(job_id: str, format: Literal["csv", "xlsx"] = "csv"):
+    job = await _review_capture_request("GET", f"/v1/jobs/{job_id}")
+    if job.get("status") != "completed" or not job.get("output_path"):
+        raise HTTPException(409, "剧评采集尚未完成")
+    path = _review_capture_output_path(str(job["output_path"]))
+    if format == "xlsx":
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "剧评"
+        with path.open("r", encoding="utf-8-sig", newline="") as file:
+            for row in csv.reader(file):
+                sheet.append(row)
+        output = io.BytesIO()
+        workbook.save(output)
+        output.seek(0)
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="hongguo-reviews-{job_id}.xlsx"'},
+        )
+    return FileResponse(path, media_type="text/csv", filename=f"hongguo-reviews-{job_id}.csv")
+
+
+def _douyin_review_aweme_id(topic_id: int, title: str) -> str:
+    """Use the ranking source video when it is still available; the worker can search as a fallback."""
+    topic = creative_repository.get_topic(topic_id)
+    source_paths = [] if topic is None else [topic.get("source_path"), *(topic.get("source_paths") or [])]
+    title_key = normalize_title(title)
+    for raw_path in dict.fromkeys(str(path or "") for path in source_paths):
+        candidate = (WORKSPACE_ROOT / raw_path).resolve()
+        if not _is_relative_to(candidate, WORKSPACE_ROOT) or not candidate.is_file():
             continue
-        job_dir = WORKSPACE_ROOT / "data" / "hg" / "jobs" / str(job.get("job_id") or "")
-        if not job_dir.exists():
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
             continue
-        manifest_paths = []
-        for artifact in job.get("artifacts") or []:
-            artifact_path = Path(str(artifact.get("path") or ""))
-            if artifact_path.name == "manifest.json":
-                manifest_paths.append(artifact_path if artifact_path.is_absolute() else WORKSPACE_ROOT / artifact_path)
-        if not manifest_paths:
-            manifest_paths.extend(job_dir.rglob("manifest.json"))
-        # Fallback: scan episode dirs for source.json when no manifest exists
-        if not manifest_paths:
-            for drama_dir in job_dir.glob("dramas/*"):
-                for source_file in drama_dir.rglob("source.json"):
-                    try:
-                        source = json.loads(source_file.read_text(encoding="utf-8"))
-                        if str(source.get("book_id") or "").strip() != book_id:
-                            continue
-                        ep = source.get("episode")
-                        if isinstance(ep, dict):
-                            ep = ep.get("episode")
-                        episode = int(ep) if ep is not None else None
-                        if episode is None:
-                            continue
-                        statuses[episode] = {
-                            "status": "downloaded",
-                            "job_id": str(job.get("job_id") or ""),
-                            "path": str(source_file.parent),
-                        }
-                    except (OSError, ValueError, TypeError):
-                        continue
-            continue
-        for manifest_path in manifest_paths:
-            try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError, TypeError):
+        records = payload.get("records") if isinstance(payload, dict) else None
+        for record in records if isinstance(records, list) else []:
+            if not isinstance(record, dict) or normalize_title(record.get("title")) != title_key:
                 continue
+            value = str(record.get("aweme_id") or record.get("item_id") or "").strip()
+            if value:
+                return value
+            detail_url = str(record.get("detail_url") or "")
+            matched = re.search(r"/video/(\d+)", detail_url)
+            if matched:
+                return matched.group(1)
+    return ""
+
+
+def _douyin_review_output_path(job: dict[str, Any]) -> Path:
+    payload = job.get("job") if isinstance(job.get("job"), dict) else job
+    extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
+    path = Path(str(extra.get("output_path") or "")).resolve()
+    root = (WORKSPACE_ROOT / "data" / "dy" / "jobs").resolve()
+    if not path.is_file() or path.suffix.lower() != ".csv" or not _is_relative_to(path, root):
+        raise HTTPException(404, "抖音剧评导出文件尚不可用")
+    return path
+
+
+def _douyin_review_job_payload(job: dict[str, Any]) -> dict[str, Any]:
+    payload = job.get("job") if isinstance(job.get("job"), dict) else job
+    if payload.get("platform") != "dy" or payload.get("crawler_type") != "drama_reviews":
+        raise HTTPException(404, "剧评任务不存在")
+    progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
+    status = {"pending": "queued", "running": "running", "succeeded": "completed", "failed": "failed", "cancelled": "failed"}.get(str(job.get("status") or ""), "failed")
+    return {
+        "job": {
+            "job_id": job.get("job_id"),
+            "status": status,
+            "review_count": int(progress.get("review_count") or 0),
+            "source_total": int(progress.get("source_total") or 0),
+            "error": job.get("message") if status == "failed" else "",
+        },
+        "reviews": [],
+    }
+
+
+@app.post("/api/douyin/reviews/jobs")
+async def create_douyin_review_job(
+    payload: DouyinReviewCaptureRequest,
+    principal: Principal = Depends(current_principal),
+):
+    _require_permission(principal, "job.create.selection")
+    _require_permission(principal, "drama.download")
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(400, "请输入剧名")
+    job_id = job_manager.generate_job_id("dy")
+    output_path = WORKSPACE_ROOT / "data" / "dy" / "jobs" / job_id / "reviews" / "reviews.csv"
+    job = CrawlJob(
+        job_id=job_id,
+        platform="dy",
+        crawler_type="drama_reviews",
+        extra={
+            "topic_id": payload.topic_id,
+            "title": title,
+            "aweme_id": _douyin_review_aweme_id(payload.topic_id, title),
+            "limit": payload.limit,
+            "all_reviews": payload.all_reviews,
+            "output_path": str(output_path),
+            "workspace_root": str(WORKSPACE_ROOT.resolve()),
+        },
+    )
+    try:
+        job_state = job_manager.create_job(job, created_by_user_id=principal.user_id)
+    except JobConflictError as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=409)
+    return _douyin_review_job_payload(_public_created_job(job_state))
+
+
+@app.get("/api/douyin/reviews/jobs/{job_id}")
+async def get_douyin_review_job(job_id: str, principal: Principal = Depends(current_principal)):
+    try:
+        job = job_manager.get_job(job_id)
+    except JobNotFoundError as exc:
+        raise HTTPException(404, "剧评任务不存在") from exc
+    _assert_can_read_job(job, principal)
+    return _douyin_review_job_payload(job)
+
+
+@app.get("/api/douyin/reviews/jobs/{job_id}/download")
+async def download_douyin_reviews(
+    job_id: str,
+    format: Literal["csv", "xlsx"] = "csv",
+    principal: Principal = Depends(current_principal),
+):
+    try:
+        job = job_manager.get_job(job_id)
+    except JobNotFoundError as exc:
+        raise HTTPException(404, "剧评任务不存在") from exc
+    _assert_can_read_job(job, principal)
+    state = _douyin_review_job_payload(job)["job"]
+    if state["status"] != "completed":
+        raise HTTPException(409, "剧评采集尚未完成")
+    path = _douyin_review_output_path(job)
+    if format == "xlsx":
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "剧评"
+        with path.open("r", encoding="utf-8-sig", newline="") as file:
+            for row in csv.reader(file):
+                sheet.append(row)
+        output = io.BytesIO()
+        workbook.save(output)
+        output.seek(0)
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="douyin-reviews-{job_id}.xlsx"'},
+        )
+    return FileResponse(path, media_type="text/csv", filename=f"douyin-reviews-{job_id}.csv")
+
+
+def downloaded_hongguo_episode_statuses(title: str) -> dict[int, dict[str, str]]:
+    statuses: dict[int, dict[str, str]] = {}
+    title_key = normalize_title(title)
+    if not title_key:
+        return statuses
+
+    for source_file in (WORKSPACE_ROOT / "data").glob("*/jobs/**/source.json"):
+        try:
+            source = json.loads(source_file.read_text(encoding="utf-8"))
+            if normalize_title(source.get("title")) != title_key:
+                continue
+            value = source.get("episode")
+            if isinstance(value, dict):
+                value = value.get("episode") or value.get("episode_number")
+            episode = int(value or source.get("episode_number") or 0)
+            if episode < 1:
+                continue
+            episode_dir = source_file.parent
+            has_local_file = (
+                (episode_dir / "script.md").is_file()
+                or (episode_dir / "transcript.json").is_file()
+                or any(episode_dir.glob("video.*"))
+            )
+            if not has_local_file:
+                continue
+            parts = source_file.parts
+            job_id = parts[parts.index("jobs") + 1] if "jobs" in parts else ""
+            statuses[episode] = {
+                "status": "downloaded",
+                "job_id": job_id,
+                "path": str(episode_dir),
+            }
+        except (OSError, ValueError, TypeError):
+            continue
+
+    for manifest_path in (WORKSPACE_ROOT / "data").glob("*/jobs/**/manifest.json"):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if normalize_title(manifest.get("title")) != title_key:
+                continue
+            parts = manifest_path.parts
+            job_id = parts[parts.index("jobs") + 1] if "jobs" in parts else ""
             for item in manifest.get("items") or []:
-                if not isinstance(item, dict) or item.get("status") != "succeeded":
+                if not isinstance(item, dict):
                     continue
-                try:
-                    episode = int(item.get("episode"))
-                except (TypeError, ValueError):
+                episode = int(item.get("episode") or 0)
+                path_value = str(item.get("path") or "").strip()
+                artifact_path = Path(path_value)
+                candidates = [artifact_path] if artifact_path.is_absolute() else [
+                    WORKSPACE_ROOT / artifact_path,
+                    manifest_path.parent / artifact_path,
+                ]
+                local_file = next((path for path in candidates if path.is_file()), None)
+                if episode < 1 or local_file is None:
                     continue
                 statuses[episode] = {
                     "status": "downloaded",
-                    "job_id": str(job.get("job_id") or ""),
-                    "path": str(item.get("path") or ""),
+                    "job_id": job_id,
+                    "path": str(local_file),
                 }
+        except (OSError, ValueError, TypeError):
+            continue
     return statuses
+
+
+def downloaded_douyin_full_drama_status(title: str) -> dict[str, int] | None:
+    title_key = normalize_title(title)
+    if not title_key:
+        return None
+    for source_file in (WORKSPACE_ROOT / "data").glob("*/jobs/**/source.json"):
+        try:
+            source = json.loads(source_file.read_text(encoding="utf-8"))
+            if (
+                normalize_title(source.get("title")) != title_key
+                or str(source.get("source_platform") or "").lower() != "dy"
+            ):
+                continue
+            metadata = source.get("episode_metadata") or {}
+            start = int(metadata.get("episode_start") or 0)
+            end = int(metadata.get("episode_end") or 0)
+            count = int(metadata.get("episode_count") or 0)
+            if start < 1 or end <= start or count < 2:
+                continue
+            episode_dir = source_file.parent
+            if not (
+                (episode_dir / "script.md").is_file()
+                or (episode_dir / "transcript.json").is_file()
+                or any(episode_dir.glob("video.*"))
+            ):
+                continue
+            return {
+                "episode_start": start,
+                "episode_end": end,
+                "episode_count": count,
+            }
+        except (OSError, ValueError, TypeError):
+            continue
+    return None
+
+
+@app.post("/api/hongguo/drama/download/status")
+async def get_hongguo_drama_download_status(payload: HongguoDramaDownloadStatusRequest):
+    full_drama = await asyncio.to_thread(
+        downloaded_douyin_full_drama_status, payload.title
+    )
+    return {
+        "douyin_full_downloaded": full_drama is not None,
+        **(full_drama or {}),
+    }
 
 
 @app.post("/api/hongguo/drama/episodes")
 async def get_hongguo_drama_episodes(payload: HongguoDramaEpisodesRequest):
     try:
         client = HongguoDramaClient(load_hongguo_drama_settings(WORKSPACE_ROOT / ".runtime"))
-        episodes = await asyncio.to_thread(client.episodes, payload.book_id)
-        downloaded = await asyncio.to_thread(downloaded_hongguo_episode_statuses, payload.book_id.strip())
+        episodes = await asyncio.to_thread(
+            client.episodes, payload.book_id, payload.source_platform
+        )
+        downloaded = await asyncio.to_thread(
+            downloaded_hongguo_episode_statuses,
+            payload.title,
+        )
         public_episodes = []
         for item in episodes:
             episode = {key: value for key, value in item.items() if key not in {"raw", "subtitle_url"}}
@@ -1932,17 +2306,14 @@ async def search_hongguo_drama_for_download(payload: HongguoDramaSearchRequest):
     fallback_reason = ""
     try:
         client = HongguoDramaClient(load_hongguo_drama_settings(WORKSPACE_ROOT / ".runtime"))
-        # Do not leave the modal spinning through several slow provider pages;
-        # a timed-out Hongguo search immediately proceeds to the Douyin fallback.
-        candidates = await asyncio.wait_for(
-            asyncio.to_thread(client.search_exact, payload.title.strip()),
-            timeout=15,
+        # The source aggregator queries every configured provider. Do not turn a
+        # still-running provider query into a premature Douyin fallback.
+        candidates = await asyncio.to_thread(
+            client.search_exact_all_sources, payload.title.strip()
         )
         if candidates:
             return {"status": "success", "source": "hongguo", "candidates": [{key: value for key, value in item.items() if key != "raw"} for item in candidates]}
-        fallback_reason = "红果接口未返回剧名完全匹配结果"
-    except asyncio.TimeoutError:
-        fallback_reason = "红果接口检索超时"
+        fallback_reason = "七个剧目源均未返回剧名完全匹配结果"
     except HongguoDramaError as exc:
         fallback_reason = f"红果接口检索失败：{exc}"
     backend_logger.info("Hongguo download search falling back to Douyin: title=%s reason=%s", payload.title.strip(), fallback_reason)
@@ -2004,6 +2375,7 @@ async def create_hongguo_drama_job(
             "title": payload.title.strip(),
             "book_id": payload.book_id.strip(),
             "episode": payload.episode,
+            "source_platform": payload.source_platform.strip().lower() or "hg",
             "creative_db_path": str(creative_repository.db_path.resolve()),
             "workspace_root": str(WORKSPACE_ROOT.resolve()),
             "created_by_user_id": actor.user_id,
@@ -2096,6 +2468,7 @@ async def create_hongguo_drama_download_job(
             "book_id": payload.book_id.strip(),
             "episodes": episodes,
             "all_episodes": payload.all_episodes,
+            "source_platform": payload.source_platform.strip().lower() or "hg",
             "pause_path": str(job_manager.jobs_dir / f"{job_id}.pause"),
             "creative_db_path": str(creative_repository.db_path.resolve()),
             "workspace_root": str(WORKSPACE_ROOT.resolve()),
@@ -2710,30 +3083,220 @@ async def get_logs(principal: Principal = Depends(current_principal)):
 
 @app.get("/api/files")
 async def list_files(filter: str = "all"):
+    return sorted(_iter_data_file_info(filter), key=_data_file_sort_key, reverse=True)
+
+
+def _data_file_sort_key(file_info: Dict[str, Any]) -> tuple[float, str]:
+    return (float(file_info["modified"]), str(file_info["path"]))
+
+
+def _iter_data_file_info(filter_value: str = "all", query: str = ""):
     if not DATA_ROOT.exists():
-        return []
+        return
+    query_value = query.strip().casefold()
+    for path in DATA_ROOT.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in SUPPORTED_DATA_EXTENSIONS:
+            continue
+        stats = path.stat()
+        classification = classify_data_file(path)
+        file_info = {
+            "name": path.name,
+            "path": display_data_path(path),
+            "size": stats.st_size,
+            "modified": stats.st_mtime,
+            "category": classification["category"],
+            "legacy_category": classification["legacy_category"],
+            "type": path.suffix.lower().lstrip("."),
+            "media_type": classification["media_type"],
+            **describe_data_file(path, classification),
+        }
+        if not filter_matches_file(filter_value, file_info):
+            continue
+        if query_value and query_value not in (
+            f"{file_info['name']} {file_info['path']}".casefold()
+        ):
+            continue
+        yield file_info
 
-    files = []
-    for f in DATA_ROOT.rglob("*"):
-        if f.is_file() and f.suffix.lower() in SUPPORTED_DATA_EXTENSIONS:
-            stats = f.stat()
-            classification = classify_data_file(f)
-            file_info = {
-                "name": f.name,
-                "path": display_data_path(f),
-                "size": stats.st_size,
-                "modified": stats.st_mtime,
-                "category": classification["category"],
-                "legacy_category": classification["legacy_category"],
-                "type": f.suffix.lower().lstrip("."),
-                "media_type": classification["media_type"],
-                **describe_data_file(f, classification),
-            }
-            if filter_matches_file(filter, file_info):
-                files.append(file_info)
 
-    files.sort(key=lambda x: x["modified"], reverse=True)
-    return files
+def _encode_file_cursor(key: tuple[float, str]) -> str:
+    payload = json.dumps({"modified": key[0], "path": key[1]}, separators=(",", ":"))
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii")
+
+
+def _decode_file_cursor(value: str | None) -> tuple[float, str] | None:
+    if not value:
+        return None
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(value.encode("ascii")))
+        return (float(payload["modified"]), str(payload["path"]))
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(400, "Invalid file cursor") from exc
+
+
+def _data_operation_dir() -> Path:
+    return WORKSPACE_ROOT / ".runtime" / "data_operations"
+
+
+def cleanup_data_operation_artifacts(max_age_seconds: int = 24 * 60 * 60) -> None:
+    root = _data_operation_dir()
+    if not root.exists():
+        return
+    deadline = time.time() - max_age_seconds
+    for path in root.iterdir():
+        if not path.is_file():
+            continue
+        try:
+            if path.stat().st_mtime < deadline:
+                path.unlink()
+        except OSError as exc:
+            backend_logger.warning("Failed to clean expired data operation artifact %s: %s", path, exc)
+
+
+async def _periodic_data_operation_cleanup() -> None:
+    while True:
+        await asyncio.to_thread(cleanup_data_operation_artifacts)
+        await asyncio.sleep(60 * 60)
+
+
+def create_data_operation_snapshot(
+    selection: FileOperationSelection, job_id: str
+) -> tuple[Path, int]:
+    root = _data_operation_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    snapshot_path = root / f"{job_id}.paths"
+    temporary_path = root / f"{job_id}.paths.partial"
+    total = 0
+
+    try:
+        with temporary_path.open("w", encoding="utf-8") as snapshot:
+            if selection.mode == "explicit":
+                seen_paths: set[str] = set()
+                for raw_path in selection.paths:
+                    value = raw_path.strip()
+                    if not value:
+                        continue
+                    file_path = resolve_data_file_path(value)
+                    display_path = display_data_path(file_path)
+                    if display_path in seen_paths:
+                        continue
+                    seen_paths.add(display_path)
+                    snapshot.write(json.dumps(display_path, ensure_ascii=False) + "\n")
+                    total += 1
+            else:
+                excluded_paths = {
+                    path.strip().replace("\\", "/")
+                    for path in selection.excluded_paths
+                    if path.strip()
+                }
+                for file_info in _iter_data_file_info(selection.filter, selection.query):
+                    display_path = str(file_info["path"])
+                    if display_path in excluded_paths:
+                        continue
+                    snapshot.write(json.dumps(display_path, ensure_ascii=False) + "\n")
+                    total += 1
+        if not total:
+            raise HTTPException(400, "没有可处理的文件")
+        temporary_path.replace(snapshot_path)
+        return snapshot_path, total
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        snapshot_path.unlink(missing_ok=True)
+        raise
+
+
+async def list_files_page(
+    filter: str = "all", query: str = "", cursor: str | None = None, limit: int = 100
+) -> Dict[str, Any]:
+    page_limit = max(1, min(int(limit), 200))
+    cursor_key = _decode_file_cursor(cursor)
+    page_heap: list[tuple[tuple[float, str], Dict[str, Any]]] = []
+    total = 0
+    remaining = 0
+    for file_info in _iter_data_file_info(filter, query):
+        total += 1
+        key = _data_file_sort_key(file_info)
+        if cursor_key is not None and key >= cursor_key:
+            continue
+        remaining += 1
+        if len(page_heap) < page_limit:
+            heapq.heappush(page_heap, (key, file_info))
+        elif key > page_heap[0][0]:
+            heapq.heapreplace(page_heap, (key, file_info))
+    items = [item for _, item in sorted(page_heap, key=lambda pair: pair[0], reverse=True)]
+    next_cursor = (
+        _encode_file_cursor(_data_file_sort_key(items[-1]))
+        if len(items) < remaining
+        else None
+    )
+    return {"items": items, "total": total, "next_cursor": next_cursor}
+
+
+@app.get("/api/files/page")
+async def list_files_page_route(
+    filter: str = "all", query: str = "", cursor: str | None = None, limit: int = 100
+):
+    return await list_files_page(filter, query, cursor, limit)
+
+
+@app.post("/api/files/operations")
+async def create_file_operation(
+    request: FileOperationRequest,
+    principal: Principal = Depends(current_principal),
+):
+    permission = "data.media.preview" if request.operation == "archive" else "data.media.delete"
+    _require_permission(principal, permission)
+    cleanup_data_operation_artifacts()
+    job_id = job_manager.generate_job_id("data")
+    snapshot_path, total = create_data_operation_snapshot(request.selection, job_id)
+    output_path = _data_operation_dir() / (
+        f"{job_id}.zip" if request.operation == "archive" else f"{job_id}.result"
+    )
+    job = CrawlJob(
+        job_id=job_id,
+        platform="data",
+        crawler_type="file_operation",
+        extra={
+            "operation": request.operation,
+            "snapshot_path": str(snapshot_path),
+            "output_path": str(output_path),
+            "workspace_root": str(WORKSPACE_ROOT),
+            "total": total,
+        },
+    )
+    try:
+        job_state = job_manager.create_job(job, created_by_user_id=principal.user_id)
+    except Exception:
+        snapshot_path.unlink(missing_ok=True)
+        raise
+    _record_job_audit(None, principal, "data.operation.create", _public_created_job(job_state))
+    return {"job_id": job_state.job_id, "total": total}
+
+
+@app.get("/api/files/operations/{job_id}/download")
+async def download_file_operation(
+    job_id: str,
+    principal: Principal = Depends(current_principal),
+):
+    _require_permission(principal, "data.media.preview")
+    cleanup_data_operation_artifacts()
+    try:
+        job = job_manager.get_job(job_id)
+    except JobNotFoundError as exc:
+        raise HTTPException(404, "Job not found") from exc
+    _assert_can_read_job(job, principal)
+    payload = job.get("job") if isinstance(job.get("job"), dict) else job
+    extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
+    if payload.get("platform") != "data" or payload.get("crawler_type") != "file_operation" or extra.get("operation") != "archive":
+        raise HTTPException(404, "Archive not found")
+    archive_path = Path(str(extra.get("output_path") or "")).resolve()
+    if not _is_relative_to(archive_path, _data_operation_dir()) or not archive_path.is_file():
+        raise HTTPException(404, "Archive not found")
+    return FileResponse(
+        str(archive_path),
+        media_type="application/zip",
+        filename=f"aiworker-data-{job_id}.zip",
+    )
 
 @app.get("/api/file/content")
 async def get_file_content(path: str):
@@ -2814,10 +3377,47 @@ async def download_file(path: str):
     return FileResponse(str(file_path), filename=file_path.name)
 
 
+@app.post("/api/files/download")
+async def download_files_archive(
+    req: FileBatchDownloadRequest,
+    _: Principal = Depends(require_permission("data.media.preview")),
+):
+    paths = list(dict.fromkeys(path.strip() for path in req.paths if path.strip()))
+    if not paths:
+        raise HTTPException(400, "At least one file path is required")
+    file_paths = [resolve_data_file_path(path) for path in paths]
+    archive_dir = WORKSPACE_ROOT / ".runtime" / "downloads"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archive_fd, archive_name = tempfile.mkstemp(
+        prefix="aiworker-data-", suffix=".zip", dir=archive_dir
+    )
+    os.close(archive_fd)
+    archive_path = Path(archive_name)
+    try:
+        with zipfile.ZipFile(
+            archive_path, "w", compression=zipfile.ZIP_STORED, allowZip64=True
+        ) as archive:
+            for file_path in file_paths:
+                archive.write(
+                    file_path,
+                    arcname=file_path.relative_to(DATA_ROOT).as_posix(),
+                )
+    except BaseException:
+        archive_path.unlink(missing_ok=True)
+        raise
+    filename = f"aiworker-data-{time.strftime('%Y%m%d-%H%M%S')}.zip"
+    return FileResponse(
+        str(archive_path),
+        media_type="application/zip",
+        filename=filename,
+        background=BackgroundTask(archive_path.unlink, missing_ok=True),
+    )
+
+
 @app.delete("/api/files")
 async def delete_files(
     req: FileDeleteRequest,
-    _: Principal = Depends(require_permission("*")),
+    _: Principal = Depends(require_permission("data.media.delete")),
 ):
     paths = list(dict.fromkeys(path.strip() for path in req.paths if path.strip()))
     if not paths:

@@ -36,6 +36,34 @@
         </div>
     </div>
 
+    <div class="modal fade" id="dramaReviewCaptureModal" tabindex="-1" aria-labelledby="dramaReviewCaptureModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <div><h5 class="modal-title" id="dramaReviewCaptureModalLabel"><i class="bi bi-chat-square-text me-2"></i>下载剧评</h5><div class="small text-muted mt-1" x-text="dramaReviews.title"></div></div>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-danger py-2" x-show="dramaReviews.error" x-text="dramaReviews.error"></div>
+                    <div class="row g-3 align-items-end">
+                        <div class="col-md-5"><label class="form-label">剧评数量</label><input class="form-control" type="number" min="1" max="10000" step="1" x-model.number="dramaReviews.limit" :disabled="dramaReviews.allReviews"></div>
+                        <div class="col-md-3"><label class="form-label">导出格式</label><select class="form-select" x-model="dramaReviews.format"><option value="csv">CSV</option><option value="xlsx">Excel</option></select></div>
+                        <div class="col-md-4"><label class="form-check mb-2"><input class="form-check-input" type="checkbox" x-model="dramaReviews.allReviews"><span class="form-check-label">下载全部剧评</span></label></div>
+                    </div>
+                    <div class="border border-secondary rounded p-3 mt-3" x-show="dramaReviews.jobId">
+                        <div class="d-flex justify-content-between align-items-center"><span class="badge bg-secondary" x-text="dramaReviewStatusLabel()"></span><span class="small text-muted" x-text="`已获取 ${dramaReviews.reviewCount} / ${dramaReviews.sourceTotal || '-'} 条`"></span></div>
+                        <div class="small text-muted mt-2" x-show="['queued', 'running'].includes(dramaReviews.status)">正在采集剧评，请保持此页面打开。</div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                    <button type="button" class="btn btn-outline-primary" x-show="dramaReviews.status !== 'completed'" @click="startDramaReviewCapture" :disabled="dramaReviews.loading || ['queued', 'running'].includes(dramaReviews.status)"><span class="spinner-border spinner-border-sm me-1" x-show="dramaReviews.loading"></span><span x-text="dramaReviews.status === 'failed' ? '重新下载' : '开始下载'"></span></button>
+                    <button type="button" class="btn btn-primary" x-show="dramaReviews.status === 'completed'" @click="downloadDramaReviews"><i class="bi bi-download me-1"></i>下载到本地</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="modal fade" id="audioModal" tabindex="-1">
         <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
             <div class="modal-content">
@@ -157,15 +185,15 @@
                     <div x-show="!dramaDownload.searching && !dramaDownload.jobId && dramaDownload.candidates.length">
                         <label class="form-label" x-text="dramaDownload.source === 'douyin_fallback' ? '确认抖音视频' : '确认剧目'"></label>
                         <div x-show="dramaDownload.source !== 'douyin_fallback'">
-                            <template x-for="candidate in dramaDownload.candidates" :key="candidate.book_id || candidate.aweme_id">
-                                <button type="button" class="list-group-item list-group-item-action bg-transparent text-light border-secondary mb-2" :class="{active: dramaDownload.selectedCandidate?.book_id === candidate.book_id}" @click="selectDramaDownloadCandidate(candidate)">
-                                    <div class="fw-semibold text-start" x-text="candidate.title"></div><div class="small text-muted text-start" x-text="`${candidate.episode_count || '-'} 集 · ${candidate.summary || '暂无简介'}`"></div>
+                            <template x-for="candidate in dramaDownload.candidates" :key="`${candidate.source_platform || dramaDownload.source}:${candidate.book_id || candidate.aweme_id}`">
+                                <button type="button" class="list-group-item list-group-item-action bg-transparent text-light border-secondary mb-2" :class="{active: dramaDownload.selectedCandidate?.book_id === candidate.book_id && (dramaDownload.selectedCandidate?.source_platform || 'hg') === (candidate.source_platform || 'hg')}" @click="selectDramaDownloadCandidate(candidate)">
+                                    <div class="fw-semibold text-start" x-text="candidate.title"></div><div class="small text-muted text-start" x-text="`${candidate.episode_count || '-'} 集 · ${candidate.summary || '暂无简介'}`"></div><div class="small text-info text-start" x-text="candidate.source_platform || 'hg'"></div>
                                 </button>
                             </template>
                         </div>
                         <div x-show="dramaDownload.source === 'douyin_fallback'">
                             <div class="small text-muted mb-2">先确认一个属于该剧的种子视频，系统再解析合集与同作者连续剧集。</div>
-                            <template x-for="candidate in dramaDownload.candidates" :key="candidate.aweme_id">
+                            <template x-for="(candidate, index) in dramaDownload.candidates" :key="`${candidate.aweme_id || 'candidate'}:${index}`">
                                 <button type="button" class="list-group-item list-group-item-action bg-transparent text-light border-secondary mb-2" :class="{'border-primary': dramaDownload.selectedCandidate?.aweme_id === candidate.aweme_id, 'opacity-75': candidate.is_paid}" @click="selectDramaDownloadCandidate(candidate)">
                                     <div class="d-flex gap-2 align-items-start">
                                         <div class="flex-grow-1 min-w-0">

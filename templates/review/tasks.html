@@ -1,7 +1,0 @@
-{% extends "layouts/base.html" %}
-
-{% block content %}
-<div class="d-flex align-items-center justify-content-between border-bottom pb-3 mb-4"><div><h3 class="mb-1">审批任务</h3><div class="small text-muted">领取、指派并处理项目审批事项</div></div><button class="btn btn-outline-secondary btn-sm" id="refresh-review-tasks" title="刷新"><i class="bi bi-arrow-clockwise"></i></button></div>
-<div id="review-task-list" class="alert alert-light border" role="status">暂无待处理审批任务。</div>
-{% endblock %}
-{% block scripts %}<script src="/static/js/review/tasks.js"></script>{% endblock %}

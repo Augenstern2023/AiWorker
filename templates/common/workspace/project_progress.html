@@ -7,6 +7,6 @@
                         <button class="btn btn-sm btn-outline-success" x-show="creativeWorkspace.paused && creativeJobRunning()" @click="resumeCreativeJob"><i class="bi bi-play-fill me-1"></i>继续</button>
                         <button class="btn btn-sm btn-outline-danger" x-show="creativeJobRunning()" @click="cancelCreativeJob"><i class="bi bi-stop-fill me-1"></i>取消</button>
                         <button class="btn btn-sm btn-outline-light" x-show="creativeJobRetryable()" @click="retryCreativeJob"><i class="bi bi-arrow-repeat me-1"></i>重试</button>
-                        <button class="btn btn-sm btn-outline-secondary" @click="window.location.assign('/tasks?job_id=' + encodeURIComponent(creativeWorkspace.jobId))"><i class="bi bi-list-ul me-1"></i>任务日志</button>
+                        <button class="btn btn-sm btn-outline-secondary" @click="openCreativeTaskLog"><i class="bi bi-list-ul me-1"></i>任务日志</button>
                     </div>
                 </div>

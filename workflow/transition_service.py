@@ -10,14 +10,14 @@
 from __future__ import annotations
 
 import sqlite3
-import uuid
+import time
+
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from identity.repository import IdentityRepository
 from identity.schema import Principal
 
-from .approval_service import ApprovalService
 from .repository import SYSTEM_ACTOR, WorkflowRepository
 
 if TYPE_CHECKING:
@@ -25,9 +25,6 @@ if TYPE_CHECKING:
 
 
 WORKFLOW_NODES = {
-    "topic_decision": ("selection_operator", "project_owner", "source_package"),
-    "source_package": ("selection_operator", "project_owner", "breakdown"),
-    "breakdown": ("selection_operator", "project_owner", "brief"),
     "brief": ("creative_planner", "project_owner", "characters"),
     "characters": ("creative_planner", "project_owner", "outline"),
     "outline": ("screenwriter", "project_owner", "beats"),
@@ -46,193 +43,179 @@ class TransitionService:
             if isinstance(repository, WorkflowRepository)
             else WorkflowRepository(repository)
         )
-        self.approval_service = ApprovalService(self.repository)
         self.creative_adapter = creative_adapter or self._default_creative_adapter()
 
-    def create_submission(
+    def complete_creative_without_review(
         self,
         task_id: str,
         resource_type: str,
         resource_id: str,
-        content: Any,
         actor: Principal,
+        *,
+        difference_note: str = "",
     ) -> dict[str, Any]:
-        if (
-            self.creative_adapter is not None
-            and resource_type in {"breakdown", "brief", "characters", "outline", "beats"}
-        ):
-            return self.creative_adapter.create_draft(
-                task_id, resource_type, resource_id, actor
-            )
-        return self.approval_service.create_draft(
-            task_id=task_id,
-            resource_type=resource_type,
-            resource_id=resource_id,
-            content=content,
-            actor=actor,
+        """Finish a creative task by locking its version instead of submitting it."""
+        if self.creative_adapter is None:
+            raise RuntimeError("creative workflow adapter is not configured")
+        if resource_type not in {"brief", "characters", "outline", "beats"}:
+            raise ValueError("resource type requires its configured workflow")
+
+        completed = self.creative_adapter.lock_without_review(
+            task_id,
+            resource_type,
+            resource_id,
+            actor,
+            difference_note=difference_note,
         )
-
-    def submit(self, submission_id: str, actor: Principal) -> dict[str, Any]:
-        submission = self.approval_service.get_submission(submission_id)
-        if (
-            submission is not None
-            and self.creative_adapter is not None
-            and submission["resource_type"]
-            in {"breakdown", "brief", "characters", "outline", "beats"}
-        ):
-            return self.creative_adapter.submit_draft(submission_id, actor)
-        return self.approval_service.submit(submission_id, actor)
-
-    def approve(self, submission_id: str, actor: Principal) -> dict[str, Any]:
         with self.repository.identity_repository.transaction() as connection:
-            current = self.approval_service.get_submission(
-                submission_id, connection=connection
+            task = self.repository.transition_task_in_transaction(
+                task_id,
+                "complete_work",
+                actor,
+                connection=connection,
+                details={
+                    "resource_type": resource_type,
+                    "resource_id": resource_id,
+                    "completion": "locked_without_review",
+                },
+                event_type="creative.lock",
             )
-            if current is None:
-                raise KeyError(submission_id)
-            if (
-                current["status"] == "submitted"
-                and self.creative_adapter is not None
-                and current["resource_type"]
-                in {"breakdown", "brief", "characters", "outline", "beats"}
-            ):
-                self.creative_adapter.assert_approvable(current)
-            if current["status"] == "approved":
-                self._assert_repeated_approval_allowed(
-                    current, actor, connection=connection
-                )
-                submission = current
-            else:
-                submission = self.approval_service.approve(
-                    submission_id, actor, connection=connection
-                )
-
-            task = self.repository._require_task(
-                connection, submission["task_id"]
-            )
-            if current["status"] == "submitted":
-                connection.execute(
-                    """
-                    INSERT INTO approval_records (
-                        id, workflow_id, task_id, version_id, stage, decision,
-                        reviewer_id, comment
-                    ) VALUES (?, ?, ?, ?, ?, 'approved', ?, '')
-                    """,
-                    (
-                        str(uuid.uuid4()),
-                        task["workflow_id"],
-                        task["id"],
-                        submission["id"],
-                        submission["resource_type"],
-                        actor.user_id,
-                    ),
-                )
-            node = WORKFLOW_NODES.get(task["task_type"])
-            if node is None:
-                raise ValueError(f"unknown workflow node: {task['task_type']}")
-            next_node = node[2]
             next_task = None
             beats_progress = None
-            topic_requires_adoption = (
-                submission["resource_type"] == "topic_decision"
-                and self.creative_adapter is not None
-            )
-            if (
-                submission["resource_type"] == "beats"
-                and self.creative_adapter is not None
-            ):
-                beats_progress = self.creative_adapter.beats_episode_progress(
-                    submission["resource_id"]
-                )
-            if beats_progress is not None and not beats_progress["complete"]:
-                completed_task = self.repository._require_task(connection, task["id"])
-                if completed_task["status"] == "completed":
+            if resource_type == "beats":
+                beats_progress = self.creative_adapter.beats_episode_progress(resource_id)
+                if not beats_progress["complete"]:
                     connection.execute(
                         "UPDATE workflow_tasks SET status = 'in_progress', "
                         "updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'completed'",
-                        (task["id"],),
+                        (task_id,),
                     )
                     self.repository._record_event(
                         connection,
-                        task["id"],
+                        task_id,
                         "beats.remaining",
                         actor.user_id,
                         "completed",
                         "in_progress",
                         beats_progress,
                     )
-                task = self.repository._require_task(connection, task["id"])
-            elif next_node is not None and not topic_requires_adoption:
-                next_role = WORKFLOW_NODES[next_node][0]
-                next_task = self.repository.create_next_task(
-                    task["id"],
-                    next_node,
-                    next_role,
-                    actor=SYSTEM_ACTOR,
-                    connection=connection,
-                )
-        result = {
-            "submission": submission,
-            "task": task,
-            "next_task": next_task,
-        }
+                    task = self.repository._require_task(connection, task_id)
+            else:
+                node = WORKFLOW_NODES[resource_type]
+                next_node = node[2]
+                if next_node is not None:
+                    next_task = self.repository.create_next_task(
+                        task_id,
+                        next_node,
+                        WORKFLOW_NODES[next_node][0],
+                        actor=SYSTEM_ACTOR,
+                        connection=connection,
+                    )
+            if resource_type == "beats" and beats_progress and beats_progress["complete"]:
+                node = WORKFLOW_NODES[resource_type]
+                next_node = node[2]
+                if next_node is not None:
+                    next_task = self.repository.create_next_task(
+                        task_id,
+                        next_node,
+                        WORKFLOW_NODES[next_node][0],
+                        actor=SYSTEM_ACTOR,
+                        connection=connection,
+                    )
+        result = {"resource": completed["resource"], "task": task, "next_task": next_task}
         if beats_progress is not None:
             result["beats_progress"] = beats_progress
-        if self.creative_adapter is not None and submission["resource_type"] in {
-            "breakdown", "brief", "characters", "outline", "beats"
-        }:
-            try:
-                authoritative = self.creative_adapter.on_approved(submission, actor)
-                if authoritative["id"] != submission["id"]:
-                    result["authoritative_submission_id"] = authoritative["id"]
-            except Exception as exc:
-                self.repository.record_mirror_error(
-                    submission["task_id"], submission, str(exc)
-                )
-        if (
-            self.creative_adapter is not None
-            and submission["resource_type"] == "topic_decision"
-        ):
-            try:
-                result["topic"] = self.creative_adapter.on_topic_decision_approved(
-                    submission
-                )
-            except Exception as exc:
-                self.repository.record_mirror_error(
-                    submission["task_id"], submission, str(exc)
-                )
-                raise RuntimeError(
-                    "topic decision approved but adoption reconciliation failed"
-                ) from exc
-            try:
-                next_task = self._create_topic_successor(submission["task_id"])
-                result["next_task"] = next_task
-            except Exception as exc:
-                raise RuntimeError(
-                    "topic decision adopted but successor creation failed"
-                ) from exc
         return result
 
-    def return_submission(
-        self,
-        submission_id: str,
-        actor: Principal,
-        review_comment: str,
-    ) -> dict[str, Any]:
-        with self.repository.identity_repository.transaction() as connection:
-            submission, draft = self.approval_service.return_submission(
-                submission_id, actor, review_comment, connection=connection
-            )
-            if self.creative_adapter is not None and submission["resource_type"] in {
-                "breakdown", "brief", "characters", "outline", "beats"
-            }:
-                draft = self.creative_adapter.on_returned(
-                    submission, draft, actor, conn=connection
+    def migrate_pending_creative_approvals(self) -> list[str]:
+        """Lock legacy pending creative versions and remove their review wait state."""
+        if self.creative_adapter is None:
+            return []
+        resource_types = ("brief", "characters", "outline", "beats")
+        with self.repository.identity_repository.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM workflow_submissions WHERE status = 'submitted' "
+                f"AND resource_type IN ({','.join('?' for _ in resource_types)}) "
+                "ORDER BY submitted_at, created_at, id",
+                resource_types,
+            ).fetchall()
+        migrated: list[str] = []
+        for row in rows:
+            submission = self.repository._submission_dict(row)
+            try:
+                self.creative_adapter.lock_submitted_without_review(
+                    submission["resource_type"], submission["resource_id"]
                 )
-        task = self.repository.get_task(submission["task_id"])
-        if task is None:
-            raise KeyError(submission["task_id"])
-        return {"submission": submission, "task": task, "draft": draft}
+                self._bypass_pending_submission(submission)
+            except (KeyError, ValueError, PermissionError):
+                continue
+            migrated.append(submission["id"])
+        return migrated
+
+    def _bypass_pending_submission(self, submission: dict[str, Any]) -> None:
+        resource_type = submission["resource_type"]
+        with self.repository.identity_repository.transaction() as connection:
+            current = self.repository.get_submission(
+                submission["id"], connection=connection
+            )
+            if current is None or current["status"] != "submitted":
+                return
+            task = self.repository._require_task(connection, current["task_id"])
+            now = time.time()
+            connection.execute(
+                "UPDATE workflow_submissions SET status = 'superseded', updated_at = ? "
+                "WHERE id = ? AND status = 'submitted'",
+                (now, current["id"]),
+            )
+            self.repository._ensure_system_actor(connection, SYSTEM_ACTOR.user_id)
+            self.repository._record_event(
+                connection,
+                task["id"],
+                "creative.legacy_review_removed",
+                SYSTEM_ACTOR.user_id,
+                task["status"],
+                "completed",
+                {
+                    "submission_id": current["id"],
+                    "resource_type": resource_type,
+                    "resource_id": current["resource_id"],
+                    "submission_before": current,
+                    "submission_after": {**current, "status": "superseded"},
+                },
+            )
+            if task["status"] not in {"in_progress", "completed"}:
+                raise ValueError("legacy task is not ready for migration")
+            now = time.time()
+            if resource_type == "beats":
+                beats_progress = self.creative_adapter.beats_episode_progress(
+                    current["resource_id"]
+                )
+                if not beats_progress["complete"]:
+                    connection.execute(
+                        "UPDATE workflow_tasks SET status = 'in_progress', updated_at = CURRENT_TIMESTAMP "
+                        "WHERE id = ? AND status = 'completed'",
+                        (task["id"],),
+                    )
+                    self.repository._record_event(
+                        connection,
+                        task["id"],
+                        "beats.remaining",
+                        SYSTEM_ACTOR.user_id,
+                        "completed",
+                        "in_progress",
+                        beats_progress,
+                    )
+            if resource_type != "beats" or (beats_progress and beats_progress["complete"]):
+                next_node = WORKFLOW_NODES[resource_type][2]
+                if next_node is not None:
+                    self.repository.create_next_task(
+                        task["id"],
+                        next_node,
+                        WORKFLOW_NODES[next_node][0],
+                        actor=SYSTEM_ACTOR,
+                        connection=connection,
+                    )
+
 
     def _default_creative_adapter(self) -> CreativeWorkflowAdapter | None:
         system_path = self.repository.identity_repository.db_path
@@ -246,61 +229,7 @@ class TransitionService:
             CreativeRepository(creative_path), self.repository
         )
 
-    def fork(self, submission_id: str, actor: Principal) -> dict[str, Any]:
-        return self.approval_service.fork(submission_id, actor)
-
-    def list_task_submissions(self, task_id: str) -> list[dict[str, Any]]:
-        submissions = self.repository.list_task_submissions(task_id)
-        if self.creative_adapter is not None:
-            for submission in submissions:
-                self.creative_adapter.reconcile_submission(submission)
-                if (
-                    submission["resource_type"] == "topic_decision"
-                    and submission["status"] == "approved"
-                ):
-                    self._create_topic_successor(task_id)
-        return self.repository.list_task_submissions(task_id)
-
     def reconcile_task(self, task_id: str) -> None:
-        self.list_task_submissions(task_id)
-
-    def _create_topic_successor(self, task_id: str) -> dict[str, Any]:
-        task = self.repository.get_task(task_id)
-        if task is None:
-            raise KeyError(task_id)
-        node = WORKFLOW_NODES.get(task["task_type"])
-        if node is None or task["task_type"] != "topic_decision":
-            raise ValueError("task is not a topic decision")
-        next_node = node[2]
-        if next_node is None:
-            raise ValueError("topic decision has no successor")
-        return self.repository.create_next_task(
-            task_id,
-            next_node,
-            WORKFLOW_NODES[next_node][0],
-            actor=SYSTEM_ACTOR,
-        )
-
-    def _assert_repeated_approval_allowed(
-        self,
-        submission: dict[str, Any],
-        actor: Principal,
-        *,
-        connection: sqlite3.Connection | None = None,
-    ) -> None:
-        actor_id = self.repository._actor_id(actor)
-        with self.repository.identity_repository.connection_scope(
-            connection
-        ) as active_connection:
-            live_actor = self.repository._live_actor(active_connection, actor_id)
-            if (
-                submission["submitted_by"] == actor_id
-                and not live_actor["is_system_admin"]
-            ):
-                raise PermissionError("a submitter cannot approve their own submission")
-            task = self.repository._require_task(
-                active_connection, submission["task_id"]
-            )
-            self.approval_service._assert_reviewer(
-                active_connection, task, live_actor, "version.approve"
-            )
+        # Legacy records are migrated at router startup; active tasks no longer
+        # have a review state to reconcile.
+        return None

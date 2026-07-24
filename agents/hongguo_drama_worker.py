@@ -71,10 +71,18 @@ def render_script(title: str, episode: int, source: str, transcript: str) -> str
     )
 
 
+def _play_url(client: HongguoDramaClient, video_id: str, book_id: str) -> str:
+    try:
+        return client.play_url(video_id, book_id=book_id)
+    except TypeError:
+        return client.play_url(video_id)
+
+
 def run(job: CrawlJob) -> None:
     extra = job.extra or {}
     title = str(extra.get("title") or "未命名剧目").strip()
     book_id = str(extra.get("book_id") or "").strip()
+    source_platform = str(extra.get("source_platform") or "hg").strip().lower() or "hg"
     episode_number = int(extra.get("episode") or 0)
     if not book_id or episode_number < 1:
         raise HongguoDramaError("剧目分析任务缺少 book_id 或有效集数")
@@ -84,6 +92,7 @@ def run(job: CrawlJob) -> None:
     emit(job, "log", f"开始分析《{title}》第 {episode_number} 集")
 
     client = HongguoDramaClient(load_settings())
+    client.default_source_platform = source_platform
     client.refresh_interfaces()
     episodes = client.episodes(book_id)
     if episode_number > len(episodes):
@@ -109,7 +118,7 @@ def run(job: CrawlJob) -> None:
 
     emit(job, "log", "正在获取临时播放地址")
     try:
-        video_url = client.play_url(episode["video_id"])
+        video_url = _play_url(client, episode["video_id"], book_id)
     except HongguoPaidContentError as exc:
         source_path = target_dir / "source.json"
         source_path.write_text(json.dumps({
@@ -128,7 +137,7 @@ def run(job: CrawlJob) -> None:
         size = client.download_video(video_url, video_path)
     except HongguoDramaError:
         emit(job, "log", "首次下载失败，正在刷新播放地址重试", "warning")
-        video_url = client.play_url(episode["video_id"])
+        video_url = _play_url(client, episode["video_id"], book_id)
         size = client.download_video(video_url, video_path)
     artifact(job, video_path, "video")
     emit(job, "log", f"视频下载完成，{size / 1024 / 1024:.1f} MB")

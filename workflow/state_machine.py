@@ -26,21 +26,18 @@ TRANSITIONS = {
     "claim": TransitionRule(frozenset({"pool"}), "assigned", "matching_role"),
     "assign": TransitionRule(frozenset({"pool"}), "assigned", "manager"),
     "reassign": TransitionRule(
-        frozenset({"assigned", "in_progress", "waiting_review", "returned"}),
+        frozenset({"assigned", "in_progress"}),
         "assigned",
         "manager",
     ),
     "start": TransitionRule(
-        frozenset({"assigned", "returned"}), "in_progress", "assignee"
-    ),
-    "submit": TransitionRule(
-        frozenset({"in_progress"}), "waiting_review", "assignee"
-    ),
-    "return": TransitionRule(
-        frozenset({"waiting_review"}), "returned", "manager"
+        frozenset({"assigned"}), "in_progress", "assignee"
     ),
     "complete": TransitionRule(
-        frozenset({"in_progress", "waiting_review"}), "completed", "manager"
+        frozenset({"in_progress"}), "completed", "manager"
+    ),
+    "complete_work": TransitionRule(
+        frozenset({"in_progress"}), "completed", "assignee"
     ),
     "deliver": TransitionRule(
         frozenset({"pool", "assigned", "in_progress"}),
@@ -49,7 +46,7 @@ TRANSITIONS = {
     ),
     "cancel": TransitionRule(
         frozenset(
-            {"pool", "assigned", "in_progress", "waiting_review", "returned"}
+            {"pool", "assigned", "in_progress"}
         ),
         "cancelled",
         "manager",
@@ -63,8 +60,7 @@ class WorkflowStateMachine:
             "pool",
             "assigned",
             "in_progress",
-            "waiting_review",
-            "returned",
+
             "completed",
             "cancelled",
         }

@@ -35,6 +35,7 @@ from .lifecycle_service import (
     content_fingerprint as stage_content_fingerprint,
 )
 from .repository import CreativeRepository
+from .workflow_adapter import CreativeWorkflowAdapter
 
 
 STAGE_RESOURCE_TYPES = {
@@ -48,7 +49,7 @@ STAGE_RESOURCE_TYPES = {
 class DeliveryCreateRequest(BaseModel):
     project_id: int = Field(gt=0)
     stage: str = Field(pattern="^(brief|characters|outline|beats)$")
-    submission_id: str = Field(min_length=1)
+    resource_id: str = Field(min_length=1)
     format: str = Field(pattern="^(md|json)$")
     workflow_task_id: str | None = None
 
@@ -132,7 +133,7 @@ class DeliveryService:
         *,
         project_id: int,
         stage: str,
-        submission_id: str,
+        resource_id: str,
         format: str,
         actor: Principal,
         request: Request | None = None,
@@ -145,17 +146,17 @@ class DeliveryService:
             raise ValueError("stage must be brief, characters, outline, or beats")
         if format not in {"md", "json"}:
             raise ValueError("format must be md or json")
-        submission = self.workflow_repository.get_submission(submission_id)
-        if submission is None:
-            raise KeyError(submission_id)
-        if submission["status"] != "approved":
-            raise ValueError("delivery requires an approved submission")
-        if submission["resource_type"] != resource_type:
-            raise ValueError("approved submission does not match the requested stage")
-        snapshot = submission["content_snapshot"]
+        adapter = CreativeWorkflowAdapter(
+            self.creative_repository, self.workflow_repository
+        )
+        if adapter.domain_status(resource_type, resource_id) not in {
+            "locked", "brief_locked", "approved"
+        }:
+            raise ValueError("delivery requires a completed resource")
+        snapshot = adapter.snapshot(resource_type, resource_id, reconcile=False)
         snapshot_project_id = self._snapshot_project_id(resource_type, snapshot)
         if snapshot_project_id != int(project_id):
-            raise ValueError("approved submission does not belong to the requested project")
+            raise ValueError("completed resource does not belong to the requested project")
         project = self.creative_repository.get_project(project_id)
         if project is None:
             raise KeyError(str(project_id))
@@ -168,9 +169,8 @@ class DeliveryService:
         )
         if stage == "beats":
             lifecycle_fingerprint = beats_resource_fingerprint(snapshot)
-        existing = self._find_existing(
-            project_id, stage, submission_id, format
-        )
+        source_key = f"direct:{stage}:{resource_id}"
+        existing = self._find_existing(project_id, stage, source_key, format)
         if existing is not None:
             if (
                 workflow_task_id
@@ -193,10 +193,10 @@ class DeliveryService:
             "project_name": project["name"],
             "stage": stage,
             "resource_type": resource_type,
-            "resource_id": submission["resource_id"],
+            "resource_id": resource_id,
             "resource_version": resource_version,
-            "submission_id": submission_id,
-            "submission_version": int(submission["version"]),
+            "submission_id": source_key,
+            "submission_version": resource_version,
             "format": format,
             "fingerprint": fingerprint,
             "actor_user_id": actor.user_id,
@@ -219,10 +219,10 @@ class DeliveryService:
                         project_id,
                         stage,
                         resource_type,
-                        submission["resource_id"],
+                        resource_id,
                         resource_version,
-                        submission_id,
-                        int(submission["version"]),
+                        source_key,
+                        resource_version,
                         format,
                         fingerprint,
                         actor.user_id,
@@ -235,7 +235,7 @@ class DeliveryService:
         except sqlite3.IntegrityError:
             path.unlink(missing_ok=True)
             existing = self._find_existing(
-                project_id, stage, submission_id, format
+                project_id, stage, source_key, format
             )
             if existing is None:
                 raise
@@ -270,37 +270,43 @@ class DeliveryService:
         ]
 
     def options(self) -> list[dict[str, Any]]:
-        with self.workflow_repository.identity_repository.connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT s.id AS submission_id, s.resource_type AS stage,
-                       s.resource_id, s.version AS submission_version,
-                       s.reviewed_at, t.project_id
-                FROM workflow_submissions AS s
-                JOIN workflow_tasks AS t ON t.id = s.task_id
-                WHERE s.status = 'approved'
-                  AND s.resource_type IN ('brief', 'characters', 'outline', 'beats')
-                  AND t.project_id IS NOT NULL
-                ORDER BY s.reviewed_at DESC, s.id DESC
-                """
-            ).fetchall()
         options: list[dict[str, Any]] = []
-        for row in rows:
-            project = self.creative_repository.get_project(int(row["project_id"]))
-            if project is None:
-                continue
+        for project in self.creative_repository.list_projects():
             try:
-                task = self._resolve_delivery_task(int(row["project_id"]), None)
+                task = self._resolve_delivery_task(int(project["id"]), None)
             except (KeyError, ValueError):
                 continue
-            options.append(
-                {
-                    **dict(row),
-                    "project_id": str(row["project_id"]),
+            resources: list[tuple[str, str, int]] = []
+            if project.get("locked_brief_id"):
+                brief = self.creative_repository.get_blueprint(
+                    int(project["locked_brief_id"])
+                )
+                if brief:
+                    resources.append(("brief", str(brief["id"]), int(brief["version"])))
+            if project.get("character_batch_id"):
+                batch = self.creative_repository.get_character_batch(
+                    int(project["id"]), str(project["character_batch_id"])
+                )
+                if batch["characters"]:
+                    resources.append(("characters", f"{project['id']}:{project['character_batch_id']}", int(batch["characters"][0]["version"])))
+            if project.get("outline_batch_id"):
+                batch = self.creative_repository.get_outline_batch(
+                    int(project["id"]), str(project["outline_batch_id"])
+                )
+                if batch["episodes"]:
+                    resources.append(("outline", f"{project['id']}:{project['outline_batch_id']}", int(batch["episodes"][0]["version"])))
+            for episode in project.get("episodes", []):
+                if episode.get("stage") == "beats" and episode.get("status") in {"locked", "approved"}:
+                    resources.append(("beats", str(episode["id"]), int(episode["version"])))
+            for stage, resource_id, version in resources:
+                options.append({
+                    "resource_id": resource_id,
+                    "stage": stage,
+                    "resource_version": version,
+                    "project_id": str(project["id"]),
                     "project_name": project["name"],
                     "workflow_task_id": task["id"],
-                }
-            )
+                })
         return options
 
     def get(self, delivery_id: str) -> dict[str, Any] | None:
@@ -410,15 +416,14 @@ class DeliveryService:
             )
             record["workflow_task_id"] = task["id"]
         if not record.get("stage_content_fingerprint"):
-            submission = self.workflow_repository.get_submission(
-                record["submission_id"]
-            )
             project = self.creative_repository.get_project(
                 int(record["project_id"])
             )
-            if submission is None or project is None:
+            if project is None:
                 raise ValueError("delivery source is no longer available")
-            snapshot = submission["content_snapshot"]
+            snapshot = CreativeWorkflowAdapter(
+                self.creative_repository, self.workflow_repository
+            ).snapshot(record["stage"], record["resource_id"], reconcile=False)
             payload = self._payload(project, record["stage"], snapshot)
             fingerprint = stage_content_fingerprint(
                 payload["content"]
@@ -603,7 +608,7 @@ class DeliveryService:
     @staticmethod
     def _snapshot_project_id(resource_type: str, snapshot: Any) -> int:
         if not isinstance(snapshot, dict) or "project_id" not in snapshot:
-            raise ValueError(f"approved {resource_type} snapshot has no project_id")
+            raise ValueError(f"completed {resource_type} snapshot has no project_id")
         return int(snapshot["project_id"])
 
     @staticmethod
@@ -615,7 +620,7 @@ class DeliveryService:
             versions = {int(item.get("version") or 1) for item in items}
             if len(versions) == 1:
                 return versions.pop()
-        raise ValueError("approved snapshot has no unambiguous resource version")
+        raise ValueError("completed snapshot has no unambiguous resource version")
 
     @staticmethod
     def _payload(
@@ -698,7 +703,7 @@ def build_delivery_router(service: DeliveryService) -> APIRouter:
             delivery = service.create(
                 project_id=payload.project_id,
                 stage=payload.stage,
-                submission_id=payload.submission_id,
+                resource_id=payload.resource_id,
                 format=payload.format,
                 actor=principal,
                 request=request,

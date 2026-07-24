@@ -14,8 +14,11 @@ window.aiworkerModules.push(() => ({
                     this.dramaAnalysis.episode = 0;
                     this.dramaAnalysis.searchSource = '';
                     this.dramaAnalysis.fallbackReason = '';
+                    this.dramaReviews.title = title;
+                    this.dramaReviews.platform = this.dramaAnalysis.platform;
                     try {
-                        const res = await aiworkerApi.request('/api/hongguo/drama/search', {
+                        const endpoint = this.dramaAnalysis.platform === 'dy' ? '/api/douyin/drama/search' : '/api/hongguo/drama/search';
+                        const res = await aiworkerApi.request(endpoint, {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json'},
                             body: JSON.stringify({title})
@@ -33,11 +36,28 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
+                isDouyinDramaSearch() {
+                    return ['douyin', 'douyin_fallback'].includes(this.dramaAnalysis.searchSource);
+                },
+
+                changeDramaSearchPlatform() {
+                    this.dramaAnalysis.suggestions = [];
+                    this.dramaAnalysis.candidates = [];
+                    this.dramaAnalysis.selected = null;
+                    this.dramaAnalysis.episodes = [];
+                    this.dramaAnalysis.episode = 0;
+                    this.dramaAnalysis.searchSource = '';
+                    this.dramaAnalysis.fallbackReason = '';
+                    this.dramaAnalysis.error = '';
+                    this.dramaReviews.platform = this.dramaAnalysis.platform;
+                },
+
                 onDramaTitleInput() {
                     clearTimeout(this.dramaAnalysis.suggestionTimer);
                     const requestId = ++this.dramaAnalysis.suggestionRequestId;
                     this.dramaAnalysis.suggestions = [];
                     const title = this.dramaAnalysis.title.trim();
+                    if (this.dramaAnalysis.platform === 'dy') return;
                     if (title.length < 2) return;
                     this.dramaAnalysis.suggestionTimer = setTimeout(async () => {
                         this.dramaAnalysis.suggestionLoading = true;
@@ -69,13 +89,13 @@ window.aiworkerModules.push(() => ({
                     this.dramaAnalysis.selected = candidate;
                     this.dramaAnalysis.episodes = [];
                     this.dramaAnalysis.episode = 0;
-                    if (this.dramaAnalysis.searchSource === 'douyin_fallback') return;
+                    if (this.isDouyinDramaSearch()) return;
                     this.dramaAnalysis.loading = true;
                     try {
                         const res = await aiworkerApi.request('/api/hongguo/drama/episodes', {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({book_id: candidate.book_id})
+                            body: JSON.stringify({book_id: candidate.book_id, source_platform: candidate.source_platform || 'hg'})
                         });
                         const data = await res.json();
                         if (!res.ok || data.status === 'error') throw new Error(data.message || '读取剧集失败');
@@ -91,18 +111,18 @@ window.aiworkerModules.push(() => ({
 
                 async startDramaAnalysis() {
                     const selected = this.dramaAnalysis.selected;
-                    const isDouyinFallback = this.dramaAnalysis.searchSource === 'douyin_fallback';
-                    if (!selected || (isDouyinFallback ? !selected.aweme_id : !this.dramaAnalysis.episode)) return;
+                    const isDouyinSearch = this.isDouyinDramaSearch();
+                    if (!selected || (isDouyinSearch ? !selected.aweme_id : !this.dramaAnalysis.episode)) return;
                     this.dramaAnalysis.loading = true;
                     this.dramaAnalysis.error = '';
                     try {
                         const task = await this.resolveSourcePackageWorkflowTask(
                             this.dramaAnalysis.title || selected.title
                         );
-                        const endpoint = isDouyinFallback
+                        const endpoint = isDouyinSearch
                             ? '/api/hongguo/drama/douyin-fallback/jobs'
                             : '/api/hongguo/drama/jobs';
-                        const jobPayload = isDouyinFallback
+                        const jobPayload = isDouyinSearch
                             ? {
                                 title: this.dramaAnalysis.title || selected.title,
                                 aweme_id: selected.aweme_id,
@@ -114,6 +134,7 @@ window.aiworkerModules.push(() => ({
                                 title: selected.title || this.dramaAnalysis.title,
                                 book_id: selected.book_id,
                                 episode: this.dramaAnalysis.episode,
+                                source_platform: selected.source_platform || 'hg',
                                 topic_id: task.topic_id,
                                 workflow_task_id: task.id
                             };
@@ -129,8 +150,8 @@ window.aiworkerModules.push(() => ({
                         this.selectedJobId = data.job.job_id;
                         await this.fetchJobs();
                         await this.fetchLogs();
-                        alert(isDouyinFallback
-                            ? '抖音降级下载任务已创建，正在下载已确认的视频并生成转写。完成后会弹窗提醒。'
+                        alert(isDouyinSearch
+                            ? '抖音下载任务已创建，正在下载已确认的视频并生成转写。完成后会弹窗提醒。'
                             : '剧集下载任务已创建，正在下载并生成转写。完成后会弹窗提醒。');
                     } catch (e) {
                         this.dramaAnalysis.error = e.message || '创建下载任务失败';

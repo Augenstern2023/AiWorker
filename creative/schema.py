@@ -56,6 +56,7 @@ class BlueprintUpdateRequest(BaseModel):
 
 class BriefLockRequest(BaseModel):
     difference_note: str = ""
+    workflow_task_id: str = Field(min_length=1)
 
 
 class CharacterBatchRequest(BaseModel):
@@ -81,6 +82,10 @@ class EpisodeBeatsRequest(BaseModel):
 
 class WorkflowLinkRequest(BaseModel):
     workflow_task_id: str | None = None
+
+
+class CreativeLockRequest(BaseModel):
+    workflow_task_id: str = Field(min_length=1)
 
 
 class CreativeSubmitRequest(BaseModel):

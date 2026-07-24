@@ -87,5 +87,21 @@ def test_build_creative_breakdown_worker_command():
     ]
 
 
+def test_build_data_file_operation_worker_command():
+    assert build_worker_command(
+        ".runtime/jobs/data-operation.json",
+        platform="data",
+        crawler_type="file_operation",
+    ) == [
+        "uv",
+        "run",
+        "python",
+        "-m",
+        "agents.data_file_operation_worker",
+        "--job-file",
+        ".runtime/jobs/data-operation.json",
+    ]
+
+
 def test_build_worker_env_sets_utf8():
     assert build_worker_env()["PYTHONIOENCODING"] == "utf-8"

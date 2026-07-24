@@ -1,17 +1,36 @@
 window.aiworkerModules = window.aiworkerModules || [];
 window.aiworkerModules.push(() => ({
-                async fetchFiles() {
+                async fetchFiles({reset = false, cursor = null} = {}) {
+                    const page = this.filePage;
+                    if (reset) {
+                        page.cursorHistory = [];
+                        page.currentCursor = null;
+                        this.clearFileSelection();
+                    }
+                    page.loading = true;
                     try {
-                        const res = await aiworkerApi.request(`/api/files?filter=${this.fileFilter}`);
-                        this.files = await res.json();
-                        this.selectedFilePaths = this.selectedFilePaths.filter(path =>
-                            this.files.some(file => file.path === path)
-                        );
-                        this.applyFileSearch();
+                        const params = new URLSearchParams({
+                            filter: this.fileFilter,
+                            query: this.fileSearch.trim(),
+                            limit: '100',
+                        });
+                        if (cursor) params.set('cursor', cursor);
+                        const res = await aiworkerApi.request(`/api/files/page?${params}`);
+                        if (!res.ok) throw new Error('文件加载失败');
+                        const data = await res.json();
+                        this.files = data.items || [];
+                        this.filteredFiles = this.files;
+                        page.total = Number(data.total || 0);
+                        page.currentCursor = cursor;
+                        page.nextCursor = data.next_cursor || null;
                     } catch (e) {
                         this.files = [];
                         this.filteredFiles = [];
-                        this.selectedFilePaths = [];
+                        page.total = 0;
+                        page.currentCursor = null;
+                        page.nextCursor = null;
+                    } finally {
+                        page.loading = false;
                     }
                 },
 
@@ -237,15 +256,29 @@ window.aiworkerModules.push(() => ({
                 },
 
                 applyFileSearch() {
-                    const query = String(this.fileSearch || '').trim().toLowerCase();
-                    if (!query) {
-                        this.filteredFiles = this.files;
-                        return;
-                    }
-                    this.filteredFiles = this.files.filter(file =>
-                        String(file.name || '').toLowerCase().includes(query) ||
-                        String(file.path || '').toLowerCase().includes(query)
-                    );
+                    clearTimeout(this.filePage.searchTimer);
+                    this.filePage.searchTimer = setTimeout(() => this.fetchFiles({reset: true}), 250);
+                },
+
+                clearFileSelection() {
+                    this.selectedFilePaths = [];
+                    this.filePage.selectionMode = 'explicit';
+                    this.filePage.excludedPaths = [];
+                    this.filePage.selectionFilter = this.fileFilter;
+                    this.filePage.selectionQuery = this.fileSearch.trim();
+                },
+
+                nextFilePage() {
+                    if (!this.filePage.nextCursor || this.filePage.loading) return;
+                    this.filePage.cursorHistory.push(this.filePage.currentCursor);
+                    this.fetchFiles({cursor: this.filePage.nextCursor});
+                },
+
+                previousFilePage() {
+                    if (!this.filePage.cursorHistory.length || this.filePage.loading) return;
+                    this.filePage.cursorHistory.pop();
+                    const cursor = this.filePage.cursorHistory.at(-1) || null;
+                    this.fetchFiles({cursor});
                 },
 
                 groupedFiles() {
@@ -272,6 +305,9 @@ window.aiworkerModules.push(() => ({
                 },
 
                 isFileSelected(path) {
+                    if (this.filePage.selectionMode === 'all_matching') {
+                        return !this.filePage.excludedPaths.includes(path);
+                    }
                     return this.selectedFilePaths.includes(path);
                 },
 
@@ -279,17 +315,28 @@ window.aiworkerModules.push(() => ({
                     return this.filteredFiles.length > 0 && this.filteredFiles.every(file => this.isFileSelected(file.path));
                 },
 
+                selectedFileCount() {
+                    return this.filePage.selectionMode === 'all_matching'
+                        ? Math.max(0, this.filePage.total - this.filePage.excludedPaths.length)
+                        : this.selectedFilePaths.length;
+                },
+
                 startBatchDelete() {
-                    this.selectedFilePaths = [];
+                    this.clearFileSelection();
                     this.batchDeleteMode = true;
                 },
 
                 cancelBatchDelete() {
-                    this.selectedFilePaths = [];
+                    this.clearFileSelection();
                     this.batchDeleteMode = false;
                 },
 
                 toggleFileSelection(path, selected) {
+                    if (this.filePage.selectionMode === 'all_matching') {
+                        if (selected) this.filePage.excludedPaths = this.filePage.excludedPaths.filter(item => item !== path);
+                        else if (!this.filePage.excludedPaths.includes(path)) this.filePage.excludedPaths.push(path);
+                        return;
+                    }
                     if (selected && !this.isFileSelected(path)) {
                         this.selectedFilePaths.push(path);
                     }
@@ -299,16 +346,80 @@ window.aiworkerModules.push(() => ({
                 },
 
                 toggleAllVisibleFiles(selected) {
-                    const visiblePaths = this.filteredFiles.map(file => file.path);
+                    this.toggleAllMatchingFiles(selected);
+                },
+
+                toggleAllMatchingFiles(selected) {
                     if (selected) {
-                        this.selectedFilePaths = [...new Set([...this.selectedFilePaths, ...visiblePaths])];
+                        this.selectedFilePaths = [];
+                        this.filePage.excludedPaths = [];
+                        this.filePage.selectionMode = 'all_matching';
+                        this.filePage.selectionFilter = this.fileFilter;
+                        this.filePage.selectionQuery = this.fileSearch.trim();
                     } else {
-                        this.selectedFilePaths = this.selectedFilePaths.filter(path => !visiblePaths.includes(path));
+                        this.clearFileSelection();
                     }
                 },
 
+                async downloadSelectedFiles() {
+                    await this.startFileOperation('archive');
+                },
+
+                fileOperationSelection() {
+                    return this.filePage.selectionMode === 'all_matching'
+                        ? {mode: 'all_matching', filter: this.filePage.selectionFilter, query: this.filePage.selectionQuery, excluded_paths: this.filePage.excludedPaths}
+                        : {mode: 'explicit', paths: [...new Set(this.selectedFilePaths)]};
+                },
+
+                async startFileOperation(operation) {
+                    if (!this.selectedFileCount()) return;
+                    try {
+                        const response = await aiworkerApi.request('/api/files/operations', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({operation, selection: this.fileOperationSelection()}),
+                        });
+                        if (!response.ok) {
+                            const data = await response.json().catch(() => ({}));
+                            throw new Error(data.detail || '批量任务创建失败');
+                        }
+                        const data = await response.json();
+                        this.filePage.operation = {jobId: data.job_id, operation, status: 'running', progress: {completed: 0, total: this.selectedFileCount()}};
+                        this.pollFileOperation();
+                    } catch (error) {
+                        alert(error.message || '批量任务创建失败，请检查服务状态后重试');
+                    }
+                },
+
+                async pollFileOperation() {
+                    const operation = this.filePage.operation;
+                    if (!operation?.jobId) return;
+                    try {
+                        const response = await aiworkerApi.request(`/api/jobs/${operation.jobId}`);
+                        if (!response.ok) throw new Error('读取批量任务失败');
+                        const job = await response.json();
+                        operation.status = job.status;
+                        operation.progress = job.progress || operation.progress;
+                        if (['pending', 'running', 'stopping'].includes(job.status)) {
+                            setTimeout(() => this.pollFileOperation(), 1000);
+                        } else if (job.status === 'succeeded' && operation.operation === 'delete') {
+                            this.clearFileSelection();
+                            await this.fetchFiles({reset: true});
+                        }
+                    } catch (error) {
+                        operation.status = 'failed';
+                    }
+                },
+
+                downloadFileOperation() {
+                    const jobId = this.filePage.operation?.jobId;
+                    if (jobId) window.open(`/api/files/operations/${encodeURIComponent(jobId)}/download`, '_blank', 'noopener');
+                },
+
                 async deleteSelectedFiles() {
-                    await this.deleteFiles(this.selectedFilePaths);
+                    const count = this.selectedFileCount();
+                    if (!count || !confirm(`确认删除已选的 ${count} 个文件吗？本地文件将永久移除。`)) return;
+                    await this.startFileOperation('delete');
                 },
 
                 async deleteFiles(paths) {
@@ -329,7 +440,7 @@ window.aiworkerModules.push(() => ({
                         }
                         const deletedPaths = data.deleted_paths || [];
                         this.selectedFilePaths = this.selectedFilePaths.filter(path => !deletedPaths.includes(path));
-                        await this.fetchFiles();
+                        await this.fetchFiles({reset: true});
                         if (data.status === 'partial_success') {
                             alert(`已删除 ${deletedPaths.length} 个文件，${(data.failed || []).length} 个文件删除失败`);
                         } else {

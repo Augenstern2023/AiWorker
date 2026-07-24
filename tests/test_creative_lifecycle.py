@@ -17,6 +17,7 @@ from core.job import CrawlJob
 from creative.api import creative_api_principal, register_creative_routes
 from creative.lifecycle_service import content_fingerprint, current_beats_content
 from creative.repository import CreativeRepository
+from creative.topic_service import TopicService
 from identity.dependencies import current_principal
 from identity.schema import Principal
 from runtime.job_state import JobState
@@ -82,6 +83,16 @@ def write_script(root: Path, title: str, episode: int) -> None:
         encoding="utf-8",
     )
     (episode_dir / "script.md").write_text(f"## 转写内容\n\n第 {episode} 集正文", encoding="utf-8")
+
+
+def write_downloaded_video(root: Path, title: str, episode: int) -> None:
+    episode_dir = root / "data" / "hg" / "jobs" / "download-video" / "dramas" / title / f"episode_{episode:02d}"
+    episode_dir.mkdir(parents=True, exist_ok=True)
+    (episode_dir / "source.json").write_text(
+        f'{{"title":"{title}","episode":{{"episode":{episode}}}}}',
+        encoding="utf-8",
+    )
+    (episode_dir / "video.mp4").write_bytes(b"video")
 
 
 def topic_payload(client: TestClient) -> dict:
@@ -152,6 +163,83 @@ def test_topic_lifecycle_follows_the_complete_creation_flow(tmp_path: Path):
 
     repository.update_episode(beats["id"], {"beats": [{"order": 1, "scene": "天台"}]})
     assert topic_payload(client)["lifecycle_status"] == "beats_generated"
+
+
+def test_generating_today_hits_returns_only_unadopted_recommendations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    client, repository, _ = build_client(tmp_path)
+    adopted = seed_topic(repository, "已采纳剧目")
+    repository.update_topic(adopted["id"], "adopted")
+
+    monkeypatch.setattr(TopicService, "generate", lambda *_args, **_kwargs: [{
+        "platform": "hg",
+        "job_id": "rank-new",
+        "source_path": "data/hg/new.json",
+        "captured_at": "2026-07-24",
+        "title": "待采纳剧目",
+        "description": "新的爆款推荐",
+        "category": "都市",
+        "rank_type": "热播榜",
+        "score": 95,
+        "confidence": "high",
+        "score_details": {},
+        "recommendation": "推荐",
+        "evidence": [],
+    }])
+
+    response = client.post("/api/creative/topics/generate", json={"platform": "hg", "limit": 10})
+
+    assert response.status_code == 200
+    assert [item["title"] for item in response.json()["items"]] == ["待采纳剧目"]
+    assert response.json()["items"][0]["status"] == "pending_review"
+
+
+def test_topic_library_can_load_every_adopted_topic_without_a_page_limit(tmp_path: Path):
+    client, repository, _ = build_client(tmp_path)
+    topics = [{
+        "platform": "hg",
+        "job_id": f"rank-{index}",
+        "source_path": f"data/hg/{index}.json",
+        "captured_at": "2026-07-24",
+        "title": f"已采纳剧目-{index}",
+        "description": "选题库数量测试",
+        "category": "都市",
+        "rank_type": "热播榜",
+        "score": 100 - index / 10_000,
+        "confidence": "high",
+        "score_details": {},
+        "recommendation": "推荐",
+        "evidence": [],
+    } for index in range(501)]
+    repository.upsert_topics(topics)
+    saved = repository.list_topics(limit=None)
+    for topic in saved:
+        repository.update_topic(topic["id"], "adopted")
+
+    response = client.get("/api/creative/topics?status=adopted&all=true")
+
+    assert response.status_code == 200
+    assert len(response.json()["items"]) == 501
+
+
+def test_downloaded_videos_advance_an_adopted_topic_to_pending_breakdown(tmp_path: Path):
+    client, repository, manager = build_client(tmp_path)
+    topic = seed_topic(repository, "视频下载完成短剧")
+    repository.update_topic(topic["id"], "adopted")
+    manager.create_job({
+        "platform": "hg",
+        "crawler_type": "drama_download",
+        "extra": {"title": topic["title"], "book_id": "book-video"},
+    })
+    write_downloaded_video(tmp_path, topic["title"], 1)
+    write_downloaded_video(tmp_path, topic["title"], 2)
+
+    downloaded = topic_payload(client)
+
+    assert downloaded["lifecycle_status"] == "pending_breakdown"
+    assert downloaded["lifecycle_label"] == "待拆解"
+    assert downloaded["downloaded_episode_count"] == 2
 
 
 def test_latest_breakdown_draft_takes_precedence_over_older_locked_version(tmp_path: Path):

@@ -61,10 +61,19 @@ def _progress_payload(
     }
 
 
+def _play_url(client: HongguoDramaClient, video_id: str, book_id: str) -> str:
+    try:
+        return client.play_url(video_id, book_id=book_id)
+    except TypeError:
+        # Backward-compatible with test doubles and legacy client implementations.
+        return client.play_url(video_id)
+
+
 def run(job: CrawlJob) -> None:
     extra = job.extra or {}
     title = str(extra.get("title") or "未命名剧目").strip()
     book_id = str(extra.get("book_id") or "").strip()
+    source_platform = str(extra.get("source_platform") or "hg").strip().lower() or "hg"
     requested = [int(value) for value in (extra.get("episodes") or []) if str(value).isdigit()]
     if not title or not book_id:
         raise HongguoDramaError("下载任务缺少剧名或 book_id")
@@ -73,6 +82,7 @@ def run(job: CrawlJob) -> None:
     target_root.mkdir(parents=True, exist_ok=True)
     pause_path = _pause_path(job)
     client = HongguoDramaClient(load_settings())
+    client.default_source_platform = source_platform
     client.refresh_interfaces()
     episodes = client.episodes(book_id)
     selected = episodes if extra.get("all_episodes") else [item for item in episodes if item.get("episode") in requested]
@@ -80,7 +90,7 @@ def run(job: CrawlJob) -> None:
         raise HongguoDramaError("没有选择有效集数")
 
     total = len(selected)
-    manifest: dict[str, Any] = {"source_platform": "hg", "title": title, "book_id": book_id, "items": []}
+    manifest: dict[str, Any] = {"source_platform": source_platform, "title": title, "book_id": book_id, "items": []}
     counts = {"downloaded": 0, "skipped_paid": 0}
     emit(job, "log", f"开始下载《{title}》，共 {total} 集")
     emit(job, "progress", f"任务已创建，准备下载 {total} 集", payload=_progress_payload(0, 0, total, 0, counts))
@@ -107,7 +117,7 @@ def run(job: CrawlJob) -> None:
             raise HongguoDramaError(f"第 {number} 集缺少 video_id")
         emit(job, "log", f"正在下载第 {number}/{len(episodes)} 集")
         try:
-            video_url = client.play_url(video_id)
+            video_url = _play_url(client, video_id, book_id)
         except HongguoPaidContentError as exc:
             record.update({"status": "skipped_paid", "reason": str(exc)})
             manifest["items"].append(record)
@@ -139,7 +149,7 @@ def run(job: CrawlJob) -> None:
         except HongguoDramaError:
             emit(job, "log", f"第 {number} 集地址失效，正在刷新后重试", "warning")
             try:
-                video_url = client.play_url(video_id)
+                video_url = _play_url(client, video_id, book_id)
             except HongguoPaidContentError as exc:
                 record.update({"status": "skipped_paid", "reason": str(exc)})
                 manifest["items"].append(record)
@@ -151,7 +161,7 @@ def run(job: CrawlJob) -> None:
                 continue
             size = client.download_video(video_url, video_path, on_progress=report_download_progress, wait_if_paused=lambda: _wait_if_paused(job, pause_path))
         source_path = target_dir / "source.json"
-        source_path.write_text(json.dumps({"title": title, "book_id": book_id, "episode": episode}, ensure_ascii=False, indent=2), encoding="utf-8")
+        source_path.write_text(json.dumps({"title": title, "book_id": book_id, "source_platform": source_platform, "episode": episode}, ensure_ascii=False, indent=2), encoding="utf-8")
         artifact(job, video_path, "video")
         artifact(job, source_path, "json")
         record.update({"status": "succeeded", "bytes": size, "path": str(video_path)})

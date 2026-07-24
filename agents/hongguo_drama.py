@@ -23,6 +23,15 @@ from agents.drama_download_policy import paid_content_reason
 
 
 DEFAULT_CONFIG_URL = "https://mizhi.kissm.top/pc/con.php"
+DOWNLOAD_SEARCH_SOURCES = (
+    "hg",
+    "hgmj",
+    "hgzh",
+    "redguo",
+    "hm",
+    "huolong",
+    "xingyadongli",
+)
 
 
 class HongguoDramaError(RuntimeError):
@@ -105,6 +114,14 @@ def _data_list(payload: Any) -> list[dict[str, Any]]:
 
 
 def _find_platform_config(payload: Any) -> dict[str, Any]:
+    platforms = _find_platform_configs(payload)
+    candidate = platforms.get("hg")
+    if candidate is not None:
+        return candidate
+    raise HongguoDramaError("配置中心未提供红果 hg 接口配置")
+
+
+def _find_platform_configs(payload: Any) -> dict[str, dict[str, Any]]:
     if not isinstance(payload, dict):
         raise HongguoDramaError("配置中心返回格式无效")
     containers = [payload]
@@ -114,18 +131,27 @@ def _find_platform_config(payload: Any) -> dict[str, Any]:
     for container in containers:
         platforms = container.get("platforms")
         if isinstance(platforms, dict):
-            candidate = platforms.get("hg")
-            if isinstance(candidate, dict):
-                return candidate
+            return {
+                text_value(key).lower(): value
+                for key, value in platforms.items()
+                if isinstance(value, dict) and text_value(key)
+            }
         if isinstance(platforms, list):
+            result: dict[str, dict[str, Any]] = {}
             for candidate in platforms:
                 if not isinstance(candidate, dict):
                     continue
-                if text_value(
-                    candidate.get("platform") or candidate.get("key") or candidate.get("name") or candidate.get("value")
-                ).lower() == "hg":
-                    return candidate
-    raise HongguoDramaError("配置中心未提供红果 hg 接口配置")
+                key = text_value(
+                    candidate.get("platform")
+                    or candidate.get("key")
+                    or candidate.get("name")
+                    or candidate.get("value")
+                ).lower()
+                if key:
+                    result[key] = candidate
+            if result:
+                return result
+    raise HongguoDramaError("配置中心未提供剧目接口配置")
 
 
 class HongguoDramaClient:
@@ -133,6 +159,8 @@ class HongguoDramaClient:
         self.settings = settings
         self.timeout = timeout
         self.interfaces: dict[str, str] = {}
+        self.platform_interfaces: dict[str, dict[str, Any]] = {}
+        self.default_source_platform = "hg"
 
     def _params(self, **params: Any) -> dict[str, Any]:
         result = {key: value for key, value in params.items() if value not in (None, "")}
@@ -142,9 +170,12 @@ class HongguoDramaClient:
 
     def _request_url(self, url: str, **params: Any) -> str:
         parsed = urlsplit(url)
-        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        query = list(parse_qsl(parsed.query, keep_blank_values=True))
+        existing_keys = {key for key, _ in query}
         for key, value in self._params(**params).items():
-            query.setdefault(key, value)
+            if key == "platform" or key not in existing_keys:
+                query.append((key, str(value)))
+                existing_keys.add(key)
         return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
 
     def _json(self, url: str, **params: Any) -> dict[str, Any]:
@@ -171,11 +202,24 @@ class HongguoDramaClient:
 
     def refresh_interfaces(self) -> dict[str, str]:
         payload = self._json(self.settings.get("config_url") or DEFAULT_CONFIG_URL)
-        platform = _find_platform_config(payload)
+        platforms = _find_platform_configs(payload)
+        self.platform_interfaces = {
+            source: {
+                "search": text_value(platform.get("searchUrl")),
+                "book": text_value(platform.get("bookUrl")),
+                "play": text_value(platform.get("playUrl")),
+                "play_requires_book_id": bool(platform.get("playRequiresBookId")),
+            }
+            for source, platform in platforms.items()
+            if source in DOWNLOAD_SEARCH_SOURCES
+        }
+        platform = self.platform_interfaces.get("hg")
+        if platform is None:
+            raise HongguoDramaError("配置中心未提供红果 hg 接口配置")
         interfaces = {
-            "search": text_value(platform.get("searchUrl")),
-            "book": text_value(platform.get("bookUrl")),
-            "play": text_value(platform.get("playUrl")),
+            "search": str(platform["search"]),
+            "book": str(platform["book"]),
+            "play": str(platform["play"]),
         }
         missing = [name for name, value in interfaces.items() if not value]
         if missing:
@@ -188,11 +232,30 @@ class HongguoDramaClient:
             self.refresh_interfaces()
         return self.interfaces[name]
 
-    def search(self, title: str, page: int = 1) -> list[dict[str, Any]]:
+    def _platform_interface(self, source_platform: str, name: str) -> str:
+        source = text_value(source_platform).lower() or self.default_source_platform
+        if source == "hg" and self.interfaces.get(name):
+            return self.interfaces[name]
+        if not self.platform_interfaces:
+            self.refresh_interfaces()
+        interface = self.platform_interfaces.get(source, {}).get(name)
+        if not interface:
+            raise HongguoDramaError(f"配置中心未提供 {source} 的 {name} 接口")
+        return str(interface)
+
+    def search(
+        self, title: str, page: int = 1, source_platform: str = "hg"
+    ) -> list[dict[str, Any]]:
         query = text_value(title)
         if not query:
             raise HongguoDramaError("请输入剧名")
-        payload = self._json(self._interface("search"), name=query, page=max(1, int(page)), platform="hg")
+        source = text_value(source_platform).lower() or self.default_source_platform
+        payload = self._json(
+            self._platform_interface(source, "search"),
+            name=query,
+            page=max(1, int(page)),
+            platform=source,
+        )
         candidates = []
         for item in _data_list(payload):
             book_id = text_value(item.get("book_id") or item.get("bookId") or item.get("id"))
@@ -205,10 +268,40 @@ class HongguoDramaClient:
                     "cover": text_value(item.get("cover") or item.get("cover_url") or item.get("image")),
                     "summary": text_value(item.get("desc") or item.get("description") or item.get("intro")),
                     "episode_count": item.get("episode_count") or item.get("total") or item.get("total_episode") or "",
+                    "source_platform": source,
                     "raw": item,
                 }
             )
         return candidates
+
+    def search_exact_all_sources(self, title: str) -> list[dict[str, Any]]:
+        """Search every configured source once before allowing a Douyin fallback."""
+        query = normalize_drama_title(title)
+        if not query:
+            raise HongguoDramaError("请输入剧名")
+        self.refresh_interfaces()
+        matches: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        errors: list[str] = []
+        for source in DOWNLOAD_SEARCH_SOURCES:
+            if not self.platform_interfaces.get(source, {}).get("search"):
+                continue
+            try:
+                candidates = self.search(title, page=1, source_platform=source)
+            except HongguoDramaError as exc:
+                errors.append(f"{source}: {exc}")
+                continue
+            for candidate in candidates:
+                if normalize_drama_title(candidate.get("title")) != query:
+                    continue
+                key = (source, str(candidate.get("book_id") or ""))
+                if key in seen or not key[1]:
+                    continue
+                seen.add(key)
+                matches.append(candidate)
+        if not matches and errors and len(errors) == len(DOWNLOAD_SEARCH_SOURCES):
+            raise HongguoDramaError("；".join(errors))
+        return matches
 
     def search_exact(self, title: str) -> list[dict[str, Any]]:
         """Return only exact normalized title matches for episode downloads."""
@@ -237,11 +330,15 @@ class HongguoDramaClient:
                 seen.add(book_id)
         return matches
 
-    def episodes(self, book_id: str) -> list[dict[str, Any]]:
+    def episodes(
+        self, book_id: str, source_platform: str = ""
+    ) -> list[dict[str, Any]]:
         value = text_value(book_id)
         if not value:
             raise HongguoDramaError("缺少 book_id")
-        payload = self._json(self._interface("book"), book_id=value)
+        payload = self._json(
+            self._platform_interface(source_platform, "book"), book_id=value
+        )
         episodes = []
         for index, item in enumerate(_data_list(payload), start=1):
             video_id = text_value(item.get("video_id") or item.get("videoId") or item.get("id"))
@@ -263,8 +360,17 @@ class HongguoDramaClient:
             raise HongguoDramaError("未找到可播放剧集")
         return episodes
 
-    def play_url(self, video_id: str) -> str:
-        payload = self._json(self._interface("play"), video_id=text_value(video_id))
+    def play_url(
+        self,
+        video_id: str,
+        book_id: str = "",
+        source_platform: str = "",
+    ) -> str:
+        source = text_value(source_platform).lower() or self.default_source_platform
+        params: dict[str, Any] = {"video_id": text_value(video_id)}
+        if self.platform_interfaces.get(source, {}).get("play_requires_book_id"):
+            params["book_id"] = text_value(book_id)
+        payload = self._json(self._platform_interface(source, "play"), **params)
         paid_reason = paid_content_reason(payload)
         if paid_reason:
             raise HongguoPaidContentError(paid_reason)

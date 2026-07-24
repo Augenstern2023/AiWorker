@@ -21,20 +21,20 @@
 
     async function loadOptions() {
         const response = await window.aiworkerApi.request('/api/admin/deliveries/options');
-        if (!response.ok) throw new Error('已批准版本加载失败');
+        if (!response.ok) throw new Error('已完成版本加载失败');
         const {options} = await response.json();
         submissionSelect.replaceChildren();
         const empty = document.createElement('option');
         empty.value = '';
-        empty.textContent = options.length ? '请选择版本' : '暂无已批准版本';
+        empty.textContent = options.length ? '请选择版本' : '暂无已完成版本';
         submissionSelect.appendChild(empty);
         for (const item of options) {
             const option = document.createElement('option');
-            option.value = item.submission_id;
+            option.value = item.resource_id;
             option.dataset.projectId = item.project_id;
             option.dataset.stage = item.stage;
             option.dataset.workflowTaskId = item.workflow_task_id;
-            option.textContent = `${item.project_name} / ${stageLabels[item.stage] || item.stage} / v${item.submission_version}`;
+            option.textContent = `${item.project_name} / ${stageLabels[item.stage] || item.stage} / v${item.resource_version}`;
             submissionSelect.appendChild(option);
         }
     }
@@ -53,7 +53,7 @@
                 new Date(delivery.created_at * 1000).toLocaleString(),
                 delivery.project_name,
                 stageLabels[delivery.stage] || delivery.stage,
-                `资源 v${delivery.resource_version} / 提交 v${delivery.submission_version}`,
+                `资源 v${delivery.resource_version} / 快照 v${delivery.submission_version}`,
                 delivery.format.toUpperCase(),
                 delivery.fingerprint.slice(0, 12),
             ];
@@ -90,7 +90,7 @@
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
-                submission_id: option.value,
+                resource_id: option.value,
                 project_id: Number(option.dataset.projectId),
                 stage: option.dataset.stage,
                 format: formatSelect.value,

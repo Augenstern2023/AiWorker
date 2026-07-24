@@ -1,19 +1,27 @@
 window.aiworkerModules = window.aiworkerModules || [];
 window.aiworkerModules.push(() => ({
                 async updateTopicLibrary(topic, status) {
-                    const res = await aiworkerApi.request(`/api/creative/topics/${topic.id}`, {
-                        method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({status})
-                    });
-                    const data = await res.json();
-                    if (!res.ok) { this.topicLibrary.error = data.detail || '更新选题状态失败'; return; }
-                    Object.assign(topic, data);
+                    this.topicLibrary.error = '';
+                    try {
+                        const res = await aiworkerApi.request(`/api/creative/topics/${topic.id}`, {
+                            method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({status})
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (!res.ok) {
+                            this.topicLibrary.error = data.detail || '更新选题状态失败';
+                            return;
+                        }
+                        Object.assign(topic, data);
+                        await this.fetchTopicLibrary();
+                    } catch (error) {
+                        this.topicLibrary.error = error.message || '更新选题状态失败';
+                    }
                 },
 
                 createTopicLibraryBreakdown(topic) {
                     return this.startTranscriptBreakdown(
                         topic,
-                        'topic-library',
-                        Boolean(topic?.locked_breakdown_id)
+                        'topic-library'
                     );
                 },
 
@@ -77,7 +85,10 @@ window.aiworkerModules.push(() => ({
                         notifiedStatus: '',
                         error: '',
                         startedAt: Date.now(),
-                        elapsedSeconds: 0
+                        elapsedSeconds: 0,
+                        logs: [],
+                        logCount: 0,
+                        showLogs: false
                     };
                     try {
                         const res = await aiworkerApi.request('/api/creative/breakdowns', {
@@ -145,6 +156,8 @@ window.aiworkerModules.push(() => ({
                     this.breakdownGeneration.status = job.status;
                     this.breakdownGeneration.message = job.message || this.breakdownGeneration.message;
                     this.breakdownGeneration.progress = job.progress || this.breakdownGeneration.progress || {};
+                    this.breakdownGeneration.logCount = Number(job.log_count || 0);
+                    if (this.breakdownGeneration.showLogs) await this.syncBreakdownGenerationLogs();
                     if (!this.breakdownGeneration.startedAt && Number(job.started_at || 0) > 0) {
                         this.breakdownGeneration.startedAt = Number(job.started_at) * 1000;
                     }
@@ -278,15 +291,31 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async openBreakdownTaskLog() {
+                    if (!this.breakdownGeneration.jobId) return;
+                    this.breakdownGeneration.showLogs = true;
+                    await this.syncBreakdownGenerationLogs();
+                    this.$nextTick(() => {
+                        this.$refs.breakdownGenerationLogPane?.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+                    });
+                },
+
+                async syncBreakdownGenerationLogs() {
                     const jobId = this.breakdownGeneration.jobId;
-                    this.breakdownGenerationProgressModal.hide();
-                    window.location.assign(`/tasks${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ''}`);
+                    if (!jobId) return;
+                    try {
+                        const res = await aiworkerApi.request(`/api/jobs/${jobId}/logs`);
+                        const data = await res.json();
+                        if (!res.ok) throw new Error(data.detail || '读取任务日志失败');
+                        this.breakdownGeneration.logs = data.logs || [];
+                    } catch (e) {
+                        this.breakdownGeneration.error = e.message || '读取任务日志失败';
+                    }
                 },
 
                 regenerateCurrentBreakdown() {
                     const record = this.breakdownEditor.record;
                     if (!record?.topic_id || this.breakdownGenerationRunning()) return;
-                    if (!confirm('确定重新分析已下载脚本并生成一个新拆解版本吗？')) return;
+                    if (!confirm('确定根据已下载脚本更新拆解并生成一个新版本吗？')) return;
                     const topic = this.breakdownGeneration.topic?.id === record.topic_id
                         ? this.breakdownGeneration.topic
                         : {id: record.topic_id, title: this.breakdownEditor.title};
@@ -432,6 +461,18 @@ window.aiworkerModules.push(() => ({
                         this.restoreDramaDownloadJob(topic, runningJob, true);
                         return;
                     }
+                    try {
+                        const statusResponse = await aiworkerApi.request('/api/hongguo/drama/download/status', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({title: topic?.title || ''})
+                        });
+                        const downloadStatus = await this.parseDramaDownloadResponse(statusResponse);
+                        if (statusResponse.ok && downloadStatus.douyin_full_downloaded) {
+                            alert(`抖音全剧已下载（第 ${downloadStatus.episode_start}-${downloadStatus.episode_end} 集），无需重复下载。`);
+                            return;
+                        }
+                    } catch (_) {}
                     this.dramaDownload = {title: topic.title || '', topic, source: 'hongguo', fallbackReason: '', candidates: [], selectedCandidate: null, selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], relatedVideos: [], missingEpisodes: [], seriesRangeLabel: '', seriesWarnings: [], selectedEpisodes: [], allEpisodes: false, searching: true, episodesLoading: false, starting: false, error: '', jobId: '', jobStatus: '', progress: {}, progressMessage: '', paused: false, finished: false, background: false, showFiles: false};
                     this.dramaDownloadModal.show();
                     try {
@@ -494,7 +535,7 @@ window.aiworkerModules.push(() => ({
                     this.dramaDownload.episodesLoading = true;
                     this.dramaDownload.error = '';
                     try {
-                        const res = await aiworkerApi.request('/api/hongguo/drama/episodes', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({book_id: candidate.book_id})});
+                        const res = await aiworkerApi.request('/api/hongguo/drama/episodes', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({book_id: candidate.book_id, source_platform: candidate.source_platform || 'hg', title: this.dramaDownload.title || candidate.title || ''})});
                         const data = await res.json();
                         if (!res.ok || data.status === 'error') throw new Error(data.message || '读取剧集失败');
                         this.dramaDownload.episodes = data.episodes || [];
@@ -561,7 +602,7 @@ window.aiworkerModules.push(() => ({
                         const endpoint = isDouyinFallback ? '/api/hongguo/drama/douyin-fallback/jobs' : '/api/hongguo/drama/download/jobs';
                         const payload = isDouyinFallback
                             ? {topic_id: this.dramaDownload.topic.id, title: this.dramaDownload.title, aweme_ids: this.dramaDownload.selectedAwemeIds, fallback_reason: this.dramaDownload.fallbackReason || ''}
-                            : {topic_id: this.dramaDownload.topic.id, title: this.dramaDownload.title, book_id: this.dramaDownload.selectedCandidate.book_id, episodes: episodeNumbers, all_episodes: this.dramaDownload.allEpisodes && episodeNumbers.length === this.dramaDownload.episodes.length};
+                            : {topic_id: this.dramaDownload.topic.id, title: this.dramaDownload.title, book_id: this.dramaDownload.selectedCandidate.book_id, source_platform: this.dramaDownload.selectedCandidate.source_platform || 'hg', episodes: episodeNumbers, all_episodes: this.dramaDownload.allEpisodes && episodeNumbers.length === this.dramaDownload.episodes.length};
                         const res = await aiworkerApi.request(endpoint, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
                         const data = await res.json();
                         if (!res.ok || data.status === 'error') throw new Error(data.message || '创建下载任务失败');
@@ -769,9 +810,18 @@ window.aiworkerModules.push(() => ({
 
                 breakdownRecordStatusLabel(status) {
                     return {
-                        draft: '草稿', submitted: '待审批', approved: '已批准',
-                        returned: '已退回', superseded: '已替代', locked: '已完成'
+                        draft: '草稿', superseded: '已替代', locked: '已完成'
                     }[status] || status || '草稿';
+                },
+
+                downloadBreakdown() {
+                    const breakdownId = this.breakdownEditor.record?.id;
+                    if (!breakdownId) return;
+                    window.open(
+                        `/api/creative/breakdowns/${encodeURIComponent(breakdownId)}/download`,
+                        '_blank',
+                        'noopener'
+                    );
                 },
 
                 async submitBreakdownEditor() {
@@ -829,13 +879,13 @@ window.aiworkerModules.push(() => ({
                     const data = await res.json();
                     if (!res.ok) { alert(data.detail || '更新失败'); return; }
                     Object.assign(topic, data);
+                    await this.fetchCreativeTopics();
                 },
 
                 createCreativeBreakdown(topic) {
                     return this.startTranscriptBreakdown(
                         topic,
-                        'creative',
-                        Boolean(topic?.locked_breakdown_id)
+                        'creative'
                     );
                 },
 

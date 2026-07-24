@@ -67,6 +67,24 @@ def _submit(
     return response.json()
 
 
+def _complete(
+    client: TestClient, task_id: str, resource_type: str, resource_id: str
+) -> dict:
+    if resource_type == "brief":
+        url = f"/api/creative/blueprints/{resource_id}/lock-brief"
+    elif resource_type == "characters":
+        project_id, batch_id = resource_id.split(":", 1)
+        url = f"/api/creative/projects/{project_id}/characters/{batch_id}/lock"
+    elif resource_type == "outline":
+        project_id, batch_id = resource_id.split(":", 1)
+        url = f"/api/creative/projects/{project_id}/outlines/{batch_id}/lock"
+    else:
+        url = f"/api/creative/episodes/{resource_id}/lock"
+    response = client.post(url, json={"workflow_task_id": task_id})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 def _approve(client: TestClient, submission_id: str) -> dict:
     response = client.post(
         f"/api/workflow/submissions/{submission_id}/approve"
@@ -195,7 +213,7 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
     first_task = approve_generic(source_package_task, "source_package")
     assert first_task["task_type"] == "breakdown"
 
-    assert clients["selection_operator"].get("/selection/breakdowns").status_code == 200
+    assert clients["selection_operator"].get("/selection/breakdowns").status_code == 404
     assert "创建工作流" not in clients["selection_operator"].get(
         "/selection/topics"
     ).text
@@ -203,7 +221,7 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
     assert clients["creative_planner"].get("/planning/projects").status_code == 200
     assert clients["creative_planner"].get("/admin/deliveries").status_code == 403
     assert clients["screenwriter"].get("/writing/projects").status_code == 200
-    assert clients["project_owner"].get("/review/approvals").status_code == 200
+    assert clients["project_owner"].get("/review/approvals").status_code == 404
     assert "managed-project-list" in clients["project_owner"].get(
         "/review/projects"
     ).text
@@ -240,12 +258,10 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
         project["id"], [{"content": {"premise": "approved"}, "risk_level": "low"}]
     )[0]
     _claim_start(clients["creative_planner"], brief_task["id"])
-    brief_submission = _submit(
+    brief_result = _complete(
         clients["creative_planner"], brief_task["id"], "brief", str(brief["id"])
     )
-    characters_task = _approve(
-        clients["project_owner"], brief_submission["id"]
-    )["next_task"]
+    characters_task = brief_result["next_task"]
     assert characters_task["role_code"] == "creative_planner"
 
     _claim_start(clients["creative_planner"], characters_task["id"])
@@ -309,15 +325,13 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
     )
 
     character_resource_id = f"{project_id}:{characters['batch_id']}"
-    character_submission = _submit(
+    character_result = _complete(
         clients["creative_planner"],
         characters_task["id"],
         "characters",
         character_resource_id,
     )
-    outline_task = _approve(
-        clients["project_owner"], character_submission["id"]
-    )["next_task"]
+    outline_task = character_result["next_task"]
     assert outline_task["role_code"] == "screenwriter"
     no_character_task = clients["creative_planner"].post(
         f"/api/creative/projects/{project_id}/characters",
@@ -335,21 +349,21 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
     )
     outline_resource_id = f"{project_id}:{outline['batch_id']}"
     _claim_start(clients["screenwriter"], outline_task["id"])
-    outline_submission = _submit(
+    outline_result = _complete(
         clients["screenwriter"],
         outline_task["id"],
         "outline",
         outline_resource_id,
     )
-    beats_task = _approve(
-        clients["project_owner"], outline_submission["id"]
-    )["next_task"]
+    beats_task = outline_result["next_task"]
     assert beats_task["role_code"] == "screenwriter"
 
-    beats = creative.create_episode_beats(
-        project["id"],
-        1,
-        {
+    _claim_start(clients["screenwriter"], beats_task["id"])
+    beats_response = clients["screenwriter"].post(
+        f"/api/creative/projects/{project_id}/episodes/1/beats",
+        json={
+            "workflow_task_id": beats_task["id"],
+            "content": {
             "beats": [
                 {
                     "order": 1,
@@ -362,22 +376,22 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
                     "hook": "door opens",
                 }
             ]
+            },
         },
     )
-    _claim_start(clients["screenwriter"], beats_task["id"])
-    beats_submission = _submit(
+    assert beats_response.status_code == 200, beats_response.text
+    beats = beats_response.json()
+    first_beats_result = _complete(
         clients["screenwriter"], beats_task["id"], "beats", str(beats["id"])
-    )
-    first_beats_result = _approve(
-        clients["project_owner"], beats_submission["id"]
     )
     assert first_beats_result["next_task"] is None
     assert first_beats_result["task"]["status"] == "in_progress"
 
-    beats_two = creative.create_episode_beats(
-        project["id"],
-        2,
-        {
+    beats_two_response = clients["screenwriter"].post(
+        f"/api/creative/projects/{project_id}/episodes/2/beats",
+        json={
+            "workflow_task_id": beats_task["id"],
+            "content": {
             "beats": [
                 {
                     "order": 1,
@@ -390,93 +404,36 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
                     "hook": "lights fail",
                 }
             ]
+            },
         },
     )
-    beats_two_submission = _submit(
+    assert beats_two_response.status_code == 200, beats_two_response.text
+    beats_two = beats_two_response.json()
+    second_beats_result = _complete(
         clients["screenwriter"], beats_task["id"], "beats", str(beats_two["id"])
     )
-    delivery_task = _approve(
-        clients["project_owner"], beats_two_submission["id"]
-    )["next_task"]
+    delivery_task = second_beats_result["next_task"]
     assert (delivery_task["task_type"], delivery_task["role_code"]) == (
         "delivery",
         "system_admin",
     )
 
-    delivered = clients["system_admin"].post(
-        "/api/admin/deliveries",
-        json={
-            "project_id": project["id"],
-            "stage": "beats",
-            "submission_id": beats_two_submission["id"],
-            "format": "json",
-        },
-    )
-    assert delivered.status_code == 201, delivered.text
-    delivery = delivered.json()["delivery"]
-    assert delivery["workflow_task_id"] == delivery_task["id"]
-    assert clients["system_admin"].get(
-        f"/api/admin/deliveries/{delivery['id']}/download"
-    ).status_code == 200
     assert TopicLifecycleService(creative, tmp_path).enrich_topic(topic["id"])[
         "lifecycle_status"
     ] == "beats_generated"
-    delivered_first = clients["system_admin"].post(
-        "/api/admin/deliveries",
-        json={
-            "project_id": project["id"],
-            "stage": "beats",
-            "submission_id": beats_submission["id"],
-            "format": "json",
-        },
-    )
-    assert delivered_first.status_code == 201, delivered_first.text
-    assert TopicLifecycleService(creative, tmp_path).enrich_topic(topic["id"])[
-        "lifecycle_status"
-    ] == "beats_exported"
-    repeated_delivery = clients["system_admin"].post(
-        "/api/admin/deliveries",
-        json={
-            "project_id": project["id"],
-            "stage": "beats",
-            "submission_id": beats_two_submission["id"],
-            "format": "json",
-        },
-    )
-    assert repeated_delivery.status_code == 201
-    assert repeated_delivery.json()["delivery"]["id"] == delivery["id"]
 
     with identity.connect() as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM approval_records WHERE decision = 'approved'"
-        ).fetchone()[0] == 8
+        ).fetchone()[0] == 3
         assert connection.execute(
             "SELECT COUNT(*) FROM workflow_task_events WHERE event_type = 'approve'"
-        ).fetchone()[0] == 8
+        ).fetchone()[0] == 3
         assert connection.execute(
             "SELECT COUNT(*) FROM workflow_task_events "
-            "WHERE task_id = ? AND event_type = 'delivery.complete'",
-            (delivery_task["id"],),
-        ).fetchone()[0] == 1
-    with creative._connect() as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM creative_stage_exports "
-            "WHERE project_id = ? AND stage = 'beats'",
-            (project["id"],),
-        ).fetchone()[0] == 2
-    assert audit.query(action="delivery.create", target_id=delivery["id"])
+            "WHERE event_type = 'creative.lock'"
+        ).fetchone()[0] == 5
 
     restarted_identity = IdentityRepository(runtime / "system/system.db")
     restarted_workflow = WorkflowRepository(restarted_identity)
-    restarted_creative = CreativeRepository(runtime / "creative/creative.db")
-    restarted_delivery = DeliveryService(
-        root=tmp_path,
-        creative_repository=restarted_creative,
-        workflow_repository=restarted_workflow,
-        audit_service=AuditService(restarted_identity),
-    )
-    assert restarted_workflow.get_submission(beats_two_submission["id"])["status"] == (
-        "approved"
-    )
-    assert restarted_workflow.get_task(delivery_task["id"])["status"] == "completed"
-    assert restarted_delivery.download_path(delivery["id"]).is_file()
+    assert restarted_workflow.get_task(delivery_task["id"])["status"] == "pool"

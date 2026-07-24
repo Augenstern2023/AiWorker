@@ -14,6 +14,18 @@
                     <div class="progress" role="progressbar" aria-label="拆解生成进度">
                         <div class="progress-bar progress-bar-striped" :class="{'progress-bar-animated': breakdownGenerationRunning(), 'bg-danger': breakdownGeneration.status === 'failed'}" :style="`width: ${breakdownGenerationIndeterminate() ? 100 : breakdownGenerationProgressPercent()}%`"></div>
                     </div>
+                    <div class="mt-3 border-top border-secondary pt-3" x-show="breakdownGeneration.showLogs" x-cloak>
+                        <div class="d-flex align-items-center justify-content-between mb-1">
+                            <small class="fw-semibold"><i class="bi bi-terminal me-1"></i>任务日志</small>
+                            <small class="text-muted" x-text="breakdownGeneration.logCount ? `共 ${breakdownGeneration.logCount} 条` : ''"></small>
+                        </div>
+                        <div id="breakdownGenerationLogPane" class="log-pane" style="height: 220px; font-size: 12px;" x-ref="breakdownGenerationLogPane">
+                            <template x-for="(log, i) in breakdownGeneration.logs" :key="i">
+                                <div class="log-line" :class="log.includes('[ERROR]') ? 'text-danger' : log.includes('[WARNING]') ? 'text-warning' : ''" x-text="log"></div>
+                            </template>
+                            <div x-show="!breakdownGeneration.logs || breakdownGeneration.logs.length === 0" class="text-muted p-2">等待日志...</div>
+                        </div>
+                    </div>
                     <div class="alert alert-danger py-2 mt-3 mb-0" x-show="breakdownGeneration.error" x-text="breakdownGeneration.error"></div>
                 </div>
                 <div class="modal-footer">
@@ -50,11 +62,12 @@
                             </div>
                         </template>
                     </div>
-                    <div class="small text-muted mt-2">内容字段来源和风险信息保留在拆解版本中。提交后不可覆盖。<span class="badge text-bg-secondary ms-2" x-text="breakdownRecordStatusLabel(breakdownEditor.record?.status)"></span><span class="visually-hidden">待审批 已批准 已退回 已替代</span></div>
+                    <div class="small text-muted mt-2">内容字段来源和风险信息保留在拆解版本中。完成后不可覆盖。<span class="badge text-bg-secondary ms-2" x-text="breakdownRecordStatusLabel(breakdownEditor.record?.status)"></span><span class="visually-hidden">草稿 已完成 已替代</span></div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">关闭</button>
-                    <button type="button" class="btn btn-outline-info" @click="regenerateCurrentBreakdown" :disabled="breakdownEditor.saving || breakdownGenerationRunning()"><i class="bi bi-arrow-clockwise me-1"></i>重新生成</button>
+                    <button type="button" class="btn btn-outline-secondary" @click="downloadBreakdown" :disabled="!breakdownEditor.record?.id"><i class="bi bi-download me-1"></i>下载到本地</button>
+                    <button type="button" class="btn btn-outline-info" @click="regenerateCurrentBreakdown" :disabled="breakdownEditor.saving || breakdownGenerationRunning()"><i class="bi bi-arrow-clockwise me-1"></i>更新拆解</button>
                     <button type="button" class="btn btn-outline-light" @click="saveBreakdownEditor" :disabled="breakdownEditor.saving || breakdownEditor.record?.status !== 'draft'"><i class="bi bi-save me-1"></i>保存草稿</button>
                     <button type="button" class="btn btn-warning" @click="submitBreakdownEditor" :disabled="breakdownEditor.saving || breakdownEditor.record?.status !== 'draft'"><i class="bi bi-lock-fill me-1"></i>完成并锁定</button>
                 </div>

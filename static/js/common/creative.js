@@ -1,10 +1,182 @@
 window.aiworkerModules = window.aiworkerModules || [];
 window.aiworkerModules.push(() => ({
+                dramaReviewStatusLabel() {
+                    return {queued: '等待采集', running: '采集中', completed: '已完成', failed: '失败'}[this.dramaReviews.status] || '未开始';
+                },
+
+                dramaReviewPlatformForTopic(topic) {
+                    const platforms = topic?.source_platforms || [topic?.platform];
+                    return platforms.includes('hg') ? 'hg' : 'dy';
+                },
+
+                isDouyinDramaReview(state) {
+                    return state?.platform === 'dy';
+                },
+
+                dramaReviewTopicKey(topic) {
+                    return String(topic?.id || topic?.title || '');
+                },
+
+                dramaReviewJobForTopic(topic) {
+                    return this.dramaReviewJobs[this.dramaReviewTopicKey(topic)] || null;
+                },
+
+                dramaReviewRunningForTopic(topic) {
+                    return ['queued', 'running'].includes(this.dramaReviewJobForTopic(topic)?.status);
+                },
+
+                dramaReviewActionTitle(topic) {
+                    const job = this.dramaReviewJobForTopic(topic);
+                    if (['queued', 'running'].includes(job?.status)) return '查看剧评下载进度';
+                    if (job?.status === 'completed') return '下载剧评（已完成）';
+                    return '下载剧评';
+                },
+
+                persistDramaReviewJob(state) {
+                    const key = this.dramaReviewTopicKey(state?.topic);
+                    if (!key || !state?.jobId) return;
+                    this.dramaReviewJobs[key] = state;
+                },
+
+                syncDramaReviewModal(state) {
+                    if (this.dramaReviewTopicKey(this.dramaReviews.topic) === this.dramaReviewTopicKey(state?.topic)) {
+                        Object.assign(this.dramaReviews, state);
+                    }
+                },
+
+                finishDisplayedDramaReviewJob() {
+                    const state = this.dramaReviews;
+                    if (!state?.jobId || !['completed', 'failed'].includes(state.status)) return;
+                    state.polling = false;
+                    this.persistDramaReviewJob(state);
+                },
+
+                async parseDramaReviewResponse(response) {
+                    const body = await response.text();
+                    try {
+                        return body ? JSON.parse(body) : {};
+                    } catch (_) {
+                        return {detail: body.trim() || `服务器返回错误（${response.status}）`};
+                    }
+                },
+
+                async startDramaReviewCapture() {
+                    const state = this.dramaReviews;
+                    const title = String(state.title || '').trim();
+                    const limit = Number(state.limit || 0);
+                    if (!title) {
+                        state.error = '请输入剧名';
+                        return;
+                    }
+                    if (!state.allReviews && (!Number.isInteger(limit) || limit < 1 || limit > 10000)) {
+                        state.error = '数量限制需为 1 到 10000 的整数';
+                        return;
+                    }
+                    state.loading = true;
+                    state.error = '';
+                    state.items = [];
+                    const topicKey = this.dramaReviewTopicKey(state.topic);
+                    const requestState = {...state};
+                    try {
+                        const endpoint = this.isDouyinDramaReview(state) ? '/api/douyin/reviews/jobs' : '/api/hongguo/reviews/capture';
+                        const payload = this.isDouyinDramaReview(state)
+                            ? {topic_id: state.topic?.id, title, limit, all_reviews: Boolean(state.allReviews)}
+                            : {title, limit, all_reviews: Boolean(state.allReviews)};
+                        const response = await aiworkerApi.request(endpoint, {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify(payload)
+                        });
+                        const data = await this.parseDramaReviewResponse(response);
+                        if (!response.ok) throw new Error(data.detail || data.message || '剧评检索失败');
+                        const jobState = {...requestState, loading: false, polling: false};
+                        this.applyDramaReviewCapture(data, jobState);
+                        await this.pollDramaReviewCapture(jobState);
+                    } catch (error) {
+                        if (this.dramaReviewTopicKey(this.dramaReviews.topic) === topicKey) this.dramaReviews.error = error.message || '剧评检索失败';
+                    } finally {
+                        if (this.dramaReviewTopicKey(this.dramaReviews.topic) === topicKey) this.dramaReviews.loading = false;
+                    }
+                },
+
+                applyDramaReviewCapture(data, state = this.dramaReviews) {
+                    const job = data?.job || {};
+                    state.jobId = job.job_id || state.jobId;
+                    state.status = job.status || state.status;
+                    state.reviewCount = Number(job.review_count || 0);
+                    state.sourceTotal = Number(job.source_total || 0);
+                    state.items = data?.reviews || [];
+                    state.error = job.status === 'failed' ? String(job.error || '剧评采集失败') : '';
+                    this.persistDramaReviewJob(state);
+                    this.syncDramaReviewModal(state);
+                },
+
+                async pollDramaReviewCapture(state = this.dramaReviews) {
+                    const jobId = state.jobId;
+                    if (!jobId || state.polling) return;
+                    state.polling = true;
+                    try {
+                        const root = this.isDouyinDramaReview(state) ? '/api/douyin/reviews/jobs' : '/api/hongguo/reviews/jobs';
+                        const response = await aiworkerApi.request(`${root}/${encodeURIComponent(jobId)}`);
+                        const data = await this.parseDramaReviewResponse(response);
+                        if (!response.ok) throw new Error(data.detail || data.message || '读取剧评检索进度失败');
+                        if (state.jobId !== jobId) return;
+                        this.applyDramaReviewCapture(data, state);
+                        if (['queued', 'running'].includes(state.status)) {
+                            window.setTimeout(() => this.pollDramaReviewCapture(state), 2000);
+                        }
+                    } catch (error) {
+                        if (state.jobId === jobId) {
+                            state.error = error.message || '读取剧评检索进度失败';
+                            this.persistDramaReviewJob(state);
+                        }
+                    } finally {
+                        state.polling = false;
+                        this.persistDramaReviewJob(state);
+                        this.syncDramaReviewModal(state);
+                    }
+                },
+
+                downloadDramaReviews() {
+                    if (!this.dramaReviews.jobId || this.dramaReviews.status !== 'completed') return;
+                    const state = this.dramaReviews;
+                    const root = this.isDouyinDramaReview(state) ? '/api/douyin/reviews/jobs' : '/api/hongguo/reviews/jobs';
+                    window.open(`${root}/${encodeURIComponent(state.jobId)}/download?format=${encodeURIComponent(state.format || 'csv')}`, '_blank', 'noopener');
+                },
+
+                async openTopicReviewCapture(topic) {
+                    const state = this.dramaReviews;
+                    const existing = this.dramaReviewJobForTopic(topic);
+                    Object.assign(state, {
+                        topic,
+                        title: String(topic?.title || '').trim(),
+                        platform: this.dramaReviewPlatformForTopic(topic),
+                        limit: 100,
+                        allReviews: false,
+                        format: 'csv',
+                        jobId: '',
+                        status: '',
+                        reviewCount: 0,
+                        sourceTotal: 0,
+                        items: [],
+                        loading: false,
+                        polling: false,
+                        error: ''
+                    }, existing || {});
+                    state.topic = topic;
+                    state.title = String(topic?.title || '').trim();
+                    state.platform = existing?.platform || this.dramaReviewPlatformForTopic(topic);
+                    state.loading = false;
+                    state.polling = false;
+                    this.dramaReviewCaptureModal?.show();
+                    if (['queued', 'running'].includes(existing?.status)) this.pollDramaReviewCapture(existing);
+                },
+
                 creativeTopicOptionLabel(topic) {
                     if (!topic?.latest_breakdown_id) return `${topic.title}（未拆解）`;
                     const version = topic.latest_breakdown_version ? ` v${topic.latest_breakdown_version}` : '';
                     if (!topic.locked_breakdown_id) return `${topic.title}（草稿${version}，需先完成拆解）`;
-                    if (topic.latest_breakdown_status === 'draft') return `${topic.title}（已有批准版，最新草稿${version}）`;
+                    if (topic.latest_breakdown_status === 'draft') return `${topic.title}（已有完成版，最新草稿${version}）`;
                     return `${topic.title}（${this.creativeWorkflowStatusLabel(topic.latest_breakdown_status)}${version}）`;
                 },
 
@@ -65,7 +237,7 @@ window.aiworkerModules.push(() => ({
 
                 async openCreativeProjectFromTopic(topic) {
                     if (topic.status !== 'adopted' || !topic.locked_breakdown_id) {
-                        this.topicLibrary.error = '请先采纳选题并批准拆解版本';
+                        this.topicLibrary.error = '请先采纳选题并完成拆解版本';
                         return;
                     }
                     window.location.assign(`/planning/projects?topic_id=${encodeURIComponent(topic.id)}`);
@@ -156,9 +328,8 @@ window.aiworkerModules.push(() => ({
 
                 creativeWorkflowStatusLabel(status) {
                     return {
-                        draft: '草稿', submitted: '待审批', approved: '已批准',
-                        returned: '已退回', superseded: '已替代',
-                        locked: '已完成', brief_locked: '已批准'
+                        draft: '草稿', locked: '已完成', brief_locked: '已完成',
+                        superseded: '已替代'
                     }[status] || status || '草稿';
                 },
 
@@ -169,7 +340,7 @@ window.aiworkerModules.push(() => ({
                 async resolveCreativeWorkflowTask(resourceType, projectId = null, topicId = null) {
                     const response = await aiworkerApi.request('/api/workflow/tasks');
                     const tasks = await response.json();
-                    if (!response.ok) throw new Error(tasks.detail || '读取审批任务失败');
+                    if (!response.ok) throw new Error(tasks.detail || '读取创作任务失败');
                     const open = ['assigned', 'in_progress', 'returned'];
                     const task = (tasks || []).find(item =>
                         item.task_type === resourceType
@@ -199,19 +370,25 @@ window.aiworkerModules.push(() => ({
                     return matches[0];
                 },
 
-                async submitCreativeResource(resourceType, resourceId, projectId = null, topicId = null) {
-                    const task = await this.resolveCreativeWorkflowTask(resourceType, projectId, topicId);
-                    const response = await aiworkerApi.request('/api/creative/workflow/submit', {
+                async completeCreativeResource(resourceType, resourceId, projectId, differenceNote = '') {
+                    const task = await this.resolveCreativeWorkflowTask(resourceType, projectId);
+                    const batchId = String(resourceId).split(':', 2)[1];
+                    const endpoint = {
+                        brief: `/api/creative/blueprints/${resourceId}/lock-brief`,
+                        characters: `/api/creative/projects/${projectId}/characters/${batchId}/lock`,
+                        outline: `/api/creative/projects/${projectId}/outlines/${batchId}/lock`,
+                        beats: `/api/creative/episodes/${resourceId}/lock`,
+                    }[resourceType];
+                    if (!endpoint) throw new Error('不支持完成该创作阶段');
+                    const body = {workflow_task_id: task.id};
+                    if (resourceType === 'brief') body.difference_note = differenceNote || '';
+                    const response = await aiworkerApi.request(endpoint, {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({
-                            workflow_task_id: task.id,
-                            resource_type: resourceType,
-                            resource_id: String(resourceId),
-                        }),
+                        body: JSON.stringify(body),
                     });
                     const data = await response.json();
-                    if (!response.ok) throw new Error(data.detail || '提交审批失败');
+                    if (!response.ok) throw new Error(data.detail || '完成并锁定失败');
                     return data;
                 },
 
@@ -298,6 +475,9 @@ window.aiworkerModules.push(() => ({
                     this.creativeWorkspace.jobElapsedSeconds = 0;
                     this.creativeWorkspace.paused = false;
                     this.creativeWorkspace.notifiedStatus = '';
+                    this.creativeWorkspace.jobLogs = [];
+                    this.creativeWorkspace.jobLogCount = 0;
+                    this.creativeWorkspace.showJobLogs = false;
                     this.creativeWorkspace.activeAction = action;
                     this.creativeGenerationProgressModal.show();
                     try {
@@ -310,6 +490,7 @@ window.aiworkerModules.push(() => ({
                         this.creativeWorkspace.jobStatus = data.job.status;
                         this.creativeWorkspace.jobMessage = this.creativeGenerationStartedMessage(action);
                         this.creativeWorkspace.jobProgress = data.job.progress || {};
+                        this.creativeWorkspace.jobLogCount = Number(data.job.log_count || 0);
                         if (Number(data.job.started_at || 0) > 0) {
                             this.creativeWorkspace.jobStartedAt = Number(data.job.started_at) * 1000;
                         }
@@ -432,6 +613,8 @@ window.aiworkerModules.push(() => ({
                     this.creativeWorkspace.jobMessage = job.message || this.creativeWorkspace.jobMessage;
                     this.creativeWorkspace.jobProgress = job.progress || {};
                     this.creativeWorkspace.paused = Boolean(job.paused);
+                    this.creativeWorkspace.jobLogCount = Number(job.log_count || 0);
+                    if (this.creativeWorkspace.showJobLogs) await this.syncCreativeJobLogs();
                     if (Number(job.started_at || 0) > 0) {
                         this.creativeWorkspace.jobStartedAt = Number(job.started_at) * 1000;
                     }
@@ -510,6 +693,29 @@ window.aiworkerModules.push(() => ({
                     );
                 },
 
+                async openCreativeTaskLog() {
+                    if (!this.creativeWorkspace.jobId) return;
+                    this.creativeWorkspace.showJobLogs = true;
+                    this.creativeGenerationProgressModal.show();
+                    await this.syncCreativeJobLogs();
+                    this.$nextTick(() => {
+                        this.$refs.creativeGenerationLogPane?.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+                    });
+                },
+
+                async syncCreativeJobLogs() {
+                    const jobId = this.creativeWorkspace.jobId;
+                    if (!jobId) return;
+                    try {
+                        const res = await aiworkerApi.request(`/api/jobs/${jobId}/logs`);
+                        const data = await res.json();
+                        if (!res.ok) throw new Error(data.detail || '读取任务日志失败');
+                        this.creativeWorkspace.jobLogs = data.logs || [];
+                    } catch (e) {
+                        this.creativeWorkspace.error = e.message || '读取任务日志失败';
+                    }
+                },
+
                 async pauseCreativeJob() {
                     const res = await aiworkerApi.request(`/api/jobs/${this.creativeWorkspace.jobId}/pause`, {method: 'POST'});
                     const data = await res.json();
@@ -542,6 +748,9 @@ window.aiworkerModules.push(() => ({
                     this.creativeWorkspace.jobElapsedSeconds = 0;
                     this.creativeWorkspace.paused = false;
                     this.creativeWorkspace.notifiedStatus = '';
+                    this.creativeWorkspace.jobLogs = [];
+                    this.creativeWorkspace.jobLogCount = Number(data.job.log_count || 0);
+                    this.creativeWorkspace.showJobLogs = false;
                     this.creativeGenerationProgressModal.show();
                     await this.fetchJobs();
                 },
@@ -584,16 +793,16 @@ window.aiworkerModules.push(() => ({
                     this.creativeWorkspace.selectedBlueprintId = data.id;
                 },
 
-                async submitProjectBrief() {
+                async completeProjectBrief() {
                     const item = this.selectedProjectBlueprint();
                     if (!item) return;
                     try {
                         await this.saveProjectBlueprint();
-                        await this.submitCreativeResource('brief', item.id, this.creativeWorkspace.project.id);
+                        await this.completeCreativeResource('brief', item.id, this.creativeWorkspace.project.id, item.difference_note);
                         await this.selectCreativeProject(this.creativeWorkspace.project.id);
-                        this.showCreativeNotice('Brief 已提交审批');
+                        this.showCreativeNotice('Brief 已完成并锁定');
                     } catch (error) {
-                        this.creativeWorkspace.error = error.message || '提交 Brief 失败';
+                        this.creativeWorkspace.error = error.message || '完成 Brief 失败';
                     }
                 },
 
@@ -630,36 +839,36 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
-                async submitProjectCharacters() {
+                async completeProjectCharacters() {
                     const projectId = this.creativeWorkspace.project.id;
                     const batchId = this.latestCharacterBatchId();
                     if (!batchId) return;
                     try {
-                        await this.submitCreativeResource('characters', `${projectId}:${batchId}`, projectId);
+                        await this.completeCreativeResource('characters', `${projectId}:${batchId}`, projectId);
                         await this.selectCreativeProject(projectId);
-                        this.showCreativeNotice('人物关系已提交审批');
-                    } catch (error) { this.creativeWorkspace.error = error.message || '提交人物关系失败'; }
+                        this.showCreativeNotice('人物关系已完成并锁定');
+                    } catch (error) { this.creativeWorkspace.error = error.message || '完成人物关系失败'; }
                 },
 
-                async submitProjectOutlines() {
+                async completeProjectOutlines() {
                     const projectId = this.creativeWorkspace.project.id;
                     const batchId = this.latestOutlineBatchId();
                     if (!batchId) return;
                     try {
-                        await this.submitCreativeResource('outline', `${projectId}:${batchId}`, projectId);
+                        await this.completeCreativeResource('outline', `${projectId}:${batchId}`, projectId);
                         await this.selectCreativeProject(projectId);
-                        this.showCreativeNotice('分集大纲已提交审批');
-                    } catch (error) { this.creativeWorkspace.error = error.message || '提交分集大纲失败'; }
+                        this.showCreativeNotice('分集大纲已完成并锁定');
+                    } catch (error) { this.creativeWorkspace.error = error.message || '完成分集大纲失败'; }
                 },
 
-                async submitProjectBeats() {
+                async completeProjectBeats() {
                     const item = this.selectedProjectBeats();
                     if (!item) return;
                     try {
-                        await this.submitCreativeResource('beats', item.id, this.creativeWorkspace.project.id);
+                        await this.completeCreativeResource('beats', item.id, this.creativeWorkspace.project.id);
                         await this.selectCreativeProject(this.creativeWorkspace.project.id);
-                        this.showCreativeNotice('Beats 已提交审批');
-                    } catch (error) { this.creativeWorkspace.error = error.message || '提交 Beats 失败'; }
+                        this.showCreativeNotice('Beats 已完成并锁定');
+                    } catch (error) { this.creativeWorkspace.error = error.message || '完成 Beats 失败'; }
                 },
 
                 creativeExportUrl(stage, format = 'md') {

@@ -1,10 +1,23 @@
 window.aiworkerModules = window.aiworkerModules || [];
 window.aiworkerModules.push(() => ({
+                rememberCreativePlatform() {
+                    try {
+                        window.localStorage.setItem('aiworker.selection.hits.platform', this.creative.platform === 'hg' ? 'hg' : 'dy');
+                    } catch (_) {
+                        // Private browsing can deny storage; the current page still works.
+                    }
+                },
+
+                async changeCreativePlatform() {
+                    this.rememberCreativePlatform();
+                    await this.generateCreativeTopics();
+                },
+
                 async fetchCreativeTopics() {
                     this.creative.loading = true;
                     this.creative.error = '';
                     try {
-                        const res = await aiworkerApi.request(`/api/creative/topics?platform=${encodeURIComponent(this.creative.platform)}`);
+                        const res = await aiworkerApi.request(`/api/creative/topics?platform=${encodeURIComponent(this.creative.platform)}&status=pending_review`);
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.detail || '读取选题失败');
                         this.creative.items = data.items || [];
@@ -19,7 +32,7 @@ window.aiworkerModules.push(() => ({
                     this.topicLibrary.loading = true;
                     this.topicLibrary.error = '';
                     try {
-                        const params = new URLSearchParams({limit: '500'});
+                        const params = new URLSearchParams({status: 'adopted', all: 'true'});
                         if (this.topicLibrary.platform) params.set('platform', this.topicLibrary.platform);
                         if (this.topicLibrary.lifecycleStatus) params.set('lifecycle_status', this.topicLibrary.lifecycleStatus);
                         if (this.topicLibrary.category.trim()) params.set('category', this.topicLibrary.category.trim());
@@ -174,27 +187,22 @@ window.aiworkerModules.push(() => ({
                     if (!topic?.latest_breakdown_id) return '未拆解';
                     const version = topic.latest_breakdown_version ? ` v${topic.latest_breakdown_version}` : '';
                     if (topic.latest_breakdown_status === 'locked') return `已锁定${version}`;
-                    if (topic.latest_breakdown_status === 'submitted') return `待审批${version}`;
-                    if (topic.latest_breakdown_status === 'approved') return `已批准${version}`;
-                    if (topic.latest_breakdown_status === 'returned') return `已退回${version}`;
                     return topic.locked_breakdown_id
-                        ? `草稿${version} · 已有批准版`
-                        : `草稿${version} · 待提交`;
+                        ? `草稿${version} · 已有完成版`
+                        : `草稿${version} · 待完成`;
                 },
 
                 breakdownStatusClass(topic) {
                     if (!topic?.latest_breakdown_id) return 'bg-secondary';
                     if (['locked', 'approved'].includes(topic.latest_breakdown_status)) return 'bg-success';
-                    if (topic.latest_breakdown_status === 'returned') return 'bg-danger';
-                    if (topic.latest_breakdown_status === 'submitted') return 'bg-warning text-dark';
                     return topic.locked_breakdown_id ? 'bg-info text-dark' : 'bg-warning text-dark';
                 },
 
                 creativeTopicOptionLabel(topic) {
                     if (!topic?.latest_breakdown_id) return `${topic.title}（未拆解）`;
                     const version = topic.latest_breakdown_version ? ` v${topic.latest_breakdown_version}` : '';
-                    if (!topic.locked_breakdown_id) return `${topic.title}（草稿${version}，需先提交审批）`;
-                    if (topic.latest_breakdown_status === 'draft') return `${topic.title}（已有批准版，最新草稿${version}）`;
+                    if (!topic.locked_breakdown_id) return `${topic.title}（草稿${version}，需先完成拆解）`;
+                    if (topic.latest_breakdown_status === 'draft') return `${topic.title}（已有完成版，最新草稿${version}）`;
                     return `${topic.title}（${this.breakdownStatusLabel(topic)}）`;
                 },
 
@@ -258,6 +266,7 @@ window.aiworkerModules.push(() => ({
                         const payload = await response.json();
                         if (!response.ok) throw new Error(payload.detail || '分配策划任务失败');
                         state.result = payload;
+                        await this.fetchTopicLibrary();
                     } catch (error) {
                         state.error = error.message || '分配策划任务失败';
                     } finally {

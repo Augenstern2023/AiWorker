@@ -225,6 +225,89 @@ def _task(workflow, creative, admin, owner, actor, resource_type, resource_id):
     return task
 
 
+def test_brief_completion_locks_and_advances_without_creating_an_approval(
+    environment,
+) -> None:
+    _, workflow, creative, adapter, transitions, admin, owner, actors = environment
+    resource_id, _ = _seed_resources(creative)["brief"]
+    _make_resource_draft(creative, "brief", resource_id)
+    task = _task(
+        workflow,
+        creative,
+        admin,
+        owner,
+        actors["brief"],
+        "brief",
+        resource_id,
+    )
+
+    result = transitions.complete_creative_without_review(
+        task["id"], "brief", resource_id, actors["brief"]
+    )
+
+    assert adapter.domain_status("brief", resource_id) == "brief_locked"
+    assert result["task"]["status"] == "completed"
+    assert result["next_task"]["task_type"] == "characters"
+    assert workflow.list_task_submissions(task["id"]) == []
+
+
+@pytest.mark.parametrize(
+    ("resource_type", "expected_next"),
+    (("characters", "outline"), ("outline", "beats"), ("beats", "delivery")),
+)
+def test_creative_completion_locks_each_later_stage_without_an_approval(
+    environment, resource_type: str, expected_next: str
+) -> None:
+    _, workflow, creative, adapter, transitions, admin, owner, actors = environment
+    resource_id, _ = _seed_resources(creative)[resource_type]
+    _make_resource_draft(creative, resource_type, resource_id)
+    task = _task(
+        workflow,
+        creative,
+        admin,
+        owner,
+        actors[resource_type],
+        resource_type,
+        resource_id,
+    )
+
+    result = transitions.complete_creative_without_review(
+        task["id"], resource_type, resource_id, actors[resource_type]
+    )
+
+    assert adapter.domain_status(resource_type, resource_id) == "locked"
+    assert result["task"]["status"] == "completed"
+    assert result["next_task"]["task_type"] == expected_next
+    assert workflow.list_task_submissions(task["id"]) == []
+
+
+def test_pending_brief_approval_is_migrated_to_a_locked_version(environment) -> None:
+    _, workflow, creative, adapter, transitions, admin, owner, actors = environment
+    resource_id, _ = _seed_resources(creative)["brief"]
+    _make_resource_draft(creative, "brief", resource_id)
+    task = _task(
+        workflow,
+        creative,
+        admin,
+        owner,
+        actors["brief"],
+        "brief",
+        resource_id,
+    )
+    submitted = adapter.submit(task["id"], "brief", resource_id, actors["brief"])
+
+    migrated = transitions.migrate_pending_creative_approvals()
+
+    assert migrated == [submitted["id"]]
+    assert adapter.domain_status("brief", resource_id) == "brief_locked"
+    assert workflow.get_submission(submitted["id"])["status"] == "superseded"
+    assert workflow.get_task(task["id"])["status"] == "completed"
+    assert any(
+        event["event_type"] == "creative.approval_bypassed"
+        for event in workflow.list_task_events(task["id"])
+    )
+
+
 @pytest.mark.parametrize("resource_type", ["breakdown", "brief", "characters", "outline", "beats"])
 def test_all_creative_resources_snapshot_submit_freeze_approve_and_return_clone(
     environment, resource_type: str

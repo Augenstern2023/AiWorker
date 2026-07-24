@@ -1,9 +1,0 @@
-{% extends "layouts/base.html" %}
-
-{% block content %}
-<div class="d-flex align-items-center justify-content-between mb-3"><div><h3 class="mb-1">剧目拆解</h3><div class="small text-muted">依据已下载转写生成、校正并锁定拆解版本</div></div><button class="btn btn-outline-secondary btn-sm" @click="fetchTopicLibrary()"><i class="bi bi-arrow-clockwise"></i></button></div>
-<div class="creative-topic-table"><table class="table table-sm table-hover align-middle"><thead><tr><th>剧目</th><th>素材覆盖</th><th>生命周期</th><th>拆解版本</th><th>操作</th></tr></thead><tbody><template x-for="topic in topicLibrary.items" :key="topic.id"><tr><td x-text="topic.title"></td><td x-text="`已下载 ${Number(topic.downloaded_episode_count || 0)} 集`"></td><td><span class="badge lifecycle-badge" :class="topicLifecycleClass(topic.lifecycle_status)" x-text="topic.lifecycle_label || topicLifecycleLabel(topic)"></span></td><td><span class="badge breakdown-version-badge" :class="breakdownStatusClass(topic)" x-text="breakdownStatusLabel(topic)"></span></td><td><button class="btn btn-sm btn-outline-light" @click="createTopicLibraryBreakdown(topic)"><i class="bi bi-diagram-3 me-1"></i><span x-text="topic.latest_breakdown_id ? '更新拆解' : '生成拆解'"></span></button></td></tr></template><tr x-show="!topicLibrary.items.length"><td colspan="5" class="text-center text-muted py-5">暂无可拆解剧目</td></tr></tbody></table></div>
-{% include "common/workspace/selection_modals.html" %}
-{% include "common/workspace/breakdown_modals.html" %}
-{% endblock %}
-{% block scripts %}<script src="/static/js/common/creative.js?v={{ asset_version }}"></script><script src="/static/js/selection/topics.js?v={{ asset_version }}"></script><script src="/static/js/selection/breakdowns.js?v={{ asset_version }}"></script>{% endblock %}

@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 
 $repo = 'D:\Crawler\AiWorker'
 $git = 'C:\Users\Administrator\AppData\Local\Programs\Git\cmd\git.exe'
-$remote = 'origin'
+$remotes = @('origin', 'gitee-xuanpin')
 $branch = 'main'
 $lockName = 'Global\AiWorker-Daily-Git-Update'
 $logDir = Join-Path $repo 'logs\scheduled-git-update'
@@ -71,54 +71,78 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw 'Unable to read repository status'
     }
-    if (-not $status) {
-        Write-TaskLog 'SKIP working tree has no changes'
-        exit 0
-    }
-
     if ($DryRun) {
-        Write-TaskLog 'DRY-RUN changes detected; commit and push were not executed'
-        Write-TaskLog $status
+        if ($status) {
+            Write-TaskLog 'DRY-RUN changes detected; commit and push were not executed'
+            Write-TaskLog $status
+        } else {
+            Write-TaskLog 'DRY-RUN working tree has no changes; pending commits would still be pushed to all remotes'
+        }
+        foreach ($remote in $remotes) {
+            $remoteUrl = (& $git -C $repo remote get-url --push $remote 2>&1 | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) {
+                throw "Required Git remote '$remote' is not configured"
+            }
+            Write-TaskLog "DRY-RUN push target $remote ($remoteUrl) branch $branch"
+        }
         exit 0
     }
 
-    $stagedBeforeRun = (& $git -C $repo diff --cached --name-only 2>&1 | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Unable to inspect the staged index'
-    }
-    if ($stagedBeforeRun) {
-        throw 'Repository already contains staged changes; aborting so the task does not commit a partial/manual staging selection'
-    }
+    if ($status) {
+        $stagedBeforeRun = (& $git -C $repo diff --cached --name-only 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Unable to inspect the staged index'
+        }
+        if ($stagedBeforeRun) {
+            throw 'Repository already contains staged changes; aborting so the task does not commit a partial/manual staging selection'
+        }
 
-    Invoke-Git @('add', '--all') | Out-Null
+        Invoke-Git @('add', '--all') | Out-Null
 
-    $staged = (& $git -C $repo diff --cached --quiet 2>&1)
-    $diffExit = $LASTEXITCODE
-    if ($diffExit -eq 0) {
-        Write-TaskLog 'SKIP no staged changes after git add --all'
-        exit 0
-    }
-    if ($diffExit -ne 1) {
-        throw "git diff --cached --quiet failed with exit code $diffExit"
-    }
-
-    $commitMessage = 'chore(auto-update): daily sync {0}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-    Invoke-Git @('commit', '-m', $commitMessage) | Out-Null
-
-    try {
-        Invoke-Git @('fetch', $remote, $branch) | Out-Null
-    } catch {
-        throw "Fetch failed after local commit. The commit remains local and will be retried next run. $($_.Exception.Message)"
+        $staged = (& $git -C $repo diff --cached --quiet 2>&1)
+        $diffExit = $LASTEXITCODE
+        if ($diffExit -ne 0 -and $diffExit -ne 1) {
+            throw "git diff --cached --quiet failed with exit code $diffExit"
+        }
+        if ($diffExit -eq 1) {
+            $commitMessage = 'chore(auto-update): daily sync {0}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+            Invoke-Git @('commit', '-m', $commitMessage) | Out-Null
+        } else {
+            Write-TaskLog 'No staged changes after git add --all; continuing with remote synchronization'
+        }
+    } else {
+        Write-TaskLog 'Working tree has no changes; checking for commits pending push'
     }
 
-    & $git -C $repo merge-base --is-ancestor "$remote/$branch" 'HEAD' 2>&1 | ForEach-Object { Write-TaskLog "git merge-base: $_" }
-    if ($LASTEXITCODE -ne 0) {
-        throw "Remote '$remote/$branch' is not an ancestor of local HEAD; push aborted to avoid non-fast-forward overwrite"
+    $pushFailures = @()
+    foreach ($remote in $remotes) {
+        try {
+            $remoteUrl = (& $git -C $repo remote get-url --push $remote 2>&1 | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) {
+                throw "Required Git remote '$remote' is not configured"
+            }
+            Write-TaskLog "SYNC target $remote ($remoteUrl)"
+            Invoke-Git @('fetch', $remote, $branch) | Out-Null
+
+            & $git -C $repo merge-base --is-ancestor "$remote/$branch" 'HEAD' 2>&1 | ForEach-Object { Write-TaskLog "git merge-base $remote/$branch HEAD: $_" }
+            if ($LASTEXITCODE -ne 0) {
+                throw "Remote '$remote/$branch' is not an ancestor of local HEAD; push aborted to avoid non-fast-forward overwrite"
+            }
+
+            Invoke-Git @('push', $remote, "HEAD:$branch") | Out-Null
+            Write-TaskLog "SUCCESS synchronized $remote/$branch"
+        } catch {
+            $message = "FAILED $remote/$branch - $($_.Exception.Message)"
+            Write-TaskLog $message
+            $pushFailures += $message
+        }
     }
 
-    Invoke-Git @('push', $remote, "HEAD:$branch") | Out-Null
     $head = (& $git -C $repo rev-parse --short 'HEAD' 2>&1 | Out-String).Trim()
-    Write-TaskLog "SUCCESS pushed commit $head to $remote/$branch"
+    if ($pushFailures.Count -gt 0) {
+        throw "Commit $head was not synchronized to all targets: $($pushFailures -join '; ')"
+    }
+    Write-TaskLog "SUCCESS pushed commit $head to all configured remotes"
     exit 0
 } catch {
     Write-TaskLog "ERROR $($_.Exception.Message)"

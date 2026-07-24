@@ -69,6 +69,73 @@ def test_job_manager_create_job(monkeypatch, tmp_path):
     assert (tmp_path / "jobs" / "job-1.json").exists()
 
 
+def test_job_manager_allows_different_drama_downloads_to_run_together(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "runtime.job_manager.launch_worker", lambda *_args, **_kwargs: FakeProcess()
+    )
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    first = CrawlJob(
+        job_id="drama-a",
+        platform="hg",
+        crawler_type="drama_download",
+        extra={"title": "剧目甲", "book_id": "book-a"},
+    )
+    manager.jobs[first.job_id] = JobState(job=first, status="running")
+    manager.processes[first.job_id] = FakeProcess()
+
+    second = manager.start_job(
+        CrawlJob(
+            job_id="drama-b",
+            platform="hg",
+            crawler_type="drama_download",
+            extra={"title": "剧目乙", "book_id": "book-b"},
+        )
+    )
+
+    assert second.job_id == "drama-b"
+    with pytest.raises(JobConflictError, match="platform 'hg'"):
+        manager.start_job(CrawlJob(job_id="rank-c", platform="hg", crawler_type="rank"))
+
+
+def test_job_manager_allows_different_breakdowns_to_run_together(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "runtime.job_manager.launch_worker", lambda *_args, **_kwargs: FakeProcess()
+    )
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    first = CrawlJob(
+        job_id="breakdown-a",
+        platform="creative",
+        crawler_type="breakdown_generate",
+        extra={"topic_id": 101, "title": "剧目甲"},
+    )
+    manager.jobs[first.job_id] = JobState(job=first, status="running")
+    manager.processes[first.job_id] = FakeProcess()
+
+    second = manager.start_job(
+        CrawlJob(
+            job_id="breakdown-b",
+            platform="creative",
+            crawler_type="breakdown_generate",
+            extra={"topic_id": 102, "title": "剧目乙"},
+        )
+    )
+
+    assert second.job_id == "breakdown-b"
+    with pytest.raises(JobConflictError, match="platform 'creative'"):
+        manager.start_job(
+            CrawlJob(
+                job_id="breakdown-a-duplicate",
+                platform="creative",
+                crawler_type="breakdown_generate",
+                extra={"topic_id": 101, "title": "剧目甲"},
+            )
+        )
+
+
 def test_job_manager_normalizes_job_ownership_in_extra_and_public_state(
     monkeypatch, tmp_path
 ):
@@ -184,6 +251,21 @@ def test_orphan_stopping_job_is_reconciled_and_does_not_block_new_job(monkeypatc
     new_job = CrawlJob(job_id="job-new", platform="hg", crawler_type="rank")
 
     assert reloaded.start_job(new_job).job_id == "job-new"
+
+
+def test_job_manager_keeps_a_live_worker_owned_by_another_server(monkeypatch, tmp_path):
+    job = CrawlJob(job_id="job-shared", platform="creative", crawler_type="breakdown_generate")
+    state = JobState(job=job, status="running", pid=2468)
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    manager._save_state(state)
+    job.save(tmp_path / "jobs" / "job-shared.json")
+    monkeypatch.setattr(
+        JobManager, "_process_id_is_alive", lambda _self, pid: pid == 2468, raising=False
+    )
+
+    reloaded = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+
+    assert reloaded.get_job("job-shared")["status"] == "running"
 
 
 def test_job_manager_retries_terminal_job_with_original_payload(monkeypatch, tmp_path):

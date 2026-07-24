@@ -22,6 +22,7 @@ from .repository import CreativeRepository
 
 
 RESOURCE_TYPES = frozenset({"breakdown", "brief", "characters", "outline", "beats"})
+APPROVAL_FREE_RESOURCE_TYPES = frozenset({"brief", "characters", "outline", "beats"})
 IMMUTABLE_WORKFLOW_STATUSES = frozenset(
     {"submitted", "approved", "returned", "superseded"}
 )
@@ -372,7 +373,56 @@ class CreativeWorkflowAdapter:
         if latest and latest["status"] in IMMUTABLE_WORKFLOW_STATUSES:
             raise ValueError("creative resource is immutable after submission")
         if self.domain_status(resource_type, resource_id) != "draft":
-            raise ValueError("creative resource is immutable while in approval")
+            raise ValueError("creative resource is immutable after completion")
+
+    def lock_without_review(
+        self,
+        task_id: str,
+        resource_type: str,
+        resource_id: str,
+        actor: Principal,
+        *,
+        difference_note: str = "",
+    ) -> dict:
+        """Lock an assigned creative version without creating a submission."""
+        if resource_type not in APPROVAL_FREE_RESOURCE_TYPES:
+            raise ValueError("resource type requires its configured workflow")
+        self._validate_type(resource_type)
+        self._assert_task(task_id, resource_type, resource_id, actor)
+        self.assert_editable(resource_type, resource_id)
+        snapshot = self.snapshot(resource_type, resource_id)
+        self._assert_current_upstream(resource_type, resource_id, snapshot)
+        self._assert_brief_risk(resource_type, resource_id)
+
+        if resource_type == "brief":
+            resource = self.creative_repository.lock_brief(
+                int(resource_id), difference_note
+            )
+        elif resource_type == "characters":
+            project_id, batch_id = self._batch_key(resource_id)
+            resource = self.creative_repository.lock_character_batch(project_id, batch_id)
+        elif resource_type == "outline":
+            project_id, batch_id = self._batch_key(resource_id)
+            resource = self.creative_repository.lock_outline_batch(project_id, batch_id)
+        else:
+            resource = self.creative_repository.lock_episode_beats(int(resource_id))
+        return {"resource": resource, "snapshot": snapshot}
+
+    def lock_submitted_without_review(
+        self, resource_type: str, resource_id: str
+    ) -> dict:
+        """Convert a legacy submitted version into the same locked domain state."""
+        if resource_type not in APPROVAL_FREE_RESOURCE_TYPES:
+            raise ValueError("resource type requires its configured workflow")
+        if resource_type == "brief":
+            return self.creative_repository.lock_brief(int(resource_id))
+        if resource_type == "characters":
+            project_id, batch_id = self._batch_key(resource_id)
+            return self.creative_repository.lock_character_batch(project_id, batch_id)
+        if resource_type == "outline":
+            project_id, batch_id = self._batch_key(resource_id)
+            return self.creative_repository.lock_outline_batch(project_id, batch_id)
+        return self.creative_repository.lock_episode_beats(int(resource_id))
 
     def assert_task_for_creation(
         self,
@@ -571,7 +621,7 @@ class CreativeWorkflowAdapter:
                 ).fetchone()
         task_id = str(row["workflow_task_id"] or "") if row else ""
         if not task_id:
-            raise ValueError("强制操作需要关联审批任务以记录审计")
+            raise ValueError("强制操作需要关联工作任务以记录审计")
         self.workflow_repository.record_legacy_force(
             task_id, actor, resource_type, resource_id
         )
@@ -609,7 +659,7 @@ class CreativeWorkflowAdapter:
         return str(row["status"])
 
     def beats_episode_progress(self, resource_id: str) -> dict[str, Any]:
-        """Return current-outline coverage, treating this approval as accepted."""
+        """Return current-outline coverage, treating this completion as accepted."""
         episode = self._required(
             self.creative_repository.get_episode(int(resource_id))
         )
@@ -628,7 +678,7 @@ class CreativeWorkflowAdapter:
             int(item["episode_number"])
             for item in project.get("episodes", [])
             if item["stage"] == "beats"
-            and item["status"] == "approved"
+            and item["status"] in {"approved", "locked"}
             and (item.get("upstream_refs") or {}).get("outline_batch_id")
             == outline_batch_id
         }
@@ -742,7 +792,7 @@ class CreativeWorkflowAdapter:
         project = self._required(self.creative_repository.get_project(project_id))
         brief_id = project.get("locked_brief_id")
         if not brief_id or not self._brief_is_approved(int(brief_id)):
-            raise ValueError("current approved Brief upstream is required")
+            raise ValueError("current completed Brief upstream is required")
         if any(str(ref.get("brief_id") or "") != str(brief_id) for ref in refs):
             raise ValueError("creative resource references a stale Brief upstream")
         if resource_type in {"outline", "beats"}:
@@ -750,7 +800,7 @@ class CreativeWorkflowAdapter:
             if not character_batch_id or not self._character_batch_is_approved(
                 project_id, character_batch_id
             ):
-                raise ValueError("current approved character upstream is required")
+                raise ValueError("current completed character upstream is required")
             if any(
                 str(ref.get("character_batch_id") or "")
                 != str(character_batch_id)
@@ -762,7 +812,7 @@ class CreativeWorkflowAdapter:
             if not outline_batch_id or not self._outline_batch_is_approved(
                 project_id, outline_batch_id
             ):
-                raise ValueError("current approved outline upstream is required")
+                raise ValueError("current completed outline upstream is required")
             if any(
                 str(ref.get("outline_batch_id") or "") != str(outline_batch_id)
                 for ref in refs

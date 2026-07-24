@@ -15,4 +15,4 @@
     <div class="alert alert-danger d-none mt-3 mb-0" id="user-form-error" role="alert"></div>
 </div><div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" id="save-user" type="submit"><i class="bi bi-save me-1"></i>保存</button></div></form></div></div>
 {% endblock %}
-{% block scripts %}<script src="/static/js/admin/users.js"></script>{% endblock %}
+{% block scripts %}<script src="/static/js/admin/users.js?v={{ asset_version }}"></script>{% endblock %}

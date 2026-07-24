@@ -831,6 +831,22 @@ def test_topic_transcript_preview_reports_when_no_transcript_exists(tmp_path: Pa
     assert response.json()["detail"] == "该剧目暂无可预览的转写"
 
 
+def test_breakdown_download_returns_the_current_version_as_a_local_markdown_file(
+    tmp_path: Path,
+):
+    client, repository, _ = build_phase4_client(tmp_path)
+    _, breakdown = seed_adopted_topic(repository)
+
+    response = client.get(f"/api/creative/breakdowns/{breakdown['id']}/download")
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-disposition"] == (
+        f'attachment; filename="breakdown-{breakdown["id"]}.md"'
+    )
+    assert response.headers["content-type"].startswith("text/markdown")
+    assert "核心冲突" in response.text
+
+
 def test_breakdown_api_enqueues_transcription_when_only_video_exists(tmp_path: Path):
     client, repository, manager = build_phase4_client(tmp_path)
     topic = seed_topic_without_breakdown(repository)

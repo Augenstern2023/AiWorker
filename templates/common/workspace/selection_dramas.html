@@ -9,7 +9,8 @@
                         <div class="card-body">
                             <div class="position-relative mb-3">
                                 <div class="input-group">
-                                    <input class="form-control" x-model="dramaAnalysis.title" @input="onDramaTitleInput" @keydown.enter="searchDrama" autocomplete="off" placeholder="输入剧名，自动联想红果剧目">
+                                    <select class="form-select" style="max-width: 140px" x-model="dramaAnalysis.platform" @change="changeDramaSearchPlatform" aria-label="检索平台"><option value="hg">红果</option><option value="dy">抖音</option></select>
+                                    <input class="form-control" x-model="dramaAnalysis.title" @input="onDramaTitleInput" @keydown.enter="searchDrama" autocomplete="off" :placeholder="dramaAnalysis.platform === 'dy' ? '输入剧名，检索抖音视频' : '输入剧名，自动联想红果剧目'">
                                     <button class="btn btn-primary" @click="searchDrama" :disabled="dramaAnalysis.loading || !dramaAnalysis.title.trim()">
                                         <i class="bi bi-search me-1"></i>搜索
                                     </button>
@@ -27,8 +28,8 @@
                                 </div>
                             </div>
                             <div class="alert alert-danger" x-show="dramaAnalysis.error" x-text="dramaAnalysis.error"></div>
-                            <div class="alert alert-warning" x-show="dramaAnalysis.searchSource === 'douyin_fallback'">
-                                <div class="fw-semibold">红果检索已降级至抖音</div>
+                            <div class="alert alert-warning" x-show="isDouyinDramaSearch()">
+                                <div class="fw-semibold" x-text="dramaAnalysis.searchSource === 'douyin_fallback' ? '红果检索已降级至抖音' : '抖音检索结果'"></div>
                                 <div class="small" x-text="dramaAnalysis.fallbackReason"></div>
                                 <div class="small mt-1">请手动确认视频。候选可能是推广或片段，并非完整剧集。</div>
                             </div>
@@ -39,8 +40,8 @@
                                             <img x-show="candidate.cover" :src="candidate.cover" alt="" style="width: 42px; height: 56px; object-fit: cover;">
                                             <div class="text-start">
                                                 <div class="fw-semibold" x-text="candidate.title || '未命名剧目'"></div>
-                                                <div class="small text-muted" x-show="dramaAnalysis.searchSource !== 'douyin_fallback'" x-text="`${candidate.episode_count || '-'} 集 · ${candidate.summary || '暂无简介'}`"></div>
-                                                <div class="small text-muted" x-show="dramaAnalysis.searchSource === 'douyin_fallback'" x-text="`${candidate.author || '未知作者'} · 时长 ${formatDramaDuration(candidate.duration)} · 点赞 ${candidate.like_count || 0} · 评论 ${candidate.comment_count || 0}`"></div>
+                                                <div class="small text-muted" x-show="!isDouyinDramaSearch()" x-text="`${candidate.episode_count || '-'} 集 · ${candidate.summary || '暂无简介'}`"></div>
+                                                <div class="small text-muted" x-show="isDouyinDramaSearch()" x-text="`${candidate.author || '未知作者'} · 时长 ${formatDramaDuration(candidate.duration)} · 点赞 ${candidate.like_count || 0} · 评论 ${candidate.comment_count || 0}`"></div>
                                             </div>
                                         </div>
                                     </button>
@@ -48,7 +49,7 @@
                             </div>
                             <div x-show="dramaAnalysis.selected" class="border border-secondary p-3">
                                 <div class="fw-semibold mb-3" x-text="dramaAnalysis.selected?.title"></div>
-                                <div x-show="dramaAnalysis.searchSource !== 'douyin_fallback'" class="row g-3 align-items-end">
+                                <div x-show="!isDouyinDramaSearch()" class="row g-3 align-items-end">
                                     <div class="col-md-8">
                                         <label class="form-label">集数</label>
                                         <select class="form-select" x-model.number="dramaAnalysis.episode">
@@ -63,7 +64,7 @@
                                         </button>
                                     </div>
                                 </div>
-                                <div x-show="dramaAnalysis.searchSource === 'douyin_fallback'">
+                                <div x-show="isDouyinDramaSearch()">
                                     <div class="alert alert-warning py-2">
                                         <span x-text="`来源：抖音 · 作者：${dramaAnalysis.selected?.author || '未知作者'} · 视频：${dramaAnalysis.selected?.title || ''}`"></span>
                                         <div class="small mt-1">该视频可能是推广或片段，非完整剧集；确认后仅下载这一个视频。</div>
@@ -84,6 +85,15 @@
                                     <button class="btn btn-sm btn-outline-light" @click="downloadFile(item.path)" x-text="item.path.replace(/\\/g, '/').split('/').pop()"></button>
                                 </template>
                             </div>
+                        </div>
+                    </div>
+                    <div class="card mt-3">
+                        <div class="card-header d-flex align-items-center justify-content-between"><span><i class="bi bi-chat-square-text me-2"></i>剧评检索下载</span><span class="badge bg-secondary" x-text="dramaReviewStatusLabel()"></span></div>
+                        <div class="card-body">
+                            <div class="row g-2 align-items-end"><div class="col-md-7"><label class="form-label">剧名</label><input class="form-control" x-model.trim="dramaReviews.title" placeholder="输入需要检索的剧名"></div><div class="col-md-3"><label class="form-label">数量限制</label><input class="form-control" type="number" min="1" max="10000" step="1" x-model.number="dramaReviews.limit"></div><div class="col-md-2 d-grid"><button type="button" class="btn btn-outline-primary" @click="startDramaReviewCapture" :disabled="dramaReviews.loading || dramaReviews.polling"><span x-show="dramaReviews.loading" class="spinner-border spinner-border-sm me-1"></span><i x-show="!dramaReviews.loading" class="bi bi-search me-1"></i>检索</button></div></div>
+                            <div class="alert alert-danger mt-3 mb-0" x-show="dramaReviews.error" x-text="dramaReviews.error"></div>
+                            <div class="d-flex align-items-center justify-content-between mt-3" x-show="dramaReviews.jobId"><span class="small text-muted" x-text="`已获取 ${dramaReviews.reviewCount} / ${dramaReviews.sourceTotal || '-'} 条剧评`"></span><button type="button" class="btn btn-sm btn-outline-secondary" x-show="dramaReviews.status === 'completed'" @click="downloadDramaReviews"><i class="bi bi-download me-1"></i>下载 CSV</button></div>
+                            <div class="table-responsive mt-2" x-show="dramaReviews.items.length"><table class="table table-sm table-hover mb-0"><thead><tr><th>用户</th><th>剧评</th><th>时间</th><th>点赞</th></tr></thead><tbody><template x-for="review in dramaReviews.items" :key="review.comment_id"><tr><td x-text="review.author || '-' "></td><td class="text-break" x-text="review.content || '-' "></td><td class="text-nowrap" x-text="review.created_at || '-' "></td><td x-text="review.like_count || 0"></td></tr></template></tbody></table></div>
                         </div>
                     </div>
                 </div>

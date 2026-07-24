@@ -20,7 +20,6 @@ ROLE_TEMPLATES = (
     "selection/ranks.html",
     "selection/topics.html",
     "selection/dramas.html",
-    "selection/breakdowns.html",
     "planning/projects.html",
     "planning/brief.html",
     "planning/characters.html",
@@ -28,8 +27,6 @@ ROLE_TEMPLATES = (
     "writing/outlines.html",
     "writing/beats.html",
     "review/projects.html",
-    "review/tasks.html",
-    "review/approvals.html",
     "review/versions.html",
     "admin/users.html",
     "admin/roles.html",
@@ -78,14 +75,11 @@ def test_each_operational_domain_loads_only_external_javascript():
         "templates/selection/ranks.html": "/static/js/selection/ranks.js",
         "templates/selection/topics.html": "/static/js/selection/topics.js",
         "templates/selection/dramas.html": "/static/js/selection/dramas.js",
-        "templates/selection/breakdowns.html": "/static/js/selection/breakdowns.js",
         "templates/planning/projects.html": "/static/js/planning/projects.js",
         "templates/planning/brief.html": "/static/js/planning/brief.js",
         "templates/planning/characters.html": "/static/js/planning/characters.js",
         "templates/writing/outlines.html": "/static/js/writing/outlines.js",
         "templates/writing/beats.html": "/static/js/writing/beats.js",
-        "templates/review/tasks.html": "/static/js/review/tasks.js",
-        "templates/review/approvals.html": "/static/js/review/approvals.js",
         "templates/admin/users.html": "/static/js/admin/users.js",
         "templates/admin/roles.html": "/static/js/admin/roles.js",
         "templates/admin/jobs.html": "/static/js/admin/jobs.js",
@@ -135,7 +129,7 @@ def test_all_workspace_javascript_has_valid_syntax():
 def test_selection_pages_load_topic_capabilities_before_alpine_init():
     tasks = _read("static/js/common/tasks.js")
     topics = _read("static/js/selection/topics.js")
-    for page_name in ("topics", "breakdowns"):
+    for page_name in ("topics",):
         page = _read(f"templates/selection/{page_name}.html")
         assert "/static/js/selection/topics.js?v={{ asset_version }}" in page
     assert "async fetchTopicLibrary()" in topics
@@ -233,6 +227,19 @@ def test_admin_identity_pages_expose_complete_management_flows():
     assert "toggleRoleStatus" in roles_js
 
 
+def test_user_list_displays_role_names_instead_of_role_codes():
+    users_js = _read("static/js/admin/users.js")
+
+    assert "function roleDisplayName(roleCode)" in users_js
+    assert "(user.role_codes || []).map(roleDisplayName).join('、')" in users_js
+
+
+def test_team_account_page_loads_the_current_users_script_version():
+    users_page = _read("templates/admin/users.html")
+
+    assert "/static/js/admin/users.js?v={{ asset_version }}" in users_page
+
+
 def test_selection_topics_includes_planning_assignment_modal():
     topics = _read("templates/selection/topics.html")
 
@@ -263,6 +270,12 @@ def test_admin_delivery_page_uses_approved_delivery_registry():
     assert "/download`" in source
     assert "method: 'POST'" in source
     assert "/api/creative/projects/" not in html
+
+
+def test_admin_delivery_initializer_does_not_require_creative_workspace_module():
+    tasks = _read("static/js/common/tasks.js")
+
+    assert "this.page === 'admin-deliveries'" not in tasks
 
 
 def test_base_layout_globally_surfaces_permission_denials_without_rejection():
@@ -324,7 +337,6 @@ def test_selection_download_pages_load_workflow_task_resolvers():
     for relative_path, feature_script in (
         ("templates/selection/hits.html", "/static/js/selection/breakdowns.js"),
         ("templates/selection/topics.html", "/static/js/selection/breakdowns.js"),
-        ("templates/selection/breakdowns.html", "/static/js/selection/breakdowns.js"),
         ("templates/selection/dramas.html", "/static/js/selection/dramas.js"),
     ):
         html = _read(relative_path)
@@ -334,10 +346,9 @@ def test_selection_download_pages_load_workflow_task_resolvers():
         assert html.index(resolver) < html.index(feature_script)
 
 
-def test_creative_workflow_ui_submits_and_reviews_without_direct_locks():
+def test_creative_workflow_ui_locks_versions_without_review_panels():
     creative = _read("static/js/common/creative.js")
     breakdowns = _read("static/js/selection/breakdowns.js")
-    approvals = _read("static/js/review/approvals.js")
     workspace = "\n".join(
         _read(f"templates/common/workspace/{name}")
         for name in (
@@ -349,25 +360,20 @@ def test_creative_workflow_ui_submits_and_reviews_without_direct_locks():
         )
     )
 
-    assert "提交审批" in workspace
-    assert "待审批" in workspace
-    assert "已批准" in workspace
-    assert "已退回" in workspace
+    assert "提交审批" not in workspace
+    assert "待审批" not in workspace
+    assert "已批准" not in workspace
+    assert "已退回" not in workspace
     for direct_lock in (
         "/lock-brief",
         "/characters/${batchId}/lock",
         "/outlines/${batchId}/lock",
-        "/episodes/${item.id}/lock",
+        "/episodes/${resourceId}/lock",
     ):
-        assert direct_lock not in creative
+        assert direct_lock in creative
     assert "/api/creative/breakdowns/${record.id}/lock" in breakdowns
     assert "完成并锁定" in workspace
-    assert "/api/creative/workflow/submit" in creative + breakdowns
-    assert "/api/workflow/submissions/${submission.id}/${action}" in approvals
-    assert "writeReview(submission, 'approve')" in approvals
-    assert "writeReview(submission, 'return'" in approvals
-    assert "review_comment" in approvals
-    assert "trim()" in approvals
+    assert "/api/creative/workflow/submit" not in creative
     assert "breakdownEditor.record?.status === 'locked'" not in workspace
     assert "breakdownRecordStatusLabel" in workspace + breakdowns
     assert "creativeWorkflowStatusLabel(currentCharacterBatchStatus())" in workspace

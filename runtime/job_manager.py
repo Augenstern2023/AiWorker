@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -25,6 +26,11 @@ from runtime.worker_launcher import launch_worker
 
 
 logger = logging.getLogger("aiworker.web.jobs")
+
+_CONCURRENT_DRAMA_DOWNLOAD_TYPES = frozenset(
+    {"drama_download", "douyin_fallback_analysis", "drama_reviews"}
+)
+_CONCURRENT_BREAKDOWN_TYPES = frozenset({"breakdown_generate"})
 
 
 class JobConflictError(RuntimeError):
@@ -83,7 +89,11 @@ class JobManager:
             self._load_states_from_disk()
             self._reconcile_orphan_jobs()
             for state in self.jobs.values():
-                if state.platform == job.platform and state.status in {"pending", "running", "stopping"}:
+                if (
+                    state.platform == job.platform
+                    and state.status in {"pending", "running", "stopping"}
+                    and not self._can_run_concurrently(state.job, job)
+                ):
                     raise JobConflictError(f"platform {job.platform!r} already has a running job")
 
             state = JobState(job=job)
@@ -108,6 +118,25 @@ class JobManager:
             )
             thread.start()
             return state
+
+    @staticmethod
+    def _can_run_concurrently(existing: CrawlJob, incoming: CrawlJob) -> bool:
+        job_types = {existing.crawler_type, incoming.crawler_type}
+        existing_extra = existing.extra or {}
+        incoming_extra = incoming.extra or {}
+        if not job_types - _CONCURRENT_DRAMA_DOWNLOAD_TYPES:
+            existing_identity = str(
+                existing_extra.get("book_id") or existing_extra.get("title") or ""
+            ).strip().casefold()
+            incoming_identity = str(
+                incoming_extra.get("book_id") or incoming_extra.get("title") or ""
+            ).strip().casefold()
+        elif not job_types - _CONCURRENT_BREAKDOWN_TYPES:
+            existing_identity = str(existing_extra.get("topic_id") or "").strip()
+            incoming_identity = str(incoming_extra.get("topic_id") or "").strip()
+        else:
+            return False
+        return bool(existing_identity and incoming_identity and existing_identity != incoming_identity)
 
     def _monitor_process(self, state: JobState, process: subprocess.Popen) -> None:
         try:
@@ -261,6 +290,33 @@ class JobManager:
         process = self.processes.get(job_id)
         return bool(process and process.poll() is None)
 
+    def _process_id_is_alive(self, pid: int | None) -> bool:
+        if not pid or int(pid) < 1:
+            return False
+        process_id = int(pid)
+        if os.name == "nt":
+            import ctypes
+
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, process_id)
+            if not handle:
+                return False
+            try:
+                exit_code = ctypes.c_ulong()
+                if not ctypes.windll.kernel32.GetExitCodeProcess(
+                    handle, ctypes.byref(exit_code)
+                ):
+                    return False
+                return exit_code.value == 259
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        try:
+            os.kill(process_id, 0)
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
+
     def _reconcile_orphan_jobs(self) -> None:
         for state in list(self.jobs.values()):
             self._reconcile_orphan_job(state)
@@ -268,7 +324,10 @@ class JobManager:
     def _reconcile_orphan_job(self, state: JobState) -> None:
         if state.status not in {"pending", "running", "stopping"}:
             return
-        if self._tracked_process_is_alive(state.job_id):
+        if (
+            self._tracked_process_is_alive(state.job_id)
+            or self._process_id_is_alive(state.pid)
+        ):
             return
         state.status = "cancelled" if state.status == "stopping" else "failed"
         state.return_code = state.return_code if state.return_code is not None else -1

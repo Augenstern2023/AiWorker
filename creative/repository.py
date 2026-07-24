@@ -153,6 +153,57 @@ class CreativeRepository:
                     FOREIGN KEY(project_id) REFERENCES creative_projects(id)
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS selection_stage_snapshots (
+                    id TEXT PRIMARY KEY, stage TEXT NOT NULL, topic_id INTEGER NOT NULL,
+                    version INTEGER NOT NULL, outcome TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL, content_fingerprint TEXT NOT NULL,
+                    resource_type TEXT NOT NULL DEFAULT '', resource_id TEXT NOT NULL DEFAULT '',
+                    actor_user_id TEXT NOT NULL DEFAULT '', source_job_id TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL, UNIQUE(stage, topic_id, version)
+                )
+            """)
+            snapshot_columns = {
+                str(row[1]): str(row[2]).upper()
+                for row in conn.execute(
+                    "PRAGMA table_info(selection_stage_snapshots)"
+                ).fetchall()
+            }
+            if snapshot_columns.get("id") != "TEXT":
+                conn.execute(
+                    "ALTER TABLE selection_stage_snapshots "
+                    "RENAME TO selection_stage_snapshots_legacy"
+                )
+                conn.execute("""
+                    CREATE TABLE selection_stage_snapshots (
+                        id TEXT PRIMARY KEY, stage TEXT NOT NULL, topic_id INTEGER NOT NULL,
+                        version INTEGER NOT NULL, outcome TEXT NOT NULL,
+                        snapshot_json TEXT NOT NULL, content_fingerprint TEXT NOT NULL,
+                        resource_type TEXT NOT NULL DEFAULT '', resource_id TEXT NOT NULL DEFAULT '',
+                        actor_user_id TEXT NOT NULL DEFAULT '', source_job_id TEXT NOT NULL DEFAULT '',
+                        created_at REAL NOT NULL, UNIQUE(stage, topic_id, version)
+                    )
+                """)
+                conn.execute("""
+                    INSERT INTO selection_stage_snapshots (
+                        id, stage, topic_id, version, outcome, snapshot_json,
+                        content_fingerprint, resource_type, resource_id,
+                        actor_user_id, source_job_id, created_at
+                    )
+                    SELECT CAST(id AS TEXT), stage, topic_id, version, outcome, snapshot_json,
+                           content_fingerprint, resource_type, resource_id,
+                           actor_user_id, source_job_id, created_at
+                    FROM selection_stage_snapshots_legacy
+                """)
+                conn.execute("DROP TABLE selection_stage_snapshots_legacy")
+            conn.executescript("""
+                CREATE TRIGGER IF NOT EXISTS trg_selection_snapshot_no_update
+                BEFORE UPDATE ON selection_stage_snapshots
+                BEGIN SELECT RAISE(ABORT, 'selection snapshots are immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS trg_selection_snapshot_no_delete
+                BEFORE DELETE ON selection_stage_snapshots
+                BEGIN SELECT RAISE(ABORT, 'selection snapshots are immutable'); END;
+            """)
             for table in (
                 "creative_projects",
                 "creative_breakdowns",
@@ -328,7 +379,7 @@ class CreativeRepository:
         max_score: float | None = None,
         captured_date: str = "",
         has_locked_breakdown: bool | None = None,
-        limit: int = 50,
+        limit: int | None = 50,
     ) -> list[dict[str, Any]]:
         clauses = ["deleted = 0"]
         params: list[Any] = []
@@ -351,7 +402,10 @@ class CreativeRepository:
         latest_id_expr = "(SELECT id FROM creative_breakdowns b WHERE b.topic_id = creative_topics.id ORDER BY b.version DESC, b.id DESC LIMIT 1)"
         latest_version_expr = "(SELECT version FROM creative_breakdowns b WHERE b.topic_id = creative_topics.id ORDER BY b.version DESC, b.id DESC LIMIT 1)"
         latest_status_expr = "(SELECT status FROM creative_breakdowns b WHERE b.topic_id = creative_topics.id ORDER BY b.version DESC, b.id DESC LIMIT 1)"
-        params.append(500)
+        limit_clause = ""
+        if limit is not None:
+            params.append(max(1, min(limit, 500)))
+            limit_clause = "LIMIT ?"
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
@@ -363,7 +417,7 @@ class CreativeRepository:
                     FROM creative_topics
                     WHERE {' AND '.join(clauses)}
                     ORDER BY score DESC, updated_at DESC
-                    LIMIT ?
+                    {limit_clause}
                 """,
                 params,
             ).fetchall()
@@ -374,7 +428,7 @@ class CreativeRepository:
             merged = [item for item in merged if item.get("locked_breakdown_id")]
         elif has_locked_breakdown is False:
             merged = [item for item in merged if not item.get("locked_breakdown_id")]
-        return merged[: max(1, min(limit, 500))]
+        return merged if limit is None else merged[: max(1, min(limit, 500))]
 
     def get_topic(self, topic_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -388,6 +442,69 @@ class CreativeRepository:
             conn.execute("UPDATE creative_topics SET status = ?, decision_note = ?, updated_at = ? WHERE id = ? AND deleted = 0", (status, decision_note, time.time(), topic_id))
         return self.get_topic(topic_id)
 
+    def decide_topic(
+        self, topic_id: int, status: str, decision_note: str, actor_user_id: str
+    ) -> dict[str, Any] | None:
+        topic = self.update_topic(topic_id, status, decision_note)
+        if topic is not None:
+            self.append_selection_stage_snapshot(
+                "topic_decision", topic_id, status,
+                {"topic_id": topic_id, "title": topic["title"], "outcome": status,
+                 "decision_note": decision_note},
+                resource_type="topic", resource_id=topic_id,
+                actor_user_id=actor_user_id,
+            )
+        return topic
+
+    def append_selection_stage_snapshot(
+        self, stage: str, topic_id: int, outcome: str, snapshot: dict[str, Any],
+        *, resource_type: str = "", resource_id: str | int = "",
+        actor_user_id: str = "", source_job_id: str = "", deduplicate: bool = False,
+    ) -> dict[str, Any]:
+        canonical = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        import hashlib
+        fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        with self._connect() as conn:
+            if deduplicate:
+                existing = conn.execute(
+                    "SELECT * FROM selection_stage_snapshots WHERE stage = ? AND topic_id = ? "
+                    "AND content_fingerprint = ? ORDER BY version DESC LIMIT 1",
+                    (stage, topic_id, fingerprint),
+                ).fetchone()
+                if existing is not None:
+                    return self._selection_snapshot(dict(existing))
+            version = int(conn.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM selection_stage_snapshots "
+                "WHERE stage = ? AND topic_id = ?", (stage, topic_id)
+            ).fetchone()[0])
+            snapshot_id = str(uuid.uuid4())
+            conn.execute(
+                "INSERT INTO selection_stage_snapshots "
+                "(id,stage,topic_id,version,outcome,snapshot_json,content_fingerprint,"
+                "resource_type,resource_id,actor_user_id,source_job_id,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (snapshot_id, stage, topic_id, version, outcome, canonical, fingerprint,
+                 resource_type, str(resource_id), actor_user_id, source_job_id, time.time()),
+            )
+            row = conn.execute("SELECT * FROM selection_stage_snapshots WHERE id = ?", (snapshot_id,)).fetchone()
+        assert row is not None
+        return self._selection_snapshot(dict(row))
+
+    def get_latest_selection_stage_snapshot(
+        self, topic_id: int, stage: str
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM selection_stage_snapshots WHERE topic_id = ? AND stage = ? "
+                "ORDER BY version DESC LIMIT 1", (topic_id, stage)
+            ).fetchone()
+        return self._selection_snapshot(dict(row)) if row else None
+
+    @staticmethod
+    def _selection_snapshot(row: dict[str, Any]) -> dict[str, Any]:
+        row["snapshot"] = json.loads(row.pop("snapshot_json"))
+        return row
+
     def create_breakdown(
         self,
         topic_id: int,
@@ -396,6 +513,7 @@ class CreativeRepository:
         risks: list[str],
         parent_version_id: int | None = None,
         workflow_task_id: str | None = None,
+        source_snapshot_id: str | None = None,
     ) -> dict[str, Any]:
         with self._connect() as conn:
             row = conn.execute("SELECT COALESCE(MAX(version), 0) AS version, MAX(id) AS parent_id FROM creative_breakdowns WHERE topic_id = ?", (topic_id,)).fetchone()
@@ -405,7 +523,9 @@ class CreativeRepository:
                 INSERT INTO creative_breakdowns (topic_id, version, parent_version_id, content_json, field_sources_json, risks_json, workflow_task_id, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (topic_id, version, parent_version_id if parent_version_id is not None else row["parent_id"], json.dumps(content, ensure_ascii=False), json.dumps(sources, ensure_ascii=False), json.dumps(risks, ensure_ascii=False), workflow_task_id, now, now))
-        return self.get_breakdown(cursor.lastrowid) or {}
+        result = self.get_breakdown(cursor.lastrowid) or {}
+        result["source_snapshot_id"] = source_snapshot_id
+        return result
 
     def get_latest_locked_breakdown(self, topic_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -450,6 +570,20 @@ class CreativeRepository:
         with self._connect() as conn:
             conn.execute("UPDATE creative_breakdowns SET status = 'locked', locked_at = ?, updated_at = ? WHERE id = ? AND status = 'draft'", (time.time(), time.time(), breakdown_id))
         return self.get_breakdown(breakdown_id)
+
+    def complete_breakdown(self, breakdown_id: int, actor_user_id: str) -> dict[str, Any]:
+        result = self.lock_breakdown(breakdown_id)
+        if result is None:
+            raise ValueError("拆解不存在")
+        self.append_selection_stage_snapshot(
+            "breakdown", int(result["topic_id"]), "completed",
+            {"breakdown_id": breakdown_id, "version": result["version"],
+             "status": result["status"], "content": result["content"],
+             "field_sources": result["field_sources"], "risks": result["risks"]},
+            resource_type="breakdown", resource_id=breakdown_id,
+            actor_user_id=actor_user_id, deduplicate=True,
+        )
+        return result
 
     def create_project(
         self,
@@ -614,7 +748,7 @@ class CreativeRepository:
                     (project_id,),
                 ).fetchone()
             if pending_brief:
-                raise ValueError("Brief 待审批期间不能修改项目 Brief 参数")
+                raise ValueError("Brief 完成后不能修改项目 Brief 参数")
         if "target_episode_count" in updates:
             count = int(updates["target_episode_count"])
             if not 1 <= count <= 100:
@@ -825,7 +959,7 @@ class CreativeRepository:
         if not current:
             return None
         if current["status"] != "draft":
-            raise ValueError("已锁定或审批中的 Brief 不能原地修改")
+            raise ValueError("已完成的 Brief 不能原地修改")
         with self._connect() as conn:
             conn.execute(
                 """
@@ -1213,7 +1347,7 @@ class CreativeRepository:
             if not row:
                 return None
             if row["status"] != "draft":
-                raise ValueError("审批中的版本不能原地修改")
+                raise ValueError("已完成的版本不能原地修改")
             conn.execute(
                 f"UPDATE {table} SET content_json = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(content, ensure_ascii=False), time.time(), item_id),

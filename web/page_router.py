@@ -31,7 +31,6 @@ PAGE_TEMPLATES = {
     "/selection/hits": "selection/hits.html",
     "/selection/topics": "selection/topics.html",
     "/selection/dramas": "selection/dramas.html",
-    "/selection/breakdowns": "selection/breakdowns.html",
     "/planning/projects": "planning/projects.html",
     "/planning/projects/{project_id}/brief": "planning/brief.html",
     "/planning/projects/{project_id}/characters": "planning/characters.html",
@@ -39,8 +38,6 @@ PAGE_TEMPLATES = {
     "/writing/projects/{project_id}/outlines": "writing/outlines.html",
     "/writing/projects/{project_id}/episodes/{episode_number}/beats": "writing/beats.html",
     "/review/projects": "review/projects.html",
-    "/review/tasks": "review/tasks.html",
-    "/review/approvals": "review/approvals.html",
     "/review/users": "admin/users.html",
     "/review/roles": "admin/roles.html",
     "/review/projects/{project_id}/members": "review/projects.html",
@@ -226,6 +223,20 @@ def _template_context(
         "current_route": request.url.path,
         "page_title": page_title,
         "workspace_page": workspace_page,
+        "can_manage_data": bool(
+            principal
+            and (
+                principal.is_system_admin
+                or "data.media.delete" in principal.permissions
+            )
+        ),
+        "can_preview_data": bool(
+            principal
+            and (
+                principal.is_system_admin
+                or "data.media.preview" in principal.permissions
+            )
+        ),
         "asset_version": ASSET_VERSION,
         "csrf_token": csrf_token,
         "show_tasks": _show_tasks(principal),

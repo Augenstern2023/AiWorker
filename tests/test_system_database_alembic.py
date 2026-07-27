@@ -18,7 +18,7 @@ from alembic.config import Config
 from sqlalchemy import Text, create_engine, inspect
 from sqlalchemy.engine import make_url
 
-from system_database.schema import SYSTEM_METADATA
+from system_database.schema import BASELINE_TABLE_NAMES, SYSTEM_METADATA
 
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -66,6 +66,30 @@ def test_system_schema_declares_all_shared_tables():
 
 def test_system_schema_keeps_existing_user_ids_as_text():
     assert isinstance(SYSTEM_METADATA.tables["users"].c.id.type, Text)
+
+
+def test_baseline_table_names_are_immutable():
+    assert BASELINE_TABLE_NAMES == frozenset(
+        {
+            "approval_records",
+            "audit_logs",
+            "permission_dependencies",
+            "permissions",
+            "project_members",
+            "role_claimable_task_types",
+            "role_permissions",
+            "roles",
+            "sessions",
+            "user_roles",
+            "users",
+            "workflow_instances",
+            "workflow_project_member_events",
+            "workflow_submissions",
+            "workflow_task_events",
+            "workflow_task_jobs",
+            "workflow_tasks",
+        }
+    )
 
 
 def test_upgrade_head_creates_system_tables(postgres_url, monkeypatch):

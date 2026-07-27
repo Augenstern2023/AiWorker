@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from alembic import op
 
-from system_database.schema import SYSTEM_METADATA
+from system_database.schema import BASELINE_TABLE_NAMES, SYSTEM_METADATA
 
 
 revision = "0001_system_schema_baseline"
@@ -21,8 +21,14 @@ depends_on = None
 
 
 def upgrade() -> None:
-    SYSTEM_METADATA.create_all(bind=op.get_bind())
+    SYSTEM_METADATA.create_all(
+        bind=op.get_bind(),
+        tables=[SYSTEM_METADATA.tables[name] for name in BASELINE_TABLE_NAMES],
+    )
 
 
 def downgrade() -> None:
-    SYSTEM_METADATA.drop_all(bind=op.get_bind())
+    SYSTEM_METADATA.drop_all(
+        bind=op.get_bind(),
+        tables=[SYSTEM_METADATA.tables[name] for name in BASELINE_TABLE_NAMES],
+    )

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Column,
     Float,
@@ -21,6 +22,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    literal_column,
     text,
 )
 
@@ -157,6 +159,33 @@ project_members = Table(
     UniqueConstraint(
         "project_id", "user_id", "project_role", name="uq_project_members_role"
     ),
+)
+
+departments = Table(
+    "departments",
+    SYSTEM_METADATA,
+    Column("id", Text, primary_key=True),
+    Column("name", Text, nullable=False),
+    Column("parent_id", Text, ForeignKey("departments.id", ondelete="RESTRICT")),
+    Column("sort_order", Integer, nullable=False, server_default=text("0")),
+    Column("status", Text, nullable=False, server_default=text("'active'")),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("status IN ('active', 'disabled')", name="ck_departments_status"),
+)
+
+user_departments = Table(
+    "user_departments",
+    SYSTEM_METADATA,
+    Column("user_id", Text, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column(
+        "department_id",
+        Text,
+        ForeignKey("departments.id", ondelete="RESTRICT"),
+        primary_key=True,
+    ),
+    Column("is_primary", Boolean, nullable=False, server_default=text("false")),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
 )
 
 workflow_instances = Table(
@@ -313,10 +342,34 @@ workflow_project_member_events = Table(
     Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
 )
 
+BASELINE_TABLE_NAMES = frozenset(
+    {
+        "approval_records", "audit_logs", "permission_dependencies", "permissions",
+        "project_members", "role_claimable_task_types", "role_permissions", "roles",
+        "sessions", "user_roles", "users", "workflow_instances",
+        "workflow_project_member_events", "workflow_submissions",
+        "workflow_task_events", "workflow_task_jobs", "workflow_tasks",
+    }
+)
+
 Index("uq_users_normalized_username", func.lower(users.c.normalized_username), unique=True)
 Index("uq_roles_code", func.lower(roles.c.code), unique=True)
 Index("idx_sessions_user_id", sessions.c.user_id)
 Index("idx_project_members_project_id", project_members.c.project_id)
+Index(
+    "uq_departments_parent_name",
+    func.coalesce(departments.c.parent_id, literal_column("''")),
+    departments.c.name,
+    unique=True,
+)
+Index("idx_departments_parent_sort", departments.c.parent_id, departments.c.sort_order)
+Index("idx_user_departments_department_id", user_departments.c.department_id)
+Index(
+    "uq_user_departments_primary",
+    user_departments.c.user_id,
+    unique=True,
+    postgresql_where=user_departments.c.is_primary.is_(True),
+)
 Index("idx_workflow_tasks_pool", workflow_tasks.c.role_code, workflow_tasks.c.status)
 Index("idx_workflow_submissions_task", workflow_submissions.c.task_id, workflow_submissions.c.status)
 Index("idx_audit_logs_created_at", audit_logs.c.created_at)

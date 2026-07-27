@@ -116,6 +116,13 @@ class DepartmentService:
                 nodes[parent_id]["children"].append(node)
         return roots
 
+    def get_department(self, department_id: str) -> dict[str, Any] | None:
+        with self.database.connection() as connection:
+            row = connection.execute(
+                select(departments).where(departments.c.id == department_id)
+            ).mappings().one_or_none()
+        return self._department_dict(row) if row is not None else None
+
     def assign_user_department(
         self, user_id: str, department_id: str, *, is_primary: bool = False
     ) -> dict[str, Any]:

@@ -79,6 +79,8 @@ from identity.repository import IdentityRepository
 from identity.schema import Principal
 from identity.session_service import SessionService
 from identity.team_api import build_team_management_router
+from organization.api import build_organization_router
+from organization.service import DepartmentService
 from agents.douyin_analysis_agent import AnalyzeOptions as DouyinAnalyzeOptions
 from agents.douyin_analysis_agent import analyze_rank_file as analyze_douyin_rank_file
 from agents.hongguo_analysis_agent import AnalyzeOptions, analyze_rank_file
@@ -554,6 +556,10 @@ app.include_router(
     )
 )
 app.include_router(build_audit_router(audit_service))
+if system_database is not None:
+    app.include_router(
+        build_organization_router(DepartmentService(system_database), audit_service)
+    )
 app.include_router(build_delivery_router(delivery_service))
 app.include_router(
     build_workflow_router(workflow_repository, workflow_transition_service)

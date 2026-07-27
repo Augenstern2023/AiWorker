@@ -133,6 +133,21 @@ class RecordingJobManager:
         self.stop_calls.append(job_id)
 
 
+class RecordingScheduler:
+    def __init__(self) -> None:
+        self.jobs: list[dict] = []
+
+    def start(self) -> None:
+        return None
+
+    def shutdown(self, *, wait: bool) -> None:
+        del wait
+
+    def add_job(self, func, *args, **kwargs) -> None:
+        del func, args
+        self.jobs.append(kwargs)
+
+
 @pytest.fixture
 def repository() -> InMemoryScheduleRepository:
     return InMemoryScheduleRepository()
@@ -274,3 +289,23 @@ def test_process_shutdown_cancels_submitted_runs_before_database_disposal(reposi
     assert cancelled_job_ids == {run.job_id}
     assert manager.stop_calls == [run.job_id]
     assert repository.get_run(run.id).status == "cancelled"
+
+
+def test_start_restores_queued_retry_runs_after_restart(repository):
+    schedule = definition(
+        "schedule-retry-restore",
+        "ranking_update",
+        {"platform": "dy", "crawler_type": "rank"},
+    )
+    repository.create_definition(schedule)
+    manager = RecordingJobManager()
+    first_service = LocalScheduleService(repository, manager)
+    first = first_service.trigger(schedule.id, datetime(2026, 7, 27, 2, tzinfo=UTC))
+    manager.jobs[first.job_id]["status"] = "failed"
+    first_service.reconcile_active_runs(now=datetime(2026, 7, 27, 2, 1, tzinfo=UTC))
+    retry = repository.list_retry_runs(schedule.id)[0]
+    scheduler = RecordingScheduler()
+
+    LocalScheduleService(repository, manager, scheduler=scheduler).start()
+
+    assert f"local-schedule:retry:{retry.id}" in {job["id"] for job in scheduler.jobs}

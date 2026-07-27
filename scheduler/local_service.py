@@ -139,6 +139,8 @@ class LocalScheduleService:
             )
             for definition in self.repository.list_enabled_definitions():
                 self._schedule_definition(definition)
+                for retry in self.repository.list_retry_runs(definition.id):
+                    self._schedule_retry(retry)
             self._started = True
 
     def shutdown(self) -> None:

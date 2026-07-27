@@ -10,8 +10,11 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import text
 
 from system_database.config import SystemDatabaseSettings
@@ -72,3 +75,15 @@ def test_health_never_exposes_password(database):
 
     assert health.reachable is True
     assert "secret" not in health.database_url_redacted
+
+
+def test_health_reports_schema_current_after_upgrade(database, monkeypatch):
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", database.settings.url)
+    config = Config(str(Path(__file__).parent.parent / "alembic.ini"))
+    command.upgrade(config, "head")
+
+    health = database.health()
+
+    assert health.reachable is True
+    assert health.schema_current is True
+    assert health.current_revision == health.head_revision

@@ -18,7 +18,8 @@ from alembic.config import Config
 from sqlalchemy import Text, create_engine, inspect
 from sqlalchemy.engine import make_url
 
-from system_database.schema import BASELINE_TABLE_NAMES, SYSTEM_METADATA
+from system_database.baseline_schema import BASELINE_METADATA
+from system_database.schema import SYSTEM_METADATA
 
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -69,7 +70,7 @@ def test_system_schema_keeps_existing_user_ids_as_text():
 
 
 def test_baseline_table_names_are_immutable():
-    assert BASELINE_TABLE_NAMES == frozenset(
+    assert frozenset(BASELINE_METADATA.tables) == frozenset(
         {
             "approval_records",
             "audit_logs",

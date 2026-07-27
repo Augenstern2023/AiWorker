@@ -280,6 +280,7 @@ audit_logs = Table(
     Column("id", Text, primary_key=True),
     Column("actor_id", Text, ForeignKey("users.id", ondelete="SET NULL")),
     Column("actor_user_id", Text, ForeignKey("users.id", ondelete="SET NULL")),
+    Column("actor_display_name_snapshot", Text),
     Column(
         "actor_role_snapshot_json", Text, nullable=False, server_default=text("'[]'")
     ),
@@ -311,6 +312,16 @@ workflow_project_member_events = Table(
     Column("before_json", Text),
     Column("after_json", Text),
     Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+)
+
+BASELINE_TABLE_NAMES = frozenset(
+    {
+        "approval_records", "audit_logs", "permission_dependencies", "permissions",
+        "project_members", "role_claimable_task_types", "role_permissions", "roles",
+        "sessions", "user_roles", "users", "workflow_instances",
+        "workflow_project_member_events", "workflow_submissions",
+        "workflow_task_events", "workflow_task_jobs", "workflow_tasks",
+    }
 )
 
 Index("uq_users_normalized_username", func.lower(users.c.normalized_username), unique=True)

@@ -63,6 +63,9 @@ class AuditService:
             {
                 "id": event_id,
                 "actor_user_id": actor.user_id if actor is not None else None,
+                "actor_display_name_snapshot": (
+                    actor.display_name if actor is not None else None
+                ),
                 "actor_role_snapshot_json": json.dumps(
                     list(actor.role_codes) if actor is not None else [],
                     ensure_ascii=False,

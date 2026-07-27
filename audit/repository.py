@@ -38,6 +38,8 @@ class AuditRepository:
         self._migrate_schema()
 
     def _migrate_schema(self) -> None:
+        if self.identity_repository.is_postgres:
+            return
         with self.identity_repository.connect() as connection:
             existing = {
                 row["name"]

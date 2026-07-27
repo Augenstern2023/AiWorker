@@ -65,8 +65,9 @@ class WorkflowRepository:
             else IdentityRepository(repository)
         )
         self.state_machine = state_machine or WorkflowStateMachine()
-        with self.identity_repository.connect() as connection:
-            connection.executescript(_PROJECT_MEMBER_EVENTS_SQL)
+        if not self.identity_repository.is_postgres:
+            with self.identity_repository.connect() as connection:
+                connection.executescript(_PROJECT_MEMBER_EVENTS_SQL)
 
     def create_task(
         self,

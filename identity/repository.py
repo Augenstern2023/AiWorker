@@ -16,6 +16,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+from system_database import SystemDatabase
+from system_database.compat import PostgreSQLCompatConnection
+
 from .permission_catalog import DEFAULT_ROLES, PERMISSIONS, PERMISSION_DEPENDENCIES
 
 
@@ -208,13 +211,26 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
 
 
 class IdentityRepository:
-    def __init__(self, db_path: str | Path):
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
+    def __init__(self, db_path: str | Path | SystemDatabase):
+        self._system_database = (
+            db_path if isinstance(db_path, SystemDatabase) else None
+        )
+        self.db_path = None if self._system_database is not None else Path(db_path)
+        if self.db_path is not None:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._init_schema()
+
+    @property
+    def is_postgres(self) -> bool:
+        return self._system_database is not None
 
     @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
+    def connect(self) -> Iterator[sqlite3.Connection | PostgreSQLCompatConnection]:
+        if self._system_database is not None:
+            with self._system_database.transaction() as connection:
+                yield PostgreSQLCompatConnection(connection)
+            return
+        assert self.db_path is not None
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
@@ -225,16 +241,17 @@ class IdentityRepository:
             connection.close()
 
     @contextmanager
-    def transaction(self) -> Iterator[sqlite3.Connection]:
+    def transaction(self) -> Iterator[sqlite3.Connection | PostgreSQLCompatConnection]:
         """Open a serialized transaction shared by identity and audit writes."""
         with self.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            if not self.is_postgres:
+                connection.execute("BEGIN IMMEDIATE")
             yield connection
 
     @contextmanager
     def connection_scope(
-        self, connection: sqlite3.Connection | None
-    ) -> Iterator[sqlite3.Connection]:
+        self, connection: sqlite3.Connection | PostgreSQLCompatConnection | None
+    ) -> Iterator[sqlite3.Connection | PostgreSQLCompatConnection]:
         if connection is not None:
             yield connection
             return
@@ -396,11 +413,14 @@ class IdentityRepository:
 
             for role in DEFAULT_ROLES:
                 role_id = f"role:{role.code}"
+                role_conflict_target = (
+                    "ON CONFLICT ((lower(code)))" if self.is_postgres else "ON CONFLICT(code)"
+                )
                 connection.execute(
-                    """
+                    f"""
                     INSERT INTO roles (id, code, name, description, is_system)
                     VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(code) DO UPDATE SET
+                    {role_conflict_target} DO UPDATE SET
                         name = excluded.name,
                         description = excluded.description,
                         is_system = excluded.is_system,

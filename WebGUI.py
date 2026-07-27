@@ -467,7 +467,19 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-identity_repository = IdentityRepository(SYSTEM_DB_PATH)
+def _build_runtime_identity_repository() -> tuple[IdentityRepository, SystemDatabase | None]:
+    """Use PostgreSQL whenever the system database URL is configured."""
+
+    if not os.getenv("AIWORKER_SYSTEM_DATABASE_URL", "").strip():
+        return IdentityRepository(SYSTEM_DB_PATH), None
+    database = SystemDatabase(SystemDatabaseSettings.from_environment())
+    if not database.health().schema_current:
+        database.dispose()
+        raise RuntimeError("PostgreSQL system database is unavailable or not at Alembic head")
+    return IdentityRepository(database), database
+
+
+identity_repository, system_database = _build_runtime_identity_repository()
 identity_repository.seed_defaults()
 identity_password_service = PasswordService()
 identity_session_service = SessionService(identity_repository)
@@ -487,6 +499,7 @@ delivery_service = DeliveryService(
     audit_service=audit_service,
 )
 app.state.identity_repository = identity_repository
+app.state.system_database = system_database
 app.state.identity_password_service = identity_password_service
 app.state.identity_session_service = identity_session_service
 app.state.identity_permission_service = identity_permission_service

@@ -92,6 +92,7 @@ from runtime.job_manager import JobConflictError, JobManager, JobNotFoundError
 from scheduler.local_service import LocalScheduleService
 from scheduler.repository import PostgresScheduleRepository
 from system_database import SystemDatabase, SystemDatabaseSettings
+from web.navigation_repository import NavigationRepository
 from web.navigation_service import NavigationService
 from web.page_router import build_page_router
 from workflow.api import build_workflow_router
@@ -491,6 +492,16 @@ identity_permission_service = PermissionService(
 audit_service = AuditService(identity_repository)
 workflow_repository = WorkflowRepository(identity_repository)
 workflow_transition_service = TransitionService(workflow_repository)
+navigation_repository = (
+    NavigationRepository(system_database) if system_database is not None else None
+)
+if navigation_repository is not None:
+    navigation_repository.seed_catalog()
+navigation_service = (
+    NavigationService(navigation_repository.list_items())
+    if navigation_repository is not None
+    else NavigationService()
+)
 creative_repository = CreativeRepository(
     WORKSPACE_ROOT / ".runtime" / "creative" / "creative.db"
 )
@@ -564,7 +575,7 @@ app.include_router(build_delivery_router(delivery_service))
 app.include_router(
     build_workflow_router(workflow_repository, workflow_transition_service)
 )
-app.include_router(build_page_router(templates, NavigationService()))
+app.include_router(build_page_router(templates, navigation_service))
 register_rag_routes(app, root=Path(__file__).resolve().parent, runtime_dir=Path(__file__).resolve().parent / ".runtime")
 register_analytics_routes(app, root=Path(__file__).resolve().parent, runtime_dir=Path(__file__).resolve().parent / ".runtime")
 register_today_rank_routes(app, root=Path(__file__).resolve().parent)

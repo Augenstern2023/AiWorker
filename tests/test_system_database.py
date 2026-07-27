@@ -9,9 +9,26 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
+from sqlalchemy import text
 
 from system_database.config import SystemDatabaseSettings
+from system_database.database import SystemDatabase
+
+
+@pytest.fixture
+def database():
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required for PostgreSQL tests")
+
+    system_database = SystemDatabase(SystemDatabaseSettings(url=postgres_url))
+    try:
+        yield system_database
+    finally:
+        system_database.dispose()
 
 
 def test_settings_require_a_postgresql_sqlalchemy_url(monkeypatch):
@@ -32,3 +49,26 @@ def test_settings_redact_database_password(monkeypatch):
     assert settings.redacted_url == (
         "postgresql+psycopg://app:***@127.0.0.1:5432/aiworker_system"
     )
+
+
+def test_transaction_rolls_back_when_block_raises(database):
+    with pytest.raises(RuntimeError, match="rollback"):
+        with database.transaction() as connection:
+            connection.execute(text("CREATE TEMP TABLE rollback_probe (id integer)"))
+            connection.execute(text("INSERT INTO rollback_probe VALUES (1)"))
+            raise RuntimeError("rollback")
+
+    with database.connection() as connection:
+        assert (
+            connection.execute(
+                text("SELECT to_regclass('pg_temp.rollback_probe')")
+            ).scalar_one()
+            is None
+        )
+
+
+def test_health_never_exposes_password(database):
+    health = database.health()
+
+    assert health.reachable is True
+    assert "secret" not in health.database_url_redacted

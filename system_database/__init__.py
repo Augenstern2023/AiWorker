@@ -8,5 +8,7 @@
 #
 
 from system_database.config import SystemDatabaseSettings
+from system_database.database import SystemDatabase
+from system_database.health import DatabaseHealth
 
-__all__ = ["SystemDatabaseSettings"]
+__all__ = ["DatabaseHealth", "SystemDatabase", "SystemDatabaseSettings"]

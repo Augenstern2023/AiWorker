@@ -50,6 +50,26 @@ class PostgresScheduleRepository:
             ).mappings()
             return [self._definition_from_row(row) for row in rows]
 
+    def update_definition(
+        self, schedule_id: str, definition: ScheduleDefinition
+    ) -> ScheduleDefinition:
+        values = self._definition_values(definition)
+        values.pop("id", None)
+        with self.database.transaction() as connection:
+            result = connection.execute(
+                update(scheduling_definitions)
+                .where(scheduling_definitions.c.id == schedule_id)
+                .values(**values, updated_at=func.now())
+            )
+            if result.rowcount != 1:
+                raise KeyError(schedule_id)
+            row = connection.execute(
+                select(scheduling_definitions).where(
+                    scheduling_definitions.c.id == schedule_id
+                )
+            ).mappings().one()
+        return self._definition_from_row(row)
+
     def list_definitions(self) -> list[ScheduleDefinition]:
         with self.database.connection() as connection:
             rows = connection.execute(select(scheduling_definitions).order_by(scheduling_definitions.c.created_at.desc())).mappings()

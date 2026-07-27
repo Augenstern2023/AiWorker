@@ -87,6 +87,10 @@ class ScheduleRepository(Protocol):
 
     def list_enabled_definitions(self) -> list[ScheduleDefinition]: ...
 
+    def update_definition(
+        self, schedule_id: str, definition: ScheduleDefinition
+    ) -> ScheduleDefinition: ...
+
     def set_definition_enabled(self, schedule_id: str, enabled: bool) -> None: ...
 
     def reserve_run(self, schedule_id: str, scheduled_at: datetime) -> ScheduleRun: ...
@@ -190,6 +194,26 @@ class LocalScheduleService:
             raise ValueError("only queued retry runs can be triggered")
         return self._submit_run(run, now)
 
+    def cancel_run(self, run_id: str, finished_at: datetime | None = None) -> ScheduleRun:
+        """Cancel one active scheduled run without touching unrelated jobs."""
+
+        run = self.repository.get_run(run_id)
+        if run.status not in _ACTIVE_STATUSES:
+            raise ValueError("only active schedule runs can be cancelled")
+        if run.job_id:
+            self.job_manager.stop(run.job_id)
+        return self.repository.update_run(
+            run_id,
+            status="cancelled",
+            finished_at=finished_at or datetime.now(UTC),
+        )
+
+    def validate_definition(self, definition: ScheduleDefinition) -> None:
+        """Validate both the whitelisted job payload and its trigger before saving."""
+
+        self._job_payload(definition, "validation")
+        self._trigger_for(definition)
+
     def reconcile_active_runs(self, now: datetime | None = None) -> None:
         completed_at = now or datetime.now(UTC)
         for run in self.repository.list_active_runs():
@@ -263,13 +287,7 @@ class LocalScheduleService:
                 self._schedule_retry(retry)
 
     def _schedule_definition(self, definition: ScheduleDefinition) -> None:
-        if definition.trigger_type == "cron":
-            trigger = CronTrigger(timezone=definition.timezone, **definition.trigger_config)
-        elif definition.trigger_type == "date":
-            run_date = datetime.fromisoformat(str(definition.trigger_config["run_date"]))
-            trigger = DateTrigger(run_date=run_date, timezone=definition.timezone)
-        else:
-            raise ValueError("trigger_type must be cron or date")
+        trigger = self._trigger_for(definition)
         self.scheduler.add_job(
             self.trigger,
             trigger=trigger,
@@ -280,6 +298,27 @@ class LocalScheduleService:
             coalesce=True,
             misfire_grace_time=1 if definition.misfire_policy == "skip" else None,
         )
+
+    @staticmethod
+    def _trigger_for(definition: ScheduleDefinition) -> CronTrigger | DateTrigger:
+        """Build a trigger without registering it, so API validation is side-effect free."""
+
+        if definition.trigger_type == "cron":
+            try:
+                return CronTrigger(
+                    timezone=definition.timezone, **definition.trigger_config
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError("invalid trigger configuration") from exc
+        elif definition.trigger_type == "date":
+            try:
+                run_date = datetime.fromisoformat(
+                    str(definition.trigger_config["run_date"])
+                )
+                return DateTrigger(run_date=run_date, timezone=definition.timezone)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("invalid trigger configuration") from exc
+        raise ValueError("trigger_type must be cron or date")
 
     def _schedule_retry(self, run: ScheduleRun) -> None:
         self.scheduler.add_job(
@@ -305,10 +344,11 @@ class LocalScheduleService:
         job.extra = dict(job.extra)
         job.extra["schedule_id"] = definition.id
         job.extra["schedule_run_id"] = run_id
+        if definition.created_by:
+            job.extra["created_by_user_id"] = definition.created_by
         return job.to_dict()
 
     @staticmethod
     def _error_summary(job: dict[str, Any]) -> str:
         message = str(job.get("message") or job.get("error") or "scheduled job failed")
         return message.replace("\n", " ").strip()[:500]
-

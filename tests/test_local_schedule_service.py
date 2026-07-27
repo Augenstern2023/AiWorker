@@ -206,6 +206,35 @@ def test_triggered_supported_job_is_tracked_and_linked_to_job_manager(
     assert manager.payloads[0]["extra"]["schedule_run_id"] == run.id
 
 
+def test_scheduled_job_payload_keeps_the_definition_creator_for_traceability(repository):
+    schedule = replace(
+        definition(
+            "schedule-creator",
+            "crawl",
+            {"platform": "dy", "crawler_type": "search", "keywords": ["drama"]},
+        ),
+        created_by="user:admin",
+    )
+    repository.create_definition(schedule)
+    manager = RecordingJobManager()
+
+    LocalScheduleService(repository, manager).trigger(schedule.id)
+
+    assert manager.payloads[0]["extra"]["created_by_user_id"] == "user:admin"
+
+
+def test_invalid_trigger_configuration_is_rejected_before_schedule_is_persisted(repository):
+    schedule = definition(
+        "schedule-invalid-trigger",
+        "crawl",
+        {"platform": "dy", "crawler_type": "search", "keywords": ["drama"]},
+    )
+    invalid = replace(schedule, trigger_config={})
+
+    with pytest.raises(ValueError, match="trigger configuration"):
+        LocalScheduleService(repository, RecordingJobManager()).validate_definition(invalid)
+
+
 def test_active_run_at_concurrency_limit_is_skipped_without_creating_a_job(repository):
     schedule = definition(
         "schedule-crawl",

@@ -621,6 +621,63 @@ def test_download_modal_blurs_focused_controls_before_bootstrap_hides_it():
     assert "document.activeElement?.blur()" in script
 
 
+def test_download_modal_plays_completed_video_artifacts_inline():
+    modal = _source("templates/common/workspace/selection_modals.html")
+    script = _source("static/js/selection/breakdowns.js")
+
+    assert "isDramaVideoArtifact(item)" in modal
+    assert '@click="openDramaDownloadVideo(item)"' in modal
+    assert "dramaDownload.videoPreviewUrl" in modal
+    assert "isDramaVideoArtifact(item)" in script
+    assert "openDramaDownloadVideo(item)" in script
+    assert "/api/file/preview?path=" in script
+
+
+def test_download_artifacts_identify_their_episode_numbers():
+    modal = _source("templates/common/workspace/selection_modals.html")
+    script = _source("static/js/selection/breakdowns.js")
+
+    assert "dramaDownloadArtifactEpisodeLabel(item)" in modal
+    assert "dramaDownloadArtifactEpisodeLabel(item)" in script
+    assert "episode_" in script
+    assert "第 ${episode} 集" in script
+
+
+def test_download_modal_collapses_episode_grid_when_some_episodes_are_already_downloaded():
+    modal = _source("templates/common/workspace/selection_modals.html")
+    script = _source("static/js/selection/breakdowns.js")
+
+    assert "dramaDownload.episodesExpanded" in modal
+    assert "继续下载" in modal
+    assert "openDramaDownloadEpisodes" in modal
+    assert "episodesExpanded" in script
+    assert "openDramaDownloadEpisodes()" in script
+    assert "isDramaEpisodeDownloaded(episode)" in modal
+    assert "已下载" in modal
+    assert "downloadedDramaEpisodeCount() > 0" in modal
+    assert "downloadedDramaEpisodeCount() === 0" in modal
+    assert "dramaDownload.finished && !dramaDownload.episodesExpanded" in modal
+    assert "!dramaDownload.finished || dramaDownload.episodesExpanded" in modal
+    assert "refreshDramaDownloadEpisodes" in script
+    assert "if (this.downloadedDramaEpisodeCount() > 0) this.dramaDownload.finished = true;" not in script
+
+
+def test_download_completed_summary_visibility_is_not_overridden_by_bootstrap_display_utility():
+    modal = _source("templates/common/workspace/selection_modals.html")
+
+    summary_condition = (
+        'x-show="dramaDownload.finished && !dramaDownload.episodesExpanded '
+        '&& downloadedDramaEpisodeCount() > 0"'
+    )
+    assert f'<div {summary_condition}>' in modal
+    assert '<div class="border border-success p-3 d-flex align-items-center justify-content-between gap-3">' in modal
+    unsafe_summary = (
+        'class="border border-success p-3 d-flex align-items-center justify-content-between gap-3" '
+        f'{summary_condition}'
+    )
+    assert unsafe_summary not in modal
+
+
 def test_webgui_python_source_contains_no_mojibake_text():
     source = Path("WebGUI.py").read_text(encoding="utf-8")
     mojibake_tokens = (
@@ -735,6 +792,19 @@ def test_today_rank_duration_column_is_after_hot_comment_and_formats_both_day_co
     assert "formatRankDuration" in html
     assert "连续在榜" in html
     assert "累计在榜" in html
+
+
+def test_today_rank_refresh_starts_a_douyin_rank_job_then_reloads_the_snapshot():
+    script = _source("static/js/selection/ranks.js")
+    template = _source("templates/common/workspace/selection_ranks.html")
+
+    assert "async refreshTodayRank()" in script
+    assert "'/api/jobs'" in script
+    assert "platform: 'dy'" in script
+    assert "crawler_type: 'rank'" in script
+    assert "pollTodayRankRefresh" in script
+    assert "await this.fetchTodayRank()" in script
+    assert '@click="refreshTodayRank"' in template
 
 
 def test_removed_assets_and_rag_pages_are_not_in_sidebar():

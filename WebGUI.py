@@ -23,6 +23,9 @@ import json
 import csv
 import io
 import base64
+import copy
+import hashlib
+import hmac
 import asyncio
 import heapq
 import logging
@@ -98,6 +101,9 @@ HONGGUO_REVIEW_CAPTURE_SERVICE_URL = os.getenv(
 HONGGUO_REVIEW_CAPTURE_EXPORT_ROOT = Path(
     os.getenv("HONGGUO_REVIEW_CAPTURE_EXPORT_ROOT", r"E:\hg\exports")
 ).resolve()
+DRAMA_DOWNLOAD_SEARCH_CACHE_TTL_SECONDS = 5 * 60
+_drama_download_search_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+_drama_download_search_cache_lock = threading.RLock()
 WEB_LOG_LEVEL = os.getenv("AIWORKER_WEB_LOG_LEVEL", "INFO").strip().upper()
 WEB_LOG_MAX_BYTES = 5 * 1024 * 1024
 WEB_LOG_BACKUP_COUNT = 5
@@ -107,6 +113,7 @@ UNSAFE_HTTP_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 CSRF_EXEMPT_PATHS = frozenset({"/api/auth/login", "/api/auth/setup"})
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 BACKUP_FILENAME_PATTERN = re.compile(r"^data_backup_[A-Za-z0-9_-]+\.json$")
+DRAMA_PLAYER_TOKEN_SECRET = os.getenv("AIWORKER_DRAMA_PLAYER_TOKEN_SECRET", uuid.uuid4().hex).encode("utf-8")
 
 
 def resolve_backup_path(filename: str, backup_dir: str | Path = "backups") -> Path:
@@ -165,6 +172,8 @@ def _api_permission(method: str, path: str) -> str | None:
         return None
     if path == "/api/files" and method == "DELETE":
         return "data.media.delete"
+    if path.startswith("/api/drama-player/"):
+        return "data.media.preview"
     if path.startswith(("/api/files", "/api/file/", "/api/media/")):
         return "data.media.preview"
     if path.startswith(("/api/run", "/api/batch/", "/api/stop")):
@@ -957,6 +966,103 @@ def display_data_path(path: Path) -> str:
         return str(path.resolve().relative_to(WORKSPACE_ROOT)).replace("\\", "/")
     except ValueError:
         return str(path)
+
+
+def _drama_player_token(path: Path) -> str:
+    relative_path = path.resolve().relative_to(DATA_ROOT.resolve()).as_posix()
+    encoded_path = base64.urlsafe_b64encode(relative_path.encode("utf-8")).decode("ascii").rstrip("=")
+    signature = hmac.new(
+        DRAMA_PLAYER_TOKEN_SECRET, encoded_path.encode("ascii"), hashlib.sha256
+    ).hexdigest()
+    return f"{encoded_path}.{signature}"
+
+
+def _drama_player_path_from_token(token: str) -> Path:
+    try:
+        encoded_path, signature = token.rsplit(".", 1)
+        expected_signature = hmac.new(
+            DRAMA_PLAYER_TOKEN_SECRET, encoded_path.encode("ascii"), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected_signature):
+            raise ValueError("invalid signature")
+        padded_path = encoded_path + "=" * (-len(encoded_path) % 4)
+        relative_path = base64.urlsafe_b64decode(padded_path.encode("ascii")).decode("utf-8")
+        candidate = (DATA_ROOT / relative_path).resolve()
+    except (UnicodeDecodeError, ValueError, base64.binascii.Error):
+        raise HTTPException(404, "剧集不存在") from None
+    if not _is_relative_to(candidate, DATA_ROOT) or not candidate.exists() or not candidate.is_file():
+        raise HTTPException(404, "剧集不存在")
+    return candidate
+
+
+def _drama_episode_number(video_path: Path, drama_root: Path) -> int | None:
+    for part in video_path.resolve().relative_to(drama_root.resolve()).parts:
+        match = re.fullmatch(r"episode_(\d+)", part, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        match = re.match(r"item_(\d+)_", part, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def resolve_downloaded_drama_episode(token: str) -> Path:
+    """Resolve a signed token only when it still points at a downloaded episode."""
+    video_path = _drama_player_path_from_token(token)
+    if video_path.suffix.lower() not in VIDEO_EXTENSIONS:
+        raise HTTPException(404, "剧集不存在")
+    relative_parts = video_path.resolve().relative_to(DATA_ROOT.resolve()).parts
+    if len(relative_parts) < 5 or relative_parts[1] != "jobs" or "dramas" not in relative_parts:
+        raise HTTPException(404, "剧集不存在")
+    drama_index = relative_parts.index("dramas")
+    if drama_index < 2 or drama_index + 2 >= len(relative_parts):
+        raise HTTPException(404, "剧集不存在")
+    drama_root = DATA_ROOT.joinpath(*relative_parts[: drama_index + 2])
+    if _drama_episode_number(video_path, drama_root) is None:
+        raise HTTPException(404, "剧集不存在")
+    return video_path
+
+
+def list_downloaded_drama_library() -> list[dict[str, Any]]:
+    """Return only episode videos stored by completed drama download jobs."""
+    if not DATA_ROOT.exists():
+        return []
+    dramas: dict[str, dict[str, Any]] = {}
+    for drama_root in sorted(DATA_ROOT.glob("*/jobs/**/dramas/*"), key=lambda path: str(path).lower()):
+        if not drama_root.is_dir():
+            continue
+        drama_key = drama_root.name.strip().casefold()
+        if not drama_key:
+            continue
+        drama = dramas.setdefault(
+            drama_key,
+            {"id": _drama_player_token(drama_root), "title": drama_root.name, "episode_paths": {}},
+        )
+        for video_path in sorted(drama_root.rglob("*"), key=lambda path: str(path).lower()):
+            if not video_path.is_file() or video_path.suffix.lower() not in VIDEO_EXTENSIONS:
+                continue
+            episode_number = _drama_episode_number(video_path, drama_root)
+            if episode_number is None:
+                continue
+            existing = drama["episode_paths"].get(episode_number)
+            if existing is None or video_path.stat().st_mtime > existing.stat().st_mtime:
+                drama["episode_paths"][episode_number] = video_path
+    return [
+        {
+            "id": drama["id"],
+            "title": drama["title"],
+            "episodes": [
+                {
+                    "id": _drama_player_token(video_path),
+                    "number": episode_number,
+                    "title": f"第 {episode_number} 集",
+                }
+                for episode_number, video_path in sorted(drama["episode_paths"].items())
+            ],
+        }
+        for drama in sorted(dramas.values(), key=lambda item: str(item["title"]).casefold())
+        if drama["episode_paths"]
+    ]
 
 
 def classify_data_file(path: Path) -> Dict[str, str]:
@@ -2301,26 +2407,49 @@ async def get_hongguo_drama_episodes(payload: HongguoDramaEpisodesRequest):
 @app.post("/api/hongguo/drama/download/search")
 async def search_hongguo_drama_for_download(payload: HongguoDramaSearchRequest):
     """Search Hongguo first, then return manually selectable Douyin candidates."""
-    if not payload.title.strip():
+    title = payload.title.strip()
+    if not title:
         raise HTTPException(400, "请输入剧名")
+    cache_key = (str(WORKSPACE_ROOT.resolve()), normalize_title(title))
+    now = time.monotonic()
+    with _drama_download_search_cache_lock:
+        cached = _drama_download_search_cache.get(cache_key)
+        if cached and cached[0] > now:
+            return copy.deepcopy(cached[1])
+        _drama_download_search_cache.pop(cache_key, None)
+
+    def cache_result(result: dict[str, Any]) -> dict[str, Any]:
+        with _drama_download_search_cache_lock:
+            if len(_drama_download_search_cache) >= 200:
+                expired = [key for key, value in _drama_download_search_cache.items() if value[0] <= now]
+                for key in expired:
+                    _drama_download_search_cache.pop(key, None)
+                if len(_drama_download_search_cache) >= 200:
+                    _drama_download_search_cache.pop(next(iter(_drama_download_search_cache)))
+            _drama_download_search_cache[cache_key] = (
+                now + DRAMA_DOWNLOAD_SEARCH_CACHE_TTL_SECONDS,
+                copy.deepcopy(result),
+            )
+        return result
+
     fallback_reason = ""
     try:
         client = HongguoDramaClient(load_hongguo_drama_settings(WORKSPACE_ROOT / ".runtime"))
         # The source aggregator queries every configured provider. Do not turn a
         # still-running provider query into a premature Douyin fallback.
         candidates = await asyncio.to_thread(
-            client.search_exact_all_sources, payload.title.strip()
+            client.search_exact_all_sources, title
         )
         if candidates:
-            return {"status": "success", "source": "hongguo", "candidates": [{key: value for key, value in item.items() if key != "raw"} for item in candidates]}
+            return cache_result({"status": "success", "source": "hongguo", "candidates": [{key: value for key, value in item.items() if key != "raw"} for item in candidates]})
         fallback_reason = "七个剧目源均未返回剧名完全匹配结果"
     except HongguoDramaError as exc:
         fallback_reason = f"红果接口检索失败：{exc}"
-    backend_logger.info("Hongguo download search falling back to Douyin: title=%s reason=%s", payload.title.strip(), fallback_reason)
+    backend_logger.info("Hongguo download search falling back to Douyin: title=%s reason=%s", title, fallback_reason)
     try:
-        candidates = await DouyinDramaFallbackClient().search(payload.title.strip())
-        backend_logger.info("Douyin fallback search returned %s candidates: title=%s", len(candidates), payload.title.strip())
-        return {"status": "success", "source": "douyin_fallback", "fallback_reason": fallback_reason, "candidates": candidates}
+        candidates = await DouyinDramaFallbackClient().search(title)
+        backend_logger.info("Douyin fallback search returned %s candidates: title=%s", len(candidates), title)
+        return cache_result({"status": "success", "source": "douyin_fallback", "fallback_reason": fallback_reason, "candidates": candidates})
     except DouyinFallbackError as exc:
         backend_logger.warning("Douyin fallback search failed: title=%s error=%s", payload.title.strip(), exc)
         return JSONResponse(
@@ -2334,7 +2463,7 @@ async def search_hongguo_drama_for_download(payload: HongguoDramaSearchRequest):
         )
     except Exception as exc:
         backend_logger.exception(
-            "Douyin fallback search crashed: title=%s", payload.title.strip()
+            "Douyin fallback search crashed: title=%s", title
         )
         return JSONResponse(
             {
@@ -3336,11 +3465,7 @@ def iter_file_range(path: Path, start: int, end: int, chunk_size: int = 1024 * 1
             yield chunk
 
 
-@app.get("/api/file/preview")
-async def preview_file(path: str, request: Request):
-    file_path = resolve_data_file_path(path)
-    if file_path.suffix.lower() not in MEDIA_EXTENSIONS:
-        raise HTTPException(400, "该文件格式不支持媒体预览")
+def stream_media_file(file_path: Path, request: Request) -> StreamingResponse | Response:
     size = file_path.stat().st_size
     media_type = mimetypes.guess_type(file_path.name)[0] or (
         "audio/wav" if file_path.suffix.lower() == ".wav" else "application/octet-stream"
@@ -3370,6 +3495,30 @@ async def preview_file(path: str, request: Request):
     if status_code == 206:
         headers["Content-Range"] = f"bytes {start}-{end}/{size}"
     return StreamingResponse(iter_file_range(file_path, start, end), status_code=status_code, media_type=media_type, headers=headers)
+
+
+@app.get("/api/file/preview")
+async def preview_file(path: str, request: Request):
+    file_path = resolve_data_file_path(path)
+    if file_path.suffix.lower() not in MEDIA_EXTENSIONS:
+        raise HTTPException(400, "该文件格式不支持媒体预览")
+    return stream_media_file(file_path, request)
+
+
+@app.get("/api/drama-player/library")
+async def downloaded_drama_library(
+    _: Principal = Depends(require_permission("data.media.preview")),
+):
+    return {"dramas": list_downloaded_drama_library(), "refreshed_at": int(time.time())}
+
+
+@app.get("/api/drama-player/episodes/{episode_id}/stream")
+async def stream_downloaded_drama_episode(
+    episode_id: str,
+    request: Request,
+    _: Principal = Depends(require_permission("data.media.preview")),
+):
+    return stream_media_file(resolve_downloaded_drama_episode(episode_id), request)
 
 @app.get("/api/file/download")
 async def download_file(path: str):

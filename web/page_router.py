@@ -46,6 +46,7 @@ PAGE_TEMPLATES = {
     "/admin/roles": "admin/roles.html",
     "/admin/config": "admin/config.html",
     "/admin/data": "admin/data.html",
+    "/admin/drama-player": "admin/drama_player.html",
     "/admin/jobs": "admin/jobs.html",
     "/admin/deliveries": "admin/deliveries.html",
     "/admin/audit": "admin/audit.html",
@@ -184,7 +185,7 @@ def _page_response(
             workspace_page=(
                 "tasks"
                 if template_name in {"common/tasks.html", "common/my_tasks.html"}
-                else template_name.removesuffix(".html").replace("/", "-")
+                else template_name.removesuffix(".html").replace("/", "-").replace("_", "-")
             ),
         ),
     )

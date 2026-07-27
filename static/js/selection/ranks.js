@@ -30,6 +30,80 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
+                async refreshTodayRank() {
+                    if (this.todayRankPlatform !== 'dy') {
+                        await this.fetchTodayRank();
+                        return;
+                    }
+                    if (this.todayRankRefreshing) return;
+                    this.todayRankRefreshing = true;
+                    this.todayRankRefreshMessage = '正在抓取抖音榜单...';
+                    this.todayRankError = '';
+                    try {
+                        const response = await aiworkerApi.request('/api/jobs', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({
+                                platform: 'dy',
+                                login_type: 'qrcode',
+                                crawler_type: 'rank',
+                                keywords: '',
+                                start_page: 1,
+                                headless: false,
+                                save_option: 'json',
+                                get_comment: false,
+                                get_sub_comment: false,
+                                extra: {
+                                    DOUYIN_RANK_LIMIT: 50,
+                                    DOUYIN_RANK_COMMENT_LIMIT: 10,
+                                    DOUYIN_AUTO_ANALYZE_TOP10: true,
+                                    DOUYIN_ANALYSIS_TOP_N: 10,
+                                    DOUYIN_ANALYSIS_PER_CATEGORY: true,
+                                    DOUYIN_ANALYSIS_WITH_LLM: true
+                                }
+                            })
+                        });
+                        const data = await response.json().catch(() => ({}));
+                        if (!response.ok || !data.job?.job_id) {
+                            throw new Error(data.detail || data.message || '抖音榜单抓取任务创建失败');
+                        }
+                        this.todayRankRefreshJobId = data.job.job_id;
+                        this.todayRankRefreshMessage = '抖音榜单抓取任务已启动...';
+                        this.pollTodayRankRefresh();
+                    } catch (error) {
+                        this.todayRankRefreshing = false;
+                        this.todayRankRefreshMessage = '';
+                        this.todayRankError = error.message || '抖音榜单抓取任务创建失败';
+                    }
+                },
+
+                async pollTodayRankRefresh() {
+                    if (!this.todayRankRefreshJobId) return;
+                    try {
+                        const response = await aiworkerApi.request(`/api/jobs/${encodeURIComponent(this.todayRankRefreshJobId)}`);
+                        const job = await response.json().catch(() => ({}));
+                        if (!response.ok) throw new Error(job.detail || '读取抖音榜单任务失败');
+                        if (['pending', 'running', 'stopping'].includes(job.status)) {
+                            this.todayRankRefreshMessage = job.message || '正在抓取抖音榜单...';
+                            window.setTimeout(() => this.pollTodayRankRefresh(), 1000);
+                            return;
+                        }
+                        this.todayRankRefreshing = false;
+                        this.todayRankRefreshJobId = '';
+                        if (job.status !== 'succeeded') {
+                            throw new Error(job.message || '抖音榜单抓取失败');
+                        }
+                        this.todayRankRefreshMessage = '抖音榜单已更新';
+                        await this.fetchJobs();
+                        await this.fetchTodayRank();
+                    } catch (error) {
+                        this.todayRankRefreshing = false;
+                        this.todayRankRefreshJobId = '';
+                        this.todayRankRefreshMessage = '';
+                        this.todayRankError = error.message || '抖音榜单抓取失败';
+                    }
+                },
+
                 parseTodayRankHash(shouldFetch = false) {
                     const raw = window.location.hash || '';
                     const path = raw.replace(/^#\/?/, '');

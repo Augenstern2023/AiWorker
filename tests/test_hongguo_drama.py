@@ -1248,6 +1248,29 @@ async def test_download_search_calls_douyin_when_no_exact_hongguo_match(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_download_search_reuses_a_recent_title_result(tmp_path, monkeypatch):
+    calls = []
+
+    class HongguoClient:
+        def __init__(self, settings):
+            pass
+
+        def search_exact_all_sources(self, title):
+            calls.append(title)
+            return [{"book_id": "book-9", "title": title, "source_platform": "redguo"}]
+
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI, "HongguoDramaClient", HongguoClient)
+    monkeypatch.setattr(WebGUI, "_drama_download_search_cache", {})
+
+    first = await WebGUI.search_hongguo_drama_for_download(WebGUI.HongguoDramaSearchRequest(title="测试短剧"))
+    second = await WebGUI.search_hongguo_drama_for_download(WebGUI.HongguoDramaSearchRequest(title="测试短剧"))
+
+    assert calls == ["测试短剧"]
+    assert second == first
+
+
+@pytest.mark.asyncio
 async def test_download_search_waits_for_all_sources_before_douyin_fallback(
     tmp_path, monkeypatch
 ):

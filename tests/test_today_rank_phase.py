@@ -563,7 +563,7 @@ def test_today_rank_explicit_absence_resets_continuous_but_preserves_cumulative(
     assert entry["rank_duration"] == "连续在榜1天 / 累计在榜2天"
 
 
-def test_today_rank_missing_board_data_does_not_break_continuity_or_leak_future(tmp_path):
+def test_today_rank_duration_counts_only_dates_present_in_rank_csv_files(tmp_path):
     day1 = dy_record(1, "跨缺口剧", "series-a")
     day2_other_board = dy_record(1, "其他榜剧", "series-b")
     day2_other_board["tab"] = "推荐榜"
@@ -581,10 +581,38 @@ def test_today_rank_missing_board_data_does_not_break_continuity_or_leak_future(
     current = TodayRankService(root=tmp_path).get_today_rank("dy")
     historical = TodayRankService(root=tmp_path).get_today_rank("dy", date="2026-07-01")
 
-    assert current["current_entries"][0]["continuous_rank_days"] == 3
+    assert current["current_entries"][0]["continuous_rank_days"] == 1
     assert current["current_entries"][0]["cumulative_rank_days"] == 2
+    assert current["current_entries"][0]["rank_duration"] == "连续在榜1天 / 累计在榜2天"
     assert historical["current_entries"][0]["continuous_rank_days"] == 1
     assert historical["current_entries"][0]["cumulative_rank_days"] == 1
+
+
+def test_today_rank_duration_uses_longest_recorded_streak_and_skips_weekends(tmp_path):
+    for date in ("2026-07-07", "2026-07-08", "2026-07-11", "2026-07-12", "2026-07-13", "2026-07-27"):
+        write_json(
+            tmp_path / f"data/dy/jobs/{date}/rank/douyin_series_rank_{date.replace('-', '')}_090000.json",
+            {"captured_at": f"{date} 09:00:00", "records": [dy_record(1, "连续剧", "series-a")]},
+        )
+
+    entry = TodayRankService(root=tmp_path).get_today_rank("dy")["current_entries"][0]
+
+    assert entry["continuous_rank_days"] == 3
+    assert entry["cumulative_rank_days"] == 6
+    assert entry["rank_duration"] == "连续在榜3天 / 累计在榜6天"
+
+
+def test_today_rank_duration_keeps_a_friday_to_monday_streak(tmp_path):
+    for date in ("2026-07-20", "2026-07-21", "2026-07-22", "2026-07-23", "2026-07-24", "2026-07-27"):
+        write_json(
+            tmp_path / f"data/dy/jobs/{date}/rank/douyin_series_rank_{date.replace('-', '')}_090000.json",
+            {"captured_at": f"{date} 09:00:00", "records": [dy_record(1, "周末不断榜", "series-a")]},
+        )
+
+    entry = TodayRankService(root=tmp_path).get_today_rank("dy")["current_entries"][0]
+
+    assert entry["continuous_rank_days"] == 6
+    assert entry["cumulative_rank_days"] == 6
 
 
 def test_today_rank_invalid_platform(tmp_path):

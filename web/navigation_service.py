@@ -57,6 +57,7 @@ NAVIGATION_CATALOG = (
         "items": (
             {"label": "负责项目", "route": "/review/projects"},
             {"label": "数据管理", "route": "/admin/data", "permission": "page.data_management"},
+            {"label": "已下载剧目播放", "route": "/admin/drama-player", "permission": "page.data_management"},
         ),
     },
     {
@@ -115,6 +116,7 @@ PAGE_ROUTES = (
     ("/admin/roles", "*", "角色权限"),
     ("/admin/config", "*", "系统配置"),
     ("/admin/data", "page.data_management", "数据管理"),
+    ("/admin/drama-player", "page.data_management", "已下载剧目播放"),
     ("/admin/jobs", "*", "机器任务"),
     ("/admin/deliveries", "*", "成果交付"),
     ("/admin/audit", "*", "审计日志"),

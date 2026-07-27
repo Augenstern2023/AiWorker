@@ -15,7 +15,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -765,6 +765,18 @@ def _rank_history_identity(record: dict[str, Any]) -> str:
     return _clean_text(record.get("id") or record.get("record_id")) or _normalize_title(record.get("title"))
 
 
+def _recorded_rank_dates_are_continuous(previous: Any, current: Any) -> bool:
+    """Treat a gap as continuous only when every skipped calendar day is a weekend."""
+    if current <= previous:
+        return False
+    date = previous + timedelta(days=1)
+    while date < current:
+        if date.weekday() < 5:
+            return False
+        date += timedelta(days=1)
+    return True
+
+
 def _annotate_rank_durations(snapshot: RankSnapshot, snapshots: list[RankSnapshot]) -> RankSnapshot:
     eligible = [item for item in snapshots if item.captured_at <= snapshot.captured_at]
     daily_groups: dict[Any, dict[str, set[str]]] = {}
@@ -788,17 +800,16 @@ def _annotate_rank_durations(snapshot: RankSnapshot, snapshots: list[RankSnapsho
             if identity in groups.get(group, set())
         )
         cumulative_days = len(appearance_dates)
-        continuous_start = target_date
-        for date in sorted(daily_groups, reverse=True):
-            if date > target_date:
-                continue
-            identities = daily_groups[date].get(group)
-            if identities is None:
-                continue
-            if identity not in identities:
-                break
-            continuous_start = date
-        continuous_days = (target_date - continuous_start).days + 1 if identity else 0
+        continuous_days = 0
+        current_streak = 0
+        previous_date = None
+        for date in appearance_dates:
+            if previous_date is not None and _recorded_rank_dates_are_continuous(previous_date, date):
+                current_streak += 1
+            else:
+                current_streak = 1
+            continuous_days = max(continuous_days, current_streak)
+            previous_date = date
         item["continuous_rank_days"] = continuous_days
         item["cumulative_rank_days"] = cumulative_days
         item["rank_duration"] = (

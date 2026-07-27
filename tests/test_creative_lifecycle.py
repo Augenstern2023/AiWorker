@@ -195,6 +195,58 @@ def test_generating_today_hits_returns_only_unadopted_recommendations(
     assert response.json()["items"][0]["status"] == "pending_review"
 
 
+def test_generating_top_ten_is_not_reduced_by_higher_scored_adopted_topics(
+    tmp_path: Path, monkeypatch
+):
+    client, repository, _ = build_client(tmp_path)
+    adopted = [
+        {
+            "platform": "dy",
+            "job_id": f"historical-{index}",
+            "source_path": f"data/dy/historical-{index}.json",
+            "captured_at": "2026-07-26",
+            "title": f"历史已采纳-{index}",
+            "description": "历史记录",
+            "category": "都市",
+            "rank_type": "热榜",
+            "score": 100 - index,
+            "confidence": "high",
+            "score_details": {},
+            "recommendation": "历史推荐",
+            "evidence": [],
+        }
+        for index in range(5)
+    ]
+    for topic in repository.upsert_topics(adopted):
+        repository.update_topic(topic["id"], "adopted")
+    generated = [
+        {
+            "platform": "dy",
+            "job_id": "today-rank",
+            "source_path": "data/dy/today-rank.json",
+            "captured_at": "2026-07-27",
+            "title": f"今日候选-{index}",
+            "description": "今日热榜",
+            "category": "都市",
+            "rank_type": "热榜",
+            "score": 90 - index,
+            "confidence": "high",
+            "score_details": {},
+            "recommendation": "今日推荐",
+            "evidence": [],
+        }
+        for index in range(10)
+    ]
+    monkeypatch.setattr(TopicService, "generate", lambda *_args, **_kwargs: generated)
+
+    response = client.post("/api/creative/topics/generate", json={"platform": "dy", "limit": 10})
+
+    assert response.status_code == 200
+    assert [item["title"] for item in response.json()["items"]] == [
+        f"今日候选-{index}" for index in range(10)
+    ]
+
+
 def test_topic_library_can_load_every_adopted_topic_without_a_page_limit(tmp_path: Path):
     client, repository, _ = build_client(tmp_path)
     topics = [{

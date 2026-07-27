@@ -874,13 +874,19 @@ def build_creative_router(
         if payload.platform not in {"dy", "hg"}:
             raise HTTPException(400, "platform must be dy or hg")
         try:
-            repository.upsert_topics(service.generate(payload.platform, payload.date, payload.limit))
+            generated = service.generate(payload.platform, payload.date, payload.limit)
+            repository.upsert_topics(generated)
+            captured_date = str(generated[0].get("captured_at") or "").split("T", 1)[0] if generated else ""
             topics = repository.list_topics(
                 platform=payload.platform,
                 status="pending_review",
-                limit=payload.limit,
+                captured_date=captured_date,
+                limit=None,
             )
-            return {"status": "success", "items": lifecycle_service.enrich_topics(topics)}
+            return {
+                "status": "success",
+                "items": lifecycle_service.enrich_topics(topics[: payload.limit]),
+            }
         except Exception as exc:
             raise HTTPException(500, str(exc)) from exc
 

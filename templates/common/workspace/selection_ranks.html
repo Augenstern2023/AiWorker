@@ -25,13 +25,14 @@
                             <option :value="date" x-text="date"></option>
                         </template>
                     </select>
-                    <button class="btn btn-outline-secondary btn-sm" @click="fetchTodayRank" :disabled="todayRankLoading">
-                        <i class="bi bi-arrow-clockwise me-1"></i>刷新
+                    <button class="btn btn-outline-secondary btn-sm" @click="refreshTodayRank" :disabled="todayRankLoading || todayRankRefreshing">
+                        <i class="bi" :class="todayRankRefreshing ? 'bi-arrow-repeat' : 'bi-arrow-clockwise'"></i><span class="ms-1" x-text="todayRankPlatform === 'dy' ? (todayRankRefreshing ? '抓取中' : '刷新并爬取') : '刷新'"></span>
                     </button>
                 </div>
             </div>
 
             <div class="alert alert-danger" x-show="todayRankError" x-text="todayRankError"></div>
+            <div class="alert alert-info" x-show="todayRankRefreshMessage" x-text="todayRankRefreshMessage"></div>
             <div class="alert alert-secondary" x-show="!todayRankLoading && todayRankData?.message" x-text="todayRankData?.message"></div>
 
             <div class="row g-3 mb-3">

@@ -46,6 +46,12 @@ def database(postgres_url: str, monkeypatch: pytest.MonkeyPatch) -> SystemDataba
 @pytest.fixture
 def service(database: SystemDatabase) -> DepartmentService:
     with database.transaction() as connection:
+        connection.execute(
+            text(
+                "DELETE FROM project_members "
+                "WHERE project_id = 'project:organization'"
+            )
+        )
         connection.execute(text("DELETE FROM user_departments"))
         connection.execute(text("DELETE FROM departments"))
     return DepartmentService(database)

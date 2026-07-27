@@ -2,6 +2,15 @@
 
 {% block content %}
 <div class="d-flex align-items-center justify-content-between mb-3"><div><h3 class="mb-1">审计日志</h3><div class="small text-muted">查询关键操作、操作者和结果</div></div><button class="btn btn-outline-secondary btn-sm" id="refresh-audit" title="刷新"><i class="bi bi-arrow-clockwise"></i></button></div>
+<form class="row g-2 mb-3" id="audit-filters">
+    <div class="col-md-3"><label class="visually-hidden" for="audit-actor">操作人</label><input class="form-control form-control-sm" id="audit-actor" name="actor" placeholder="操作人"></div>
+    <div class="col-md-2"><label class="visually-hidden" for="audit-project">项目 ID</label><input class="form-control form-control-sm" id="audit-project" name="project_id" placeholder="项目 ID"></div>
+    <div class="col-md-2"><label class="visually-hidden" for="audit-action">动作</label><input class="form-control form-control-sm" id="audit-action" name="action" placeholder="动作"></div>
+    <div class="col-md-2"><label class="visually-hidden" for="audit-result">结果</label><select class="form-select form-select-sm" id="audit-result" name="result"><option value="">全部结果</option><option value="success">成功</option><option value="failure">失败</option></select></div>
+    <div class="col-md-3"><label class="visually-hidden" for="audit-created-from">开始时间</label><input class="form-control form-control-sm" id="audit-created-from" name="created_from" type="datetime-local"></div>
+    <div class="col-md-3"><label class="visually-hidden" for="audit-created-to">结束时间</label><input class="form-control form-control-sm" id="audit-created-to" name="created_to" type="datetime-local"></div>
+    <div class="col-md-3 d-flex gap-2"><button class="btn btn-primary btn-sm" type="submit">筛选</button><button class="btn btn-outline-secondary btn-sm" id="export-audit-csv" type="button"><i class="bi bi-download me-1"></i>CSV</button><button class="btn btn-outline-secondary btn-sm" id="export-audit-xlsx" type="button"><i class="bi bi-download me-1"></i>XLSX</button></div>
+</form>
 <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>资源</th><th>结果</th></tr></thead><tbody id="audit-list"><tr><td colspan="5" class="text-center text-muted py-4">正在加载审计日志...</td></tr></tbody></table></div>
 {% endblock %}
 {% block scripts %}<script src="/static/js/admin/audit.js"></script>{% endblock %}

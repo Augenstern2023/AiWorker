@@ -309,6 +309,7 @@ audit_logs = Table(
     Column("id", Text, primary_key=True),
     Column("actor_id", Text, ForeignKey("users.id", ondelete="SET NULL")),
     Column("actor_user_id", Text, ForeignKey("users.id", ondelete="SET NULL")),
+    Column("actor_display_name_snapshot", Text),
     Column(
         "actor_role_snapshot_json", Text, nullable=False, server_default=text("'[]'")
     ),

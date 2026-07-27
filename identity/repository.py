@@ -179,13 +179,23 @@ CREATE TABLE IF NOT EXISTS approval_records (
 CREATE TABLE IF NOT EXISTS audit_logs (
     id TEXT PRIMARY KEY,
     actor_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+    actor_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+    actor_display_name_snapshot TEXT,
+    actor_role_snapshot_json TEXT NOT NULL DEFAULT '[]',
     action TEXT NOT NULL,
     resource_type TEXT NOT NULL,
+    target_type TEXT,
     resource_id TEXT,
+    target_id TEXT,
     project_id TEXT,
     reason TEXT,
     details_json TEXT NOT NULL DEFAULT '{}',
+    before_summary_json TEXT,
+    after_summary_json TEXT,
+    request_id TEXT,
     ip_address TEXT,
+    user_agent TEXT,
+    result TEXT NOT NULL DEFAULT 'success',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);

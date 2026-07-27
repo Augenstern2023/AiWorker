@@ -78,6 +78,40 @@ permissions = Table(
     Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
 )
 
+navigation_items = Table(
+    "navigation_items",
+    SYSTEM_METADATA,
+    Column("id", Text, primary_key=True),
+    Column(
+        "parent_id",
+        Text,
+        ForeignKey("navigation_items.id", ondelete="RESTRICT"),
+    ),
+    Column("label", Text, nullable=False),
+    Column("icon", Text, nullable=False, server_default=text("''")),
+    Column("route", Text, nullable=False),
+    Column(
+        "required_permission",
+        Text,
+        ForeignKey("permissions.code", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    Column("sort_order", Integer, nullable=False, server_default=text("0")),
+    Column("is_enabled", Integer, nullable=False, server_default=text("1")),
+    Column("is_system", Integer, nullable=False, server_default=text("1")),
+    Column(
+        "hide_for_system_admin", Integer, nullable=False, server_default=text("0")
+    ),
+    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    CheckConstraint("is_enabled IN (0, 1)", name="ck_navigation_items_is_enabled"),
+    CheckConstraint("is_system IN (0, 1)", name="ck_navigation_items_is_system"),
+    CheckConstraint(
+        "hide_for_system_admin IN (0, 1)",
+        name="ck_navigation_items_hide_for_system_admin",
+    ),
+)
+
 user_roles = Table(
     "user_roles",
     SYSTEM_METADATA,
@@ -368,6 +402,11 @@ BASELINE_TABLE_NAMES = frozenset(
 Index("uq_users_normalized_username", func.lower(users.c.normalized_username), unique=True)
 Index("uq_roles_code", func.lower(roles.c.code), unique=True)
 Index("idx_sessions_user_id", sessions.c.user_id)
+Index(
+    "idx_navigation_items_parent_sort",
+    navigation_items.c.parent_id,
+    navigation_items.c.sort_order,
+)
 Index("idx_project_members_project_id", project_members.c.project_id)
 Index(
     "uq_departments_parent_name",

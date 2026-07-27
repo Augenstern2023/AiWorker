@@ -10,11 +10,19 @@
 from __future__ import annotations
 
 import sqlite3
+import os
+import uuid
 from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import select
+from sqlalchemy.engine import make_url
 
-from system_database.sqlite_import import inspect_sqlite_system
+from system_database import SystemDatabase, SystemDatabaseSettings
+from system_database.schema import users
+from system_database.sqlite_import import import_sqlite_system, inspect_sqlite_system
 from system_database.sqlite_import_cli import execute_import_command
 
 
@@ -53,3 +61,46 @@ def test_check_command_is_read_only_and_returns_machine_readable_report(tmp_path
     assert report["mode"] == "check"
     assert report["source_counts"] == {"users": 1}
     assert report["skipped_session_count"] == 1
+
+
+def test_apply_import_preserves_text_ids_and_does_not_copy_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required for PostgreSQL tests")
+    if make_url(postgres_url).database == "aiworker_system":
+        raise ValueError("tests must not run against the aiworker_system database")
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
+    command.upgrade(Config("alembic.ini"), "head")
+    database = SystemDatabase(SystemDatabaseSettings(postgres_url))
+    identifier = f"role:import-{uuid.uuid4()}"
+    username = f"import-{uuid.uuid4()}"
+    source = tmp_path / "legacy.db"
+    with sqlite3.connect(source) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE users (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                normalized_username TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                password_hash TEXT NOT NULL
+            );
+            CREATE TABLE sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL);
+            """
+        )
+        connection.execute(
+            "INSERT INTO users VALUES (?, ?, ?, 'Import User', 'hash')",
+            (identifier, username, username),
+        )
+        connection.execute(
+            "INSERT INTO sessions VALUES ('legacy-session', ?)", (identifier,)
+        )
+
+    report = import_sqlite_system(source, database)
+
+    with database.connection() as connection:
+        assert connection.execute(select(users.c.id).where(users.c.id == identifier)).scalar_one() == identifier
+    assert report.verified is True
+    assert report.skipped_session_count == 1

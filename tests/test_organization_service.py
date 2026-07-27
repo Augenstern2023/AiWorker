@@ -151,6 +151,19 @@ def test_disabled_or_nonempty_departments_reject_new_assignment_and_disable(
         service.assign_user_department(user_id, empty["id"], is_primary=True)
 
 
+def test_only_an_empty_department_can_be_deleted(service: DepartmentService):
+    parent = service.create_department("Parent")
+    child = service.create_department("Child", parent_id=parent["id"])
+
+    with pytest.raises(ValueError, match="非空部门"):
+        service.delete_department(parent["id"])
+
+    service.delete_department(child["id"])
+    service.delete_department(parent["id"])
+
+    assert service.list_tree() == []
+
+
 def test_department_assignments_do_not_change_project_member_roles(
     service: DepartmentService, database: SystemDatabase
 ):

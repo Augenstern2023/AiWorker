@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import exists, insert, select, update
+from sqlalchemy import delete, exists, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.engine import Connection
 
@@ -78,16 +78,7 @@ class DepartmentService:
     def disable_department(self, department_id: str) -> dict[str, Any]:
         with self.database.transaction() as connection:
             self._require_department(connection, department_id)
-            has_children = connection.execute(
-                select(exists().where(departments.c.parent_id == department_id))
-            ).scalar_one()
-            has_assignments = connection.execute(
-                select(
-                    exists().where(user_departments.c.department_id == department_id)
-                )
-            ).scalar_one()
-            if has_children or has_assignments:
-                raise ValueError("非空部门不能停用")
+            self._require_empty_department(connection, department_id, "停用")
             connection.execute(
                 update(departments)
                 .where(departments.c.id == department_id)
@@ -96,6 +87,12 @@ class DepartmentService:
             return self._department_dict(
                 self._require_department(connection, department_id)
             )
+
+    def delete_department(self, department_id: str) -> None:
+        with self.database.transaction() as connection:
+            self._require_department(connection, department_id)
+            self._require_empty_department(connection, department_id, "删除")
+            connection.execute(delete(departments).where(departments.c.id == department_id))
 
     def list_tree(self) -> list[dict[str, Any]]:
         with self.database.connection() as connection:
@@ -221,6 +218,19 @@ class DepartmentService:
         if row is None:
             raise ValueError("部门不存在")
         return row
+
+    @staticmethod
+    def _require_empty_department(
+        connection: Connection, department_id: str, operation: str
+    ) -> None:
+        has_children = connection.execute(
+            select(exists().where(departments.c.parent_id == department_id))
+        ).scalar_one()
+        has_assignments = connection.execute(
+            select(exists().where(user_departments.c.department_id == department_id))
+        ).scalar_one()
+        if has_children or has_assignments:
+            raise ValueError(f"非空部门不能{operation}")
 
     def _assert_not_descendant(
         self, connection: Connection, department_id: str, parent_id: str

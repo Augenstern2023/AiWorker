@@ -12,6 +12,7 @@ from __future__ import annotations
 from sqlalchemy import (
     CheckConstraint,
     Column,
+    DateTime,
     Float,
     ForeignKey,
     Index,
@@ -23,6 +24,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 
 
 SYSTEM_METADATA = MetaData()
@@ -313,6 +315,93 @@ workflow_project_member_events = Table(
     Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
 )
 
+scheduling_definitions = Table(
+    "schedule_definitions",
+    SYSTEM_METADATA,
+    Column("id", Text, primary_key=True),
+    Column("name", Text, nullable=False, unique=True),
+    Column("job_type", Text, nullable=False),
+    Column("payload_json", JSONB, nullable=False),
+    Column("trigger_type", Text, nullable=False),
+    Column("trigger_config_json", JSONB, nullable=False),
+    Column("timezone", Text, nullable=False, server_default=text("'Asia/Shanghai'")),
+    Column("is_enabled", Integer, nullable=False, server_default=text("1")),
+    Column("max_retries", Integer, nullable=False, server_default=text("3")),
+    Column("max_concurrent_runs", Integer, nullable=False, server_default=text("1")),
+    Column("misfire_policy", Text, nullable=False, server_default=text("'skip'")),
+    Column("created_by", Text, ForeignKey("users.id", ondelete="SET NULL")),
+    Column("updated_by", Text, ForeignKey("users.id", ondelete="SET NULL")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint(
+        "job_type IN ('crawl', 'ranking_update', 'asset_download')",
+        name="ck_schedule_definitions_job_type",
+    ),
+    CheckConstraint(
+        "trigger_type IN ('cron', 'date')", name="ck_schedule_definitions_trigger_type"
+    ),
+    CheckConstraint("is_enabled IN (0, 1)", name="ck_schedule_definitions_enabled"),
+    CheckConstraint("max_retries >= 0", name="ck_schedule_definitions_max_retries"),
+    CheckConstraint(
+        "max_concurrent_runs >= 1", name="ck_schedule_definitions_max_concurrent_runs"
+    ),
+    CheckConstraint(
+        "misfire_policy = 'skip'", name="ck_schedule_definitions_misfire_policy"
+    ),
+)
+
+scheduling_runs = Table(
+    "schedule_runs",
+    SYSTEM_METADATA,
+    Column("id", Text, primary_key=True),
+    Column(
+        "schedule_id",
+        Text,
+        ForeignKey("schedule_definitions.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("job_id", Text, unique=True),
+    Column("attempt", Integer, nullable=False),
+    Column("status", Text, nullable=False),
+    Column("scheduled_at", DateTime(timezone=True), nullable=False),
+    Column("started_at", DateTime(timezone=True)),
+    Column("finished_at", DateTime(timezone=True)),
+    Column("error_summary", Text),
+    Column("retry_of_run_id", Text, ForeignKey("schedule_runs.id", ondelete="SET NULL")),
+    CheckConstraint("attempt >= 1", name="ck_schedule_runs_attempt"),
+    CheckConstraint(
+        "status IN ('queued', 'running', 'succeeded', 'failed', 'skipped', 'cancelled')",
+        name="ck_schedule_runs_status",
+    ),
+)
+
+scheduling_alerts = Table(
+    "schedule_alerts",
+    SYSTEM_METADATA,
+    Column("id", Text, primary_key=True),
+    Column(
+        "schedule_id",
+        Text,
+        ForeignKey("schedule_definitions.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("run_id", Text, ForeignKey("schedule_runs.id", ondelete="CASCADE"), nullable=False),
+    Column("severity", Text, nullable=False),
+    Column("message", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint("severity IN ('warning', 'error')", name="ck_schedule_alerts_severity"),
+)
+
+BASELINE_TABLE_NAMES = frozenset(
+    {
+        "approval_records", "audit_logs", "permission_dependencies", "permissions",
+        "project_members", "role_claimable_task_types", "role_permissions", "roles",
+        "sessions", "user_roles", "users", "workflow_instances",
+        "workflow_project_member_events", "workflow_submissions",
+        "workflow_task_events", "workflow_task_jobs", "workflow_tasks",
+    }
+)
+
 Index("uq_users_normalized_username", func.lower(users.c.normalized_username), unique=True)
 Index("uq_roles_code", func.lower(roles.c.code), unique=True)
 Index("idx_sessions_user_id", sessions.c.user_id)
@@ -322,6 +411,9 @@ Index("idx_workflow_submissions_task", workflow_submissions.c.task_id, workflow_
 Index("idx_audit_logs_created_at", audit_logs.c.created_at)
 Index("idx_audit_logs_action", audit_logs.c.action)
 Index("idx_audit_logs_actor_user_id", audit_logs.c.actor_user_id)
+Index("idx_schedule_runs_schedule_status", scheduling_runs.c.schedule_id, scheduling_runs.c.status)
+Index("idx_schedule_runs_scheduled_at", scheduling_runs.c.scheduled_at)
+Index("idx_schedule_alerts_schedule_created", scheduling_alerts.c.schedule_id, scheduling_alerts.c.created_at)
 Index(
     "idx_workflow_project_member_events_project",
     workflow_project_member_events.c.project_id,

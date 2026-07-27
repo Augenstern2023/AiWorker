@@ -87,6 +87,9 @@ from agents.douyin_drama_fallback import DouyinDramaFallbackClient, DouyinFallba
 from core.job import CrawlJob
 from rag.api import register_rag_routes
 from runtime.job_manager import JobConflictError, JobManager, JobNotFoundError
+from scheduler.local_service import LocalScheduleService
+from scheduler.repository import PostgresScheduleRepository
+from system_database import SystemDatabase, SystemDatabaseSettings
 from web.navigation_service import NavigationService
 from web.page_router import build_page_router
 from workflow.api import build_workflow_router
@@ -411,9 +414,37 @@ job_manager = JobManager(cwd=Path(__file__).resolve().parent)
 async def lifespan(app: FastAPI):
     backend_logger.info("Web GUI started")
     cleanup_task = asyncio.create_task(_periodic_data_operation_cleanup())
+    schedule_database: SystemDatabase | None = None
+    local_schedule_service: LocalScheduleService | None = None
+    try:
+        schedule_database = SystemDatabase(SystemDatabaseSettings.from_environment())
+        database_health = schedule_database.health()
+        if not database_health.schema_current:
+            backend_logger.error(
+                "Local scheduler disabled because the PostgreSQL system schema is unavailable or outdated"
+            )
+            schedule_database.dispose()
+            schedule_database = None
+        else:
+            local_schedule_service = LocalScheduleService(
+                PostgresScheduleRepository(schedule_database), job_manager
+            )
+            local_schedule_service.start()
+            app.state.local_schedule_service = local_schedule_service
+    except ValueError:
+        backend_logger.info("Local scheduler disabled because PostgreSQL system database is not configured")
+    except Exception:
+        backend_logger.exception("Local scheduler disabled because it could not start")
+        if schedule_database is not None:
+            schedule_database.dispose()
+            schedule_database = None
     try:
         yield
     finally:
+        if local_schedule_service is not None:
+            local_schedule_service.shutdown()
+        if schedule_database is not None:
+            schedule_database.dispose()
         cleanup_task.cancel()
         with suppress(asyncio.CancelledError):
             await cleanup_task

@@ -18,6 +18,7 @@ from identity.repository import IdentityRepository
 
 _AUDIT_COLUMNS = {
     "actor_user_id": "TEXT REFERENCES users(id) ON DELETE SET NULL",
+    "actor_display_name_snapshot": "TEXT",
     "actor_role_snapshot_json": "TEXT NOT NULL DEFAULT '[]'",
     "target_type": "TEXT",
     "target_id": "TEXT",
@@ -50,6 +51,17 @@ class AuditRepository:
             connection.execute(
                 "UPDATE audit_logs SET actor_user_id = actor_id "
                 "WHERE actor_user_id IS NULL AND actor_id IS NOT NULL"
+            )
+            connection.execute(
+                """
+                UPDATE audit_logs
+                SET actor_display_name_snapshot = COALESCE(
+                    (SELECT display_name FROM users WHERE users.id = audit_logs.actor_user_id),
+                    actor_user_id
+                )
+                WHERE actor_display_name_snapshot IS NULL
+                  AND actor_user_id IS NOT NULL
+                """
             )
             connection.execute(
                 "UPDATE audit_logs SET target_type = resource_type "
@@ -86,13 +98,14 @@ class AuditRepository:
         connection.execute(
             """
             INSERT INTO audit_logs (
-                id, actor_id, actor_user_id, actor_role_snapshot_json,
+                id, actor_id, actor_user_id, actor_display_name_snapshot,
+                actor_role_snapshot_json,
                 action, resource_type, target_type, resource_id, target_id,
                 project_id, reason, details_json, before_summary_json,
                 after_summary_json, request_id, ip_address, user_agent,
                 result, created_at
             ) VALUES (
-                :id, :actor_user_id, :actor_user_id,
+                :id, :actor_user_id, :actor_user_id, :actor_display_name_snapshot,
                 :actor_role_snapshot_json, :action, :target_type,
                 :target_type, :target_id, :target_id, :project_id, :reason,
                 '{}', :before_summary_json, :after_summary_json, :request_id,
@@ -105,7 +118,18 @@ class AuditRepository:
     def get(self, event_id: str) -> dict[str, Any] | None:
         with self.identity_repository.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM audit_logs WHERE id = ?", (event_id,)
+                """
+                SELECT audit_logs.*,
+                       COALESCE(
+                           NULLIF(audit_logs.actor_display_name_snapshot, ''),
+                           users.display_name,
+                           audit_logs.actor_user_id
+                       ) AS actor_display_name
+                FROM audit_logs
+                LEFT JOIN users ON users.id = audit_logs.actor_user_id
+                WHERE audit_logs.id = ?
+                """,
+                (event_id,),
             ).fetchone()
         return self._event_dict(row) if row is not None else None
 
@@ -113,6 +137,7 @@ class AuditRepository:
         self,
         *,
         actor_user_id: str | None = None,
+        actor: str | None = None,
         action: str | None = None,
         target_type: str | None = None,
         target_id: str | None = None,
@@ -135,22 +160,42 @@ class AuditRepository:
         parameters: list[Any] = []
         for column, value in filters.items():
             if value is not None:
-                clauses.append(f"{column} = ?")
+                clauses.append(f"audit_logs.{column} = ?")
                 parameters.append(value)
+        if actor is not None:
+            pattern = f"%{actor}%"
+            clauses.append(
+                """
+                (
+                    audit_logs.actor_user_id = ?
+                    OR audit_logs.actor_display_name_snapshot LIKE ? COLLATE NOCASE
+                    OR users.username LIKE ? COLLATE NOCASE
+                    OR users.display_name LIKE ? COLLATE NOCASE
+                )
+                """
+            )
+            parameters.extend((actor, pattern, pattern, pattern))
         if created_from is not None:
-            clauses.append("created_at >= ?")
+            clauses.append("audit_logs.created_at >= ?")
             parameters.append(created_from)
         if created_to is not None:
-            clauses.append("created_at <= ?")
+            clauses.append("audit_logs.created_at < ?")
             parameters.append(created_to)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         parameters.extend((max(1, min(limit, 500)), max(0, offset)))
         with self.identity_repository.connect() as connection:
             rows = connection.execute(
                 f"""
-                SELECT * FROM audit_logs
+                SELECT audit_logs.*,
+                       COALESCE(
+                           NULLIF(audit_logs.actor_display_name_snapshot, ''),
+                           users.display_name,
+                           audit_logs.actor_user_id
+                       ) AS actor_display_name
+                FROM audit_logs
+                LEFT JOIN users ON users.id = audit_logs.actor_user_id
                 {where}
-                ORDER BY created_at DESC, id DESC
+                ORDER BY audit_logs.created_at DESC, audit_logs.id DESC
                 LIMIT ? OFFSET ?
                 """,
                 parameters,
@@ -162,6 +207,7 @@ class AuditRepository:
         return {
             "id": row["id"],
             "actor_user_id": row["actor_user_id"],
+            "actor_display_name": row["actor_display_name"],
             "actor_role_snapshot": json.loads(
                 row["actor_role_snapshot_json"] or "[]"
             ),

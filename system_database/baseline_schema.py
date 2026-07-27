@@ -357,4 +357,3 @@ Index(
     unique=True,
     postgresql_where=workflow_tasks.c.predecessor_task_id.is_not(None),
 )
-

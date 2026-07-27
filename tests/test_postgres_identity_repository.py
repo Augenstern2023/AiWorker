@@ -22,6 +22,7 @@ from identity.repository import IdentityRepository
 from identity.schema import Principal
 from system_database import SystemDatabase, SystemDatabaseSettings
 from workflow.repository import WorkflowRepository
+from workflow.transition_service import TransitionService
 
 
 def test_identity_repository_uses_postgresql_system_database(
@@ -44,7 +45,9 @@ def test_identity_repository_uses_postgresql_system_database(
     assert repository.get_user(user["id"])["username"] == username
     assert repository.get_role_by_code("SYSTEM_ADMIN") is not None
 
-    task = WorkflowRepository(repository).create_task(
+    workflow_repository = WorkflowRepository(repository)
+    TransitionService(workflow_repository)
+    task = workflow_repository.create_task(
         f"workflow:{uuid.uuid4()}",
         "selection",
         "selection_operator",

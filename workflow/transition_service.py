@@ -219,7 +219,7 @@ class TransitionService:
 
     def _default_creative_adapter(self) -> CreativeWorkflowAdapter | None:
         system_path = self.repository.identity_repository.db_path
-        if system_path.parent.name != "system":
+        if system_path is None or system_path.parent.name != "system":
             return None
         creative_path = system_path.parent.parent / "creative" / "creative.db"
         from creative.repository import CreativeRepository

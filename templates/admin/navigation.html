@@ -1,0 +1,5 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-3"><h3 class="mb-0">导航配置</h3><button class="btn btn-outline-secondary btn-sm" id="navigation-refresh" title="刷新"><i class="bi bi-arrow-clockwise"></i></button></div>
+<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>名称</th><th>图标</th><th>路径</th><th>权限</th><th>排序</th><th>启用</th><th></th></tr></thead><tbody id="navigation-list"></tbody></table></div>
+{% endblock %}{% block scripts %}<script src="/static/js/admin/navigation.js"></script>{% endblock %}

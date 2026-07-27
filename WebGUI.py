@@ -90,9 +90,11 @@ from core.job import CrawlJob
 from rag.api import register_rag_routes
 from runtime.job_manager import JobConflictError, JobManager, JobNotFoundError
 from scheduler.local_service import LocalScheduleService
+from scheduler.api import build_schedule_router
 from scheduler.repository import PostgresScheduleRepository
 from system_database import SystemDatabase, SystemDatabaseSettings
 from web.navigation_repository import NavigationRepository
+from web.navigation_api import build_navigation_router
 from web.navigation_service import NavigationService
 from web.page_router import build_page_router
 from workflow.api import build_workflow_router
@@ -435,6 +437,7 @@ async def lifespan(app: FastAPI):
             )
             local_schedule_service.start()
             app.state.local_schedule_service = local_schedule_service
+            app.state.schedule_repository = local_schedule_service.repository
     except ValueError:
         backend_logger.info("Local scheduler disabled because PostgreSQL system database is not configured")
     except Exception:
@@ -517,6 +520,7 @@ app.state.identity_password_service = identity_password_service
 app.state.identity_session_service = identity_session_service
 app.state.identity_permission_service = identity_permission_service
 app.state.audit_service = audit_service
+app.state.navigation_repository = navigation_repository
 app.state.workflow_repository = workflow_repository
 app.state.workflow_transition_service = workflow_transition_service
 templates = Jinja2Templates(directory=str(WORKSPACE_ROOT / "templates"))
@@ -567,6 +571,8 @@ app.include_router(
     )
 )
 app.include_router(build_audit_router(audit_service))
+app.include_router(build_navigation_router())
+app.include_router(build_schedule_router())
 if system_database is not None:
     app.include_router(
         build_organization_router(DepartmentService(system_database), audit_service)

@@ -46,6 +46,8 @@ PAGE_ROUTES = (
     ("/admin/jobs", "*", "机器任务"),
     ("/admin/deliveries", "*", "成果交付"),
     ("/admin/audit", "*", "审计日志"),
+    ("/admin/navigation", "*", "导航配置"),
+    ("/admin/schedules", "*", "调度中心"),
 )
 
 

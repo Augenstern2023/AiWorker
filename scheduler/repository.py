@@ -50,6 +50,17 @@ class PostgresScheduleRepository:
             ).mappings()
             return [self._definition_from_row(row) for row in rows]
 
+    def list_definitions(self) -> list[ScheduleDefinition]:
+        with self.database.connection() as connection:
+            rows = connection.execute(select(scheduling_definitions).order_by(scheduling_definitions.c.created_at.desc())).mappings()
+            return [self._definition_from_row(row) for row in rows]
+
+    def delete_definition(self, schedule_id: str) -> None:
+        with self.database.transaction() as connection:
+            result = connection.execute(scheduling_definitions.delete().where(scheduling_definitions.c.id == schedule_id))
+            if result.rowcount != 1:
+                raise KeyError(schedule_id)
+
     def set_definition_enabled(self, schedule_id: str, enabled: bool) -> None:
         with self.database.transaction() as connection:
             connection.execute(
@@ -96,6 +107,11 @@ class PostgresScheduleRepository:
             rows = connection.execute(
                 select(scheduling_runs).where(scheduling_runs.c.status.in_(_ACTIVE_STATUSES))
             ).mappings()
+            return [self._run_from_row(row) for row in rows]
+
+    def list_runs(self, schedule_id: str, limit: int = 100) -> list[ScheduleRun]:
+        with self.database.connection() as connection:
+            rows = connection.execute(select(scheduling_runs).where(scheduling_runs.c.schedule_id == schedule_id).order_by(scheduling_runs.c.scheduled_at.desc()).limit(max(1, min(limit, 500)))).mappings()
             return [self._run_from_row(row) for row in rows]
 
     def update_run(self, run_id: str, **changes: Any) -> ScheduleRun:

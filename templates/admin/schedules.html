@@ -1,0 +1,5 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-3"><h3 class="mb-0">调度中心</h3><button class="btn btn-outline-secondary btn-sm" id="schedule-refresh" title="刷新"><i class="bi bi-arrow-clockwise"></i></button></div>
+<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>名称</th><th>类型</th><th>触发器</th><th>状态</th><th>操作</th></tr></thead><tbody id="schedule-list"></tbody></table></div>
+{% endblock %}{% block scripts %}<script src="/static/js/admin/schedules.js"></script>{% endblock %}

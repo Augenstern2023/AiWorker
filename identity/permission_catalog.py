@@ -302,6 +302,26 @@ NAVIGATION_CATALOG = (
         "required_permission": "*",
         "sort_order": 60,
     },
+    {
+        "id": "navigation:admin:navigation",
+        "parent_id": "navigation:admin",
+        "label": "导航配置",
+        "icon": "bi-menu-button-wide",
+        "route": "/admin/navigation",
+        "required_permission": "*",
+        "sort_order": 70,
+        "is_system": True,
+    },
+    {
+        "id": "navigation:admin:schedules",
+        "parent_id": "navigation:admin",
+        "label": "调度中心",
+        "icon": "bi-clock-history",
+        "route": "/admin/schedules",
+        "required_permission": "*",
+        "sort_order": 80,
+        "is_system": True,
+    },
 )
 
 PERMISSION_DEPENDENCIES = {

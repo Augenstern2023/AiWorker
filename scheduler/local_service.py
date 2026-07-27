@@ -148,6 +148,32 @@ class LocalScheduleService:
                 self.scheduler.shutdown(wait=False)
                 self._started = False
 
+    def cancel_active_runs_for_process_shutdown(
+        self, now: datetime | None = None
+    ) -> set[str]:
+        """Cancel submitted schedule jobs and persist their terminal state before disposal."""
+
+        finished_at = now or datetime.now(UTC)
+        cancelled_job_ids: set[str] = set()
+        with self._lock:
+            for run in self.repository.list_active_runs():
+                if not run.job_id:
+                    continue
+                try:
+                    self.job_manager.stop(run.job_id)
+                except Exception:
+                    logger.exception(
+                        "Unable to stop scheduled job during process shutdown: run_id=%s job_id=%s",
+                        run.id,
+                        run.job_id,
+                    )
+                    continue
+                self.repository.update_run(
+                    run.id, status="cancelled", finished_at=finished_at
+                )
+                cancelled_job_ids.add(run.job_id)
+        return cancelled_job_ids
+
     def trigger(self, schedule_id: str, scheduled_at: datetime | None = None) -> ScheduleRun:
         now = scheduled_at or datetime.now(UTC)
         run = self.repository.reserve_run(schedule_id, now)

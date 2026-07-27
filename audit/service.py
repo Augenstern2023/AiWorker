@@ -93,6 +93,11 @@ class AuditService:
     def query(self, **filters: Any) -> list[dict[str, Any]]:
         return self.repository.query(**filters)
 
+    def count(self, **filters: Any) -> int:
+        filters.pop("limit", None)
+        filters.pop("offset", None)
+        return self.repository.count(**filters)
+
     @staticmethod
     def _request_metadata(
         request: Request | None,

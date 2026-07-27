@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import csv
 import json
+import re
+from datetime import UTC, datetime
 from io import BytesIO, StringIO
 from typing import Literal
 from typing import Any
@@ -83,10 +85,11 @@ def build_audit_router(audit_service: AuditService) -> APIRouter:
         created_to: str | None = None,
         limit: int = Query(default=100, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
+        response: Response = None,  # type: ignore[assignment]
         principal: Principal = Depends(current_principal),
     ) -> list[dict[str, Any]]:
         assert_can_read_audit(principal, project_id)
-        return audit_service.query(**query_filters(
+        filters = query_filters(
             actor_user_id=actor_user_id,
             actor=actor,
             action=action,
@@ -98,7 +101,9 @@ def build_audit_router(audit_service: AuditService) -> APIRouter:
             created_to=created_to,
             limit=limit,
             offset=offset,
-        ))
+        )
+        response.headers["X-Total-Count"] = str(audit_service.count(**filters))
+        return audit_service.query(**filters)
 
     @router.get("/api/admin/audit/export")
     def export_audit_events(
@@ -141,7 +146,7 @@ def build_audit_router(audit_service: AuditService) -> APIRouter:
             reason=None,
             result="success",
         )
-        filename = f"audit-{format}.{format}"
+        filename = _export_filename(format, project_id, created_from, created_to)
         if format == "csv":
             return Response(
                 _audit_csv(events),
@@ -226,3 +231,16 @@ def _export_value(value: Any) -> str:
 
 def _export_json(value: Any) -> str:
     return "" if value is None else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _export_filename(
+    format: Literal["csv", "xlsx"],
+    project_id: str | None,
+    created_from: str | None,
+    created_to: str | None,
+) -> str:
+    scope = "all" if project_id is None else re.sub(r"[^A-Za-z0-9_-]+", "-", project_id)
+    if created_from or created_to:
+        scope = f"{scope}-{created_from or 'start'}-{created_to or 'end'}"
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return f"audit-{format}-{scope}-{timestamp}.{format}"

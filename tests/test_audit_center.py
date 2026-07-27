@@ -138,6 +138,7 @@ def test_audit_export_uses_filtered_snapshot_data_and_records_export(tmp_path: P
 
     assert csv_response.status_code == 200
     assert csv_response.headers["content-type"].startswith("text/csv")
+    assert "audit-csv-" in csv_response.headers["content-disposition"]
     assert csv_response.content.startswith(b"\xef\xbb\xbf")
     csv_text = csv_response.content.decode("utf-8-sig")
     assert "Audit Admin" in csv_text

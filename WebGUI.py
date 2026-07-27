@@ -416,6 +416,7 @@ async def lifespan(app: FastAPI):
     cleanup_task = asyncio.create_task(_periodic_data_operation_cleanup())
     schedule_database: SystemDatabase | None = None
     local_schedule_service: LocalScheduleService | None = None
+    scheduled_job_ids: set[str] = set()
     try:
         schedule_database = SystemDatabase(SystemDatabaseSettings.from_environment())
         database_health = schedule_database.health()
@@ -443,6 +444,9 @@ async def lifespan(app: FastAPI):
     finally:
         if local_schedule_service is not None:
             local_schedule_service.shutdown()
+            scheduled_job_ids = (
+                local_schedule_service.cancel_active_runs_for_process_shutdown()
+            )
         if schedule_database is not None:
             schedule_database.dispose()
         cleanup_task.cancel()
@@ -450,7 +454,10 @@ async def lifespan(app: FastAPI):
             await cleanup_task
         backend_logger.info("Web GUI shutting down")
         for job in job_manager.list_jobs():
-            if job["status"] in {"pending", "running", "stopping"}:
+            if (
+                job["job_id"] not in scheduled_job_ids
+                and job["status"] in {"pending", "running", "stopping"}
+            ):
                 try:
                     job_manager.stop(job["job_id"])
                 except Exception:

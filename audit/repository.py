@@ -148,6 +148,86 @@ class AuditRepository:
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
+        where, parameters = self._where_clause(
+            actor_user_id=actor_user_id,
+            actor=actor,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            project_id=project_id,
+            result=result,
+            created_from=created_from,
+            created_to=created_to,
+        )
+        parameters.extend((max(1, min(limit, 500)), max(0, offset)))
+        with self.identity_repository.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT audit_logs.*,
+                       COALESCE(
+                           NULLIF(audit_logs.actor_display_name_snapshot, ''),
+                           users.display_name,
+                           audit_logs.actor_user_id
+                       ) AS actor_display_name
+                FROM audit_logs
+                LEFT JOIN users ON users.id = audit_logs.actor_user_id
+                {where}
+                ORDER BY audit_logs.created_at DESC, audit_logs.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                parameters,
+            ).fetchall()
+        return [self._event_dict(row) for row in rows]
+
+    def count(
+        self,
+        *,
+        actor_user_id: str | None = None,
+        actor: str | None = None,
+        action: str | None = None,
+        target_type: str | None = None,
+        target_id: str | None = None,
+        project_id: str | None = None,
+        result: str | None = None,
+        created_from: str | None = None,
+        created_to: str | None = None,
+    ) -> int:
+        where, parameters = self._where_clause(
+            actor_user_id=actor_user_id,
+            actor=actor,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            project_id=project_id,
+            result=result,
+            created_from=created_from,
+            created_to=created_to,
+        )
+        with self.identity_repository.connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM audit_logs
+                LEFT JOIN users ON users.id = audit_logs.actor_user_id
+                {where}
+                """,
+                parameters,
+            ).fetchone()
+        return int(row[0])
+
+    @staticmethod
+    def _where_clause(
+        *,
+        actor_user_id: str | None,
+        actor: str | None,
+        action: str | None,
+        target_type: str | None,
+        target_id: str | None,
+        project_id: str | None,
+        result: str | None,
+        created_from: str | None,
+        created_to: str | None,
+    ) -> tuple[str, list[Any]]:
         filters = {
             "actor_user_id": actor_user_id,
             "action": action,
@@ -182,25 +262,7 @@ class AuditRepository:
             clauses.append("audit_logs.created_at < ?")
             parameters.append(created_to)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        parameters.extend((max(1, min(limit, 500)), max(0, offset)))
-        with self.identity_repository.connect() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT audit_logs.*,
-                       COALESCE(
-                           NULLIF(audit_logs.actor_display_name_snapshot, ''),
-                           users.display_name,
-                           audit_logs.actor_user_id
-                       ) AS actor_display_name
-                FROM audit_logs
-                LEFT JOIN users ON users.id = audit_logs.actor_user_id
-                {where}
-                ORDER BY audit_logs.created_at DESC, audit_logs.id DESC
-                LIMIT ? OFFSET ?
-                """,
-                parameters,
-            ).fetchall()
-        return [self._event_dict(row) for row in rows]
+        return where, parameters
 
     @staticmethod
     def _event_dict(row: Any) -> dict[str, Any]:

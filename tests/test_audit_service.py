@@ -288,6 +288,7 @@ def test_admin_audit_api_requires_permission_and_applies_filters(
     )
     assert response.status_code == 200
     assert [event["action"] for event in response.json()] == ["user.update"]
+    assert response.headers["X-Total-Count"] == "1"
 
 
 def test_logout_and_password_changes_are_audited(repository: IdentityRepository):

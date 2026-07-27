@@ -254,3 +254,23 @@ def test_shutdown_only_stops_future_triggers_and_keeps_submitted_jobs_running(re
 
     assert manager.stop_calls == []
     assert manager.jobs[run.job_id]["status"] == "running"
+
+
+def test_process_shutdown_cancels_submitted_runs_before_database_disposal(repository):
+    schedule = definition(
+        "schedule-process-shutdown",
+        "crawl",
+        {"platform": "dy", "crawler_type": "search", "keywords": ["drama"]},
+    )
+    repository.create_definition(schedule)
+    manager = RecordingJobManager()
+    service = LocalScheduleService(repository, manager)
+    run = service.trigger(schedule.id, datetime(2026, 7, 27, 2, tzinfo=UTC))
+
+    cancelled_job_ids = service.cancel_active_runs_for_process_shutdown(
+        now=datetime(2026, 7, 27, 2, 1, tzinfo=UTC)
+    )
+
+    assert cancelled_job_ids == {run.job_id}
+    assert manager.stop_calls == [run.job_id]
+    assert repository.get_run(run.id).status == "cancelled"

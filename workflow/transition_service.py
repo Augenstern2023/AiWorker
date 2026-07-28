@@ -12,10 +12,11 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import text
+from sqlalchemy import select, update
 
 from identity.repository import IdentityRepository
 from identity.schema import Principal
+from system_database.schema import workflow_submissions, workflow_tasks
 
 from .repository import SYSTEM_ACTOR, WorkflowRepository
 
@@ -84,10 +85,13 @@ class TransitionService:
             if resource_type == "beats":
                 beats_progress = self.creative_adapter.beats_episode_progress(resource_id)
                 if not beats_progress["complete"]:
-                    connection.exec_driver_sql(
-                        "UPDATE workflow_tasks SET status = 'in_progress', "
-                        "updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'completed'",
-                        (task_id,),
+                    connection.execute(
+                        update(workflow_tasks)
+                        .where(
+                            workflow_tasks.c.id == task_id,
+                            workflow_tasks.c.status == "completed",
+                        )
+                        .values(status="in_progress")
                     )
                     self.repository._record_event(
                         connection,
@@ -132,12 +136,18 @@ class TransitionService:
             return []
         resource_types = ("brief", "characters", "outline", "beats")
         with self.repository.identity_repository.connect() as connection:
-            rows = connection.exec_driver_sql(
-                "SELECT * FROM workflow_submissions WHERE status = 'submitted' "
-                f"AND resource_type IN ({','.join('?' for _ in resource_types)}) "
-                "ORDER BY submitted_at, created_at, id",
-                resource_types,
-            ).fetchall()
+            rows = connection.execute(
+                select(workflow_submissions)
+                .where(
+                    workflow_submissions.c.status == "submitted",
+                    workflow_submissions.c.resource_type.in_(resource_types),
+                )
+                .order_by(
+                    workflow_submissions.c.submitted_at,
+                    workflow_submissions.c.created_at,
+                    workflow_submissions.c.id,
+                )
+            ).mappings().all()
         migrated: list[str] = []
         for row in rows:
             submission = self.repository._submission_dict(row)
@@ -161,10 +171,13 @@ class TransitionService:
                 return
             task = self.repository._require_task(connection, current["task_id"])
             now = time.time()
-            connection.exec_driver_sql(
-                "UPDATE workflow_submissions SET status = 'superseded', updated_at = ? "
-                "WHERE id = ? AND status = 'submitted'",
-                (now, current["id"]),
+            connection.execute(
+                update(workflow_submissions)
+                .where(
+                    workflow_submissions.c.id == current["id"],
+                    workflow_submissions.c.status == "submitted",
+                )
+                .values(status="superseded", updated_at=now)
             )
             self.repository._ensure_system_actor(connection, SYSTEM_ACTOR.user_id)
             self.repository._record_event(
@@ -190,10 +203,13 @@ class TransitionService:
                     current["resource_id"]
                 )
                 if not beats_progress["complete"]:
-                    connection.exec_driver_sql(
-                        "UPDATE workflow_tasks SET status = 'in_progress', updated_at = CURRENT_TIMESTAMP "
-                        "WHERE id = ? AND status = 'completed'",
-                        (task["id"],),
+                    connection.execute(
+                        update(workflow_tasks)
+                        .where(
+                            workflow_tasks.c.id == task["id"],
+                            workflow_tasks.c.status == "completed",
+                        )
+                        .values(status="in_progress")
                     )
                     self.repository._record_event(
                         connection,

@@ -11,13 +11,16 @@ from __future__ import annotations
 
 import os
 import uuid
+from pathlib import Path
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from fastapi import FastAPI
 from sqlalchemy.engine import make_url
 
 from audit.service import AuditService
+from creative.api import register_creative_routes
 from identity.repository import IdentityRepository
 from identity.schema import Principal
 from system_database import SystemDatabase, SystemDatabaseSettings
@@ -83,3 +86,26 @@ def test_identity_repository_uses_postgresql_system_database(
         result="success",
     )
     assert audit.query(action="postgres.verify")[0]["actor_display_name"] == "PostgreSQL User"
+
+
+def test_creative_routes_accept_the_postgres_workflow_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required for PostgreSQL tests")
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
+    command.upgrade(Config("alembic.ini"), "head")
+    database = SystemDatabase(SystemDatabaseSettings(postgres_url))
+    identity_repository = IdentityRepository(database)
+    identity_repository.seed_defaults()
+
+    app = FastAPI()
+    register_creative_routes(
+        app,
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        workflow_repository=WorkflowRepository(identity_repository),
+    )
+
+    assert any(route.path.startswith("/api/creative") for route in app.routes)

@@ -49,6 +49,7 @@ from identity.dependencies import current_principal, require_permission
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.schema import Principal
+from system_database import SystemDatabase, SystemDatabaseSettings
 from workflow.repository import SYSTEM_ACTOR, WorkflowRepository
 from workflow.transition_service import TransitionService
 
@@ -399,6 +400,7 @@ def build_creative_router(
     root: str | Path = ".",
     runtime_dir: str | Path = ".runtime",
     job_manager: Any | None = None,
+    workflow_repository: WorkflowRepository | None = None,
 ) -> APIRouter:
     router = APIRouter(
         prefix="/api/creative",
@@ -406,9 +408,12 @@ def build_creative_router(
         dependencies=[Depends(creative_api_authorization)],
     )
     repository = CreativeRepository(Path(runtime_dir) / "creative" / "creative.db")
-    workflow_repository = WorkflowRepository(
-        IdentityRepository(Path(runtime_dir) / "system" / "system.db")
-    )
+    if workflow_repository is None:
+        workflow_repository = WorkflowRepository(
+            IdentityRepository(
+                SystemDatabase(SystemDatabaseSettings.from_environment())
+            )
+        )
     workflow_adapter = CreativeWorkflowAdapter(repository, workflow_repository)
     workflow_transitions = TransitionService(
         workflow_repository, creative_adapter=workflow_adapter
@@ -1903,5 +1908,13 @@ def register_creative_routes(
     root: str | Path = ".",
     runtime_dir: str | Path = ".runtime",
     job_manager: Any | None = None,
+    workflow_repository: WorkflowRepository | None = None,
 ) -> None:
-    app.include_router(build_creative_router(root=root, runtime_dir=runtime_dir, job_manager=job_manager))
+    app.include_router(
+        build_creative_router(
+            root=root,
+            runtime_dir=runtime_dir,
+            job_manager=job_manager,
+            workflow_repository=workflow_repository,
+        )
+    )

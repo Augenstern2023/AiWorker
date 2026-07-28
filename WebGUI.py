@@ -592,6 +592,7 @@ register_creative_routes(
     root=Path(__file__).resolve().parent,
     runtime_dir=Path(__file__).resolve().parent / ".runtime",
     job_manager=job_manager,
+    workflow_repository=workflow_repository,
 )
 
 # Models

@@ -907,7 +907,7 @@ class WorkflowRepository:
             rows = connection.exec_driver_sql(
                 """
                 SELECT * FROM workflow_task_events
-                WHERE task_id = %s ORDER BY created_at, rowid
+                WHERE task_id = %s ORDER BY created_at, id
                 """,
                 (task_id,),
             ).mappings().fetchall()
@@ -997,7 +997,7 @@ class WorkflowRepository:
             rows = connection.exec_driver_sql(
                 """
                 SELECT * FROM project_members
-                WHERE project_id = %s ORDER BY created_at, rowid
+                WHERE project_id = %s ORDER BY created_at, id
                 """,
                 (project_id,),
             ).mappings().fetchall()
@@ -1008,7 +1008,7 @@ class WorkflowRepository:
             rows = connection.exec_driver_sql(
                 """
                 SELECT * FROM workflow_project_member_events
-                WHERE project_id = %s ORDER BY created_at, rowid
+                WHERE project_id = %s ORDER BY created_at, id
                 """,
                 (project_id,),
             ).mappings().fetchall()
@@ -1021,6 +1021,18 @@ class WorkflowRepository:
         with self.identity_repository.connect() as connection:
             live_actor = self._live_actor(connection, actor_id)
             self._assert_project_manager(connection, project_id, live_actor)
+
+    def list_managed_project_ids(self, actor: Principal | dict[str, Any]) -> set[str]:
+        """Return the active projects the current project owner may manage."""
+
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.connect() as connection:
+            live_actor = self._live_actor(connection, actor_id)
+            if live_actor["is_system_admin"]:
+                return set()
+            if "project_owner" not in live_actor["role_codes"]:
+                return set()
+            return self._managed_project_ids(connection, actor_id)
 
     def can_review_task(
         self,
@@ -1068,7 +1080,7 @@ class WorkflowRepository:
             members = connection.exec_driver_sql(
                 """
                 SELECT * FROM project_members
-                WHERE project_id = %s AND user_id = %s ORDER BY rowid
+                WHERE project_id = %s AND user_id = %s ORDER BY id
                 """,
                 (project_id, membership_id),
             ).mappings().fetchall()

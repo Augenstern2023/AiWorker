@@ -9,11 +9,12 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from contextlib import contextmanager
 from typing import Any, Iterator
 
-from sqlalchemy import Connection, and_, delete, func, insert, or_, select, text, update
+from sqlalchemy import Connection, and_, delete, exists, func, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -25,6 +26,8 @@ from system_database.schema import (
     role_permissions,
     roles,
     sessions,
+    departments,
+    user_departments,
     user_roles,
     users,
 )
@@ -280,15 +283,13 @@ class IdentityRepository:
     ):
         with self.connection_scope(connection) as conn:
             rows = conn.execute(
-                conn.execute(
-                    __import__('sqlalchemy').select(
-                        __import__('system_database.schema', fromlist=['role_permissions']).role_permissions.c.permission_code,
-                        __import__('system_database.schema', fromlist=['role_permissions']).role_permissions.c.data_scope,
-                    )
-                    .where(__import__('system_database.schema', fromlist=['role_permissions']).role_permissions.c.role_id == role_id)
-                    .order_by(__import__('system_database.schema', fromlist=['role_permissions']).role_permissions.c.permission_code)
-                ).mappings().all()
-            )
+                select(
+                    role_permissions.c.permission_code,
+                    role_permissions.c.data_scope,
+                )
+                .where(role_permissions.c.role_id == role_id)
+                .order_by(role_permissions.c.permission_code)
+            ).mappings().all()
         return [dict(r) for r in rows]
 
     def list_role_claimable_task_types(self, role_id: str, *, connection=None):
@@ -330,12 +331,54 @@ class IdentityRepository:
                 conn.execute(S.insert(rp).values(role_id=role_id, permission_code=code, data_scope=scope))
         return self.list_role_permissions(role_id, connection=connection)
 
-    def list_users(self):
+    _UNSET = object()
+
+    def list_users(
+        self,
+        *,
+        username: str | None = None,
+        role_code: str | None = None,
+        department_id: str | None = None,
+        gender: str | None = None,
+        status: str | None = None,
+    ):
         S = __import__('sqlalchemy')
         users_t = __import__('system_database.schema', fromlist=['users']).users
+        filters = [users_t.c.is_deleted == 0]
+        if username and username.strip():
+            filters.append(users_t.c.normalized_username.like(f"%{username.strip().casefold()}%"))
+        if status:
+            filters.append(users_t.c.status == status)
+        if gender:
+            filters.append(users_t.c.gender == gender)
+        if role_code:
+            filters.append(
+                exists(
+                    select(user_roles.c.user_id)
+                    .select_from(user_roles.join(roles, roles.c.id == user_roles.c.role_id))
+                    .where(user_roles.c.user_id == users_t.c.id, roles.c.code == role_code)
+                )
+            )
+        if department_id:
+            scope = select(departments.c.id).where(departments.c.id == department_id).cte(
+                "department_scope", recursive=True
+            )
+            scope = scope.union_all(
+                select(departments.c.id).where(departments.c.parent_id == scope.c.id)
+            )
+            filters.append(
+                exists(
+                    select(user_departments.c.user_id).where(
+                        user_departments.c.user_id == users_t.c.id,
+                        user_departments.c.department_id.in_(select(scope.c.id)),
+                    )
+                )
+            )
         with self.connect() as conn:
-            rows = conn.execute(S.select(users_t).where(users_t.c.is_deleted == 0).order_by(users_t.c.normalized_username)).mappings().all()
-        return [self._user_dict(r) for r in rows]
+            rows = conn.execute(
+                S.select(users_t).where(*filters).order_by(users_t.c.normalized_username)
+            ).mappings().all()
+            return [self._user_dict(row, connection=conn) for row in rows]
 
     def get_user(self, user_id: str, *, connection=None):
         S = __import__('sqlalchemy')
@@ -344,20 +387,20 @@ class IdentityRepository:
             row = conn.execute(S.select(users_t).where(S.and_(users_t.c.id == user_id, users_t.c.is_deleted == 0))).mappings().first()
         return self._user_dict(row, connection=connection) if row else None
 
-    def create_user(self, username: str, display_name: str, password_hash: str, *, created_by_user_id: str = None, connection=None):
+    def create_user(self, username: str, display_name: str, password_hash: str, *, email=None, phone=None, gender="unspecified", created_by_user_id: str = None, connection=None):
         import uuid as _uuid
         S = __import__('sqlalchemy')
         users_t = __import__('system_database.schema', fromlist=['users']).users
         user_id = str(_uuid.uuid4())
         with self.connection_scope(connection) as conn:
-            conn.execute(S.insert(users_t).values(id=user_id, username=username, normalized_username=username.casefold(), display_name=display_name, password_hash=password_hash, created_by_user_id=created_by_user_id))
+            conn.execute(S.insert(users_t).values(id=user_id, username=username, normalized_username=username.casefold(), display_name=display_name, password_hash=password_hash, email=self._normalize_email(email), phone=self._normalize_phone(phone), gender=self._normalize_gender(gender), created_by_user_id=created_by_user_id))
         user = self.get_user(user_id, connection=connection)
         assert user is not None
         return user
 
 
     def update_user(
-        self, user_id, *, display_name=None, status=None, role_ids=None, connection=None
+        self, user_id, *, display_name=None, status=None, role_ids=None, email=_UNSET, phone=_UNSET, gender=_UNSET, connection=None
     ):
         S = __import__('sqlalchemy')
         user_roles_t = __import__('system_database.schema', fromlist=['user_roles']).user_roles
@@ -395,6 +438,12 @@ class IdentityRepository:
                 vals['display_name'] = display_name
             if status is not None:
                 vals['status'] = status
+            if email is not self._UNSET:
+                vals['email'] = self._normalize_email(email)
+            if phone is not self._UNSET:
+                vals['phone'] = self._normalize_phone(phone)
+            if gender is not self._UNSET:
+                vals['gender'] = self._normalize_gender(gender)
             conn.execute(S.update(users_t).where(users_t.c.id == user_id).values(**vals))
             if unique_role_ids is not None:
                 conn.execute(S.delete(user_roles_t).where(user_roles_t.c.user_id == user_id))
@@ -545,8 +594,51 @@ class IdentityRepository:
     def _user_dict(self, row, *, connection=None):
         d = dict(row)
         d['role_codes'] = self.user_role_codes(d['id'], connection=connection)
+        d['departments'] = self.list_user_departments(d['id'], connection=connection)
+        d['primary_department'] = next(
+            (department for department in d['departments'] if department['is_primary']), None
+        )
         d.pop('password_hash', None)
         d.pop('normalized_username', None)
         d.pop('is_deleted', None)
         d.pop('updated_at', None)
         return d
+
+    def list_user_departments(self, user_id: str, *, connection=None) -> list[dict[str, Any]]:
+        with self.connection_scope(connection) as conn:
+            rows = conn.execute(
+                select(
+                    user_departments.c.department_id.label('id'),
+                    departments.c.name,
+                    user_departments.c.is_primary,
+                )
+                .select_from(user_departments.join(departments, departments.c.id == user_departments.c.department_id))
+                .where(user_departments.c.user_id == user_id)
+                .order_by(user_departments.c.is_primary.desc(), departments.c.sort_order, departments.c.name)
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _normalize_email(value: str | None) -> str | None:
+        normalized = (value or '').strip().lower()
+        if not normalized:
+            return None
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", normalized):
+            raise ValueError('邮箱格式无效')
+        return normalized
+
+    @staticmethod
+    def _normalize_phone(value: str | None) -> str | None:
+        normalized = (value or '').strip()
+        if not normalized:
+            return None
+        if not re.fullmatch(r"1[3-9]\d{9}", normalized):
+            raise ValueError('手机号必须为中国大陆 11 位手机号')
+        return normalized
+
+    @staticmethod
+    def _normalize_gender(value: str | None) -> str:
+        normalized = value or 'unspecified'
+        if normalized not in {'unspecified', 'male', 'female'}:
+            raise ValueError('性别值无效')
+        return normalized

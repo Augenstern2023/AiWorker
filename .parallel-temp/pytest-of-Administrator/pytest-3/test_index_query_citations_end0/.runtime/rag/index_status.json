@@ -1,0 +1,18 @@
+{
+  "jobs": {
+    "job-1": {
+      "status": "success",
+      "job_id": "job-1",
+      "platform": "dy",
+      "artifact_count": 2,
+      "document_count": 3,
+      "chunk_count": 3,
+      "skipped": [],
+      "errors": [],
+      "indexed_at": "2026-07-28T03:22:54.606407+00:00"
+    }
+  },
+  "recent_errors": [],
+  "last_indexed_at": "2026-07-28T03:22:54.606407+00:00",
+  "updated_at": "2026-07-28T03:22:54.606407+00:00"
+}

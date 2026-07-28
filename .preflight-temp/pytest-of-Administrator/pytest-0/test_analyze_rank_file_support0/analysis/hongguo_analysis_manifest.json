@@ -1,0 +1,40 @@
+{
+  "rank_file": "D:\\Crawler\\AiWorker\\.preflight-temp\\pytest-of-Administrator\\pytest-0\\test_analyze_rank_file_support0\\rank.json",
+  "output_dir": "D:\\Crawler\\AiWorker\\.preflight-temp\\pytest-of-Administrator\\pytest-0\\test_analyze_rank_file_support0\\analysis",
+  "overview": "D:\\Crawler\\AiWorker\\.preflight-temp\\pytest-of-Administrator\\pytest-0\\test_analyze_rank_file_support0\\analysis\\hongguo_analysis_overview.md",
+  "overview_json": "D:\\Crawler\\AiWorker\\.preflight-temp\\pytest-of-Administrator\\pytest-0\\test_analyze_rank_file_support0\\analysis\\hongguo_llm_overview.json",
+  "overview_llm_error": "",
+  "items": [
+    {
+      "json": "D:\\Crawler\\AiWorker\\.preflight-temp\\pytest-of-Administrator\\pytest-0\\test_analyze_rank_file_support0\\analysis\\01_LLM短剧.json",
+      "markdown": "D:\\Crawler\\AiWorker\\.preflight-temp\\pytest-of-Administrator\\pytest-0\\test_analyze_rank_file_support0\\analysis\\01_LLM短剧.md",
+      "analysis": {
+        "rank": "1",
+        "title": "LLM短剧",
+        "book_id": "",
+        "play_type": "",
+        "library_source": "csv",
+        "category": "红果短剧热播榜",
+        "episode_count": "",
+        "summary": "开局强冲突",
+        "plot_tags": [
+          "红果短剧热播榜"
+        ],
+        "selling_points": [
+          "开局强冲突"
+        ],
+        "episodes_analyzed": [],
+        "media_candidates": [],
+        "subtitle_candidates": [],
+        "downloaded_media": [],
+        "transcript_source": "rank_text",
+        "transcript": "开局强冲突",
+        "llm_analysis": {
+          "genre": "逆袭爽剧"
+        },
+        "llm_error": ""
+      }
+    }
+  ],
+  "manifest": "D:\\Crawler\\AiWorker\\.preflight-temp\\pytest-of-Administrator\\pytest-0\\test_analyze_rank_file_support0\\analysis\\hongguo_analysis_manifest.json"
+}

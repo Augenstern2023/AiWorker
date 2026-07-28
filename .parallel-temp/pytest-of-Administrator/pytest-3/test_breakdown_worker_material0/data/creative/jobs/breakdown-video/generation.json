@@ -1,0 +1,122 @@
+{
+  "job_id": "breakdown-video",
+  "action": "breakdown",
+  "breakdown_id": 2,
+  "topic_id": 1,
+  "coverage": [
+    1
+  ],
+  "generation_meta": {
+    "provider": "test-llm",
+    "repair_attempted": false,
+    "prompt_version": "transcript-breakdown-v1",
+    "coverage": [
+      1
+    ],
+    "transcript_count": 1
+  },
+  "field_sources": {
+    "risk_notes": [
+      {
+        "episode_number": 1,
+        "source_path": "D:\\Crawler\\AiWorker\\.parallel-temp\\pytest-of-Administrator\\pytest-3\\test_breakdown_worker_material0\\data\\hg\\jobs\\job-video\\dramas\\目标剧\\episode_01\\script.md",
+        "excerpt": "苏软穿书后认错顾宴，并被迫与他同行"
+      }
+    ],
+    "core_conflict": [
+      {
+        "episode_number": 1,
+        "source_path": "D:\\Crawler\\AiWorker\\.parallel-temp\\pytest-of-Administrator\\pytest-3\\test_breakdown_worker_material0\\data\\hg\\jobs\\job-video\\dramas\\目标剧\\episode_01\\script.md",
+        "excerpt": "苏软穿书后认错顾宴，并被迫与他同行"
+      }
+    ],
+    "production_difficulty": [
+      {
+        "episode_number": 1,
+        "source_path": "D:\\Crawler\\AiWorker\\.parallel-temp\\pytest-of-Administrator\\pytest-3\\test_breakdown_worker_material0\\data\\hg\\jobs\\job-video\\dramas\\目标剧\\episode_01\\script.md",
+        "excerpt": "苏软穿书后认错顾宴，并被迫与他同行"
+      }
+    ],
+    "selling_points": [
+      {
+        "episode_number": 1,
+        "source_path": "D:\\Crawler\\AiWorker\\.parallel-temp\\pytest-of-Administrator\\pytest-3\\test_breakdown_worker_material0\\data\\hg\\jobs\\job-video\\dramas\\目标剧\\episode_01\\script.md",
+        "excerpt": "苏软穿书后认错顾宴，并被迫与他同行"
+      }
+    ],
+    "resistance_source": [
+      {
+        "episode_number": 1,
+        "source_path": "D:\\Crawler\\AiWorker\\.parallel-temp\\pytest-of-Administrator\\pytest-3\\test_breakdown_worker_material0\\data\\hg\\jobs\\job-video\\dramas\\目标剧\\episode_01\\script.md",
+        "excerpt": "苏软穿书后认错顾宴，并被迫与他同行"
+      }
+    ],
+    "category": [
+      {
+        "episode_number": 1,
+        "source_path": "D:\\Crawler\\AiWorker\\.parallel-temp\\pytest-of-Administrator\\pytest-3\\test_breakdown_worker_material0\\data\\hg\\jobs\\job-video\\dramas\\目标剧\\episode_01\\script.md",
+        "excerpt": "苏软穿书后认错顾宴，并被迫与他同行"
+      }
+    ],
+    "protagonist_identity": [
+      {
+        "episode_number": 1,
+        "source_path": "D:\\Crawler\\AiWorker\\.parallel-temp\\pytest-of-Administrator\\pytest-3\\test_breakdown_worker_material0\\data\\hg\\jobs\\job-video\\dramas\\目标剧\\episode_01\\script.md",
+        "excerpt": "苏软穿书后认错顾宴，并被迫与他同行"
+      }
+    ],
+    "imitable_elements": [
+      {
+        "episode_number": 1,
+        "source_path": "D:\\Crawler\\AiWorker\\.parallel-temp\\pytest-of-Administrator\\pytest-3\\test_breakdown_worker_material0\\data\\hg\\jobs\\job-video\\dramas\\目标剧\\episode_01\\script.md",
+        "excerpt": "苏软穿书后认错顾宴，并被迫与他同行"
+      }
+    ],
+    "hook_points": [
+      {
+        "episode_number": 1,
+        "source_path": "D:\\Crawler\\AiWorker\\.parallel-temp\\pytest-of-Administrator\\pytest-3\\test_breakdown_worker_material0\\data\\hg\\jobs\\job-video\\dramas\\目标剧\\episode_01\\script.md",
+        "excerpt": "苏软穿书后认错顾宴，并被迫与他同行"
+      }
+    ],
+    "comment_resonance": [],
+    "emotional_curve": [
+      {
+        "episode_number": 1,
+        "source_path": "D:\\Crawler\\AiWorker\\.parallel-temp\\pytest-of-Administrator\\pytest-3\\test_breakdown_worker_material0\\data\\hg\\jobs\\job-video\\dramas\\目标剧\\episode_01\\script.md",
+        "excerpt": "苏软穿书后认错顾宴，并被迫与他同行"
+      }
+    ],
+    "title": [
+      {
+        "episode_number": 1,
+        "source_path": "D:\\Crawler\\AiWorker\\.parallel-temp\\pytest-of-Administrator\\pytest-3\\test_breakdown_worker_material0\\data\\hg\\jobs\\job-video\\dramas\\目标剧\\episode_01\\source.json",
+        "excerpt": "目标剧"
+      }
+    ],
+    "one_line_selling_point": [
+      {
+        "episode_number": 1,
+        "source_path": "D:\\Crawler\\AiWorker\\.parallel-temp\\pytest-of-Administrator\\pytest-3\\test_breakdown_worker_material0\\data\\hg\\jobs\\job-video\\dramas\\目标剧\\episode_01\\script.md",
+        "excerpt": "苏软穿书后认错顾宴，并被迫与他同行"
+      }
+    ],
+    "target_audience": [
+      {
+        "episode_number": 1,
+        "source_path": "D:\\Crawler\\AiWorker\\.parallel-temp\\pytest-of-Administrator\\pytest-3\\test_breakdown_worker_material0\\data\\hg\\jobs\\job-video\\dramas\\目标剧\\episode_01\\script.md",
+        "excerpt": "苏软穿书后认错顾宴，并被迫与他同行"
+      }
+    ],
+    "reversal_nodes": [
+      {
+        "episode_number": 1,
+        "source_path": "D:\\Crawler\\AiWorker\\.parallel-temp\\pytest-of-Administrator\\pytest-3\\test_breakdown_worker_material0\\data\\hg\\jobs\\job-video\\dramas\\目标剧\\episode_01\\script.md",
+        "excerpt": "苏软穿书后认错顾宴，并被迫与他同行"
+      }
+    ]
+  },
+  "risks": [
+    "仅覆盖第1集。"
+  ]
+}

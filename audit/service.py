@@ -93,6 +93,19 @@ class AuditService:
         )
         return event_id
 
+    def filter_options(
+        self,
+        *,
+        project_id: str | None = None,
+        target_type: str | None = None,
+        project_ids: set[str] | None = None,
+    ) -> dict[str, list[dict[str, str]]]:
+        return self.repository.filter_options(
+            project_id=project_id,
+            target_type=target_type,
+            project_ids=project_ids,
+        )
+
     def get(self, event_id: str) -> dict[str, Any] | None:
         return self.repository.get(event_id)
 

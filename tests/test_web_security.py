@@ -220,6 +220,11 @@ def test_team_management_api_defers_to_route_level_permissions():
     assert _api_permission("POST", "/api/team/users") is None
 
 
+def test_current_profile_api_relies_on_authenticated_session_not_page_permissions():
+    assert _api_permission("GET", "/api/profile") is None
+    assert _api_permission("PATCH", "/api/profile") is None
+
+
 @pytest.mark.parametrize(
     ("method", "path"),
     [

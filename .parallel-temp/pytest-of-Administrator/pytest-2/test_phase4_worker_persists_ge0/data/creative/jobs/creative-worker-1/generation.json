@@ -1,0 +1,10 @@
+{
+  "job_id": "creative-worker-1",
+  "project_id": 1,
+  "action": "blueprints",
+  "blueprint_ids": [
+    1,
+    2,
+    3
+  ]
+}

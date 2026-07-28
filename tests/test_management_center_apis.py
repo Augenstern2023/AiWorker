@@ -265,10 +265,65 @@ def test_management_pages_include_department_editor_audit_pagination_and_job_lin
     )
 
     assert "department-tree" in departments_html
+    assert 'id="department-submit"' in departments_html
+    assert 'id="department-submit-label">新增<' in departments_html
     assert "/api/admin/users/" in departments_js
     assert "/departments/" in departments_js
+    assert "setEditorMode" in departments_js
     assert "audit-target-type" in audit_html
     assert "audit-pagination" in audit_html
+    assert "<th>操作类型</th>" in audit_html
+    assert '<select class="form-select form-select-sm" id="audit-actor"' in audit_html
+    assert '<select class="form-select form-select-sm" id="audit-project"' in audit_html
+    assert "audit-actor-help" in audit_html
+    assert "/static/js/admin/audit.js?v={{ asset_version }}&audit_ui=2" in audit_html
     assert "/api/admin/audit/" in audit_js
+    assert "/api/admin/audit/filter-options" in audit_js
+    assert "loadFilterOptions" in audit_js
+    assert "project_scope_required" in audit_js
+    assert "请选择一个负责项目" in audit_js
     assert "job_id" in schedules_js
     assert "/api/jobs/" in schedules_js
+
+
+def test_dark_workspace_inputs_keep_audit_filters_legible_and_editable():
+    root = Path(__file__).resolve().parents[1]
+    audit_html = (root / "templates/admin/audit.html").read_text(encoding="utf-8")
+    workspace_css = (root / "static/css/workspaces.css").read_text(encoding="utf-8")
+
+    assert 'type="datetime-local"' in audit_html
+    assert ".form-control::placeholder" in workspace_css
+    assert '.form-control[type="datetime-local"]' in workspace_css
+    assert "color-scheme: dark" in workspace_css
+    assert ".form-text" in workspace_css
+
+
+def test_audit_list_uses_consistent_second_precision_timestamp_display():
+    root = Path(__file__).resolve().parents[1]
+    audit_js = (root / "static/js/admin/audit.js").read_text(encoding="utf-8")
+
+    assert "function formatAuditTimestamp" in audit_js
+    assert "formatAuditTimestamp(event.created_at)" in audit_js
+
+
+def test_user_directory_and_profile_page_include_contact_management_contracts():
+    root = Path(__file__).resolve().parents[1]
+    users_html = (root / "templates/admin/users.html").read_text(encoding="utf-8")
+    users_js = (root / "static/js/admin/users.js").read_text(encoding="utf-8")
+    profile_html = (root / "templates/profile.html").read_text(encoding="utf-8")
+    profile_js = (root / "static/js/profile.js").read_text(encoding="utf-8")
+    profile_css = (root / "static/css/profile.css").read_text(encoding="utf-8")
+    page_router = (root / "web/page_router.py").read_text(encoding="utf-8")
+
+    assert 'id="user-filters"' in users_html
+    assert 'id="user-email"' in users_html
+    assert 'id="export-users-csv"' in users_html
+    assert "/api/admin/users/export" in users_js
+    assert '"/profile"' in page_router
+    assert '"profile.html"' in page_router
+    assert 'id="profile-feedback"' in profile_html
+    assert "profile-toast" in profile_html
+    assert "showFeedback" in profile_js
+    assert "保存成功" in profile_js
+    assert "background: #171a24" in profile_css
+    assert "color: #aeb8cd" in profile_css

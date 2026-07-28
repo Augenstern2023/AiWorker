@@ -18,13 +18,14 @@
 
 """Tests for worker command generation."""
 
+import sys
+
 from runtime.worker_launcher import build_worker_command, build_worker_env
 
 
 def test_build_worker_command():
     assert build_worker_command(".runtime/jobs/job.json") == [
-        "uv",
-        "run",
+        sys.executable,
         "main.py",
         "--job-file",
         ".runtime/jobs/job.json",
@@ -33,9 +34,7 @@ def test_build_worker_command():
 
 def test_build_hongguo_worker_command():
     assert build_worker_command(".runtime/jobs/hg.json", platform="hg") == [
-        "uv",
-        "run",
-        "python",
+        sys.executable,
         "-m",
         "agents.hongguo_csv_worker",
         "--job-file",
@@ -45,9 +44,7 @@ def test_build_hongguo_worker_command():
 
 def test_build_douyin_rank_worker_command():
     assert build_worker_command(".runtime/jobs/dy-rank.json", platform="dy", crawler_type="rank") == [
-        "uv",
-        "run",
-        "python",
+        sys.executable,
         "-m",
         "agents.douyin_rank_worker",
         "--job-file",
@@ -61,9 +58,7 @@ def test_build_creative_phase4_worker_command():
         platform="creative",
         crawler_type="phase4_generate",
     ) == [
-        "uv",
-        "run",
-        "python",
+        sys.executable,
         "-m",
         "creative.phase4_worker",
         "--job-file",
@@ -77,9 +72,7 @@ def test_build_creative_breakdown_worker_command():
         platform="creative",
         crawler_type="breakdown_generate",
     ) == [
-        "uv",
-        "run",
-        "python",
+        sys.executable,
         "-m",
         "creative.breakdown_worker",
         "--job-file",
@@ -93,9 +86,7 @@ def test_build_data_file_operation_worker_command():
         platform="data",
         crawler_type="file_operation",
     ) == [
-        "uv",
-        "run",
-        "python",
+        sys.executable,
         "-m",
         "agents.data_file_operation_worker",
         "--job-file",

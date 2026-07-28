@@ -1,0 +1,12 @@
+{
+  "title": "测试短剧",
+  "book_id": "book-1",
+  "source_platform": "hg",
+  "episode": {
+    "episode": 2,
+    "video_id": "free",
+    "title": "第二集",
+    "is_paid": false,
+    "paid_reason": ""
+  }
+}

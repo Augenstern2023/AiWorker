@@ -28,9 +28,7 @@ class NavigationRepository:
     def seed_catalog(self) -> None:
         with self.database.transaction() as connection:
             for item in NAVIGATION_CATALOG:
-                connection.execute(
-                    postgresql_insert(navigation_items)
-                    .values(
+                statement = postgresql_insert(navigation_items).values(
                         id=item["id"],
                         parent_id=item.get("parent_id"),
                         label=item["label"],
@@ -42,7 +40,17 @@ class NavigationRepository:
                         is_system=True,
                         hide_for_system_admin=item.get("hide_for_system_admin", False),
                     )
-                    .on_conflict_do_nothing(index_elements=[navigation_items.c.id])
+                connection.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=[navigation_items.c.id],
+                        set_={
+                            "parent_id": statement.excluded.parent_id,
+                            "route": statement.excluded.route,
+                            "required_permission": statement.excluded.required_permission,
+                            "is_system": True,
+                            "hide_for_system_admin": statement.excluded.hide_for_system_admin,
+                        },
+                    )
                 )
 
     def list_items(self) -> list[dict[str, Any]]:

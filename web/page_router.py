@@ -96,11 +96,24 @@ def build_page_router(
         route = (
             last_route
             if last_route and navigation_service.can_open(principal, last_route)
-            else navigation_service.default_route(principal)
+            else "/profile"
         )
         if last_route and route != last_route:
             navigation_service.forget_route(principal)
         return RedirectResponse(route, status_code=303)
+
+    @router.get("/profile", response_class=HTMLResponse)
+    def profile(
+        request: Request, principal: Principal = Depends(current_principal)
+    ) -> Response:
+        return _page_response(
+            templates,
+            navigation_service,
+            request,
+            principal,
+            page_title="个人信息",
+            template_name="profile.html",
+        )
 
     @router.get("/tasks", response_class=HTMLResponse)
     def tasks(
@@ -126,6 +139,25 @@ def build_page_router(
         principal: Principal = Depends(require_page("page.writing")),
     ) -> RedirectResponse:
         return RedirectResponse("/tasks", status_code=307)
+
+    @router.get("/admin/audit", response_class=HTMLResponse)
+    def audit_page(
+        request: Request, principal: Principal = Depends(current_principal)
+    ) -> Response:
+        if (
+            not principal.is_system_admin
+            and "audit.read" not in principal.permissions
+            and "audit.read.project" not in principal.permissions
+        ):
+            raise HTTPException(status_code=403, detail="没有执行此操作的权限")
+        return _page_response(
+            templates,
+            navigation_service,
+            request,
+            principal,
+            page_title="审计日志",
+            template_name="admin/audit.html",
+        )
 
     def page_endpoint(page_title: str, permission: str, template_name: str):
         def endpoint(
@@ -156,6 +188,8 @@ def build_page_router(
         )
 
     for route, permission, title in PAGE_ROUTES:
+        if route == "/admin/audit":
+            continue
         router.add_api_route(
             route,
             page_endpoint(title, permission, PAGE_TEMPLATES[route]),

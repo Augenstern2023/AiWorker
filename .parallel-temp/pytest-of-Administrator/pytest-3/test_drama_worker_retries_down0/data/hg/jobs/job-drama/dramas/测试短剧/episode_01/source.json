@@ -1,0 +1,11 @@
+{
+  "title": "测试短剧",
+  "book_id": "book-1",
+  "episode": {
+    "episode": 1,
+    "video_id": "video-1",
+    "title": "第一集",
+    "subtitle_url": ""
+  },
+  "video_url": "https://video.example.test/episode.mp4"
+}

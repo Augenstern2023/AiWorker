@@ -85,14 +85,10 @@ class NavigationService:
                 continue
             items = []
             for item in children_by_parent.get(group["id"], []):
-                if (
-                    principal.is_system_admin
-                    or item["required_permission"] in principal.permissions
-                ):
+                if self._can_open_permission(principal, item["required_permission"]):
                     items.append({"label": item["label"], "route": item["route"]})
             if not items and (
-                principal.is_system_admin
-                or group["required_permission"] in principal.permissions
+                self._can_open_permission(principal, group["required_permission"])
             ):
                 items.append({"label": group["label"], "route": group["route"]})
             if not items:
@@ -158,7 +154,13 @@ class NavigationService:
         permission = self.permission_for(route)
         if permission is None:
             return route == "/tasks"
-        return principal.is_system_admin or permission in principal.permissions
+        return self._can_open_permission(principal, permission)
+
+    @staticmethod
+    def _can_open_permission(principal: Principal, permission: str) -> bool:
+        if principal.is_system_admin or permission in principal.permissions:
+            return True
+        return permission == "audit.read.project" and "audit.read" in principal.permissions
 
     def permission_for(self, route: str) -> str | None:
         path = route.split("?", 1)[0]

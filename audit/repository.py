@@ -169,6 +169,74 @@ class AuditRepository:
         with self.identity_repository.connect() as conn:
             return conn.execute(stmt).scalar_one()
 
+    def filter_options(
+        self,
+        *,
+        project_id: str | None = None,
+        target_type: str | None = None,
+        project_ids: set[str] | None = None,
+    ) -> dict[str, list[dict[str, str]]]:
+        """Return only values already present in audit data for select filters."""
+
+        base_conditions = []
+        if project_ids is not None:
+            base_conditions.append(audit_logs.c.project_id.in_(project_ids))
+        if project_id is not None:
+            base_conditions.append(audit_logs.c.project_id == project_id)
+        if target_type is not None:
+            base_conditions.append(audit_logs.c.target_type == target_type)
+
+        def options_for(column, *, conditions=()) -> list[dict[str, str]]:
+            statement = (
+                select(column.label("value"))
+                .where(column.is_not(None), *conditions)
+                .distinct()
+                .order_by(column)
+            )
+            with self.identity_repository.connect() as connection:
+                rows = connection.execute(statement).mappings().all()
+            return [{"value": str(row["value"]), "label": str(row["value"])} for row in rows]
+
+        actor_display_name = func.coalesce(
+            func.nullif(audit_logs.c.actor_display_name_snapshot, ""),
+            users.c.display_name,
+            audit_logs.c.actor_user_id,
+        ).label("label")
+        actor_statement = (
+            select(
+                audit_logs.c.actor_user_id.label("value"),
+                actor_display_name,
+            )
+            .select_from(
+                audit_logs.outerjoin(users, users.c.id == audit_logs.c.actor_user_id)
+            )
+            .where(audit_logs.c.actor_user_id.is_not(None), *base_conditions)
+            .distinct()
+            .order_by(actor_display_name, audit_logs.c.actor_user_id)
+        )
+        with self.identity_repository.connect() as connection:
+            actor_rows = connection.execute(actor_statement).mappings().all()
+
+        return {
+            "actors": [
+                {
+                    "value": str(row["value"]),
+                    "label": str(row["label"] or row["value"]),
+                }
+                for row in actor_rows
+            ],
+            "projects": options_for(
+                audit_logs.c.project_id, conditions=base_conditions
+            ),
+            "actions": options_for(audit_logs.c.action, conditions=base_conditions),
+            "target_types": options_for(
+                audit_logs.c.target_type, conditions=base_conditions
+            ),
+            "target_ids": options_for(
+                audit_logs.c.target_id, conditions=base_conditions
+            ),
+        }
+
     @staticmethod
     def _build_filters(
         *,

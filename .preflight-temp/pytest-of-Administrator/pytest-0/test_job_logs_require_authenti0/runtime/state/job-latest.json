@@ -1,0 +1,46 @@
+{
+  "job": {
+    "job_id": "job-latest",
+    "platform": "dy",
+    "crawler_type": "rank",
+    "keywords": [],
+    "login_type": "qrcode",
+    "save_data_option": "json",
+    "start_page": 1,
+    "max_notes_count": 200,
+    "max_concurrency": 1,
+    "get_comments": true,
+    "get_sub_comments": false,
+    "headless": false,
+    "auto_close": true,
+    "cdp_debug_port": null,
+    "user_data_dir": null,
+    "project_keyword_map": {},
+    "project_name": "",
+    "specified_ids": [],
+    "creator_ids": [],
+    "cookies": "",
+    "extra": {}
+  },
+  "status": "pending",
+  "pid": null,
+  "return_code": null,
+  "created_at": 1785207312.1379316,
+  "started_at": null,
+  "finished_at": null,
+  "message": "latest log",
+  "progress": {},
+  "events": [
+    {
+      "event": "log",
+      "job_id": "job-latest",
+      "worker_id": "test",
+      "platform": "dy",
+      "level": "info",
+      "message": "latest log",
+      "ts": 1785207312.1379316,
+      "payload": {}
+    }
+  ],
+  "artifacts": []
+}

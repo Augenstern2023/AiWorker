@@ -33,16 +33,23 @@ def build_audit_router(audit_service: AuditService) -> APIRouter:
         audit_service.repository.identity_repository
     )
 
+    def project_scope_for(principal: Principal) -> set[str] | None:
+        if principal.is_system_admin or "audit.read" in principal.permissions:
+            return None
+        if "audit.read.project" not in principal.permissions:
+            raise HTTPException(403, "没有执行此操作的权限")
+        return workflow_repository.list_managed_project_ids(principal)
+
     def assert_can_read_audit(
         principal: Principal, project_id: str | None
     ) -> None:
-        if not principal.is_system_admin and "audit.read" not in principal.permissions:
-            if "audit.read.project" not in principal.permissions or project_id is None:
-                raise HTTPException(403, "没有执行此操作的权限")
-            try:
-                workflow_repository.assert_can_manage_project(project_id, principal)
-            except PermissionError as exc:
-                raise HTTPException(403, "没有访问此项目审计的权限") from exc
+        project_scope = project_scope_for(principal)
+        if project_scope is None:
+            return
+        if project_id is None:
+            raise HTTPException(403, "请选择负责的项目后查看审计日志")
+        if project_id not in project_scope:
+            raise HTTPException(403, "没有访问此项目审计的权限")
 
     def query_filters(
         *,
@@ -104,6 +111,25 @@ def build_audit_router(audit_service: AuditService) -> APIRouter:
         )
         response.headers["X-Total-Count"] = str(audit_service.count(**filters))
         return audit_service.query(**filters)
+
+    @router.get("/api/admin/audit/filter-options")
+    def list_audit_filter_options(
+        project_id: str | None = None,
+        target_type: str | None = None,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        project_scope = project_scope_for(principal)
+        if project_scope is not None and project_id is not None:
+            assert_can_read_audit(principal, project_id)
+        options = audit_service.filter_options(
+            project_id=project_id,
+            target_type=target_type,
+            project_ids=project_scope,
+        )
+        return {
+            **options,
+            "project_scope_required": project_scope is not None,
+        }
 
     @router.get("/api/admin/audit/export")
     def export_audit_events(

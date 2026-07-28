@@ -128,6 +128,29 @@
             color: var(--muted);
             opacity: 1;
         }
+        .form-control::placeholder {
+            color: var(--muted);
+            opacity: 1;
+        }
+        .form-text {
+            color: var(--muted);
+            margin-top: .35rem;
+        }
+        .form-control[type="date"],
+        .form-control[type="datetime-local"],
+        .form-control[type="time"] {
+            color-scheme: dark;
+        }
+        .form-control[type="date"]::-webkit-datetime-edit,
+        .form-control[type="datetime-local"]::-webkit-datetime-edit,
+        .form-control[type="time"]::-webkit-datetime-edit {
+            color: var(--text);
+        }
+        .form-control[type="date"]::-webkit-calendar-picker-indicator,
+        .form-control[type="datetime-local"]::-webkit-calendar-picker-indicator,
+        .form-control[type="time"]::-webkit-calendar-picker-indicator {
+            cursor: pointer;
+        }
         .creative-inline-textarea {
             min-height: 38px;
             line-height: 1.35;

@@ -9,17 +9,26 @@
 
 from __future__ import annotations
 
+import csv
 import uuid
+from io import BytesIO, StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from sqlalchemy import Connection, select, text, update
+from sqlalchemy import Connection, and_, func, insert, select, text, update
 from sqlalchemy.exc import IntegrityError
 
-from system_database.schema import roles as roles_table, user_roles as user_roles_table, users as users_table
+from system_database.schema import (
+    permissions as permissions_table,
+    roles as roles_table,
+    sessions as sessions_table,
+    user_roles as user_roles_table,
+    users as users_table,
+)
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
+from openpyxl import Workbook
 from pydantic import BaseModel, Field
 
 from audit.service import AuditService
@@ -35,6 +44,7 @@ from .schema import (
     RolePermissionRequest,
     RoleUpdateRequest,
     UserCreateRequest,
+    UserProfileUpdateRequest,
     UserUpdateRequest,
 )
 from .session_service import SessionContext, SessionService
@@ -169,50 +179,47 @@ def build_identity_router(
         try:
             with repository.transaction() as connection:
                 role = connection.execute(
-                    "SELECT id FROM roles WHERE code = 'system_admin'"
-                ).fetchone()
+                    select(roles_table.c.id).where(roles_table.c.code == "system_admin")
+                ).mappings().first()
                 if role is None:
                     raise HTTPException(
                         status_code=500, detail="系统管理员角色尚未初始化"
                     )
                 bound_active_admins = connection.execute(
-                    """
-                    SELECT COUNT(DISTINCT u.id)
-                    FROM users AS u
-                    JOIN user_roles AS ur ON ur.user_id = u.id
-                    WHERE u.status = 'active' AND u.is_deleted = 0
-                      AND ur.role_id = ?
-                    """,
-                    (role["id"],),
-                ).fetchone()[0]
+                    select(func.count(func.distinct(users_table.c.id)))
+                    .select_from(
+                        users_table.join(
+                            user_roles_table,
+                            user_roles_table.c.user_id == users_table.c.id,
+                        )
+                    )
+                    .where(
+                        users_table.c.status == "active",
+                        users_table.c.is_deleted == 0,
+                        user_roles_table.c.role_id == role["id"],
+                    )
+                ).scalar_one()
                 if bound_active_admins:
                     setup_already_complete = True
                 else:
                     connection.execute(
-                        """
-                        UPDATE roles
-                        SET is_enabled = 1, updated_at = CURRENT_TIMESTAMP
-                        WHERE id = ?
-                        """,
-                        (role["id"],),
+                        update(roles_table)
+                        .where(roles_table.c.id == role["id"])
+                        .values(is_enabled=1, updated_at=func.now())
                     )
                     connection.execute(
-                        """
-                        INSERT INTO users
-                            (id, username, normalized_username, display_name, password_hash)
-                        VALUES (?, ?, ?, ?, ?)
-                        """,
-                        (
-                            user_id,
-                            username,
-                            username.casefold(),
-                            display_name,
-                            password_hash,
-                        ),
+                        insert(users_table).values(
+                            id=user_id,
+                            username=username,
+                            normalized_username=username.casefold(),
+                            display_name=display_name,
+                            password_hash=password_hash,
+                        )
                     )
                     connection.execute(
-                        "INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)",
-                        (user_id, role["id"]),
+                        insert(user_roles_table).values(
+                            user_id=user_id, role_id=role["id"]
+                        )
                     )
                     response = authenticated_response(
                         user_id,
@@ -308,9 +315,10 @@ def build_identity_router(
         context = session_context(request, require_csrf=True)
         with repository.connect() as connection:
             user = connection.execute(
-                "SELECT password_hash FROM users WHERE id = ?",
-                (context.principal.user_id,),
-            ).fetchone()
+                select(users_table.c.password_hash).where(
+                    users_table.c.id == context.principal.user_id
+                )
+            ).mappings().first()
         if user is None or not password_service.verify(
             user["password_hash"], payload.current_password
         ):
@@ -321,17 +329,19 @@ def build_identity_router(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         with repository.transaction() as connection:
             connection.execute(
-                """
-                UPDATE users
-                SET password_hash = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                """,
-                (new_hash, context.principal.user_id),
+                update(users_table)
+                .where(users_table.c.id == context.principal.user_id)
+                .values(password_hash=new_hash, updated_at=func.now())
             )
             connection.execute(
-                "UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP "
-                "WHERE user_id = ? AND revoked_at IS NULL",
-                (context.principal.user_id,),
+                update(sessions_table)
+                .where(
+                    and_(
+                        sessions_table.c.user_id == context.principal.user_id,
+                        sessions_table.c.revoked_at.is_(None),
+                    )
+                )
+                .values(revoked_at=func.now())
             )
             record_audit(
                 actor=context.principal,
@@ -362,9 +372,144 @@ def build_identity_router(
         session_context(request, require_csrf=True)
         return principal
 
+    @router.get("/api/profile")
+    def get_current_profile(request: Request) -> dict[str, Any]:
+        return _user_response(session_context(request).principal.user_id)
+
+    @router.patch("/api/profile")
+    def update_current_profile(
+        payload: UserProfileUpdateRequest, request: Request
+    ) -> dict[str, Any]:
+        context = session_context(request, require_csrf=True)
+        if not payload.model_fields_set:
+            raise HTTPException(status_code=422, detail="至少提交一项个人资料")
+        try:
+            with repository.transaction() as connection:
+                before = repository.get_user(
+                    context.principal.user_id, connection=connection
+                )
+                assert before is not None
+                repository.update_user(
+                    context.principal.user_id,
+                    email=(payload.email if "email" in payload.model_fields_set else repository._UNSET),
+                    phone=(payload.phone if "phone" in payload.model_fields_set else repository._UNSET),
+                    gender=(payload.gender if "gender" in payload.model_fields_set else repository._UNSET),
+                    connection=connection,
+                )
+                updated = _user_response(
+                    context.principal.user_id, connection=connection
+                )
+                record_audit(
+                    actor=context.principal,
+                    action="user.profile.update",
+                    target_type="user",
+                    target_id=context.principal.user_id,
+                    before=_masked_user_audit_snapshot(before),
+                    after=_masked_user_audit_snapshot(updated),
+                    result="success",
+                    request=request,
+                    connection=connection,
+                )
+        except IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="邮箱或手机号已存在") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return updated
+
     @router.get("/api/admin/users")
-    def list_users(_: Principal = Depends(admin_read)) -> list[dict[str, Any]]:
-        return repository.list_users()
+    def list_users(
+        username: str | None = None,
+        role_code: str | None = None,
+        department_id: str | None = None,
+        gender: str | None = None,
+        status: str | None = None,
+        _: Principal = Depends(admin_read),
+    ) -> list[dict[str, Any]]:
+        return repository.list_users(
+            username=username,
+            role_code=role_code,
+            department_id=department_id,
+            gender=gender,
+            status=status,
+        )
+
+    @router.get("/api/admin/users/export")
+    def export_users(
+        request: Request,
+        format: Literal["csv", "xlsx"] = "csv",
+        username: str | None = None,
+        role_code: str | None = None,
+        department_id: str | None = None,
+        gender: str | None = None,
+        status: str | None = None,
+        principal: Principal = Depends(admin_read),
+    ) -> Response:
+        rows = repository.list_users(
+            username=username,
+            role_code=role_code,
+            department_id=department_id,
+            gender=gender,
+            status=status,
+        )
+        headers = [
+            "用户名", "显示名称", "部门", "邮箱", "手机号", "性别",
+            "创建时间", "状态", "角色",
+        ]
+        gender_labels = {"unspecified": "未填写", "male": "男", "female": "女"}
+        values = [
+            [
+                user["username"],
+                user["display_name"],
+                "、".join(department["name"] for department in user["departments"]) or "-",
+                user.get("email") or "",
+                user.get("phone") or "",
+                gender_labels.get(user.get("gender"), "未填写"),
+                str(user.get("created_at") or ""),
+                "启用" if user.get("status") == "active" else "停用",
+                "、".join(user.get("role_codes") or []),
+            ]
+            for user in rows
+        ]
+        record_audit(
+            actor=principal,
+            action="user.export",
+            target_type="user",
+            target_id=None,
+            before=None,
+            after={"format": format, "exported_count": len(rows)},
+            result="success",
+            request=request,
+        )
+        filename = "用户人员表"
+        if format == "csv":
+            output = StringIO(newline="")
+            writer = csv.writer(output)
+            writer.writerow(headers)
+            writer.writerows(values)
+            return Response(
+                content=("\ufeff" + output.getvalue()).encode("utf-8"),
+                media_type="text/csv; charset=utf-8",
+                headers={
+                    "Content-Disposition": "attachment; filename*=UTF-8''%E7%94%A8%E6%88%B7%E4%BA%BA%E5%91%98%E8%A1%A8.csv"
+                },
+            )
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = filename
+        worksheet.append(headers)
+        for value in values:
+            worksheet.append(value)
+        output = BytesIO()
+        workbook.save(output)
+        return Response(
+            content=output.getvalue(),
+            media_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            headers={
+                "Content-Disposition": "attachment; filename*=UTF-8''%E7%94%A8%E6%88%B7%E4%BA%BA%E5%91%98%E8%A1%A8.xlsx"
+            },
+        )
 
     @router.post("/api/admin/users", status_code=201)
     def create_user(
@@ -386,6 +531,9 @@ def build_identity_router(
                     username,
                     display_name,
                     password_hash,
+                    email=payload.email,
+                    phone=payload.phone,
+                    gender=payload.gender,
                     created_by_user_id=principal.user_id,
                     connection=connection,
                 )
@@ -399,13 +547,13 @@ def build_identity_router(
                     target_type="user",
                     target_id=user["id"],
                     before=None,
-                    after=created,
+                    after=_masked_user_audit_snapshot(created),
                     result="success",
                     request=request,
                     connection=connection,
                 )
         except IntegrityError as exc:
-            raise HTTPException(status_code=409, detail="用户名已存在") from exc
+            raise HTTPException(status_code=409, detail="用户名、邮箱或手机号已存在") from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return created
@@ -431,6 +579,9 @@ def build_identity_router(
                     ),
                     status=payload.status,
                     role_ids=payload.role_ids,
+                    email=(payload.email if "email" in payload.model_fields_set else repository._UNSET),
+                    phone=(payload.phone if "phone" in payload.model_fields_set else repository._UNSET),
+                    gender=(payload.gender if "gender" in payload.model_fields_set else repository._UNSET),
                     connection=connection,
                 )
                 updated = repository.get_user(user_id, connection=connection)
@@ -440,16 +591,19 @@ def build_identity_router(
                     action="user.update",
                     target_type="user",
                     target_id=user_id,
-                    before=before,
-                    after=updated,
+                    before=_masked_user_audit_snapshot(before or {}),
+                    after=_masked_user_audit_snapshot(updated),
                     result="success",
                     request=request,
                     connection=connection,
                 )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="用户不存在") from exc
+        except IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="用户名、邮箱或手机号已存在") from exc
         except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            status_code = 409 if "系统必须至少保留" in str(exc) else 422
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
         return updated
 
     @router.delete("/api/admin/users/{user_id}", status_code=204)
@@ -502,16 +656,19 @@ def build_identity_router(
             if repository.get_user(user_id, connection=connection) is None:
                 raise HTTPException(status_code=404, detail="用户不存在")
             connection.execute(
-                """
-                UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                """,
-                (password_hash, user_id),
+                update(users_table)
+                .where(users_table.c.id == user_id)
+                .values(password_hash=password_hash, updated_at=func.now())
             )
             connection.execute(
-                "UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP "
-                "WHERE user_id = ? AND revoked_at IS NULL",
-                (user_id,),
+                update(sessions_table)
+                .where(
+                    and_(
+                        sessions_table.c.user_id == user_id,
+                        sessions_table.c.revoked_at.is_(None),
+                    )
+                )
+                .values(revoked_at=func.now())
             )
             record_audit(
                 actor=principal,
@@ -793,8 +950,10 @@ def build_identity_router(
     def list_permissions(_: Principal = Depends(admin_read)) -> list[dict[str, Any]]:
         with repository.connect() as connection:
             rows = connection.execute(
-                "SELECT code, label FROM permissions ORDER BY code"
-            ).fetchall()
+                select(permissions_table.c.code, permissions_table.c.label).order_by(
+                    permissions_table.c.code
+                )
+            ).mappings().all()
         return [
             {
                 "code": row["code"],
@@ -822,6 +981,17 @@ def build_identity_router(
         if user is None:
             raise HTTPException(status_code=404, detail="用户不存在")
         return user
+
+    def _masked_user_audit_snapshot(user: dict[str, Any]) -> dict[str, Any]:
+        snapshot = dict(user)
+        email = snapshot.get("email")
+        phone = snapshot.get("phone")
+        if email:
+            local, _, domain = str(email).partition("@")
+            snapshot["email"] = f"{local[:1]}***@{domain}"
+        if phone:
+            snapshot["phone"] = f"*******{str(phone)[-4:]}"
+        return snapshot
 
     def _role_response(
         role: dict[str, Any], *, connection: Connection | None = None
@@ -950,18 +1120,7 @@ def _auth_body(context: SessionContext) -> dict[str, Any]:
 
 
 def _landing_route(permissions: frozenset[str]) -> str:
-    if "*" in permissions:
-        return "/tasks"
-    for permission, route in (
-        ("page.selection", "/selection/dashboard"),
-        ("page.planning", "/planning/projects"),
-        ("page.writing", "/writing/projects"),
-        ("page.review", "/review/tasks"),
-        ("page.admin.delivery", "/admin/deliveries"),
-    ):
-        if permission in permissions:
-            return route
-    return "/tasks"
+    return "/profile"
 
 
 def _read_template(name: str) -> str:

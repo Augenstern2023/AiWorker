@@ -1,0 +1,21 @@
+{
+  "source_platform": "dy",
+  "source": "douyin_fallback",
+  "title": "测试短剧",
+  "fallback_reason": "红果未找到匹配剧目",
+  "items": [
+    {
+      "index": 1,
+      "aweme_id": "aweme-1",
+      "source_url": "https://www.douyin.com/video/aweme-1",
+      "status": "succeeded",
+      "title": "抖音视频",
+      "episode_start": null,
+      "episode_end": null,
+      "episode_count": null,
+      "episode_label": "",
+      "bytes": 5,
+      "script_path": "data\\hg\\jobs\\job-fallback\\dramas\\测试短剧\\douyin_fallback\\item_001_aweme-1\\script.md"
+    }
+  ]
+}

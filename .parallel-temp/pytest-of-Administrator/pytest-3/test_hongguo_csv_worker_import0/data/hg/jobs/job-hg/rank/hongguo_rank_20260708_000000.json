@@ -1,0 +1,30 @@
+{
+  "job_id": "job-hg",
+  "platform": "hg",
+  "captured_at": "2026-07-08 00:00:00",
+  "source": "csv_import",
+  "source_path": "D:\\Crawler\\AiWorker\\.parallel-temp\\pytest-of-Administrator\\pytest-3\\test_hongguo_csv_worker_import0\\exports\\20260708\\top10_rankings.csv",
+  "snapshot_date": "20260708",
+  "rank_type_count": 1,
+  "record_count": 1,
+  "records": [
+    {
+      "榜单类型": "红果短剧热播榜",
+      "排名": "1",
+      "剧名": "今日剧",
+      "标签": "",
+      "简介": "",
+      "评分": "",
+      "分享": "",
+      "点赞": "",
+      "收藏": "",
+      "热度": "",
+      "推荐指数": "",
+      "评分人数": "",
+      "期待指数": "",
+      "热搜指数": "",
+      "最高热度": "",
+      "热评": ""
+    }
+  ]
+}

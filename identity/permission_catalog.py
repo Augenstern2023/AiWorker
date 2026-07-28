@@ -299,7 +299,7 @@ NAVIGATION_CATALOG = (
         "parent_id": "navigation:admin",
         "label": "审计日志",
         "route": "/admin/audit",
-        "required_permission": "*",
+        "required_permission": "audit.read",
         "sort_order": 60,
     },
     {
@@ -446,17 +446,17 @@ DEFAULT_ROLES = (
     RoleSeed(
         code="project_owner",
         name="项目负责人",
-        description="负责项目组织、任务分配和阶段流转。",
+        description="负责项目组织、任务分配、阶段流转与全局审计监督。",
         is_system=True,
         permissions=_scoped(
             """page.review page.team_management project.read.managed project.manage project.member.manage
             project.archive workflow.read.managed workflow.assign workflow.reassign
             workflow.reclaim workflow.cancel version.read.managed version.compare
-            job.read.project audit.read.project page.data_management data.media.preview data.media.delete
+            job.read.project page.data_management data.media.preview data.media.delete
             identity.user.read identity.user.create identity.user.manage_created
             identity.role.read identity.role.create identity.role.manage_created""",
             "managed_projects",
-        ),
+        ) + (("audit.read", "all"),),
     ),
     RoleSeed(
         code="system_admin",

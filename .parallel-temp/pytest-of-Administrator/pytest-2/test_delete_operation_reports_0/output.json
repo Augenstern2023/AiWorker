@@ -1,0 +1,13 @@
+{
+  "operation": "delete",
+  "completed": 2,
+  "total": 0,
+  "succeeded": 1,
+  "failed": 1,
+  "failures": [
+    {
+      "path": "data/missing.json",
+      "message": "文件不存在"
+    }
+  ]
+}

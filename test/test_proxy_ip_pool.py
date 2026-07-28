@@ -22,7 +22,9 @@
 # @Author  : relakkes@gmail.com
 # @Time    : 2023/12/2 14:42
 # @Desc    :
+import os
 import time
+import unittest
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock
 
@@ -30,7 +32,22 @@ from proxy.proxy_ip_pool import create_ip_pool, ProxyIpPool
 from proxy.types import IpInfoModel
 
 
+KDL_CREDENTIAL_ENV_VARS = (
+    "KDL_SECERT_ID",
+    "KDL_SIGNATURE",
+    "KDL_USER_NAME",
+    "KDL_USER_PWD",
+)
+KDL_CREDENTIALS_CONFIGURED = all(os.getenv(name) for name in KDL_CREDENTIAL_ENV_VARS)
+kdl_integration_test = unittest.skipUnless(
+    KDL_CREDENTIALS_CONFIGURED,
+    "快代理外部服务集成测试需要配置 KDL_SECERT_ID、KDL_SIGNATURE、"
+    "KDL_USER_NAME 和 KDL_USER_PWD",
+)
+
+
 class TestIpPool(IsolatedAsyncioTestCase):
+    @kdl_integration_test
     async def test_ip_pool(self):
         pool = await create_ip_pool(ip_pool_count=1, enable_validate_ip=True)
         print("\n")
@@ -39,6 +56,7 @@ class TestIpPool(IsolatedAsyncioTestCase):
             print(ip_proxy_info)
             self.assertIsNotNone(ip_proxy_info.ip, msg="验证 ip 是否获取成功")
 
+    @kdl_integration_test
     async def test_ip_expiration(self):
         """测试IP代理过期检测功能"""
         print("\n=== 开始测试IP代理过期检测 ===")
@@ -91,6 +109,7 @@ class TestIpPool(IsolatedAsyncioTestCase):
 
         print("\n=== IP代理过期检测测试完成 ===")
 
+    @kdl_integration_test
     async def test_proxy_pool_auto_refresh(self):
         """测试代理池自动刷新过期代理的功能"""
         print("\n=== 开始测试代理池自动刷新功能 ===")

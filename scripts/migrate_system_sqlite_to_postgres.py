@@ -12,9 +12,15 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import typer
+
+# Permit ``python scripts/migrate_system_sqlite_to_postgres.py`` from the repo root.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from system_database import SystemDatabase, SystemDatabaseSettings
 from system_database.sqlite_import_cli import execute_import_command

@@ -272,20 +272,18 @@ class AuditRepository:
             "id": row["id"],
             "actor_user_id": row["actor_user_id"],
             "actor_display_name": row["actor_display_name"],
-            "actor_role_snapshot": json.loads(
-                row["actor_role_snapshot_json"] or "[]"
-            ),
+            "actor_role_snapshot": _json_value(row["actor_role_snapshot_json"], []),
             "action": row["action"],
             "target_type": row["target_type"],
             "target_id": row["target_id"],
             "project_id": row["project_id"],
             "before_summary": (
-                json.loads(row["before_summary_json"])
+                _json_value(row["before_summary_json"], None)
                 if row["before_summary_json"] is not None
                 else None
             ),
             "after_summary": (
-                json.loads(row["after_summary_json"])
+                _json_value(row["after_summary_json"], None)
                 if row["after_summary_json"] is not None
                 else None
             ),
@@ -296,3 +294,11 @@ class AuditRepository:
             "result": row["result"],
             "created_at": row["created_at"],
         }
+
+
+def _json_value(value: Any, default: Any) -> Any:
+    if value is None:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    return json.loads(value)

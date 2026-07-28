@@ -116,7 +116,6 @@ WEB_LOG_LEVEL = os.getenv("AIWORKER_WEB_LOG_LEVEL", "INFO").strip().upper()
 WEB_LOG_MAX_BYTES = 5 * 1024 * 1024
 WEB_LOG_BACKUP_COUNT = 5
 WEB_LOG_PATH = WORKSPACE_ROOT / "logs" / "webgui.log"
-SYSTEM_DB_PATH = WORKSPACE_ROOT / ".runtime" / "system" / "system.db"
 UNSAFE_HTTP_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 CSRF_EXEMPT_PATHS = frozenset({"/api/auth/login", "/api/auth/setup"})
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -473,11 +472,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-def _build_runtime_identity_repository() -> tuple[IdentityRepository, SystemDatabase | None]:
-    """Use PostgreSQL whenever the system database URL is configured."""
+def _build_runtime_identity_repository() -> tuple[IdentityRepository, SystemDatabase]:
+    """Build the sole production system-data dependency from PostgreSQL."""
 
     if not os.getenv("AIWORKER_SYSTEM_DATABASE_URL", "").strip():
-        return IdentityRepository(SYSTEM_DB_PATH), None
+        raise RuntimeError("AIWORKER_SYSTEM_DATABASE_URL is required for WebGUI")
     database = SystemDatabase(SystemDatabaseSettings.from_environment())
     if not database.health().schema_current:
         database.dispose()

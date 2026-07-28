@@ -45,8 +45,8 @@ users = Table(
     Column("deleted_at", Text),
     Column("deleted_by_user_id", Text, ForeignKey("users.id", ondelete="SET NULL")),
     Column("last_login_at", Text),
-    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
-    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     CheckConstraint("status IN ('active', 'disabled')", name="ck_users_status"),
     CheckConstraint("is_deleted IN (0, 1)", name="ck_users_is_deleted"),
 )
@@ -173,12 +173,12 @@ sessions = Table(
     Column("user_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
     Column("token_hash", Text, nullable=False, unique=True),
     Column("csrf_token_hash", Text, nullable=False),
-    Column("expires_at", Text, nullable=False),
-    Column("last_seen_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
-    Column("revoked_at", Text),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("last_seen_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("revoked_at", DateTime(timezone=True)),
     Column("user_agent", Text),
     Column("ip_address", Text),
-    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
 project_members = Table(
@@ -260,9 +260,9 @@ workflow_tasks = Table(
         ForeignKey("workflow_tasks.id", ondelete="SET NULL"),
     ),
     Column("status", Text, nullable=False, server_default=text("'pending'")),
-    Column("due_at", Text),
-    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
-    Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("due_at", DateTime(timezone=True)),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
 workflow_task_jobs = Table(
@@ -275,7 +275,7 @@ workflow_task_jobs = Table(
         primary_key=True,
     ),
     Column("job_id", Text, primary_key=True),
-    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
 workflow_task_events = Table(
@@ -292,8 +292,8 @@ workflow_task_events = Table(
     Column("actor_id", Text, ForeignKey("users.id", ondelete="SET NULL")),
     Column("from_status", Text),
     Column("to_status", Text),
-    Column("details_json", Text, nullable=False, server_default=text("'{}'")),
-    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("details_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
 workflow_submissions = Table(
@@ -306,16 +306,16 @@ workflow_submissions = Table(
     Column("version", Integer, nullable=False),
     Column("parent_submission_id", Text),
     Column("status", Text, nullable=False),
-    Column("content_snapshot_json", Text, nullable=False),
+    Column("content_snapshot_json", JSONB, nullable=False),
     Column("content_fingerprint", Text, nullable=False),
     Column("created_by", Text, nullable=False),
     Column("submitted_by", Text),
-    Column("submitted_at", Float),
+    Column("submitted_at", DateTime(timezone=True)),
     Column("reviewed_by", Text),
-    Column("reviewed_at", Float),
+    Column("reviewed_at", DateTime(timezone=True)),
     Column("review_comment", Text, nullable=False, server_default=text("''")),
-    Column("created_at", Float, nullable=False),
-    Column("updated_at", Float, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
     CheckConstraint(
         "status IN ('draft', 'submitted', 'approved', 'returned', 'superseded')",
         name="ck_workflow_submissions_status",
@@ -347,7 +347,7 @@ audit_logs = Table(
     Column("actor_user_id", Text, ForeignKey("users.id", ondelete="SET NULL")),
     Column("actor_display_name_snapshot", Text),
     Column(
-        "actor_role_snapshot_json", Text, nullable=False, server_default=text("'[]'")
+        "actor_role_snapshot_json", JSONB, nullable=False, server_default=text("'[]'::jsonb")
     ),
     Column("action", Text, nullable=False),
     Column("resource_type", Text, nullable=False),
@@ -356,14 +356,14 @@ audit_logs = Table(
     Column("target_id", Text),
     Column("project_id", Text),
     Column("reason", Text),
-    Column("details_json", Text, nullable=False, server_default=text("'{}'")),
-    Column("before_summary_json", Text),
-    Column("after_summary_json", Text),
+    Column("details_json", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("before_summary_json", JSONB),
+    Column("after_summary_json", JSONB),
     Column("request_id", Text),
     Column("ip_address", Text),
     Column("user_agent", Text),
     Column("result", Text, nullable=False, server_default=text("'success'")),
-    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
 workflow_project_member_events = Table(
@@ -374,9 +374,9 @@ workflow_project_member_events = Table(
     Column("membership_id", Text, nullable=False),
     Column("event_type", Text, nullable=False),
     Column("actor_id", Text, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False),
-    Column("before_json", Text),
-    Column("after_json", Text),
-    Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
+    Column("before_json", JSONB),
+    Column("after_json", JSONB),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
 scheduling_definitions = Table(

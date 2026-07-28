@@ -15,7 +15,8 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Text, create_engine, inspect
+from sqlalchemy import DateTime, Text, create_engine, inspect
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import make_url
 
 from system_database.baseline_schema import BASELINE_METADATA
@@ -67,6 +68,21 @@ def test_system_schema_declares_all_shared_tables():
 
 def test_system_schema_keeps_existing_user_ids_as_text():
     assert isinstance(SYSTEM_METADATA.tables["users"].c.id.type, Text)
+
+
+def test_runtime_schema_uses_timestamptz_and_jsonb_for_system_events():
+    sessions = SYSTEM_METADATA.tables["sessions"]
+    audit_logs = SYSTEM_METADATA.tables["audit_logs"]
+    task_events = SYSTEM_METADATA.tables["workflow_task_events"]
+    submissions = SYSTEM_METADATA.tables["workflow_submissions"]
+
+    assert isinstance(sessions.c.expires_at.type, DateTime)
+    assert sessions.c.expires_at.type.timezone is True
+    assert isinstance(audit_logs.c.created_at.type, DateTime)
+    assert audit_logs.c.created_at.type.timezone is True
+    assert isinstance(audit_logs.c.details_json.type, JSONB)
+    assert isinstance(task_events.c.details_json.type, JSONB)
+    assert isinstance(submissions.c.content_snapshot_json.type, JSONB)
 
 
 def test_baseline_table_names_are_immutable():

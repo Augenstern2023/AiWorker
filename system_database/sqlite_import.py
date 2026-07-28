@@ -14,11 +14,12 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
-from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy import DateTime, MetaData, Table, func, select
+from sqlalchemy.dialects.postgresql import JSONB, insert as postgresql_insert
 
 from system_database.database import SystemDatabase
 from system_database.schema import SYSTEM_METADATA
@@ -106,12 +107,8 @@ def import_sqlite_system(
                 if not rows:
                     imported_counts[table_name] = 0
                     continue
-                table = SYSTEM_METADATA.tables[table_name]
-                accepted_columns = set(table.c.keys())
-                values = [
-                    {key: value for key, value in dict(row).items() if key in accepted_columns}
-                    for row in rows
-                ]
+                table = Table(table_name, MetaData(), autoload_with=target_connection)
+                values = [_target_values(dict(row), table) for row in rows]
                 result = target_connection.execute(
                     postgresql_insert(table).values(values).on_conflict_do_nothing()
                 )
@@ -179,6 +176,29 @@ def _primary_key_sample(connection: sqlite3.Connection, table_name: str) -> tupl
 
 def _source_rows(connection: sqlite3.Connection, table_name: str) -> list[sqlite3.Row]:
     return list(connection.execute(f'SELECT * FROM "{table_name}"'))
+
+
+def _target_values(row: dict[str, Any], table: Any) -> dict[str, Any]:
+    """Convert SQLite JSON text and legacy timestamps for PostgreSQL Core types."""
+
+    values: dict[str, Any] = {}
+    for key, value in row.items():
+        if key not in table.c:
+            continue
+        column_type = table.c[key].type
+        if value is not None and isinstance(column_type, JSONB) and isinstance(value, str):
+            value = json.loads(value)
+        if value is not None and isinstance(column_type, DateTime):
+            value = _timestamp_value(value)
+        values[key] = value
+    return values
+
+
+def _timestamp_value(value: Any) -> datetime:
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, UTC)
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
 
 
 def _import_order(source_counts: dict[str, int]) -> tuple[str, ...]:

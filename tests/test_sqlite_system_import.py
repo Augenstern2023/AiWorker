@@ -12,6 +12,7 @@ from __future__ import annotations
 import sqlite3
 import os
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import make_url
 
 from system_database import SystemDatabase, SystemDatabaseSettings
-from system_database.schema import users
+from system_database.schema import users, workflow_instances
 from system_database.sqlite_import import import_sqlite_system, inspect_sqlite_system
 from system_database.sqlite_import_cli import execute_import_command
 
@@ -104,3 +105,48 @@ def test_apply_import_preserves_text_ids_and_does_not_copy_sessions(
         assert connection.execute(select(users.c.id).where(users.c.id == identifier)).scalar_one() == identifier
     assert report.verified is True
     assert report.skipped_session_count == 1
+
+
+def test_apply_import_converts_workflow_instance_timestamps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required for PostgreSQL tests")
+    if make_url(postgres_url).database == "aiworker_system":
+        raise ValueError("tests must not run against the aiworker_system database")
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
+    command.upgrade(Config("alembic.ini"), "head")
+    database = SystemDatabase(SystemDatabaseSettings(postgres_url))
+    identifier = f"workflow:import-{uuid.uuid4()}"
+    source = tmp_path / "legacy-workflow.db"
+    with sqlite3.connect(source) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE workflow_instances (
+                id TEXT PRIMARY KEY,
+                workflow_type TEXT NOT NULL,
+                resource_type TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO workflow_instances VALUES (?, 'brief', 'project', '1', "
+            "'active', '2026-07-23 05:07:20', '2026-07-23 05:07:20')",
+            (identifier,),
+        )
+
+    report = import_sqlite_system(source, database)
+
+    with database.connection() as connection:
+        created_at = connection.execute(
+            select(workflow_instances.c.created_at).where(
+                workflow_instances.c.id == identifier
+            )
+        ).scalar_one()
+    assert created_at.astimezone(UTC) == datetime(2026, 7, 23, 5, 7, 20, tzinfo=UTC)
+    assert report.verified is True

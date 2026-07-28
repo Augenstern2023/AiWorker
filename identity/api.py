@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Connection, select, text
+from sqlalchemy import Connection, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from system_database.schema import roles as roles_table, user_roles as user_roles_table, users as users_table
@@ -234,12 +234,13 @@ def build_identity_router(
         normalized_username = payload.username.strip().casefold()
         with repository.connect() as connection:
             user = connection.execute(
-                """
-                SELECT id, password_hash, status, is_deleted
-                FROM users WHERE normalized_username = :normalized_username
-                """,
-                (normalized_username,),
-            ).fetchone()
+                select(
+                    users_table.c.id,
+                    users_table.c.password_hash,
+                    users_table.c.status,
+                    users_table.c.is_deleted,
+                ).where(users_table.c.normalized_username == normalized_username)
+            ).mappings().first()
         password_hash = user["password_hash"] if user is not None else dummy_password_hash
         password_matches = password_service.verify(password_hash, payload.password)
         if (
@@ -901,8 +902,9 @@ def build_identity_router(
         context = SessionContext(principal=principal, csrf_token=context.csrf_token)
         if update_last_login:
             connection.execute(
-                "UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (user_id,),
+                update(users_table)
+                .where(users_table.c.id == user_id)
+                .values(last_login_at=text("CURRENT_TIMESTAMP"))
             )
         if audit_action is not None:
             record_audit(

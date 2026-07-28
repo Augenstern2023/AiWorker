@@ -17,12 +17,16 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy.engine import make_url
 
 from audit.service import AuditService
 from creative.api import register_creative_routes
+from identity.api import build_identity_router
+from identity.password_service import PasswordService
 from identity.repository import IdentityRepository
 from identity.schema import Principal
+from identity.session_service import SessionService
 from system_database import SystemDatabase, SystemDatabaseSettings
 from workflow.repository import WorkflowRepository
 from workflow.transition_service import TransitionService
@@ -109,3 +113,40 @@ def test_creative_routes_accept_the_postgres_workflow_repository(
     )
 
     assert any(route.path.startswith("/api/creative") for route in app.routes)
+
+
+def test_postgres_login_creates_a_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required for PostgreSQL tests")
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
+    command.upgrade(Config("alembic.ini"), "head")
+    database = SystemDatabase(SystemDatabaseSettings(postgres_url))
+    repository = IdentityRepository(database)
+    repository.seed_defaults()
+    password_service = PasswordService()
+    username = f"login-user-{uuid.uuid4()}"
+    repository.create_user(
+        username,
+        "PostgreSQL Login User",
+        password_service.hash("StrongPassword-123!"),
+    )
+    app = FastAPI()
+    app.include_router(
+        build_identity_router(
+            repository,
+            SessionService(repository),
+            AuditService(repository),
+            password_service=password_service,
+        )
+    )
+
+    response = TestClient(app).post(
+        "/api/auth/login",
+        json={"username": username, "password": "StrongPassword-123!"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["user"]["username"] == username

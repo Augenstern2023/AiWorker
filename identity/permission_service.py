@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Connection
+from sqlalchemy import Connection, and_, select
+
+from system_database.schema import role_permissions, roles, user_roles, users
 
 from .permission_catalog import PERMISSION_DEPENDENCIES
 from .repository import IdentityRepository
@@ -46,25 +48,37 @@ class PermissionService:
     ) -> Principal | None:
         with self.repository.connection_scope(connection) as active_connection:
             user = active_connection.execute(
-                """
-                SELECT id, username, display_name, status, is_deleted
-                FROM users WHERE id = ?
-                """,
-                (user_id,),
-            ).fetchone()
+                select(
+                    users.c.id,
+                    users.c.username,
+                    users.c.display_name,
+                    users.c.status,
+                    users.c.is_deleted,
+                ).where(users.c.id == user_id)
+            ).mappings().first()
             if user is None or user["status"] != "active" or user["is_deleted"]:
                 return None
             rows = active_connection.execute(
-                """
-                SELECT r.code, rp.permission_code, rp.data_scope
-                FROM user_roles AS ur
-                JOIN roles AS r ON r.id = ur.role_id AND r.is_enabled = 1
-                LEFT JOIN role_permissions AS rp ON rp.role_id = r.id
-                WHERE ur.user_id = ?
-                ORDER BY r.code, rp.permission_code
-                """,
-                (user_id,),
-            ).fetchall()
+                select(
+                    roles.c.code,
+                    role_permissions.c.permission_code,
+                    role_permissions.c.data_scope,
+                )
+                .select_from(
+                    user_roles.join(
+                        roles,
+                        and_(
+                            roles.c.id == user_roles.c.role_id,
+                            roles.c.is_enabled == 1,
+                        ),
+                    ).outerjoin(
+                        role_permissions,
+                        role_permissions.c.role_id == roles.c.id,
+                    )
+                )
+                .where(user_roles.c.user_id == user_id)
+                .order_by(roles.c.code, role_permissions.c.permission_code)
+            ).mappings().all()
 
         role_codes = tuple(sorted({row["code"] for row in rows}))
         grants = [

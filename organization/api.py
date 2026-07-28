@@ -153,4 +153,26 @@ def build_organization_router(
         )
         return assignment
 
+    @router.delete(
+        "/api/admin/users/{user_id}/departments/{department_id}", status_code=204
+    )
+    def remove_user_department(
+        user_id: str,
+        department_id: str,
+        principal: Principal = Depends(administrator),
+    ) -> Response:
+        try:
+            assignment = service.remove_user_department(user_id, department_id)
+        except KeyError as exc:
+            raise HTTPException(404, "用户部门归属不存在") from exc
+        record(
+            principal,
+            "organization.user_department.remove",
+            "user_department",
+            f"{user_id}:{department_id}",
+            assignment,
+            None,
+        )
+        return Response(status_code=204)
+
     return router

@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-import sqlite3
+from sqlalchemy import Connection
 
 from .permission_catalog import PERMISSION_DEPENDENCIES
 from .repository import IdentityRepository
@@ -42,7 +42,7 @@ class PermissionService:
         user_id: str,
         session_id: str,
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> Principal | None:
         with self.repository.connection_scope(connection) as active_connection:
             user = active_connection.execute(

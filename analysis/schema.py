@@ -43,4 +43,3 @@ class BilibiliAnalysisResult:
         data = asdict(self)
         data["source"] = "bilibili"
         return data
-

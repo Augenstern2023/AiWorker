@@ -1,5 +1,55 @@
 window.aiworkerModules = window.aiworkerModules || [];
 window.aiworkerModules.push(() => ({
+                dramaReviewStatusLabel() {
+                    return {queued: '等待采集', running: '采集中', completed: '已完成', failed: '失败'}[this.dramaReviews.status] || '未开始';
+                },
+
+                async startDramaReviewCapture() {
+                    const state = this.dramaReviews;
+                    const title = String(state.title || '').trim();
+                    const limit = Number(state.limit || 0);
+                    if (!title) {
+                        state.error = '请输入剧名';
+                        return;
+                    }
+                    if (!state.allReviews && (!Number.isInteger(limit) || limit < 1 || limit > 10000)) {
+                        state.error = '数量限制需为 1 到 10000 的整数';
+                        return;
+                    }
+                    state.loading = true;
+                    state.error = '';
+                    state.items = [];
+                    const topicKey = this.dramaReviewTopicKey(state.topic);
+                    const requestState = {...state};
+                    try {
+                        const endpoint = this.isDouyinDramaReview(state) ? '/api/douyin/reviews/jobs' : '/api/hongguo/reviews/capture';
+                        const payload = this.isDouyinDramaReview(state)
+                            ? {topic_id: state.topic?.id, title, limit, all_reviews: Boolean(state.allReviews)}
+                            : {title, limit, all_reviews: Boolean(state.allReviews)};
+                        const response = await aiworkerApi.request(endpoint, {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify(payload)
+                        });
+                        const data = await this.parseDramaReviewResponse(response);
+                        if (!response.ok) throw new Error(data.detail || data.message || '剧评检索失败');
+                        const jobState = {...requestState, loading: false, polling: false};
+                        this.applyDramaReviewCapture(data, jobState);
+                        await this.pollDramaReviewCapture(jobState);
+                    } catch (error) {
+                        if (this.dramaReviewTopicKey(this.dramaReviews.topic) === topicKey) this.dramaReviews.error = error.message || '剧评检索失败';
+                    } finally {
+                        if (this.dramaReviewTopicKey(this.dramaReviews.topic) === topicKey) this.dramaReviews.loading = false;
+                    }
+                },
+
+                downloadDramaReviews() {
+                    if (!this.dramaReviews.jobId || this.dramaReviews.status !== 'completed') return;
+                    const state = this.dramaReviews;
+                    const root = this.isDouyinDramaReview(state) ? '/api/douyin/reviews/jobs' : '/api/hongguo/reviews/jobs';
+                    window.open(`${root}/${encodeURIComponent(state.jobId)}/download?format=${encodeURIComponent(state.format || 'csv')}`, '_blank', 'noopener');
+                },
+
                 async searchDrama() {
                     const title = this.dramaAnalysis.title.trim();
                     if (!title) return;

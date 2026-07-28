@@ -11,12 +11,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
+from sqlalchemy import Connection, and_, func, or_, select, insert, update, delete, text
 import time
 import uuid
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
+
+from system_database.schema import (
+    workflow_submissions,
+    workflow_tasks,
+)
 
 from identity.repository import IdentityRepository
 from identity.schema import Principal
@@ -42,7 +47,7 @@ class ApprovalService:
         self,
         submission_id: str,
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, Any] | None:
         return self.repository.get_submission(submission_id, connection=connection)
 
@@ -129,13 +134,13 @@ class ApprovalService:
                 else content_snapshot
             )
             now = time.time()
-            cursor = connection.execute(
+            cursor = connection.exec_driver_sql(
                 """
                 UPDATE workflow_submissions
-                SET status = 'submitted', content_snapshot_json = ?,
-                    content_fingerprint = ?, submitted_by = ?, submitted_at = ?,
-                    updated_at = ?
-                WHERE id = ? AND status = 'draft'
+                SET status = 'submitted', content_snapshot_json = %s,
+                    content_fingerprint = %s, submitted_by = %s, submitted_at = %s,
+                    updated_at = %s
+                WHERE id = %s AND status = 'draft'
                 """,
                 (
                     canonical,
@@ -162,7 +167,7 @@ class ApprovalService:
         submission_id: str,
         actor: Principal,
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         actor_id = self.repository._actor_id(actor)
         transaction = (
@@ -181,11 +186,11 @@ class ApprovalService:
             self._assert_reviewer(
                 active_connection, task, live_actor, "version.approve"
             )
-            newer_approved = active_connection.execute(
+            newer_approved = active_connection.exec_driver_sql(
                 """
                 SELECT 1 FROM workflow_submissions
-                WHERE resource_type = ? AND resource_id = ?
-                  AND status = 'approved' AND version > ?
+                WHERE resource_type = %s AND resource_id = %s
+                  AND status = 'approved' AND version > %s
                 LIMIT 1
                 """,
                 (
@@ -197,22 +202,22 @@ class ApprovalService:
             if newer_approved is not None:
                 raise ValueError("a newer approved submission already exists")
             now = time.time()
-            cursor = active_connection.execute(
+            cursor = active_connection.exec_driver_sql(
                 """
                 UPDATE workflow_submissions
-                SET status = 'approved', reviewed_by = ?, reviewed_at = ?,
-                    review_comment = '', updated_at = ?
-                WHERE id = ? AND status = 'submitted'
+                SET status = 'approved', reviewed_by = %s, reviewed_at = %s,
+                    review_comment = '', updated_at = %s
+                WHERE id = %s AND status = 'submitted'
                 """,
                 (actor_id, now, now, submission_id),
             )
             self._assert_updated(cursor)
             after = self._require_submission(active_connection, submission_id)
-            previous_rows = active_connection.execute(
+            previous_rows = active_connection.exec_driver_sql(
                 """
                 SELECT * FROM workflow_submissions
-                WHERE resource_type = ? AND resource_id = ? AND status = 'approved'
-                  AND version < ?
+                WHERE resource_type = %s AND resource_id = %s AND status = 'approved'
+                  AND version < %s
                 ORDER BY version
                 """,
                 (
@@ -223,11 +228,11 @@ class ApprovalService:
             ).fetchall()
             for row in previous_rows:
                 previous = self.repository._submission_dict(row)
-                active_connection.execute(
+                active_connection.exec_driver_sql(
                     """
                     UPDATE workflow_submissions
-                    SET status = 'superseded', updated_at = ?
-                    WHERE id = ? AND status = 'approved'
+                    SET status = 'superseded', updated_at = %s
+                    WHERE id = %s AND status = 'approved'
                     """,
                     (now, previous["id"]),
                 )
@@ -258,7 +263,7 @@ class ApprovalService:
         actor: Principal,
         review_comment: str,
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         comment = review_comment.strip()
         if not comment:
@@ -277,12 +282,12 @@ class ApprovalService:
             task = self.repository._require_task(active_connection, before["task_id"])
             self._assert_reviewer(active_connection, task, live_actor, "version.return")
             now = time.time()
-            cursor = active_connection.execute(
+            cursor = active_connection.exec_driver_sql(
                 """
                 UPDATE workflow_submissions
-                SET status = 'returned', reviewed_by = ?, reviewed_at = ?,
-                    review_comment = ?, updated_at = ?
-                WHERE id = ? AND status = 'submitted'
+                SET status = 'returned', reviewed_by = %s, reviewed_at = %s,
+                    review_comment = %s, updated_at = %s
+                WHERE id = %s AND status = 'submitted'
                 """,
                 (actor_id, now, comment, now, submission_id),
             )
@@ -339,7 +344,7 @@ class ApprovalService:
 
     def _insert_draft(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         *,
         task_id: str,
         resource_type: str,
@@ -348,23 +353,23 @@ class ApprovalService:
         created_by: str,
         parent_submission_id: str | None,
     ) -> dict[str, Any]:
-        version = connection.execute(
+        version = connection.exec_driver_sql(
             """
             SELECT COALESCE(MAX(version), 0) + 1
             FROM workflow_submissions
-            WHERE resource_type = ? AND resource_id = ?
+            WHERE resource_type = %s AND resource_id = %s
             """,
             (resource_type, resource_id),
         ).fetchone()[0]
         now = time.time()
         submission_id = str(uuid.uuid4())
-        connection.execute(
+        connection.exec_driver_sql(
             """
             INSERT INTO workflow_submissions (
                 id, task_id, resource_type, resource_id, version,
                 parent_submission_id, status, content_snapshot_json,
                 content_fingerprint, created_by, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, 'draft', %s, %s, %s, %s, %s)
             """,
             (
                 submission_id,
@@ -384,7 +389,7 @@ class ApprovalService:
 
     def _assert_reviewer(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         task: dict[str, Any],
         actor: dict[str, Any],
         permission: str,
@@ -410,7 +415,7 @@ class ApprovalService:
         )
 
     def _require_submission(
-        self, connection: sqlite3.Connection, submission_id: str
+        self, connection: Connection, submission_id: str
     ) -> dict[str, Any]:
         submission = self.repository.get_submission(
             submission_id, connection=connection
@@ -440,6 +445,6 @@ class ApprovalService:
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def _assert_updated(cursor: sqlite3.Cursor) -> None:
+    def _assert_updated(cursor: Any) -> None:
         if cursor.rowcount != 1:
             raise ValueError("submission state changed concurrently")

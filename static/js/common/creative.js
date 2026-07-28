@@ -876,4 +876,42 @@ window.aiworkerModules.push(() => ({
                     return `/api/creative/projects/${id}/export?stage=${encodeURIComponent(stage)}&format=${encodeURIComponent(format)}`;
                 },
 
+                async resolveSourcePackageWorkflowTask(title) {
+                    const response = await aiworkerApi.request('/api/workflow/tasks');
+                    const tasks = await response.json();
+                    if (!response.ok) throw new Error(tasks.detail || '读取素材包任务失败');
+                    const open = (tasks || []).filter(item =>
+                        item.task_type === 'source_package'
+                        && ['assigned', 'in_progress', 'returned'].includes(item.status)
+                        && item.topic_id
+                    );
+                    const normalizeTitle = value => String(value || '')
+                        .normalize('NFKC')
+                        .toLocaleLowerCase()
+                        .replace(/[^\p{L}\p{N}]/gu, '');
+                    const expectedTitle = normalizeTitle(title);
+                    const candidates = await Promise.all(open.map(async task => {
+                        const topicResponse = await aiworkerApi.request(
+                            `/api/creative/topics/${task.topic_id}`
+                        );
+                        const topic = await topicResponse.json();
+                        return topicResponse.ok && normalizeTitle(topic.title) === expectedTitle
+                            ? {task, topic}
+                            : null;
+                    }));
+                    const match = candidates.find(Boolean)?.task;
+                    if (!match) {
+                        throw new Error('请先在选题库采纳该剧目并领取对应素材包任务');
+                    }
+                    if (['assigned', 'returned'].includes(match.status)) {
+                        const startResponse = await aiworkerApi.request(
+                            `/api/workflow/tasks/${match.id}/start`, {method: 'POST'}
+                        );
+                        const started = await startResponse.json();
+                        if (!startResponse.ok) throw new Error(started.detail || '开始素材包任务失败');
+                        return started;
+                    }
+                    return match;
+                },
+
 }));

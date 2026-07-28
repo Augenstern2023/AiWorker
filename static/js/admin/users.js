@@ -105,6 +105,7 @@
             if (user.can_edit !== false) {
                 group.append(
                     actionButton('bi-pencil', '编辑用户', 'btn-outline-light', () => openUserEditor(user)),
+                    actionButton('bi-diagram-3', '编辑部门归属', 'btn-outline-info', () => { window.location.assign(`/admin/departments?user_id=${encodeURIComponent(user.id)}`); }),
                     actionButton(
                     user.status === 'active' ? 'bi-person-dash' : 'bi-person-check',
                     user.status === 'active' ? '停用用户' : '启用用户',

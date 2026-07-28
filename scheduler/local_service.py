@@ -23,6 +23,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
 from core.job import CrawlJob
+from audit.service import AuditService
 
 
 logger = logging.getLogger("aiworker.scheduler")
@@ -112,6 +113,12 @@ class ScheduleRepository(Protocol):
     def consecutive_failures(self, schedule_id: str) -> int: ...
 
 
+class ScheduleAuditWriter(Protocol):
+    def record(
+        self, *, action: str, target_id: str, after: dict[str, Any], result: str
+    ) -> None: ...
+
+
 class LocalScheduleService:
     """Schedules whitelisted jobs without taking ownership of worker processes."""
 
@@ -120,10 +127,12 @@ class LocalScheduleService:
         repository: ScheduleRepository,
         job_manager: Any,
         scheduler: BackgroundScheduler | None = None,
+        audit_writer: ScheduleAuditWriter | None = None,
     ) -> None:
         self.repository = repository
         self.job_manager = job_manager
         self.scheduler = scheduler or BackgroundScheduler(timezone="Asia/Shanghai")
+        self.audit_writer = audit_writer
         self._started = False
         self._lock = threading.RLock()
 
@@ -176,6 +185,17 @@ class LocalScheduleService:
                     continue
                 self.repository.update_run(
                     run.id, status="cancelled", finished_at=finished_at
+                )
+                self._record_audit(
+                    "schedule.run.cancelled",
+                    run.id,
+                    {
+                        "schedule_id": run.schedule_id,
+                        "run_id": run.id,
+                        "job_id": run.job_id,
+                        "reason": "webgui_shutdown",
+                    },
+                    "success",
                 )
                 cancelled_job_ids.add(run.job_id)
         return cancelled_job_ids
@@ -259,15 +279,38 @@ class LocalScheduleService:
     def _handle_failure(self, run: ScheduleRun, now: datetime) -> None:
         definition = self.repository.get_definition(run.schedule_id)
         message = run.error_summary or "scheduled job failed"
-        self.repository.record_alert(
-            ScheduleAlert(
-                id=str(uuid.uuid4()),
-                schedule_id=run.schedule_id,
-                run_id=run.id,
-                severity="error",
-                message=message,
-                created_at=now,
-            )
+        self._record_audit(
+            "schedule.run.failed",
+            run.id,
+            {
+                "schedule_id": run.schedule_id,
+                "run_id": run.id,
+                "job_id": run.job_id,
+                "attempt": run.attempt,
+                "error_summary": message,
+                "payload": definition.payload,
+            },
+            "failure",
+        )
+        alert = ScheduleAlert(
+            id=str(uuid.uuid4()),
+            schedule_id=run.schedule_id,
+            run_id=run.id,
+            severity="error",
+            message=message,
+            created_at=now,
+        )
+        self.repository.record_alert(alert)
+        self._record_audit(
+            "schedule.alert.created",
+            alert.id,
+            {
+                "schedule_id": alert.schedule_id,
+                "run_id": alert.run_id,
+                "severity": alert.severity,
+                "message": alert.message,
+            },
+            "failure",
         )
         logger.error(
             "Scheduled job failed: schedule_id=%s run_id=%s job_id=%s message=%s",
@@ -278,6 +321,16 @@ class LocalScheduleService:
         )
         if self.repository.consecutive_failures(run.schedule_id) >= 3:
             self.repository.set_definition_enabled(run.schedule_id, False)
+            self._record_audit(
+                "schedule.auto_paused",
+                run.schedule_id,
+                {
+                    "schedule_id": run.schedule_id,
+                    "consecutive_failures": 3,
+                    "reason": "three_consecutive_failures",
+                },
+                "failure",
+            )
             logger.error("Scheduled job paused after repeated failures: schedule_id=%s", run.schedule_id)
             return
         if run.attempt <= definition.max_retries:
@@ -350,5 +403,18 @@ class LocalScheduleService:
 
     @staticmethod
     def _error_summary(job: dict[str, Any]) -> str:
-        message = str(job.get("message") or job.get("error") or "scheduled job failed")
+        raw_message = job.get("message") or job.get("error") or "scheduled job failed"
+        message = str(AuditService._redact(raw_message))
         return message.replace("\n", " ").strip()[:500]
+
+    def _record_audit(
+        self, action: str, target_id: str, after: dict[str, Any], result: str
+    ) -> None:
+        if self.audit_writer is None:
+            return
+        self.audit_writer.record(
+            action=action,
+            target_id=target_id,
+            after=AuditService._redact(after),
+            result=result,
+        )

@@ -137,7 +137,7 @@ class KuaishouCrawler(AbstractCrawler):
             # 设置当前关键词对应的项目列表
             projects = config.PROJECT_KEYWORD_MAP.get(keyword, [])
             project_var.set(projects)
-            
+
             utils.logger.info(
                 f"[KuaishouCrawler.search] Current search keyword: {keyword}, Projects: {projects}"
             )

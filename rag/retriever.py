@@ -32,4 +32,3 @@ class RagRetriever:
     ) -> list[RetrievalResult]:
         vectors = await self.embedding_provider.embed([query])
         return self.vector_store.query(vectors[0], filters=filters or {}, top_k=top_k)
-

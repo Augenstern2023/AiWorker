@@ -1,0 +1,11 @@
+{% extends "layouts/base.html" %}
+
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-3"><div><h3 class="mb-1">组织架构</h3><div class="small text-muted">维护部门树和用户部门归属</div></div><button class="btn btn-outline-secondary btn-sm" id="department-refresh" type="button" title="刷新"><i class="bi bi-arrow-clockwise" aria-hidden="true"></i></button></div>
+<div class="alert alert-danger d-none" id="department-error" role="alert"></div>
+<div class="row g-4">
+    <section class="col-lg-7"><form class="border-bottom pb-3 mb-3" id="department-editor"><input id="department-id" type="hidden"><div class="row g-2 align-items-end"><div class="col-md-4"><label class="form-label" for="department-name">部门名称</label><input class="form-control" id="department-name" maxlength="120" required></div><div class="col-md-4"><label class="form-label" for="department-parent">上级部门</label><select class="form-select" id="department-parent"><option value="">顶级部门</option></select></div><div class="col-md-4 d-flex gap-2"><button class="btn btn-primary" type="submit"><i class="bi bi-save me-1" aria-hidden="true"></i>保存</button><button class="btn btn-outline-secondary d-none" id="department-editor-cancel" type="button" title="取消编辑"><i class="bi bi-x-lg" aria-hidden="true"></i></button></div></div></form><div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>部门</th><th>状态</th><th></th></tr></thead><tbody id="department-tree"><tr><td colspan="3" class="text-center text-muted py-4">正在加载部门...</td></tr></tbody></table></div></section>
+    <section class="col-lg-5 border-start-lg"><h5 class="mb-3">用户部门归属</h5><div class="mb-3"><label class="form-label" for="department-user">用户</label><select class="form-select" id="department-user"></select></div><div id="department-memberships" class="border rounded p-2 mb-3 small text-muted">选择用户后加载部门归属</div><button class="btn btn-primary" id="save-user-departments" type="button"><i class="bi bi-person-check me-1" aria-hidden="true"></i>保存归属</button></section>
+</div>
+{% endblock %}
+{% block scripts %}<script src="/static/js/admin/departments.js?v={{ asset_version }}"></script>{% endblock %}

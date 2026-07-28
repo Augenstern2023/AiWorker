@@ -69,4 +69,3 @@ async def test_save_bytes_writes_arbitrary_media_file(tmp_path):
     file_path = await save_bytes(tmp_path / "123" / "audio.m4s", b"audio")
 
     assert file_path.read_bytes() == b"audio"
-

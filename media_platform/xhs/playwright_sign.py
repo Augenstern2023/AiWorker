@@ -31,12 +31,12 @@ from .xhs_sign import b64_encode, encode_utf8, get_trace_id, mrc
 
 def _build_sign_string(uri: str, data: Optional[Union[Dict, str]] = None, method: str = "POST") -> str:
     """构建待签名字符串
-    
+
     Args:
         uri: API路径
         data: 请求数据
         method: 请求方法 (GET 或 POST)
-        
+
     Returns:
         待签名字符串
     """
@@ -53,7 +53,7 @@ def _build_sign_string(uri: str, data: Optional[Union[Dict, str]] = None, method
         # GET 请求使用查询字符串格式
         if not data or (isinstance(data, dict) and len(data) == 0):
             return uri
-        
+
         if isinstance(data, dict):
             params = []
             for key in data.keys():

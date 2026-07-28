@@ -218,4 +218,3 @@ def _as_list(value: Any) -> list[str]:
 
 def _compact_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
-

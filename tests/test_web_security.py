@@ -21,7 +21,6 @@ from identity.session_service import SessionService
 from identity.password_service import PasswordService
 from identity.permission_service import PermissionService
 from WebGUI import (
-    SYSTEM_DB_PATH,
     app as production_app,
     configure_cors,
     install_security_middleware,
@@ -162,8 +161,7 @@ def test_cors_defaults_to_same_origin_and_uses_explicit_origin_list():
 def test_production_webgui_wires_shared_identity_security_and_routes():
     repository = production_app.state.identity_repository
 
-    assert repository.db_path == SYSTEM_DB_PATH
-    assert SYSTEM_DB_PATH.parts[-3:] == (".runtime", "system", "system.db")
+    assert repository.database.url.get_backend_name() == "postgresql"
     assert isinstance(production_app.state.identity_password_service, PasswordService)
     assert isinstance(production_app.state.identity_session_service, SessionService)
     assert isinstance(production_app.state.identity_permission_service, PermissionService)

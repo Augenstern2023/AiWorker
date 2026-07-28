@@ -188,8 +188,8 @@ window.aiworkerModules.push(() => ({
                     const version = topic.latest_breakdown_version ? ` v${topic.latest_breakdown_version}` : '';
                     if (topic.latest_breakdown_status === 'locked') return `已锁定${version}`;
                     return topic.locked_breakdown_id
-                        ? `草稿${version} · 已有完成版`
-                        : `草稿${version} · 待完成`;
+                        ? `草稿${version} · 已有批准版`
+                        : `草稿${version} · 待提交`;
                 },
 
                 breakdownStatusClass(topic) {

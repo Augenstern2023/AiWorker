@@ -1342,9 +1342,9 @@ def build_creative_router(
         try:
             workflow_task_id = payload.workflow_task_id or ""
             breakdown = repository.get_breakdown(payload.breakdown_id)
-            if breakdown is None or breakdown.get("status") not in {"locked", "approved"}:
+            if breakdown is None or breakdown.get("status") != "approved":
                 raise HTTPException(
-                    409, "project creation requires a completed breakdown"
+                    409, "project creation requires an approved breakdown"
                 )
             task = workflow_repository.get_task(workflow_task_id) if workflow_task_id else None
             project = (

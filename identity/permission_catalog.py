@@ -303,6 +303,16 @@ NAVIGATION_CATALOG = (
         "sort_order": 60,
     },
     {
+        "id": "navigation:admin:departments",
+        "parent_id": "navigation:admin",
+        "label": "组织架构",
+        "icon": "bi-diagram-3",
+        "route": "/admin/departments",
+        "required_permission": "*",
+        "sort_order": 65,
+        "is_system": True,
+    },
+    {
         "id": "navigation:admin:navigation",
         "parent_id": "navigation:admin",
         "label": "导航配置",

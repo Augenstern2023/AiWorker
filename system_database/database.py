@@ -16,7 +16,7 @@ from typing import Iterator
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.engine import Connection, Engine, URL, make_url
 from sqlalchemy.exc import SQLAlchemyError
 
 from system_database.config import SystemDatabaseSettings
@@ -27,6 +27,12 @@ class SystemDatabase:
     def __init__(self, settings: SystemDatabaseSettings) -> None:
         self.settings = settings
         self.engine: Engine = create_engine(settings.url, pool_pre_ping=True)
+
+    @property
+    def url(self) -> URL:
+        """Expose the immutable SQLAlchemy URL without exposing a second engine."""
+
+        return make_url(self.settings.url)
 
     @contextmanager
     def connection(self) -> Iterator[Connection]:

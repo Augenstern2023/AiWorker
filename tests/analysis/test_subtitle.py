@@ -89,4 +89,3 @@ def test_select_subtitle_and_accessors_support_url_variants():
     assert selected is not None
     assert get_subtitle_url(selected) == "//example/zh.json"
     assert get_subtitle_language(selected) == "中文"
-

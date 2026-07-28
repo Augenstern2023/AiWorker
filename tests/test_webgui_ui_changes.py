@@ -213,7 +213,8 @@ def test_draft_breakdowns_are_visible_but_not_project_eligible():
     assert "更新拆解" in html
     assert "继续拆解" not in _source("templates/common/workspace/selection_topics.html")
     breakdowns = _source("static/js/selection/breakdowns.js")
-    assert "Boolean(topic?.locked_breakdown_id)" in breakdowns
+    assert "topicProjectEligible(topic)" in breakdowns
+    assert "return !!topic?.locked_breakdown_id;" in breakdowns
     assert "aiworkerApi.request('/api/creative/topics?status=adopted&limit=500')" in html
     assert ':disabled="!topic.locked_breakdown_id"' in html
     assert 'x-text="creativeTopicOptionLabel(topic)"' in html

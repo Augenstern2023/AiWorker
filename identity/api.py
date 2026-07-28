@@ -9,10 +9,14 @@
 
 from __future__ import annotations
 
-import sqlite3
 import uuid
 from pathlib import Path
 from typing import Any
+
+from sqlalchemy import Connection, select, text
+from sqlalchemy.exc import IntegrityError
+
+from system_database.schema import roles as roles_table, user_roles as user_roles_table, users as users_table
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -104,7 +108,7 @@ def build_identity_router(
         after: Any,
         result: str,
         request: Request,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> None:
         if audit_service is not None:
             audit_service.record(
@@ -165,7 +169,7 @@ def build_identity_router(
         try:
             with repository.transaction() as connection:
                 role = connection.execute(
-                    "SELECT id FROM roles WHERE code = 'system_admin' COLLATE NOCASE"
+                    "SELECT id FROM roles WHERE code = 'system_admin'"
                 ).fetchone()
                 if role is None:
                     raise HTTPException(
@@ -218,7 +222,7 @@ def build_identity_router(
                         audit_action="user.setup",
                         connection=connection,
                     )
-        except sqlite3.IntegrityError as exc:
+        except IntegrityError as exc:
             raise HTTPException(status_code=409, detail="用户名已存在") from exc
         if setup_already_complete:
             raise HTTPException(status_code=409, detail="系统已经完成初始化")
@@ -232,7 +236,7 @@ def build_identity_router(
             user = connection.execute(
                 """
                 SELECT id, password_hash, status, is_deleted
-                FROM users WHERE normalized_username = ? COLLATE NOCASE
+                FROM users WHERE normalized_username = :normalized_username
                 """,
                 (normalized_username,),
             ).fetchone()
@@ -399,7 +403,7 @@ def build_identity_router(
                     request=request,
                     connection=connection,
                 )
-        except sqlite3.IntegrityError as exc:
+        except IntegrityError as exc:
             raise HTTPException(status_code=409, detail="用户名已存在") from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -597,7 +601,7 @@ def build_identity_router(
                     request=request,
                     connection=connection,
                 )
-        except sqlite3.IntegrityError as exc:
+        except IntegrityError as exc:
             raise HTTPException(status_code=409, detail="角色编码已存在") from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -711,7 +715,7 @@ def build_identity_router(
                 )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="角色不存在") from exc
-        except sqlite3.IntegrityError as exc:
+        except IntegrityError as exc:
             raise HTTPException(status_code=409, detail="角色编码已存在") from exc
         return cloned
 
@@ -811,7 +815,7 @@ def build_identity_router(
             )
 
     def _user_response(
-        user_id: str, *, connection: sqlite3.Connection | None = None
+        user_id: str, *, connection: Connection | None = None
     ) -> dict[str, Any]:
         user = repository.get_user(user_id, connection=connection)
         if user is None:
@@ -819,7 +823,7 @@ def build_identity_router(
         return user
 
     def _role_response(
-        role: dict[str, Any], *, connection: sqlite3.Connection | None = None
+        role: dict[str, Any], *, connection: Connection | None = None
     ) -> dict[str, Any]:
         return {
             **role,
@@ -848,7 +852,7 @@ def build_identity_router(
         role_id: str,
         permissions: list[RolePermissionRequest],
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> None:
         role = repository.get_role(role_id, connection=connection)
         if role is None:
@@ -869,7 +873,7 @@ def build_identity_router(
         status_code: int,
         update_last_login: bool,
         audit_action: str | None = None,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> JSONResponse:
         if connection is None:
             with repository.transaction() as atomic_connection:

@@ -23,7 +23,11 @@ from sqlalchemy.engine import make_url
 
 from system_database import SystemDatabase, SystemDatabaseSettings
 from system_database.schema import users, workflow_instances
-from system_database.sqlite_import import import_sqlite_system, inspect_sqlite_system
+from system_database.sqlite_import import (
+    _import_order,
+    import_sqlite_system,
+    inspect_sqlite_system,
+)
 from system_database.sqlite_import_cli import execute_import_command
 
 
@@ -150,3 +154,9 @@ def test_apply_import_converts_workflow_instance_timestamps(
         ).scalar_one()
     assert created_at.astimezone(UTC) == datetime(2026, 7, 23, 5, 7, 20, tzinfo=UTC)
     assert report.verified is True
+
+
+def test_import_order_includes_project_member_events():
+    assert _import_order({"workflow_project_member_events": 1}) == (
+        "workflow_project_member_events",
+    )

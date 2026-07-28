@@ -121,7 +121,8 @@ class TopicLifecycleService:
             episode_count = max(transcript_count, video_count)
             status, project_id = self._resolve_topic(
                 topic,
-                episode_count,
+                transcript_count,
+                video_count,
                 jobs.get(title_key) or set(),
                 projects.get(title_key) or [],
             )
@@ -193,7 +194,8 @@ class TopicLifecycleService:
     def _resolve_topic(
         self,
         topic: dict[str, Any],
-        episode_count: int,
+        transcript_count: int,
+        video_count: int,
         jobs: set[str],
         projects: list[dict[str, Any]],
     ) -> tuple[str, int | None]:
@@ -216,8 +218,10 @@ class TopicLifecycleService:
             ), None
         if "breakdown" in jobs:
             return "pending_breakdown", None
-        if episode_count:
+        if video_count:
             return "pending_breakdown", None
+        if transcript_count:
+            return "downloaded", None
         if "download" in jobs:
             return "pending_download", None
         return "adopted", None

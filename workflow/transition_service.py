@@ -9,11 +9,10 @@
 
 from __future__ import annotations
 
-import sqlite3
 import time
-
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from sqlalchemy import text
 
 from identity.repository import IdentityRepository
 from identity.schema import Principal
@@ -85,7 +84,7 @@ class TransitionService:
             if resource_type == "beats":
                 beats_progress = self.creative_adapter.beats_episode_progress(resource_id)
                 if not beats_progress["complete"]:
-                    connection.execute(
+                    connection.exec_driver_sql(
                         "UPDATE workflow_tasks SET status = 'in_progress', "
                         "updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'completed'",
                         (task_id,),
@@ -133,7 +132,7 @@ class TransitionService:
             return []
         resource_types = ("brief", "characters", "outline", "beats")
         with self.repository.identity_repository.connect() as connection:
-            rows = connection.execute(
+            rows = connection.exec_driver_sql(
                 "SELECT * FROM workflow_submissions WHERE status = 'submitted' "
                 f"AND resource_type IN ({','.join('?' for _ in resource_types)}) "
                 "ORDER BY submitted_at, created_at, id",
@@ -162,7 +161,7 @@ class TransitionService:
                 return
             task = self.repository._require_task(connection, current["task_id"])
             now = time.time()
-            connection.execute(
+            connection.exec_driver_sql(
                 "UPDATE workflow_submissions SET status = 'superseded', updated_at = ? "
                 "WHERE id = ? AND status = 'submitted'",
                 (now, current["id"]),
@@ -191,7 +190,7 @@ class TransitionService:
                     current["resource_id"]
                 )
                 if not beats_progress["complete"]:
-                    connection.execute(
+                    connection.exec_driver_sql(
                         "UPDATE workflow_tasks SET status = 'in_progress', updated_at = CURRENT_TIMESTAMP "
                         "WHERE id = ? AND status = 'completed'",
                         (task["id"],),
@@ -218,7 +217,7 @@ class TransitionService:
 
 
     def _default_creative_adapter(self) -> CreativeWorkflowAdapter | None:
-        system_path = self.repository.identity_repository.db_path
+        system_path = getattr(self.repository.identity_repository, "db_path", None)
         if system_path is None or system_path.parent.name != "system":
             return None
         creative_path = system_path.parent.parent / "creative" / "creative.db"

@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import DateTime, MetaData, Table, func, select
+from sqlalchemy import DateTime, MetaData, Table, func, literal, select
 from sqlalchemy.dialects.postgresql import JSONB, insert as postgresql_insert
 
 from system_database.database import SystemDatabase
@@ -110,9 +110,12 @@ def import_sqlite_system(
                 table = Table(table_name, MetaData(), autoload_with=target_connection)
                 values = [_target_values(dict(row), table) for row in rows]
                 result = target_connection.execute(
-                    postgresql_insert(table).values(values).on_conflict_do_nothing()
+                    postgresql_insert(table)
+                    .values(values)
+                    .on_conflict_do_nothing()
+                    .returning(literal(1))
                 )
-                imported_counts[table_name] = int(result.rowcount or 0)
+                imported_counts[table_name] = len(result.fetchall())
 
     verified = verify_sqlite_import(source_path, database)
     return ImportReport(
@@ -214,6 +217,7 @@ def _import_order(source_counts: dict[str, int]) -> tuple[str, ...]:
         "user_departments",
         "navigation_items",
         "project_members",
+        "workflow_project_member_events",
         "workflow_instances",
         "workflow_tasks",
         "workflow_task_jobs",

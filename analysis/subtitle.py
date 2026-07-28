@@ -83,4 +83,3 @@ def get_subtitle_url(subtitle_item: Dict[str, Any]) -> str:
 
 def get_subtitle_language(subtitle_item: Dict[str, Any]) -> str:
     return subtitle_item.get("lan") or subtitle_item.get("lan_doc") or ""
-

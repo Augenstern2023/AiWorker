@@ -50,6 +50,7 @@ PAGE_TEMPLATES = {
     "/admin/jobs": "admin/jobs.html",
     "/admin/deliveries": "admin/deliveries.html",
     "/admin/audit": "admin/audit.html",
+    "/admin/departments": "admin/departments.html",
     "/admin/navigation": "admin/navigation.html",
     "/admin/schedules": "admin/schedules.html",
 }

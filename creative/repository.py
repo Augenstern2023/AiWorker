@@ -959,7 +959,7 @@ class CreativeRepository:
         if not current:
             return None
         if current["status"] != "draft":
-            raise ValueError("已完成的 Brief 不能原地修改")
+            raise ValueError("已锁定的 Brief 不能原地修改")
         with self._connect() as conn:
             conn.execute(
                 """

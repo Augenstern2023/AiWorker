@@ -5,29 +5,17 @@
 # Repository: https://github.com/NanmiCoder/MediaCrawler
 # GitHub: https://github.com/NanmiCoder
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
-#
 
 from __future__ import annotations
 
 import json
-import sqlite3
 from typing import Any
 
+from sqlalchemy import Connection, and_, func, or_, select
+from sqlalchemy.sql.elements import ColumnClause
+
 from identity.repository import IdentityRepository
-
-
-_AUDIT_COLUMNS = {
-    "actor_user_id": "TEXT REFERENCES users(id) ON DELETE SET NULL",
-    "actor_display_name_snapshot": "TEXT",
-    "actor_role_snapshot_json": "TEXT NOT NULL DEFAULT '[]'",
-    "target_type": "TEXT",
-    "target_id": "TEXT",
-    "before_summary_json": "TEXT",
-    "after_summary_json": "TEXT",
-    "request_id": "TEXT",
-    "user_agent": "TEXT",
-    "result": "TEXT NOT NULL DEFAULT 'success'",
-}
+from system_database.schema import audit_logs, users
 
 
 class AuditRepository:
@@ -35,104 +23,66 @@ class AuditRepository:
 
     def __init__(self, identity_repository: IdentityRepository) -> None:
         self.identity_repository = identity_repository
-        self._migrate_schema()
-
-    def _migrate_schema(self) -> None:
-        if self.identity_repository.is_postgres:
-            return
-        with self.identity_repository.connect() as connection:
-            existing = {
-                row["name"]
-                for row in connection.execute("PRAGMA table_info(audit_logs)")
-            }
-            for column, definition in _AUDIT_COLUMNS.items():
-                if column not in existing:
-                    connection.execute(
-                        f"ALTER TABLE audit_logs ADD COLUMN {column} {definition}"
-                    )
-            connection.execute(
-                "UPDATE audit_logs SET actor_user_id = actor_id "
-                "WHERE actor_user_id IS NULL AND actor_id IS NOT NULL"
-            )
-            connection.execute(
-                """
-                UPDATE audit_logs
-                SET actor_display_name_snapshot = COALESCE(
-                    (SELECT display_name FROM users WHERE users.id = audit_logs.actor_user_id),
-                    actor_user_id
-                )
-                WHERE actor_display_name_snapshot IS NULL
-                  AND actor_user_id IS NOT NULL
-                """
-            )
-            connection.execute(
-                "UPDATE audit_logs SET target_type = resource_type "
-                "WHERE target_type IS NULL"
-            )
-            connection.execute(
-                "UPDATE audit_logs SET target_id = resource_id "
-                "WHERE target_id IS NULL AND resource_id IS NOT NULL"
-            )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_audit_logs_action "
-                "ON audit_logs(action)"
-            )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_audit_logs_actor_user_id "
-                "ON audit_logs(actor_user_id)"
-            )
 
     def insert(
         self,
         event: dict[str, Any],
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> str:
         if connection is not None:
             self._insert(connection, event)
         else:
-            with self.identity_repository.connect() as owned_connection:
-                self._insert(owned_connection, event)
+            with self.identity_repository.connect() as conn:
+                self._insert(conn, event)
         return str(event["id"])
 
     @staticmethod
-    def _insert(connection: sqlite3.Connection, event: dict[str, Any]) -> None:
-        connection.execute(
-            """
-            INSERT INTO audit_logs (
-                id, actor_id, actor_user_id, actor_display_name_snapshot,
-                actor_role_snapshot_json,
-                action, resource_type, target_type, resource_id, target_id,
-                project_id, reason, details_json, before_summary_json,
-                after_summary_json, request_id, ip_address, user_agent,
-                result, created_at
-            ) VALUES (
-                :id, :actor_user_id, :actor_user_id, :actor_display_name_snapshot,
-                :actor_role_snapshot_json, :action, :target_type,
-                :target_type, :target_id, :target_id, :project_id, :reason,
-                '{}', :before_summary_json, :after_summary_json, :request_id,
-                :ip_address, :user_agent, :result, CURRENT_TIMESTAMP
+    def _insert(conn: Connection, event: dict[str, Any]) -> None:
+        conn.execute(
+            audit_logs.insert().values(
+                id=event["id"],
+                actor_id=event["actor_user_id"],
+                actor_user_id=event["actor_user_id"],
+                actor_display_name_snapshot=event["actor_display_name_snapshot"],
+                actor_role_snapshot_json=event["actor_role_snapshot_json"],
+                action=event["action"],
+                resource_type=event["target_type"],
+                target_type=event["target_type"],
+                resource_id=event["target_id"],
+                target_id=event["target_id"],
+                project_id=event["project_id"],
+                reason=event["reason"],
+                details_json="{}",
+                before_summary_json=event["before_summary_json"],
+                after_summary_json=event["after_summary_json"],
+                request_id=event["request_id"],
+                ip_address=event["ip_address"],
+                user_agent=event["user_agent"],
+                result=event["result"],
             )
-            """,
-            event,
         )
 
     def get(self, event_id: str) -> dict[str, Any] | None:
-        with self.identity_repository.connect() as connection:
-            row = connection.execute(
-                """
-                SELECT audit_logs.*,
-                       COALESCE(
-                           NULLIF(audit_logs.actor_display_name_snapshot, ''),
-                           users.display_name,
-                           audit_logs.actor_user_id
-                       ) AS actor_display_name
-                FROM audit_logs
-                LEFT JOIN users ON users.id = audit_logs.actor_user_id
-                WHERE audit_logs.id = ?
-                """,
-                (event_id,),
-            ).fetchone()
+        display_name = func.coalesce(
+            func.nullif(audit_logs.c.actor_display_name_snapshot, ""),
+            users.c.display_name,
+            audit_logs.c.actor_user_id,
+        ).label("actor_display_name")
+        stmt = (
+            select(
+                audit_logs,
+                display_name,
+            )
+            .select_from(
+                audit_logs.outerjoin(
+                    users, users.c.id == audit_logs.c.actor_user_id
+                )
+            )
+            .where(audit_logs.c.id == event_id)
+        )
+        with self.identity_repository.connect() as conn:
+            row = conn.execute(stmt).mappings().first()
         return self._event_dict(row) if row is not None else None
 
     def query(
@@ -150,36 +100,39 @@ class AuditRepository:
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        where, parameters = self._where_clause(
-            actor_user_id=actor_user_id,
-            actor=actor,
-            action=action,
-            target_type=target_type,
-            target_id=target_id,
-            project_id=project_id,
-            result=result,
-            created_from=created_from,
-            created_to=created_to,
+        display_name = func.coalesce(
+            func.nullif(audit_logs.c.actor_display_name_snapshot, ""),
+            users.c.display_name,
+            audit_logs.c.actor_user_id,
+        ).label("actor_display_name")
+        stmt = (
+            select(
+                audit_logs,
+                display_name,
+            )
+            .select_from(
+                audit_logs.outerjoin(
+                    users, users.c.id == audit_logs.c.actor_user_id
+                )
+            )
+            .where(self._build_filters(
+                actor_user_id=actor_user_id,
+                actor=actor,
+                action=action,
+                target_type=target_type,
+                target_id=target_id,
+                project_id=project_id,
+                result=result,
+                created_from=created_from,
+                created_to=created_to,
+            ))
+            .order_by(audit_logs.c.created_at.desc(), audit_logs.c.id.desc())
+            .limit(max(1, min(limit, 500)))
+            .offset(max(0, offset))
         )
-        parameters.extend((max(1, min(limit, 500)), max(0, offset)))
-        with self.identity_repository.connect() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT audit_logs.*,
-                       COALESCE(
-                           NULLIF(audit_logs.actor_display_name_snapshot, ''),
-                           users.display_name,
-                           audit_logs.actor_user_id
-                       ) AS actor_display_name
-                FROM audit_logs
-                LEFT JOIN users ON users.id = audit_logs.actor_user_id
-                {where}
-                ORDER BY audit_logs.created_at DESC, audit_logs.id DESC
-                LIMIT ? OFFSET ?
-                """,
-                parameters,
-            ).fetchall()
-        return [self._event_dict(row) for row in rows]
+        with self.identity_repository.connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._event_dict(r) for r in rows]
 
     def count(
         self,
@@ -194,31 +147,30 @@ class AuditRepository:
         created_from: str | None = None,
         created_to: str | None = None,
     ) -> int:
-        where, parameters = self._where_clause(
-            actor_user_id=actor_user_id,
-            actor=actor,
-            action=action,
-            target_type=target_type,
-            target_id=target_id,
-            project_id=project_id,
-            result=result,
-            created_from=created_from,
-            created_to=created_to,
+        stmt = (
+            select(func.count())
+            .select_from(
+                audit_logs.outerjoin(
+                    users, users.c.id == audit_logs.c.actor_user_id
+                )
+            )
+            .where(self._build_filters(
+                actor_user_id=actor_user_id,
+                actor=actor,
+                action=action,
+                target_type=target_type,
+                target_id=target_id,
+                project_id=project_id,
+                result=result,
+                created_from=created_from,
+                created_to=created_to,
+            ))
         )
-        with self.identity_repository.connect() as connection:
-            row = connection.execute(
-                f"""
-                SELECT COUNT(*)
-                FROM audit_logs
-                LEFT JOIN users ON users.id = audit_logs.actor_user_id
-                {where}
-                """,
-                parameters,
-            ).fetchone()
-        return int(row[0])
+        with self.identity_repository.connect() as conn:
+            return conn.execute(stmt).scalar_one()
 
     @staticmethod
-    def _where_clause(
+    def _build_filters(
         *,
         actor_user_id: str | None,
         actor: str | None,
@@ -229,42 +181,35 @@ class AuditRepository:
         result: str | None,
         created_from: str | None,
         created_to: str | None,
-    ) -> tuple[str, list[Any]]:
-        filters = {
-            "actor_user_id": actor_user_id,
-            "action": action,
-            "target_type": target_type,
-            "target_id": target_id,
-            "project_id": project_id,
-            "result": result,
-        }
-        clauses: list[str] = []
-        parameters: list[Any] = []
-        for column, value in filters.items():
+    ) -> ColumnClause:
+        conditions = []
+        for column_name, value in (
+            ("actor_user_id", actor_user_id),
+            ("action", action),
+            ("target_type", target_type),
+            ("target_id", target_id),
+            ("project_id", project_id),
+            ("result", result),
+        ):
             if value is not None:
-                clauses.append(f"audit_logs.{column} = ?")
-                parameters.append(value)
+                conditions.append(
+                    getattr(audit_logs.c, column_name) == value
+                )
         if actor is not None:
             pattern = f"%{actor}%"
-            clauses.append(
-                """
-                (
-                    audit_logs.actor_user_id = ?
-                    OR audit_logs.actor_display_name_snapshot LIKE ? COLLATE NOCASE
-                    OR users.username LIKE ? COLLATE NOCASE
-                    OR users.display_name LIKE ? COLLATE NOCASE
+            conditions.append(
+                or_(
+                    audit_logs.c.actor_user_id == actor,
+                    audit_logs.c.actor_display_name_snapshot.ilike(pattern),
+                    users.c.username.ilike(pattern),
+                    users.c.display_name.ilike(pattern),
                 )
-                """
             )
-            parameters.extend((actor, pattern, pattern, pattern))
         if created_from is not None:
-            clauses.append("audit_logs.created_at >= ?")
-            parameters.append(created_from)
+            conditions.append(audit_logs.c.created_at >= created_from)
         if created_to is not None:
-            clauses.append("audit_logs.created_at < ?")
-            parameters.append(created_to)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        return where, parameters
+            conditions.append(audit_logs.c.created_at < created_to)
+        return and_(*conditions) if conditions else True
 
     @staticmethod
     def _event_dict(row: Any) -> dict[str, Any]:

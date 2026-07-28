@@ -130,6 +130,28 @@ def test_audit_redacts_secrets_and_records_request_metadata(
     assert event["user_agent"] == "audit-test"
 
 
+def test_audit_redacts_sensitive_key_value_text_inside_error_summaries(
+    audit_service: AuditService, admin: Principal
+):
+    event_id = audit_service.record(
+        actor=admin,
+        action="schedule.run.failed",
+        target_type="schedule",
+        target_id="run:1",
+        before=None,
+        after={"error_summary": "request failed: token=top-secret password: keep-out"},
+        reason=None,
+        result="failure",
+    )
+
+    event = audit_service.get(event_id)
+
+    assert event is not None
+    assert "top-secret" not in event["after_summary"]["error_summary"]
+    assert "keep-out" not in event["after_summary"]["error_summary"]
+    assert "[REDACTED]" in event["after_summary"]["error_summary"]
+
+
 def test_audit_summaries_are_bounded_and_queries_are_filterable(
     audit_service: AuditService, admin: Principal
 ):

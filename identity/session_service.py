@@ -13,12 +13,18 @@ import base64
 import hashlib
 import hmac
 import secrets
-import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Request
+from sqlalchemy import Connection, and_, select, text, update
+
+from system_database.schema import roles as roles_table
+from system_database.schema import role_permissions as role_permissions_table
+from system_database.schema import sessions as sessions_table
+from system_database.schema import user_roles as user_roles_table
+from system_database.schema import users as users_table
 
 from .repository import IdentityRepository
 from .schema import DATA_SCOPE_ORDER, Principal
@@ -54,7 +60,7 @@ class SessionService:
         user_id: str,
         request: Request,
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> tuple[str, str]:
         with self.repository.connection_scope(connection) as active_connection:
             user = active_connection.execute(
@@ -90,7 +96,7 @@ class SessionService:
         self,
         raw_token: str | None,
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> SessionContext | None:
         if not raw_token:
             return None
@@ -181,7 +187,7 @@ class SessionService:
         self,
         raw_token: str,
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> None:
         with self.repository.connection_scope(connection) as active_connection:
             active_connection.execute(
@@ -194,7 +200,7 @@ class SessionService:
         self,
         user_id: str,
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> None:
         with self.repository.connection_scope(connection) as active_connection:
             active_connection.execute(

@@ -79,7 +79,7 @@ class DouyinCsvStoreImplement(AbstractStore):
                 # 如果是秒级时间戳，转换为毫秒
                 if ct < 1000000000000:
                     ct *= 1000
-                
+
                 # 6个月 = 180天
                 six_months_ms = 180 * 24 * 3600 * 1000
                 if current_ts - ct > six_months_ms:
@@ -207,7 +207,7 @@ class DouyinJsonStoreImplement(AbstractStore):
                 # 如果是秒级时间戳，转换为毫秒
                 if ct < 1000000000000:
                     ct *= 1000
-                
+
                 # 6个月 = 180天
                 six_months_ms = 180 * 24 * 3600 * 1000
                 if current_ts - ct > six_months_ms:

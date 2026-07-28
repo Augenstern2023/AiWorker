@@ -161,6 +161,17 @@ def build_audit_router(audit_service: AuditService) -> APIRouter:
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
+    @router.get("/api/admin/audit/{event_id}")
+    def get_audit_event(
+        event_id: str,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        event = audit_service.get(event_id)
+        if event is None:
+            raise HTTPException(404, "审计记录不存在")
+        assert_can_read_audit(principal, event.get("project_id"))
+        return event
+
     return router
 
 

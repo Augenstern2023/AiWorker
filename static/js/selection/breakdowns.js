@@ -25,6 +25,10 @@ window.aiworkerModules.push(() => ({
                     );
                 },
 
+                topicProjectEligible(topic) {
+                    return !!topic?.locked_breakdown_id;
+                },
+
                 async openTopicTranscriptPreview(topic) {
                     this.topicTranscriptPreview = {topic, episodes: [], selectedEpisode: null, loading: true, error: ''};
                     this.topicTranscriptPreviewModal.show();

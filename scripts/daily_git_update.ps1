@@ -7,8 +7,9 @@ $ErrorActionPreference = 'Stop'
 
 $repo = 'D:\Crawler\AiWorker'
 $git = 'C:\Users\Administrator\AppData\Local\Programs\Git\cmd\git.exe'
-$remotes = @('origin', 'gitee-xuanpin')
-$branch = 'main'
+$remotes = @('origin', 'gitee-xuanpin', 'manjuxuanpin')
+$localBranch = 'improve/local-management'
+$targetBranch = 'main'
 $lockName = 'Global\AiWorker-Daily-Git-Update'
 $logDir = Join-Path $repo 'logs\scheduled-git-update'
 $logFile = Join-Path $logDir ((Get-Date -Format 'yyyy-MM-dd') + '.log')
@@ -63,8 +64,8 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw 'Unable to determine current branch'
     }
-    if ($currentBranch -ne $branch) {
-        throw "Expected branch '$branch', found '$currentBranch'; aborting to avoid updating the wrong branch"
+    if ($currentBranch -ne $localBranch) {
+        throw "Expected branch '$localBranch', found '$currentBranch'; aborting to avoid updating the wrong branch"
     }
 
     $status = (& $git -C $repo status --porcelain=v1 --untracked-files=all 2>&1 | Out-String).Trim()
@@ -83,7 +84,7 @@ try {
             if ($LASTEXITCODE -ne 0) {
                 throw "Required Git remote '$remote' is not configured"
             }
-            Write-TaskLog "DRY-RUN push target $remote ($remoteUrl) branch $branch"
+            Write-TaskLog "DRY-RUN push target $remote ($remoteUrl) branch $targetBranch"
         }
         exit 0
     }
@@ -122,17 +123,17 @@ try {
                 throw "Required Git remote '$remote' is not configured"
             }
             Write-TaskLog "SYNC target $remote ($remoteUrl)"
-            Invoke-Git @('fetch', $remote, $branch) | Out-Null
+            Invoke-Git @('fetch', $remote, $targetBranch) | Out-Null
 
-            & $git -C $repo merge-base --is-ancestor "$remote/$branch" 'HEAD' 2>&1 | ForEach-Object { Write-TaskLog "git merge-base $remote/$branch HEAD: $_" }
+            & $git -C $repo merge-base --is-ancestor "$remote/$targetBranch" 'HEAD' 2>&1 | ForEach-Object { Write-TaskLog "git merge-base $remote/$targetBranch HEAD: $_" }
             if ($LASTEXITCODE -ne 0) {
-                throw "Remote '$remote/$branch' is not an ancestor of local HEAD; push aborted to avoid non-fast-forward overwrite"
+                throw "Remote '$remote/$targetBranch' is not an ancestor of local HEAD; push aborted to avoid non-fast-forward overwrite"
             }
 
-            Invoke-Git @('push', $remote, "HEAD:$branch") | Out-Null
-            Write-TaskLog "SUCCESS synchronized $remote/$branch"
+            Invoke-Git @('push', $remote, "HEAD:$targetBranch") | Out-Null
+            Write-TaskLog "SUCCESS synchronized $remote/$targetBranch"
         } catch {
-            $message = "FAILED $remote/$branch - $($_.Exception.Message)"
+            $message = "FAILED $remote/$targetBranch - $($_.Exception.Message)"
             Write-TaskLog $message
             $pushFailures += $message
         }

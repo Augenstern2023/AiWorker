@@ -248,3 +248,27 @@ def test_management_pages_render_safe_navigation_fields_and_schedule_history_con
     assert "/runs" in schedules_js
     assert "/alerts" in schedules_js
     assert "schedule-editor" in (root / "templates/admin/schedules.html").read_text(encoding="utf-8")
+
+
+def test_management_pages_include_department_editor_audit_pagination_and_job_links():
+    root = Path(__file__).resolve().parents[1]
+    departments_html = (root / "templates/admin/departments.html").read_text(
+        encoding="utf-8"
+    )
+    departments_js = (root / "static/js/admin/departments.js").read_text(
+        encoding="utf-8"
+    )
+    audit_html = (root / "templates/admin/audit.html").read_text(encoding="utf-8")
+    audit_js = (root / "static/js/admin/audit.js").read_text(encoding="utf-8")
+    schedules_js = (root / "static/js/admin/schedules.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "department-tree" in departments_html
+    assert "/api/admin/users/" in departments_js
+    assert "/departments/" in departments_js
+    assert "audit-target-type" in audit_html
+    assert "audit-pagination" in audit_html
+    assert "/api/admin/audit/" in audit_js
+    assert "job_id" in schedules_js
+    assert "/api/jobs/" in schedules_js

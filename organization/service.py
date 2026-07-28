@@ -190,7 +190,48 @@ class DepartmentService:
                     departments.c.id,
                 )
             ).mappings()
-            return [dict(row) for row in rows]
+        return [dict(row) for row in rows]
+
+    def remove_user_department(
+        self, user_id: str, department_id: str
+    ) -> dict[str, Any]:
+        """Remove one membership and keep a remaining membership primary."""
+
+        with self.database.transaction() as connection:
+            assignment = connection.execute(
+                select(user_departments).where(
+                    user_departments.c.user_id == user_id,
+                    user_departments.c.department_id == department_id,
+                )
+            ).mappings().one_or_none()
+            if assignment is None:
+                raise KeyError(f"{user_id}:{department_id}")
+            connection.execute(
+                delete(user_departments).where(
+                    user_departments.c.user_id == user_id,
+                    user_departments.c.department_id == department_id,
+                )
+            )
+            if assignment["is_primary"]:
+                replacement = connection.execute(
+                    select(user_departments.c.department_id)
+                    .where(user_departments.c.user_id == user_id)
+                    .order_by(
+                        user_departments.c.created_at,
+                        user_departments.c.department_id,
+                    )
+                    .limit(1)
+                ).scalar_one_or_none()
+                if replacement is not None:
+                    connection.execute(
+                        update(user_departments)
+                        .where(
+                            user_departments.c.user_id == user_id,
+                            user_departments.c.department_id == replacement,
+                        )
+                        .values(is_primary=True)
+                    )
+        return dict(assignment)
 
     def list_project_member_roles(self, project_id: str) -> list[dict[str, Any]]:
         with self.database.connection() as connection:

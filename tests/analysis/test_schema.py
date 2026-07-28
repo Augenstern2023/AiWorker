@@ -37,4 +37,3 @@ def test_bilibili_analysis_result_to_dict_includes_source_and_defaults():
     assert data["key_points"] == []
     assert data["tags"] == []
     assert data["analysis"] == {}
-

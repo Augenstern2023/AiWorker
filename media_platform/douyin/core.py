@@ -83,7 +83,7 @@ class DouYinCrawler(AbstractCrawler):
             return
 
         utils.logger.info("[DouYinCrawler] 开始执行视频标题筛选流程...")
-        
+
         # Load filter configs for each project
         project_configs = {}
         try:
@@ -106,39 +106,39 @@ class DouYinCrawler(AbstractCrawler):
             return
 
         api_url = f"{config.FILTER_HOST.rstrip('/')}/api/filter_video_titles"
-        
+
         for project_name, items in collected_items.items():
             filter_config = project_configs.get(project_name)
             if not filter_config:
                 utils.logger.warning(f"[DouYinCrawler] 未找到项目 {project_name} 的筛选配置，跳过筛选")
                 continue
-                
+
             utils.logger.info(f"[DouYinCrawler] 正在筛选项目 {project_name} 的视频，共 {len(items)} 条")
-            
+
             items_to_check = []
             indices_to_check = []
-            
+
             for i, item in enumerate(items):
                 if "pass" not in item:
                     items_to_check.append(item)
                     indices_to_check.append(i)
-            
+
             if not items_to_check:
                 continue
-                
+
             # Batch process
             batch_size = 10
             for i in range(0, len(items_to_check), batch_size):
                 batch_items = items_to_check[i:i+batch_size]
                 batch_indices = indices_to_check[i:i+batch_size]
-                
+
                 titles = [item.get("title", "") or item.get("desc", "") for item in batch_items]
-                
+
                 payload = {
                     "titles": titles,
                     "filter_config": filter_config
                 }
-                
+
                 try:
                     async with httpx.AsyncClient() as client:
                         resp = await client.post(api_url, json=payload, timeout=30)
@@ -157,36 +157,36 @@ class DouYinCrawler(AbstractCrawler):
                             utils.logger.error(f"[DouYinCrawler] 筛选接口HTTP错误: {resp.status_code}")
                 except Exception as e:
                     utils.logger.error(f"[DouYinCrawler] 筛选请求异常: {e}")
-                    
+
             # After updating items in memory, update the file
             await self.update_project_file_status(project_name, items)
-            
+
     async def update_project_file_status(self, project_name: str, raw_items: List[Dict]):
         """Update the JSON file for a specific project with pass status"""
         from tools.utils import utils
         import aiofiles
-        
+
         # Create a map of aweme_id -> pass status from raw items
         status_map = {}
         for item in raw_items:
             if "pass" in item:
                 status_map[item.get("aweme_id")] = item.get("pass")
-        
+
         if not status_map:
             return
 
         date_str = utils.get_current_date()
         c_type = crawler_type_var.get()
         file_path = f"data/douyin/json/{c_type}_contents_{date_str}.json"
-        
+
         if not os.path.exists(file_path):
             return
-            
+
         try:
             async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
                 content = await f.read()
                 data = json.loads(content)
-                
+
             updated = False
             if isinstance(data, dict):
                 project_items = data.get(project_name, [])
@@ -195,13 +195,13 @@ class DouYinCrawler(AbstractCrawler):
                     if aid in status_map:
                         item["pass"] = status_map[aid]
                         updated = True
-            
+
             if updated:
                 async with aiofiles.open(file_path, 'w', encoding='utf-8') as f:
                     await f.write(json.dumps(data, ensure_ascii=False, indent=4))
-                    
+
                 utils.logger.info(f"[DouYinCrawler] 已更新项目 {project_name} 的文件数据(pass状态)")
-            
+
         except Exception as e:
             utils.logger.error(f"[DouYinCrawler] 更新文件失败: {e}")
 
@@ -216,7 +216,7 @@ class DouYinCrawler(AbstractCrawler):
                     # 兼容data.json可能为列表的情况
                     if isinstance(data_config, list) and len(data_config) > 0:
                         data_config = data_config[0]
-                    
+
                     if isinstance(data_config, dict):
                         val = data_config.get("sleep")
                         if isinstance(val, int):
@@ -256,7 +256,7 @@ class DouYinCrawler(AbstractCrawler):
                 await self.browser_context.add_init_script(path="libs/stealth.min.js")
 
             self.context_page = await self.browser_context.new_page()
-            
+
             # 如果有cookie，先添加到浏览器上下文
             if config.COOKIES:
                 utils.logger.info("[DouYinCrawler] 检测到cookie，正在添加到浏览器上下文...")
@@ -268,7 +268,7 @@ class DouYinCrawler(AbstractCrawler):
                         'path': "/"
                     }])
                 utils.logger.info("[DouYinCrawler] cookie添加完成")
-            
+
             await self.context_page.goto(self.index_url)
 
             self.dy_client = await self.create_douyin_client(httpx_proxy_format)
@@ -304,12 +304,12 @@ class DouYinCrawler(AbstractCrawler):
         for keyword in config.KEYWORDS.split(","):
             # Dictionary to store collected items by project for filtering (scoped to keyword)
             collected_data: Dict[str, List[Dict]] = {}
-            
+
             source_keyword_var.set(keyword)
             # 设置当前关键词对应的项目列表
             projects = config.PROJECT_KEYWORD_MAP.get(keyword, [])
             project_var.set(projects)
-            
+
             utils.logger.info(f"[DouYinCrawler.search] Current keyword: {keyword}, Projects: {projects}")
             aweme_list: List[str] = []
             page = 0
@@ -352,47 +352,47 @@ class DouYinCrawler(AbstractCrawler):
                     messagebox.showwarning("账号受限", "账号可能被风控或未登录。\n请在浏览器中切换账号或完成验证，然后点击确定继续。")
                     root.destroy()
                     continue # 继续重试当前页或下一页
-                
+
                 dy_search_id = posts_res.get("extra", {}).get("logid", "")
                 for post_item in posts_res.get("data"):
                     try:
                         aweme_info: Dict = (post_item.get("aweme_info") or post_item.get("aweme_mix_info", {}).get("mix_items")[0])
                     except TypeError:
                         continue
-                    
+
                     aweme_list.append(aweme_info.get("aweme_id", ""))
-                    
+
                     # Store for filtering
                     for p in projects:
                         if p not in collected_data: collected_data[p] = []
                         collected_data[p].append(aweme_info)
-                        
+
                     await douyin_store.update_douyin_aweme(aweme_item=aweme_info)
-                    
+
                     if not config.VIDEO_FILTER:
                         await self.get_aweme_media(aweme_item=aweme_info)
-                        
+
                 # Sleep after each page navigation
                 await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
                 utils.logger.info(f"[DouYinCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
-            
+
             # Filter process
             if config.VIDEO_FILTER:
                 await self.filter_video_titles(collected_data)
-                
+
                 passed_ids = set()
-                processed_ids = set() 
-                
+                processed_ids = set()
+
                 for p, items in collected_data.items():
                     for item in items:
                         if item.get("pass"):
                             aid = item.get("aweme_id")
                             passed_ids.add(aid)
-                            
+
                             if config.ENABLE_GET_MEIDAS and aid not in processed_ids:
                                 await self.get_aweme_media(aweme_item=item)
                                 processed_ids.add(aid)
-                
+
                 # Filter aweme_list for comments crawling
                 aweme_list = [aid for aid in aweme_list if aid in passed_ids]
 
@@ -408,7 +408,7 @@ class DouYinCrawler(AbstractCrawler):
                         # 兼容data.json可能为列表的情况
                         if isinstance(data_config, list) and len(data_config) > 0:
                             data_config = data_config[0]
-                        
+
                         if isinstance(data_config, dict):
                             sleep_seconds = data_config.get("sleep", 0)
                             if isinstance(sleep_seconds, int) and sleep_seconds > 0:

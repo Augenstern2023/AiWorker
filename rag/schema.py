@@ -147,4 +147,3 @@ class IndexResult(BaseModel):
     skipped: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     indexed_at: str = Field(default_factory=utc_now_iso)
-

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 # Copyright (c) 2025 relakkes@gmail.com
 #
 # This file is part of MediaCrawler project.
@@ -9,19 +9,31 @@
 
 from __future__ import annotations
 
+from sqlalchemy import Connection, and_, func, or_, select, insert, update, delete, text
 import json
-import sqlite3
 import time
 import uuid
 from contextlib import nullcontext
-from pathlib import Path
-from typing import Any
 
 from identity.repository import IdentityRepository
 from identity.schema import DATA_SCOPE_ORDER, Principal
 
-from .state_machine import WorkflowStateMachine
+from system_database.schema import (
+    project_members,
+    role_claimable_task_types,
+    role_permissions,
+    roles,
+    user_roles,
+    users,
+    workflow_instances,
+    workflow_project_member_events,
+    workflow_submissions,
+    workflow_task_events,
+    workflow_task_jobs,
+    workflow_tasks,
+)
 
+from .state_machine import WorkflowStateMachine
 
 OWNER_PROJECT_ROLES = frozenset({"owner", "project_owner"})
 _MANAGED_PROJECT_ROLES = OWNER_PROJECT_ROLES | frozenset(
@@ -37,21 +49,7 @@ SYSTEM_ACTOR = Principal(
     session_id="workflow:system",
 )
 
-_PROJECT_MEMBER_EVENTS_SQL = """
-CREATE TABLE IF NOT EXISTS workflow_project_member_events (
-    id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    membership_id TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    actor_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-    before_json TEXT,
-    after_json TEXT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_workflow_project_member_events_project
-ON workflow_project_member_events(project_id, created_at);
-"""
-
+# PG schema managed by Alembic
 
 class WorkflowRepository:
     def __init__(
@@ -65,9 +63,7 @@ class WorkflowRepository:
             else IdentityRepository(repository)
         )
         self.state_machine = state_machine or WorkflowStateMachine()
-        if not self.identity_repository.is_postgres:
-            with self.identity_repository.connect() as connection:
-                connection.executescript(_PROJECT_MEMBER_EVENTS_SQL)
+        # Schema managed by Alembic
 
     def create_task(
         self,
@@ -84,10 +80,10 @@ class WorkflowRepository:
         actor_id = self._actor_id(actor)
         with self.identity_repository.transaction() as connection:
             self._ensure_system_actor(connection, actor_id)
-            role = connection.execute(
-                "SELECT 1 FROM roles WHERE code = ? COLLATE NOCASE AND is_enabled = 1",
+            role = connection.exec_driver_sql(
+                "SELECT 1 FROM roles WHERE code = %s  AND is_enabled = 1",
                 (role_code,),
-            ).fetchone()
+            ).mappings().fetchone()
             if role is None:
                 raise ValueError(f"unknown or disabled role: {role_code}")
             self._ensure_workflow(
@@ -98,12 +94,12 @@ class WorkflowRepository:
                 topic_id,
                 actor_id,
             )
-            connection.execute(
+            connection.exec_driver_sql(
                 """
                 INSERT INTO workflow_tasks
                     (id, workflow_id, task_type, role_code, topic_id, project_id,
                      assignee_id, assigned_by, status, due_at)
-                VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 'pool', ?)
+                VALUES (%s, %s, %s, %s, %s, %s, NULL, NULL, 'pool', %s)
                 """,
                 (
                     task_id,
@@ -144,40 +140,40 @@ class WorkflowRepository:
         workflow_id = f"topic:{topic_id}"
         actor_id = self._actor_id(actor)
         with self.identity_repository.transaction() as connection:
-            existing = connection.execute(
+            existing = connection.exec_driver_sql(
                 """
                 SELECT * FROM workflow_tasks
-                WHERE workflow_id = ? AND task_type = ? AND topic_id = ?
+                WHERE workflow_id = %s AND task_type = %s AND topic_id = %s
                 ORDER BY created_at, id LIMIT 1
                 """,
                 (workflow_id, task_type, topic_id),
-            ).fetchone()
+            ).mappings().fetchone()
             if existing is not None:
                 if project_id is not None and existing["project_id"] != project_id:
-                    connection.execute(
-                        "UPDATE workflow_instances SET project_id = ?, resource_type = 'project', "
-                        "resource_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    connection.exec_driver_sql(
+                        "UPDATE workflow_instances SET project_id = %s, resource_type = 'project', "
+                        "resource_id = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
                         (project_id, project_id, workflow_id),
                     )
-                    connection.execute(
-                        "UPDATE workflow_tasks SET project_id = ?, updated_at = CURRENT_TIMESTAMP "
-                        "WHERE workflow_id = ? AND project_id IS NULL",
+                    connection.exec_driver_sql(
+                        "UPDATE workflow_tasks SET project_id = %s, updated_at = CURRENT_TIMESTAMP "
+                        "WHERE workflow_id = %s AND project_id IS NULL",
                         (project_id, workflow_id),
                     )
-                    existing = connection.execute(
-                        "SELECT * FROM workflow_tasks WHERE id = ?", (existing["id"],)
-                    ).fetchone()
+                    existing = connection.exec_driver_sql(
+                        "SELECT * FROM workflow_tasks WHERE id = %s", (existing["id"],)
+                    ).mappings().fetchone()
                 return self._task_dict(existing)
             self._ensure_workflow(
                 connection, workflow_id, task_type, project_id, topic_id, actor_id
             )
             task_id = str(uuid.uuid4())
-            connection.execute(
+            connection.exec_driver_sql(
                 """
                 INSERT INTO workflow_tasks
                     (id, workflow_id, task_type, role_code, topic_id, project_id,
                      assignee_id, assigned_by, status, due_at)
-                VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 'pool', NULL)
+                VALUES (%s, %s, %s, %s, %s, %s, NULL, NULL, 'pool', NULL)
                 """,
                 (task_id, workflow_id, task_type, role_code, topic_id, project_id),
             )
@@ -205,14 +201,14 @@ class WorkflowRepository:
         actor_id = self._actor_id(actor)
         with self.identity_repository.transaction() as connection:
             self._ensure_system_actor(connection, actor_id)
-            existing = connection.execute(
+            existing = connection.exec_driver_sql(
                 """
                 SELECT * FROM workflow_tasks
-                WHERE workflow_id = ? AND task_type = ? AND project_id = ?
+                WHERE workflow_id = %s AND task_type = %s AND project_id = %s
                 ORDER BY created_at, id LIMIT 1
                 """,
                 (workflow_id, task_type, project_id),
-            ).fetchone()
+            ).mappings().fetchone()
             if existing is not None:
                 return self._task_dict(existing)
             self._ensure_workflow(
@@ -223,20 +219,20 @@ class WorkflowRepository:
                 topic_id,
                 actor_id,
             )
-            role = connection.execute(
-                "SELECT 1 FROM roles WHERE code = ? COLLATE NOCASE "
+            role = connection.exec_driver_sql(
+                "SELECT 1 FROM roles WHERE code = %s  "
                 "AND is_enabled = 1 AND is_deleted = 0",
                 (role_code,),
-            ).fetchone()
+            ).mappings().fetchone()
             if role is None:
                 raise ValueError(f"unknown or disabled role: {role_code}")
             task_id = str(uuid.uuid4())
-            connection.execute(
+            connection.exec_driver_sql(
                 """
                 INSERT INTO workflow_tasks
                     (id, workflow_id, task_type, role_code, topic_id, project_id,
                      assignee_id, assigned_by, status, due_at)
-                VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 'pool', NULL)
+                VALUES (%s, %s, %s, %s, %s, %s, NULL, NULL, 'pool', NULL)
                 """,
                 (
                     task_id,
@@ -261,8 +257,8 @@ class WorkflowRepository:
     def link_task_job(self, task_id: str, job_id: str) -> None:
         with self.identity_repository.transaction() as connection:
             self._require_task(connection, task_id)
-            connection.execute(
-                "INSERT OR IGNORE INTO workflow_task_jobs (task_id, job_id) VALUES (?, ?)",
+            connection.exec_driver_sql(
+                "INSERT INTO workflow_task_jobs (task_id, job_id) VALUES (%s, %s)",
                 (task_id, job_id),
             )
 
@@ -279,42 +275,42 @@ class WorkflowRepository:
                 raise ValueError("workflow task is already linked to another project")
             self._live_actor(connection, creator_id)
             self._ensure_system_actor(connection, SYSTEM_ACTOR.user_id)
-            connection.execute(
-                "UPDATE workflow_instances SET project_id = ?, resource_type = 'project', "
-                "resource_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            connection.exec_driver_sql(
+                "UPDATE workflow_instances SET project_id = %s, resource_type = 'project', "
+                "resource_id = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
                 (project_id, project_id, task["workflow_id"]),
             )
-            connection.execute(
-                "UPDATE workflow_tasks SET project_id = ?, updated_at = CURRENT_TIMESTAMP "
-                "WHERE workflow_id = ? AND project_id IS NULL",
+            connection.exec_driver_sql(
+                "UPDATE workflow_tasks SET project_id = %s, updated_at = CURRENT_TIMESTAMP "
+                "WHERE workflow_id = %s AND project_id IS NULL",
                 (project_id, task["workflow_id"]),
             )
             members = {creator_id: task["role_code"]}
-            reviewers = connection.execute(
+            reviewers = connection.exec_driver_sql(
                 """
                 SELECT DISTINCT s.reviewed_by
                 FROM workflow_submissions s
                 JOIN workflow_tasks t ON t.id = s.task_id
-                WHERE t.workflow_id = ? AND s.reviewed_by IS NOT NULL
+                WHERE t.workflow_id = %s AND s.reviewed_by IS NOT NULL
                 """,
                 (task["workflow_id"],),
-            ).fetchall()
+            ).mappings().fetchall()
             for reviewer in reviewers:
                 members.setdefault(str(reviewer["reviewed_by"]), "project_owner")
             for user_id, project_role in members.items():
-                existing = connection.execute(
-                    "SELECT * FROM project_members WHERE project_id = ? "
-                    "AND user_id = ? AND project_role = ?",
+                existing = connection.exec_driver_sql(
+                    "SELECT * FROM project_members WHERE project_id = %s "
+                    "AND user_id = %s AND project_role = %s",
                     (project_id, user_id, project_role),
-                ).fetchone()
+                ).mappings().fetchone()
                 if existing is not None:
                     continue
                 membership_id = str(uuid.uuid4())
-                connection.execute(
+                connection.exec_driver_sql(
                     """
                     INSERT INTO project_members
                         (id, project_id, user_id, project_role, status, added_by)
-                    VALUES (?, ?, ?, ?, 'active', ?)
+                    VALUES (%s, %s, %s, %s, 'active', %s)
                     """,
                     (
                         membership_id,
@@ -324,10 +320,10 @@ class WorkflowRepository:
                         SYSTEM_ACTOR.user_id,
                     ),
                 )
-                member = connection.execute(
-                    "SELECT * FROM project_members WHERE id = ?",
+                member = connection.exec_driver_sql(
+                    "SELECT * FROM project_members WHERE id = %s",
                     (membership_id,),
-                ).fetchone()
+                ).mappings().fetchone()
                 assert member is not None
                 self._record_project_member_event(
                     connection,
@@ -343,36 +339,36 @@ class WorkflowRepository:
     def list_task_job_ids(self, task_id: str) -> list[str]:
         with self.identity_repository.connect() as connection:
             self._require_task(connection, task_id)
-            rows = connection.execute(
+            rows = connection.exec_driver_sql(
                 "SELECT job_id FROM workflow_task_jobs "
-                "WHERE task_id = ? ORDER BY created_at, job_id",
+                "WHERE task_id = %s ORDER BY created_at, job_id",
                 (task_id,),
-            ).fetchall()
+            ).mappings().fetchall()
         return [str(row["job_id"]) for row in rows]
 
     def get_submission(
         self,
         submission_id: str,
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, Any] | None:
         with self.identity_repository.connection_scope(connection) as active_connection:
-            row = active_connection.execute(
-                "SELECT * FROM workflow_submissions WHERE id = ?",
+            row = active_connection.exec_driver_sql(
+                "SELECT * FROM workflow_submissions WHERE id = %s",
                 (submission_id,),
-            ).fetchone()
+            ).mappings().fetchone()
         return self._submission_dict(row) if row is not None else None
 
     def list_task_submissions(self, task_id: str) -> list[dict[str, Any]]:
         with self.identity_repository.connect() as connection:
             self._require_task(connection, task_id)
-            rows = connection.execute(
+            rows = connection.exec_driver_sql(
                 """
                 SELECT * FROM workflow_submissions
-                WHERE task_id = ? ORDER BY version, created_at, id
+                WHERE task_id = %s ORDER BY version, created_at, id
                 """,
                 (task_id,),
-            ).fetchall()
+            ).mappings().fetchall()
         return [self._submission_dict(row) for row in rows]
 
     def get_latest_resource_submission(
@@ -380,31 +376,31 @@ class WorkflowRepository:
         resource_type: str,
         resource_id: str,
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, Any] | None:
         with self.identity_repository.connection_scope(connection) as active_connection:
-            row = active_connection.execute(
+            row = active_connection.exec_driver_sql(
                 """
                 SELECT * FROM workflow_submissions
-                WHERE resource_type = ? AND resource_id = ?
+                WHERE resource_type = %s AND resource_id = %s
                 ORDER BY version DESC, created_at DESC, id DESC LIMIT 1
                 """,
                 (resource_type, resource_id),
-            ).fetchone()
+            ).mappings().fetchone()
         return self._submission_dict(row) if row is not None else None
 
     def list_approved_submissions(
         self, resource_type: str
     ) -> list[dict[str, Any]]:
         with self.identity_repository.connect() as connection:
-            rows = connection.execute(
+            rows = connection.exec_driver_sql(
                 """
                 SELECT * FROM workflow_submissions
-                WHERE resource_type = ? AND status = 'approved'
+                WHERE resource_type = %s AND status = 'approved'
                 ORDER BY reviewed_at DESC, id DESC
                 """,
                 (resource_type,),
-            ).fetchall()
+            ).mappings().fetchall()
         return [self._submission_dict(row) for row in rows]
 
     def update_submission_resource_id(
@@ -412,12 +408,12 @@ class WorkflowRepository:
         submission_id: str,
         resource_id: str,
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         with self.identity_repository.connection_scope(connection) as active_connection:
-            cursor = active_connection.execute(
-                "UPDATE workflow_submissions SET resource_id = ?, updated_at = CURRENT_TIMESTAMP "
-                "WHERE id = ? AND status = 'draft'",
+            cursor = active_connection.exec_driver_sql(
+                "UPDATE workflow_submissions SET resource_id = %s, updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = %s AND status = 'draft'",
                 (resource_id, submission_id),
             )
             if cursor.rowcount != 1:
@@ -467,15 +463,15 @@ class WorkflowRepository:
         actor: Principal,
     ) -> None:
         with self.identity_repository.transaction() as connection:
-            rows = connection.execute(
-                "SELECT * FROM workflow_submissions WHERE resource_type = ? "
-                "AND resource_id = ? AND status = 'approved'",
+            rows = connection.exec_driver_sql(
+                "SELECT * FROM workflow_submissions WHERE resource_type = %s "
+                "AND resource_id = %s AND status = 'approved'",
                 (resource_type, resource_id),
-            ).fetchall()
+            ).mappings().fetchall()
             for row in rows:
                 before = self._submission_dict(row)
-                connection.execute(
-                    "UPDATE workflow_submissions SET status = 'superseded', updated_at = ? WHERE id = ?",
+                connection.exec_driver_sql(
+                    "UPDATE workflow_submissions SET status = 'superseded', updated_at = %s WHERE id = %s",
                     (time.time(), before["id"]),
                 )
                 after = self.get_submission(before["id"], connection=connection)
@@ -496,7 +492,7 @@ class WorkflowRepository:
         role_code: str,
         *,
         actor: Principal | dict[str, Any],
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         actor_id = self._actor_id(actor)
         transaction = (
@@ -508,34 +504,34 @@ class WorkflowRepository:
             predecessor = self._require_task(
                 active_connection, predecessor_task_id
             )
-            existing = active_connection.execute(
+            existing = active_connection.exec_driver_sql(
                 """
                 SELECT * FROM workflow_tasks
-                WHERE workflow_id = ? AND task_type = ?
-                  AND predecessor_task_id = ?
+                WHERE workflow_id = %s AND task_type = %s
+                  AND predecessor_task_id = %s
                 """,
                 (
                     predecessor["workflow_id"],
                     task_type,
                     predecessor_task_id,
                 ),
-            ).fetchone()
+            ).mappings().fetchone()
             if existing is not None:
                 return self._task_dict(existing)
             self._ensure_system_actor(active_connection, actor_id)
-            role = active_connection.execute(
-                "SELECT 1 FROM roles WHERE code = ? COLLATE NOCASE AND is_enabled = 1",
+            role = active_connection.exec_driver_sql(
+                "SELECT 1 FROM roles WHERE code = %s  AND is_enabled = 1",
                 (role_code,),
-            ).fetchone()
+            ).mappings().fetchone()
             if role is None:
                 raise ValueError(f"unknown or disabled role: {role_code}")
             task_id = str(uuid.uuid4())
-            active_connection.execute(
+            active_connection.exec_driver_sql(
                 """
                 INSERT INTO workflow_tasks
                     (id, workflow_id, task_type, role_code, topic_id, project_id,
                      assignee_id, assigned_by, predecessor_task_id, status, due_at)
-                VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, 'pool', NULL)
+                VALUES (%s, %s, %s, %s, %s, %s, NULL, NULL, %s, 'pool', NULL)
                 """,
                 (
                     task_id,
@@ -568,7 +564,7 @@ class WorkflowRepository:
         action: str,
         actor: Principal | dict[str, Any],
         *,
-        connection: sqlite3.Connection,
+        connection: Connection,
         assignee_user_id: str | None = None,
         details: dict[str, Any] | None = None,
         event_type: str | None = None,
@@ -581,21 +577,21 @@ class WorkflowRepository:
         transition_actor.update(authorization_context or {})
         to_status = self.state_machine.transition(task, action, transition_actor)
         if assignee_user_id is None:
-            cursor = connection.execute(
+            cursor = connection.exec_driver_sql(
                 """
-                UPDATE workflow_tasks SET status = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND status = ?
+                UPDATE workflow_tasks SET status = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND status = %s
                 """,
                 (to_status, task_id, task["status"]),
             )
         else:
             self._live_actor(connection, assignee_user_id)
-            cursor = connection.execute(
+            cursor = connection.exec_driver_sql(
                 """
                 UPDATE workflow_tasks
-                SET status = ?, assignee_id = ?, assigned_by = ?,
+                SET status = %s, assignee_id = %s, assigned_by = %s,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND status = ?
+                WHERE id = %s AND status = %s
                 """,
                 (to_status, assignee_user_id, actor_id, task_id, task["status"]),
             )
@@ -622,7 +618,7 @@ class WorkflowRepository:
         event_type: str,
         actor: Principal | dict[str, Any],
         *,
-        connection: sqlite3.Connection,
+        connection: Connection,
         details: dict[str, Any],
     ) -> None:
         actor_id = self._actor_id(actor)
@@ -648,16 +644,16 @@ class WorkflowRepository:
         with self.identity_repository.connect() as connection:
             live_actor = self._live_actor(connection, actor_id)
             if live_actor["is_system_admin"]:
-                rows = connection.execute(
+                rows = connection.exec_driver_sql(
                     "SELECT * FROM workflow_tasks ORDER BY created_at, id"
-                ).fetchall()
+                ).mappings().fetchall()
             else:
                 role_codes = live_actor["role_codes"]
                 managed_projects = self._managed_project_ids(connection, actor_id)
                 assigned_projects = self._assigned_project_ids(connection, actor_id)
-                rows = connection.execute(
+                rows = connection.exec_driver_sql(
                     "SELECT * FROM workflow_tasks ORDER BY created_at, id"
-                ).fetchall()
+                ).mappings().fetchall()
                 rows = [
                     row
                     for row in rows
@@ -696,16 +692,16 @@ class WorkflowRepository:
     ) -> list[dict[str, Any]]:
         actor_id = self._actor_id(actor)
         with self.identity_repository.connect() as connection:
-            rows = connection.execute(
+            rows = connection.exec_driver_sql(
                 """
                 SELECT s.*, t.task_type, t.project_id, t.role_code
                 FROM workflow_submissions s
                 JOIN workflow_tasks t ON s.task_id = t.id
-                WHERE s.created_by = ?
+                WHERE s.created_by = %s
                 ORDER BY s.created_at DESC
                 """,
                 (actor_id,),
-            ).fetchall()
+            ).mappings().fetchall()
         return [self._submission_dict(row) for row in rows]
 
     def can_claim_task(
@@ -765,12 +761,12 @@ class WorkflowRepository:
             ):
                 raise PermissionError("actor must be an active project member")
             to_status = self.state_machine.transition(task, "claim", live_actor)
-            cursor = connection.execute(
+            cursor = connection.exec_driver_sql(
                 """
                 UPDATE workflow_tasks
-                SET assignee_id = ?, assigned_by = ?, status = ?,
+                SET assignee_id = %s, assigned_by = %s, status = %s,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND status = 'pool' AND assignee_id IS NULL
+                WHERE id = %s AND status = 'pool' AND assignee_id IS NULL
                 """,
                 (actor_id, actor_id, to_status, task_id),
             )
@@ -812,10 +808,10 @@ class WorkflowRepository:
             task = self._require_task(connection, task_id)
             live_actor = self._live_actor(connection, actor_id)
             to_status = self.state_machine.transition(task, "start", live_actor)
-            connection.execute(
+            connection.exec_driver_sql(
                 """
-                UPDATE workflow_tasks SET status = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND status = ?
+                UPDATE workflow_tasks SET status = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND status = %s
                 """,
                 (to_status, task_id, task["status"]),
             )
@@ -839,10 +835,10 @@ class WorkflowRepository:
             live_actor = self._live_actor(connection, actor_id)
             self._assert_task_manager(connection, task, live_actor)
             to_status = self.state_machine.transition(task, "cancel", live_actor)
-            connection.execute(
+            connection.exec_driver_sql(
                 """
-                UPDATE workflow_tasks SET status = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND status = ?
+                UPDATE workflow_tasks SET status = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND status = %s
                 """,
                 (to_status, task_id, task["status"]),
             )
@@ -872,7 +868,7 @@ class WorkflowRepository:
             live_actor = self._live_actor(connection, actor_id)
             if not live_actor["is_system_admin"] and "workflow.assign" not in live_actor["permissions"]:
                 raise PermissionError("workflow.assign permission is required")
-            rows = connection.execute(
+            rows = connection.exec_driver_sql(
                 """
                 SELECT DISTINCT u.id, u.username, u.display_name
                 FROM users AS u
@@ -881,11 +877,11 @@ class WorkflowRepository:
                 LEFT JOIN role_claimable_task_types AS rct ON rct.role_id = r.id
                 WHERE u.status = 'active' AND u.is_deleted = 0
                   AND r.is_enabled = 1
-                  AND (r.code = ? OR rct.task_type = ?)
-                ORDER BY u.display_name COLLATE NOCASE, u.username COLLATE NOCASE, u.id
+                  AND (r.code = %s OR rct.task_type = %s)
+                ORDER BY u.display_name , u.username , u.id
                 """,
                 (normalized_role, normalized_task),
-            ).fetchall()
+            ).mappings().fetchall()
             candidates = []
             for row in rows:
                 candidate = self._live_actor(connection, str(row["id"]))
@@ -908,13 +904,13 @@ class WorkflowRepository:
 
     def list_task_events(self, task_id: str) -> list[dict[str, Any]]:
         with self.identity_repository.connect() as connection:
-            rows = connection.execute(
+            rows = connection.exec_driver_sql(
                 """
                 SELECT * FROM workflow_task_events
-                WHERE task_id = ? ORDER BY created_at, rowid
+                WHERE task_id = %s ORDER BY created_at, rowid
                 """,
                 (task_id,),
-            ).fetchall()
+            ).mappings().fetchall()
         return [self._event_dict(row) for row in rows]
 
     def add_project_member(
@@ -933,10 +929,10 @@ class WorkflowRepository:
         actor_id = self._actor_id(actor)
         with self.identity_repository.transaction() as connection:
             live_actor = self._live_actor(connection, actor_id)
-            has_members = connection.execute(
-                "SELECT 1 FROM project_members WHERE project_id = ? LIMIT 1",
+            has_members = connection.exec_driver_sql(
+                "SELECT 1 FROM project_members WHERE project_id = %s LIMIT 1",
                 (project_id,),
-            ).fetchone()
+            ).mappings().fetchone()
             is_owner_bootstrap = (
                 has_members is None
                 and actor_id == user_id
@@ -945,28 +941,28 @@ class WorkflowRepository:
             )
             if not is_owner_bootstrap:
                 self._assert_project_manager(connection, project_id, live_actor)
-            user = connection.execute(
+            user = connection.exec_driver_sql(
                 """
                 SELECT 1 FROM users
-                WHERE id = ? AND status = 'active' AND is_deleted = 0
+                WHERE id = %s AND status = 'active' AND is_deleted = 0
                 """,
                 (user_id,),
-            ).fetchone()
+            ).mappings().fetchone()
             if user is None:
                 raise ValueError("project member user does not exist or is inactive")
-            existing = connection.execute(
+            existing = connection.exec_driver_sql(
                 """
                 SELECT * FROM project_members
-                WHERE project_id = ? AND user_id = ? AND project_role = ?
+                WHERE project_id = %s AND user_id = %s AND project_role = %s
                 """,
                 (project_id, user_id, project_role),
-            ).fetchone()
+            ).mappings().fetchone()
             membership_id = existing["id"] if existing else str(uuid.uuid4())
-            connection.execute(
+            connection.exec_driver_sql(
                 """
                 INSERT INTO project_members
                     (id, project_id, user_id, project_role, status, added_by)
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT(project_id, user_id, project_role) DO UPDATE SET
                     status = excluded.status,
                     added_by = excluded.added_by,
@@ -981,9 +977,9 @@ class WorkflowRepository:
                     actor_id,
                 ),
             )
-            member = connection.execute(
-                "SELECT * FROM project_members WHERE id = ?", (membership_id,)
-            ).fetchone()
+            member = connection.exec_driver_sql(
+                "SELECT * FROM project_members WHERE id = %s", (membership_id,)
+            ).mappings().fetchone()
             assert member is not None
             self._record_project_member_event(
                 connection,
@@ -998,24 +994,24 @@ class WorkflowRepository:
 
     def list_project_members(self, project_id: str) -> list[dict[str, Any]]:
         with self.identity_repository.connect() as connection:
-            rows = connection.execute(
+            rows = connection.exec_driver_sql(
                 """
                 SELECT * FROM project_members
-                WHERE project_id = ? ORDER BY created_at, rowid
+                WHERE project_id = %s ORDER BY created_at, rowid
                 """,
                 (project_id,),
-            ).fetchall()
+            ).mappings().fetchall()
         return [dict(row) for row in rows]
 
     def list_project_member_events(self, project_id: str) -> list[dict[str, Any]]:
         with self.identity_repository.connect() as connection:
-            rows = connection.execute(
+            rows = connection.exec_driver_sql(
                 """
                 SELECT * FROM workflow_project_member_events
-                WHERE project_id = ? ORDER BY created_at, rowid
+                WHERE project_id = %s ORDER BY created_at, rowid
                 """,
                 (project_id,),
-            ).fetchall()
+            ).mappings().fetchall()
         return [self._project_member_event_dict(row) for row in rows]
 
     def assert_can_manage_project(
@@ -1069,20 +1065,20 @@ class WorkflowRepository:
         with self.identity_repository.transaction() as connection:
             live_actor = self._live_actor(connection, actor_id)
             self._assert_project_manager(connection, project_id, live_actor)
-            members = connection.execute(
+            members = connection.exec_driver_sql(
                 """
                 SELECT * FROM project_members
-                WHERE project_id = ? AND user_id = ? ORDER BY rowid
+                WHERE project_id = %s AND user_id = %s ORDER BY rowid
                 """,
                 (project_id, membership_id),
-            ).fetchall()
+            ).mappings().fetchall()
             if not members:
-                member = connection.execute(
+                member = connection.exec_driver_sql(
                     """
-                    SELECT * FROM project_members WHERE project_id = ? AND id = ?
+                    SELECT * FROM project_members WHERE project_id = %s AND id = %s
                     """,
                     (project_id, membership_id),
-                ).fetchone()
+                ).mappings().fetchone()
                 members = [member] if member is not None else []
             if not members:
                 raise KeyError(membership_id)
@@ -1093,13 +1089,13 @@ class WorkflowRepository:
                 for member in members
             )
             if removes_active_owner:
-                other_roles = connection.execute(
+                other_roles = connection.exec_driver_sql(
                     """
                     SELECT project_role FROM project_members
-                    WHERE project_id = ? AND user_id <> ? AND status = 'active'
+                    WHERE project_id = %s AND user_id <> %s AND status = 'active'
                     """,
                     (project_id, removed_user_id),
-                ).fetchall()
+                ).mappings().fetchall()
                 if not any(
                     row["project_role"] in OWNER_PROJECT_ROLES
                     for row in other_roles
@@ -1108,8 +1104,8 @@ class WorkflowRepository:
                         "current project owner cannot be removed until another owner is assigned"
                     )
             for member in members:
-                connection.execute(
-                    "DELETE FROM project_members WHERE id = ?", (member["id"],)
+                connection.exec_driver_sql(
+                    "DELETE FROM project_members WHERE id = %s", (member["id"],)
                 )
                 self._record_project_member_event(
                     connection,
@@ -1142,32 +1138,32 @@ class WorkflowRepository:
             ):
                 raise ValueError("assignee is not live-eligible for this task type")
             if task["project_id"] is not None:
-                membership = connection.execute(
+                membership = connection.exec_driver_sql(
                     """
                     SELECT 1 FROM project_members
-                    WHERE project_id = ? AND user_id = ? AND status = 'active'
+                    WHERE project_id = %s AND user_id = %s AND status = 'active'
                     """,
                     (task["project_id"], assignee_user_id),
-                ).fetchone()
+                ).mappings().fetchone()
                 if membership is None:
                     raise ValueError("assignee must be an active project member")
             if action == "assign":
-                cursor = connection.execute(
+                cursor = connection.exec_driver_sql(
                     """
                     UPDATE workflow_tasks
-                    SET assignee_id = ?, assigned_by = ?, status = ?,
+                    SET assignee_id = %s, assigned_by = %s, status = %s,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ? AND status = 'pool' AND assignee_id IS NULL
+                    WHERE id = %s AND status = 'pool' AND assignee_id IS NULL
                     """,
                     (assignee_user_id, actor_id, to_status, task_id),
                 )
             else:
-                cursor = connection.execute(
+                cursor = connection.exec_driver_sql(
                     """
                     UPDATE workflow_tasks
-                    SET assignee_id = ?, assigned_by = ?, status = ?,
+                    SET assignee_id = %s, assigned_by = %s, status = %s,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ? AND status = ?
+                    WHERE id = %s AND status = %s
                     """,
                     (
                         assignee_user_id,
@@ -1196,7 +1192,7 @@ class WorkflowRepository:
 
     def _assert_task_manager(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         task: dict[str, Any],
         actor: dict[str, Any],
     ) -> None:
@@ -1209,7 +1205,7 @@ class WorkflowRepository:
 
     @staticmethod
     def _assert_project_manager(
-        connection: sqlite3.Connection,
+        connection: Connection,
         project_id: str,
         actor: dict[str, Any],
     ) -> None:
@@ -1223,102 +1219,102 @@ class WorkflowRepository:
 
     @staticmethod
     def _assert_managed_project_membership(
-        connection: sqlite3.Connection,
+        connection: Connection,
         project_id: str,
         actor: dict[str, Any],
     ) -> None:
         if actor["is_system_admin"]:
             return
-        member = connection.execute(
+        member = connection.exec_driver_sql(
             """
             SELECT 1 FROM project_members
-            WHERE project_id = ? AND user_id = ? AND status = 'active'
+            WHERE project_id = %s AND user_id = %s AND status = 'active'
               AND project_role IN ('owner', 'project_owner', 'manager', 'project_manager')
             """,
             (project_id, actor["user_id"]),
-        ).fetchone()
+        ).mappings().fetchone()
         if member is None:
             raise PermissionError("actor does not manage this project")
 
     @staticmethod
     def _managed_project_ids(
-        connection: sqlite3.Connection, actor_id: str
+        connection: Connection, actor_id: str
     ) -> set[str]:
         return {
             row["project_id"]
-            for row in connection.execute(
+            for row in connection.exec_driver_sql(
                 """
                 SELECT DISTINCT project_id FROM project_members
-                WHERE user_id = ? AND status = 'active'
+                WHERE user_id = %s AND status = 'active'
                   AND project_role IN ('owner', 'project_owner', 'manager', 'project_manager')
                 """,
                 (actor_id,),
-            )
+            ).mappings()
         }
 
     @staticmethod
     def _assigned_project_ids(
-        connection: sqlite3.Connection, actor_id: str
+        connection: Connection, actor_id: str
     ) -> set[str]:
         return {
             row["project_id"]
-            for row in connection.execute(
+            for row in connection.exec_driver_sql(
                 """
                 SELECT DISTINCT project_id FROM project_members
-                WHERE user_id = ? AND status = 'active'
+                WHERE user_id = %s AND status = 'active'
                 """,
                 (actor_id,),
-            )
+            ).mappings()
         }
 
     @staticmethod
     def _is_active_project_member(
-        connection: sqlite3.Connection, project_id: str, actor_id: str
+        connection: Connection, project_id: str, actor_id: str
     ) -> bool:
         return (
-            connection.execute(
+            connection.exec_driver_sql(
                 """
                 SELECT 1 FROM project_members
-                WHERE project_id = ? AND user_id = ? AND status = 'active'
+                WHERE project_id = %s AND user_id = %s AND status = 'active'
                 LIMIT 1
                 """,
                 (project_id, actor_id),
-            ).fetchone()
+            ).mappings().fetchone()
             is not None
         )
 
     @staticmethod
-    def _live_actor(connection: sqlite3.Connection, user_id: str) -> dict[str, Any]:
-        user = connection.execute(
+    def _live_actor(connection: Connection, user_id: str) -> dict[str, Any]:
+        user = connection.exec_driver_sql(
             """
             SELECT id FROM users
-            WHERE id = ? AND status = 'active' AND is_deleted = 0
+            WHERE id = %s AND status = 'active' AND is_deleted = 0
             """,
             (user_id,),
-        ).fetchone()
+        ).mappings().fetchone()
         if user is None:
             raise PermissionError("actor or assignee is inactive or unknown")
         roles = {
             row["code"]
-            for row in connection.execute(
+            for row in connection.exec_driver_sql(
                 """
                 SELECT r.code FROM user_roles AS ur
                 JOIN roles AS r ON r.id = ur.role_id AND r.is_enabled = 1
-                WHERE ur.user_id = ?
+                WHERE ur.user_id = %s
                 """,
                 (user_id,),
-            )
+            ).mappings()
         }
         permission_scopes: dict[str, str] = {}
-        permission_rows = connection.execute(
+        permission_rows = connection.exec_driver_sql(
             """
             SELECT rp.permission_code, rp.data_scope FROM user_roles AS ur
             JOIN roles AS r ON r.id = ur.role_id AND r.is_enabled = 1
             JOIN role_permissions AS rp ON rp.role_id = r.id
-            WHERE ur.user_id = ?
+            WHERE ur.user_id = %s
             """,
             (user_id,),
-        )
+        ).mappings()
         for row in permission_rows:
             current_scope = permission_scopes.get(row["permission_code"])
             if current_scope is None or (
@@ -1330,15 +1326,15 @@ class WorkflowRepository:
             permission_scopes = {"*": "all"}
         claimable_task_types = {
             row["task_type"]
-            for row in connection.execute(
+            for row in connection.exec_driver_sql(
                 """
                 SELECT rct.task_type FROM user_roles AS ur
                 JOIN roles AS r ON r.id = ur.role_id AND r.is_enabled = 1
                 JOIN role_claimable_task_types AS rct ON rct.role_id = r.id
-                WHERE ur.user_id = ?
+                WHERE ur.user_id = %s
                 """,
                 (user_id,),
-            )
+            ).mappings()
         }
         return {
             "user_id": user_id,
@@ -1363,16 +1359,16 @@ class WorkflowRepository:
 
     @staticmethod
     def _ensure_system_actor(
-        connection: sqlite3.Connection, actor_id: str
+        connection: Connection, actor_id: str
     ) -> None:
         if actor_id != SYSTEM_ACTOR.user_id:
             return
-        connection.execute(
+        connection.exec_driver_sql(
             """
             INSERT INTO users
                 (id, username, normalized_username, display_name, password_hash,
                  status, is_deleted)
-            VALUES (?, ?, ?, ?, ?, 'disabled', 1)
+            VALUES (%s, %s, %s, %s, %s, 'disabled', 1)
             ON CONFLICT(id) DO NOTHING
             """,
             (
@@ -1386,7 +1382,7 @@ class WorkflowRepository:
 
     @staticmethod
     def _ensure_workflow(
-        connection: sqlite3.Connection,
+        connection: Connection,
         workflow_id: str,
         task_type: str,
         project_id: str | None,
@@ -1395,11 +1391,11 @@ class WorkflowRepository:
     ) -> None:
         resource_type = "project" if project_id else "topic" if topic_id is not None else "task"
         resource_id = project_id or (str(topic_id) if topic_id is not None else workflow_id)
-        connection.execute(
+        connection.exec_driver_sql(
             """
             INSERT INTO workflow_instances
                 (id, workflow_type, resource_type, resource_id, project_id, created_by)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT(id) DO NOTHING
             """,
             (workflow_id, task_type, resource_type, resource_id, project_id, actor_id),
@@ -1407,16 +1403,16 @@ class WorkflowRepository:
 
     @classmethod
     def _get_task(
-        cls, connection: sqlite3.Connection, task_id: str
+        cls, connection: Connection, task_id: str
     ) -> dict[str, Any] | None:
-        row = connection.execute(
-            "SELECT * FROM workflow_tasks WHERE id = ?", (task_id,)
-        ).fetchone()
+        row = connection.exec_driver_sql(
+            "SELECT * FROM workflow_tasks WHERE id = %s", (task_id,)
+        ).mappings().fetchone()
         return cls._task_dict(row) if row is not None else None
 
     @classmethod
     def _require_task(
-        cls, connection: sqlite3.Connection, task_id: str
+        cls, connection: Connection, task_id: str
     ) -> dict[str, Any]:
         task = cls._get_task(connection, task_id)
         if task is None:
@@ -1424,14 +1420,14 @@ class WorkflowRepository:
         return task
 
     @staticmethod
-    def _task_dict(row: sqlite3.Row) -> dict[str, Any]:
+    def _task_dict(row: Any) -> dict[str, Any]:
         task = dict(row)
         task["assignee_user_id"] = task.pop("assignee_id")
         task["assigned_by_user_id"] = task.pop("assigned_by")
         return task
 
     @staticmethod
-    def _submission_dict(row: sqlite3.Row) -> dict[str, Any]:
+    def _submission_dict(row: Any) -> dict[str, Any]:
         submission = dict(row)
         submission["content_snapshot"] = json.loads(
             submission["content_snapshot_json"]
@@ -1440,7 +1436,7 @@ class WorkflowRepository:
 
     @staticmethod
     def _record_event(
-        connection: sqlite3.Connection,
+        connection: Connection,
         task_id: str,
         event_type: str,
         actor_id: str | None,
@@ -1448,11 +1444,11 @@ class WorkflowRepository:
         to_status: str | None,
         details: dict[str, Any] | None = None,
     ) -> None:
-        connection.execute(
+        connection.exec_driver_sql(
             """
             INSERT INTO workflow_task_events
                 (id, task_id, event_type, actor_id, from_status, to_status, details_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 str(uuid.uuid4()),
@@ -1467,7 +1463,7 @@ class WorkflowRepository:
 
     @staticmethod
     def _record_project_member_event(
-        connection: sqlite3.Connection,
+        connection: Connection,
         project_id: str,
         membership_id: str,
         event_type: str,
@@ -1475,12 +1471,12 @@ class WorkflowRepository:
         before: dict[str, Any] | None,
         after: dict[str, Any] | None,
     ) -> None:
-        connection.execute(
+        connection.exec_driver_sql(
             """
             INSERT INTO workflow_project_member_events
                 (id, project_id, membership_id, event_type, actor_id,
                  before_json, after_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 str(uuid.uuid4()),
@@ -1498,7 +1494,7 @@ class WorkflowRepository:
         )
 
     @staticmethod
-    def _event_dict(row: sqlite3.Row) -> dict[str, Any]:
+    def _event_dict(row: Any) -> dict[str, Any]:
         event = dict(row)
         event["actor_user_id"] = event.pop("actor_id")
         event["before_status"] = event.pop("from_status")
@@ -1507,7 +1503,7 @@ class WorkflowRepository:
         return event
 
     @staticmethod
-    def _project_member_event_dict(row: sqlite3.Row) -> dict[str, Any]:
+    def _project_member_event_dict(row: Any) -> dict[str, Any]:
         event = dict(row)
         event["actor_user_id"] = event.pop("actor_id")
         before_json = event.pop("before_json")

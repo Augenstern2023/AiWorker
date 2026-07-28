@@ -83,3 +83,43 @@ def test_system_administrator_can_manage_departments_and_audit_changes(
         "organization.department.rename",
         "organization.department.delete",
     ]
+
+
+def test_administrator_can_remove_a_user_department_assignment(
+    database: SystemDatabase,
+):
+    audit = RecordingAudit()
+    service = DepartmentService(database)
+    user_id = f"user:organization-api:{uuid.uuid4()}"
+    username = f"organization-api-{uuid.uuid4()}"
+    with database.transaction() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO users (
+                    id, username, normalized_username, display_name,
+                    password_hash, status
+                ) VALUES (
+                    :id, :username, :username,
+                    'Organization API User', 'unused', 'active'
+                )
+                """
+            ),
+            {"id": user_id, "username": username},
+        )
+    department = service.create_department(f"Production {uuid.uuid4()}")
+    service.assign_user_department(
+        user_id, department["id"], is_primary=True
+    )
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = _admin
+    app.include_router(build_organization_router(service, audit))
+    client = TestClient(app)
+
+    response = client.delete(
+        f"/api/admin/users/{user_id}/departments/" + department["id"]
+    )
+
+    assert response.status_code == 204
+    assert service.list_user_departments(user_id) == []
+    assert audit.actions == ["organization.user_department.remove"]

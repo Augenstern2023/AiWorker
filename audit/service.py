@@ -10,10 +10,12 @@
 from __future__ import annotations
 
 import json
-import sqlite3
+import re
 import uuid
 from collections.abc import Mapping
 from typing import Any
+
+from sqlalchemy import Connection
 
 from fastapi import Request
 
@@ -31,6 +33,10 @@ _SENSITIVE_KEY_PARTS = (
     "cookie",
     "activation_code",
     "api_key",
+)
+_SENSITIVE_TEXT_VALUE = re.compile(
+    r"\b(password|token|secret|cookie|activation_code|api_key)\b(\s*[:=]\s*)([^\s,;]+)",
+    re.IGNORECASE,
 )
 
 
@@ -55,7 +61,7 @@ class AuditService:
         result: str,
         request: Request | None = None,
         project_id: str | None = None,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> str:
         event_id = str(uuid.uuid4())
         request_id, ip_address, user_agent = self._request_metadata(request)
@@ -163,4 +169,6 @@ class AuditService:
             return redacted
         if isinstance(value, (list, tuple, set, frozenset)):
             return [cls._redact(item) for item in value]
+        if isinstance(value, str):
+            return _SENSITIVE_TEXT_VALUE.sub(r"\1\2[REDACTED]", value)
         return value

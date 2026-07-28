@@ -91,6 +91,7 @@ from rag.api import register_rag_routes
 from runtime.job_manager import JobConflictError, JobManager, JobNotFoundError
 from scheduler.local_service import LocalScheduleService
 from scheduler.api import build_schedule_router
+from scheduler.audit import SystemScheduleAuditWriter
 from scheduler.repository import PostgresScheduleRepository
 from system_database import SystemDatabase, SystemDatabaseSettings
 from web.navigation_repository import NavigationRepository
@@ -432,7 +433,9 @@ async def lifespan(app: FastAPI):
             schedule_database = None
         else:
             local_schedule_service = LocalScheduleService(
-                PostgresScheduleRepository(schedule_database), job_manager
+                PostgresScheduleRepository(schedule_database),
+                job_manager,
+                audit_writer=SystemScheduleAuditWriter(audit_service),
             )
             local_schedule_service.start()
             app.state.local_schedule_service = local_schedule_service

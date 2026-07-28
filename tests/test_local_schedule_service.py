@@ -148,6 +148,21 @@ class RecordingScheduler:
         self.jobs.append(kwargs)
 
 
+class RecordingScheduleAudit:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    def record(self, *, action: str, target_id: str, after: dict, result: str) -> None:
+        self.events.append(
+            {
+                "action": action,
+                "target_id": target_id,
+                "after": after,
+                "result": result,
+            }
+        )
+
+
 @pytest.fixture
 def repository() -> InMemoryScheduleRepository:
     return InMemoryScheduleRepository()
@@ -318,6 +333,56 @@ def test_process_shutdown_cancels_submitted_runs_before_database_disposal(reposi
     assert cancelled_job_ids == {run.job_id}
     assert manager.stop_calls == [run.job_id]
     assert repository.get_run(run.id).status == "cancelled"
+
+
+def test_failure_alert_auto_pause_and_shutdown_are_recorded_as_schedule_audit_events(
+    repository,
+):
+    schedule = definition(
+        "schedule-audit",
+        "crawl",
+        {
+            "platform": "dy",
+            "crawler_type": "search",
+            "extra": {"password": "must-not-leak"},
+        },
+        max_retries=0,
+    )
+    repository.create_definition(schedule)
+    manager = RecordingJobManager()
+    audit = RecordingScheduleAudit()
+    service = LocalScheduleService(repository, manager, audit_writer=audit)
+
+    for minute in range(3):
+        run = service.trigger(schedule.id, datetime(2026, 7, 27, 2, minute, tzinfo=UTC))
+        manager.jobs[run.job_id]["status"] = "failed"
+        service.reconcile_active_runs(
+            now=datetime(2026, 7, 27, 2, minute, 30, tzinfo=UTC)
+        )
+
+    active = service.trigger(schedule.id, datetime(2026, 7, 27, 3, tzinfo=UTC))
+    # The auto-paused definition skips the fourth invocation, so explicitly
+    # create an active run through a separate enabled schedule for shutdown.
+    assert repository.get_definition(schedule.id).is_enabled is False
+    assert active.status == "skipped"
+    assert {event["action"] for event in audit.events} >= {
+        "schedule.run.failed",
+        "schedule.alert.created",
+        "schedule.auto_paused",
+    }
+    assert "must-not-leak" not in str(audit.events)
+
+    shutdown_schedule = definition(
+        "schedule-shutdown-audit",
+        "crawl",
+        {"platform": "dy", "crawler_type": "search"},
+    )
+    repository.create_definition(shutdown_schedule)
+    shutdown_run = service.trigger(shutdown_schedule.id)
+    service.cancel_active_runs_for_process_shutdown()
+
+    assert repository.get_run(shutdown_run.id).status == "cancelled"
+    assert any(event["action"] == "schedule.run.cancelled" for event in audit.events)
 
 
 def test_start_restores_queued_retry_runs_after_restart(repository):

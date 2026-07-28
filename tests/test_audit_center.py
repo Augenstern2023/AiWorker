@@ -156,3 +156,32 @@ def test_audit_export_uses_filtered_snapshot_data_and_records_export(tmp_path: P
     assert rows[0][1] == "操作人"
     assert rows[1][1] == "Audit Admin"
     assert len(audit_service.query(action="audit.export")) == 2
+
+
+def test_audit_api_returns_one_event_for_the_details_drawer(tmp_path: Path):
+    repository = IdentityRepository(tmp_path / "system.db")
+    repository.seed_defaults()
+    admin = _principal(
+        repository.create_user("admin", "Audit Admin", "hash"), "admin-session"
+    )
+    audit_service = AuditService(repository)
+    event_id = audit_service.record(
+        actor=admin,
+        action="organization.department.rename",
+        target_type="department",
+        target_id="department:production",
+        project_id=None,
+        before={"name": "Production"},
+        after={"name": "Content"},
+        reason=None,
+        result="success",
+    )
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = lambda: admin
+    app.include_router(build_audit_router(audit_service))
+
+    response = TestClient(app).get(f"/api/admin/audit/{event_id}")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == event_id
+    assert response.json()["target_id"] == "department:production"

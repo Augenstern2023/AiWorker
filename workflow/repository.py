@@ -1429,8 +1429,9 @@ class WorkflowRepository:
     @staticmethod
     def _submission_dict(row: Any) -> dict[str, Any]:
         submission = dict(row)
-        submission["content_snapshot"] = json.loads(
-            submission["content_snapshot_json"]
+        snapshot = submission["content_snapshot_json"]
+        submission["content_snapshot"] = (
+            json.loads(snapshot) if isinstance(snapshot, str) else snapshot
         )
         return submission
 

@@ -11,7 +11,14 @@ from __future__ import annotations
 
 from sqlalchemy import Connection, and_, select
 
-from system_database.schema import role_permissions, roles, user_roles, users
+from system_database.schema import (
+    project_members,
+    role_permissions,
+    roles,
+    user_roles,
+    users,
+    workflow_tasks,
+)
 
 from .permission_catalog import PERMISSION_DEPENDENCIES
 from .repository import IdentityRepository
@@ -121,9 +128,10 @@ class PermissionService:
     def can_access_task(self, principal: Principal, task_id: str) -> bool:
         with self.repository.connect() as connection:
             task = connection.execute(
-                "SELECT assignee_id, project_id FROM workflow_tasks WHERE id = ?",
-                (task_id,),
-            ).fetchone()
+                select(workflow_tasks.c.assignee_id, workflow_tasks.c.project_id).where(
+                    workflow_tasks.c.id == task_id
+                )
+            ).mappings().first()
         if task is None:
             return False
         if principal.data_scope == "all":
@@ -148,12 +156,12 @@ class PermissionService:
             return False
         with self.repository.connect() as connection:
             row = connection.execute(
-                """
-                SELECT 1 FROM project_members
-                WHERE project_id = ? AND user_id = ? AND status = 'active'
-                """,
-                (project_id, principal.user_id),
-            ).fetchone()
+                select(project_members.c.id).where(
+                    project_members.c.project_id == project_id,
+                    project_members.c.user_id == principal.user_id,
+                    project_members.c.status == "active",
+                )
+            ).mappings().first()
         return row is not None
 
     def can_access_managed_project(
@@ -165,12 +173,12 @@ class PermissionService:
             return False
         with self.repository.connect() as connection:
             rows = connection.execute(
-                """
-                SELECT project_role FROM project_members
-                WHERE project_id = ? AND user_id = ? AND status = 'active'
-                """,
-                (project_id, principal.user_id),
-            ).fetchall()
+                select(project_members.c.project_role).where(
+                    project_members.c.project_id == project_id,
+                    project_members.c.user_id == principal.user_id,
+                    project_members.c.status == "active",
+                )
+            ).mappings().all()
         return any(row["project_role"] in _MANAGED_PROJECT_ROLES for row in rows)
 
     @staticmethod

@@ -24,10 +24,12 @@ from audit.service import AuditService
 from creative.api import register_creative_routes
 from identity.api import build_identity_router
 from identity.password_service import PasswordService
+from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.schema import Principal
 from identity.session_service import SessionService
 from system_database import SystemDatabase, SystemDatabaseSettings
+from system_database.schema import project_members
 from workflow.repository import WorkflowRepository
 from workflow.transition_service import TransitionService
 
@@ -150,3 +152,50 @@ def test_postgres_login_creates_a_session(
 
     assert response.status_code == 200
     assert response.json()["user"]["username"] == username
+
+
+def test_workflow_submission_dict_accepts_postgresql_jsonb_values() -> None:
+    submission = WorkflowRepository._submission_dict(
+        {"content_snapshot_json": {"source": "postgresql"}}
+    )
+
+    assert submission["content_snapshot"] == {"source": "postgresql"}
+
+
+def test_postgres_permission_service_checks_assigned_project_membership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required for PostgreSQL tests")
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
+    command.upgrade(Config("alembic.ini"), "head")
+    database = SystemDatabase(SystemDatabaseSettings(postgres_url))
+    repository = IdentityRepository(database)
+    repository.seed_defaults()
+    user = repository.create_user(
+        f"member-{uuid.uuid4()}", "Project Member", "unused-password-hash"
+    )
+    with database.transaction() as connection:
+        connection.execute(
+            project_members.insert().values(
+                id=str(uuid.uuid4()),
+                project_id="creative-project-test",
+                user_id=user["id"],
+                project_role="member",
+                status="active",
+            )
+        )
+    principal = Principal(
+        user_id=user["id"],
+        username=user["username"],
+        display_name=user["display_name"],
+        role_codes=(),
+        permissions=frozenset(),
+        data_scope="project",
+        session_id="project-membership-test",
+    )
+
+    assert PermissionService(repository, SessionService(repository)).can_access_assigned_project(
+        principal, "creative-project-test"
+    )

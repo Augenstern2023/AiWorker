@@ -363,6 +363,15 @@
             font-weight: 800;
             color: #f7f9ff;
         }
+        .today-rank-table .rank-adopt-action {
+            width: 92px;
+            min-width: 92px;
+            text-align: center;
+            white-space: nowrap;
+        }
+        .today-rank-table .rank-adopt-action .btn {
+            min-width: 74px;
+        }
         .today-rank-table .rank-subtitle {
             color: #8793a8 !important;
         }

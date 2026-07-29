@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -16,6 +17,10 @@ import unicodedata
 import uuid
 from pathlib import Path
 from typing import Any
+
+
+class DuplicateTopicError(ValueError):
+    """Raised when a title has already been collected into the topic store."""
 
 
 class CreativeRepository:
@@ -357,7 +362,7 @@ class CreativeRepository:
                         confidence, score_details_json, recommendation, evidence_json, source_platforms_json, created_at, updated_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(platform, job_id, source_path, title) DO UPDATE SET
-                        description=excluded.description, category=excluded.category, rank_type=excluded.rank_type, score=excluded.score, confidence=excluded.confidence,
+                        captured_at=excluded.captured_at, description=excluded.description, category=excluded.category, rank_type=excluded.rank_type, score=excluded.score, confidence=excluded.confidence,
                         score_details_json=excluded.score_details_json, recommendation=excluded.recommendation,
                         evidence_json=excluded.evidence_json, source_platforms_json=excluded.source_platforms_json,
                         updated_at=excluded.updated_at
@@ -369,6 +374,64 @@ class CreativeRepository:
                     json.dumps(sorted({str(topic.get("platform") or "")}), ensure_ascii=False), now, now,
                 ))
         return self.list_topics(limit=1000)
+
+    def adopt_rank_topic(self, topic: dict[str, Any], actor_user_id: str) -> dict[str, Any]:
+        title_key = self._title_key(topic.get("title"))
+        if not title_key:
+            raise ValueError("榜单剧目缺少标题")
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT title FROM creative_topics WHERE deleted = 0"
+            ).fetchall()
+            if any(self._title_key(row["title"]) == title_key for row in existing):
+                raise DuplicateTopicError("剧目已收录")
+            cursor = conn.execute(
+                """
+                INSERT INTO creative_topics (
+                    platform, job_id, source_path, captured_at, title, description, category, rank_type,
+                    status, score, confidence, score_details_json, recommendation, evidence_json,
+                    source_platforms_json, decision_note, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'adopted', ?, ?, ?, ?, ?, ?, '', ?, ?)
+                """,
+                (
+                    topic["platform"], topic["job_id"], topic["source_path"], topic["captured_at"],
+                    topic["title"], topic.get("description", ""), topic.get("category", ""),
+                    topic.get("rank_type", ""), topic["score"], topic["confidence"],
+                    json.dumps(topic["score_details"], ensure_ascii=False), topic["recommendation"],
+                    json.dumps(topic["evidence"], ensure_ascii=False),
+                    json.dumps(sorted({str(topic.get("platform") or "")}), ensure_ascii=False), now, now,
+                ),
+            )
+            topic_id = int(cursor.lastrowid)
+            snapshot = {
+                "topic_id": topic_id, "title": topic["title"], "outcome": "adopted",
+                "decision_note": "", "source": "today_rank",
+            }
+            canonical = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            conn.execute(
+                """
+                INSERT INTO selection_stage_snapshots (
+                    id, stage, topic_id, version, outcome, snapshot_json, content_fingerprint,
+                    resource_type, resource_id, actor_user_id, source_job_id, created_at
+                ) VALUES (?, 'topic_decision', ?, 1, 'adopted', ?, ?, 'topic', ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()), topic_id, canonical,
+                    hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+                    str(topic_id), actor_user_id, topic["job_id"], now,
+                ),
+            )
+        return self.get_topic(topic_id) or {}
+
+    def decided_title_keys(self) -> set[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT title FROM creative_topics "
+                "WHERE deleted = 0 AND status IN ('adopted', 'rejected', 'archived')"
+            ).fetchall()
+        return {self._title_key(row["title"]) for row in rows if self._title_key(row["title"])}
 
     def list_topics(
         self,

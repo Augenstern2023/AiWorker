@@ -53,9 +53,6 @@ window.aiworkerModules.push(() => ({
                 async searchDrama() {
                     const title = this.dramaAnalysis.title.trim();
                     if (!title) return;
-                    clearTimeout(this.dramaAnalysis.suggestionTimer);
-                    this.dramaAnalysis.suggestionRequestId += 1;
-                    this.dramaAnalysis.suggestions = [];
                     this.dramaAnalysis.loading = true;
                     this.dramaAnalysis.error = '';
                     this.dramaAnalysis.candidates = [];
@@ -64,10 +61,9 @@ window.aiworkerModules.push(() => ({
                     this.dramaAnalysis.episode = 0;
                     this.dramaAnalysis.searchSource = '';
                     this.dramaAnalysis.fallbackReason = '';
-                    this.dramaReviews.title = title;
                     this.dramaReviews.platform = this.dramaAnalysis.platform;
                     try {
-                        const endpoint = this.dramaAnalysis.platform === 'dy' ? '/api/douyin/drama/search' : '/api/hongguo/drama/search';
+                        const endpoint = this.dramaAnalysis.platform === 'dy' ? '/api/douyin/drama/search' : '/api/hongguo/drama/download/search';
                         const res = await aiworkerApi.request(endpoint, {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json'},
@@ -91,7 +87,6 @@ window.aiworkerModules.push(() => ({
                 },
 
                 changeDramaSearchPlatform() {
-                    this.dramaAnalysis.suggestions = [];
                     this.dramaAnalysis.candidates = [];
                     this.dramaAnalysis.selected = null;
                     this.dramaAnalysis.episodes = [];
@@ -100,38 +95,6 @@ window.aiworkerModules.push(() => ({
                     this.dramaAnalysis.fallbackReason = '';
                     this.dramaAnalysis.error = '';
                     this.dramaReviews.platform = this.dramaAnalysis.platform;
-                },
-
-                onDramaTitleInput() {
-                    clearTimeout(this.dramaAnalysis.suggestionTimer);
-                    const requestId = ++this.dramaAnalysis.suggestionRequestId;
-                    this.dramaAnalysis.suggestions = [];
-                    const title = this.dramaAnalysis.title.trim();
-                    if (this.dramaAnalysis.platform === 'dy') return;
-                    if (title.length < 2) return;
-                    this.dramaAnalysis.suggestionTimer = setTimeout(async () => {
-                        this.dramaAnalysis.suggestionLoading = true;
-                        try {
-                            const res = await aiworkerApi.request('/api/hongguo/drama/suggest', {
-                                method: 'POST',
-                                headers: {'Content-Type': 'application/json'},
-                                body: JSON.stringify({title})
-                            });
-                            const data = await res.json();
-                            if (requestId !== this.dramaAnalysis.suggestionRequestId) return;
-                            this.dramaAnalysis.suggestions = res.ok && data.status !== 'error' ? (data.candidates || []) : [];
-                        } catch (e) {
-                            if (requestId === this.dramaAnalysis.suggestionRequestId) this.dramaAnalysis.suggestions = [];
-                        } finally {
-                            if (requestId === this.dramaAnalysis.suggestionRequestId) this.dramaAnalysis.suggestionLoading = false;
-                        }
-                    }, 350);
-                },
-
-                chooseDramaSuggestion(suggestion) {
-                    this.dramaAnalysis.title = suggestion.title || this.dramaAnalysis.title;
-                    this.dramaAnalysis.suggestions = [];
-                    this.searchDrama();
                 },
 
                 async selectDramaCandidate(candidate) {
@@ -171,7 +134,7 @@ window.aiworkerModules.push(() => ({
                         );
                         const endpoint = isDouyinSearch
                             ? '/api/hongguo/drama/douyin-fallback/jobs'
-                            : '/api/hongguo/drama/jobs';
+                            : '/api/hongguo/drama/download/jobs';
                         const jobPayload = isDouyinSearch
                             ? {
                                 title: this.dramaAnalysis.title || selected.title,
@@ -183,7 +146,8 @@ window.aiworkerModules.push(() => ({
                             : {
                                 title: selected.title || this.dramaAnalysis.title,
                                 book_id: selected.book_id,
-                                episode: this.dramaAnalysis.episode,
+                                episodes: [this.dramaAnalysis.episode],
+                                all_episodes: false,
                                 source_platform: selected.source_platform || 'hg',
                                 topic_id: task.topic_id,
                                 workflow_task_id: task.id

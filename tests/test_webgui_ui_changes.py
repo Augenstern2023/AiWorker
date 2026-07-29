@@ -76,6 +76,39 @@ def test_webgui_registers_today_rank_route():
     assert "/favicon.ico" in paths
 
 
+def test_douyin_today_rank_uses_switchable_rank_and_heat_boards():
+    script = _source("static/js/selection/ranks.js")
+    template = _source("templates/common/workspace/selection_ranks.html")
+
+    assert "douyinSections()" in script
+    assert "selectedDouyinSection()" in script
+    assert "this.todayRankSectionKey = parts[2] || '榜单'" in script
+    assert "todayRankPlatform === 'dy'" in template
+    assert "setTodayRankRoute('dy', section.key)" in template
+
+
+def test_today_rank_supports_adoption_actions_and_shared_result_modal():
+    rank_template = _source("templates/common/workspace/selection_ranks.html")
+    rank_script = _source("static/js/selection/ranks.js")
+    workspace = _source("static/js/common/tasks.js")
+    breakdowns = _source("static/js/selection/breakdowns.js")
+    modal = _source("templates/common/workspace/adoption_notice_modal.html")
+    styles = _source("static/css/workspaces.css")
+
+    assert rank_template.count('class="rank-adopt-action"') == 4
+    assert rank_template.count('@click="adoptRankEntry(item)"') == 2
+    assert rank_template.count('rankingTableColspan(tbl) + 1') == 2
+    assert "/api/creative/topics/adopt-from-rank" in rank_script
+    assert "rankAdoptionFailureMessage" in rank_script
+    assert "收录接口尚未生效，请刷新页面或重启 Web 服务。" in rank_script
+    assert "adoptionNotice" in workspace
+    assert "showAdoptionNotice" in workspace
+    assert "showAdoptionNotice" in breakdowns
+    assert "采纳成功" in modal
+    assert "采纳失败" in modal
+    assert ".today-rank-table .rank-adopt-action" in styles
+
+
 def test_webgui_registers_creative_phase3_routes_and_page():
     paths = {route.path for route in WebGUI.app.routes}
     html = _workspace_source()
@@ -227,7 +260,9 @@ def test_today_hits_only_load_unadopted_recommendations_and_adoption_moves_them_
 
     assert "&status=pending_review" in topics.split("async fetchCreativeTopics", 1)[1].split("async fetchTopicLibrary", 1)[0]
     assert "new URLSearchParams({status: 'adopted', all: 'true'})" in topics
-    assert "await this.fetchCreativeTopics();" in breakdowns.split("async updateCreativeTopic", 1)[1].split("createCreativeBreakdown", 1)[0]
+    update_topic = breakdowns.split("async updateCreativeTopic", 1)[1].split("createCreativeBreakdown", 1)[0]
+    assert "this.creative.items = this.creative.items.filter" in update_topic
+    assert "await this.fetchCreativeTopics();" not in update_topic
     assert "updateCreativeTopic(topic, 'adopted')" in section
     assert "createCreativeBreakdown(topic)" not in section
     assert "topic.status === 'adopted'" not in section
@@ -242,6 +277,16 @@ def test_today_hits_restores_the_last_selected_platform_after_refresh():
     assert "creativePlatformPreference()" in tasks
     assert "rememberCreativePlatform()" in topics
     assert "@change=\"changeCreativePlatform\"" in section
+
+
+def test_today_hits_initial_load_generates_the_latest_top_ten():
+    tasks = _source("static/js/common/tasks.js")
+    hits_init = tasks.split("} else if (this.page === 'selection-hits') {", 1)[1].split(
+        "} else if (this.page === 'selection-topics')", 1
+    )[0]
+
+    assert "await this.generateCreativeTopics();" in hits_init
+    assert "await this.fetchCreativeTopics();" not in hits_init
 
 
 def test_topic_library_shows_full_lifecycle_and_breakdown_version_column():
@@ -895,9 +940,9 @@ def test_hongguo_drama_routes_replace_legacy_proxy_routes():
     assert "breakdownEditor.record?.status !== 'draft'" in html
     assert "episodesLoading" in html
     assert 'x-show="dramaDownload.searching"' in html
-    assert "onDramaTitleInput" in html
-    assert "chooseDramaSuggestion" in html
-    assert "自动联想红果剧目" in html
+    assert "检索全部红果剧源" in drama_page
+    assert "onDramaTitleInput" not in drama_page
+    assert "chooseDramaSuggestion" not in drama_page
     assert "topic-evidence-drawer" not in html
     assert "查看来源证据" not in html
     assert "topic.rank_type" in html
@@ -922,6 +967,14 @@ def test_hongguo_drama_routes_replace_legacy_proxy_routes():
     assert "dramaDownload.background" in html
     assert "isDramaEpisodeDownloaded" in html
     assert "episode.download_status?.status === 'downloaded'" in html
+
+
+def test_drama_search_keeps_cross_source_candidates_distinct_and_review_input_independent():
+    drama_page = _source("templates/common/workspace/selection_dramas.html")
+    drama_script = _source("static/js/selection/dramas.js")
+
+    assert ':key="`${candidate.source_platform || \'hongguo\'}:${candidate.book_id || candidate.aweme_id}`"' in drama_page
+    assert "this.dramaReviews.title = title;" not in drama_script
 
 
 def test_job_logs_require_authentication_before_falling_back(tmp_path, monkeypatch):

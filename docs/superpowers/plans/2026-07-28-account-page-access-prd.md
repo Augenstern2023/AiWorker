@@ -1,5 +1,11 @@
 # 账号页面访问配置 PRD 与实施计划
 
+> **2026-07-29 规则变更（优先于本文其余历史内容）**：页面授权改为“角色默认授权 + 账号例外覆盖”，不再以 `user_page_access` 为唯一来源。`/profile` 始终开放；`system_admin` 全量开放。普通账号有效权限按“页面停用 → 账号明确拒绝 → 账号明确允许 → 已分配角色页面授权并集 → 拒绝”计算。
+>
+> 默认角色页面：`selection_operator` 为选品工作台、今日榜单、今日爆款、选题库、剧目检索下载；`creative_planner` 为策划项目及其动态子页；`screenwriter` 为编剧项目及其动态子页；`project_owner` 为角色权限、审计日志、数据管理、已下载剧目播放及五个选品页面。项目负责人不再默认拥有导航配置、负责项目、团队账号或角色授权页面。
+>
+> `role_page_access` 保存角色页面授权；`user_page_access` 保存账号三态例外（允许、拒绝、未配置即继承）。系统管理员维护账号例外；项目负责人可在角色权限页维护角色页面授权。授权变更必须在下一次请求同时反映到导航、页面 URL 和页面绑定 API，无需重新登录。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 取消角色的页面访问限制，登录账号默认仅访问个人信息页；由系统管理员或项目负责人按账号配置其他页面及其页面功能的访问权。

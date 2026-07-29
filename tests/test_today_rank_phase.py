@@ -59,6 +59,32 @@ def test_today_rank_compares_douyin_snapshots(tmp_path):
     assert data["like_growth_top"][0]["title"] == "B"
 
 
+def test_today_rank_splits_douyin_tabs_without_changing_heat_count(tmp_path):
+    ranking_records = [
+        {**dy_record(rank, f"榜单剧{rank}", f"ranking-{rank}"), "tab": "榜单"}
+        for rank in range(1, 17)
+    ]
+    heat_records = [
+        {**dy_record(rank, f"热榜剧{rank}", f"heat-{rank}"), "tab": "热榜"}
+        for rank in range(1, 8)
+    ]
+    duplicated_heat_records = [{**record, "rank_category": "漫剧"} for record in heat_records]
+    write_json(
+        tmp_path / "data/dy/jobs/job/rank/douyin_series_rank_20260702_100000.json",
+        {"captured_at": "2026-07-02 10:00:00", "records": ranking_records + heat_records + duplicated_heat_records},
+    )
+
+    data = TodayRankService(root=tmp_path).get_today_rank("dy", limit=20)
+    sections = {section["key"]: section for section in data["sections"]}
+
+    assert [section["key"] for section in data["sections"]] == ["榜单", "热榜"]
+    assert sections["榜单"]["summary"]["current_count"] == 16
+    assert len(sections["榜单"]["rankings"][0]["current_entries"]) == 16
+    assert sections["热榜"]["summary"]["current_count"] == 7
+    assert len(sections["热榜"]["rankings"][0]["current_entries"]) == 7
+    assert [item["rank"] for item in sections["热榜"]["rankings"][0]["current_entries"]] == list(range(1, 8))
+
+
 def test_today_rank_normalizes_hongguo_nested_records(tmp_path):
     write_json(
         tmp_path / "data/hg/jobs/hg-job/rank/hongguo_hot_rank_20260702_091652.json",

@@ -97,6 +97,7 @@ from system_database import SystemDatabase, SystemDatabaseSettings
 from web.navigation_repository import NavigationRepository
 from web.navigation_api import build_navigation_router
 from web.navigation_service import NavigationService
+from web.page_access_service import PageAccessService
 from web.page_router import build_page_router
 from workflow.api import build_workflow_router
 from workflow.repository import WorkflowRepository
@@ -297,7 +298,25 @@ def install_security_middleware(target_app: FastAPI, session_service=None) -> No
                     content={"detail": "登录已失效，请重新登录"},
                 )
             request.state.principal = principal
-            required = _api_permission(request.method.upper(), request.url.path)
+            page_api_decision = None
+            page_access_service = getattr(
+                request.app.state, "page_access_service", None
+            )
+            if isinstance(page_access_service, PageAccessService):
+                page_api_decision = page_access_service.can_call_page_api(
+                    principal, request.method.upper(), request.url.path
+                )
+            request.state.page_api_access_decision = page_api_decision
+            if page_api_decision is False:
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "没有执行此操作的权限"},
+                )
+            required = (
+                None
+                if page_api_decision is True
+                else _api_permission(request.method.upper(), request.url.path)
+            )
             if (
                 required is not None
                 and not principal.is_system_admin
@@ -505,11 +524,15 @@ navigation_repository = (
 )
 if navigation_repository is not None:
     navigation_repository.seed_catalog()
-navigation_service = (
-    NavigationService(navigation_repository.list_items())
-    if navigation_repository is not None
-    else NavigationService()
-)
+if navigation_repository is not None:
+    page_access_service = PageAccessService(navigation_repository)
+    navigation_service = NavigationService(
+        navigation_repository.list_items(),
+        page_access_service=page_access_service,
+    )
+else:
+    navigation_service = NavigationService()
+    page_access_service = navigation_service.page_access_service
 creative_repository = CreativeRepository(
     WORKSPACE_ROOT / ".runtime" / "creative" / "creative.db"
 )
@@ -526,6 +549,7 @@ app.state.identity_session_service = identity_session_service
 app.state.identity_permission_service = identity_permission_service
 app.state.audit_service = audit_service
 app.state.navigation_repository = navigation_repository
+app.state.page_access_service = page_access_service
 app.state.workflow_repository = workflow_repository
 app.state.workflow_transition_service = workflow_transition_service
 templates = Jinja2Templates(directory=str(WORKSPACE_ROOT / "templates"))
@@ -2033,41 +2057,8 @@ async def test_hongguo_drama_interface(payload: HongguoDramaSettingsRequest):
 
 @app.post("/api/hongguo/drama/search")
 async def search_hongguo_drama(payload: HongguoDramaSearchRequest):
-    title = payload.title.strip()
-    if not title:
-        raise HTTPException(400, "请输入剧名")
-    fallback_reason = ""
-    try:
-        client = HongguoDramaClient(load_hongguo_drama_settings(WORKSPACE_ROOT / ".runtime"))
-        candidates = await asyncio.to_thread(client.search, title)
-        if candidates:
-            return {
-                "status": "success",
-                "source": "hongguo",
-                "candidates": [{key: value for key, value in item.items() if key != "raw"} for item in candidates],
-            }
-        fallback_reason = "红果未找到匹配剧目"
-    except HongguoDramaError as exc:
-        fallback_reason = f"红果接口不可用：{exc}"
-
-    try:
-        candidates = await DouyinDramaFallbackClient().search(title)
-        return {
-            "status": "success",
-            "source": "douyin_fallback",
-            "fallback_reason": fallback_reason,
-            "candidates": candidates,
-        }
-    except DouyinFallbackError as exc:
-        return JSONResponse(
-            {
-                "status": "error",
-                "source": "douyin_fallback",
-                "fallback_reason": fallback_reason,
-                "message": f"{fallback_reason}；抖音降级检索失败：{exc}",
-            },
-            status_code=502,
-        )
+    """Legacy alias for the unified exact-match download search."""
+    return await search_hongguo_drama_for_download(payload)
 
 
 @app.post("/api/douyin/drama/search")
@@ -2087,18 +2078,13 @@ async def search_douyin_drama(payload: HongguoDramaSearchRequest):
 
 @app.post("/api/hongguo/drama/suggest")
 async def suggest_hongguo_drama(payload: HongguoDramaSearchRequest):
-    """Return lightweight Hongguo title suggestions while the user is typing.
-
-    Suggestions intentionally do not trigger the Douyin fallback.  A browser/CDP
-    search is expensive and should only run after the user submits a complete
-    title through the main search action.
-    """
+    """Return exact title matches from every configured Hongguo source."""
     title = payload.title.strip()
     if not title:
         return {"status": "success", "source": "hongguo", "candidates": []}
     try:
         client = HongguoDramaClient(load_hongguo_drama_settings(WORKSPACE_ROOT / ".runtime"))
-        candidates = await asyncio.to_thread(client.search, title)
+        candidates = await asyncio.to_thread(client.search_exact_all_sources, title)
         return {
             "status": "success",
             "source": "hongguo",

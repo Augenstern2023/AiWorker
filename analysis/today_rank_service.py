@@ -28,6 +28,7 @@ RANK_PATTERNS = {
 DEFAULT_HONGGUO_EXPORTS_ROOT = Path(os.environ.get("HONGGUO_EXPORTS_DIR", r"E:\hg\exports"))
 HONGGUO_SECTION_ORDER = ["全部", "真人剧", "漫剧", "AI剧"]
 HONGGUO_RANKING_ORDER = ["热播榜", "推荐榜", "必看榜", "热搜榜", "收藏榜", "新剧榜", "预约榜", "高分臻果榜"]
+DOUYIN_RANKING_ORDER = ["榜单", "热榜"]
 logger = logging.getLogger("aiworker.web.today_rank")
 
 RANK_COMMON_COLUMNS = (
@@ -397,7 +398,49 @@ class TodayRankService:
         comparison = self._compare_records(current_records, previous_records, limit=limit)
         if selected.platform == "hg":
             comparison["sections"] = self._hongguo_sections(current_records, previous_records, limit=limit)
+        elif selected.platform == "dy":
+            comparison["sections"] = self._douyin_sections(current_records, previous_records, limit=limit)
         return comparison
+
+    def _douyin_sections(
+        self,
+        current_records: list[dict[str, Any]],
+        previous_records: list[dict[str, Any]],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        current_groups = _douyin_rank_groups(current_records)
+        previous_groups = _douyin_rank_groups(previous_records)
+        ranking_names = _ordered_values(set(current_groups) | set(previous_groups), DOUYIN_RANKING_ORDER)
+        sections: list[dict[str, Any]] = []
+        for ranking_name in ranking_names:
+            current = current_groups.get(ranking_name, [])
+            previous = previous_groups.get(ranking_name, [])
+            comparison = self._compare_records(current, previous, limit=limit)
+            ranking = {
+                "key": ranking_name,
+                "label": ranking_name,
+                "section": ranking_name,
+                "summary": comparison["summary"],
+                "validation": _validate_records(current),
+                "columns": comparison["columns"],
+                "current_entries": comparison["current_entries"],
+                "new_entries": comparison["new_entries"],
+                "dropped_entries": comparison["dropped_entries"],
+                "rank_up": comparison["rank_up"],
+                "rank_down": comparison["rank_down"],
+                "heat_growth_top": comparison["heat_growth_top"],
+                "like_growth_top": comparison["like_growth_top"],
+            }
+            sections.append(
+                {
+                    "key": ranking_name,
+                    "label": ranking_name,
+                    "summary": comparison["summary"],
+                    "validation": _validate_records(current),
+                    "rankings": [ranking],
+                }
+            )
+        return sections
 
     def _hongguo_sections(
         self,
@@ -836,6 +879,14 @@ def _hongguo_rank_groups(records: list[dict[str, Any]]) -> dict[str, list[dict[s
         board_type = _clean_text(record.get("board_type")) or _clean_text(record.get("category_label")) or "未分类"
         grouped.setdefault(f"{section}|{board_type}", []).append(record)
     return grouped
+
+
+def _douyin_rank_groups(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        ranking_name = _clean_text(record.get("tab")) or "榜单"
+        grouped.setdefault(ranking_name, []).append(record)
+    return {ranking_name: list(_record_map(items).values()) for ranking_name, items in grouped.items()}
 
 
 def _ordered_values(values: set[str], preferred_order: list[str]) -> list[str]:

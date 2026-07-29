@@ -13,15 +13,24 @@
         description: document.getElementById('role-description'),
         claimableTaskTypes: document.getElementById('role-claimable-task-types'),
         permissions: document.getElementById('permission-list'),
+        pagesForm: document.getElementById('role-pages-form'),
+        pagesRoleId: document.getElementById('role-pages-role-id'),
+        pagesRoleName: document.getElementById('role-pages-role-name'),
+        pages: document.getElementById('role-pages-list'),
+        pagesError: document.getElementById('role-pages-error'),
+        filters: document.getElementById('role-filters'),
+        total: document.getElementById('role-total'),
     };
     if (!elements.body) return;
 
     const editor = bootstrap.Modal.getOrCreateInstance(document.getElementById('role-editor-modal'));
+    const pagesEditor = bootstrap.Modal.getOrCreateInstance(document.getElementById('role-pages-modal'));
     const teamMode = window.location.pathname.startsWith('/review/');
     const rolesApi = teamMode ? '/api/team/roles' : '/api/admin/roles';
     const permissionsApi = teamMode ? '/api/team/permissions' : '/api/admin/permissions';
     let roles = [];
     let permissionCatalog = [];
+    let pageCatalog = [];
 
     function showError(target, message = '') {
         target.textContent = message;
@@ -33,13 +42,25 @@
         return data.detail || data.message || fallback;
     }
 
+    function filterParameters() {
+        return new URLSearchParams(new FormData(elements.filters));
+    }
+
+    function formatDate(value) {
+        return value
+            ? String(value).replace('T', ' ').replace(/\.\d+(?=[+-]\d\d:\d\d$)/, '').replace(/[+-]\d\d:\d\d$/, '')
+            : '-';
+    }
+
     function actionButton(icon, label, style, handler, disabled = false) {
         const button = document.createElement('button');
         button.type = 'button';
         button.className = `btn btn-sm ${style}`;
         button.title = label;
         button.setAttribute('aria-label', label);
-        button.innerHTML = `<i class="bi ${icon}"></i>`;
+        const glyph = document.createElement('i');
+        glyph.className = `bi ${icon}`;
+        button.appendChild(glyph);
         button.disabled = disabled;
         button.addEventListener('click', handler);
         return button;
@@ -74,10 +95,9 @@
             const scopeLabels = {task: '本人任务', project: '所在项目', managed_projects: '负责项目', all: '全部数据'};
             const allowedScopes = permission.allowed_scopes || ['task', 'project', 'managed_projects', 'all'];
             for (const value of allowedScopes) {
-                const label = scopeLabels[value] || value;
                 const option = document.createElement('option');
                 option.value = value;
-                option.textContent = label;
+                option.textContent = scopeLabels[value] || value;
                 option.selected = (grantMap.get(permission.code) || 'task') === value;
                 scope.appendChild(option);
             }
@@ -96,6 +116,39 @@
         });
     }
 
+    function renderRolePages(grantedRoutes = []) {
+        const granted = new Set(grantedRoutes);
+        elements.pages.replaceChildren(...pageCatalog.map((page) => {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'col-md-6';
+            const label = document.createElement('label');
+            label.className = 'form-check border rounded p-2 w-100 h-100';
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.className = 'form-check-input me-2 role-page-toggle';
+            checkbox.value = page.route;
+            checkbox.checked = granted.has(page.route);
+            const text = document.createElement('span');
+            text.className = 'form-check-label';
+            text.textContent = page.label;
+            const route = document.createElement('small');
+            route.className = 'd-block text-muted ms-4';
+            route.textContent = page.route;
+            label.append(checkbox, text, route);
+            wrapper.appendChild(label);
+            return wrapper;
+        }));
+    }
+
+    function openRolePages(role) {
+        showError(elements.pagesError);
+        elements.pagesForm.reset();
+        elements.pagesRoleId.value = role.id;
+        elements.pagesRoleName.textContent = `${role.name}（${role.code}）`;
+        renderRolePages(role.page_routes || []);
+        pagesEditor.show();
+    }
+
     function openRoleEditor(role = null) {
         elements.form.reset();
         showError(elements.formError);
@@ -111,15 +164,23 @@
     }
 
     function renderRoles() {
+        if (elements.total) elements.total.textContent = `共 ${roles.length} 个角色`;
         if (!roles.length) {
             const row = document.createElement('tr');
-            row.innerHTML = '<td colspan="5" class="text-center text-muted py-4">暂无角色</td>';
+            const cell = document.createElement('td');
+            cell.colSpan = teamMode ? 5 : 7;
+            cell.className = 'text-center text-muted py-4';
+            cell.textContent = '暂无符合条件的角色';
+            row.appendChild(cell);
             elements.body.replaceChildren(row);
             return;
         }
         elements.body.replaceChildren(...roles.map((role) => {
             const row = document.createElement('tr');
-            for (const value of [role.name, role.code, String((role.permissions || []).length), role.is_enabled ? '启用' : '停用']) {
+            const values = teamMode
+                ? [role.name, role.code, String((role.permissions || []).length), role.is_enabled ? '启用' : '停用']
+                : [role.name, role.code, role.description || '-', String((role.permissions || []).length), role.is_enabled ? '启用' : '停用', formatDate(role.created_at)];
+            for (const value of values) {
                 const cell = document.createElement('td');
                 cell.textContent = value;
                 row.appendChild(cell);
@@ -130,11 +191,12 @@
             if (role.can_edit !== false) {
                 group.append(
                     actionButton('bi-pencil', '编辑权限', 'btn-outline-light', () => openRoleEditor(role)),
+                    ...(!teamMode ? [actionButton('bi-window-stack', '页面授权', 'btn-outline-info', () => openRolePages(role))] : []),
                     actionButton(
-                    role.is_enabled ? 'bi-toggle-off' : 'bi-toggle-on',
-                    role.is_enabled ? '停用角色' : '启用角色',
-                    role.is_enabled ? 'btn-outline-warning' : 'btn-outline-success',
-                    () => window.toggleRoleStatus(role),
+                        role.is_enabled ? 'bi-toggle-off' : 'bi-toggle-on',
+                        role.is_enabled ? '停用角色' : '启用角色',
+                        role.is_enabled ? 'btn-outline-warning' : 'btn-outline-success',
+                        () => window.toggleRoleStatus(role),
                         role.is_system,
                     ),
                 );
@@ -154,14 +216,19 @@
     async function loadRolesAndPermissions() {
         showError(elements.error);
         try {
-            const [rolesResponse, permissionsResponse] = await Promise.all([
-                window.aiworkerApi.request(rolesApi),
+            const roleListUrl = teamMode ? rolesApi : `${rolesApi}?${filterParameters().toString()}`;
+            const requests = [
+                window.aiworkerApi.request(roleListUrl),
                 window.aiworkerApi.request(permissionsApi),
-            ]);
+            ];
+            if (!teamMode) requests.push(window.aiworkerApi.request('/api/admin/roles/page-catalog'));
+            const [rolesResponse, permissionsResponse, pagesResponse] = await Promise.all(requests);
             if (!rolesResponse.ok) throw new Error(await responseError(rolesResponse, '角色加载失败'));
             if (!permissionsResponse.ok) throw new Error(await responseError(permissionsResponse, '权限目录加载失败'));
+            if (!teamMode && !pagesResponse.ok) throw new Error(await responseError(pagesResponse, '页面目录加载失败'));
             roles = await rolesResponse.json();
             permissionCatalog = await permissionsResponse.json();
+            pageCatalog = teamMode ? [] : await pagesResponse.json();
             renderRoles();
         } catch (error) {
             showError(elements.error, error.message || '角色加载失败');
@@ -188,7 +255,6 @@
         const name = window.prompt('新角色名称', `${role.name}副本`);
         if (!name) return;
         try {
-            // Admin equivalent: /api/admin/roles/${role.id}/clone
             const response = await window.aiworkerApi.request(`${rolesApi}/${role.id}/clone`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -209,6 +275,22 @@
             await loadRolesAndPermissions();
         } catch (error) {
             showError(elements.error, error.message || '角色删除失败');
+        }
+    }
+
+    async function exportRoles(format) {
+        try {
+            const parameters = filterParameters();
+            parameters.set('format', format);
+            const response = await window.aiworkerApi.request(`/api/admin/roles/export?${parameters.toString()}`);
+            if (!response.ok) throw new Error(await responseError(response, '角色表导出失败'));
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(await response.blob());
+            link.download = `角色权限表.${format}`;
+            link.click();
+            URL.revokeObjectURL(link.href);
+        } catch (error) {
+            showError(elements.error, error.message || '角色表导出失败');
         }
     }
 
@@ -240,6 +322,33 @@
         }
     });
 
+    elements.pagesForm?.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        showError(elements.pagesError);
+        const roleId = elements.pagesRoleId.value;
+        const page_routes = Array.from(
+            elements.pages.querySelectorAll('.role-page-toggle:checked'),
+            (toggle) => toggle.value,
+        );
+        try {
+            const response = await window.aiworkerApi.request(`${rolesApi}/${roleId}/pages`, {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({page_routes}),
+            });
+            if (!response.ok) throw new Error(await responseError(response, '页面授权保存失败'));
+            pagesEditor.hide();
+            await loadRolesAndPermissions();
+        } catch (error) {
+            showError(elements.pagesError, error.message || '页面授权保存失败');
+        }
+    });
+
     document.getElementById('create-role')?.addEventListener('click', () => openRoleEditor());
+    elements.filters?.addEventListener('submit', (event) => { event.preventDefault(); loadRolesAndPermissions(); });
+    document.getElementById('clear-role-filters')?.addEventListener('click', () => { elements.filters.reset(); loadRolesAndPermissions(); });
+    document.getElementById('refresh-roles')?.addEventListener('click', loadRolesAndPermissions);
+    document.getElementById('export-roles-csv')?.addEventListener('click', () => exportRoles('csv'));
+    document.getElementById('export-roles-xlsx')?.addEventListener('click', () => exportRoles('xlsx'));
     loadRolesAndPermissions();
 })();

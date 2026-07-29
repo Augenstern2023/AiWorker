@@ -14,52 +14,48 @@ from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from identity.permission_catalog import NAVIGATION_CATALOG, PERMISSIONS
-from identity.schema import Principal
-
-PAGE_ROUTES = (
-    ("/selection/dashboard", "page.selection", "工作概览"),
-    ("/selection/ranks", "page.selection", "今日榜单"),
-    ("/selection/hits", "page.selection", "今日爆款"),
-    ("/selection/topics", "page.selection", "选题库"),
-    ("/selection/dramas", "page.selection", "剧目检索下载"),
-    ("/planning/projects", "page.planning", "策划项目"),
-    ("/planning/projects/{project_id}/brief", "page.planning", "创作任务书"),
-    ("/planning/projects/{project_id}/characters", "page.planning", "人物关系"),
-    ("/writing/projects", "page.writing", "编剧项目"),
-    ("/writing/projects/{project_id}/outlines", "page.writing", "全剧大纲"),
-    (
-        "/writing/projects/{project_id}/episodes/{episode_number}/beats",
-        "page.writing",
-        "单集节拍",
-    ),
-    ("/review/projects", "page.review", "负责项目"),
-    ("/review/users", "page.team_management", "团队账号"),
-    ("/review/roles", "page.team_management", "角色授权"),
-    ("/review/projects/{project_id}/members", "page.review", "项目成员"),
-    ("/review/projects/{project_id}/versions", "page.review", "项目版本"),
-    ("/admin/users", "*", "用户管理"),
-    ("/admin/roles", "*", "角色权限"),
-    ("/admin/config", "*", "系统配置"),
-    ("/admin/data", "page.data_management", "数据管理"),
-    ("/admin/drama-player", "page.data_management", "已下载剧目播放"),
-    ("/admin/jobs", "*", "机器任务"),
-    ("/admin/deliveries", "*", "成果交付"),
-    ("/admin/audit", "*", "审计日志"),
-    ("/admin/departments", "*", "组织架构"),
-    ("/admin/navigation", "*", "导航配置"),
-    ("/admin/schedules", "*", "调度中心"),
+from identity.permission_catalog import (
+    DEFAULT_ROLE_PAGE_ROUTES,
+    NAVIGATION_CATALOG,
+    PERMISSIONS,
 )
+from identity.schema import Principal
+from web.page_access_service import PageAccessService
+from web.page_routes import PAGE_ROUTES
+
+
+class _CatalogPageAccessRepository:
+    """Provide deny-by-default page access when no persistent service is wired."""
+
+    def __init__(self, catalog: Sequence[Mapping[str, Any]]) -> None:
+        self._catalog = tuple(dict(item) for item in catalog)
+
+    def list_items(self) -> list[dict[str, Any]]:
+        return [dict(item) for item in self._catalog]
+
+    def list_page_access_user_ids(self, route: str) -> set[str]:
+        return set()
+
+    def list_role_page_access_routes(self, role_codes: tuple[str, ...]) -> set[str]:
+        return set().union(
+            *(DEFAULT_ROLE_PAGE_ROUTES.get(role_code, frozenset()) for role_code in role_codes)
+        ) if role_codes else set()
 
 
 class NavigationService:
     """Build navigation and landing choices from effective page grants."""
 
     def __init__(
-        self, catalog: Sequence[Mapping[str, Any]] = NAVIGATION_CATALOG
+        self,
+        catalog: Sequence[Mapping[str, Any]] = NAVIGATION_CATALOG,
+        *,
+        page_access_service: PageAccessService | None = None,
     ) -> None:
-        registered_routes = frozenset(route for route, _, _ in PAGE_ROUTES)
-        self._catalog = self._validate_catalog(catalog, registered_routes)
+        self._registered_routes = frozenset(route for route, _, _ in PAGE_ROUTES)
+        self._catalog = self._validate_catalog(catalog, self._registered_routes)
+        self.page_access_service = page_access_service or PageAccessService(
+            _CatalogPageAccessRepository(self._catalog)
+        )
         self._route_patterns = tuple(
             (self._compile_route(route), permission)
             for route, permission, _ in PAGE_ROUTES
@@ -71,7 +67,11 @@ class NavigationService:
         visible_groups: list[dict[str, Any]] = []
         children_by_parent: dict[str, list[dict[str, Any]]] = {}
         roots: list[dict[str, Any]] = []
-        for item in self._catalog:
+        catalog = self._validate_catalog(
+            self.page_access_service.repository.list_items(),
+            self._registered_routes,
+        )
+        for item in catalog:
             if not item["is_enabled"]:
                 continue
             parent_id = item.get("parent_id")
@@ -81,15 +81,16 @@ class NavigationService:
                 children_by_parent.setdefault(parent_id, []).append(item)
 
         for group in roots:
-            if principal.is_system_admin and group["hide_for_system_admin"]:
+            if (
+                "system_admin" in principal.role_codes
+                and group["hide_for_system_admin"]
+            ):
                 continue
             items = []
             for item in children_by_parent.get(group["id"], []):
-                if self._can_open_permission(principal, item["required_permission"]):
+                if self.can_open(principal, item["route"]):
                     items.append({"label": item["label"], "route": item["route"]})
-            if not items and (
-                self._can_open_permission(principal, group["required_permission"])
-            ):
+            if not items and self.can_open(principal, group["route"]):
                 items.append({"label": group["label"], "route": group["route"]})
             if not items:
                 continue
@@ -151,16 +152,9 @@ class NavigationService:
         )
 
     def can_open(self, principal: Principal, route: str) -> bool:
-        permission = self.permission_for(route)
-        if permission is None:
-            return route == "/tasks"
-        return self._can_open_permission(principal, permission)
-
-    @staticmethod
-    def _can_open_permission(principal: Principal, permission: str) -> bool:
-        if principal.is_system_admin or permission in principal.permissions:
-            return True
-        return permission == "audit.read.project" and "audit.read" in principal.permissions
+        return self.page_access_service.can_open_page(
+            principal, route.split("?", 1)[0]
+        )
 
     def permission_for(self, route: str) -> str | None:
         path = route.split("?", 1)[0]
@@ -170,8 +164,7 @@ class NavigationService:
         return None
 
     def default_route(self, principal: Principal) -> str:
-        items = self.items_for(principal)
-        return items[0]["route"] if items else "/tasks"
+        return "/profile"
 
     def remember_route(self, principal: Principal, route: str) -> None:
         if not self.can_open(principal, route):

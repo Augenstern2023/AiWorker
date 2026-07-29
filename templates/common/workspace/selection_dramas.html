@@ -10,21 +10,10 @@
                             <div class="position-relative mb-3">
                                 <div class="input-group">
                                     <select class="form-select" style="max-width: 140px" x-model="dramaAnalysis.platform" @change="changeDramaSearchPlatform" aria-label="检索平台"><option value="hg">红果</option><option value="dy">抖音</option></select>
-                                    <input class="form-control" x-model="dramaAnalysis.title" @input="onDramaTitleInput" @keydown.enter="searchDrama" autocomplete="off" :placeholder="dramaAnalysis.platform === 'dy' ? '输入剧名，检索抖音视频' : '输入剧名，自动联想红果剧目'">
+                                    <input class="form-control" x-model="dramaAnalysis.title" @keydown.enter="searchDrama" autocomplete="off" :placeholder="dramaAnalysis.platform === 'dy' ? '输入剧名，检索抖音视频' : '输入完整剧名，检索全部红果剧源'">
                                     <button class="btn btn-primary" @click="searchDrama" :disabled="dramaAnalysis.loading || !dramaAnalysis.title.trim()">
                                         <i class="bi bi-search me-1"></i>搜索
                                     </button>
-                                </div>
-                                <div class="list-group position-absolute w-100 shadow" style="top: calc(100% + 2px); z-index: 20;" x-show="dramaAnalysis.suggestionLoading || dramaAnalysis.suggestions.length" @click.outside="dramaAnalysis.suggestions = []">
-                                    <div class="list-group-item bg-dark text-muted border-secondary py-2" x-show="dramaAnalysis.suggestionLoading">
-                                        <i class="bi bi-search me-1"></i>正在联想剧目…
-                                    </div>
-                                    <template x-for="suggestion in dramaAnalysis.suggestions" :key="suggestion.book_id">
-                                        <button type="button" class="list-group-item list-group-item-action bg-dark text-light border-secondary text-start" @click="chooseDramaSuggestion(suggestion)">
-                                            <span class="fw-semibold" x-text="suggestion.title || '未命名剧目'"></span>
-                                            <span class="small text-muted ms-2" x-text="`${suggestion.episode_count || '-'} 集 · ${suggestion.summary || '暂无简介'}`"></span>
-                                        </button>
-                                    </template>
                                 </div>
                             </div>
                             <div class="alert alert-danger" x-show="dramaAnalysis.error" x-text="dramaAnalysis.error"></div>
@@ -34,7 +23,7 @@
                                 <div class="small mt-1">请手动确认视频。候选可能是推广或片段，并非完整剧集。</div>
                             </div>
                             <div class="list-group mb-3" x-show="dramaAnalysis.candidates.length">
-                                <template x-for="candidate in dramaAnalysis.candidates" :key="candidate.book_id || candidate.aweme_id">
+                                <template x-for="candidate in dramaAnalysis.candidates" :key="`${candidate.source_platform || 'hongguo'}:${candidate.book_id || candidate.aweme_id}`">
                                     <button type="button" class="list-group-item list-group-item-action bg-transparent text-light border-secondary" :class="{active: (candidate.book_id && dramaAnalysis.selected?.book_id === candidate.book_id) || (candidate.aweme_id && dramaAnalysis.selected?.aweme_id === candidate.aweme_id)}" @click="selectDramaCandidate(candidate)" :disabled="dramaAnalysis.loading">
                                         <div class="d-flex gap-3 align-items-center">
                                             <img x-show="candidate.cover" :src="candidate.cover" alt="" style="width: 42px; height: 56px; object-fit: cover;">

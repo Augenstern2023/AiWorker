@@ -14,7 +14,25 @@ from sqlalchemy import Text
 
 from identity.schema import Principal
 from system_database.schema import SYSTEM_METADATA
+from web.page_access_service import PageAccessService
 from web.navigation_service import NavigationService
+
+
+class FakeNavigationRepository:
+    def __init__(self, items=()) -> None:
+        self.items = [dict(item) for item in items]
+        self.access_by_route: dict[str, set[str]] = {}
+
+    def list_items(self):
+        items = []
+        for raw_item in self.items:
+            item = dict(raw_item)
+            item.setdefault("is_enabled", True)
+            items.append(item)
+        return items
+
+    def list_page_access_user_ids(self, route: str) -> set[str]:
+        return set(self.access_by_route.get(route, set()))
 
 
 def _principal(*permissions: str) -> Principal:
@@ -30,8 +48,7 @@ def _principal(*permissions: str) -> Principal:
 
 
 def test_navigation_service_filters_configured_items_by_catalog_permissions():
-    navigation = NavigationService(
-        catalog=(
+    catalog = (
             {
                 "id": "navigation:selection",
                 "label": "Selection",
@@ -49,6 +66,11 @@ def test_navigation_service_filters_configured_items_by_catalog_permissions():
                 "sort_order": 10,
             },
         )
+    repository = FakeNavigationRepository(catalog)
+    repository.access_by_route["/selection/ranks"] = {"user-1"}
+    navigation = NavigationService(
+        catalog=catalog,
+        page_access_service=PageAccessService(repository),
     )
 
     assert navigation.items_for(_principal("rank.read")) == [
@@ -59,6 +81,26 @@ def test_navigation_service_filters_configured_items_by_catalog_permissions():
             "items": ({"label": "Ranks", "route": "/selection/ranks"},),
         }
     ]
+
+
+def test_navigation_service_ignores_legacy_page_permissions_without_whitelist():
+    catalog = (
+        {
+            "id": "navigation:selection",
+            "label": "Selection",
+            "icon": "bi-funnel",
+            "route": "/selection/dashboard",
+            "required_permission": "page.selection",
+            "sort_order": 10,
+        },
+    )
+    repository = FakeNavigationRepository(catalog)
+    navigation = NavigationService(
+        catalog=catalog,
+        page_access_service=PageAccessService(repository),
+    )
+
+    assert navigation.items_for(_principal("page.selection")) == []
 
 
 def test_navigation_service_rejects_permissions_outside_the_permission_catalog():
@@ -94,8 +136,7 @@ def test_navigation_service_rejects_routes_outside_the_page_registry():
 
 
 def test_navigation_service_omits_disabled_configured_items():
-    navigation = NavigationService(
-        catalog=(
+    catalog = (
             {
                 "id": "navigation:selection",
                 "label": "Selection",
@@ -106,9 +147,81 @@ def test_navigation_service_omits_disabled_configured_items():
                 "is_enabled": False,
             },
         )
+    repository = FakeNavigationRepository(catalog)
+    repository.access_by_route["/selection/dashboard"] = {"user-1"}
+    navigation = NavigationService(
+        catalog=catalog,
+        page_access_service=PageAccessService(repository),
     )
 
     assert navigation.items_for(_principal("page.selection")) == []
+
+
+def test_navigation_service_refreshes_presentation_after_page_is_enabled():
+    catalog = (
+        {
+            "id": "navigation:selection",
+            "label": "Selection",
+            "icon": "bi-funnel",
+            "route": "/selection/dashboard",
+            "required_permission": "page.selection",
+            "sort_order": 10,
+            "is_enabled": False,
+        },
+        {
+            "id": "navigation:admin",
+            "label": "System",
+            "icon": "bi-gear",
+            "route": "/admin/users",
+            "required_permission": "*",
+            "sort_order": 20,
+            "is_enabled": True,
+        },
+    )
+    repository = FakeNavigationRepository(catalog)
+    repository.access_by_route["/selection/dashboard"] = {"user-1"}
+    repository.access_by_route["/admin/users"] = {"user-1"}
+    navigation = NavigationService(
+        catalog=catalog,
+        page_access_service=PageAccessService(repository),
+    )
+
+    assert navigation.items_for(_principal()) == [
+        {
+            "label": "System",
+            "icon": "bi-gear",
+            "route": "/admin/users",
+            "items": ({"label": "System", "route": "/admin/users"},),
+        }
+    ]
+
+    repository.items[0].update(
+        is_enabled=True,
+        label="Selection Updated",
+        icon="bi-stars",
+        sort_order=30,
+    )
+
+    assert navigation.can_open(_principal(), "/selection/dashboard") is True
+    assert navigation.items_for(_principal()) == [
+        {
+            "label": "System",
+            "icon": "bi-gear",
+            "route": "/admin/users",
+            "items": ({"label": "System", "route": "/admin/users"},),
+        },
+        {
+            "label": "Selection Updated",
+            "icon": "bi-stars",
+            "route": "/selection/dashboard",
+            "items": (
+                {
+                    "label": "Selection Updated",
+                    "route": "/selection/dashboard",
+                },
+            ),
+        }
+    ]
 
 
 def test_navigation_items_schema_uses_text_ids_and_permission_foreign_key():

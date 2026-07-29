@@ -221,8 +221,11 @@ def test_admin_identity_pages_expose_complete_management_flows():
 
     assert 'id="role-editor-modal"' in roles_html
     assert 'id="permission-editor"' in roles_html
+    assert 'id="role-pages-modal"' in roles_html
     assert "/api/admin/permissions" in roles_js
     assert "/api/admin/roles/${role.id}/clone" in roles_js
+    assert "${rolesApi}/${roleId}/pages" in roles_js
+    assert "openRolePages" in roles_js
     assert "permissions" in roles_js
     assert "toggleRoleStatus" in roles_js
 

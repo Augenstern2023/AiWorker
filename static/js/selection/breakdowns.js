@@ -9,12 +9,15 @@ window.aiworkerModules.push(() => ({
                         const data = await res.json().catch(() => ({}));
                         if (!res.ok) {
                             this.topicLibrary.error = data.detail || '更新选题状态失败';
+                            if (status === 'adopted') this.showAdoptionNotice(false, topic.title, this.topicLibrary.error);
                             return;
                         }
                         Object.assign(topic, data);
                         await this.fetchTopicLibrary();
+                        if (status === 'adopted') this.showAdoptionNotice(true, data.title || topic.title, '已收录至选题库。');
                     } catch (error) {
                         this.topicLibrary.error = error.message || '更新选题状态失败';
+                        if (status === 'adopted') this.showAdoptionNotice(false, topic.title, this.topicLibrary.error);
                     }
                 },
 
@@ -939,13 +942,23 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async updateCreativeTopic(topic, status) {
-                    const res = await aiworkerApi.request(`/api/creative/topics/${topic.id}`, {
-                        method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({status})
-                    });
-                    const data = await res.json();
-                    if (!res.ok) { alert(data.detail || '更新失败'); return; }
-                    Object.assign(topic, data);
-                    await this.fetchCreativeTopics();
+                    try {
+                        const res = await aiworkerApi.request(`/api/creative/topics/${topic.id}`, {
+                            method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({status})
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (!res.ok) {
+                            if (status === 'adopted') this.showAdoptionNotice(false, topic.title, data.detail || '采纳接口错误，请稍后重试。');
+                            else alert(data.detail || '更新失败');
+                            return;
+                        }
+                        Object.assign(topic, data);
+                        this.creative.items = this.creative.items.filter(item => item.id !== topic.id);
+                        if (status === 'adopted') this.showAdoptionNotice(true, data.title || topic.title, '已收录至选题库。');
+                    } catch (error) {
+                        if (status === 'adopted') this.showAdoptionNotice(false, topic.title, error.message || '采纳接口错误，请稍后重试。');
+                        else alert(error.message || '更新失败');
+                    }
                 },
 
                 createCreativeBreakdown(topic) {

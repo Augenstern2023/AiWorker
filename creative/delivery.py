@@ -15,7 +15,7 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -23,8 +23,8 @@ from pydantic import BaseModel, Field
 
 from audit.service import AuditService
 from identity.dependencies import (
-    current_principal,
     permission_service_for_request,
+    require_page_api,
 )
 from identity.schema import Principal
 from workflow.repository import WorkflowRepository
@@ -138,9 +138,12 @@ class DeliveryService:
         actor: Principal,
         request: Request | None = None,
         workflow_task_id: str | None = None,
+        page_authorized: bool = False,
     ) -> dict[str, Any]:
-        if not actor.is_system_admin:
-            raise PermissionError("only system administrators may create deliveries")
+        if not actor.is_system_admin and not page_authorized:
+            raise PermissionError(
+                "delivery requires system administrator or page authorization"
+            )
         resource_type = STAGE_RESOURCE_TYPES.get(stage)
         if resource_type is None:
             raise ValueError("stage must be brief, characters, outline, or beats")
@@ -178,7 +181,9 @@ class DeliveryService:
                 and existing["workflow_task_id"] != workflow_task_id
             ):
                 raise ValueError("delivery already belongs to another workflow task")
-            return self._reconcile_delivery(existing)
+            return self._reconcile_delivery(
+                existing, page_authorized=page_authorized
+            )
         task = self._resolve_delivery_task(project_id, workflow_task_id)
         delivery_id = str(uuid.uuid4())
         extension = "json" if format == "json" else "md"
@@ -239,7 +244,9 @@ class DeliveryService:
             )
             if existing is None:
                 raise
-            return self._reconcile_delivery(existing)
+            return self._reconcile_delivery(
+                existing, page_authorized=page_authorized
+            )
         except BaseException:
             path.unlink(missing_ok=True)
             raise
@@ -252,9 +259,16 @@ class DeliveryService:
                 "audit_recorded_at": None,
             }
         )
-        return self._reconcile_delivery(record, request=request)
+        return self._reconcile_delivery(
+            record, request=request, page_authorized=page_authorized
+        )
 
-    def list(self) -> list[dict[str, Any]]:
+    def list(
+        self,
+        *,
+        page_authorized: bool = False,
+        project_authorizer: Callable[[str], bool] | None = None,
+    ) -> list[dict[str, Any]]:
         with self.creative_repository._connect() as connection:
             rows = connection.execute(
                 """
@@ -264,14 +278,29 @@ class DeliveryService:
                 ORDER BY d.created_at DESC, d.id DESC
                 """
             ).fetchall()
+        records = [self._public_record(dict(row)) for row in rows]
+        if project_authorizer is not None:
+            records = [
+                record
+                for record in records
+                if project_authorizer(str(record["project_id"]))
+            ]
         return [
-            self._reconcile_delivery(self._public_record(dict(row)))
-            for row in rows
+            self._reconcile_delivery(
+                record, page_authorized=page_authorized
+            )
+            for record in records
         ]
 
-    def options(self) -> list[dict[str, Any]]:
+    def options(
+        self, *, project_authorizer: Callable[[str], bool] | None = None
+    ) -> list[dict[str, Any]]:
         options: list[dict[str, Any]] = []
         for project in self.creative_repository.list_projects():
+            if project_authorizer is not None and not project_authorizer(
+                str(project["id"])
+            ):
+                continue
             try:
                 task = self._resolve_delivery_task(int(project["id"]), None)
             except (KeyError, ValueError):
@@ -309,7 +338,13 @@ class DeliveryService:
                 })
         return options
 
-    def get(self, delivery_id: str) -> dict[str, Any] | None:
+    def get(
+        self,
+        delivery_id: str,
+        *,
+        page_authorized: bool = False,
+        project_authorizer: Callable[[str], bool] | None = None,
+    ) -> dict[str, Any] | None:
         with self.creative_repository._connect() as connection:
             row = connection.execute(
                 """
@@ -320,10 +355,15 @@ class DeliveryService:
                 """,
                 (delivery_id,),
             ).fetchone()
-        return (
-            self._reconcile_delivery(self._public_record(dict(row)))
-            if row is not None
-            else None
+        if row is None:
+            return None
+        record = self._public_record(dict(row))
+        if project_authorizer is not None and not project_authorizer(
+            str(record["project_id"])
+        ):
+            raise PermissionError("delivery project is outside the actor scope")
+        return self._reconcile_delivery(
+            record, page_authorized=page_authorized
         )
 
     def _find_existing(
@@ -404,7 +444,11 @@ class DeliveryService:
         return task
 
     def _reconcile_delivery(
-        self, record: dict[str, Any], *, request: Request | None = None
+        self,
+        record: dict[str, Any],
+        *,
+        request: Request | None = None,
+        page_authorized: bool = False,
     ) -> dict[str, Any]:
         path = Path(record["path"]).resolve()
         if path.parent != self.delivery_dir.resolve() or not path.is_file():
@@ -435,7 +479,7 @@ class DeliveryService:
             )
             record["stage_content_fingerprint"] = fingerprint
         self._record_stage_export(record)
-        self._complete_workflow_task(record)
+        self._complete_workflow_task(record, page_authorized=page_authorized)
         self._record_audit(record, request=request)
         refreshed = self._get_unreconciled(record["id"])
         assert refreshed is not None
@@ -459,7 +503,9 @@ class DeliveryService:
             record["id"], "stage_export_recorded_at", time.time()
         )
 
-    def _complete_workflow_task(self, record: dict[str, Any]) -> None:
+    def _complete_workflow_task(
+        self, record: dict[str, Any], *, page_authorized: bool = False
+    ) -> None:
         if record.get("workflow_completed_at") is not None:
             return
         repository = self.workflow_repository.identity_repository
@@ -479,9 +525,9 @@ class DeliveryService:
                 actor = self.workflow_repository._live_actor(
                     connection, record["actor_user_id"]
                 )
-                if not actor["is_system_admin"]:
+                if not actor["is_system_admin"] and not page_authorized:
                     raise PermissionError(
-                        "delivery actor is no longer a system administrator"
+                        "delivery actor no longer has page authorization"
                     )
                 self.workflow_repository.transition_task_in_transaction(
                     task["id"],
@@ -494,6 +540,9 @@ class DeliveryService:
                         "stage": record["stage"],
                         "submission_id": record["submission_id"],
                     },
+                    authorization_context=(
+                        {"permissions": {"*"}} if page_authorized else None
+                    ),
                 )
             else:
                 event = connection.execute(
@@ -589,8 +638,18 @@ class DeliveryService:
             ).fetchone()
         return self._public_record(dict(row)) if row is not None else None
 
-    def download_path(self, delivery_id: str) -> Path:
-        record = self.get(delivery_id)
+    def download_path(
+        self,
+        delivery_id: str,
+        *,
+        page_authorized: bool = False,
+        project_authorizer: Callable[[str], bool] | None = None,
+    ) -> Path:
+        record = self.get(
+            delivery_id,
+            page_authorized=page_authorized,
+            project_authorizer=project_authorizer,
+        )
         if record is None:
             raise KeyError(delivery_id)
         path = Path(record["path"]).resolve()
@@ -669,10 +728,23 @@ class DeliveryService:
 def build_delivery_router(service: DeliveryService) -> APIRouter:
     router = APIRouter(prefix="/api/admin/deliveries", tags=["admin-deliveries"])
 
-    def admin(principal: Principal = Depends(current_principal)) -> Principal:
-        if not principal.is_system_admin:
-            raise HTTPException(403, "only system administrators may manage deliveries")
-        return principal
+    admin = require_page_api()
+
+    def can_access_project(
+        request: Request, principal: Principal, project_id: str
+    ) -> bool:
+        if principal.is_system_admin:
+            return True
+        permission_service = permission_service_for_request(request)
+        return permission_service.can_access_assigned_project(
+            principal, project_id
+        ) or permission_service.can_access_managed_project(principal, project_id)
+
+    def assert_project_access(
+        request: Request, principal: Principal, project_id: str
+    ) -> None:
+        if not can_access_project(request, principal, project_id):
+            raise HTTPException(403, "没有访问此项目交付成果的权限")
 
     def verify_csrf(request: Request) -> None:
         permission_service = permission_service_for_request(request)
@@ -683,14 +755,29 @@ def build_delivery_router(service: DeliveryService) -> APIRouter:
             raise HTTPException(403, "CSRF 校验失败")
 
     @router.get("")
-    def list_deliveries(principal: Principal = Depends(admin)):
-        del principal
-        return {"deliveries": service.list()}
+    def list_deliveries(
+        request: Request, principal: Principal = Depends(admin)
+    ):
+        return {
+            "deliveries": service.list(
+                page_authorized=not principal.is_system_admin,
+                project_authorizer=lambda project_id: can_access_project(
+                    request, principal, project_id
+                ),
+            )
+        }
 
     @router.get("/options")
-    def list_options(principal: Principal = Depends(admin)):
-        del principal
-        return {"options": service.options()}
+    def list_options(
+        request: Request, principal: Principal = Depends(admin)
+    ):
+        return {
+            "options": service.options(
+                project_authorizer=lambda project_id: can_access_project(
+                    request, principal, project_id
+                )
+            )
+        }
 
     @router.post("", status_code=201)
     def create_delivery(
@@ -699,6 +786,7 @@ def build_delivery_router(service: DeliveryService) -> APIRouter:
         principal: Principal = Depends(admin),
     ):
         verify_csrf(request)
+        assert_project_access(request, principal, str(payload.project_id))
         try:
             delivery = service.create(
                 project_id=payload.project_id,
@@ -708,6 +796,7 @@ def build_delivery_router(service: DeliveryService) -> APIRouter:
                 actor=principal,
                 request=request,
                 workflow_task_id=payload.workflow_task_id,
+                page_authorized=not principal.is_system_admin,
             )
         except KeyError as exc:
             raise HTTPException(404, "project or submission not found") from exc
@@ -719,16 +808,32 @@ def build_delivery_router(service: DeliveryService) -> APIRouter:
 
     @router.get("/{delivery_id}/download")
     def download_delivery(
-        delivery_id: str, principal: Principal = Depends(admin)
+        delivery_id: str,
+        request: Request,
+        principal: Principal = Depends(admin),
     ) -> FileResponse:
-        del principal
         try:
-            path = service.download_path(delivery_id)
+            page_authorized = not principal.is_system_admin
+            path = service.download_path(
+                delivery_id,
+                page_authorized=page_authorized,
+                project_authorizer=lambda project_id: can_access_project(
+                    request, principal, project_id
+                ),
+            )
         except KeyError as exc:
             raise HTTPException(404, "delivery not found") from exc
         except FileNotFoundError as exc:
             raise HTTPException(410, "delivery file is unavailable") from exc
-        record = service.get(delivery_id)
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        record = service.get(
+            delivery_id,
+            page_authorized=page_authorized,
+            project_authorizer=lambda project_id: can_access_project(
+                request, principal, project_id
+            ),
+        )
         assert record is not None
         media_type = (
             "application/json"

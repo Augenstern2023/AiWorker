@@ -23,6 +23,7 @@ from system_database.schema import (
     permission_dependencies,
     permissions,
     role_claimable_task_types,
+    role_page_access,
     role_permissions,
     roles,
     sessions,
@@ -32,7 +33,12 @@ from system_database.schema import (
     users,
 )
 
-from .permission_catalog import DEFAULT_ROLES, PERMISSIONS, PERMISSION_DEPENDENCIES
+from .permission_catalog import (
+    DEFAULT_ROLE_PAGE_ROUTES,
+    DEFAULT_ROLES,
+    PERMISSIONS,
+    PERMISSION_DEPENDENCIES,
+)
 
 
 class IdentityRepository:
@@ -109,6 +115,11 @@ class IdentityRepository:
 
             for role in DEFAULT_ROLES:
                 role_id = f"role:{role.code}"
+                existing_role_id = connection.execute(
+                    select(roles.c.id).where(
+                        func.lower(roles.c.code) == role.code.lower()
+                    )
+                ).scalar_one_or_none()
                 connection.execute(
                     pg_insert(roles)
                     .values(
@@ -148,6 +159,13 @@ class IdentityRepository:
                             set_={"data_scope": data_scope},
                         )
                     )
+                if existing_role_id is None:
+                    for route in DEFAULT_ROLE_PAGE_ROUTES.get(role.code, ()):
+                        connection.execute(
+                            pg_insert(role_page_access)
+                            .values(role_id=stored_role_id, route=route)
+                            .on_conflict_do_nothing()
+                        )
 
     @staticmethod
     def _expanded_permissions(
@@ -173,10 +191,25 @@ class IdentityRepository:
 
     # ------------------------------------------------------------------ roles
 
-    def list_roles(self) -> list[dict[str, Any]]:
+    def list_roles(
+        self, *, keyword: str | None = None, status: str | None = None
+    ) -> list[dict[str, Any]]:
+        conditions = [roles.c.is_deleted == 0]
+        normalized_keyword = (keyword or "").strip().casefold()
+        if normalized_keyword:
+            pattern = f"%{normalized_keyword}%"
+            conditions.append(
+                or_(
+                    func.lower(roles.c.code).like(pattern),
+                    func.lower(roles.c.name).like(pattern),
+                    func.lower(roles.c.description).like(pattern),
+                )
+            )
+        if status is not None:
+            conditions.append(roles.c.is_enabled == (1 if status == "enabled" else 0))
         with self.connect() as connection:
             rows = connection.execute(
-                select(roles).where(roles.c.is_deleted == 0).order_by(roles.c.code)
+                select(roles).where(and_(*conditions)).order_by(roles.c.code)
             ).mappings().all()
         return [self._role_dict(row) for row in rows]
 
@@ -301,6 +334,33 @@ class IdentityRepository:
                 .order_by(t.c.task_type)
             ).mappings().all()
         return [str(r['task_type']) for r in rows]
+
+    def list_role_page_access(self, role_id: str, *, connection=None) -> list[str]:
+        with self.connection_scope(connection) as conn:
+            rows = conn.execute(
+                select(role_page_access.c.route)
+                .where(role_page_access.c.role_id == role_id)
+                .order_by(role_page_access.c.route)
+            ).scalars().all()
+        return [str(route) for route in rows]
+
+    def replace_role_page_access(self, role_id: str, routes, *, connection=None) -> set[str]:
+        from web.page_routes import PAGE_ROUTES
+
+        allowed_routes = {route for route, _, _ in PAGE_ROUTES if "{" not in route}
+        normalized = {str(route).strip() for route in routes}
+        if not normalized <= allowed_routes:
+            raise ValueError("角色页面授权包含未知或动态页面")
+        with self.connection_scope(connection) as conn:
+            if self.get_role(role_id, connection=conn) is None:
+                raise KeyError(role_id)
+            conn.execute(delete(role_page_access).where(role_page_access.c.role_id == role_id))
+            if normalized:
+                conn.execute(
+                    insert(role_page_access),
+                    [{"role_id": role_id, "route": route} for route in sorted(normalized)],
+                )
+        return normalized
 
     def replace_role_claimable_task_types(
         self, role_id: str, task_types, *, connection=None

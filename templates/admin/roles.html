@@ -2,9 +2,17 @@
 
 {% block content %}
 {% set team_mode = request.url.path.startswith('/review/') %}
-<div class="d-flex align-items-center justify-content-between mb-3"><div><h3 class="mb-1">{{ '角色授权' if team_mode else '角色权限' }}</h3><div class="small text-muted">{{ '创建可委派的业务角色并配置执行权限' if team_mode else '维护角色权限与数据范围' }}</div></div><button class="btn btn-primary btn-sm" id="create-role"><i class="bi bi-plus-lg me-1"></i>新建角色</button></div>
+<div class="d-flex align-items-center justify-content-between gap-3 mb-3"><div><h3 class="mb-1">{{ '角色授权' if team_mode else '角色权限' }}</h3><div class="small text-muted">{{ '创建可委派的业务角色并配置执行权限' if team_mode else '维护角色权限、数据范围与启停状态' }}</div></div><button class="btn btn-primary btn-sm flex-shrink-0" id="create-role"><i class="bi bi-plus-lg me-1"></i>新建角色</button></div>
 <div class="alert alert-danger d-none" id="role-error" role="alert"></div>
-<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>角色</th><th>代码</th><th>权限数</th><th>状态</th><th>操作</th></tr></thead><tbody id="role-list"><tr><td colspan="5" class="text-center text-muted py-4">正在加载角色...</td></tr></tbody></table></div>
+{% if not team_mode %}
+<form class="row g-2 align-items-end mb-3" id="role-filters">
+    <div class="col-lg-5"><label class="form-label form-label-sm" for="role-filter-keyword">检索角色</label><input class="form-control form-control-sm" id="role-filter-keyword" name="keyword" placeholder="角色名称、代码或说明"></div>
+    <div class="col-lg-2"><label class="form-label form-label-sm" for="role-filter-status">状态</label><select class="form-select form-select-sm" id="role-filter-status" name="status"><option value="">全部状态</option><option value="enabled">启用</option><option value="disabled">停用</option></select></div>
+    <div class="col-lg-5 d-flex flex-wrap gap-2"><button class="btn btn-primary btn-sm" type="submit"><i class="bi bi-search me-1"></i>检索</button><button class="btn btn-outline-secondary btn-sm" id="clear-role-filters" type="button">清除</button><button class="btn btn-outline-secondary btn-sm" id="refresh-roles" type="button" title="刷新角色列表" aria-label="刷新角色列表"><i class="bi bi-arrow-clockwise"></i></button><button class="btn btn-outline-secondary btn-sm" id="export-roles-csv" type="button"><i class="bi bi-download me-1"></i>CSV</button><button class="btn btn-outline-secondary btn-sm" id="export-roles-xlsx" type="button"><i class="bi bi-download me-1"></i>XLSX</button></div>
+</form>
+{% endif %}
+<div class="d-flex align-items-center justify-content-between mb-2"><span class="small text-muted" id="role-total" aria-live="polite">正在加载角色...</span></div>
+<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>{% if team_mode %}<th>角色</th><th>代码</th><th>权限数</th><th>状态</th>{% else %}<th>角色</th><th>代码</th><th>说明</th><th>权限数</th><th>状态</th><th>创建时间</th>{% endif %}<th>操作</th></tr></thead><tbody id="role-list"><tr><td colspan="{{ 5 if team_mode else 7 }}" class="text-center text-muted py-4">正在加载角色...</td></tr></tbody></table></div>
 
 <div class="modal fade" id="role-editor-modal" tabindex="-1" aria-labelledby="role-editor-title" aria-hidden="true"><div class="modal-dialog modal-xl modal-dialog-centered"><form class="modal-content" id="role-editor-form"><div class="modal-header"><h5 class="modal-title" id="role-editor-title">新建角色</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button></div><div class="modal-body">
     <input type="hidden" id="role-id">
@@ -13,5 +21,6 @@
     <div class="table-responsive border" id="permission-editor"><table class="table table-sm align-middle mb-0"><thead><tr><th style="width:48px"></th><th>权限</th><th>代码</th><th style="width:180px">数据范围</th></tr></thead><tbody id="permission-list"></tbody></table></div>
     <div class="alert alert-danger d-none mt-3 mb-0" id="role-form-error" role="alert"></div>
 </div><div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" id="save-role" type="submit"><i class="bi bi-save me-1"></i>保存</button></div></form></div></div></div>
+<div class="modal fade" id="role-pages-modal" tabindex="-1" aria-labelledby="role-pages-title" aria-hidden="true"><div class="modal-dialog modal-lg modal-dialog-centered"><form class="modal-content" id="role-pages-form"><div class="modal-header"><h5 class="modal-title" id="role-pages-title">页面授权</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button></div><div class="modal-body"><input type="hidden" id="role-pages-role-id"><p class="small text-muted mb-3" id="role-pages-role-name"></p><div class="row g-2" id="role-pages-list"></div><div class="alert alert-danger d-none mt-3 mb-0" id="role-pages-error" role="alert"></div></div><div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" type="submit"><i class="bi bi-save me-1"></i>保存</button></div></form></div></div>
 {% endblock %}
-{% block scripts %}<script src="/static/js/admin/roles.js"></script>{% endblock %}
+{% block scripts %}<script src="/static/js/admin/roles.js?v={{ asset_version }}&role_directory=1&page_access=1"></script>{% endblock %}

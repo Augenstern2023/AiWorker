@@ -8,12 +8,16 @@
 #
 
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 from identity.permission_catalog import PERMISSION_DEPENDENCIES
+from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
+from identity.schema import Principal
+from workflow.repository import WorkflowRepository
 
 
 SYSTEM_TABLES = {
@@ -65,6 +69,128 @@ def test_identity_repository_seeds_exact_default_roles(tmp_path: Path):
     assert admin["is_system"] is True
     assert repository.list_role_permissions(admin["id"]) == [
         {"permission_code": "*", "data_scope": "all"},
+    ]
+
+
+def test_project_owner_project_scope_and_configuration_do_not_require_membership() -> None:
+    class MembershipQueryMustNotRun:
+        def exec_driver_sql(self, *args, **kwargs):
+            del args, kwargs
+            raise AssertionError("global project owner must not query project membership")
+
+    class NoManagedMembership:
+        def exec_driver_sql(self, *args, **kwargs):
+            del args, kwargs
+            return self
+
+        def mappings(self):
+            return self
+
+        def fetchone(self):
+            return None
+
+    class RepositoryMustNotConnect:
+        def connect(self):
+            raise AssertionError("global project owner must not query project membership")
+
+    owner = Principal(
+        user_id="global-owner",
+        username="global-owner",
+        display_name="Global Owner",
+        role_codes=("project_owner",),
+        permissions=frozenset(),
+        data_scope="task",
+        session_id="owner-session",
+    )
+    regular = Principal(
+        user_id="regular-user",
+        username="regular-user",
+        display_name="Regular User",
+        role_codes=("selection_operator",),
+        permissions=frozenset(),
+        data_scope="managed_projects",
+        session_id="regular-session",
+    )
+    permissions = object.__new__(PermissionService)
+    permissions.repository = RepositoryMustNotConnect()  # type: ignore[assignment]
+
+    assert permissions.can_access_assigned_project(owner, "unassigned-project")
+    assert permissions.can_access_managed_project(owner, "unassigned-project")
+    WorkflowRepository._assert_project_manager(
+        MembershipQueryMustNotRun(), "unassigned-project", {  # type: ignore[arg-type]
+            "is_system_admin": False,
+            "user_id": owner.user_id,
+            "role_codes": {"project_owner"},
+        }
+    )
+
+    with pytest.raises(PermissionError):
+        WorkflowRepository._assert_project_manager(
+            NoManagedMembership(), "different-project", {  # type: ignore[arg-type]
+                "is_system_admin": False,
+                "user_id": regular.user_id,
+                "role_codes": set(regular.role_codes),
+            }
+        )
+
+
+def test_project_owner_sees_project_tasks_without_membership() -> None:
+    project_task = {
+        "id": "foreign-project-task",
+        "assignee_id": "someone-else",
+        "status": "assigned",
+        "role_code": "creative_planner",
+        "task_type": "brief",
+        "project_id": "foreign-project",
+    }
+    unrelated_unscoped_task = {
+        "id": "unrelated-unscoped-task",
+        "assignee_id": "someone-else",
+        "status": "assigned",
+        "role_code": "creative_planner",
+        "task_type": "brief",
+        "project_id": None,
+    }
+
+    class QueryResult:
+        def mappings(self):
+            return self
+
+        def fetchall(self):
+            return [project_task, unrelated_unscoped_task]
+
+    class Connection:
+        def exec_driver_sql(self, *args, **kwargs):
+            del args, kwargs
+            return QueryResult()
+
+    class Identity:
+        @contextmanager
+        def connect(self):
+            yield Connection()
+
+    repository = object.__new__(WorkflowRepository)
+    repository.identity_repository = Identity()  # type: ignore[assignment]
+    repository._live_actor = lambda connection, actor_id: {  # type: ignore[method-assign]
+        "is_system_admin": False,
+        "role_codes": {"project_owner"},
+        "claimable_task_types": set(),
+    }
+    repository._managed_project_ids = lambda connection, actor_id: set()  # type: ignore[method-assign]
+    repository._assigned_project_ids = lambda connection, actor_id: set()  # type: ignore[method-assign]
+    repository._task_dict = lambda row: dict(row)  # type: ignore[method-assign]
+    owner = Principal(
+        user_id="global-owner",
+        username="global-owner",
+        display_name="Global Owner",
+        role_codes=("project_owner",),
+        permissions=frozenset(),
+        data_scope="managed_projects",
+        session_id="owner-session",
+    )
+
+    assert [task["id"] for task in repository.list_tasks(owner)] == [
+        "foreign-project-task"
     ]
 
 

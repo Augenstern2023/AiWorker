@@ -34,7 +34,11 @@ def build_audit_router(audit_service: AuditService) -> APIRouter:
     )
 
     def project_scope_for(principal: Principal) -> set[str] | None:
-        if principal.is_system_admin or "audit.read" in principal.permissions:
+        if (
+            principal.is_system_admin
+            or "project_owner" in principal.role_codes
+            or "audit.read" in principal.permissions
+        ):
             return None
         if "audit.read.project" not in principal.permissions:
             raise HTTPException(403, "没有执行此操作的权限")

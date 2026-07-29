@@ -447,6 +447,63 @@ def test_postgres_role_management_endpoints_return_catalog_data(
     assert any(item["code"] == "page.admin.delivery" for item in permissions.json())
 
 
+def test_postgres_role_page_access_endpoint_updates_the_effective_role_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required for PostgreSQL tests")
+    if make_url(postgres_url).database == "aiworker_system":
+        raise ValueError("tests must not run against the aiworker_system database")
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
+    command.upgrade(Config("alembic.ini"), "head")
+    database = SystemDatabase(SystemDatabaseSettings(postgres_url))
+    repository = IdentityRepository(database)
+    repository.seed_defaults()
+    password_service = PasswordService()
+    user = repository.create_user(
+        f"role-pages-admin-{uuid.uuid4()}",
+        "Role Pages Administrator",
+        password_service.hash("StrongPassword-123!"),
+    )
+    system_admin = repository.get_role_by_code("system_admin")
+    screenwriter = repository.get_role_by_code("screenwriter")
+    assert system_admin is not None and screenwriter is not None
+    repository.replace_user_roles(user["id"], [system_admin["id"]])
+    app = FastAPI()
+    app.include_router(
+        build_identity_router(
+            repository,
+            SessionService(repository),
+            AuditService(repository),
+            password_service=password_service,
+        )
+    )
+    client = TestClient(app)
+    login = client.post(
+        "/api/auth/login",
+        json={"username": user["username"], "password": "StrongPassword-123!"},
+    )
+    assert login.status_code == 200
+    csrf_token = login.json()["csrf_token"]
+
+    catalog = client.get("/api/admin/roles/page-catalog")
+    assert catalog.status_code == 200
+    assert {item["route"] for item in catalog.json()} >= {
+        "/selection/ranks", "/admin/data"
+    }
+    updated = client.put(
+        f"/api/admin/roles/{screenwriter['id']}/pages",
+        headers={"X-CSRF-Token": csrf_token},
+        json={"page_routes": ["/selection/ranks", "/admin/data"]},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["page_routes"] == ["/admin/data", "/selection/ranks"]
+    assert repository.list_role_page_access(screenwriter["id"]) == [
+        "/admin/data", "/selection/ranks"
+    ]
+
+
 def test_postgres_project_member_listing_uses_text_primary_key_tiebreaker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -824,3 +881,96 @@ def test_postgres_user_directory_filters_and_current_profile(
         "/api/auth/login",
         json={"username": reset_target["username"], "password": "Reset-New-123!"},
     ).status_code == 200
+
+
+def test_postgres_role_directory_filters_and_exports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required for PostgreSQL tests")
+    if make_url(postgres_url).database == "aiworker_system":
+        raise ValueError("tests must not run against the aiworker_system database")
+
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
+    command.upgrade(Config("alembic.ini"), "head")
+    database = SystemDatabase(SystemDatabaseSettings(postgres_url))
+    repository = IdentityRepository(database)
+    audit_service = AuditService(repository)
+    app = FastAPI()
+    app.include_router(
+        build_identity_router(repository, SessionService(repository), audit_service)
+    )
+    repository.seed_defaults()
+
+    admin_username = f"role-export-admin-{uuid.uuid4()}"
+    admin = repository.create_user(
+        admin_username, "Role Export Admin", PasswordService().hash("Admin-Strong-123!")
+    )
+    admin_role = repository.get_role_by_code("system_admin")
+    assert admin_role is not None
+    repository.replace_user_roles(admin["id"], [admin_role["id"]])
+    admin_client = TestClient(app, raise_server_exceptions=False)
+    assert admin_client.post(
+        "/api/auth/login",
+        json={"username": admin_username, "password": "Admin-Strong-123!"},
+    ).status_code == 200
+
+    marker = uuid.uuid4().hex
+    enabled = repository.create_role(
+        f"role-search-{marker}", "可检索角色", f"角色检索说明 {marker}"
+    )
+    disabled = repository.create_role(
+        f"role-disabled-{marker}", "已停用角色", f"角色检索说明 {marker}"
+    )
+    repository.update_role(disabled["id"], is_enabled=False)
+
+    unfiltered_result = admin_client.get(
+        "/api/admin/roles", params={"keyword": "", "status": ""}
+    )
+    assert unfiltered_result.status_code == 200
+    unfiltered_export = admin_client.get(
+        "/api/admin/roles/export",
+        params={"keyword": "", "status": "", "format": "csv"},
+    )
+    assert unfiltered_export.status_code == 200
+
+    enabled_result = admin_client.get(
+        "/api/admin/roles", params={"keyword": marker.upper(), "status": "enabled"}
+    )
+    assert enabled_result.status_code == 200
+    assert [role["id"] for role in enabled_result.json()] == [enabled["id"]]
+
+    disabled_result = admin_client.get(
+        "/api/admin/roles", params={"keyword": marker, "status": "disabled"}
+    )
+    assert disabled_result.status_code == 200
+    assert [role["id"] for role in disabled_result.json()] == [disabled["id"]]
+
+    exported_csv = admin_client.get(
+        "/api/admin/roles/export",
+        params={"keyword": marker, "status": "disabled", "format": "csv"},
+    )
+    assert exported_csv.status_code == 200
+    assert exported_csv.content.startswith(b"\xef\xbb\xbf")
+    assert disabled["code"].encode() in exported_csv.content
+    assert enabled["code"].encode() not in exported_csv.content
+
+    exported_xlsx = admin_client.get(
+        "/api/admin/roles/export",
+        params={"keyword": marker, "status": "enabled", "format": "xlsx"},
+    )
+    assert exported_xlsx.status_code == 200
+    assert exported_xlsx.content.startswith(b"PK")
+    assert any(event["action"] == "role.export" for event in audit_service.query())
+
+    member_username = f"role-export-member-{uuid.uuid4()}"
+    repository.create_user(
+        member_username, "Role Export Member", PasswordService().hash("Member-Strong-123!")
+    )
+    member_client = TestClient(app, raise_server_exceptions=False)
+    assert member_client.post(
+        "/api/auth/login",
+        json={"username": member_username, "password": "Member-Strong-123!"},
+    ).status_code == 200
+    assert member_client.get("/api/admin/roles/export").status_code == 403

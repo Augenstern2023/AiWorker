@@ -97,3 +97,4 @@ def test_topic_repository_deduplicates_same_title_and_marks_platforms(tmp_path):
     assert len(items) == 1
     assert items[0]["source_platforms"] == ["dy", "hg"]
     assert {item["platform"] for item in items[0]["evidence"]} == {"dy", "hg"}
+

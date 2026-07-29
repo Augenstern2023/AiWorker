@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.routing import APIRoute
 from fastapi.templating import Jinja2Templates
 
-from identity.dependencies import current_principal, require_page
+from identity.dependencies import current_principal
 from identity.schema import Principal
 
 from .navigation_service import PAGE_ROUTES, NavigationService
@@ -59,6 +59,14 @@ PAGE_TEMPLATES = {
 def build_page_router(
     templates: Jinja2Templates, navigation_service: NavigationService
 ) -> APIRouter:
+    def require_page_access(
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ) -> Principal:
+        if not navigation_service.can_open(principal, request.url.path):
+            raise HTTPException(status_code=403, detail="没有执行此操作的权限")
+        return principal
+
     class PageRoute(APIRoute):
         def get_route_handler(self) -> Callable:
             handler = super().get_route_handler()
@@ -92,15 +100,7 @@ def build_page_router(
     def landing(
         request: Request, principal: Principal = Depends(current_principal)
     ) -> RedirectResponse:
-        last_route = navigation_service.last_route_for(principal)
-        route = (
-            last_route
-            if last_route and navigation_service.can_open(principal, last_route)
-            else "/profile"
-        )
-        if last_route and route != last_route:
-            navigation_service.forget_route(principal)
-        return RedirectResponse(route, status_code=303)
+        return RedirectResponse("/profile", status_code=303)
 
     @router.get("/profile", response_class=HTMLResponse)
     def profile(
@@ -117,7 +117,7 @@ def build_page_router(
 
     @router.get("/tasks", response_class=HTMLResponse)
     def tasks(
-        request: Request, principal: Principal = Depends(current_principal)
+        request: Request, principal: Principal = Depends(require_page_access)
     ) -> Response:
         return _page_response(
             templates,
@@ -130,26 +130,20 @@ def build_page_router(
 
     @router.get("/planning/tasks", response_class=HTMLResponse)
     def planning_tasks_redirect(
-        principal: Principal = Depends(require_page("page.planning")),
+        principal: Principal = Depends(require_page_access),
     ) -> RedirectResponse:
         return RedirectResponse("/tasks", status_code=307)
 
     @router.get("/writing/tasks", response_class=HTMLResponse)
     def writing_tasks_redirect(
-        principal: Principal = Depends(require_page("page.writing")),
+        principal: Principal = Depends(require_page_access),
     ) -> RedirectResponse:
         return RedirectResponse("/tasks", status_code=307)
 
     @router.get("/admin/audit", response_class=HTMLResponse)
     def audit_page(
-        request: Request, principal: Principal = Depends(current_principal)
+        request: Request, principal: Principal = Depends(require_page_access)
     ) -> Response:
-        if (
-            not principal.is_system_admin
-            and "audit.read" not in principal.permissions
-            and "audit.read.project" not in principal.permissions
-        ):
-            raise HTTPException(status_code=403, detail="没有执行此操作的权限")
         return _page_response(
             templates,
             navigation_service,
@@ -162,7 +156,7 @@ def build_page_router(
     def page_endpoint(page_title: str, permission: str, template_name: str):
         def endpoint(
             request: Request,
-            principal: Principal = Depends(require_page(permission)),
+            principal: Principal = Depends(require_page_access),
         ) -> Response:
             return _page_response(
                 templates,
@@ -181,7 +175,7 @@ def build_page_router(
     )
     def legacy_directions_page(
         project_id: str,
-        principal: Principal = Depends(require_page("page.planning")),
+        principal: Principal = Depends(require_page_access),
     ) -> RedirectResponse:
         return RedirectResponse(
             f"/planning/projects/{project_id}/brief", status_code=307
@@ -230,16 +224,6 @@ def _page_response(
     return response
 
 
-def _show_tasks(principal: Principal | None) -> bool:
-    if principal is None:
-        return False
-    if principal.is_system_admin:
-        return True
-    # Only hide tasks for users whose sole page permission is selection
-    visible_pages = {p for p in principal.permissions if p.startswith("page.")}
-    return visible_pages != {"page.selection"}
-
-
 def _template_context(
     request: Request,
     principal: Principal | None,
@@ -277,7 +261,9 @@ def _template_context(
         ),
         "asset_version": ASSET_VERSION,
         "csrf_token": csrf_token,
-        "show_tasks": _show_tasks(principal),
+        "show_tasks": bool(
+            principal and navigation_service.can_open(principal, "/tasks")
+        ),
         **request.path_params,
     }
 

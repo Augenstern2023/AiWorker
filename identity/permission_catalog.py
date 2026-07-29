@@ -466,3 +466,33 @@ DEFAULT_ROLES = (
         permissions=(("*", "all"),),
     ),
 )
+
+
+# Page access is intentionally separate from business permissions.  These are
+# inserted only when a built-in role is first created, then remain editable.
+DEFAULT_ROLE_PAGE_ROUTES: dict[str, frozenset[str]] = {
+    "selection_operator": frozenset(
+        {
+            "/selection/dashboard",
+            "/selection/ranks",
+            "/selection/hits",
+            "/selection/topics",
+            "/selection/dramas",
+        }
+    ),
+    "creative_planner": frozenset({"/planning/projects"}),
+    "screenwriter": frozenset({"/writing/projects"}),
+    "project_owner": frozenset(
+        {
+            "/admin/roles",
+            "/admin/audit",
+            "/admin/data",
+            "/admin/drama-player",
+            "/selection/dashboard",
+            "/selection/ranks",
+            "/selection/hits",
+            "/selection/topics",
+            "/selection/dramas",
+        }
+    ),
+}

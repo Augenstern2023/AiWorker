@@ -16,7 +16,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from identity.dependencies import current_principal
+from identity.dependencies import require_page_api
 from identity.schema import Principal
 from organization.service import DepartmentService
 
@@ -41,10 +41,7 @@ def build_organization_router(
 ) -> APIRouter:
     router = APIRouter()
 
-    def administrator(principal: Principal = Depends(current_principal)) -> Principal:
-        if not principal.is_system_admin:
-            raise HTTPException(403, "仅系统管理员可以管理组织架构")
-        return principal
+    administrator = require_page_api()
 
     def record(
         principal: Principal,

@@ -649,6 +649,7 @@ class WorkflowRepository:
                 ).mappings().fetchall()
             else:
                 role_codes = live_actor["role_codes"]
+                is_global_project_owner = "project_owner" in role_codes
                 managed_projects = self._managed_project_ids(connection, actor_id)
                 assigned_projects = self._assigned_project_ids(connection, actor_id)
                 rows = connection.exec_driver_sql(
@@ -657,7 +658,10 @@ class WorkflowRepository:
                 rows = [
                     row
                     for row in rows
-                    if row["assignee_id"] == actor_id
+                    if (
+                        is_global_project_owner and row["project_id"] is not None
+                    )
+                    or row["assignee_id"] == actor_id
                     or (
                         row["status"] == "pool"
                         and (
@@ -1223,8 +1227,8 @@ class WorkflowRepository:
     ) -> None:
         if actor["is_system_admin"]:
             return
-        if "project_owner" not in actor["role_codes"]:
-            raise PermissionError("actor is not a project owner")
+        if "project_owner" in actor["role_codes"]:
+            return
         WorkflowRepository._assert_managed_project_membership(
             connection, project_id, actor
         )
@@ -1235,7 +1239,7 @@ class WorkflowRepository:
         project_id: str,
         actor: dict[str, Any],
     ) -> None:
-        if actor["is_system_admin"]:
+        if actor["is_system_admin"] or "project_owner" in actor["role_codes"]:
             return
         member = connection.exec_driver_sql(
             """

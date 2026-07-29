@@ -197,6 +197,22 @@ def test_management_apis_reject_non_system_administrators():
     assert client.get("/api/admin/schedules").status_code == 403
 
 
+def test_navigation_configuration_is_not_available_to_project_owners():
+    app, _, _ = _app(
+        Principal(
+            user_id="user:owner",
+            username="owner",
+            display_name="负责人",
+            role_codes=("project_owner",),
+            permissions=frozenset(),
+            data_scope="managed_projects",
+            session_id="session:owner",
+        )
+    )
+
+    assert TestClient(app).get("/api/admin/navigation").status_code == 403
+
+
 def test_schedule_api_supports_crud_manual_operations_history_alerts_and_audit():
     app, audit, repository = _app(_principal(admin=True))
     client = TestClient(app)
@@ -327,3 +343,18 @@ def test_user_directory_and_profile_page_include_contact_management_contracts():
     assert "保存成功" in profile_js
     assert "background: #171a24" in profile_css
     assert "color: #aeb8cd" in profile_css
+
+
+def test_role_directory_includes_filter_export_and_result_summary_controls():
+    root = Path(__file__).resolve().parents[1]
+    roles_html = (root / "templates/admin/roles.html").read_text(encoding="utf-8")
+    roles_js = (root / "static/js/admin/roles.js").read_text(encoding="utf-8")
+
+    assert 'id="role-filters"' in roles_html
+    assert 'id="role-filter-keyword"' in roles_html
+    assert 'id="role-filter-status"' in roles_html
+    assert 'id="role-total"' in roles_html
+    assert 'id="export-roles-csv"' in roles_html
+    assert 'id="export-roles-xlsx"' in roles_html
+    assert "/api/admin/roles/export" in roles_js
+    assert "exportRoles" in roles_js

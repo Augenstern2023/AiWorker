@@ -956,12 +956,58 @@ async def test_download_status_reports_a_local_douyin_full_drama(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_drama_search_api_hides_raw_provider_record(tmp_path, monkeypatch):
+async def test_drama_search_api_returns_only_exact_matches_from_all_configured_sources(
+    tmp_path, monkeypatch
+):
     class FakeClient:
         def __init__(self, settings):
             pass
 
         def search(self, title):
+            return [{"book_id": "partial-1", "title": f"{title} 番外"}]
+
+        def search_exact_all_sources(self, title):
+            return [
+                {
+                    "book_id": "exact-1",
+                    "title": title,
+                    "source_platform": "hm",
+                    "raw": {"provider_only": True},
+                }
+            ]
+
+    class UnexpectedFallbackClient:
+        async def search(self, title):
+            raise AssertionError("精确匹配存在时不应调用抖音降级")
+
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI, "HongguoDramaClient", FakeClient)
+    monkeypatch.setattr(WebGUI, "DouyinDramaFallbackClient", UnexpectedFallbackClient)
+
+    response = await WebGUI.search_hongguo_drama(
+        WebGUI.HongguoDramaSearchRequest(title="测试短剧")
+    )
+
+    assert response == {
+        "status": "success",
+        "source": "hongguo",
+        "candidates": [
+            {
+                "book_id": "exact-1",
+                "title": "测试短剧",
+                "source_platform": "hm",
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_drama_search_api_hides_raw_provider_record(tmp_path, monkeypatch):
+    class FakeClient:
+        def __init__(self, settings):
+            pass
+
+        def search_exact_all_sources(self, title):
             return [{"book_id": "book-1", "title": title, "raw": {"provider_only": True}}]
 
     class UnexpectedFallbackClient:
@@ -1182,7 +1228,7 @@ async def test_drama_search_falls_back_to_douyin_after_hongguo_empty(tmp_path, m
         def __init__(self, settings):
             pass
 
-        def search(self, title):
+        def search_exact_all_sources(self, title):
             return []
 
     class FakeFallbackClient:
@@ -1196,7 +1242,7 @@ async def test_drama_search_falls_back_to_douyin_after_hongguo_empty(tmp_path, m
     response = await WebGUI.search_hongguo_drama(WebGUI.HongguoDramaSearchRequest(title="测试短剧"))
 
     assert response["source"] == "douyin_fallback"
-    assert response["fallback_reason"] == "红果未找到匹配剧目"
+    assert response["fallback_reason"] == "七个剧目源均未返回剧名完全匹配结果"
     assert response["candidates"][0]["aweme_id"] == "aweme-1"
 
 
@@ -1206,7 +1252,7 @@ async def test_drama_search_falls_back_to_douyin_after_hongguo_error(tmp_path, m
         def __init__(self, settings):
             pass
 
-        def search(self, title):
+        def search_exact_all_sources(self, title):
             raise HongguoDramaError("请求接口失败: HTTP 401")
 
     class FakeFallbackClient:
@@ -1410,15 +1456,14 @@ async def test_douyin_fallback_job_accepts_ordered_multiple_aweme_ids(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_drama_suggest_returns_hongguo_candidates_without_douyin_fallback(tmp_path, monkeypatch):
+async def test_drama_suggest_returns_exact_hongguo_candidates_without_douyin_fallback(tmp_path, monkeypatch):
     class FakeClient:
         def __init__(self, settings):
             pass
 
-        def search(self, title):
+        def search_exact_all_sources(self, title):
             return [
                 {"book_id": "book-1", "title": title, "raw": {"secret": True}},
-                {"book_id": "book-2", "title": "另一个剧"},
             ]
 
     class UnexpectedFallbackClient:
@@ -1434,7 +1479,6 @@ async def test_drama_suggest_returns_hongguo_candidates_without_douyin_fallback(
     assert response["source"] == "hongguo"
     assert response["candidates"] == [
         {"book_id": "book-1", "title": "测试"},
-        {"book_id": "book-2", "title": "另一个剧"},
     ]
 
 

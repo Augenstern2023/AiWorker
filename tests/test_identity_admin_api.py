@@ -87,6 +87,11 @@ def login_writer(client: TestClient, repository: IdentityRepository) -> str:
             "/api/admin/roles/role:screenwriter/permissions",
             {"permissions": [{"permission_code": "rank.read", "data_scope": "task"}]},
         ),
+        (
+            "put",
+            "/api/admin/roles/role:screenwriter/pages",
+            {"page_routes": ["/selection/ranks"]},
+        ),
     ],
 )
 def test_non_admin_cannot_manage_users_or_roles(
@@ -191,6 +196,31 @@ def test_admin_can_clone_role_and_replace_permissions(
     assert {
         grant["permission_code"] for grant in replaced.json()["permissions"]
     } >= {"breakdown.edit", "breakdown.read", "topic.read", "page.selection"}
+
+
+def test_admin_can_replace_role_page_access_and_clone_it(
+    app: FastAPI, repository: IdentityRepository
+):
+    client = TestClient(app)
+    csrf_token = setup_admin(client)
+    source = repository.get_role_by_code("screenwriter")
+    assert source is not None
+
+    replaced = client.put(
+        f"/api/admin/roles/{source['id']}/pages",
+        headers={"X-CSRF-Token": csrf_token},
+        json={"page_routes": ["/selection/ranks", "/admin/data"]},
+    )
+    assert replaced.status_code == 200
+    assert replaced.json()["page_routes"] == ["/admin/data", "/selection/ranks"]
+
+    cloned = client.post(
+        f"/api/admin/roles/{source['id']}/clone",
+        headers={"X-CSRF-Token": csrf_token},
+        json={"code": "page_copy", "name": "页面授权副本"},
+    )
+    assert cloned.status_code == 201
+    assert cloned.json()["page_routes"] == replaced.json()["page_routes"]
 
 
 def test_required_dependency_is_restored_while_parent_remains(

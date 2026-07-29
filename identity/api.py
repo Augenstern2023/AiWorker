@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 
 from audit.service import AuditService
 
-from .dependencies import require_permission
+from .dependencies import require_page_api
 from .password_service import PasswordService
 from .permission_catalog import PERMISSIONS, PERMISSION_DEPENDENCIES
 from .permission_service import PermissionService
@@ -48,6 +48,7 @@ from .schema import (
     UserUpdateRequest,
 )
 from .session_service import SessionContext, SessionService
+from web.page_routes import PAGE_ROUTES
 
 
 AUTHENTICATION_ERROR = "用户名或密码错误"
@@ -80,6 +81,10 @@ class UserRolesRequest(BaseModel):
 
 class RolePermissionsRequest(BaseModel):
     permissions: list[RolePermissionRequest]
+
+
+class RolePagesRequest(BaseModel):
+    page_routes: list[str]
 
 
 class RoleCloneRequest(BaseModel):
@@ -364,7 +369,7 @@ def build_identity_router(
         )
         return response
 
-    admin_read = require_permission("*")
+    admin_read = require_page_api()
 
     def admin_write(
         request: Request, principal: Principal = Depends(admin_read)
@@ -721,8 +726,110 @@ def build_identity_router(
         return user_after
 
     @router.get("/api/admin/roles")
-    def list_roles(_: Principal = Depends(admin_read)) -> list[dict[str, Any]]:
-        return [_role_response(role) for role in repository.list_roles()]
+    def list_roles(
+        keyword: str | None = None,
+        status: str | None = None,
+        _: Principal = Depends(admin_read),
+    ) -> list[dict[str, Any]]:
+        return [
+            _role_response(role)
+            for role in repository.list_roles(
+                keyword=keyword, status=_role_filter_status(status)
+            )
+        ]
+
+    @router.get("/api/admin/roles/page-catalog")
+    def list_role_page_catalog(
+        _: Principal = Depends(admin_read),
+    ) -> list[dict[str, str]]:
+        return [
+            {"route": route, "label": label}
+            for route, _, label in PAGE_ROUTES
+            if "{" not in route
+        ]
+
+    @router.get("/api/admin/roles/export")
+    def export_roles(
+        request: Request,
+        format: Literal["csv", "xlsx"] = "csv",
+        keyword: str | None = None,
+        status: str | None = None,
+        principal: Principal = Depends(admin_read),
+    ) -> Response:
+        normalized_status = _role_filter_status(status)
+        rows = [
+            _role_response(role)
+            for role in repository.list_roles(
+                keyword=keyword, status=normalized_status
+            )
+        ]
+        headers = [
+            "角色名称", "角色代码", "说明", "系统角色", "状态", "权限数",
+            "权限", "可领取任务类型", "创建时间",
+        ]
+        values = [
+            [
+                role["name"],
+                role["code"],
+                role.get("description") or "",
+                "是" if role.get("is_system") else "否",
+                "启用" if role.get("is_enabled") else "停用",
+                len(role.get("permissions") or []),
+                "、".join(
+                    f"{grant['permission_code']} ({grant['data_scope']})"
+                    for grant in role.get("permissions") or []
+                ),
+                "、".join(role.get("claimable_task_types") or []),
+                str(role.get("created_at") or ""),
+            ]
+            for role in rows
+        ]
+        record_audit(
+            actor=principal,
+            action="role.export",
+            target_type="role",
+            target_id=None,
+            before=None,
+            after={
+                "format": format,
+                "filters": {
+                    "keyword": keyword or "", "status": normalized_status or ""
+                },
+                "exported_count": len(rows),
+            },
+            result="success",
+            request=request,
+        )
+        filename = "角色权限表"
+        if format == "csv":
+            output = StringIO(newline="")
+            writer = csv.writer(output)
+            writer.writerow(headers)
+            writer.writerows(values)
+            return Response(
+                content=("\ufeff" + output.getvalue()).encode("utf-8"),
+                media_type="text/csv; charset=utf-8",
+                headers={
+                    "Content-Disposition": "attachment; filename*=UTF-8''%E8%A7%92%E8%89%B2%E6%9D%83%E9%99%90%E8%A1%A8.csv"
+                },
+            )
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = filename
+        worksheet.append(headers)
+        for value in values:
+            worksheet.append(value)
+        output = BytesIO()
+        workbook.save(output)
+        return Response(
+            content=output.getvalue(),
+            media_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            headers={
+                "Content-Disposition": "attachment; filename*=UTF-8''%E8%A7%92%E8%89%B2%E6%9D%83%E9%99%90%E8%A1%A8.xlsx"
+            },
+        )
 
     @router.post("/api/admin/roles", status_code=201)
     def create_role(
@@ -859,6 +966,11 @@ def build_identity_router(
                     ),
                     connection=connection,
                 )
+                repository.replace_role_page_access(
+                    role["id"],
+                    repository.list_role_page_access(role_id, connection=connection),
+                    connection=connection,
+                )
                 cloned = _role_response(role, connection=connection)
                 record_audit(
                     actor=principal,
@@ -946,6 +1058,39 @@ def build_identity_router(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return updated
 
+    @router.put("/api/admin/roles/{role_id}/pages")
+    def replace_role_pages(
+        role_id: str,
+        payload: RolePagesRequest,
+        request: Request,
+        principal: Principal = Depends(admin_write),
+    ) -> dict[str, Any]:
+        try:
+            with repository.transaction() as connection:
+                before = repository.list_role_page_access(role_id, connection=connection)
+                routes = repository.replace_role_page_access(
+                    role_id, payload.page_routes, connection=connection
+                )
+                role = repository.get_role(role_id, connection=connection)
+                assert role is not None
+                updated = _role_response(role, connection=connection)
+                record_audit(
+                    actor=principal,
+                    action="role.pages.replace",
+                    target_type="role",
+                    target_id=role_id,
+                    before={"page_routes": before},
+                    after={"page_routes": sorted(routes)},
+                    result="success",
+                    request=request,
+                    connection=connection,
+                )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="角色不存在") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return updated
+
     @router.get("/api/admin/permissions")
     def list_permissions(_: Principal = Depends(admin_read)) -> list[dict[str, Any]]:
         with repository.connect() as connection:
@@ -973,6 +1118,12 @@ def build_identity_router(
                 status_code=422,
                 detail="项目负责人角色只能通过专用接任操作变更",
             )
+
+    def _role_filter_status(status: str | None) -> str | None:
+        normalized = (status or "").strip().casefold()
+        if normalized not in {"", "enabled", "disabled"}:
+            raise HTTPException(status_code=422, detail="角色状态筛选值无效")
+        return normalized or None
 
     def _user_response(
         user_id: str, *, connection: Connection | None = None
@@ -1002,6 +1153,9 @@ def build_identity_router(
                 role["id"], connection=connection
             ),
             "claimable_task_types": repository.list_role_claimable_task_types(
+                role["id"], connection=connection
+            ),
+            "page_routes": repository.list_role_page_access(
                 role["id"], connection=connection
             ),
         }

@@ -110,3 +110,4 @@ class RoleResponse(BaseModel):
     is_enabled: bool
     permissions: list[RolePermissionRequest] = Field(default_factory=list)
     claimable_task_types: list[str] = Field(default_factory=list)
+    page_routes: list[str] = Field(default_factory=list)

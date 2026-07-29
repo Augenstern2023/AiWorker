@@ -24,7 +24,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from identity.dependencies import current_principal
+from identity.dependencies import require_page_api
 from identity.schema import Principal
 from scheduler.local_service import ScheduleDefinition
 
@@ -55,10 +55,7 @@ def build_schedule_router() -> APIRouter:
             raise HTTPException(503, "PostgreSQL 调度服务未就绪")
         return service, repository
 
-    def admin(principal: Principal = Depends(current_principal)) -> Principal:
-        if not principal.is_system_admin:
-            raise HTTPException(403, "仅系统管理员可以管理调度计划")
-        return principal
+    admin = require_page_api()
 
     def audit(request: Request, principal: Principal, action: str, identifier: str, after: Any) -> None:
         request.app.state.audit_service.record(actor=principal, action=action, target_type="schedule", target_id=identifier, before=None, after=after, reason=None, result="success")

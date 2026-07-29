@@ -21,6 +21,7 @@ from .schema import Principal
 ScopeResolver = Callable[
     [PermissionService, Principal, Request], bool | Awaitable[bool]
 ]
+_PAGE_API_DECISION_UNSET = object()
 
 
 def permission_service_for_request(request: Request) -> PermissionService:
@@ -51,7 +52,15 @@ def require_permission(
         principal: Principal = Depends(current_principal),
         permission_service: PermissionService = Depends(permission_service_for_request),
     ) -> Principal:
-        if not principal.is_system_admin and code not in principal.permissions:
+        page_api_decision = _page_api_decision(request, principal)
+        if page_api_decision is False:
+            raise HTTPException(status_code=403, detail="没有执行此操作的权限")
+        page_grant_replaces_admin_gate = code == "*" and page_api_decision is True
+        if (
+            not page_grant_replaces_admin_gate
+            and not principal.is_system_admin
+            and code not in principal.permissions
+        ):
             raise HTTPException(status_code=403, detail="没有执行此操作的权限")
         if scope_resolver is not None:
             allowed = scope_resolver(permission_service, principal, request)
@@ -62,6 +71,38 @@ def require_permission(
         return principal
 
     return dependency
+
+
+def require_page_api() -> Callable[..., Awaitable[Principal]]:
+    """Allow a bound page API grant, with the legacy admin gate as fallback."""
+
+    async def dependency(
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ) -> Principal:
+        decision = _page_api_decision(request, principal)
+        if decision is False:
+            raise HTTPException(status_code=403, detail="没有执行此操作的权限")
+        if decision is not True and not principal.is_system_admin:
+            raise HTTPException(status_code=403, detail="没有执行此操作的权限")
+        return principal
+
+    return dependency
+
+
+def _page_api_decision(request: Request, principal: Principal) -> bool | None:
+    decision = getattr(
+        request.state, "page_api_access_decision", _PAGE_API_DECISION_UNSET
+    )
+    if decision is not _PAGE_API_DECISION_UNSET:
+        return decision if decision in {True, False, None} else None
+    service = getattr(request.app.state, "page_access_service", None)
+    checker = getattr(service, "can_call_page_api", None)
+    if not callable(checker):
+        return None
+    decision = checker(principal, request.method.upper(), request.url.path)
+    request.state.page_api_access_decision = decision
+    return decision
 
 
 def require_page(code: str) -> Callable[..., Awaitable[Principal]]:

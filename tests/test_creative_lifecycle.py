@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -192,6 +193,101 @@ def test_generating_today_hits_returns_only_unadopted_recommendations(
     assert response.status_code == 200
     assert [item["title"] for item in response.json()["items"]] == ["待采纳剧目"]
     assert response.json()["items"][0]["status"] == "pending_review"
+
+
+def test_adopting_rank_entry_creates_an_adopted_topic_and_rejects_duplicates(
+    tmp_path: Path,
+):
+    client, repository, _ = build_client(tmp_path)
+    rank_path = tmp_path / "data/dy/jobs/rank-adopt/rank/douyin_series_rank_20260728_100000.json"
+    rank_path.parent.mkdir(parents=True)
+    rank_path.write_text(
+        json.dumps(
+            {
+                "captured_at": "2026-07-28 10:00:00",
+                "records": [
+                    {
+                        "series_id": "rank-drama-1",
+                        "title": "榜单收录短剧",
+                        "rank": 1,
+                        "rank_category": "真人剧",
+                        "tab": "榜单",
+                        "description": "来自今日榜单的剧目",
+                        "heat_text": "12345",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    payload = {"platform": "dy", "date": "2026-07-28", "record_id": "rank-drama-1"}
+    created = client.post("/api/creative/topics/adopt-from-rank", json=payload)
+
+    assert created.status_code == 201
+    topic = created.json()["topic"]
+    assert topic["title"] == "榜单收录短剧"
+    assert topic["status"] == "adopted"
+    assert topic["rank_type"] == "榜单"
+    assert topic["evidence"][0]["source_type"] == "snapshot"
+    assert repository.get_latest_selection_stage_snapshot(topic["id"], "topic_decision")["outcome"] == "adopted"
+
+    duplicate = client.post("/api/creative/topics/adopt-from-rank", json=payload)
+
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == "剧目已收录"
+    assert len(repository.list_topics(limit=None)) == 1
+
+
+def test_generating_today_hits_excludes_a_title_already_in_the_topic_library(
+    tmp_path: Path, monkeypatch
+):
+    client, repository, _ = build_client(tmp_path)
+    adopted = seed_topic(repository, "已入库剧目")
+    repository.update_topic(adopted["id"], "adopted")
+    monkeypatch.setattr(TopicService, "generate", lambda *_args, **_kwargs: [
+        {
+            "platform": "hg", "job_id": "rank-today", "source_path": "data/hg/today.json",
+            "captured_at": "2026-07-24", "title": "已入库剧目", "description": "重复候选",
+            "category": "都市", "rank_type": "热播榜", "score": 99, "confidence": "high",
+            "score_details": {}, "recommendation": "重复推荐", "evidence": [],
+        },
+        {
+            "platform": "hg", "job_id": "rank-today", "source_path": "data/hg/today.json",
+            "captured_at": "2026-07-24", "title": "全新候选", "description": "新的候选",
+            "category": "都市", "rank_type": "热播榜", "score": 90, "confidence": "high",
+            "score_details": {}, "recommendation": "新推荐", "evidence": [],
+        },
+    ])
+
+    response = client.post("/api/creative/topics/generate", json={"platform": "hg", "limit": 10})
+
+    assert response.status_code == 200
+    assert [item["title"] for item in response.json()["items"]] == ["全新候选"]
+
+
+def test_generating_today_hits_matches_snapshot_day_when_capture_time_is_present(
+    tmp_path: Path, monkeypatch
+):
+    client, repository, _ = build_client(tmp_path)
+    repository.upsert_topics([{
+        "platform": "dy", "job_id": "rank-today", "source_path": "data/dy/today.json",
+        "captured_at": "2026-07-29", "title": "当日候选", "description": "初始快照",
+        "category": "都市", "rank_type": "热榜", "score": 90, "confidence": "high",
+        "score_details": {}, "recommendation": "推荐", "evidence": [],
+    }])
+    monkeypatch.setattr(TopicService, "generate", lambda *_args, **_kwargs: [{
+        "platform": "dy", "job_id": "rank-today", "source_path": "data/dy/today.json",
+        "captured_at": "2026-07-29 16:42:51", "title": "当日候选", "description": "更新快照",
+        "category": "都市", "rank_type": "热榜", "score": 95, "confidence": "high",
+        "score_details": {}, "recommendation": "推荐", "evidence": [],
+    }])
+
+    response = client.post("/api/creative/topics/generate", json={"platform": "dy", "limit": 10})
+
+    assert response.status_code == 200
+    assert [item["title"] for item in response.json()["items"]] == ["当日候选"]
 
 
 def test_generating_top_ten_is_not_reduced_by_higher_scored_adopted_topics(

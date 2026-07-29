@@ -37,22 +37,22 @@
 
             <div class="row g-3 mb-3">
                 <div class="col-md-2">
-                    <div class="card metric-card"><div class="card-body"><div class="text-muted">今日榜单数</div><div class="metric-value" x-text="todayRankData?.summary?.current_count || 0"></div></div></div>
+                    <div class="card metric-card"><div class="card-body"><div class="text-muted">今日榜单数</div><div class="metric-value" x-text="todayRankSummary().current_count || 0"></div></div></div>
                 </div>
                 <div class="col-md-2">
-                    <div class="card metric-card"><div class="card-body"><div class="text-muted">上一期榜单数</div><div class="metric-value" x-text="todayRankData?.summary?.previous_count || 0"></div></div></div>
+                    <div class="card metric-card"><div class="card-body"><div class="text-muted">上一期榜单数</div><div class="metric-value" x-text="todayRankSummary().previous_count || 0"></div></div></div>
                 </div>
                 <div class="col-md-2">
-                    <div class="card metric-card"><div class="card-body"><div class="text-muted">共同在榜</div><div class="metric-value" x-text="todayRankData?.summary?.common_count || 0"></div></div></div>
+                    <div class="card metric-card"><div class="card-body"><div class="text-muted">共同在榜</div><div class="metric-value" x-text="todayRankSummary().common_count || 0"></div></div></div>
                 </div>
                 <div class="col-md-2">
-                    <div class="card metric-card"><div class="card-body"><div class="text-muted">新上榜</div><div class="metric-value" x-text="todayRankData?.summary?.new_count || 0"></div></div></div>
+                    <div class="card metric-card"><div class="card-body"><div class="text-muted">新上榜</div><div class="metric-value" x-text="todayRankSummary().new_count || 0"></div></div></div>
                 </div>
                 <div class="col-md-2">
-                    <div class="card metric-card"><div class="card-body"><div class="text-muted">下榜</div><div class="metric-value" x-text="todayRankData?.summary?.dropped_count || 0"></div></div></div>
+                    <div class="card metric-card"><div class="card-body"><div class="text-muted">下榜</div><div class="metric-value" x-text="todayRankSummary().dropped_count || 0"></div></div></div>
                 </div>
                 <div class="col-md-2">
-                    <div class="card metric-card"><div class="card-body"><div class="text-muted">排名变动剧目</div><div class="metric-value fs-5" x-text="`上升 ${todayRankData?.summary?.rank_up_count || 0} / 下降 ${todayRankData?.summary?.rank_down_count || 0}`"></div></div></div>
+                    <div class="card metric-card"><div class="card-body"><div class="text-muted">排名变动剧目</div><div class="metric-value fs-5" x-text="`上升 ${todayRankSummary().rank_up_count || 0} / 下降 ${todayRankSummary().rank_down_count || 0}`"></div></div></div>
                 </div>
             </div>
 
@@ -77,8 +77,20 @@
                 </div>
             </div>
 
-            <div class="row g-3" x-show="todayRankPlatform !== 'hg'">
-                <template x-for="section in todayRankSections()" :key="section.key">
+            <div x-show="todayRankPlatform === 'dy'" class="mb-3">
+                <div class="today-rank-route-nav">
+                    <template x-for="section in douyinSections()" :key="section.key">
+                        <a href="#" class="btn btn-sm today-rank-route-link"
+                            :class="{active: section.key === todayRankSectionKey}"
+                            @click.prevent="setTodayRankRoute('dy', section.key)">
+                            <span x-text="section.label"></span>
+                        </a>
+                    </template>
+                </div>
+            </div>
+
+            <div class="row g-3" x-show="todayRankPlatform === 'dy'">
+                <template x-for="section in selectedDouyinSection() ? [selectedDouyinSection()] : []" :key="section.key">
                     <div class="col-12">
                         <div class="d-flex align-items-center justify-content-between mt-2 mb-2">
                             <h5 class="mb-0" x-text="section.label"></h5>
@@ -115,6 +127,7 @@
                                                                         <i x-show="column.icon" class="bi me-1" :class="column.icon"></i><span x-text="column.label"></span>
                                                                     </th>
                                                                 </template>
+                                                                <th class="rank-adopt-action">操作</th>
                                                             </tr>
                                                         </thead>
                                                         <tbody>
@@ -130,10 +143,15 @@
                                                                             <template x-if="column.kind === 'metric' || column.kind === 'text' || column.kind === 'rank_duration'"><span x-text="rankColumnValue(item, column, tbl)"></span></template>
                                                                         </td>
                                                                     </template>
+                                                                    <td class="rank-adopt-action">
+                                                                        <button type="button" class="btn btn-sm btn-outline-success" @click="adoptRankEntry(item)" :disabled="isRankAdoptionPending(item) || isRankTitleAdopted(item.title)">
+                                                                            <i class="bi" :class="isRankAdoptionPending(item) ? 'bi-arrow-repeat' : 'bi-bookmark-plus'"></i><span class="ms-1" x-text="isRankTitleAdopted(item.title) ? '已收录' : (isRankAdoptionPending(item) ? '收录中' : '收录')"></span>
+                                                                        </button>
+                                                                    </td>
                                                                 </tr>
                                                             </template>
                                                             <tr x-show="tbl.items.length === 0">
-                                                                <td :colspan="rankingTableColspan(tbl)" class="text-center text-muted py-3">暂无数据</td>
+                                                                <td :colspan="rankingTableColspan(tbl) + 1" class="text-center text-muted py-3">暂无数据</td>
                                                             </tr>
                                                         </tbody>
                                                     </table>
@@ -182,25 +200,31 @@
                                                             <i x-show="column.icon" class="bi me-1" :class="column.icon"></i><span x-text="column.label"></span>
                                                         </th>
                                                     </template>
+                                                    <th class="rank-adopt-action">操作</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
                                                 <template x-for="item in tbl.items" :key="`${selectedHongguoRanking().key}-${tbl.key}-${item.record_id}-${item.rank}`">
                                                     <tr>
-                                                        <template x-for="column in tbl.columns" :key="`${selectedHongguoRanking().key}-${tbl.key}-${item.record_id}-${column.key}`">
-                                                            <td :class="rankColumnCellClass(column)" :title="rankColumnTooltip(item, column, tbl)">
+                                                            <template x-for="column in tbl.columns" :key="`${selectedHongguoRanking().key}-${tbl.key}-${item.record_id}-${column.key}`">
+                                                                <td :class="rankColumnCellClass(column)" :title="rankColumnTooltip(item, column, tbl)">
                                                                 <template x-if="column.kind === 'rank'"><span class="rank-number" :class="rankNumberClass(item.rank)" x-text="item.rank || '-'"></span></template>
                                                                 <template x-if="column.kind === 'title'"><div class="rank-drama-title" x-text="item.title || '-'"></div></template>
                                                                 <template x-if="column.kind === 'category'"><span class="badge bg-secondary bg-opacity-25 text-light" x-text="item.board_type || item.category_label || '-'"></span></template>
                                                                 <template x-if="column.kind === 'status'"><span class="status-pill" :class="entryStatusClass(item, tbl.key)" x-text="entryStatus(item, tbl.key)"></span></template>
                                                                 <template x-if="column.kind === 'rank_delta'"><span class="status-pill" :class="entryStatusClass(item, tbl.key)" x-text="formatRankDelta(item.rank_delta)"></span></template>
                                                                             <template x-if="column.kind === 'metric' || column.kind === 'text' || column.kind === 'rank_duration'"><span x-text="rankColumnValue(item, column, tbl)"></span></template>
+                                                                </td>
+                                                            </template>
+                                                            <td class="rank-adopt-action">
+                                                                <button type="button" class="btn btn-sm btn-outline-success" @click="adoptRankEntry(item)" :disabled="isRankAdoptionPending(item) || isRankTitleAdopted(item.title)">
+                                                                    <i class="bi" :class="isRankAdoptionPending(item) ? 'bi-arrow-repeat' : 'bi-bookmark-plus'"></i><span class="ms-1" x-text="isRankTitleAdopted(item.title) ? '已收录' : (isRankAdoptionPending(item) ? '收录中' : '收录')"></span>
+                                                                </button>
                                                             </td>
-                                                        </template>
-                                                    </tr>
+                                                        </tr>
                                                 </template>
                                                 <tr x-show="tbl.items.length === 0">
-                                                    <td :colspan="rankingTableColspan(tbl)" class="text-center text-muted py-3">暂无数据</td>
+                                                        <td :colspan="rankingTableColspan(tbl) + 1" class="text-center text-muted py-3">暂无数据</td>
                                                 </tr>
                                             </tbody>
                                         </table>

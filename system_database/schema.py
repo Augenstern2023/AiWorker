@@ -141,6 +141,25 @@ user_roles = Table(
     Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
 )
 
+user_page_access = Table(
+    "user_page_access",
+    SYSTEM_METADATA,
+    Column("user_id", Text, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column("route", Text, primary_key=True),
+    Column("is_allowed", Boolean, nullable=False, server_default=text("true")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+role_page_access = Table(
+    "role_page_access",
+    SYSTEM_METADATA,
+    Column("role_id", Text, ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True),
+    Column("route", Text, primary_key=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
 role_permissions = Table(
     "role_permissions",
     SYSTEM_METADATA,
@@ -500,6 +519,7 @@ BASELINE_TABLE_NAMES = frozenset(
 Index("uq_users_normalized_username", func.lower(users.c.normalized_username), unique=True)
 Index("uq_roles_code", func.lower(roles.c.code), unique=True)
 Index("idx_sessions_user_id", sessions.c.user_id)
+Index("idx_user_page_access_route", user_page_access.c.route)
 Index(
     "idx_navigation_items_parent_sort",
     navigation_items.c.parent_id,

@@ -84,10 +84,6 @@ function localDateString(date = new Date()) {
                     selected: null,
                     episodes: [],
                     episode: 0,
-                    suggestions: [],
-                    suggestionLoading: false,
-                    suggestionTimer: null,
-                    suggestionRequestId: 0,
                     searchSource: '',
                     fallbackReason: '',
                     selectedAwemeIds: [],
@@ -107,6 +103,8 @@ function localDateString(date = new Date()) {
                 },
                 creative: {platform: creativePlatformPreference(), items: [], loading: false, error: '', breakdown: null},
                 topicLibrary: {platform: '', lifecycleStatus: '', category: '', minScore: '', hasLocked: '', items: [], loading: false, error: '', breakdown: null},
+                adoptionNotice: {success: true, title: '', message: ''},
+                adoptionNoticeModal: null,
                 generatedContentPreview: {topic: null, project: null, stage: '', versions: [], selectedResourceId: '', snapshot: null, loading: false, error: ''},
                 breakdownEditor: {source: '', title: '', record: null, content: {}, fieldGuide: [], saving: false, error: ''},
                 breakdownGeneration: {topic: null, source: '', jobId: '', status: '', message: '', progress: {}, coverage: [], requiresTranscription: false, notifiedStatus: '', error: '', startedAt: 0, elapsedSeconds: 0},
@@ -139,7 +137,7 @@ function localDateString(date = new Date()) {
                 analyticsSyncResult: null,
                 todayRankPlatform: 'dy',
                 todayRankDate: '',
-                todayRankSectionKey: '',
+                todayRankSectionKey: '榜单',
                 todayRankRankingKey: '',
                 todayRankData: null,
                 todayRankLoading: false,
@@ -148,6 +146,8 @@ function localDateString(date = new Date()) {
                 todayRankRefreshJobId: '',
                 todayRankRefreshMessage: '',
                 rankingActiveTables: {},
+                rankAdoptingRecordIds: {},
+                rankAdoptedTitleKeys: {},
                 modalMode: 'crawl',
                 modalFile: '',
                 modalProjects: [],
@@ -182,6 +182,12 @@ function localDateString(date = new Date()) {
                     return element ? bootstrap.Modal.getOrCreateInstance(element) : null;
                 },
 
+                showAdoptionNotice(success, title, message) {
+                    this.adoptionNotice = {success: Boolean(success), title: title || '', message: message || ''};
+                    this.adoptionNoticeModal = this.modal('adoptionNoticeModal');
+                    this.adoptionNoticeModal?.show();
+                },
+
                 async init() {
                     this.projectModal = this.modal('projectModal');
                     this.audioModal = this.modal('audioModal');
@@ -206,6 +212,7 @@ function localDateString(date = new Date()) {
                     this.creativeGenerationProgressModal = this.modal('creativeGenerationProgressModal');
                     this.workflowTaskModal = this.modal('workflowTaskModal');
                     this.planningAssignmentModal = this.modal('planningAssignmentModal');
+                    this.adoptionNoticeModal = this.modal('adoptionNoticeModal');
 
                     if (['tasks', 'review-tasks'].includes(this.page)) {
                         await this.fetchWorkflowTasks();
@@ -225,7 +232,7 @@ function localDateString(date = new Date()) {
                         await this.fetchCreativeTopics();
                         await this.fetchTopicLibrary();
                     } else if (this.page === 'selection-hits') {
-                        await this.fetchCreativeTopics();
+                        await this.generateCreativeTopics();
                     } else if (this.page === 'selection-topics') {
                         if (typeof this.fetchTopicLibrary !== 'function') {
                             throw new Error('选题模块加载失败，请刷新页面后重试');

@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from creative.hit_breakdown import breakdown_field_guide, personalize_breakdown_field_guide
 from creative.imitation_service import assess_similarity_risk
 from creative.lifecycle_service import TopicLifecycleService, content_fingerprint
-from creative.repository import CreativeRepository
+from creative.repository import CreativeRepository, DuplicateTopicError
 from creative.selection_stage_service import SelectionStageService
 from creative.workflow_adapter import CreativeWorkflowAdapter
 
@@ -58,6 +58,12 @@ class TopicGenerateRequest(BaseModel):
     platform: str = "dy"
     date: str = ""
     limit: int = 10
+
+
+class TopicAdoptFromRankRequest(BaseModel):
+    platform: str
+    date: str = ""
+    record_id: str
 
 
 class TopicUpdateRequest(BaseModel):
@@ -428,7 +434,7 @@ def build_creative_router(
         request: Request,
         principal: Principal = Depends(creative_api_principal),
     ) -> None:
-        if principal.is_system_admin:
+        if principal.is_system_admin or "project_owner" in principal.role_codes:
             return
         path = request.url.path.removeprefix("/api/creative")
         project_id: int | None = None
@@ -507,7 +513,7 @@ def build_creative_router(
     ) -> None:
         if principal is None:
             raise HTTPException(401, "登录已失效，请重新登录")
-        if principal.is_system_admin:
+        if principal.is_system_admin or "project_owner" in principal.role_codes:
             return
         project_key = str(project_id)
         active_member = any(
@@ -516,11 +522,6 @@ def build_creative_router(
         )
         if not active_member:
             raise HTTPException(403, "只能在已分配的项目中创建机器任务")
-        if "project_owner" in principal.role_codes:
-            try:
-                workflow_repository.assert_can_manage_project(project_key, principal)
-            except PermissionError as exc:
-                raise HTTPException(403, "项目负责人只能操作其管理的项目") from exc
 
     def project_or_404(project_id: int) -> dict[str, Any]:
         workflow_adapter.reconcile_project(project_id)
@@ -879,9 +880,19 @@ def build_creative_router(
         if payload.platform not in {"dy", "hg"}:
             raise HTTPException(400, "platform must be dy or hg")
         try:
-            generated = service.generate(payload.platform, payload.date, payload.limit)
+            candidates = service.generate(payload.platform, payload.date, max(payload.limit, 50))
+            seen_title_keys = repository.decided_title_keys()
+            generated = []
+            for candidate in candidates:
+                title_key = repository._title_key(candidate.get("title"))
+                if not title_key or title_key in seen_title_keys:
+                    continue
+                seen_title_keys.add(title_key)
+                generated.append(candidate)
+                if len(generated) >= payload.limit:
+                    break
             repository.upsert_topics(generated)
-            captured_date = str(generated[0].get("captured_at") or "").split("T", 1)[0] if generated else ""
+            captured_date = str(generated[0].get("captured_at") or "")[:10] if generated else ""
             topics = repository.list_topics(
                 platform=payload.platform,
                 status="pending_review",
@@ -894,6 +905,41 @@ def build_creative_router(
             }
         except Exception as exc:
             raise HTTPException(500, str(exc)) from exc
+
+    @router.post("/topics/adopt-from-rank", status_code=201)
+    async def adopt_topic_from_rank(
+        payload: TopicAdoptFromRankRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        if payload.platform not in {"dy", "hg"}:
+            raise HTTPException(400, "platform must be dy or hg")
+        try:
+            entry, response = service.find_rank_entry(payload.platform, payload.date, payload.record_id)
+            topic = repository.adopt_rank_topic(
+                service.rank_entry_to_topic(entry, response), principal.user_id
+            )
+        except DuplicateTopicError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(500, f"收录接口错误：{exc}") from exc
+        audit_service = getattr(request.app.state, "audit_service", None)
+        if isinstance(audit_service, AuditService):
+            audit_service.record(
+                actor=principal,
+                action="selection.topic_adopt_from_rank",
+                target_type="topic",
+                target_id=str(topic["id"]),
+                project_id=None,
+                before=None,
+                after=topic,
+                reason=None,
+                result="success",
+                request=request,
+            )
+        return {"topic": lifecycle_service.enrich_topic(int(topic["id"]))}
 
     @router.get("/topics")
     async def list_topics(

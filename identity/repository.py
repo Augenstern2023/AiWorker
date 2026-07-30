@@ -98,7 +98,7 @@ class IdentityRepository:
                     .values(code=code, label=label)
                     .on_conflict_do_update(
                         index_elements=[permissions.c.code],
-                        set_={"label": permissions.c.code, "updated_at": text("CURRENT_TIMESTAMP")},
+                        set_={"label": label, "updated_at": text("CURRENT_TIMESTAMP")},
                     )
                 )
 

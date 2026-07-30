@@ -62,6 +62,17 @@
         .modal-footer {
             border-color: var(--border);
         }
+        .role-page-option {
+            min-height: 76px;
+            cursor: pointer;
+            background: rgba(255, 255, 255, .015);
+            transition: border-color .15s ease, background-color .15s ease;
+        }
+        .role-page-option:hover {
+            border-color: rgba(59, 149, 246, .65) !important;
+            background: rgba(59, 149, 246, .08);
+        }
+        .role-page-option-copy { min-width: 0; }
         .drama-player-layout {
             display: grid;
             grid-template-columns: minmax(190px, 260px) minmax(0, 1fr);

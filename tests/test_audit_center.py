@@ -9,8 +9,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -106,6 +108,49 @@ def test_audit_query_filters_actor_project_action_result_and_exclusive_time(
 
     assert [event["id"] for event in events] == [matching_id]
     assert events[0]["actor_display_name"] == "Original Admin"
+
+
+def test_audit_api_accepts_datetime_local_time_filters():
+    admin = Principal(
+        user_id="admin",
+        username="admin",
+        display_name="Audit Admin",
+        role_codes=("system_admin",),
+        permissions=frozenset({"*"}),
+        data_scope="all",
+        session_id="admin-session",
+    )
+
+    class RecordingAuditService:
+        repository = SimpleNamespace(identity_repository=object())
+
+        def __init__(self) -> None:
+            self.filters: dict[str, object] = {}
+
+        def count(self, **filters: object) -> int:
+            self.filters = filters
+            return 0
+
+        def query(self, **filters: object) -> list[dict[str, object]]:
+            self.filters = filters
+            return []
+
+    audit_service = RecordingAuditService()
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = lambda: admin
+    app.include_router(build_audit_router(audit_service))
+
+    response = TestClient(app).get(
+        "/api/admin/audit",
+        params={
+            "created_from": "2026-07-29 09:52:00",
+            "created_to": "2026-07-30 09:52:00",
+        },
+    )
+
+    assert response.status_code == 200
+    assert audit_service.filters["created_from"] == datetime(2026, 7, 29, 9, 52)
+    assert audit_service.filters["created_to"] == datetime(2026, 7, 30, 9, 52)
 
 
 def test_audit_export_uses_filtered_snapshot_data_and_records_export(tmp_path: Path):

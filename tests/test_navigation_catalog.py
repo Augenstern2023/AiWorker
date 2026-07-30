@@ -12,10 +12,12 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import Text
 
+from identity.permission_catalog import NAVIGATION_CATALOG
 from identity.schema import Principal
 from system_database.schema import SYSTEM_METADATA
 from web.page_access_service import PageAccessService
 from web.navigation_service import NavigationService
+from web.page_routes import PAGE_ROUTES
 
 
 class FakeNavigationRepository:
@@ -45,6 +47,16 @@ def _principal(*permissions: str) -> Principal:
         data_scope="task",
         session_id="session-1",
     )
+
+
+def test_admin_role_page_is_named_role_management():
+    navigation_item = next(
+        item for item in NAVIGATION_CATALOG if item["route"] == "/admin/roles"
+    )
+    page_route = next(item for item in PAGE_ROUTES if item[0] == "/admin/roles")
+
+    assert navigation_item["label"] == "角色管理"
+    assert page_route[2] == "角色管理"
 
 
 def test_navigation_service_filters_configured_items_by_catalog_permissions():

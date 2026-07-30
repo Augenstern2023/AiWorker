@@ -64,8 +64,8 @@ def build_audit_router(audit_service: AuditService) -> APIRouter:
         target_id: str | None,
         project_id: str | None,
         result: str | None,
-        created_from: str | None,
-        created_to: str | None,
+        created_from: datetime | None,
+        created_to: datetime | None,
         limit: int,
         offset: int,
     ) -> dict[str, Any]:
@@ -92,8 +92,8 @@ def build_audit_router(audit_service: AuditService) -> APIRouter:
         target_id: str | None = None,
         project_id: str | None = None,
         result: str | None = None,
-        created_from: str | None = None,
-        created_to: str | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
         limit: int = Query(default=100, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
         response: Response = None,  # type: ignore[assignment]
@@ -145,8 +145,8 @@ def build_audit_router(audit_service: AuditService) -> APIRouter:
         target_id: str | None = None,
         project_id: str | None = None,
         result: str | None = None,
-        created_from: str | None = None,
-        created_to: str | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
         limit: int = Query(default=500, ge=1, le=500),
         principal: Principal = Depends(current_principal),
     ) -> Response:
@@ -277,8 +277,8 @@ def _export_json(value: Any) -> str:
 def _export_filename(
     format: Literal["csv", "xlsx"],
     project_id: str | None,
-    created_from: str | None,
-    created_to: str | None,
+    created_from: datetime | None,
+    created_to: datetime | None,
 ) -> str:
     scope = "all" if project_id is None else re.sub(r"[^A-Za-z0-9_-]+", "-", project_id)
     if created_from or created_to:

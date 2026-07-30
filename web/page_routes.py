@@ -34,7 +34,7 @@ PAGE_ROUTES = (
     ("/review/projects/{project_id}/members", "page.review", "项目成员"),
     ("/review/projects/{project_id}/versions", "page.review", "项目版本"),
     ("/admin/users", "*", "用户管理"),
-    ("/admin/roles", "*", "角色权限"),
+    ("/admin/roles", "*", "角色管理"),
     ("/admin/config", "*", "系统配置"),
     ("/admin/data", "page.data_management", "数据管理"),
     ("/admin/drama-player", "page.data_management", "已下载剧目播放"),

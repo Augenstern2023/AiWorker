@@ -16,6 +16,7 @@ from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from identity.api import build_identity_router
+from identity.permission_catalog import PERMISSIONS
 from identity.dependencies import assigned_project_scope, require_permission
 from identity.password_service import PasswordService
 from identity.permission_service import PermissionService
@@ -63,6 +64,11 @@ def test_role_permission_dependencies_are_transitive(
         "page.writing",
     } <= principal.permissions
     assert principal.data_scope == "project"
+
+
+def test_permission_catalog_provides_chinese_labels():
+    assert PERMISSIONS["beats.edit"] == "编辑单集节拍"
+    assert PERMISSIONS["analytics.read"] == "查看数据分析"
 
 
 def test_multiple_roles_union_permissions_and_choose_maximum_scope(

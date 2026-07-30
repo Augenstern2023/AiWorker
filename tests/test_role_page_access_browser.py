@@ -24,7 +24,7 @@ def test_role_page_authorization_modal_saves_selected_routes() -> None:
     </form>
     <div id="role-pages-modal"></div><form id="role-pages-form">
       <input id="role-pages-role-id"><span id="role-pages-role-name"></span>
-      <div id="role-pages-list"></div><div id="role-pages-error"></div><button type="submit">保存</button>
+      <div class="row g-2" id="role-pages-list"></div><div id="role-pages-error"></div><button type="submit">保存</button>
     </form>
     <script>
       window.bootstrap = { Modal: { getOrCreateInstance(element) {
@@ -40,7 +40,10 @@ def test_role_page_authorization_modal_saves_selected_routes() -> None:
         if (url === '/api/admin/permissions') return new Response('[]', {status: 200});
         if (url === '/api/admin/roles/page-catalog') return new Response(JSON.stringify([
           {route: '/writing/projects', label: '编剧项目'},
-          {route: '/admin/data', label: '数据管理'}
+          {route: '/admin/data', label: '数据管理'},
+          ...Array.from({length: 18}, (_, index) => ({
+            route: `/page/${index + 1}`, label: `业务页面 ${index + 1}`
+          }))
         ]), {status: 200});
         if (url === '/api/admin/roles/role:writer/pages') return new Response(JSON.stringify({
           id: 'role:writer', page_routes: ['/admin/data', '/writing/projects']
@@ -53,17 +56,42 @@ def test_role_page_authorization_modal_saves_selected_routes() -> None:
     script = (ROOT / "static" / "js" / "admin" / "roles.js").read_text(
         encoding="utf-8"
     )
+    bootstrap_css = (ROOT / "static" / "css" / "bootstrap.min.css").read_text(
+        encoding="utf-8"
+    )
+    bootstrap_icons_css = (
+        ROOT / "static" / "css" / "bootstrap-icons.css"
+    ).read_text(encoding="utf-8")
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
-        page = browser.new_page()
+        page = browser.new_page(viewport={"width": 1000, "height": 800})
         page.set_content(html)
+        page.add_style_tag(content=bootstrap_css)
+        page.add_style_tag(content=bootstrap_icons_css)
         page.add_script_tag(content=script)
         page.wait_for_selector('button[title="页面授权"]')
+
+        clone_icon_content = page.locator('button[title="克隆角色"] i').evaluate(
+            "element => getComputedStyle(element, '::before').content"
+        )
+        assert clone_icon_content not in {"none", "normal", '""'}
 
         page.locator('button[title="页面授权"]').click()
         assert page.locator("#role-pages-modal").get_attribute("data-open") == "true"
         assert page.locator('input[value="/writing/projects"]').is_checked()
+        card_box = page.locator("#role-pages-list label").first.bounding_box()
+        checkbox_box = page.locator("#role-pages-list input").first.bounding_box()
+        assert card_box is not None
+        assert checkbox_box is not None
+        assert checkbox_box["x"] >= card_box["x"] + 8
+        cards = page.locator("#role-pages-list label")
+        second_card_box = cards.nth(1).bounding_box()
+        third_card_box = cards.nth(2).bounding_box()
+        assert second_card_box is not None
+        assert third_card_box is not None
+        assert second_card_box["x"] > card_box["x"] + card_box["width"]
+        assert third_card_box["y"] >= card_box["y"] + card_box["height"]
 
         page.locator('input[value="/admin/data"]').check()
         page.locator("#role-pages-form button[type=submit]").click()

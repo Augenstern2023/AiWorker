@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import Connection, and_, func, or_, select
@@ -95,8 +96,8 @@ class AuditRepository:
         target_id: str | None = None,
         project_id: str | None = None,
         result: str | None = None,
-        created_from: str | None = None,
-        created_to: str | None = None,
+        created_from: datetime | str | None = None,
+        created_to: datetime | str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
@@ -144,8 +145,8 @@ class AuditRepository:
         target_id: str | None = None,
         project_id: str | None = None,
         result: str | None = None,
-        created_from: str | None = None,
-        created_to: str | None = None,
+        created_from: datetime | str | None = None,
+        created_to: datetime | str | None = None,
     ) -> int:
         stmt = (
             select(func.count())
@@ -247,8 +248,8 @@ class AuditRepository:
         target_id: str | None,
         project_id: str | None,
         result: str | None,
-        created_from: str | None,
-        created_to: str | None,
+        created_from: datetime | str | None,
+        created_to: datetime | str | None,
     ) -> ColumnClause:
         conditions = []
         for column_name, value in (

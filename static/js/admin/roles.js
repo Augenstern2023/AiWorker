@@ -55,7 +55,7 @@
     function actionButton(icon, label, style, handler, disabled = false) {
         const button = document.createElement('button');
         button.type = 'button';
-        button.className = `btn btn-sm ${style}`;
+        button.className = `btn btn-sm flex-shrink-0 ${style}`;
         button.title = label;
         button.setAttribute('aria-label', label);
         const glyph = document.createElement('i');
@@ -120,21 +120,24 @@
         const granted = new Set(grantedRoutes);
         elements.pages.replaceChildren(...pageCatalog.map((page) => {
             const wrapper = document.createElement('div');
-            wrapper.className = 'col-md-6';
+            wrapper.className = 'col-12 col-md-6';
             const label = document.createElement('label');
-            label.className = 'form-check border rounded p-2 w-100 h-100';
+            label.className = 'role-page-option d-flex align-items-start gap-3 border rounded p-3 w-100 h-100';
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
-            checkbox.className = 'form-check-input me-2 role-page-toggle';
+            checkbox.className = 'form-check-input role-page-toggle flex-shrink-0 mt-1';
             checkbox.value = page.route;
             checkbox.checked = granted.has(page.route);
+            const copy = document.createElement('span');
+            copy.className = 'role-page-option-copy d-block flex-grow-1';
             const text = document.createElement('span');
-            text.className = 'form-check-label';
+            text.className = 'd-block fw-semibold';
             text.textContent = page.label;
             const route = document.createElement('small');
-            route.className = 'd-block text-muted ms-4';
+            route.className = 'd-block text-muted text-break mt-1';
             route.textContent = page.route;
-            label.append(checkbox, text, route);
+            copy.append(text, route);
+            label.append(checkbox, copy);
             wrapper.appendChild(label);
             return wrapper;
         }));
@@ -186,8 +189,9 @@
                 row.appendChild(cell);
             }
             const actions = document.createElement('td');
+            actions.className = 'text-nowrap';
             const group = document.createElement('div');
-            group.className = 'd-flex gap-1';
+            group.className = 'd-inline-flex flex-nowrap gap-1';
             if (role.can_edit !== false) {
                 group.append(
                     actionButton('bi-pencil', '编辑权限', 'btn-outline-light', () => openRoleEditor(role)),
@@ -202,7 +206,7 @@
                 );
             }
             if (role.can_assign !== false) {
-                group.append(actionButton('bi-copy', '克隆角色', 'btn-outline-info', () => cloneRole(role)));
+                group.append(actionButton('bi-files', '克隆角色', 'btn-outline-info', () => cloneRole(role)));
             }
             if (role.can_delete) {
                 group.append(actionButton('bi-trash', '删除角色', 'btn-outline-danger', () => deleteRole(role)));

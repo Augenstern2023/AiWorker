@@ -390,6 +390,7 @@ def test_permissions_catalog_is_available_to_admin(app: FastAPI):
 
     assert response.status_code == 200
     beats_edit = next(item for item in response.json() if item["code"] == "beats.edit")
+    assert beats_edit["label"] == "编辑单集节拍"
     assert beats_edit["dependencies"] == [
         "beats.read",
         "outline.read.approved",

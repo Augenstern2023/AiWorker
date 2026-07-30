@@ -8,11 +8,16 @@
     if (!form || !submissionSelect || !formatSelect || !history) return;
 
     const stageLabels = {brief: 'Brief', characters: '人物关系', outline: '分集大纲', beats: 'Beats', script: '场次剧本'};
+    const resourceStatusLabels = {draft: '草稿', locked: '已锁定', brief_locked: '已锁定', approved: '已锁定', submitted: '已提交', returned: '已退回'};
+
+    function deliveryKindLabel(item) {
+        return item.is_formal ? '正式交付' : '草稿预览';
+    }
 
     function statusMessage(message) {
         const row = document.createElement('tr');
         const cell = document.createElement('td');
-        cell.colSpan = 7;
+        cell.colSpan = 8;
         cell.className = 'text-center text-muted py-4';
         cell.textContent = message;
         row.appendChild(cell);
@@ -21,20 +26,20 @@
 
     async function loadOptions() {
         const response = await window.aiworkerApi.request('/api/admin/deliveries/options');
-        if (!response.ok) throw new Error('已完成版本加载失败');
+        if (!response.ok) throw new Error('可预览成果加载失败');
         const {options} = await response.json();
         submissionSelect.replaceChildren();
         const empty = document.createElement('option');
         empty.value = '';
-        empty.textContent = options.length ? '请选择版本' : '暂无已完成版本';
+        empty.textContent = options.length ? '请选择成果' : '暂无已生成成果';
         submissionSelect.appendChild(empty);
         for (const item of options) {
             const option = document.createElement('option');
             option.value = item.resource_id;
             option.dataset.projectId = item.project_id;
             option.dataset.stage = item.stage;
-            option.dataset.workflowTaskId = item.workflow_task_id;
-            option.textContent = `${item.project_name} / ${stageLabels[item.stage] || item.stage} / v${item.resource_version}`;
+            if (item.workflow_task_id) option.dataset.workflowTaskId = item.workflow_task_id;
+            option.textContent = `${item.project_name} / ${stageLabels[item.stage] || item.stage} / v${item.resource_version} / ${resourceStatusLabels[item.resource_status] || item.resource_status || '草稿'} / ${deliveryKindLabel(item)}`;
             submissionSelect.appendChild(option);
         }
     }
@@ -54,6 +59,7 @@
                 delivery.project_name,
                 stageLabels[delivery.stage] || delivery.stage,
                 `资源 v${delivery.resource_version} / 快照 v${delivery.submission_version}`,
+                `${deliveryKindLabel(delivery)} / ${resourceStatusLabels[delivery.resource_status] || delivery.resource_status || '-'}`,
                 delivery.format.toUpperCase(),
                 delivery.fingerprint.slice(0, 12),
             ];
@@ -94,7 +100,7 @@
                 project_id: Number(option.dataset.projectId),
                 stage: option.dataset.stage,
                 format: formatSelect.value,
-                workflow_task_id: option.dataset.workflowTaskId,
+                workflow_task_id: option.dataset.workflowTaskId || null,
             }),
         });
         if (!response.ok) {

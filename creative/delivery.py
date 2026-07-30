@@ -116,6 +116,8 @@ class DeliveryService:
                 "stage_export_recorded_at": "REAL",
                 "workflow_completed_at": "REAL",
                 "audit_recorded_at": "REAL",
+                "resource_status": "TEXT NOT NULL DEFAULT ''",
+                "is_formal": "INTEGER NOT NULL DEFAULT 1",
             }
             for column, definition in additions.items():
                 if column not in columns:
@@ -123,8 +125,11 @@ class DeliveryService:
                         f"ALTER TABLE creative_deliveries ADD COLUMN {column} {definition}"
                     )
             connection.execute(
+                "DROP INDEX IF EXISTS uq_creative_delivery_request"
+            )
+            connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_creative_delivery_request "
-                "ON creative_deliveries(project_id, stage, submission_id, format)"
+                "ON creative_deliveries(project_id, stage, submission_id, format, is_formal)"
             )
             connection.execute(
                 "DROP INDEX IF EXISTS uq_creative_delivery_task"
@@ -154,14 +159,12 @@ class DeliveryService:
         adapter = CreativeWorkflowAdapter(
             self.creative_repository, self.workflow_repository
         )
-        if adapter.domain_status(resource_type, resource_id) not in {
-            "locked", "brief_locked", "approved"
-        }:
-            raise ValueError("delivery requires a completed resource")
+        resource_status = adapter.domain_status(resource_type, resource_id)
+        is_formal = self._is_formal_resource(resource_status)
         snapshot = adapter.snapshot(resource_type, resource_id, reconcile=False)
         snapshot_project_id = self._snapshot_project_id(resource_type, snapshot)
         if snapshot_project_id != int(project_id):
-            raise ValueError("completed resource does not belong to the requested project")
+            raise ValueError("resource does not belong to the requested project")
         project = self.creative_repository.get_project(project_id)
         if project is None:
             raise KeyError(str(project_id))
@@ -177,7 +180,9 @@ class DeliveryService:
         elif stage == "script":
             lifecycle_fingerprint = script_resource_fingerprint(snapshot)
         source_key = f"direct:{stage}:{resource_id}"
-        existing = self._find_existing(project_id, stage, source_key, format)
+        existing = self._find_existing(
+            project_id, stage, source_key, format, is_formal=is_formal
+        )
         if existing is not None:
             if (
                 workflow_task_id
@@ -188,7 +193,10 @@ class DeliveryService:
             return self._reconcile_delivery(
                 existing, page_authorized=page_authorized
             )
-        task = self._resolve_delivery_task(project_id, workflow_task_id)
+        task = (
+            self._resolve_delivery_task(project_id, workflow_task_id)
+            if is_formal else None
+        )
         delivery_id = str(uuid.uuid4())
         extension = "json" if format == "json" else format
         path = (self.delivery_dir / f"{delivery_id}.{extension}").resolve()
@@ -220,8 +228,9 @@ class DeliveryService:
                         id, project_id, stage, resource_type, resource_id,
                         resource_version, submission_id, submission_version,
                         format, content_fingerprint, actor_id, workflow_task_id,
-                        stage_content_fingerprint, path, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        stage_content_fingerprint, resource_status, is_formal,
+                        path, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         delivery_id,
@@ -235,8 +244,10 @@ class DeliveryService:
                         format,
                         fingerprint,
                         actor.user_id,
-                        task["id"],
+                        task["id"] if task else None,
                         lifecycle_fingerprint,
+                        resource_status,
+                        int(is_formal),
                         str(path),
                         created_at,
                     ),
@@ -244,7 +255,7 @@ class DeliveryService:
         except sqlite3.IntegrityError:
             path.unlink(missing_ok=True)
             existing = self._find_existing(
-                project_id, stage, source_key, format
+                project_id, stage, source_key, format, is_formal=is_formal
             )
             if existing is None:
                 raise
@@ -256,8 +267,10 @@ class DeliveryService:
             raise
         record.update(
             {
-                "workflow_task_id": task["id"],
+                "workflow_task_id": task["id"] if task else None,
                 "stage_content_fingerprint": lifecycle_fingerprint,
+                "resource_status": resource_status,
+                "is_formal": is_formal,
                 "stage_export_recorded_at": None,
                 "workflow_completed_at": None,
                 "audit_recorded_at": None,
@@ -300,47 +313,68 @@ class DeliveryService:
         self, *, project_authorizer: Callable[[str], bool] | None = None
     ) -> list[dict[str, Any]]:
         options: list[dict[str, Any]] = []
-        for project in self.creative_repository.list_projects():
+        for project_summary in self.creative_repository.list_projects():
             if project_authorizer is not None and not project_authorizer(
-                str(project["id"])
+                str(project_summary["id"])
             ):
                 continue
-            try:
-                task = self._resolve_delivery_task(int(project["id"]), None)
-            except (KeyError, ValueError):
+            project = self.creative_repository.get_project(int(project_summary["id"]))
+            if project is None:
                 continue
-            resources: list[tuple[str, str, int]] = []
-            if project.get("locked_brief_id"):
-                brief = self.creative_repository.get_blueprint(
-                    int(project["locked_brief_id"])
+            resources: list[tuple[str, str, int, str]] = []
+            resources.extend(
+                ("brief", str(item["id"]), int(item["version"]), str(item["status"]))
+                for item in project.get("blueprints", [])
+            )
+            character_batches = {
+                str(item["batch_id"]): item
+                for item in project.get("characters", [])
+                if item.get("batch_id")
+            }
+            resources.extend(
+                (
+                    "characters", f"{project['id']}:{batch_id}",
+                    int(item["version"]), str(item["status"]),
                 )
-                if brief:
-                    resources.append(("brief", str(brief["id"]), int(brief["version"])))
-            if project.get("character_batch_id"):
-                batch = self.creative_repository.get_character_batch(
-                    int(project["id"]), str(project["character_batch_id"])
+                for batch_id, item in character_batches.items()
+            )
+            outline_batches = {
+                str(item["batch_id"]): item
+                for item in project.get("episodes", [])
+                if item.get("stage") == "outline" and item.get("batch_id")
+            }
+            resources.extend(
+                (
+                    "outline", f"{project['id']}:{batch_id}",
+                    int(item["version"]), str(item["status"]),
                 )
-                if batch["characters"]:
-                    resources.append(("characters", f"{project['id']}:{project['character_batch_id']}", int(batch["characters"][0]["version"])))
-            if project.get("outline_batch_id"):
-                batch = self.creative_repository.get_outline_batch(
-                    int(project["id"]), str(project["outline_batch_id"])
-                )
-                if batch["episodes"]:
-                    resources.append(("outline", f"{project['id']}:{project['outline_batch_id']}", int(batch["episodes"][0]["version"])))
+                for batch_id, item in outline_batches.items()
+            )
             for episode in project.get("episodes", []):
-                if episode.get("stage") == "beats" and episode.get("status") in {"locked", "approved"}:
-                    resources.append(("beats", str(episode["id"]), int(episode["version"])))
-                if episode.get("stage") == "script" and episode.get("status") in {"locked", "approved"}:
-                    resources.append(("script", str(episode["id"]), int(episode["version"])))
-            for stage, resource_id, version in resources:
+                if episode.get("stage") in {"beats", "script"}:
+                    resources.append((
+                        str(episode["stage"]), str(episode["id"]),
+                        int(episode["version"]), str(episode["status"]),
+                    ))
+            for stage, resource_id, version, resource_status in resources:
+                is_formal = self._is_formal_resource(resource_status)
+                workflow_task_id = None
+                if is_formal:
+                    try:
+                        workflow_task_id = self._resolve_delivery_task(
+                            int(project["id"]), None
+                        )["id"]
+                    except (KeyError, ValueError):
+                        pass
                 options.append({
                     "resource_id": resource_id,
                     "stage": stage,
                     "resource_version": version,
                     "project_id": str(project["id"]),
                     "project_name": project["name"],
-                    "workflow_task_id": task["id"],
+                    "resource_status": resource_status,
+                    "is_formal": is_formal,
+                    "workflow_task_id": workflow_task_id,
                 })
         return options
 
@@ -373,7 +407,8 @@ class DeliveryService:
         )
 
     def _find_existing(
-        self, project_id: int, stage: str, submission_id: str, format: str
+        self, project_id: int, stage: str, submission_id: str, format: str,
+        *, is_formal: bool,
     ) -> dict[str, Any] | None:
         with self.creative_repository._connect() as connection:
             row = connection.execute(
@@ -382,9 +417,9 @@ class DeliveryService:
                 FROM creative_deliveries d
                 JOIN creative_projects p ON p.id = d.project_id
                 WHERE d.project_id = ? AND d.stage = ?
-                  AND d.submission_id = ? AND d.format = ?
+                  AND d.submission_id = ? AND d.format = ? AND d.is_formal = ?
                 """,
-                (project_id, stage, submission_id, format),
+                (project_id, stage, submission_id, format, int(is_formal)),
             ).fetchone()
         return self._public_record(dict(row)) if row is not None else None
 
@@ -459,7 +494,8 @@ class DeliveryService:
         path = Path(record["path"]).resolve()
         if path.parent != self.delivery_dir.resolve() or not path.is_file():
             raise FileNotFoundError(path)
-        if not record.get("workflow_task_id"):
+        is_formal = bool(record.get("is_formal"))
+        if is_formal and not record.get("workflow_task_id"):
             task = self._resolve_delivery_task(int(record["project_id"]), None)
             self._mark_reconciled(
                 record["id"], "workflow_task_id", task["id"]
@@ -486,8 +522,9 @@ class DeliveryService:
                 record["id"], "stage_content_fingerprint", fingerprint
             )
             record["stage_content_fingerprint"] = fingerprint
-        self._record_stage_export(record)
-        self._complete_workflow_task(record, page_authorized=page_authorized)
+        if is_formal:
+            self._record_stage_export(record)
+            self._complete_workflow_task(record, page_authorized=page_authorized)
         self._record_audit(record, request=request)
         refreshed = self._get_unreconciled(record["id"])
         assert refreshed is not None
@@ -670,7 +707,12 @@ class DeliveryService:
         record["project_id"] = str(record["project_id"])
         record["fingerprint"] = record.pop("content_fingerprint")
         record["actor_user_id"] = record.pop("actor_id")
+        record["is_formal"] = bool(record.get("is_formal"))
         return record
+
+    @staticmethod
+    def _is_formal_resource(resource_status: str) -> bool:
+        return resource_status in {"locked", "brief_locked", "approved"}
 
     @staticmethod
     def _snapshot_project_id(resource_type: str, snapshot: Any) -> int:
@@ -726,7 +768,12 @@ class DeliveryService:
         if format == "json":
             return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         if stage == "script" and format == "txt":
-            return build_script_text(project, snapshot.get("content") or {}, episode_number=int(snapshot.get("episode_number") or 0)).encode("utf-8")
+            script = payload["content"]
+            return build_script_text(
+                project,
+                script.get("content") or {},
+                episode_number=int(script.get("episode_number") or 0),
+            ).encode("utf-8")
         if stage == "beats":
             markdown = build_beats_markdown(project, payload["content"])
         else:

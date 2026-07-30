@@ -7,8 +7,10 @@
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
 
 from creative.api import build_merged_script_download, build_script_text
+from creative.delivery import DeliveryService
 from creative.repository import CreativeRepository
 from creative.lifecycle_service import TopicLifecycleService, script_resource_fingerprint
+from identity.schema import Principal
 import pytest
 
 
@@ -152,9 +154,9 @@ def test_scene_script_requires_locked_beats_and_records_its_source(tmp_path) -> 
     repository.lock_outline_batch(project["id"], outlines["batch_id"])
     beats = repository.create_episode_beats(project["id"], 1, {"beats": [{"order": 1}]})
     repository.lock_episode_beats(beats["id"])
-
     script = repository.create_episode_script(project["id"], 1, {
-        "episode_title": "开局", "scenes": [{
+        "episode_title": "开局",
+        "scenes": [{
             "sequence_no": 1, "scene_no": 1, "time_of_day": "日",
             "interior_exterior": "内", "location": "客厅", "props": [],
             "characters": ["主角"], "blocks": [{"type": "action", "text": "主角进门。"}],
@@ -195,6 +197,108 @@ def test_scene_script_save_validates_structured_content(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="场次剧本缺少"):
         repository.update_episode(script["id"], {"episode_title": "开局", "scenes": []})
+
+
+def test_draft_delivery_preview_does_not_export_or_complete_workflow(
+    tmp_path, monkeypatch
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic = repository.upsert_topics([{
+        "platform": "hg", "job_id": "job-1", "source_path": "rank.json",
+        "captured_at": "2026-07-30", "title": "草稿交付剧", "description": "",
+        "category": "都市", "rank_type": "热播榜", "score": 90,
+        "confidence": "high", "score_details": {}, "recommendation": "推荐", "evidence": [],
+    }])[0]
+    repository.update_topic(topic["id"], "adopted")
+    breakdown = repository.create_breakdown(topic["id"], {"title": "草稿交付剧"}, {}, [])
+    repository.lock_breakdown(breakdown["id"])
+    project = repository.create_project(topic["id"], breakdown["id"], "草稿项目", 1)
+    brief = repository.create_blueprints(project["id"], [{
+        "content": {"title": "方向"}, "risk_score": 1, "risk_level": "low",
+    }])[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(project["id"], [{"episode": 1}], "弧线")
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    beats = repository.create_episode_beats(project["id"], 1, {"beats": [{"order": 1}]})
+    repository.lock_episode_beats(beats["id"])
+    script = repository.create_episode_script(project["id"], 1, {
+        "episode_title": "开局",
+        "scenes": [{
+            "sequence_no": 1, "scene_no": 1, "time_of_day": "日",
+            "interior_exterior": "内", "location": "客厅", "props": [],
+            "characters": ["主角"], "blocks": [{"type": "action", "text": "主角进门。"}],
+        }],
+    })
+    draft_beats = repository.create_episode_beats(
+        project["id"], 1, {"beats": [{"order": 1, "scene": "客厅"}]}
+    )
+
+    class ExistingAudit:
+        def query(self, **_kwargs):
+            return [{"id": "existing"}]
+
+    service = DeliveryService(
+        root=tmp_path,
+        creative_repository=repository,
+        workflow_repository=object(),
+        audit_service=ExistingAudit(),
+    )
+    task_calls: list[int] = []
+    monkeypatch.setattr(
+        service,
+        "_resolve_delivery_task",
+        lambda project_id, _task_id: task_calls.append(project_id) or {"id": "delivery-task"},
+    )
+
+    options = service.options()
+    option = next(
+        item for item in options
+        if item["stage"] == "beats" and item["resource_id"] == str(draft_beats["id"])
+    )
+    calls_before_preview = len(task_calls)
+    preview = service.create(
+        project_id=project["id"],
+        stage="beats",
+        resource_id=str(draft_beats["id"]),
+        format="md",
+        actor=Principal(
+            user_id="admin", username="admin", display_name="Admin",
+            role_codes=("system_admin",), permissions=frozenset({"*"}),
+            data_scope="all", session_id="session",
+        ),
+    )
+    script_preview = service.create(
+        project_id=project["id"],
+        stage="script",
+        resource_id=str(script["id"]),
+        format="txt",
+        actor=Principal(
+            user_id="admin", username="admin", display_name="Admin",
+            role_codes=("system_admin",), permissions=frozenset({"*"}),
+            data_scope="all", session_id="session",
+        ),
+    )
+
+    assert option["resource_status"] == "draft"
+    assert option["is_formal"] is False
+    assert option["workflow_task_id"] is None
+    assert {item["stage"] for item in options} >= {
+        "brief", "characters", "outline", "beats", "script"
+    }
+    formal_option = next(item for item in options if item["stage"] == "brief")
+    assert formal_option["is_formal"] is True
+    assert formal_option["workflow_task_id"] == "delivery-task"
+    assert preview["resource_status"] == "draft"
+    assert preview["is_formal"] is False
+    assert (tmp_path / ".runtime" / "deliveries" / f"{preview['id']}.md").is_file()
+    assert script_preview["is_formal"] is False
+    assert (tmp_path / ".runtime" / "deliveries" / f"{script_preview['id']}.txt").is_file()
+    assert len(task_calls) == calls_before_preview
+    assert not repository.has_stage_export(
+        project["id"], "beats", preview["stage_content_fingerprint"]
+    )
 
 
 def test_scene_script_lifecycle_tracks_current_locked_beats(tmp_path) -> None:

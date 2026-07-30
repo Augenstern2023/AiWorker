@@ -502,6 +502,30 @@ window.aiworkerModules.push(() => ({
                     return items[0] || null;
                 },
 
+                projectEpisodeScript(episodeNumber) {
+                    const project = this.creativeWorkspace.project;
+                    const beats = (project?.episodes || [])
+                        .filter(item => item.stage === 'beats'
+                            && Number(item.episode_number) === Number(episodeNumber)
+                            && item.upstream_refs?.outline_batch_id === project?.outline_batch_id
+                            && ['locked', 'approved'].includes(item.status))
+                        .sort((a, b) => Number(b.version) - Number(a.version));
+                    const currentBeats = beats[0];
+                    if (!currentBeats) return null;
+                    return (project?.episodes || [])
+                        .filter(item => item.stage === 'script'
+                            && Number(item.episode_number) === Number(episodeNumber)
+                            && Number(item.upstream_refs?.beats_id) === Number(currentBeats.id)
+                            && Number(item.upstream_refs?.beats_version) === Number(currentBeats.version))
+                        .sort((a, b) => Number(b.version) - Number(a.version))[0] || null;
+                },
+
+                projectEpisodeScriptLabel(episodeNumber) {
+                    const script = this.projectEpisodeScript(episodeNumber);
+                    if (!script) return '';
+                    return script.status === 'locked' ? '剧本已完成' : '剧本已生成';
+                },
+
                 async startCreativeGeneration(url, body = {}, action = '') {
                     this.creativeWorkspace.error = '';
                     this.creativeWorkspace.startingAction = action;

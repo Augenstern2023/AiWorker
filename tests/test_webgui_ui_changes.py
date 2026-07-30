@@ -479,6 +479,17 @@ def test_beats_workspace_links_back_to_episode_outlines():
     assert "返回全剧大纲" in page
 
 
+def test_outline_rows_show_a_link_when_the_episode_script_exists():
+    creative = _source("static/js/common/creative.js")
+    outlines = _source("templates/common/workspace/project_outlines.html")
+
+    assert "projectEpisodeScript(episodeNumber)" in creative
+    assert "projectEpisodeScriptLabel(episodeNumber)" in creative
+    assert "projectEpisodeScript(item.episode_number)" in outlines
+    assert "projectEpisodeScriptLabel(item.episode_number)" in outlines
+    assert "/scripts`" in outlines
+
+
 def test_scene_script_lifecycle_badges_have_readable_backgrounds():
     styles = _source("static/css/workspaces.css")
 

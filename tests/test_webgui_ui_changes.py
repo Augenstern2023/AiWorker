@@ -497,6 +497,12 @@ def test_beats_workspace_uses_a_labeled_scene_script_action():
     assert "bi-file-earmark-richtext" in beats
 
 
+def test_episode_workspace_reads_the_episode_number_from_beats_and_scripts_urls():
+    tasks = _source("static/js/common/tasks.js")
+
+    assert r"/\/episodes\/(\d+)\/(?:beats|scripts)" in tasks
+
+
 def test_scene_script_lifecycle_badges_have_readable_backgrounds():
     styles = _source("static/css/workspaces.css")
 

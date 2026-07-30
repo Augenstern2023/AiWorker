@@ -254,7 +254,7 @@ function localDateString(date = new Date()) {
                             this.creativeWorkspace.create.topic_id = Number(topicId);
                             await this.syncCreativeProjectSource();
                         }
-                        const episode = window.location.pathname.match(/\/episodes\/(\d+)\/beats/)?.[1];
+                        const episode = window.location.pathname.match(/\/episodes\/(\d+)\/(?:beats|scripts)/)?.[1];
                         if (episode) this.creativeWorkspace.selectedEpisode = Number(episode);
                         if (
                             this.page === 'planning-brief'

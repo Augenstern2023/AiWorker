@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import os
 import uuid
 from pathlib import Path
@@ -101,6 +102,119 @@ def test_identity_repository_uses_postgresql_system_database(
         result="success",
     )
     assert audit.query(action="postgres.verify")[0]["actor_display_name"] == "PostgreSQL User"
+
+
+def test_workflow_event_serializes_datetime_details_on_postgresql(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required for PostgreSQL tests")
+    if make_url(postgres_url).database == "aiworker_system":
+        raise ValueError("tests must not run against the aiworker_system database")
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
+    command.upgrade(Config("alembic.ini"), "head")
+    identity_repository = IdentityRepository(
+        SystemDatabase(SystemDatabaseSettings(postgres_url))
+    )
+    identity_repository.seed_defaults()
+    username = f"event-user-{uuid.uuid4()}"
+    user = identity_repository.create_user(username, "Event User", "hash")
+    actor = Principal(
+        user_id=user["id"],
+        username=username,
+        display_name="Event User",
+        role_codes=(),
+        permissions=frozenset(),
+        data_scope="task",
+        session_id="postgres-test",
+    )
+    workflow_repository = WorkflowRepository(identity_repository)
+    task = workflow_repository.create_task(
+        f"workflow:{uuid.uuid4()}",
+        "selection",
+        "selection_operator",
+        actor=actor,
+    )
+
+    recorded_at = datetime(2026, 7, 30, 12, 34, 56, tzinfo=timezone.utc)
+    with identity_repository.transaction() as connection:
+        workflow_repository.record_task_event_in_transaction(
+            task["id"],
+            "creative.lock",
+            actor,
+            connection=connection,
+            details={"recorded_at": recorded_at},
+        )
+
+    with identity_repository.connect() as connection:
+        event_details = connection.exec_driver_sql(
+            "SELECT details_json FROM workflow_task_events "
+            "WHERE task_id = %s AND event_type = %s "
+            "ORDER BY created_at DESC LIMIT 1",
+            (task["id"], "creative.lock"),
+        ).scalar_one()
+    assert event_details["recorded_at"] == recorded_at.isoformat()
+
+
+def test_locked_beats_retry_completes_its_open_workflow_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required for PostgreSQL tests")
+    if make_url(postgres_url).database == "aiworker_system":
+        raise ValueError("tests must not run against the aiworker_system database")
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
+    command.upgrade(Config("alembic.ini"), "head")
+    identity_repository = IdentityRepository(
+        SystemDatabase(SystemDatabaseSettings(postgres_url))
+    )
+    identity_repository.seed_defaults()
+    username = f"beats-user-{uuid.uuid4()}"
+    user = identity_repository.create_user(username, "Beats User", "hash")
+    screenwriter = identity_repository.get_role_by_code("screenwriter")
+    assert screenwriter is not None
+    identity_repository.replace_user_roles(user["id"], [screenwriter["id"]])
+    actor = Principal(
+        user_id=user["id"],
+        username=username,
+        display_name="Beats User",
+        role_codes=("screenwriter",),
+        permissions=frozenset(),
+        data_scope="task",
+        session_id="postgres-test",
+    )
+    workflow_repository = WorkflowRepository(identity_repository)
+    task = workflow_repository.create_task(
+        f"workflow:{uuid.uuid4()}", "beats", "screenwriter", actor=actor
+    )
+    workflow_repository.claim_task(task["id"], actor)
+    workflow_repository.start_task(task["id"], actor)
+
+    class LockedBeatsAdapter:
+        def lock_without_review(self, *args, **kwargs):
+            raise ValueError("creative resource is immutable after completion")
+
+        def domain_status(self, resource_type, resource_id):
+            assert (resource_type, resource_id) == ("beats", "44")
+            return "locked"
+
+        def beats_episode_progress(self, resource_id):
+            assert resource_id == "44"
+            return {
+                "required_episodes": [2],
+                "approved_episodes": [2],
+                "remaining_episodes": [],
+                "complete": True,
+            }
+
+    result = TransitionService(
+        workflow_repository, creative_adapter=LockedBeatsAdapter()
+    ).complete_creative_without_review(task["id"], "beats", "44", actor)
+
+    assert result["task"]["status"] == "completed"
+    assert result["next_task"]["task_type"] == "script"
 
 
 def test_user_contact_profile_migration_round_trips_on_the_isolated_postgres_database(

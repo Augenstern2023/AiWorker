@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from sqlalchemy import Connection, and_, func, or_, select, insert, update, delete, text
+from datetime import date, datetime
 import json
 import time
 import uuid
@@ -1474,9 +1475,20 @@ class WorkflowRepository:
                 actor_id,
                 from_status,
                 to_status,
-                json.dumps(details or {}, ensure_ascii=True, sort_keys=True),
+                json.dumps(
+                    details or {},
+                    default=WorkflowRepository._json_default,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
             ),
         )
+
+    @staticmethod
+    def _json_default(value: object) -> str:
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()
+        raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
     @staticmethod
     def _record_project_member_event(

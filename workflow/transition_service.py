@@ -61,13 +61,24 @@ class TransitionService:
         if resource_type not in {"brief", "characters", "outline", "beats", "script"}:
             raise ValueError("resource type requires its configured workflow")
 
-        completed = self.creative_adapter.lock_without_review(
-            task_id,
-            resource_type,
-            resource_id,
-            actor,
-            difference_note=difference_note,
-        )
+        try:
+            completed = self.creative_adapter.lock_without_review(
+                task_id,
+                resource_type,
+                resource_id,
+                actor,
+                difference_note=difference_note,
+            )
+        except ValueError as exc:
+            # A prior request may have locked the resource before a later
+            # workflow write failed. Resume only that specific partial state.
+            if (
+                str(exc) != "creative resource is immutable after completion"
+                or self.creative_adapter.domain_status(resource_type, resource_id)
+                not in {"locked", "brief_locked"}
+            ):
+                raise
+            completed = {"resource": {"id": resource_id, "status": "locked"}}
         with self.repository.identity_repository.transaction() as connection:
             task = self.repository.transition_task_in_transaction(
                 task_id,

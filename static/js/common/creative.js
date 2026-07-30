@@ -296,6 +296,12 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
+                async refreshCreativeTopicLibrary() {
+                    if (typeof this.fetchTopicLibrary === 'function') {
+                        await this.fetchTopicLibrary();
+                    }
+                },
+
                 creativeProjectStatusLabel(status) {
                     return {
                         created: '待生成方向', direction_review: '方向评审', brief_locked: 'Brief 已锁定',
@@ -643,7 +649,7 @@ window.aiworkerModules.push(() => ({
                     const jobId = this.creativeWorkspace.jobId;
                     if (!this.creativeProjectHasJobResult(project, action, jobId)) return false;
                     this.finishCreativeGeneration();
-                    if (action === 'script') await this.fetchTopicLibrary();
+                    if (action === 'script') await this.refreshCreativeTopicLibrary();
                     this.showCreativeNotice('生成完成，结果已回填到当前项目。');
                     return true;
                 },
@@ -863,7 +869,7 @@ window.aiworkerModules.push(() => ({
                 async saveProjectRelationship(item) { await this.saveCreativeItem(`/api/creative/relationships/${item.id}`, item, '人物关系已保存', `relationship-${item.id}`); },
                 async saveProjectEpisode(item) {
                     const saved = await this.saveCreativeItem(`/api/creative/episodes/${item.id}`, item, '分集内容已保存', `episode-${item.id}`);
-                    if (saved && item.stage === 'script') await this.fetchTopicLibrary();
+                    if (saved && item.stage === 'script') await this.refreshCreativeTopicLibrary();
                 },
                 async saveCreativeItem(url, item, successMessage, saveKey) {
                     this.creativeWorkspace.error = '';
@@ -925,7 +931,7 @@ window.aiworkerModules.push(() => ({
                     try {
                         await this.completeCreativeResource('script', item.id, this.creativeWorkspace.project.id);
                         await this.selectCreativeProject(this.creativeWorkspace.project.id);
-                        await this.fetchTopicLibrary();
+                        await this.refreshCreativeTopicLibrary();
                         this.showCreativeNotice('场次剧本已完成并锁定');
                     } catch (error) { this.creativeWorkspace.error = error.message || '完成场次剧本失败'; }
                 },

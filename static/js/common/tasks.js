@@ -210,6 +210,9 @@ function localDateString(date = new Date()) {
                     this.transcriptRequiredModal = this.modal('transcriptRequiredModal');
                     this.breakdownGenerationProgressModal = this.modal('breakdownGenerationProgressModal');
                     this.creativeGenerationProgressModal = this.modal('creativeGenerationProgressModal');
+                    document.getElementById('creativeGenerationProgressModal')?.addEventListener('hide.bs.modal', () => {
+                        document.activeElement?.blur();
+                    });
                     this.workflowTaskModal = this.modal('workflowTaskModal');
                     this.planningAssignmentModal = this.modal('planningAssignmentModal');
                     this.adoptionNoticeModal = this.modal('adoptionNoticeModal');

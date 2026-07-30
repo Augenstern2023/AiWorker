@@ -450,6 +450,21 @@ def test_creative_generation_bootstraps_a_task_for_legacy_projects():
     assert '"/projects/{project_id}/workflow-tasks/{resource_type}/ensure"' in api
 
 
+def test_writing_workspace_refreshes_topics_only_when_the_page_provides_a_library():
+    creative = _source("static/js/common/creative.js")
+
+    assert "async refreshCreativeTopicLibrary()" in creative
+    assert "typeof this.fetchTopicLibrary === 'function'" in creative
+    assert "await this.refreshCreativeTopicLibrary();" in creative
+
+
+def test_creative_progress_modal_blurs_the_close_button_before_it_is_hidden():
+    tasks = _source("static/js/common/tasks.js")
+
+    assert "document.getElementById('creativeGenerationProgressModal')?.addEventListener('hide.bs.modal'" in tasks
+    assert "document.activeElement?.blur();" in tasks
+
+
 def test_topic_library_adoption_handles_non_json_server_errors():
     breakdowns = _source("static/js/selection/breakdowns.js")
 

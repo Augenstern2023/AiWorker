@@ -472,6 +472,13 @@ def test_scene_script_workspace_links_back_to_its_source_beats():
     assert "返回 Beats" in page
 
 
+def test_beats_workspace_links_back_to_episode_outlines():
+    page = _source("templates/writing/beats.html")
+
+    assert 'href="/writing/projects/{{ project_id }}/outlines"' in page
+    assert "返回全剧大纲" in page
+
+
 def test_scene_script_lifecycle_badges_have_readable_backgrounds():
     styles = _source("static/css/workspaces.css")
 

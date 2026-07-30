@@ -391,7 +391,7 @@ def build_script_text(
             elif block_type == "subtitle":
                 rendered = f"【字幕：{text}】"
             elif block_type == "cut":
-                rendered = "【切镜】"
+                rendered = f"【切镜：{text}】" if text else "【切镜】"
             else:
                 continue
             lines.extend([rendered, ""])

@@ -45,6 +45,31 @@ def test_script_text_uses_jubaopen_scene_format() -> None:
     )
 
 
+def test_script_text_retains_cut_direction() -> None:
+    text = build_script_text(
+        {"name": "聚宝盆"},
+        {
+            "episode_title": "转折",
+            "scenes": [{
+                "sequence_no": 1,
+                "scene_no": 1,
+                "time_of_day": "夜",
+                "interior_exterior": "内",
+                "location": "柴房",
+                "props": [],
+                "characters": [],
+                "blocks": [{
+                    "type": "cut",
+                    "text": "定格在主角按住账本的手上。",
+                }],
+            }],
+        },
+        episode_number=1,
+    )
+
+    assert "【切镜：定格在主角按住账本的手上。】" in text
+
+
 def test_combined_script_download_uses_current_scripts_and_episode_dividers() -> None:
     project = {
         "name": "项目名称",

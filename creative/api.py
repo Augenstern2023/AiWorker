@@ -1588,6 +1588,37 @@ def build_creative_router(
     ):
         return project_view(project_or_404(project_id), principal)
 
+    @router.post("/projects/{project_id}/workflow-tasks/{resource_type}/ensure")
+    async def ensure_project_workflow_task(
+        project_id: int,
+        resource_type: str,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        role_by_resource = {
+            "brief": "creative_planner",
+            "characters": "creative_planner",
+            "outline": "screenwriter",
+            "beats": "screenwriter",
+            "script": "screenwriter",
+        }
+        role_code = role_by_resource.get(resource_type)
+        if role_code is None:
+            raise HTTPException(400, "unsupported creative resource type")
+        assert_project_generation_access(project_id, principal)
+        project = project_or_404(project_id)
+        task = workflow_repository.ensure_project_task(
+            str(project_id),
+            int(project["topic_id"]),
+            task_type=resource_type,
+            role_code=role_code,
+            actor=principal,
+        )
+        if task["status"] == "pool" and workflow_repository.can_claim_task(
+            task["id"], principal
+        ):
+            task = workflow_repository.claim_task(task["id"], principal)
+        return task
+
     @router.get("/projects/{project_id}/generated-content")
     async def get_generated_content(
         project_id: int,

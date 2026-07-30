@@ -361,6 +361,17 @@ window.aiworkerModules.push(() => ({
                             task = claimed;
                         }
                     }
+                    if (!task && projectId !== null) {
+                        const bootstrapResponse = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/workflow-tasks/${resourceType}/ensure`,
+                            {method: 'POST'}
+                        );
+                        const bootstrap = await bootstrapResponse.json();
+                        if (!bootstrapResponse.ok) {
+                            throw new Error(bootstrap.detail || '初始化创作任务失败');
+                        }
+                        task = bootstrap;
+                    }
                     if (!task) throw new Error('当前没有可提交的创作任务，请先领取或开始对应任务');
                     if (['assigned', 'returned'].includes(task.status)) {
                         const startResponse = await aiworkerApi.request(`/api/workflow/tasks/${task.id}/start`, {method: 'POST'});

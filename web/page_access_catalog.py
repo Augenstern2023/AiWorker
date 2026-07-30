@@ -68,7 +68,9 @@ _TEAM_ROLES: tuple[ApiRoute, ...] = (
 
 _CREATIVE_TASK_SUPPORT: tuple[ApiRoute, ...] = (
     ("GET", "/api/workflow/tasks"),
+    ("POST", "/api/workflow/tasks/{task_id}/claim"),
     ("POST", "/api/workflow/tasks/{task_id}/start"),
+    ("POST", "/api/creative/projects/{project_id}/workflow-tasks/{resource_type}/ensure"),
 )
 
 _PROJECT_MANAGEMENT: tuple[ApiRoute, ...] = (

@@ -442,6 +442,14 @@ def test_creative_generation_claims_an_available_stage_task_automatically():
     assert "/api/workflow/tasks/${task.id}/claim" in resolver
 
 
+def test_creative_generation_bootstraps_a_task_for_legacy_projects():
+    creative = _source("static/js/common/creative.js")
+    api = _source("creative/api.py")
+
+    assert "/workflow-tasks/${resourceType}/ensure" in creative
+    assert '"/projects/{project_id}/workflow-tasks/{resource_type}/ensure"' in api
+
+
 def test_topic_library_adoption_handles_non_json_server_errors():
     breakdowns = _source("static/js/selection/breakdowns.js")
 

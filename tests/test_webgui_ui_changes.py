@@ -425,6 +425,13 @@ def test_scene_script_page_uses_the_writing_workspace_layout():
     assert 'src="/static/js/writing/scripts.js"' in page
 
 
+def test_locked_characters_offer_a_direct_link_to_episode_outlines():
+    characters = _source("templates/common/workspace/project_characters.html")
+
+    assert "/writing/projects/${creativeWorkspace.project.id}/outlines" in characters
+    assert "进入全剧大纲" in characters
+
+
 def test_topic_library_adoption_handles_non_json_server_errors():
     breakdowns = _source("static/js/selection/breakdowns.js")
 

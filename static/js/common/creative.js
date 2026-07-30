@@ -564,6 +564,9 @@ window.aiworkerModules.push(() => ({
                     this.creativeWorkspace.jobLogCount = 0;
                     this.creativeWorkspace.showJobLogs = false;
                     this.creativeWorkspace.activeAction = action;
+                    this.creativeWorkspace.activeEpisode = ['beats', 'script'].includes(action)
+                        ? Number(this.creativeWorkspace.selectedEpisode || 0)
+                        : 0;
                     this.creativeGenerationProgressModal.show();
                     try {
                         const res = await aiworkerApi.request(url, {
@@ -670,13 +673,19 @@ window.aiworkerModules.push(() => ({
                 },
 
                 creativeActionRunning(action) {
-                    return this.creativeWorkspace.startingAction === action
-                        || (this.creativeWorkspace.activeAction === action && this.creativeJobRunning());
+                    if (this.creativeWorkspace.startingAction === action) return true;
+                    const isActiveRunning = this.creativeWorkspace.activeAction === action && this.creativeJobRunning();
+                    if (!isActiveRunning) return false;
+                    return !['beats', 'script'].includes(action)
+                        || Number(this.creativeWorkspace.activeEpisode) === Number(this.creativeWorkspace.selectedEpisode);
                 },
 
                 creativeActionDisabled(action) {
-                    return Boolean(this.creativeWorkspace.startingAction)
-                        || (this.creativeWorkspace.activeAction === action && this.creativeJobRunning());
+                    if (this.creativeWorkspace.startingAction) return true;
+                    const isActiveRunning = this.creativeWorkspace.activeAction === action && this.creativeJobRunning();
+                    if (!isActiveRunning) return false;
+                    return !['beats', 'script'].includes(action)
+                        || Number(this.creativeWorkspace.activeEpisode) === Number(this.creativeWorkspace.selectedEpisode);
                 },
 
                 creativeProjectHasJobResult(project, action, jobId) {
@@ -702,6 +711,7 @@ window.aiworkerModules.push(() => ({
                     this.creativeWorkspace.jobProgress = {completed: 1, total: 1};
                     this.creativeWorkspace.startingAction = '';
                     this.creativeWorkspace.activeAction = '';
+                    this.creativeWorkspace.activeEpisode = 0;
                     this.creativeWorkspace.paused = false;
                     this.creativeWorkspace.notifiedStatus = 'succeeded';
                 },
@@ -749,6 +759,7 @@ window.aiworkerModules.push(() => ({
                         } else {
                             this.creativeWorkspace.startingAction = '';
                             this.creativeWorkspace.activeAction = '';
+                            this.creativeWorkspace.activeEpisode = 0;
                             this.creativeWorkspace.paused = false;
                             alert(`创作任务${job.status === 'cancelled' ? '已取消' : '失败'}：${job.message || ''}`);
                         }

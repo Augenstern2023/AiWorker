@@ -701,6 +701,16 @@ def test_next_stage_generation_is_not_blocked_by_a_stale_previous_action():
     assert ':disabled="creativeActionDisabled(\'blueprints\')"' in html
 
 
+def test_episode_generation_controls_only_block_the_active_episode():
+    creative = _source("static/js/common/creative.js")
+    tasks = _source("static/js/common/tasks.js")
+
+    assert "activeEpisode: 0" in tasks
+    assert "this.creativeWorkspace.activeEpisode = ['beats', 'script'].includes(action)" in creative
+    assert "['beats', 'script'].includes(action)" in creative
+    assert "this.creativeWorkspace.activeEpisode" in creative
+
+
 def test_saved_creative_results_reconcile_a_stale_running_indicator():
     html = _workspace_source()
 

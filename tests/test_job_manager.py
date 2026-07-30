@@ -136,6 +136,96 @@ def test_job_manager_allows_different_breakdowns_to_run_together(
         )
 
 
+def test_job_manager_allows_independent_creative_generation_jobs(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "runtime.job_manager.launch_worker", lambda *_args, **_kwargs: FakeProcess()
+    )
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    first = CrawlJob(
+        job_id="beats-episode-1",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={"project_id": 1, "action": "beats", "episode_number": 1},
+    )
+    manager.jobs[first.job_id] = JobState(job=first, status="running")
+    manager.processes[first.job_id] = FakeProcess()
+
+    second_episode = manager.start_job(
+        CrawlJob(
+            job_id="beats-episode-2",
+            platform="creative",
+            crawler_type="phase4_generate",
+            extra={"project_id": 1, "action": "beats", "episode_number": 2},
+        )
+    )
+    scene_script = manager.start_job(
+        CrawlJob(
+            job_id="script-episode-1",
+            platform="creative",
+            crawler_type="phase4_generate",
+            extra={"project_id": 1, "action": "script", "episode_number": 1},
+        )
+    )
+    another_project = manager.start_job(
+        CrawlJob(
+            job_id="outlines-project-2",
+            platform="creative",
+            crawler_type="phase4_generate",
+            extra={"project_id": 2, "action": "outlines"},
+        )
+    )
+
+    assert second_episode.job_id == "beats-episode-2"
+    assert scene_script.job_id == "script-episode-1"
+    assert another_project.job_id == "outlines-project-2"
+
+
+@pytest.mark.parametrize(
+    ("extra", "duplicate_extra"),
+    [
+        (
+            {"project_id": 1, "action": "beats", "episode_number": 1},
+            {"project_id": 1, "action": "beats", "episode_number": 1},
+        ),
+        (
+            {"project_id": 1, "action": "script", "episode_number": 1},
+            {"project_id": 1, "action": "script", "episode_number": 1},
+        ),
+        (
+            {"project_id": 1, "action": "outlines"},
+            {"project_id": 1, "action": "outlines"},
+        ),
+    ],
+)
+def test_job_manager_rejects_duplicate_creative_generation_job(
+    monkeypatch, tmp_path, extra, duplicate_extra
+):
+    monkeypatch.setattr(
+        "runtime.job_manager.launch_worker", lambda *_args, **_kwargs: FakeProcess()
+    )
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    first = CrawlJob(
+        job_id="creative-first",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra=extra,
+    )
+    manager.jobs[first.job_id] = JobState(job=first, status="running")
+    manager.processes[first.job_id] = FakeProcess()
+
+    with pytest.raises(JobConflictError, match="platform 'creative'"):
+        manager.start_job(
+            CrawlJob(
+                job_id="creative-duplicate",
+                platform="creative",
+                crawler_type="phase4_generate",
+                extra=duplicate_extra,
+            )
+        )
+
+
 def test_job_manager_normalizes_job_ownership_in_extra_and_public_state(
     monkeypatch, tmp_path
 ):

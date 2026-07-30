@@ -417,6 +417,14 @@ def test_scene_script_preview_and_download_use_delivery_formats():
     assert "generatedContentPreview.stage === 'script' ? 'txt' : 'md'" in modal
 
 
+def test_scene_script_page_uses_the_writing_workspace_layout():
+    page = _source("templates/writing/scripts.html")
+
+    assert '{% extends "layouts/base.html" %}' in page
+    assert 'src="/static/js/common/creative.js"' in page
+    assert 'src="/static/js/writing/scripts.js"' in page
+
+
 def test_topic_library_adoption_handles_non_json_server_errors():
     breakdowns = _source("static/js/selection/breakdowns.js")
 

@@ -1,4 +1,8 @@
-{% extends "base.html" %}
+{% extends "layouts/base.html" %}
 {% block content %}
+<h3 class="mb-1">场次剧本</h3><div class="small text-muted mb-3">项目 {{ project_id }} · 第 {{ episode_number }} 集 · 可拍摄场次、动作与台词</div>
+{% include "common/workspace/project_progress.html" %}
 <template x-if="creativeWorkspace.project"><div>{% include "common/workspace/project_scripts.html" %}</div></template>
+{% include "common/workspace/creative_progress_modal.html" %}
 {% endblock %}
+{% block scripts %}<script src="/static/js/common/creative.js"></script><script src="/static/js/writing/scripts.js"></script>{% endblock %}

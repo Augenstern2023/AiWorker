@@ -28,7 +28,8 @@ WORKFLOW_NODES = {
     "brief": ("creative_planner", "project_owner", "characters"),
     "characters": ("creative_planner", "project_owner", "outline"),
     "outline": ("screenwriter", "project_owner", "beats"),
-    "beats": ("screenwriter", "project_owner", "delivery"),
+    "beats": ("screenwriter", "project_owner", "script"),
+    "script": ("screenwriter", "project_owner", "delivery"),
     "delivery": ("system_admin", None, None),
 }
 
@@ -57,7 +58,7 @@ class TransitionService:
         """Finish a creative task by locking its version instead of submitting it."""
         if self.creative_adapter is None:
             raise RuntimeError("creative workflow adapter is not configured")
-        if resource_type not in {"brief", "characters", "outline", "beats"}:
+        if resource_type not in {"brief", "characters", "outline", "beats", "script"}:
             raise ValueError("resource type requires its configured workflow")
 
         completed = self.creative_adapter.lock_without_review(
@@ -82,8 +83,10 @@ class TransitionService:
             )
             next_task = None
             beats_progress = None
-            if resource_type == "beats":
+            if resource_type in {"beats", "script"}:
                 beats_progress = self.creative_adapter.beats_episode_progress(resource_id)
+                if resource_type == "script":
+                    beats_progress = self.creative_adapter.script_episode_progress(resource_id)
                 if not beats_progress["complete"]:
                     connection.execute(
                         update(workflow_tasks)
@@ -96,7 +99,7 @@ class TransitionService:
                     self.repository._record_event(
                         connection,
                         task_id,
-                        "beats.remaining",
+                        f"{resource_type}.remaining",
                         actor.user_id,
                         "completed",
                         "in_progress",
@@ -114,7 +117,7 @@ class TransitionService:
                         actor=SYSTEM_ACTOR,
                         connection=connection,
                     )
-            if resource_type == "beats" and beats_progress and beats_progress["complete"]:
+            if resource_type in {"beats", "script"} and beats_progress and beats_progress["complete"]:
                 node = WORKFLOW_NODES[resource_type]
                 next_node = node[2]
                 if next_node is not None:
@@ -134,7 +137,7 @@ class TransitionService:
         """Lock legacy pending creative versions and remove their review wait state."""
         if self.creative_adapter is None:
             return []
-        resource_types = ("brief", "characters", "outline", "beats")
+        resource_types = ("brief", "characters", "outline", "beats", "script")
         with self.repository.identity_repository.connect() as connection:
             rows = connection.execute(
                 select(workflow_submissions)
@@ -198,9 +201,11 @@ class TransitionService:
             if task["status"] not in {"in_progress", "completed"}:
                 raise ValueError("legacy task is not ready for migration")
             now = time.time()
-            if resource_type == "beats":
-                beats_progress = self.creative_adapter.beats_episode_progress(
-                    current["resource_id"]
+            if resource_type in {"beats", "script"}:
+                beats_progress = (
+                    self.creative_adapter.beats_episode_progress(current["resource_id"])
+                    if resource_type == "beats"
+                    else self.creative_adapter.script_episode_progress(current["resource_id"])
                 )
                 if not beats_progress["complete"]:
                     connection.execute(
@@ -214,13 +219,13 @@ class TransitionService:
                     self.repository._record_event(
                         connection,
                         task["id"],
-                        "beats.remaining",
+                        f"{resource_type}.remaining",
                         SYSTEM_ACTOR.user_id,
                         "completed",
                         "in_progress",
                         beats_progress,
                     )
-            if resource_type != "beats" or (beats_progress and beats_progress["complete"]):
+            if resource_type not in {"beats", "script"} or (beats_progress and beats_progress["complete"]):
                 next_node = WORKFLOW_NODES[resource_type][2]
                 if next_node is not None:
                     self.repository.create_next_task(

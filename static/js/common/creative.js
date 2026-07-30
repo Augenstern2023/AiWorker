@@ -378,6 +378,7 @@ window.aiworkerModules.push(() => ({
                         characters: `/api/creative/projects/${projectId}/characters/${batchId}/lock`,
                         outline: `/api/creative/projects/${projectId}/outlines/${batchId}/lock`,
                         beats: `/api/creative/episodes/${resourceId}/lock`,
+                        script: `/api/creative/scripts/${resourceId}/lock`,
                     }[resourceType];
                     if (!endpoint) throw new Error('不支持完成该创作阶段');
                     const body = {workflow_task_id: task.id};
@@ -464,6 +465,13 @@ window.aiworkerModules.push(() => ({
                     return items[0] || null;
                 },
 
+                selectedProjectScript() {
+                    const items = (this.creativeWorkspace.project?.episodes || [])
+                        .filter(item => item.stage === 'script' && Number(item.episode_number) === Number(this.creativeWorkspace.selectedEpisode))
+                        .sort((a, b) => Number(b.version) - Number(a.version));
+                    return items[0] || null;
+                },
+
                 async startCreativeGeneration(url, body = {}, action = '') {
                     this.creativeWorkspace.error = '';
                     this.creativeWorkspace.startingAction = action;
@@ -544,9 +552,19 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
+                async generateProjectScript() {
+                    try {
+                        const episode = Number(this.creativeWorkspace.selectedEpisode || 0);
+                        const task = await this.resolveCreativeWorkflowTask('script', this.creativeWorkspace.project.id);
+                        return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/episodes/${episode}/scripts/generate`, {workflow_task_id: task.id}, 'script');
+                    } catch (e) {
+                        window.dispatchEvent(new CustomEvent('aiworker:toast', {detail: {message: e.message, type: 'error'}}));
+                    }
+                },
+
                 creativeActionLabel(action) {
                     return {
-                        blueprints: '仿制方向', characters: '人物关系', outlines: '分集大纲', beats: 'Beats 脚本'
+                        blueprints: '仿制方向', characters: '人物关系', outlines: '分集大纲', beats: 'Beats 脚本', script: '场次剧本'
                     }[action] || '创作内容';
                 },
 
@@ -555,7 +573,7 @@ window.aiworkerModules.push(() => ({
                         blueprints: '仿制方向生成任务已发起，正在后台处理',
                         characters: '人物关系生成任务已发起，正在后台处理',
                         outlines: '分集大纲生成任务已发起，正在后台处理',
-                        beats: 'Beats 脚本生成任务已发起，正在后台处理'
+                        beats: 'Beats 脚本生成任务已发起，正在后台处理', script: '场次剧本生成任务已发起，正在后台处理'
                     }[action] || '创作内容生成任务已发起，正在后台处理';
                 },
 
@@ -596,11 +614,12 @@ window.aiworkerModules.push(() => ({
                     this.creativeWorkspace.notifiedStatus = 'succeeded';
                 },
 
-                reconcileCreativeGenerationState(project) {
+                async reconcileCreativeGenerationState(project) {
                     const action = this.creativeWorkspace.activeAction;
                     const jobId = this.creativeWorkspace.jobId;
                     if (!this.creativeProjectHasJobResult(project, action, jobId)) return false;
                     this.finishCreativeGeneration();
+                    if (action === 'script') await this.fetchTopicLibrary();
                     this.showCreativeNotice('生成完成，结果已回填到当前项目。');
                     return true;
                 },
@@ -623,14 +642,14 @@ window.aiworkerModules.push(() => ({
                         Number(job.progress?.elapsed_seconds || 0)
                     );
                     // 先尝试通过项目数据尽早检测完成（job 可能还在 running 但结果已入库）
-                    if (this.reconcileCreativeGenerationState(this.creativeWorkspace.project)) return;
+                    if (await this.reconcileCreativeGenerationState(this.creativeWorkspace.project)) return;
                     // job 已到终态：先刷新项目数据（让后端生成的结果可见），再尝试 reconcile
                     if (['succeeded', 'failed', 'cancelled'].includes(job.status)) {
                         if (this.creativeWorkspace.notifiedStatus === job.status) return;
                         this.creativeWorkspace.notifiedStatus = job.status;
                         if (this.creativeWorkspace.project?.id) {
                             await this.selectCreativeProject(this.creativeWorkspace.project.id);
-                            if (this.reconcileCreativeGenerationState(this.creativeWorkspace.project)) return;
+                            if (await this.reconcileCreativeGenerationState(this.creativeWorkspace.project)) return;
                         }
                         if (job.status === 'succeeded') {
                             this.finishCreativeGeneration(job.message || '生成完成，结果已回填到当前项目');
@@ -818,7 +837,10 @@ window.aiworkerModules.push(() => ({
 
                 async saveProjectCharacter(item) { await this.saveCreativeItem(`/api/creative/characters/${item.id}`, item, '人物卡已保存', `character-${item.id}`); },
                 async saveProjectRelationship(item) { await this.saveCreativeItem(`/api/creative/relationships/${item.id}`, item, '人物关系已保存', `relationship-${item.id}`); },
-                async saveProjectEpisode(item) { await this.saveCreativeItem(`/api/creative/episodes/${item.id}`, item, '分集内容已保存', `episode-${item.id}`); },
+                async saveProjectEpisode(item) {
+                    const saved = await this.saveCreativeItem(`/api/creative/episodes/${item.id}`, item, '分集内容已保存', `episode-${item.id}`);
+                    if (saved && item.stage === 'script') await this.fetchTopicLibrary();
+                },
                 async saveCreativeItem(url, item, successMessage, saveKey) {
                     this.creativeWorkspace.error = '';
                     this.creativeWorkspace.saveState[saveKey] = 'saving';
@@ -832,10 +854,12 @@ window.aiworkerModules.push(() => ({
                         setTimeout(() => {
                             if (this.creativeWorkspace.saveState[saveKey] === 'saved') this.creativeWorkspace.saveState[saveKey] = '';
                         }, 1800);
+                        return data;
                     } catch (e) {
                         this.creativeWorkspace.saveState[saveKey] = '';
                         this.creativeWorkspace.error = `${successMessage || '保存'}失败：${e.message || '请稍后重试'}`;
                         this.showCreativeNotice(this.creativeWorkspace.error, 'error');
+                        return null;
                     }
                 },
 
@@ -869,6 +893,17 @@ window.aiworkerModules.push(() => ({
                         await this.selectCreativeProject(this.creativeWorkspace.project.id);
                         this.showCreativeNotice('Beats 已完成并锁定');
                     } catch (error) { this.creativeWorkspace.error = error.message || '完成 Beats 失败'; }
+                },
+
+                async completeProjectScript() {
+                    const item = this.selectedProjectScript();
+                    if (!item) return;
+                    try {
+                        await this.completeCreativeResource('script', item.id, this.creativeWorkspace.project.id);
+                        await this.selectCreativeProject(this.creativeWorkspace.project.id);
+                        await this.fetchTopicLibrary();
+                        this.showCreativeNotice('场次剧本已完成并锁定');
+                    } catch (error) { this.creativeWorkspace.error = error.message || '完成场次剧本失败'; }
                 },
 
                 creativeExportUrl(stage, format = 'md') {

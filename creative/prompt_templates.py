@@ -67,6 +67,17 @@ def beats_messages(payload: dict[str, Any], episode_number: int) -> list[dict[st
     )
 
 
+def script_messages(payload: dict[str, Any], episode_number: int) -> list[dict[str, str]]:
+    return _messages(
+        f"根据第 {episode_number} 集已锁定 Beats 生成可拍摄的场次剧本，返回 episode_title 和 scenes。"
+        "每场必须包含 sequence_no、scene_no、time_of_day、interior_exterior、location、props、characters、blocks。"
+        "blocks 为数组，type 只能是 action、dialogue、voiceover、inner_voice、subtitle、cut；"
+        "每个块必须有 text，dialogue 必须有 speaker，可选 modifier。"
+        "动作写可拍摄内容，台词单独写；不得输出 Markdown。",
+        payload,
+    )
+
+
 def breakdown_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
     return _messages(
         "你是严谨的短剧拆解分析师。只能依据输入的剧目元数据和逐集转写归纳，不得套用通用案例、"

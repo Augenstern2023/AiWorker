@@ -72,6 +72,11 @@ _PERMISSION_CODES = (
     "beats.edit",
     "beats.version.create",
     "beats.submit",
+    "script.read",
+    "script.generate",
+    "script.edit",
+    "script.version.create",
+    "script.submit",
     "workflow.pool.read",
     "workflow.claim",
     "workflow.task.update",
@@ -163,6 +168,11 @@ PERMISSIONS = {
     "beats.edit": "编辑单集节拍",
     "beats.version.create": "创建单集节拍版本",
     "beats.submit": "提交单集节拍",
+    "script.read": "查看场次剧本",
+    "script.generate": "生成场次剧本",
+    "script.edit": "编辑场次剧本",
+    "script.version.create": "创建场次剧本版本",
+    "script.submit": "提交场次剧本",
     "workflow.pool.read": "查看任务池",
     "workflow.claim": "领取任务",
     "workflow.task.update": "更新任务状态",
@@ -431,6 +441,7 @@ PERMISSION_DEPENDENCIES = {
         "page.writing",
     },
     "beats.edit": {"beats.read", "outline.read.approved", "page.writing"},
+    "script.edit": {"script.read", "beats.read", "page.writing"},
 
     "workflow.assign": {"workflow.read.managed", "project.read.managed", "page.review"},
     "export.create": {"approved_content.read", "page.admin.delivery"},
@@ -469,7 +480,7 @@ _NON_DELEGABLE_PERMISSIONS = {
     "identity.role.manage_created",
 }
 DELEGABLE_PERMISSIONS = frozenset(PERMISSIONS) - _NON_DELEGABLE_PERMISSIONS
-DELEGABLE_TASK_TYPES = frozenset({"brief", "characters", "outline", "beats"})
+DELEGABLE_TASK_TYPES = frozenset({"brief", "characters", "outline", "beats", "script"})
 
 
 @dataclass(frozen=True)
@@ -518,13 +529,14 @@ DEFAULT_ROLES = (
     RoleSeed(
         code="screenwriter",
         name="编剧",
-        description="依据已完成的创作方案完成人物、全剧大纲与单集节拍。",
+        description="依据已完成的创作方案完成全剧大纲、单集节拍与场次剧本。",
         is_system=True,
         permissions=_scoped(
             """page.writing project.read.assigned brief.read.approved character.read.approved
             relationship.read.approved outline.read outline.generate outline.edit
             outline.version.create outline.submit beats.read beats.generate beats.edit
-            beats.version.create beats.submit workflow.pool.read workflow.claim
+            beats.version.create beats.submit script.read script.generate script.edit
+            script.version.create script.submit workflow.pool.read workflow.claim
             workflow.task.update job.create.writing job.read.project job.cancel.own""",
             "project",
         ),

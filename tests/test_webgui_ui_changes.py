@@ -388,6 +388,35 @@ def test_planning_assignment_refreshes_the_topic_library_after_success():
     assert "await this.fetchTopicLibrary();" in submit_method
 
 
+def test_saving_a_scene_script_refreshes_topic_library_state():
+    creative = _source("static/js/common/creative.js")
+    save_method = creative.split("async saveProjectEpisode(item)", 1)[1].split(
+        "async saveCreativeItem", 1
+    )[0]
+
+    assert "item.stage === 'script'" in save_method
+    assert "await this.fetchTopicLibrary();" in save_method
+
+
+def test_completed_scene_script_generation_refreshes_topic_library_state():
+    creative = _source("static/js/common/creative.js")
+    reconcile_method = creative.split("reconcileCreativeGenerationState(project)", 1)[1].split(
+        "async syncCreativeJobProgress", 1
+    )[0]
+
+    assert "action === 'script'" in reconcile_method
+    assert "await this.fetchTopicLibrary();" in reconcile_method
+
+
+def test_scene_script_preview_and_download_use_delivery_formats():
+    topics = _source("static/js/selection/topics.js")
+    modal = _source("templates/common/workspace/selection_modals.html")
+
+    assert "buildScriptPreview" in topics
+    assert "format = 'txt'" in topics
+    assert "generatedContentPreview.stage === 'script' ? 'txt' : 'md'" in modal
+
+
 def test_topic_library_adoption_handles_non_json_server_errors():
     breakdowns = _source("static/js/selection/breakdowns.js")
 

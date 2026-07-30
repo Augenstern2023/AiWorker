@@ -222,6 +222,16 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
     )
     + _CREATIVE_TASK_SUPPORT
     + _CREATIVE_JOB_MONITOR,
+    "/writing/projects/{project_id}/episodes/{episode_number}/scripts": (
+        ("GET", "/api/creative/projects/{project_id}"),
+        ("POST", "/api/creative/projects/{project_id}/episodes/{episode_number}/scripts/generate"),
+        ("POST", "/api/creative/projects/{project_id}/episodes/{episode_number}/scripts"),
+        ("PATCH", "/api/creative/episodes/{episode_id}"),
+        ("POST", "/api/creative/scripts/{episode_id}/lock"),
+        ("GET", "/api/creative/projects/{project_id}/generated-content/download"),
+    )
+    + _CREATIVE_TASK_SUPPORT
+    + _CREATIVE_JOB_MONITOR,
     "/review/projects": _PROJECT_MANAGEMENT,
     "/review/users": _TEAM_USERS,
     "/review/roles": _TEAM_ROLES,

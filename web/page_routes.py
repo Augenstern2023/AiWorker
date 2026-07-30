@@ -28,6 +28,11 @@ PAGE_ROUTES = (
         "page.writing",
         "单集节拍",
     ),
+    (
+        "/writing/projects/{project_id}/episodes/{episode_number}/scripts",
+        "page.writing",
+        "场次剧本",
+    ),
     ("/review/projects", "page.review", "负责项目"),
     ("/review/users", "page.team_management", "团队账号"),
     ("/review/roles", "page.team_management", "角色授权"),
@@ -54,6 +59,7 @@ PAGE_ACCESS_GRANT_ROUTES: dict[str, str] = {
     "/planning/projects/{project_id}/directions": "/planning/projects",
     "/writing/projects/{project_id}/outlines": "/writing/projects",
     "/writing/projects/{project_id}/episodes/{episode_number}/beats": "/writing/projects",
+    "/writing/projects/{project_id}/episodes/{episode_number}/scripts": "/writing/projects",
     "/review/projects/{project_id}/members": "/review/projects",
     "/review/projects/{project_id}/versions": "/review/projects",
 }

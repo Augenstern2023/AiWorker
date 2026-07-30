@@ -21,7 +21,7 @@ from core.events import emit_event
 from core.job import CrawlJob
 from creative.imitation_service import generate_blueprints
 from creative.repository import CreativeRepository
-from creative.script_service import generate_character_bundle, generate_episode_beats, generate_outline_bundle
+from creative.script_service import generate_character_bundle, generate_episode_beats, generate_episode_script, generate_outline_bundle
 
 
 def create_provider():
@@ -68,7 +68,7 @@ async def run(job: CrawlJob) -> None:
     action = str(extra.get("action") or "").strip()
     project_id = int(extra.get("project_id") or 0)
     db_path = Path(str(extra.get("db_path") or ".runtime/creative/creative.db"))
-    if action not in {"blueprints", "characters", "outlines", "beats"} or project_id < 1:
+    if action not in {"blueprints", "characters", "outlines", "beats", "script"} or project_id < 1:
         raise ValueError("Phase 4 任务缺少有效 action 或 project_id")
 
     repository = CreativeRepository(db_path)
@@ -157,8 +157,18 @@ async def run(job: CrawlJob) -> None:
         )
         if not outline:
             raise ValueError("未找到指定集的锁定大纲")
-        generated, meta = await generate_episode_beats(provider, project, outline, characters, episode_number)
-        resource = repository.create_episode_beats(project_id, episode_number, generated, job.job_id, meta)
+        if action == "beats":
+            generated, meta = await generate_episode_beats(provider, project, outline, characters, episode_number)
+            resource = repository.create_episode_beats(project_id, episode_number, generated, job.job_id, meta)
+        else:
+            candidates = sorted(
+                [item for item in project["episodes"] if item["stage"] == "beats" and int(item["episode_number"]) == episode_number and item.get("status") in {"locked", "approved"}],
+                key=lambda item: (int(item.get("version") or 0), int(item["id"])), reverse=True,
+            )
+            if not candidates:
+                raise ValueError("必须先锁定当前集 Beats")
+            generated, meta = await generate_episode_script(provider, project, outline, characters, candidates[0]["content"], episode_number)
+            resource = repository.create_episode_script(project_id, episode_number, generated, job.job_id, meta)
         result = {"action": action, "episode_id": resource["id"], "episode_number": episode_number, "brief_id": brief["id"]}
 
     await wait_if_paused(job)

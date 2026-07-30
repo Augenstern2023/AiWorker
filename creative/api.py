@@ -137,6 +137,8 @@ def creative_api_authorization(
             permissions = (("character.generate",) if path.endswith("/generate") else ("character.edit",))
         elif "/outlines" in path:
             permissions = (("outline.generate",) if path.endswith("/generate") else ("outline.edit",))
+        elif "/scripts" in path:
+            permissions = (("script.generate",) if path.endswith("/generate") else ("script.edit",))
         elif "/beats" in path:
             permissions = (("beats.generate",) if path.endswith("/generate") else ("beats.edit",))
         else:
@@ -148,7 +150,7 @@ def creative_api_authorization(
     elif path.startswith("/relationships"):
         permissions = ("relationship.edit",)
     elif path.startswith("/episodes"):
-        permissions = (("beats.edit",) if path.endswith("/lock") else ("outline.edit",))
+        permissions = (("script.edit", "beats.edit") if path.endswith("/lock") else ("outline.edit",))
     elif path == "/workflow/submit":
         permissions = None
     else:
@@ -351,6 +353,48 @@ def build_beats_markdown(project: dict[str, Any], items: list[dict[str, Any]]) -
                 "",
             ])
     return "\n".join(lines)
+
+
+def build_script_text(
+    project: dict[str, Any], content: dict[str, Any], *, episode_number: int
+) -> str:
+    """Render a structured episode script in the delivery TXT format."""
+    title = str(content.get("episode_title") or f"第 {episode_number} 集").strip()
+    lines = [f"第 {episode_number} 集:{title}", ""]
+    for scene in content.get("scenes") or []:
+        props = "、".join(str(item).strip() for item in scene.get("props") or [] if str(item).strip()) or "无"
+        characters = "、".join(
+            str(item).strip() for item in scene.get("characters") or [] if str(item).strip()
+        ) or "无"
+        lines.extend([
+            f"[{int(scene.get('sequence_no') or 0)}]-[{int(scene.get('scene_no') or 0)}] "
+            f"[{str(scene.get('time_of_day') or '').strip()}] "
+            f"[{str(scene.get('interior_exterior') or '').strip()}] "
+            f"[{str(scene.get('location') or '').strip()}]",
+            f"道具:{props} 出场人物:{characters}",
+            "",
+        ])
+        for block in scene.get("blocks") or []:
+            block_type = str(block.get("type") or "")
+            text = str(block.get("text") or "").strip()
+            speaker = str(block.get("speaker") or "").strip()
+            modifier = str(block.get("modifier") or "").strip()
+            if block_type == "action":
+                rendered = f"△ {text}"
+            elif block_type == "dialogue":
+                rendered = f"{speaker}({modifier}):{text}" if modifier else f"{speaker}:{text}"
+            elif block_type == "inner_voice":
+                rendered = f"{speaker}(内心OS):{text}"
+            elif block_type == "voiceover":
+                rendered = f"画外音（{speaker}）：{text}" if speaker else f"画外音：{text}"
+            elif block_type == "subtitle":
+                rendered = f"【字幕：{text}】"
+            elif block_type == "cut":
+                rendered = "【切镜】"
+            else:
+                continue
+            lines.extend([rendered, ""])
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def build_stage_export(project: dict[str, Any], stage: str) -> dict[str, Any]:
@@ -623,8 +667,14 @@ def build_creative_router(
                 if item.get("stage") == "beats"
             ]
             resource_type = "beats"
+        elif stage == "script":
+            versions = [
+                {"resource_id": str(item["id"]), "label": f"第 {item.get('episode_number')} 集 场次剧本 v{item.get('version') or 1}", "updated_at": updated_at(item), "version": int(item.get("version") or 1)}
+                for item in project["episodes"] if item.get("stage") == "script"
+            ]
+            resource_type = "script"
         else:
-            raise HTTPException(400, "stage 必须是 brief、characters、outline 或 beats")
+            raise HTTPException(400, "stage 必须是 brief、characters、outline、beats 或 script")
         return resource_type, sorted(
             versions,
             key=lambda item: (item["updated_at"], item["version"], item["resource_id"]),
@@ -651,10 +701,10 @@ def build_creative_router(
     def serialize_generated_stage(
         project: dict[str, Any], stage: str, snapshot: dict[str, Any], format: str
     ) -> tuple[bytes, str]:
-        if format not in {"md", "json"}:
-            raise HTTPException(400, "format 必须是 md 或 json")
+        if format not in {"md", "json", "txt"}:
+            raise HTTPException(400, "format 必须是 md、txt 或 json")
         content: Any
-        if stage == "beats":
+        if stage in {"beats", "script"}:
             content = [snapshot]
         elif stage == "characters":
             content = {
@@ -674,6 +724,8 @@ def build_creative_router(
         }
         if format == "json":
             return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"), "application/json"
+        if stage == "script":
+            return build_script_text(project, snapshot.get("content") or {}, episode_number=int(snapshot.get("episode_number") or 0)).encode("utf-8"), "text/plain; charset=utf-8"
         if stage == "beats":
             markdown = build_beats_markdown(project, content)
         else:
@@ -693,6 +745,7 @@ def build_creative_router(
             "relationships": (("relationship.read", "relationship.read.approved"), "relationship.read"),
             "outline": (("outline.read", "outline.read.approved"), "outline.read"),
             "beats": (("beats.read",), "beats.read"),
+            "script": (("script.read",), "script.read"),
         }
 
         def resource_identity(key: str, item: dict[str, Any]) -> tuple[str, str]:
@@ -702,7 +755,7 @@ def build_creative_router(
                 return "characters", f"{project['id']}:{item['batch_id']}"
             if item["stage"] == "outline":
                 return "outline", f"{project['id']}:{item['batch_id']}"
-            return "beats", str(item["id"])
+            return str(item["stage"]), str(item["id"])
 
         def visible(key: str, item: dict[str, Any]) -> bool:
             stage_key = item.get("stage") if key == "episodes" else key
@@ -739,7 +792,7 @@ def build_creative_router(
             raise HTTPException(503, "creative job manager is unavailable")
         required_permission = (
             "job.create.writing"
-            if action in {"outlines", "beats"}
+            if action in {"outlines", "beats", "script"}
             else "job.create.creative"
         )
         if (
@@ -1818,8 +1871,8 @@ def build_creative_router(
         try:
             episode = repository.get_episode(episode_id)
             if episode:
-                resource_type = "beats" if episode["stage"] == "beats" else "outline"
-                resource_id = str(episode_id) if resource_type == "beats" else f"{episode['project_id']}:{episode['batch_id']}"
+                resource_type = episode["stage"] if episode["stage"] in {"beats", "script"} else "outline"
+                resource_id = str(episode_id) if resource_type in {"beats", "script"} else f"{episode['project_id']}:{episode['batch_id']}"
                 workflow_adapter.assert_editable(resource_type, resource_id)
             result = repository.update_episode(episode_id, payload.content)
         except ValueError as exc:
@@ -1914,6 +1967,36 @@ def build_creative_router(
             raise HTTPException(403, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @router.post("/projects/{project_id}/episodes/{episode_number}/scripts/generate")
+    async def generate_episode_script(
+        project_id: int, episode_number: int, request: Request,
+        payload: WorkflowLinkRequest | None = None,
+        principal: Principal | None = Depends(creative_job_principal),
+    ):
+        project = project_or_404(project_id)
+        locked = [item for item in project["episodes"] if item["stage"] == "beats" and int(item["episode_number"]) == episode_number and item.get("status") in {"locked", "approved"}]
+        if not locked:
+            raise HTTPException(409, "必须先锁定当前集 Beats")
+        workflow_task_id = validate_task(payload.workflow_task_id if payload else None, "script", principal, project_id=project_id)
+        return create_generation_job(project_id, "script", principal, request, episode_number=episode_number, workflow_task_id=workflow_task_id)
+
+    @router.post("/projects/{project_id}/episodes/{episode_number}/scripts")
+    async def create_project_episode_script(project_id: int, episode_number: int, payload: EpisodeBeatsRequest, principal: Principal = Depends(current_principal)):
+        try:
+            workflow_task_id = validate_task(payload.workflow_task_id, "script", principal, project_id=project_id)
+            return repository.create_episode_script(project_id, episode_number, payload.content, workflow_task_id=workflow_task_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post("/scripts/{episode_id}/lock")
+    async def lock_episode_script(episode_id: int, payload: CreativeLockRequest, principal: Principal = Depends(current_principal)):
+        try:
+            return workflow_transitions.complete_creative_without_review(payload.workflow_task_id, "script", str(episode_id), principal)
+        except KeyError as exc:
+            raise HTTPException(404, "creative resource or workflow task not found") from exc
+        except (PermissionError, ValueError) as exc:
+            raise HTTPException(409 if isinstance(exc, ValueError) else 403, str(exc)) from exc
 
 
     @router.get("/projects/{project_id}/export")

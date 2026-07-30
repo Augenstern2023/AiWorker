@@ -154,7 +154,6 @@ def test_topic_lifecycle_follows_the_complete_creation_flow(tmp_path: Path):
     assert topic_payload(client)["lifecycle_status"] == "pending_beats"
     beats = repository.create_episode_beats(project["id"], 1, {"beats": [{"order": 1, "scene": "大厅"}]})
     assert topic_payload(client)["lifecycle_status"] == "beats_generated"
-
     current_beats = current_beats_content(repository.get_project(project["id"]))
     repository.record_stage_export(
         project["id"], "beats", "json", content_fingerprint(current_beats)
@@ -164,6 +163,39 @@ def test_topic_lifecycle_follows_the_complete_creation_flow(tmp_path: Path):
     repository.update_episode(beats["id"], {"beats": [{"order": 1, "scene": "天台"}]})
     assert topic_payload(client)["lifecycle_status"] == "beats_generated"
 
+
+def test_scene_script_download_api_returns_delivery_txt(tmp_path: Path):
+    client, repository, _ = build_client(tmp_path)
+    topic = seed_topic(repository, "场次剧本接口剧")
+    repository.update_topic(topic["id"], "adopted")
+    breakdown = repository.create_breakdown(topic["id"], {"title": topic["title"]}, {}, [])
+    repository.lock_breakdown(breakdown["id"])
+    project = repository.create_project(topic["id"], breakdown["id"], "场次剧本项目", 1)
+    brief = repository.create_blueprints(project["id"], [{
+        "content": {"title": "方向"}, "risk_score": 1, "risk_level": "low",
+    }])[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(project["id"], [{"episode": 1}], "弧线")
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    beats = repository.create_episode_beats(project["id"], 1, {"beats": [{"order": 1}]})
+    repository.lock_episode_beats(beats["id"])
+    script = repository.create_episode_script(project["id"], 1, {
+        "episode_title": "开局", "scenes": [{
+            "sequence_no": 1, "scene_no": 1, "time_of_day": "日",
+            "interior_exterior": "内", "location": "客厅", "props": [],
+            "characters": ["主角"], "blocks": [{"type": "subtitle", "text": "三年后"}],
+        }],
+    })
+    download = client.get(
+        f"/api/creative/projects/{project['id']}/generated-content/download",
+        params={"stage": "script", "resource_id": str(script["id"]), "format": "txt"},
+    )
+
+    assert download.status_code == 200
+    assert download.headers["content-type"].startswith("text/plain")
+    assert "【字幕：三年后】" in download.text
 
 def test_generating_today_hits_returns_only_unadopted_recommendations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -29,9 +29,10 @@ from identity.dependencies import (
 from identity.schema import Principal
 from workflow.repository import WorkflowRepository
 
-from .api import _markdown_value, build_beats_markdown
+from .api import _markdown_value, build_beats_markdown, build_script_text
 from .lifecycle_service import (
     beats_resource_fingerprint,
+    script_resource_fingerprint,
     content_fingerprint as stage_content_fingerprint,
 )
 from .repository import CreativeRepository
@@ -43,14 +44,15 @@ STAGE_RESOURCE_TYPES = {
     "characters": "characters",
     "outline": "outline",
     "beats": "beats",
+    "script": "script",
 }
 
 
 class DeliveryCreateRequest(BaseModel):
     project_id: int = Field(gt=0)
-    stage: str = Field(pattern="^(brief|characters|outline|beats)$")
+    stage: str = Field(pattern="^(brief|characters|outline|beats|script)$")
     resource_id: str = Field(min_length=1)
-    format: str = Field(pattern="^(md|json)$")
+    format: str = Field(pattern="^(md|txt|json)$")
     workflow_task_id: str | None = None
 
 
@@ -146,9 +148,9 @@ class DeliveryService:
             )
         resource_type = STAGE_RESOURCE_TYPES.get(stage)
         if resource_type is None:
-            raise ValueError("stage must be brief, characters, outline, or beats")
-        if format not in {"md", "json"}:
-            raise ValueError("format must be md or json")
+            raise ValueError("stage must be brief, characters, outline, beats, or script")
+        if format not in {"md", "txt", "json"}:
+            raise ValueError("format must be md, txt or json")
         adapter = CreativeWorkflowAdapter(
             self.creative_repository, self.workflow_repository
         )
@@ -172,6 +174,8 @@ class DeliveryService:
         )
         if stage == "beats":
             lifecycle_fingerprint = beats_resource_fingerprint(snapshot)
+        elif stage == "script":
+            lifecycle_fingerprint = script_resource_fingerprint(snapshot)
         source_key = f"direct:{stage}:{resource_id}"
         existing = self._find_existing(project_id, stage, source_key, format)
         if existing is not None:
@@ -186,7 +190,7 @@ class DeliveryService:
             )
         task = self._resolve_delivery_task(project_id, workflow_task_id)
         delivery_id = str(uuid.uuid4())
-        extension = "json" if format == "json" else "md"
+        extension = "json" if format == "json" else format
         path = (self.delivery_dir / f"{delivery_id}.{extension}").resolve()
         temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_bytes(content)
@@ -327,6 +331,8 @@ class DeliveryService:
             for episode in project.get("episodes", []):
                 if episode.get("stage") == "beats" and episode.get("status") in {"locked", "approved"}:
                     resources.append(("beats", str(episode["id"]), int(episode["version"])))
+                if episode.get("stage") == "script" and episode.get("status") in {"locked", "approved"}:
+                    resources.append(("script", str(episode["id"]), int(episode["version"])))
             for stage, resource_id, version in resources:
                 options.append({
                     "resource_id": resource_id,
@@ -474,6 +480,8 @@ class DeliveryService:
             )
             if record["stage"] == "beats":
                 fingerprint = beats_resource_fingerprint(snapshot)
+            elif record["stage"] == "script":
+                fingerprint = script_resource_fingerprint(snapshot)
             self._mark_reconciled(
                 record["id"], "stage_content_fingerprint", fingerprint
             )
@@ -488,14 +496,14 @@ class DeliveryService:
     def _record_stage_export(self, record: dict[str, Any]) -> None:
         if record.get("stage_export_recorded_at") is not None:
             return
-        if record["stage"] == "beats":
+        if record["stage"] in {"beats", "script"}:
             fingerprint = record["stage_content_fingerprint"]
             if not self.creative_repository.has_stage_export(
-                int(record["project_id"]), "beats", fingerprint
+                int(record["project_id"]), record["stage"], fingerprint
             ):
                 self.creative_repository.record_stage_export(
                     int(record["project_id"]),
-                    "beats",
+                    record["stage"],
                     record["format"],
                     fingerprint,
                 )
@@ -689,6 +697,8 @@ class DeliveryService:
             content: Any = snapshot.get("episodes") or []
         elif stage == "beats":
             content = [snapshot]
+        elif stage == "script":
+            content = snapshot
         elif stage == "characters":
             content = {
                 "batch_id": snapshot.get("batch_id"),
@@ -715,6 +725,8 @@ class DeliveryService:
     ) -> bytes:
         if format == "json":
             return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        if stage == "script" and format == "txt":
+            return build_script_text(project, snapshot.get("content") or {}, episode_number=int(snapshot.get("episode_number") or 0)).encode("utf-8")
         if stage == "beats":
             markdown = build_beats_markdown(project, payload["content"])
         else:

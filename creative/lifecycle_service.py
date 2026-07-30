@@ -37,6 +37,10 @@ LIFECYCLE_LABELS = {
     "pending_beats": "Beats脚本待生成",
     "beats_generated": "Beats脚本已生成",
     "beats_exported": "Beats脚本已导出",
+    "pending_script": "场次剧本待生成",
+    "script_in_progress": "场次剧本生成中",
+    "script_generated": "场次剧本已生成",
+    "script_exported": "场次剧本已导出",
     "rejected": "不跟进",
     "archived": "已归档",
 }
@@ -51,6 +55,10 @@ PROJECT_STATUS_RANK = {
     "pending_beats": 7,
     "beats_generated": 8,
     "beats_exported": 9,
+    "pending_script": 10,
+    "script_in_progress": 11,
+    "script_generated": 12,
+    "script_exported": 13,
 }
 
 
@@ -95,6 +103,31 @@ def beats_resource_fingerprint(item: dict[str, Any]) -> str:
         "generation_meta",
     )
     return content_fingerprint({key: item.get(key) for key in keys})
+
+
+def script_resource_fingerprint(item: dict[str, Any]) -> str:
+    return beats_resource_fingerprint(item)
+
+
+def current_script_content(project: dict[str, Any]) -> list[dict[str, Any]]:
+    locked_beats: dict[int, dict[str, Any]] = {}
+    for item in project.get("episodes") or []:
+        if item.get("stage") != "beats" or item.get("status") not in {"locked", "approved"}:
+            continue
+        episode = int(item.get("episode_number") or 0)
+        if episode and (episode not in locked_beats or (int(item.get("version") or 0), int(item["id"])) > (int(locked_beats[episode].get("version") or 0), int(locked_beats[episode]["id"]))):
+            locked_beats[episode] = item
+    current: dict[int, dict[str, Any]] = {}
+    for item in project.get("episodes") or []:
+        if item.get("stage") != "script":
+            continue
+        episode = int(item.get("episode_number") or 0)
+        beats = locked_beats.get(episode)
+        if not beats or (item.get("upstream_refs") or {}).get("beats_id") != beats.get("id"):
+            continue
+        if episode not in current or (int(item.get("version") or 0), int(item["id"])) > (int(current[episode].get("version") or 0), int(current[episode]["id"])):
+            current[episode] = item
+    return [current[key] for key in sorted(current)]
 
 
 class TopicLifecycleService:
@@ -227,6 +260,25 @@ class TopicLifecycleService:
         return "adopted", None
 
     def _project_status(self, project: dict[str, Any]) -> str:
+        scripts = current_script_content(project)
+        locked_beats = {
+            int(item["episode_number"])
+            for item in project.get("episodes") or []
+            if item.get("stage") == "beats" and item.get("status") in {"locked", "approved"}
+        }
+        if locked_beats:
+            exported = scripts and all(
+                item.get("status") in {"locked", "approved"}
+                and self.repository.has_stage_export(int(project["id"]), "script", script_resource_fingerprint(item))
+                for item in scripts
+            ) and len(scripts) >= int(project["target_episode_count"])
+            if exported:
+                return "script_exported"
+            if len(scripts) >= int(project["target_episode_count"]):
+                return "script_generated"
+            if scripts:
+                return "script_in_progress"
+            return "pending_script"
         beats = current_beats_content(project)
         if beats:
             legacy_aggregate_exported = self.repository.has_stage_export(

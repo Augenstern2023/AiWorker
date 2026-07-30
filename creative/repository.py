@@ -18,6 +18,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from creative.script_service import validate_script
+
 
 class DuplicateTopicError(ValueError):
     """Raised when a title has already been collected into the topic store."""
@@ -1270,6 +1272,9 @@ class CreativeRepository:
         return {"batch_id": batch_id, "episodes": rows}
 
     def update_episode(self, episode_id: int, content: dict[str, Any]) -> dict[str, Any] | None:
+        episode = self.get_episode(episode_id)
+        if episode and episode.get("stage") == "script":
+            content = validate_script(content)
         return self._update_creative_item("creative_episodes", episode_id, content, episode=True)
 
     def lock_outline_batch(self, project_id: int, batch_id: str) -> dict[str, Any]:
@@ -1349,6 +1354,89 @@ class CreativeRepository:
             )
         return self.get_episode(int(cursor.lastrowid)) or {}
 
+    def create_episode_script(
+        self,
+        project_id: int,
+        episode_number: int,
+        content: dict[str, Any],
+        job_id: str = "",
+        generation_meta: dict[str, Any] | None = None,
+        workflow_task_id: str | None = None,
+    ) -> dict[str, Any]:
+        project = self.get_project(project_id)
+        if not project:
+            raise ValueError("创作项目不存在")
+        if not 1 <= int(episode_number) <= int(project["target_episode_count"]):
+            raise ValueError("集数超出项目范围")
+        locked_beats = sorted(
+            [
+                item for item in project["episodes"]
+                if item["stage"] == "beats"
+                and int(item["episode_number"]) == int(episode_number)
+                and item.get("status") in {"locked", "approved"}
+            ],
+            key=lambda item: (int(item.get("version") or 0), int(item["id"])),
+            reverse=True,
+        )
+        if not locked_beats:
+            raise ValueError("必须先锁定当前集 Beats")
+        beats = locked_beats[0]
+        version = 1 + max(
+            [
+                int(item["version"]) for item in project["episodes"]
+                if item["stage"] == "script" and int(item["episode_number"]) == int(episode_number)
+            ] or [0]
+        )
+        parent_id = next(
+            (
+                int(item["id"]) for item in sorted(
+                    [
+                        item for item in project["episodes"]
+                        if item["stage"] == "script" and int(item["episode_number"]) == int(episode_number)
+                    ],
+                    key=lambda item: int(item["version"]),
+                    reverse=True,
+                )
+            ),
+            None,
+        )
+        meta = dict(generation_meta or {})
+        if job_id:
+            meta["job_id"] = job_id
+        refs = {
+            "brief_id": project.get("locked_brief_id"),
+            "character_batch_id": project.get("character_batch_id"),
+            "outline_batch_id": project.get("outline_batch_id"),
+            "beats_id": beats["id"],
+            "beats_version": beats["version"],
+            "beats_content_fingerprint": hashlib.sha256(
+                json.dumps(
+                    beats.get("content") or {}, ensure_ascii=False,
+                    sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        }
+        now = time.time()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO creative_episodes (
+                    project_id, stage, episode_number, batch_id, version, parent_version_id, content_json,
+                    upstream_refs_json, generation_meta_json, workflow_task_id, created_at, updated_at
+                ) VALUES (?, 'script', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id, int(episode_number), uuid.uuid4().hex, version, parent_id,
+                    json.dumps(content, ensure_ascii=False), json.dumps(refs, ensure_ascii=False),
+                    json.dumps(meta, ensure_ascii=False), workflow_task_id or project.get("workflow_task_id"), now, now,
+                ),
+            )
+            conn.execute(
+                "UPDATE creative_projects SET status = 'scripts_in_progress', updated_at = ? WHERE id = ?",
+                (now, project_id),
+            )
+        return self.get_episode(int(cursor.lastrowid)) or {}
+
     def get_episode(self, episode_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM creative_episodes WHERE id = ?", (episode_id,)).fetchone()
@@ -1358,6 +1446,18 @@ class CreativeRepository:
         episode = self.get_episode(episode_id)
         if not episode or episode["stage"] != "beats":
             raise ValueError("单集 Beats 不存在")
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE creative_episodes SET status = 'locked', locked_at = ?, updated_at = ? WHERE id = ?",
+                (now, now, episode_id),
+            )
+        return self.get_episode(episode_id) or {}
+
+    def lock_episode_script(self, episode_id: int) -> dict[str, Any]:
+        episode = self.get_episode(episode_id)
+        if not episode or episode["stage"] != "script":
+            raise ValueError("单集场次剧本不存在")
         now = time.time()
         with self._connect() as conn:
             conn.execute(

@@ -67,7 +67,7 @@ window.aiworkerModules.push(() => ({
                         pending_character_relationships: '人物关系待生成', character_relationships_generated: '人物关系已生成',
                         pending_episode_outlines: '分集大纲待生成', episode_outlines_generated: '分集大纲已生成',
                         pending_beats: 'Beats脚本待生成', beats_generated: 'Beats脚本已生成',
-                        beats_exported: 'Beats脚本已导出', rejected: '不跟进', archived: '已归档'
+                        beats_exported: 'Beats脚本已导出', pending_script: '场次剧本待生成', script_in_progress: '场次剧本生成中', script_generated: '场次剧本已生成', script_exported: '场次剧本已导出', rejected: '不跟进', archived: '已归档'
                     }[status] || status;
                 },
 
@@ -82,7 +82,10 @@ window.aiworkerModules.push(() => ({
                         character_relationships_generated: 'characters',
                         episode_outlines_generated: 'outline',
                         beats_generated: 'beats',
-                        beats_exported: 'beats'
+                        beats_exported: 'beats',
+                        script_in_progress: 'script',
+                        script_generated: 'script',
+                        script_exported: 'script'
                     }[status] || '';
                 },
 
@@ -105,6 +108,12 @@ window.aiworkerModules.push(() => ({
                             role_code: 'screenwriter',
                             role_label: '编剧',
                             task_label: 'Beats 脚本'
+                        },
+                        pending_script: {
+                            task_type: 'script',
+                            role_code: 'screenwriter',
+                            role_label: '编剧',
+                            task_label: '场次剧本'
                         }
                     }[topic?.lifecycle_status || topic?.status] || null;
                 },
@@ -169,16 +178,49 @@ window.aiworkerModules.push(() => ({
                         const target = document.getElementById('generatedContentPreviewBody');
                         if (!target) return;
                         target.replaceChildren();
-                        if (this.generatedContentPreview.snapshot && window.aiworkerApprovalRenderer) {
+                        if (this.generatedContentPreview.stage === 'script' && this.generatedContentPreview.snapshot) {
+                            target.appendChild(this.buildScriptPreview(this.generatedContentPreview.snapshot));
+                        } else if (this.generatedContentPreview.snapshot && window.aiworkerApprovalRenderer) {
                             target.appendChild(window.aiworkerApprovalRenderer.render(this.generatedContentPreview.stage, this.generatedContentPreview.snapshot));
                         }
                     });
+                },
+
+                buildScriptPreview(snapshot) {
+                    const content = snapshot?.content || {};
+                    const episode = Number(snapshot?.episode_number || 0);
+                    const lines = [`第 ${episode} 集:${String(content.episode_title || '').trim()}`, ''];
+                    for (const scene of content.scenes || []) {
+                        const props = (scene.props || []).filter(Boolean).join('、') || '无';
+                        const characters = (scene.characters || []).filter(Boolean).join('、') || '无';
+                        lines.push(`[${scene.sequence_no}]-[${scene.scene_no}] [${scene.time_of_day || ''}] [${scene.interior_exterior || ''}] [${scene.location || ''}]`);
+                        lines.push(`道具:${props} 出场人物:${characters}`, '');
+                        for (const block of scene.blocks || []) {
+                            const text = String(block.text || '').trim();
+                            const speaker = String(block.speaker || '').trim();
+                            const modifier = String(block.modifier || '').trim();
+                            const rendered = {
+                                action: `△ ${text}`,
+                                dialogue: modifier ? `${speaker}(${modifier}):${text}` : `${speaker}:${text}`,
+                                voiceover: speaker ? `画外音（${speaker}）：${text}` : `画外音：${text}`,
+                                inner_voice: `${speaker}(内心OS):${text}`,
+                                subtitle: `【字幕：${text}】`,
+                                cut: '【切镜】',
+                            }[block.type];
+                            if (rendered) lines.push(rendered, '');
+                        }
+                    }
+                    const preview = document.createElement('pre');
+                    preview.className = 'mb-0 text-wrap';
+                    preview.textContent = lines.join('\n').trimEnd();
+                    return preview;
                 },
 
                 downloadGeneratedContent(format) {
                     const state = this.generatedContentPreview;
                     const projectId = state.project?.id || state.topic?.lifecycle_project_id;
                     if (!projectId || !state.stage || !state.selectedResourceId) return;
+                    if (state.stage === 'script' && format === 'md') format = 'txt';
                     const params = new URLSearchParams({stage: state.stage, resource_id: state.selectedResourceId, format});
                     window.open(`/api/creative/projects/${projectId}/generated-content/download?${params.toString()}`, '_blank', 'noopener');
                 },

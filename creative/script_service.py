@@ -18,6 +18,7 @@ from creative.prompt_templates import (
     character_messages,
     outline_messages,
     series_arc_messages,
+    script_messages,
 )
 
 
@@ -87,6 +88,39 @@ def _validate_beats(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = [_require_fields(item, fields, "Beat") for item in beats]
     normalized.sort(key=lambda item: int(item["order"]))
     return {"beats": normalized}
+
+
+def validate_script(payload: dict[str, Any]) -> dict[str, Any]:
+    title = str(payload.get("episode_title") or "").strip()
+    scenes = payload.get("scenes")
+    if not title or not isinstance(scenes, list) or not scenes:
+        raise ValueError("场次剧本缺少 episode_title 或 scenes")
+    required = {"sequence_no", "scene_no", "time_of_day", "interior_exterior", "location", "props", "characters", "blocks"}
+    seen: set[tuple[int, int]] = set()
+    normalized = []
+    for scene in scenes:
+        item = _require_fields(scene, required, "场次")
+        key = (int(item["sequence_no"]), int(item["scene_no"]))
+        if key in seen:
+            raise ValueError("场次编号不能重复")
+        seen.add(key)
+        if not all(str(item[field]).strip() for field in ("time_of_day", "interior_exterior", "location")):
+            raise ValueError("场次时间、内外、场景不能为空")
+        if not isinstance(item["props"], list) or not isinstance(item["characters"], list):
+            raise ValueError("道具和出场人物必须是数组")
+        blocks = item["blocks"]
+        if not isinstance(blocks, list) or not blocks:
+            raise ValueError("每场至少包含一个内容块")
+        for block in blocks:
+            kind = str(block.get("type") or "")
+            if kind not in {"action", "dialogue", "voiceover", "inner_voice", "subtitle", "cut"}:
+                raise ValueError("内容块类型无效")
+            if kind != "cut" and not str(block.get("text") or "").strip():
+                raise ValueError("内容块缺少文本")
+            if kind == "dialogue" and not str(block.get("speaker") or "").strip():
+                raise ValueError("台词缺少人物")
+        normalized.append(item)
+    return {"episode_title": title, "scenes": sorted(normalized, key=lambda item: (int(item["sequence_no"]), int(item["scene_no"]))) }
 
 
 async def _checkpoint(callback: Callable[[], Any] | None) -> None:
@@ -171,3 +205,23 @@ async def generate_episode_beats(
     )
     meta["prompt_template_version"] = PROMPT_TEMPLATE_VERSION
     return beats, meta
+
+
+async def generate_episode_script(
+    provider: Any,
+    project: dict[str, Any],
+    outline: dict[str, Any],
+    characters: list[dict[str, Any]],
+    beats: dict[str, Any],
+    episode_number: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    payload = {
+        "project": _project_context(project), "locked_outline": outline,
+        "characters": characters, "locked_beats": beats,
+        "episode_number": int(episode_number),
+    }
+    script, meta = await complete_with_one_repair(
+        provider, script_messages(payload, int(episode_number)), validate_script
+    )
+    meta["prompt_template_version"] = PROMPT_TEMPLATE_VERSION
+    return script, meta

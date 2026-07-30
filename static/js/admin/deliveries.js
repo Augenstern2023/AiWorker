@@ -7,7 +7,7 @@
     const history = document.getElementById('delivery-history');
     if (!form || !submissionSelect || !formatSelect || !history) return;
 
-    const stageLabels = {brief: 'Brief', characters: '人物关系', outline: '分集大纲', beats: 'Beats'};
+    const stageLabels = {brief: 'Brief', characters: '人物关系', outline: '分集大纲', beats: 'Beats', script: '场次剧本'};
 
     function statusMessage(message) {
         const row = document.createElement('tr');

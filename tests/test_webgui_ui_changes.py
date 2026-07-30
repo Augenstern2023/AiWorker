@@ -490,6 +490,13 @@ def test_outline_rows_show_a_link_when_the_episode_script_exists():
     assert "/scripts`" in outlines
 
 
+def test_locked_outlines_hide_edit_actions():
+    outlines = _source("templates/common/workspace/project_outlines.html")
+
+    assert 'x-show="currentProjectOutlines().length && creativeResourceEditable(currentProjectOutlines()[0])"' in outlines
+    assert 'x-show="creativeResourceEditable(item)" @click="saveProjectEpisode(item)"' in outlines
+
+
 def test_beats_workspace_uses_a_labeled_scene_script_action():
     beats = _source("templates/common/workspace/project_beats.html")
 

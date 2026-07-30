@@ -503,6 +503,16 @@ def test_episode_workspace_reads_the_episode_number_from_beats_and_scripts_urls(
     assert r"/\/episodes\/(\d+)\/(?:beats|scripts)" in tasks
 
 
+def test_scene_script_actions_stop_before_navigation_without_locked_beats():
+    creative = _source("static/js/common/creative.js")
+    beats = _source("templates/common/workspace/project_beats.html")
+
+    assert "currentEpisodeHasLockedBeats()" in creative
+    assert "openProjectScriptWorkspace()" in creative
+    assert "请先生成并完成当前集 Beats，再生成场次剧本" in creative
+    assert '@click="openProjectScriptWorkspace"' in beats
+
+
 def test_scene_script_lifecycle_badges_have_readable_backgrounds():
     styles = _source("static/css/workspaces.css")
 

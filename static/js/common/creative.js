@@ -502,15 +502,27 @@ window.aiworkerModules.push(() => ({
                     return items[0] || null;
                 },
 
-                projectEpisodeScript(episodeNumber) {
+                lockedProjectEpisodeBeats(episodeNumber) {
                     const project = this.creativeWorkspace.project;
-                    const beats = (project?.episodes || [])
+                    return (project?.episodes || [])
                         .filter(item => item.stage === 'beats'
                             && Number(item.episode_number) === Number(episodeNumber)
                             && item.upstream_refs?.outline_batch_id === project?.outline_batch_id
                             && ['locked', 'approved'].includes(item.status))
-                        .sort((a, b) => Number(b.version) - Number(a.version));
-                    const currentBeats = beats[0];
+                        .sort((a, b) => Number(b.version) - Number(a.version))[0] || null;
+                },
+
+                currentEpisodeHasLockedBeats() {
+                    return Boolean(
+                        this.lockedProjectEpisodeBeats(
+                            this.creativeWorkspace.selectedEpisode
+                        )
+                    );
+                },
+
+                projectEpisodeScript(episodeNumber) {
+                    const project = this.creativeWorkspace.project;
+                    const currentBeats = this.lockedProjectEpisodeBeats(episodeNumber);
                     if (!currentBeats) return null;
                     return (project?.episodes || [])
                         .filter(item => item.stage === 'script'
@@ -608,12 +620,27 @@ window.aiworkerModules.push(() => ({
 
                 async generateProjectScript() {
                     try {
+                        if (!this.currentEpisodeHasLockedBeats()) {
+                            throw new Error('请先生成并完成当前集 Beats，再生成场次剧本');
+                        }
                         const episode = Number(this.creativeWorkspace.selectedEpisode || 0);
                         const task = await this.resolveCreativeWorkflowTask('script', this.creativeWorkspace.project.id);
                         return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/episodes/${episode}/scripts/generate`, {workflow_task_id: task.id}, 'script');
                     } catch (e) {
                         window.dispatchEvent(new CustomEvent('aiworker:toast', {detail: {message: e.message, type: 'error'}}));
                     }
+                },
+
+                openProjectScriptWorkspace() {
+                    if (!this.currentEpisodeHasLockedBeats()) {
+                        window.dispatchEvent(new CustomEvent('aiworker:toast', {
+                            detail: {message: '请先生成并完成当前集 Beats，再生成场次剧本', type: 'error'}
+                        }));
+                        return;
+                    }
+                    const projectId = this.creativeWorkspace.project?.id;
+                    const episode = Number(this.creativeWorkspace.selectedEpisode || 0);
+                    window.location.assign(`/writing/projects/${projectId}/episodes/${episode}/scripts`);
                 },
 
                 creativeActionLabel(action) {

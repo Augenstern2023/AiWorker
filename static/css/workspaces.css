@@ -626,6 +626,10 @@
         .lifecycle-pending-beats { background: #4338ca; }
         .lifecycle-beats-generated { background: #047857; }
         .lifecycle-beats-exported { background: #a16207; }
+        .lifecycle-pending-script { background: #c2410c; }
+        .lifecycle-script-in-progress { background: #2563eb; }
+        .lifecycle-script-generated { background: #047857; }
+        .lifecycle-script-exported { background: #a16207; }
         .lifecycle-rejected { background: #b91c1c; }
         .lifecycle-archived { background: #4b5563; }
 

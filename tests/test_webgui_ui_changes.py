@@ -472,6 +472,18 @@ def test_scene_script_workspace_links_back_to_its_source_beats():
     assert "返回 Beats" in page
 
 
+def test_scene_script_lifecycle_badges_have_readable_backgrounds():
+    styles = _source("static/css/workspaces.css")
+
+    for status in (
+        "pending-script",
+        "script-in-progress",
+        "script-generated",
+        "script-exported",
+    ):
+        assert f".lifecycle-{status}" in styles
+
+
 def test_topic_library_adoption_handles_non_json_server_errors():
     breakdowns = _source("static/js/selection/breakdowns.js")
 

@@ -197,6 +197,48 @@ def test_scene_script_download_api_returns_delivery_txt(tmp_path: Path):
     assert download.headers["content-type"].startswith("text/plain")
     assert "【字幕：三年后】" in download.text
 
+
+def test_merged_scene_script_download_returns_current_episodes_in_one_txt(tmp_path: Path):
+    client, repository, _ = build_client(tmp_path)
+    topic = seed_topic(repository, "合并剧本接口剧")
+    repository.update_topic(topic["id"], "adopted")
+    breakdown = repository.create_breakdown(topic["id"], {"title": topic["title"]}, {}, [])
+    repository.lock_breakdown(breakdown["id"])
+    project = repository.create_project(topic["id"], breakdown["id"], "合并剧本项目", 3)
+    brief = repository.create_blueprints(project["id"], [{
+        "content": {"title": "方向"}, "risk_score": 1, "risk_level": "low",
+    }])[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(
+        project["id"], [{"episode": 1}, {"episode": 2}, {"episode": 3}], "弧线"
+    )
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    for episode_number, title in ((1, "开局"), (3, "转折")):
+        beats = repository.create_episode_beats(
+            project["id"], episode_number, {"beats": [{"order": 1}]}
+        )
+        repository.lock_episode_beats(beats["id"])
+        repository.create_episode_script(project["id"], episode_number, {
+            "episode_title": title,
+            "scenes": [{
+                "sequence_no": 1, "scene_no": 1, "time_of_day": "日",
+                "interior_exterior": "内", "location": "客厅", "props": [],
+                "characters": ["主角"],
+                "blocks": [{"type": "action", "text": f"第{episode_number}集内容。"}],
+            }],
+        })
+
+    download = client.get(f"/api/creative/projects/{project['id']}/scripts/download")
+
+    assert download.status_code == 200
+    assert download.headers["content-type"].startswith("text/plain")
+    assert "filename*=UTF-8''" in download.headers["content-disposition"]
+    assert "========== 第 1 集 ==========" in download.text
+    assert "========== 第 3 集 ==========" in download.text
+    assert download.text.index("第 1 集:开局") < download.text.index("第 3 集:转折")
+
 def test_generating_today_hits_returns_only_unadopted_recommendations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

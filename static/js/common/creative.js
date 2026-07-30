@@ -538,6 +538,17 @@ window.aiworkerModules.push(() => ({
                     return script.status === 'locked' ? '剧本已完成' : '剧本已生成';
                 },
 
+                projectHasGeneratedScripts() {
+                    const episodes = this.creativeWorkspace.project?.episodes || [];
+                    return episodes.some(item => item.stage === 'script'
+                        && this.projectEpisodeScript(item.episode_number));
+                },
+
+                mergedScriptDownloadUrl() {
+                    const projectId = this.creativeWorkspace.project?.id || '';
+                    return `/api/creative/projects/${projectId}/scripts/download`;
+                },
+
                 async startCreativeGeneration(url, body = {}, action = '') {
                     this.creativeWorkspace.error = '';
                     this.creativeWorkspace.startingAction = action;

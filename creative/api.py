@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 import re
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -395,6 +396,67 @@ def build_script_text(
                 continue
             lines.extend([rendered, ""])
     return "\n".join(lines).rstrip() + "\n"
+
+
+def build_merged_script_download(project: dict[str, Any]) -> tuple[str, str]:
+    """Build one TXT download from the latest scripts for current locked Beats."""
+    locked_beats: dict[int, dict[str, Any]] = {}
+    for item in project.get("episodes") or []:
+        if item.get("stage") != "beats" or item.get("status") not in {"locked", "approved"}:
+            continue
+        episode_number = int(item.get("episode_number") or 0)
+        current = locked_beats.get(episode_number)
+        if current is None or (
+            int(item.get("version") or 0), int(item.get("id") or 0)
+        ) > (
+            int(current.get("version") or 0), int(current.get("id") or 0)
+        ):
+            locked_beats[episode_number] = item
+
+    scripts: dict[int, dict[str, Any]] = {}
+    for item in project.get("episodes") or []:
+        if item.get("stage") != "script" or item.get("status") not in {"draft", "locked", "approved"}:
+            continue
+        episode_number = int(item.get("episode_number") or 0)
+        beats = locked_beats.get(episode_number)
+        refs = item.get("upstream_refs") or {}
+        if beats is None or (
+            int(refs.get("beats_id") or 0), int(refs.get("beats_version") or 0)
+        ) != (int(beats.get("id") or 0), int(beats.get("version") or 0)):
+            continue
+        current = scripts.get(episode_number)
+        if current is None or (
+            int(item.get("version") or 0), int(item.get("id") or 0)
+        ) > (
+            int(current.get("version") or 0), int(current.get("id") or 0)
+        ):
+            scripts[episode_number] = item
+
+    ordered_scripts = [scripts[number] for number in sorted(scripts)]
+    if not ordered_scripts:
+        raise ValueError("尚无可下载的已生成场次剧本")
+
+    episode_numbers = [int(item["episode_number"]) for item in ordered_scripts]
+    drama_name = str(project.get("topic_title") or project.get("name") or "剧本").strip()
+    safe_name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", drama_name).strip(" .") or "剧本"
+    filename = f"{safe_name}第{episode_numbers[0]}集-第{episode_numbers[-1]}集.txt"
+    sections = []
+    for item in ordered_scripts:
+        episode_number = int(item["episode_number"])
+        sections.append(
+            "\n".join(
+                [
+                    f"==================== 第 {episode_number} 集 ====================",
+                    "",
+                    build_script_text(
+                        project,
+                        item.get("content") or {},
+                        episode_number=episode_number,
+                    ).rstrip(),
+                ]
+            )
+        )
+    return filename, "\n\n".join(sections).rstrip() + "\n"
 
 
 def build_stage_export(project: dict[str, Any], stage: str) -> dict[str, Any]:
@@ -1658,6 +1720,28 @@ def build_creative_router(
             media_type=media_type,
             headers={
                 "Content-Disposition": f'attachment; filename="project-{project_id}-{stage}.{format}"'
+            },
+        )
+
+    @router.get("/projects/{project_id}/scripts/download")
+    async def download_merged_project_scripts(
+        project_id: int,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        assert_project_owner_preview_access(request, project_id, principal)
+        project = project_or_404(project_id)
+        try:
+            filename, body = build_merged_script_download(project)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return Response(
+            content=body.encode("utf-8"),
+            media_type="text/plain; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f"attachment; filename*=UTF-8''{quote(filename)}"
+                )
             },
         )
 

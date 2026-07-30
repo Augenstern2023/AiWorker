@@ -6,7 +6,7 @@
 # GitHub: https://github.com/NanmiCoder
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
 
-from creative.api import build_script_text
+from creative.api import build_merged_script_download, build_script_text
 from creative.repository import CreativeRepository
 from creative.lifecycle_service import TopicLifecycleService, script_resource_fingerprint
 import pytest
@@ -43,6 +43,66 @@ def test_script_text_uses_jubaopen_scene_format() -> None:
         "沈辞霄(震惊):极品聚气丹！\n\n"
         "沈辞霄(内心OS):这破锅果然不凡。\n"
     )
+
+
+def test_combined_script_download_uses_current_scripts_and_episode_dividers() -> None:
+    project = {
+        "name": "项目名称",
+        "topic_title": "聚宝盆",
+        "episodes": [
+            {
+                "id": 101,
+                "stage": "beats",
+                "episode_number": 1,
+                "version": 1,
+                "status": "locked",
+            },
+            {
+                "id": 103,
+                "stage": "beats",
+                "episode_number": 3,
+                "version": 2,
+                "status": "locked",
+            },
+            {
+                "id": 201,
+                "stage": "script",
+                "episode_number": 1,
+                "version": 1,
+                "status": "locked",
+                "upstream_refs": {"beats_id": 101, "beats_version": 1},
+                "content": {"episode_title": "开局", "scenes": []},
+            },
+            {
+                "id": 203,
+                "stage": "script",
+                "episode_number": 3,
+                "version": 1,
+                "status": "draft",
+                "upstream_refs": {"beats_id": 103, "beats_version": 2},
+                "content": {"episode_title": "转折", "scenes": []},
+            },
+            {
+                "id": 202,
+                "stage": "script",
+                "episode_number": 2,
+                "version": 1,
+                "status": "draft",
+                "upstream_refs": {"beats_id": 102, "beats_version": 1},
+                "content": {"episode_title": "旧版", "scenes": []},
+            },
+        ],
+    }
+
+    filename, text = build_merged_script_download(project)
+
+    assert filename == "聚宝盆第1集-第3集.txt"
+    assert "========== 第 1 集 ==========" in text
+    assert "========== 第 3 集 ==========" in text
+    assert "第 1 集:开局" in text
+    assert "第 3 集:转折" in text
+    assert text.index("第 1 集:开局") < text.index("第 3 集:转折")
+    assert "第 2 集:旧版" not in text
 
 
 def test_scene_script_requires_locked_beats_and_records_its_source(tmp_path) -> None:

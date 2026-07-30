@@ -490,6 +490,13 @@ def test_outline_rows_show_a_link_when_the_episode_script_exists():
     assert "/scripts`" in outlines
 
 
+def test_beats_workspace_uses_a_labeled_scene_script_action():
+    beats = _source("templates/common/workspace/project_beats.html")
+
+    assert "生成场次剧本" in beats
+    assert "bi-file-earmark-richtext" in beats
+
+
 def test_scene_script_lifecycle_badges_have_readable_backgrounds():
     styles = _source("static/css/workspaces.css")
 

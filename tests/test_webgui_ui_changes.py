@@ -417,6 +417,14 @@ def test_scene_script_preview_and_download_use_delivery_formats():
     assert "generatedContentPreview.stage === 'script' ? 'txt' : 'md'" in modal
 
 
+def test_scene_script_workspace_distinguishes_merged_and_single_episode_downloads():
+    scripts = _source("templates/common/workspace/project_scripts.html")
+
+    assert "mergedScriptDownloadUrl()" in scripts
+    assert "剧本下载" in scripts
+    assert "本集下载" in scripts
+
+
 def test_scene_script_page_uses_the_writing_workspace_layout():
     page = _source("templates/writing/scripts.html")
 

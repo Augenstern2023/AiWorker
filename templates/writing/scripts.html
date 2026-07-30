@@ -1,6 +1,14 @@
 {% extends "layouts/base.html" %}
 {% block content %}
-<h3 class="mb-1">场次剧本</h3><div class="small text-muted mb-3">项目 {{ project_id }} · 第 {{ episode_number }} 集 · 可拍摄场次、动作与台词</div>
+<div class="d-flex justify-content-between align-items-start gap-3 mb-3">
+    <div>
+        <h3 class="mb-1">场次剧本</h3>
+        <div class="small text-muted">项目 {{ project_id }} · 第 {{ episode_number }} 集 · 可拍摄场次、动作与台词</div>
+    </div>
+    <a class="btn btn-outline-light btn-sm flex-shrink-0" href="/writing/projects/{{ project_id }}/episodes/{{ episode_number }}/beats" title="返回 Beats" aria-label="返回 Beats">
+        <i class="bi bi-arrow-left me-1" aria-hidden="true"></i>返回 Beats
+    </a>
+</div>
 {% include "common/workspace/project_progress.html" %}
 <template x-if="creativeWorkspace.project"><div>{% include "common/workspace/project_scripts.html" %}</div></template>
 {% include "common/workspace/creative_progress_modal.html" %}

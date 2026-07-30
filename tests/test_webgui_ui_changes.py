@@ -465,6 +465,13 @@ def test_creative_progress_modal_blurs_the_close_button_before_it_is_hidden():
     assert "document.activeElement?.blur();" in tasks
 
 
+def test_scene_script_workspace_links_back_to_its_source_beats():
+    page = _source("templates/writing/scripts.html")
+
+    assert 'href="/writing/projects/{{ project_id }}/episodes/{{ episode_number }}/beats"' in page
+    assert "返回 Beats" in page
+
+
 def test_topic_library_adoption_handles_non_json_server_errors():
     breakdowns = _source("static/js/selection/breakdowns.js")
 

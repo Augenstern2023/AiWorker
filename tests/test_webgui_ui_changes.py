@@ -432,6 +432,16 @@ def test_locked_characters_offer_a_direct_link_to_episode_outlines():
     assert "进入全剧大纲" in characters
 
 
+def test_creative_generation_claims_an_available_stage_task_automatically():
+    creative = _source("static/js/common/creative.js")
+    resolver = creative.split("async resolveCreativeWorkflowTask", 1)[1].split(
+        "async resolveSelectionTopicByTitle", 1
+    )[0]
+
+    assert "item.status === 'pool'" in resolver
+    assert "/api/workflow/tasks/${task.id}/claim" in resolver
+
+
 def test_topic_library_adoption_handles_non_json_server_errors():
     breakdowns = _source("static/js/selection/breakdowns.js")
 

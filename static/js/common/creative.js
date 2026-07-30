@@ -342,12 +342,25 @@ window.aiworkerModules.push(() => ({
                     const tasks = await response.json();
                     if (!response.ok) throw new Error(tasks.detail || '读取创作任务失败');
                     const open = ['assigned', 'in_progress', 'returned'];
-                    const task = (tasks || []).find(item =>
+                    const matches = (tasks || []).filter(item =>
                         item.task_type === resourceType
-                        && open.includes(item.status)
                         && (projectId === null || String(item.project_id || '') === String(projectId))
                         && (topicId === null || Number(item.topic_id) === Number(topicId))
                     );
+                    let task = matches.find(item => open.includes(item.status));
+                    if (!task) {
+                        task = matches.find(item => item.status === 'pool' && item.can_claim);
+                        if (task) {
+                            const claimResponse = await aiworkerApi.request(
+                                `/api/workflow/tasks/${task.id}/claim`, {method: 'POST'}
+                            );
+                            const claimed = await claimResponse.json();
+                            if (!claimResponse.ok) {
+                                throw new Error(claimed.detail || '自动领取创作任务失败');
+                            }
+                            task = claimed;
+                        }
+                    }
                     if (!task) throw new Error('当前没有可提交的创作任务，请先领取或开始对应任务');
                     if (['assigned', 'returned'].includes(task.status)) {
                         const startResponse = await aiworkerApi.request(`/api/workflow/tasks/${task.id}/start`, {method: 'POST'});

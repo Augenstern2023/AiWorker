@@ -20,6 +20,7 @@ from typing import Any, Callable
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 
 from audit.service import AuditService
 from identity.dependencies import (
@@ -429,26 +430,26 @@ class DeliveryService:
         with self.workflow_repository.identity_repository.connect() as connection:
             if workflow_task_id:
                 row = connection.execute(
-                    "SELECT * FROM workflow_tasks WHERE id = ?",
-                    (workflow_task_id,),
+                    text("SELECT * FROM workflow_tasks WHERE id = :workflow_task_id"),
+                    {"workflow_task_id": workflow_task_id},
                 ).fetchone()
                 rows = [row] if row is not None else []
             else:
                 rows = connection.execute(
-                    """
+                    text("""
                     SELECT * FROM workflow_tasks
-                    WHERE project_id = ? AND task_type = 'delivery'
+                    WHERE project_id = :project_id AND task_type = 'delivery'
                       AND role_code = 'system_admin'
                       AND status IN ('pool', 'assigned', 'in_progress')
                     ORDER BY created_at, id
-                    """,
-                    (str(project_id),),
+                    """),
+                    {"project_id": str(project_id)},
                 ).fetchall()
                 if not rows:
                     rows = connection.execute(
-                        """
+                        text("""
                         SELECT t.* FROM workflow_tasks AS t
-                        WHERE t.project_id = ? AND t.task_type = 'delivery'
+                        WHERE t.project_id = :project_id AND t.task_type = 'delivery'
                           AND t.role_code = 'system_admin'
                           AND t.status = 'completed'
                           AND EXISTS (
@@ -457,8 +458,8 @@ class DeliveryService:
                                 AND e.event_type = 'delivery.complete'
                           )
                         ORDER BY t.updated_at DESC, t.id DESC
-                        """,
-                        (str(project_id),),
+                        """),
+                        {"project_id": str(project_id)},
                     ).fetchall()
         if not rows:
             raise ValueError("an active terminal delivery workflow task is required")
@@ -476,9 +477,12 @@ class DeliveryService:
         if task["status"] == "completed":
             with self.workflow_repository.identity_repository.connect() as connection:
                 completed_by_delivery = connection.execute(
-                    "SELECT 1 FROM workflow_task_events "
-                    "WHERE task_id = ? AND event_type = 'delivery.complete' LIMIT 1",
-                    (task["id"],),
+                    text(
+                        "SELECT 1 FROM workflow_task_events "
+                        "WHERE task_id = :task_id "
+                        "AND event_type = 'delivery.complete' LIMIT 1"
+                    ),
+                    {"task_id": task["id"]},
                 ).fetchone()
             if completed_by_delivery is None:
                 raise ValueError("completed task was not consumed by delivery")
@@ -591,9 +595,12 @@ class DeliveryService:
                 )
             else:
                 event = connection.execute(
-                    "SELECT 1 FROM workflow_task_events "
-                    "WHERE task_id = ? AND event_type = 'delivery.complete' LIMIT 1",
-                    (task["id"],),
+                    text(
+                        "SELECT 1 FROM workflow_task_events "
+                        "WHERE task_id = :task_id "
+                        "AND event_type = 'delivery.complete' LIMIT 1"
+                    ),
+                    {"task_id": task["id"]},
                 ).fetchone()
                 if event is None:
                     actor = self.workflow_repository._live_actor(

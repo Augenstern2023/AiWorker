@@ -6,12 +6,65 @@
 # GitHub: https://github.com/NanmiCoder
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
 
+from contextlib import contextmanager
+
+from sqlalchemy import create_engine, text
+
 from creative.api import build_merged_script_download, build_script_text
 from creative.delivery import DeliveryService
 from creative.repository import CreativeRepository
 from creative.lifecycle_service import TopicLifecycleService, script_resource_fingerprint
 from identity.schema import Principal
 import pytest
+
+
+def test_delivery_task_lookup_uses_sqlalchemy_bind_parameters() -> None:
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        connection.execute(text("""
+            CREATE TABLE workflow_tasks (
+                id TEXT PRIMARY KEY,
+                project_id TEXT,
+                task_type TEXT,
+                role_code TEXT,
+                status TEXT,
+                created_at INTEGER,
+                updated_at INTEGER
+            )
+        """))
+        connection.execute(text("""
+            CREATE TABLE workflow_task_events (
+                task_id TEXT,
+                event_type TEXT
+            )
+        """))
+        connection.execute(text("""
+            INSERT INTO workflow_tasks (
+                id, project_id, task_type, role_code, status, created_at, updated_at
+            ) VALUES (
+                'delivery-task', '42', 'delivery', 'system_admin', 'pool', 1, 1
+            )
+        """))
+
+    class IdentityRepository:
+        @contextmanager
+        def connect(self):
+            with engine.begin() as connection:
+                yield connection
+
+    class WorkflowRepository:
+        identity_repository = IdentityRepository()
+
+        @staticmethod
+        def _task_dict(row):
+            return dict(row._mapping)
+
+    service = object.__new__(DeliveryService)
+    service.workflow_repository = WorkflowRepository()
+
+    task = service._resolve_delivery_task(42, None)
+
+    assert task["id"] == "delivery-task"
 
 
 def test_script_text_uses_jubaopen_scene_format() -> None:

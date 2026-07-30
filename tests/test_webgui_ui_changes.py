@@ -510,7 +510,8 @@ def test_outline_workspace_offers_merged_scene_script_download():
 def test_beats_workspace_uses_a_labeled_scene_script_action():
     beats = _source("templates/common/workspace/project_beats.html")
 
-    assert "生成场次剧本" in beats
+    assert "场次剧本" in beats
+    assert "生成场次剧本" not in beats
     assert "bi-file-earmark-richtext" in beats
 
 

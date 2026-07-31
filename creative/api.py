@@ -1650,6 +1650,64 @@ def build_creative_router(
     ):
         return project_view(project_or_404(project_id), principal)
 
+    @router.get("/generated-resources")
+    async def list_generated_resources(
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, list[dict[str, Any]]]:
+        permission_service = getattr(
+            request.app.state, "identity_permission_service", None
+        )
+        if not isinstance(permission_service, PermissionService):
+            raise HTTPException(500, "identity permission service is not configured")
+        resources: list[dict[str, Any]] = []
+        for summary in repository.list_projects():
+            project_id = int(summary["id"])
+            if not principal.is_system_admin and not (
+                permission_service.can_access_assigned_project(principal, str(project_id))
+                or permission_service.can_access_managed_project(principal, str(project_id))
+            ):
+                continue
+            project = project_or_404(project_id)
+            for item in project.get("blueprints", []):
+                resources.append({
+                    "resource_id": str(item["id"]), "stage": "brief",
+                    "resource_version": int(item["version"]),
+                    "resource_status": str(item["status"]),
+                    "project_id": str(project_id), "project_name": project["name"],
+                })
+            character_batches = {
+                str(item["batch_id"]): item for item in project.get("characters", [])
+                if item.get("batch_id")
+            }
+            for batch_id, item in character_batches.items():
+                resources.append({
+                    "resource_id": f"{project_id}:{batch_id}", "stage": "characters",
+                    "resource_version": int(item["version"]),
+                    "resource_status": str(item["status"]),
+                    "project_id": str(project_id), "project_name": project["name"],
+                })
+            outline_batches = {
+                str(item["batch_id"]): item for item in project.get("episodes", [])
+                if item.get("stage") == "outline" and item.get("batch_id")
+            }
+            for batch_id, item in outline_batches.items():
+                resources.append({
+                    "resource_id": f"{project_id}:{batch_id}", "stage": "outline",
+                    "resource_version": int(item["version"]),
+                    "resource_status": str(item["status"]),
+                    "project_id": str(project_id), "project_name": project["name"],
+                })
+            for item in project.get("episodes", []):
+                if item.get("stage") in {"beats", "script"}:
+                    resources.append({
+                        "resource_id": str(item["id"]), "stage": str(item["stage"]),
+                        "resource_version": int(item["version"]),
+                        "resource_status": str(item["status"]),
+                        "project_id": str(project_id), "project_name": project["name"],
+                    })
+        return {"resources": resources}
+
     @router.post("/projects/{project_id}/workflow-tasks/{resource_type}/ensure")
     async def ensure_project_workflow_task(
         project_id: int,

@@ -1,148 +1,93 @@
 (async function () {
     'use strict';
 
-    const form = document.getElementById('delivery-create-form');
-    const submissionSelect = document.getElementById('delivery-submission');
-    const formatSelect = document.getElementById('delivery-format');
-    const downloadButton = document.getElementById('delivery-download');
-    const formalizeButton = document.getElementById('delivery-formalize');
-    const history = document.getElementById('delivery-history');
-    if (!form || !submissionSelect || !formatSelect || !downloadButton || !formalizeButton || !history) return;
+    const resources = document.getElementById('generated-resource-list');
+    if (!resources) return;
 
     const stageLabels = {brief: 'Brief', characters: '人物关系', outline: '分集大纲', beats: 'Beats', script: '场次剧本'};
     const resourceStatusLabels = {draft: '草稿', locked: '已锁定', brief_locked: '已锁定', approved: '已锁定', submitted: '已提交', returned: '已退回'};
 
-    function deliveryKindLabel(item) {
-        return item.is_formal ? '正式交付' : '草稿预览';
-    }
-
     function statusMessage(message) {
         const row = document.createElement('tr');
         const cell = document.createElement('td');
-        cell.colSpan = 8;
+        cell.colSpan = 6;
         cell.className = 'text-center text-muted py-4';
         cell.textContent = message;
         row.appendChild(cell);
-        history.replaceChildren(row);
+        resources.replaceChildren(row);
     }
 
-    function selectedResource() {
-        const option = submissionSelect.selectedOptions[0];
-        return option?.value ? option : null;
+    function formatsFor(resource) {
+        return resource.stage === 'script'
+            ? [['txt', 'TXT'], ['json', 'JSON']]
+            : [['md', 'Markdown'], ['txt', 'TXT'], ['json', 'JSON']];
     }
 
-    function updateActions() {
-        const option = selectedResource();
-        downloadButton.disabled = !option;
-        formalizeButton.disabled = !option || option.dataset.isFormal !== 'true';
-        formalizeButton.title = formalizeButton.disabled
-            ? '仅已锁定成果可以正式交付'
-            : '创建审计交付快照';
+    function downloadUrl(resource, format) {
+        const params = new URLSearchParams({
+            stage: resource.stage,
+            resource_id: resource.resource_id,
+            format,
+        });
+        return `/api/creative/projects/${resource.project_id}/generated-content/download?${params.toString()}`;
     }
 
-    async function loadOptions() {
-        const response = await window.aiworkerApi.request('/api/admin/deliveries/options');
-        if (!response.ok) throw new Error('可预览成果加载失败');
-        const {options} = await response.json();
-        submissionSelect.replaceChildren();
-        const empty = document.createElement('option');
-        empty.value = '';
-        empty.textContent = options.length ? '请选择成果' : '暂无已生成成果';
-        submissionSelect.appendChild(empty);
-        for (const item of options) {
+    function resourceRow(resource) {
+        const row = document.createElement('tr');
+        const values = [
+            resource.project_name,
+            stageLabels[resource.stage] || resource.stage,
+            `v${resource.resource_version}`,
+            resourceStatusLabels[resource.resource_status] || resource.resource_status || '-',
+        ];
+        for (const value of values) {
+            const cell = document.createElement('td');
+            cell.textContent = value;
+            row.appendChild(cell);
+        }
+
+        const formatCell = document.createElement('td');
+        const format = document.createElement('select');
+        format.className = 'form-select form-select-sm';
+        format.setAttribute('aria-label', `${resource.project_name} ${stageLabels[resource.stage] || resource.stage} 下载格式`);
+        for (const [value, label] of formatsFor(resource)) {
             const option = document.createElement('option');
-            option.value = item.resource_id;
-            option.dataset.projectId = item.project_id;
-            option.dataset.stage = item.stage;
-            option.dataset.isFormal = String(item.is_formal);
-            if (item.workflow_task_id) option.dataset.workflowTaskId = item.workflow_task_id;
-            option.textContent = `${item.project_name} / ${stageLabels[item.stage] || item.stage} / v${item.resource_version} / ${resourceStatusLabels[item.resource_status] || item.resource_status || '草稿'} / ${deliveryKindLabel(item)}`;
-            submissionSelect.appendChild(option);
+            option.value = value;
+            option.textContent = label;
+            format.appendChild(option);
         }
-        updateActions();
-    }
+        formatCell.appendChild(format);
+        row.appendChild(formatCell);
 
-    async function loadHistory() {
-        const response = await window.aiworkerApi.request('/api/admin/deliveries');
-        if (!response.ok) throw new Error('交付记录加载失败');
-        const {deliveries} = await response.json();
-        if (!deliveries.length) {
-            statusMessage('暂无交付记录');
-            return;
-        }
-        history.replaceChildren(...deliveries.map((delivery) => {
-            const row = document.createElement('tr');
-            const values = [
-                new Date(delivery.created_at * 1000).toLocaleString(),
-                delivery.project_name,
-                stageLabels[delivery.stage] || delivery.stage,
-                `资源 v${delivery.resource_version} / 快照 v${delivery.submission_version}`,
-                `${deliveryKindLabel(delivery)} / ${resourceStatusLabels[delivery.resource_status] || delivery.resource_status || '-'}`,
-                delivery.format.toUpperCase(),
-                delivery.fingerprint.slice(0, 12),
-            ];
-            for (const value of values) {
-                const cell = document.createElement('td');
-                cell.textContent = value;
-                row.appendChild(cell);
-            }
-            const action = document.createElement('td');
-            const link = document.createElement('a');
-            link.className = 'btn btn-outline-primary btn-sm';
-            link.href = `/api/admin/deliveries/${delivery.id}/download`;
-            link.title = '下载';
-            link.innerHTML = '<i class="bi bi-download"></i>';
-            action.appendChild(link);
-            row.appendChild(action);
-            return row;
-        }));
+        const action = document.createElement('td');
+        const link = document.createElement('a');
+        link.className = 'btn btn-outline-primary btn-sm';
+        link.title = '下载';
+        link.innerHTML = '<i class="bi bi-download"></i>';
+        link.href = downloadUrl(resource, format.value);
+        format.addEventListener('change', () => {
+            link.href = downloadUrl(resource, format.value);
+        });
+        action.appendChild(link);
+        row.appendChild(action);
+        return row;
     }
 
     async function refresh() {
         try {
-            await Promise.all([loadOptions(), loadHistory()]);
+            const response = await window.aiworkerApi.request('/api/creative/generated-resources');
+            if (!response.ok) throw new Error('已生成成果加载失败');
+            const {resources: generatedResources} = await response.json();
+            if (!generatedResources.length) {
+                statusMessage('暂无已生成成果');
+                return;
+            }
+            resources.replaceChildren(...generatedResources.map(resourceRow));
         } catch (error) {
-            statusMessage(error.message || '成果交付加载失败');
+            statusMessage(error.message || '已生成成果加载失败');
         }
     }
 
-    form.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        const option = selectedResource();
-        if (!option || option.dataset.isFormal !== 'true') return;
-        const response = await window.aiworkerApi.request('/api/admin/deliveries', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                resource_id: option.value,
-                project_id: Number(option.dataset.projectId),
-                stage: option.dataset.stage,
-                format: formatSelect.value,
-                workflow_task_id: option.dataset.workflowTaskId || null,
-            }),
-        });
-        if (!response.ok) {
-            const body = await response.json().catch(() => ({}));
-            statusMessage(body.detail || '正式交付失败');
-            return;
-        }
-        await refresh();
-    });
-    downloadButton.addEventListener('click', () => {
-        const option = selectedResource();
-        if (!option) return;
-        const params = new URLSearchParams({
-            stage: option.dataset.stage,
-            resource_id: option.value,
-            format: formatSelect.value,
-        });
-        window.open(
-            `/api/creative/projects/${option.dataset.projectId}/generated-content/download?${params.toString()}`,
-            '_blank',
-            'noopener'
-        );
-    });
-    submissionSelect.addEventListener('change', updateActions);
     document.getElementById('refresh-deliveries')?.addEventListener('click', refresh);
     await refresh();
 })();

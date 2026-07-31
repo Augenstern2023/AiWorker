@@ -262,17 +262,17 @@ def test_review_projects_lists_assigned_planning_projects_only():
     assert "/workflow`" not in script
 
 
-def test_admin_delivery_page_uses_approved_delivery_registry():
+def test_admin_delivery_page_lists_generated_resources_without_delivery_registry():
     html = _read("templates/admin/deliveries.html")
     source = _read("static/js/admin/deliveries.js")
 
-    assert 'id="delivery-create-form"' in html
-    assert 'id="delivery-submission"' in html
-    assert 'id="delivery-history"' in html
-    assert "/api/admin/deliveries" in source
-    assert "/download`" in source
-    assert "method: 'POST'" in source
-    assert "/api/creative/projects/" not in html
+    assert 'id="generated-resource-list"' in html
+    assert 'id="delivery-create-form"' not in html
+    assert 'id="delivery-history"' not in html
+    assert "/api/admin/deliveries" not in source
+    assert "method: 'POST'" not in source
+    assert "/api/creative/generated-resources" in source
+    assert "generated-content/download" in source
 
 
 def test_admin_delivery_initializer_does_not_require_creative_workspace_module():

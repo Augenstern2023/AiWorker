@@ -68,7 +68,6 @@ from analysis.asr import (
 from analysis.llm import LLMError, create_llm_provider_from_config
 from analysis.today_rank_api import register_today_rank_routes
 from creative.api import register_creative_routes
-from creative.delivery import DeliveryService, build_delivery_router
 from creative.repository import CreativeRepository
 from creative.transcript_assets import normalize_title
 from identity.api import build_identity_router
@@ -536,12 +535,6 @@ else:
 creative_repository = CreativeRepository(
     WORKSPACE_ROOT / ".runtime" / "creative" / "creative.db"
 )
-delivery_service = DeliveryService(
-    root=WORKSPACE_ROOT,
-    creative_repository=creative_repository,
-    workflow_repository=workflow_repository,
-    audit_service=audit_service,
-)
 app.state.identity_repository = identity_repository
 app.state.system_database = system_database
 app.state.identity_password_service = identity_password_service
@@ -606,7 +599,6 @@ if system_database is not None:
     app.include_router(
         build_organization_router(DepartmentService(system_database), audit_service)
     )
-app.include_router(build_delivery_router(delivery_service))
 app.include_router(
     build_workflow_router(workflow_repository, workflow_transition_service)
 )

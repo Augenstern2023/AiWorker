@@ -417,16 +417,16 @@ def test_scene_script_preview_and_download_use_delivery_formats():
     assert "generatedContentPreview.stage === 'script' ? 'txt' : 'md'" in modal
 
 
-def test_delivery_page_downloads_existing_resources_and_separates_formal_delivery():
+def test_delivery_page_lists_existing_resources_without_delivery_actions():
     page = _source("templates/admin/deliveries.html")
     deliveries = _source("static/js/admin/deliveries.js")
 
     assert "已生成成果" in page
-    assert 'id="delivery-download"' in page
-    assert "正式交付" in page
-    assert "草稿预览" in deliveries
-    assert "正式交付" in deliveries
+    assert 'id="generated-resource-list"' in page
+    assert "正式交付" not in page
+    assert "草稿预览" not in deliveries
     assert "resource_status" in deliveries
+    assert "/api/creative/generated-resources" in deliveries
     assert "generated-content/download" in deliveries
 
 

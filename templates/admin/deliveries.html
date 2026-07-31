@@ -2,19 +2,22 @@
 
 {% block content %}
 <div class="d-flex align-items-center justify-content-between mb-3">
-  <div><h3 class="mb-1">成果交付</h3><div class="small text-muted">预览项目已生成成果，并生成 Markdown、TXT 或 JSON 快照</div></div>
+  <div><h3 class="mb-1">成果交付</h3><div class="small text-muted">直接下载项目已生成成果；正式交付才会创建可审计快照</div></div>
   <button class="btn btn-outline-secondary btn-sm" id="refresh-deliveries" title="刷新"><i class="bi bi-arrow-clockwise"></i></button>
 </div>
 <form id="delivery-create-form" class="row g-2 align-items-end mb-4">
-  <div class="col-12 col-lg-7">
-    <label class="form-label" for="delivery-submission">可预览成果</label>
+  <div class="col-12 col-lg-6">
+    <label class="form-label" for="delivery-submission">已生成成果</label>
     <select class="form-select" id="delivery-submission" required><option value="">正在加载成果...</option></select>
   </div>
-  <div class="col-7 col-lg-3">
+  <div class="col-5 col-lg-2">
     <label class="form-label" for="delivery-format">格式</label>
     <select class="form-select" id="delivery-format"><option value="md">Markdown</option><option value="txt">TXT</option><option value="json">JSON</option></select>
   </div>
-  <div class="col-5 col-lg-2 d-grid"><button class="btn btn-primary" type="submit"><i class="bi bi-box-arrow-down me-1"></i>生成</button></div>
+  <div class="col-7 col-lg-4 d-flex gap-2">
+    <button class="btn btn-primary flex-grow-1" id="delivery-download" type="button" disabled><i class="bi bi-download me-1"></i>下载</button>
+    <button class="btn btn-outline-warning flex-grow-1" id="delivery-formalize" type="submit" disabled><i class="bi bi-journal-check me-1"></i>正式交付</button>
+  </div>
 </form>
 <div class="table-responsive">
   <table class="table table-sm align-middle">

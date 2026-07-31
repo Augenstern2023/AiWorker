@@ -4,8 +4,10 @@
     const form = document.getElementById('delivery-create-form');
     const submissionSelect = document.getElementById('delivery-submission');
     const formatSelect = document.getElementById('delivery-format');
+    const downloadButton = document.getElementById('delivery-download');
+    const formalizeButton = document.getElementById('delivery-formalize');
     const history = document.getElementById('delivery-history');
-    if (!form || !submissionSelect || !formatSelect || !history) return;
+    if (!form || !submissionSelect || !formatSelect || !downloadButton || !formalizeButton || !history) return;
 
     const stageLabels = {brief: 'Brief', characters: '人物关系', outline: '分集大纲', beats: 'Beats', script: '场次剧本'};
     const resourceStatusLabels = {draft: '草稿', locked: '已锁定', brief_locked: '已锁定', approved: '已锁定', submitted: '已提交', returned: '已退回'};
@@ -24,6 +26,20 @@
         history.replaceChildren(row);
     }
 
+    function selectedResource() {
+        const option = submissionSelect.selectedOptions[0];
+        return option?.value ? option : null;
+    }
+
+    function updateActions() {
+        const option = selectedResource();
+        downloadButton.disabled = !option;
+        formalizeButton.disabled = !option || option.dataset.isFormal !== 'true';
+        formalizeButton.title = formalizeButton.disabled
+            ? '仅已锁定成果可以正式交付'
+            : '创建审计交付快照';
+    }
+
     async function loadOptions() {
         const response = await window.aiworkerApi.request('/api/admin/deliveries/options');
         if (!response.ok) throw new Error('可预览成果加载失败');
@@ -38,10 +54,12 @@
             option.value = item.resource_id;
             option.dataset.projectId = item.project_id;
             option.dataset.stage = item.stage;
+            option.dataset.isFormal = String(item.is_formal);
             if (item.workflow_task_id) option.dataset.workflowTaskId = item.workflow_task_id;
             option.textContent = `${item.project_name} / ${stageLabels[item.stage] || item.stage} / v${item.resource_version} / ${resourceStatusLabels[item.resource_status] || item.resource_status || '草稿'} / ${deliveryKindLabel(item)}`;
             submissionSelect.appendChild(option);
         }
+        updateActions();
     }
 
     async function loadHistory() {
@@ -90,8 +108,8 @@
 
     form.addEventListener('submit', async (event) => {
         event.preventDefault();
-        const option = submissionSelect.selectedOptions[0];
-        if (!option?.value) return;
+        const option = selectedResource();
+        if (!option || option.dataset.isFormal !== 'true') return;
         const response = await window.aiworkerApi.request('/api/admin/deliveries', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -105,11 +123,26 @@
         });
         if (!response.ok) {
             const body = await response.json().catch(() => ({}));
-            statusMessage(body.detail || '交付生成失败');
+            statusMessage(body.detail || '正式交付失败');
             return;
         }
         await refresh();
     });
+    downloadButton.addEventListener('click', () => {
+        const option = selectedResource();
+        if (!option) return;
+        const params = new URLSearchParams({
+            stage: option.dataset.stage,
+            resource_id: option.value,
+            format: formatSelect.value,
+        });
+        window.open(
+            `/api/creative/projects/${option.dataset.projectId}/generated-content/download?${params.toString()}`,
+            '_blank',
+            'noopener'
+        );
+    });
+    submissionSelect.addEventListener('change', updateActions);
     document.getElementById('refresh-deliveries')?.addEventListener('click', refresh);
     await refresh();
 })();

@@ -535,6 +535,13 @@ def build_creative_router(
     workspace_root = Path(root).resolve()
     lifecycle_service = TopicLifecycleService(repository, workspace_root, job_manager)
 
+    def has_page_api_access(request: Request, principal: Principal) -> bool:
+        page_access_service = getattr(request.app.state, "page_access_service", None)
+        checker = getattr(page_access_service, "can_call_page_api", None)
+        return bool(
+            callable(checker)
+            and checker(principal, request.method.upper(), request.url.path) is True
+        )
 
     def creative_resource_scope(
         request: Request,
@@ -589,6 +596,7 @@ def build_creative_router(
                 or permission_service.can_access_managed_project(
                     principal, str(project_id)
                 )
+                or has_page_api_access(request, principal)
             ):
                 raise HTTPException(403, "只能访问当前分配或管理的项目")
 
@@ -659,7 +667,7 @@ def build_creative_router(
     def assert_project_owner_preview_access(
         request: Request, project_id: int, principal: Principal
     ) -> None:
-        if principal.is_system_admin:
+        if principal.is_system_admin or has_page_api_access(request, principal):
             return
         permission_service = getattr(
             request.app.state, "identity_permission_service", None
@@ -1661,9 +1669,10 @@ def build_creative_router(
         if not isinstance(permission_service, PermissionService):
             raise HTTPException(500, "identity permission service is not configured")
         resources: list[dict[str, Any]] = []
+        page_authorized = has_page_api_access(request, principal)
         for summary in repository.list_projects():
             project_id = int(summary["id"])
-            if not principal.is_system_admin and not (
+            if not principal.is_system_admin and not page_authorized and not (
                 permission_service.can_access_assigned_project(principal, str(project_id))
                 or permission_service.can_access_managed_project(principal, str(project_id))
             ):

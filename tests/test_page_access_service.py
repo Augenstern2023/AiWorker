@@ -120,6 +120,22 @@ def test_whitelist_entry_grants_only_its_page_and_bound_api_capabilities() -> No
     assert service.can_call_page_api(principal, "GET", "/api/admin/users") is False
 
 
+def test_delivery_page_grant_includes_generated_resource_list_and_download() -> None:
+    repository = FakeNavigationRepository()
+    repository.access_by_route["/admin/deliveries"] = {"user-1"}
+    service = PageAccessService(repository)
+    principal = _principal()
+
+    assert service.can_call_page_api(
+        principal, "GET", "/api/creative/generated-resources"
+    ) is True
+    assert service.can_call_page_api(
+        principal,
+        "GET",
+        "/api/creative/projects/project-1/generated-content/download",
+    ) is True
+
+
 def test_planning_grant_controls_project_parameter_updates_immediately() -> None:
     repository = FakeNavigationRepository()
     repository.access_by_route["/planning/projects"] = {"user-1"}

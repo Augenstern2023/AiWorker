@@ -428,6 +428,7 @@ def test_delivery_page_lists_existing_resources_without_delivery_actions():
     assert "resource_status" in deliveries
     assert "/api/creative/generated-resources" in deliveries
     assert "generated-content/download" in deliveries
+    assert "generated_resources=2" in page
 
 
 def test_scene_script_workspace_distinguishes_merged_and_single_episode_downloads():

@@ -17,7 +17,11 @@ from typing import Any, Protocol
 
 from identity.schema import Principal
 from web.page_access_catalog import PAGE_ACCESS_CATALOG
-from web.page_routes import DENIED_PAGE_ROUTES, PAGE_ACCESS_GRANT_ROUTES
+from web.page_routes import (
+    DENIED_PAGE_ROUTES,
+    PAGE_ACCESS_ADDITIONAL_GRANT_ROUTES,
+    PAGE_ACCESS_GRANT_ROUTES,
+)
 
 
 class PageAccessRepository(Protocol):
@@ -71,10 +75,11 @@ class PageAccessService:
         page_route = self._page_route_for(route)
         if page_route is None:
             return False
-        grant_route = self._grant_route(page_route)
-        if not self._is_enabled(grant_route):
-            return False
-        return self._is_allowed(principal, grant_route)
+        return any(
+            self._is_enabled(grant_route)
+            and self._is_allowed(principal, grant_route)
+            for grant_route in self._grant_routes(page_route)
+        )
 
     def can_call_page_api(
         self, principal: Principal, method: str, path: str
@@ -149,6 +154,13 @@ class PageAccessService:
     @staticmethod
     def _grant_route(page_route: str) -> str:
         return PAGE_ACCESS_GRANT_ROUTES.get(page_route, page_route)
+
+    @classmethod
+    def _grant_routes(cls, page_route: str) -> tuple[str, ...]:
+        return (
+            cls._grant_route(page_route),
+            *PAGE_ACCESS_ADDITIONAL_GRANT_ROUTES.get(page_route, ()),
+        )
 
     @staticmethod
     def _is_system_admin(principal: Principal) -> bool:

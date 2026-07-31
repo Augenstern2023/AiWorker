@@ -190,6 +190,34 @@ def test_dynamic_legacy_route_uses_the_same_static_whitelist_mapping(page_app):
     assert response.headers["location"] == "/planning/projects/project-1/brief"
 
 
+def test_managed_project_page_grant_allows_its_creative_brief_preview(page_app):
+    principal = _principal()
+    page_app[1].access_by_route["/review/projects"] = {principal.user_id}
+    client = _client(page_app, principal)
+
+    assert client.get("/planning/projects/project-1/brief").status_code == 200
+
+
+def test_managed_project_page_grant_keeps_project_preview_navigation_available(
+    page_app,
+):
+    principal = _principal()
+    page_app[1].access_by_route["/review/projects"] = {principal.user_id}
+    client = _client(page_app, principal)
+
+    response = client.get("/planning/projects", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/review/projects"
+    for route in (
+        "/planning/projects/project-1/characters",
+        "/writing/projects/project-1/outlines",
+        "/writing/projects/project-1/episodes/1/beats",
+        "/writing/projects/project-1/episodes/1/scripts",
+    ):
+        assert client.get(route).status_code == 200
+
+
 @pytest.mark.parametrize("route", ("/", "/tasks", "/writing/projects"))
 def test_unauthenticated_page_redirects_to_login(page_app, route: str):
     response = _client(page_app, None).get(route, follow_redirects=False)

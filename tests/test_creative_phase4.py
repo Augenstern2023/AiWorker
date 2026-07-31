@@ -317,7 +317,7 @@ def test_new_beats_version_points_to_parent_version(tmp_path: Path):
     repository.lock_character_batch(project["id"], people["batch_id"])
     outlines = repository.create_outline_batch(project["id"], [{"episode": 1}], "arc")
     repository.lock_outline_batch(project["id"], outlines["batch_id"])
-    first = repository.create_episode_beats(project["id"], 1, {"beats": []})
+    first = repository.create_episode_beats(project["id"], 1, {"beats": [{"order": 1}]})
     repository.lock_episode_beats(first["id"])
 
     second = repository.create_episode_beats(project["id"], 1, {"beats": [{"order": 1}]})

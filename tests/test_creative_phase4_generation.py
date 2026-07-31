@@ -15,13 +15,17 @@ import pytest
 
 from core.job import CrawlJob
 from creative import phase4_worker
+from creative.api import build_beats_markdown
 from creative.imitation_service import generate_blueprints
 from creative.imitation_service import complete_with_one_repair
+from creative.prompt_templates import character_messages, outline_messages, beats_messages, script_messages
 from creative.repository import CreativeRepository
 from creative.script_service import (
+    build_continuity_ledger,
     generate_character_bundle,
     generate_episode_beats,
     generate_outline_bundle,
+    validate_beats,
 )
 
 
@@ -106,8 +110,11 @@ async def test_character_generation_requires_structured_people_and_relationships
         "characters": [{
             "name": "周晴", "age_range": "25-30", "identity": "调解员",
             "external_tags": ["冷静"], "desire": "守住社区", "secret": "曾经逃避责任",
-            "growth_arc": "从独自承担到信任伙伴", "dialogue_style": "简短直接",
-            "appearance_prompt": "职业女性", "voice_prompt": "清晰坚定",
+                "growth_arc": "从独自承担到信任伙伴", "dialogue_style": "简短直接",
+                "appearance_prompt": "职业女性", "voice_prompt": "清晰坚定",
+                "action_goal": "当众说服居民接受调解", "fear_of_loss": "失去社区信任",
+                "behavioral_contradiction": "越害怕失败越表现得冷静", "pressure_response": "会先替人承担后果",
+                "bottom_line": "不拿无辜者交换结果",
         }],
         "relationships": [{
             "from": "周晴", "to": "顾川", "relation": "对手",
@@ -120,6 +127,32 @@ async def test_character_generation_requires_structured_people_and_relationships
     assert bundle["characters"][0]["name"] == "周晴"
     assert bundle["relationships"][0]["relation"] == "对手"
     assert meta["provider"] == "test-llm"
+
+
+@pytest.mark.asyncio
+async def test_character_generation_requires_actionable_character_fields():
+    invalid_character = {
+        "name": "周晴", "age_range": "25-30", "identity": "调解员",
+        "external_tags": ["冷静"], "desire": "守住社区", "secret": "曾经逃避责任",
+        "growth_arc": "从独自承担到信任伙伴", "dialogue_style": "简短直接",
+        "appearance_prompt": "职业女性", "voice_prompt": "清晰坚定",
+    }
+    valid_character = {
+        **invalid_character,
+        "action_goal": "当众说服居民接受调解", "fear_of_loss": "失去社区信任",
+        "behavioral_contradiction": "越害怕失败越表现得冷静", "pressure_response": "会先替人承担后果",
+        "bottom_line": "不拿无辜者交换结果",
+    }
+    provider = SequentialProvider([
+        {"characters": [invalid_character], "relationships": []},
+        {"characters": [valid_character], "relationships": []},
+    ])
+
+    bundle, _ = await generate_character_bundle(provider, {"name": "项目"}, {"title": "Brief"})
+
+    assert bundle["characters"][0]["action_goal"] == "当众说服居民接受调解"
+    assert len(provider.calls) == 2
+    assert "反派每两集至少暴露一次软肋" in provider.calls[0][0]["content"]
 
 
 def outline_episode(number: int) -> dict:
@@ -163,8 +196,10 @@ async def test_outline_generation_chunks_every_ten_episodes():
 async def test_beats_generation_rejects_wrong_episode_shape():
     provider = SequentialProvider([
         {"beats": [{
-            "order": 1, "scene": "大厅", "characters": ["周晴"], "goal": "说服居民",
-            "obstacle": "无人信任", "emotion_change": "克制到坚定", "turn": "证据出现", "hook": "对手到场",
+                "order": 1, "scene": "大厅", "characters": ["周晴"], "goal": "说服居民",
+                "obstacle": "无人信任", "emotion_change": "克制到坚定", "turn": "证据出现", "hook": "对手到场",
+                "state_change": "居民公开站到周晴一边", "cost": "周晴失去调解资格",
+                "opposition_tactic": "对手挑动居民质疑她的资格", "continuity_updates": [],
         }]},
     ])
 
@@ -177,6 +212,144 @@ async def test_beats_generation_rejects_wrong_episode_shape():
     )
 
     assert result["beats"][0]["scene"] == "大厅"
+
+
+@pytest.mark.asyncio
+async def test_beats_generation_normalizes_a_bare_beats_array_from_the_llm():
+    beat = {
+        "order": 1, "scene": "大厅", "characters": ["周晴"], "goal": "说服居民",
+        "obstacle": "无人信任", "emotion_change": "克制到坚定", "turn": "证据出现", "hook": "对手到场",
+        "state_change": "居民公开站到周晴一边", "cost": "周晴失去调解资格",
+        "opposition_tactic": "对手挑动居民质疑她的资格", "continuity_updates": [],
+    }
+    provider = SequentialProvider([[beat]])
+
+    result, meta = await generate_episode_beats(
+        provider,
+        {"name": "项目"},
+        {"content": {"episode": 1, "core_event": "首次交锋"}},
+        [],
+        1,
+    )
+
+    assert result == {"beats": [beat]}
+    assert meta["provider"] == "test-llm"
+
+
+@pytest.mark.asyncio
+async def test_beats_generation_requires_change_cost_tactic_and_continuity_updates():
+    legacy_beat = {
+        "order": 1, "scene": "大厅", "characters": ["周晴"], "goal": "说服居民",
+        "obstacle": "无人信任", "emotion_change": "克制到坚定", "turn": "证据出现", "hook": "对手到场",
+    }
+    valid_beat = {
+        **legacy_beat,
+        "state_change": "居民公开站到周晴一边", "cost": "周晴失去调解资格",
+        "opposition_tactic": "对手挑动居民质疑她的资格",
+        "continuity_updates": [{
+            "kind": "prop", "name": "旧布袋", "event": "introduce", "holder": "周晴",
+            "location": "大厅", "known_by": ["周晴"], "status": "active",
+        }],
+    }
+    provider = SequentialProvider([{"beats": [legacy_beat]}, {"beats": [valid_beat]}])
+
+    result, _ = await generate_episode_beats(
+        provider,
+        {"name": "项目"},
+        {"content": {"episode": 1, "core_event": "首次交锋"}},
+        [],
+        1,
+        continuity_ledger=[],
+    )
+
+    assert result["beats"][0]["cost"] == "周晴失去调解资格"
+    assert len(provider.calls) == 2
+    assert provider.calls[0][1]["content"].count("continuity_ledger") == 1
+
+
+@pytest.mark.asyncio
+async def test_beats_generation_limits_an_episode_to_six_beats():
+    beat = {
+        "scene": "大厅", "characters": ["周晴"], "goal": "说服居民", "obstacle": "无人信任",
+        "emotion_change": "克制到坚定", "turn": "证据出现", "hook": "对手到场",
+        "state_change": "居民改变态度", "cost": "周晴失去资格", "opposition_tactic": "公开质疑",
+        "continuity_updates": [],
+    }
+    invalid_payload = {"beats": [{**beat, "order": number} for number in range(1, 8)]}
+
+    with pytest.raises(ValueError, match="1-6"):
+        validate_beats(invalid_payload)
+
+
+def test_continuity_ledger_carries_the_latest_prop_state_across_episodes():
+    ledger = build_continuity_ledger([
+        {"episode_number": 1, "content": {"beats": [{"order": 1, "continuity_updates": [{
+            "kind": "prop", "name": "旧布袋", "event": "introduce", "holder": "林晚",
+            "location": "洗衣店", "known_by": ["林晚"], "status": "active",
+        }]}]}},
+        {"episode_number": 2, "content": {"beats": [{"order": 1, "continuity_updates": [{
+            "kind": "prop", "name": "旧布袋", "event": "transfer", "holder": "小禾",
+            "location": "贴纸本夹层", "known_by": ["林晚", "小禾"], "status": "active",
+        }]}]}},
+    ])
+
+    assert ledger == [{
+        "kind": "prop", "name": "旧布袋", "event": "transfer", "holder": "小禾",
+        "location": "贴纸本夹层", "known_by": ["林晚", "小禾"], "status": "active",
+    }]
+
+
+def test_worker_only_injects_locked_prior_beats_into_the_next_episode_ledger():
+    update = {
+        "kind": "information", "name": "债务来源", "event": "reveal", "holder": "周启明",
+        "location": "短信", "known_by": ["周启明"], "status": "hidden",
+    }
+    project = {"episodes": [
+        {"id": 1, "stage": "beats", "episode_number": 1, "version": 1, "status": "locked",
+         "content": {"beats": [{"order": 1, "continuity_updates": [update]}]}},
+        {"id": 2, "stage": "beats", "episode_number": 2, "version": 1, "status": "draft",
+         "content": {"beats": [{"order": 1, "continuity_updates": []}]}},
+    ]}
+
+    assert phase4_worker._continuity_ledger_before(project, 2) == [update]
+    assert phase4_worker._continuity_ledger_before(project, 1) == []
+
+
+def test_beats_markdown_exports_story_changes_and_continuity_updates():
+    markdown = build_beats_markdown(
+        {"name": "项目"},
+        [{
+            "episode_number": 1,
+            "version": 1,
+            "status": "draft",
+            "content": {"beats": [{
+                "order": 1, "scene": "大厅", "characters": ["周晴"], "goal": "说服居民",
+                "obstacle": "无人信任", "emotion_change": "克制到坚定", "turn": "证据出现", "hook": "对手到场",
+                "state_change": "居民公开站到周晴一边", "cost": "周晴失去调解资格",
+                "opposition_tactic": "公开质疑", "continuity_updates": [{
+                    "kind": "prop", "name": "旧布袋", "event": "introduce", "holder": "周晴",
+                    "location": "大厅", "known_by": ["周晴"], "status": "active",
+                }],
+            }]},
+        }],
+    )
+
+    for label in ("局面变化", "代价", "对抗策略", "连续性变更"):
+        assert label in markdown
+
+
+def test_story_constraints_are_present_in_all_generation_prompts():
+    payload = {"project": {"name": "项目"}}
+    prompts = (
+        character_messages(payload),
+        outline_messages(payload, 1, 1),
+        beats_messages(payload, 1),
+        script_messages(payload, 1),
+    )
+
+    for messages in prompts:
+        assert "每场冲突不得以重复的证据留存或口头反击收束" in messages[0]["content"]
+        assert "反派每两集至少暴露一次软肋" in messages[0]["content"]
 
 
 def seed_worker_project(repository: CreativeRepository) -> dict:

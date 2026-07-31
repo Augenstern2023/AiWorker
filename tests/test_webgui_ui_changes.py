@@ -417,6 +417,17 @@ def test_scene_script_preview_and_download_use_delivery_formats():
     assert "generatedContentPreview.stage === 'script' ? 'txt' : 'md'" in modal
 
 
+def test_topic_scene_script_preview_filters_history_by_version():
+    topics = _source("static/js/selection/topics.js")
+    modal = _source("templates/common/workspace/selection_modals.html")
+
+    assert "generatedContentPreviewVersionOptions()" in topics
+    assert "filteredGeneratedContentVersions()" in topics
+    assert "filterGeneratedContentPreviewByVersion()" in topics
+    assert 'x-model.number="generatedContentPreview.selectedVersion"' in modal
+    assert "全部版本" in modal
+
+
 def test_delivery_page_lists_existing_resources_without_delivery_actions():
     page = _source("templates/admin/deliveries.html")
     deliveries = _source("static/js/admin/deliveries.js")
@@ -562,6 +573,27 @@ def test_scene_script_actions_stop_before_navigation_without_locked_beats():
     assert "openProjectScriptWorkspace()" in creative
     assert "请先生成并完成当前集 Beats，再生成场次剧本" in creative
     assert '@click="openProjectScriptWorkspace"' in beats
+
+
+def test_scene_script_workspace_hides_scripts_tied_to_superseded_beats():
+    creative = _source("static/js/common/creative.js")
+    scripts = _source("templates/common/workspace/project_scripts.html")
+
+    assert "return this.projectEpisodeScript(this.creativeWorkspace.selectedEpisode);" in creative
+    assert "scriptWorkspaceEmptyMessage()" in creative
+    assert "当前仅有基于 Beats v${olderScriptBeatsVersion || '未知'} 的旧场次剧本；当前 Beats 为 v${currentBeats.version}" in creative
+    assert 'x-text="scriptWorkspaceEmptyMessage()"' in scripts
+
+
+def test_continuity_ledger_renders_known_status_codes_in_chinese():
+    creative = _source("static/js/common/creative.js")
+    beats = _source("templates/common/workspace/project_beats.html")
+
+    assert "continuityStatusLabel(status)" in creative
+    assert "blocked: '受阻'" in creative
+    assert "active: '有效'" in creative
+    assert "status: this.continuityStatusLabel(item.status)" in creative
+    assert 'x-text="item.status"' in beats
 
 
 def test_scene_script_lifecycle_badges_have_readable_backgrounds():

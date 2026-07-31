@@ -182,8 +182,26 @@ def build_page_router(
             f"/planning/projects/{project_id}/brief", status_code=307
         )
 
+    @router.get("/planning/projects", response_class=HTMLResponse)
+    def planning_projects_page(
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ) -> Response:
+        if navigation_service.can_open(principal, "/planning/projects"):
+            return _page_response(
+                templates,
+                navigation_service,
+                request,
+                principal,
+                page_title="策划项目",
+                template_name="planning/projects.html",
+            )
+        if navigation_service.can_open(principal, "/review/projects"):
+            return RedirectResponse("/review/projects", status_code=307)
+        raise HTTPException(status_code=403, detail="没有执行此操作的权限")
+
     for route, permission, title in PAGE_ROUTES:
-        if route == "/admin/audit":
+        if route in {"/admin/audit", "/planning/projects"}:
             continue
         router.add_api_route(
             route,
@@ -264,6 +282,10 @@ def _template_context(
         "csrf_token": csrf_token,
         "show_tasks": bool(
             principal and navigation_service.can_open(principal, "/tasks")
+        ),
+        "can_open_planning_projects": bool(
+            principal
+            and navigation_service.can_open(principal, "/planning/projects")
         ),
         **request.path_params,
     }

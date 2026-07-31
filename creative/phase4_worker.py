@@ -21,7 +21,13 @@ from core.events import emit_event
 from core.job import CrawlJob
 from creative.imitation_service import generate_blueprints
 from creative.repository import CreativeRepository
-from creative.script_service import generate_character_bundle, generate_episode_beats, generate_episode_script, generate_outline_bundle
+from creative.script_service import (
+    build_continuity_ledger,
+    generate_character_bundle,
+    generate_episode_beats,
+    generate_episode_script,
+    generate_outline_bundle,
+)
 
 
 def create_provider():
@@ -61,6 +67,42 @@ def _locked_characters(project: dict[str, Any]) -> tuple[list[dict[str, Any]], l
     characters = [item for item in project["characters"] if item["batch_id"] == batch_id and item["status"] in readable_statuses]
     relationships = [item for item in project["relationships"] if item["batch_id"] == batch_id and item["status"] in readable_statuses]
     return characters, relationships
+
+
+def _continuity_ledger_before(project: dict[str, Any], episode_number: int) -> list[dict[str, Any]]:
+    latest_by_episode: dict[int, dict[str, Any]] = {}
+    for item in project["episodes"]:
+        if (
+            item["stage"] != "beats"
+            or item.get("status") not in {"locked", "approved"}
+            or int(item["episode_number"]) >= episode_number
+        ):
+            continue
+        number = int(item["episode_number"])
+        current = latest_by_episode.get(number)
+        if current is None or (int(item.get("version") or 0), int(item["id"])) > (
+            int(current.get("version") or 0), int(current["id"])
+        ):
+            latest_by_episode[number] = item
+    return build_continuity_ledger(list(latest_by_episode.values()))
+
+
+def _continuity_ledger_through(project: dict[str, Any], episode_number: int) -> list[dict[str, Any]]:
+    latest_by_episode: dict[int, dict[str, Any]] = {}
+    for item in project["episodes"]:
+        if (
+            item["stage"] != "beats"
+            or item.get("status") not in {"locked", "approved"}
+            or int(item["episode_number"]) > episode_number
+        ):
+            continue
+        number = int(item["episode_number"])
+        current = latest_by_episode.get(number)
+        if current is None or (int(item.get("version") or 0), int(item["id"])) > (
+            int(current.get("version") or 0), int(current["id"])
+        ):
+            latest_by_episode[number] = item
+    return build_continuity_ledger(list(latest_by_episode.values()))
 
 
 async def run(job: CrawlJob) -> None:
@@ -158,7 +200,14 @@ async def run(job: CrawlJob) -> None:
         if not outline:
             raise ValueError("未找到指定集的锁定大纲")
         if action == "beats":
-            generated, meta = await generate_episode_beats(provider, project, outline, characters, episode_number)
+            generated, meta = await generate_episode_beats(
+                provider,
+                project,
+                outline,
+                characters,
+                episode_number,
+                continuity_ledger=_continuity_ledger_before(project, episode_number),
+            )
             resource = repository.create_episode_beats(project_id, episode_number, generated, job.job_id, meta)
         else:
             candidates = sorted(
@@ -167,7 +216,15 @@ async def run(job: CrawlJob) -> None:
             )
             if not candidates:
                 raise ValueError("必须先锁定当前集 Beats")
-            generated, meta = await generate_episode_script(provider, project, outline, characters, candidates[0]["content"], episode_number)
+            generated, meta = await generate_episode_script(
+                provider,
+                project,
+                outline,
+                characters,
+                candidates[0]["content"],
+                episode_number,
+                continuity_ledger=_continuity_ledger_through(project, episode_number),
+            )
             resource = repository.create_episode_script(project_id, episode_number, generated, job.job_id, meta)
         result = {"action": action, "episode_id": resource["id"], "episode_number": episode_number, "brief_id": brief["id"]}
 

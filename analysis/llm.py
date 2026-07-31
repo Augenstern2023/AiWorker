@@ -41,6 +41,8 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         base_url: str,
         api_key: str,
         model: str,
+        fallback_model: str = "",
+        fallback_provider: LLMProvider | None = None,
         provider_name: str = "openai-compatible",
         wire_api: str = "chat_completions",
         reasoning_effort: str = "",
@@ -53,6 +55,8 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
+        self.fallback_model = fallback_model.strip()
+        self.fallback_provider = fallback_provider
         self.provider_name = provider_name
         self.wire_api = wire_api
         self.reasoning_effort = reasoning_effort
@@ -66,9 +70,10 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         result = await self.complete_json(build_video_analysis_messages(payload))
         return normalize_llm_analysis(result, provider=self.provider_name)
 
-    async def complete_json(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
+    async def complete_json(self, messages: List[Dict[str, str]]) -> Any:
         result = parse_json_object(await self.complete_text(messages, json_mode=True))
-        result["provider"] = self.provider_name
+        if isinstance(result, dict):
+            result["provider"] = self.provider_name
         return result
 
     async def complete_text(self, messages: List[Dict[str, str]], json_mode: bool = False) -> str:
@@ -77,22 +82,37 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         if not self.api_key:
             raise LLMError("LLM_API_KEY is required.")
 
+        try:
+            return await self._complete_text_with_model(self.model, messages, json_mode)
+        except Exception as exc:
+            if self.fallback_model and self.fallback_model != self.model and is_model_unavailable_exception(exc):
+                try:
+                    return await self._complete_text_with_model(self.fallback_model, messages, json_mode)
+                except Exception as fallback_exc:
+                    if self.fallback_provider and is_model_unavailable_exception(fallback_exc):
+                        return await self.fallback_provider.complete_text(messages, json_mode)
+                    raise
+            if self.fallback_provider and is_model_unavailable_exception(exc):
+                return await self.fallback_provider.complete_text(messages, json_mode)
+            raise
+
+    async def _complete_text_with_model(self, model: str, messages: List[Dict[str, str]], json_mode: bool) -> str:
         if self.wire_api == "responses":
             try:
-                return await self._complete_responses_text(messages, json_mode)
+                return await self._complete_responses_text(messages, json_mode, model)
             except LLMError:
                 # Some OpenAI-compatible gateways expose /responses but return an empty body.
                 # Their Chat Completions endpoint remains compatible with the same request.
-                return await self._complete_chat_completions_text(messages, json_mode)
-        return await self._complete_chat_completions_text(messages, json_mode)
+                return await self._complete_chat_completions_text(messages, json_mode, model)
+        return await self._complete_chat_completions_text(messages, json_mode, model)
 
-    async def _complete_responses_text(self, messages: List[Dict[str, str]], json_mode: bool) -> str:
+    async def _complete_responses_text(self, messages: List[Dict[str, str]], json_mode: bool, model: str | None = None) -> str:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
         request_body = build_responses_request_body(
-            self.model,
+            model or self.model,
             messages,
             json_mode=json_mode,
             reasoning_effort=self.reasoning_effort,
@@ -105,16 +125,18 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             raise LLMError("Responses API returned an empty or non-JSON response.") from exc
         return parse_responses_text(payload)
 
-    async def _complete_chat_completions_text(self, messages: List[Dict[str, str]], json_mode: bool) -> str:
+    async def _complete_chat_completions_text(self, messages: List[Dict[str, str]], json_mode: bool, model: str | None = None) -> str:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
         request_body = {
-            "model": self.model,
+            "model": model or self.model,
             "messages": messages,
             "temperature": 0.2,
         }
+        if self.reasoning_effort:
+            request_body["reasoning_effort"] = self.reasoning_effort
         if json_mode:
             request_body["response_format"] = {"type": "json_object"}
         endpoint = f"{self.base_url}/chat/completions"
@@ -155,6 +177,19 @@ def is_retryable_llm_exception(exc: Exception) -> bool:
     return isinstance(exc, httpx.RequestError)
 
 
+def is_model_unavailable_exception(exc: Exception) -> bool:
+    if is_retryable_llm_exception(exc):
+        return True
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    if int(exc.response.status_code) == 404:
+        return True
+    if int(exc.response.status_code) not in {400, 422}:
+        return False
+    message = exc.response.text.lower()
+    return "model" in message and any(marker in message for marker in ("not found", "unavailable", "does not exist", "unsupported"))
+
+
 def provider_defaults(provider: str) -> Dict[str, str]:
     if provider == "sub2api":
         return {
@@ -190,6 +225,7 @@ def resolve_llm_settings(config_module: Any, prefix: str = "LLM") -> Dict[str, s
         "base_url": str(getattr(config_module, f"{prefix}_BASE_URL", "") or getattr(config_module, "LLM_BASE_URL", "") or defaults["base_url"]),
         "api_key": api_key,
         "model": str(getattr(config_module, f"{prefix}_MODEL", "") or getattr(config_module, "LLM_MODEL", "") or defaults["model"]),
+        "fallback_model": str(getattr(config_module, f"{prefix}_FALLBACK_MODEL", "") or getattr(config_module, "LLM_FALLBACK_MODEL", "")),
         "wire_api": str(getattr(config_module, f"{prefix}_WIRE_API", "") or getattr(config_module, "LLM_WIRE_API", "") or defaults["wire_api"]),
         "reasoning_effort": str(
             getattr(config_module, f"{prefix}_REASONING_EFFORT", "")
@@ -199,12 +235,53 @@ def resolve_llm_settings(config_module: Any, prefix: str = "LLM") -> Dict[str, s
     }
 
 
+def resolve_secondary_llm_settings(config_module: Any, prefix: str = "LLM") -> Dict[str, str] | None:
+    secondary_prefix = f"{prefix}_SECONDARY"
+
+    def setting(name: str) -> str:
+        return str(
+            getattr(config_module, f"{secondary_prefix}_{name}", "")
+            or getattr(config_module, f"LLM_SECONDARY_{name}", "")
+            or ""
+        )
+
+    provider = setting("PROVIDER")
+    if not provider:
+        return None
+    defaults = provider_defaults(provider)
+    env_key = setting("ENV_KEY") or defaults["env_key"]
+    api_key = setting("API_KEY") or os.getenv(env_key, "")
+    return {
+        "provider": provider,
+        "base_url": setting("BASE_URL") or defaults["base_url"],
+        "api_key": api_key,
+        "model": setting("MODEL") or defaults["model"],
+        "fallback_model": setting("FALLBACK_MODEL"),
+        "wire_api": setting("WIRE_API") or defaults["wire_api"],
+        "reasoning_effort": setting("REASONING_EFFORT") or defaults["reasoning_effort"],
+    }
+
+
 def create_llm_provider_from_config(config_module: Any, prefix: str = "LLM") -> OpenAICompatibleLLMProvider:
     settings = resolve_llm_settings(config_module, prefix=prefix)
+    secondary_settings = resolve_secondary_llm_settings(config_module, prefix=prefix)
+    secondary_provider = None
+    if secondary_settings and secondary_settings["api_key"]:
+        secondary_provider = OpenAICompatibleLLMProvider(
+            base_url=secondary_settings["base_url"],
+            api_key=secondary_settings["api_key"],
+            model=secondary_settings["model"],
+            fallback_model=secondary_settings["fallback_model"],
+            provider_name=secondary_settings["provider"],
+            wire_api=secondary_settings["wire_api"],
+            reasoning_effort=secondary_settings["reasoning_effort"],
+        )
     return OpenAICompatibleLLMProvider(
         base_url=settings["base_url"],
         api_key=settings["api_key"],
         model=settings["model"],
+        fallback_model=settings["fallback_model"],
+        fallback_provider=secondary_provider,
         provider_name=settings["provider"],
         wire_api=settings["wire_api"],
         reasoning_effort=settings["reasoning_effort"],

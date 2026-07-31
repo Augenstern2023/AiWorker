@@ -52,7 +52,7 @@ def assess_similarity_risk(source: dict[str, Any], blueprint: dict[str, Any]) ->
 async def complete_with_one_repair(
     provider: Any,
     messages: list[dict[str, str]],
-    validator: Callable[[dict[str, Any]], Any],
+    validator: Callable[[Any], Any],
 ) -> tuple[Any, dict[str, Any]]:
     last_error: Exception | None = None
     for attempt in range(2):
@@ -60,7 +60,10 @@ async def complete_with_one_repair(
         try:
             payload = await provider.complete_json(current)
             return validator(payload), {
-                "provider": str(payload.get("provider") or getattr(provider, "provider_name", "")),
+                "provider": str(
+                    (payload.get("provider") if isinstance(payload, dict) else "")
+                    or getattr(provider, "provider_name", "")
+                ),
                 "repair_attempted": bool(attempt),
             }
         except Exception as exc:

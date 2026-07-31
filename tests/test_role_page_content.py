@@ -10,6 +10,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from playwright.sync_api import sync_playwright
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -171,6 +173,127 @@ def test_planning_projects_use_real_stage_routes():
     assert not Path("templates/planning/directions.html").exists()
     assert "仿写方向" not in brief
     assert 'href="/planning/projects/{{ project_id }}/characters"' in brief
+
+
+def test_project_brief_uses_multiline_controls_for_generated_long_text():
+    blueprint = _read("templates/common/workspace/project_blueprints.html")
+
+    fields = (
+        ("creativeWorkspace.project.target_audience", 16),
+        ("selectedProjectBlueprint().content.protagonist", 24),
+        ("selectedProjectBlueprint().content.background", 24),
+        ("selectedProjectBlueprint().content.audience", 24),
+    )
+    for field, characters_per_line in fields:
+        assert re.search(
+            rf'<textarea[^>]+:rows="textareaRows\({re.escape(field)}, {characters_per_line}\)"[^>]+'
+            rf'x-model="{re.escape(field)}"',
+            blueprint,
+        )
+        assert f'<input class="form-control form-control-sm" x-model="{field}"' not in blueprint
+
+
+def test_project_brief_long_text_controls_wrap_without_clipping():
+    blueprint = _read("templates/common/workspace/project_blueprints.html")
+    workspace_css = _read("static/css/workspaces.css")
+    bootstrap_css = _read("static/css/bootstrap.min.css")
+    markup = blueprint.replace(
+        '<template x-if="selectedProjectBlueprint()"><div class="border-top pt-3">',
+        '<div class="border-top pt-3">',
+    ).replace("</div></template>", "</div>")
+    fields = (
+        ("creativeWorkspace.project.target_audience", 16),
+        ("selectedProjectBlueprint().content.protagonist", 24),
+        ("selectedProjectBlueprint().content.background", 24),
+        ("selectedProjectBlueprint().content.audience", 24),
+    )
+    value = "女性向短剧观众，偏好情感成长、家庭关系与高密度剧情冲突。" * 3
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1600, "height": 900})
+        page.set_content(f"<style>{bootstrap_css}{workspace_css}</style>{markup}")
+        for field, characters_per_line in fields:
+            control = page.locator(f'textarea[x-model="{field}"]')
+            rows = max(2, (len(value) + characters_per_line - 1) // characters_per_line)
+            control.evaluate("(element, rows) => element.rows = rows", rows)
+            control.fill(value)
+            assert control.evaluate(
+                "element => element.scrollHeight <= element.clientHeight + 1"
+            )
+        page.screenshot(path=str(ROOT / ".runtime/qa/brief-long-text-controls.png"))
+        browser.close()
+
+
+def test_project_beats_uses_multiline_controls_for_long_content():
+    beats = _read("templates/common/workspace/project_beats.html")
+
+    fields = (
+        ("beat.scene", "beat.scene"),
+        ("listText(beat.characters)", "beat.characters"),
+        ("beat.goal", "beat.goal"),
+        ("beat.obstacle", "beat.obstacle"),
+        ("beat.emotion_change", "beat.emotion_change"),
+        ("beat.state_change", "beat.state_change"),
+        ("beat.cost", "beat.cost"),
+        ("beat.opposition_tactic", "beat.opposition_tactic"),
+        ("beat.turn", "beat.turn"),
+        ("beat.hook", "beat.hook"),
+    )
+    for row_source, field in fields:
+        assert re.search(
+            rf'<textarea[^>]+:rows="textareaRows\({re.escape(row_source)}, 10\)"[^>]+',
+            beats,
+        )
+        assert field in beats
+        assert f'<input class="form-control form-control-sm" x-model="{field}"' not in beats
+
+
+def test_project_beats_exposes_story_change_cost_and_continuity_ledger():
+    beats = _read("templates/common/workspace/project_beats.html")
+
+    for label, field in (
+        ("局面变化", "beat.state_change"),
+        ("代价", "beat.cost"),
+        ("对抗策略", "beat.opposition_tactic"),
+    ):
+        assert label in beats
+        assert field in beats
+    assert "连续性变更" in beats
+    assert "连续性账本" in beats
+
+
+def test_project_beats_long_text_controls_wrap_without_clipping():
+    beats = _read("templates/common/workspace/project_beats.html")
+    workspace_css = _read("static/css/workspaces.css")
+    bootstrap_css = _read("static/css/bootstrap.min.css")
+    markup = (
+        beats.replace('<template x-if="selectedProjectBeats()"><div>', "<div>")
+        .replace(
+            '<template x-for="beat in selectedProjectBeats().content.beats" :key="beat.order"><tr>',
+            "<tr>",
+        )
+        .replace("</tr></template>", "</tr>")
+        .replace("</div></template>", "</div>")
+    )
+    value = "主角在高压环境中做出艰难选择，关系与目标同时受到阻力。" * 3
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 2048, "height": 900})
+        page.set_content(f"<style>{bootstrap_css}{workspace_css}</style>{markup}")
+        controls = page.locator("tbody textarea")
+        assert controls.count() == 10
+        rows = max(2, (len(value) + 9) // 10)
+        for index in range(controls.count()):
+            control = controls.nth(index)
+            control.evaluate("(element, rows) => element.rows = rows", rows)
+            control.fill(value)
+            assert control.evaluate(
+                "element => element.scrollHeight <= element.clientHeight + 1"
+            )
+        page.screenshot(path=str(ROOT / ".runtime/qa/beats-long-text-controls.png"))
+        browser.close()
 
 
 def test_writing_outlines_link_each_episode_to_beats_route():

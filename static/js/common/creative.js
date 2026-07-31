@@ -313,6 +313,15 @@ window.aiworkerModules.push(() => ({
                 riskLabel(level) { return {low: '低', medium: '中', high: '高'}[level] || level || '-'; },
                 riskBadgeClass(level) { return level === 'high' ? 'bg-danger' : level === 'medium' ? 'bg-warning text-dark' : 'bg-success'; },
                 listText(value) { return Array.isArray(value) ? value.join('\n') : String(value || ''); },
+                continuityStatusLabel(status) {
+                    const code = String(status || '').trim().toLowerCase();
+                    return {
+                        active: '有效', blocked: '受阻', weakened: '削弱', aborted: '已中止',
+                        low: '低', discovered: '已发现', established: '已确立', disclosed: '已公开',
+                        confirmed: '已确认', hidden: '隐藏', lost: '遗失', destroyed: '已毁坏',
+                        transferred: '已转移', revoked: '已撤销', resolved: '已解决',
+                    }[code] || status || '-';
+                },
                 setListField(target, key, value) { target[key] = String(value || '').split(/[,，\n]/).map(item => item.trim()).filter(Boolean); },
                 textareaRows(value, charactersPerLine = 28) {
                     const lines = String(value || '').split('\n');
@@ -496,10 +505,27 @@ window.aiworkerModules.push(() => ({
                 },
 
                 selectedProjectScript() {
-                    const items = (this.creativeWorkspace.project?.episodes || [])
-                        .filter(item => item.stage === 'script' && Number(item.episode_number) === Number(this.creativeWorkspace.selectedEpisode))
-                        .sort((a, b) => Number(b.version) - Number(a.version));
-                    return items[0] || null;
+                    return this.projectEpisodeScript(this.creativeWorkspace.selectedEpisode);
+                },
+
+                scriptWorkspaceEmptyMessage() {
+                    const currentBeats = this.lockedProjectEpisodeBeats(
+                        this.creativeWorkspace.selectedEpisode
+                    );
+                    if (!currentBeats) {
+                        return '请先生成并完成当前集 Beats，再生成场次剧本';
+                    }
+                    const episode = Number(this.creativeWorkspace.selectedEpisode);
+                    const olderScript = (this.creativeWorkspace.project?.episodes || [])
+                        .filter(item => item.stage === 'script'
+                            && Number(item.episode_number) === episode
+                            && (Number(item.upstream_refs?.beats_id) !== Number(currentBeats.id)
+                                || Number(item.upstream_refs?.beats_version) !== Number(currentBeats.version)))
+                        .sort((a, b) => Number(b.version) - Number(a.version))[0];
+                    const olderScriptBeatsVersion = olderScript?.upstream_refs?.beats_version;
+                    return olderScript
+                        ? `当前仅有基于 Beats v${olderScriptBeatsVersion || '未知'} 的旧场次剧本；当前 Beats 为 v${currentBeats.version}，请重新生成后再完成并锁定`
+                        : '当前集尚未生成场次剧本';
                 },
 
                 lockedProjectEpisodeBeats(episodeNumber) {
@@ -510,6 +536,46 @@ window.aiworkerModules.push(() => ({
                             && item.upstream_refs?.outline_batch_id === project?.outline_batch_id
                             && ['locked', 'approved'].includes(item.status))
                         .sort((a, b) => Number(b.version) - Number(a.version))[0] || null;
+                },
+
+                continuityUpdatesText(beat) {
+                    return JSON.stringify(beat.continuity_updates || [], null, 2);
+                },
+
+                setContinuityUpdates(beat, value) {
+                    try {
+                        const updates = JSON.parse(value);
+                        if (!Array.isArray(updates)) throw new Error('连续性变更必须是数组');
+                        beat.continuity_updates = updates;
+                        this.creativeWorkspace.error = '';
+                    } catch (error) {
+                        this.creativeWorkspace.error = error.message || '连续性变更必须是合法 JSON 数组';
+                    }
+                },
+
+                projectContinuityLedger() {
+                    const latestByEpisode = new Map();
+                    (this.creativeWorkspace.project?.episodes || [])
+                        .filter(item => item.stage === 'beats'
+                            && item.upstream_refs?.outline_batch_id === this.creativeWorkspace.project?.outline_batch_id)
+                        .forEach(item => {
+                            const current = latestByEpisode.get(Number(item.episode_number));
+                            if (!current || Number(item.version) > Number(current.version)) {
+                                latestByEpisode.set(Number(item.episode_number), item);
+                            }
+                        });
+                    const ledger = new Map();
+                    [...latestByEpisode.values()]
+                        .sort((a, b) => Number(a.episode_number) - Number(b.episode_number))
+                        .forEach(item => (item.content?.beats || [])
+                            .sort((a, b) => Number(a.order) - Number(b.order))
+                            .forEach(beat => (beat.continuity_updates || []).forEach(update => {
+                                if (update?.kind && update?.name) ledger.set(`${update.kind}:${update.name}`, update);
+                            })));
+                    return [...ledger.values()].map(item => ({
+                        ...item,
+                        status: this.continuityStatusLabel(item.status),
+                    }));
                 },
 
                 currentEpisodeHasLockedBeats() {
@@ -931,7 +997,7 @@ window.aiworkerModules.push(() => ({
                 async createBlankCharacterBatch() {
                     const projectId = this.creativeWorkspace.project.id;
                     const task = await this.resolveCreativeWorkflowTask('characters', projectId);
-                    const blank = {name: '新角色', age_range: '', identity: '', external_tags: [], desire: '', secret: '', growth_arc: '', dialogue_style: '', appearance_prompt: '', voice_prompt: ''};
+                    const blank = {name: '新角色', age_range: '', identity: '', external_tags: [], desire: '', secret: '', growth_arc: '', dialogue_style: '', appearance_prompt: '', voice_prompt: '', action_goal: '', fear_of_loss: '', behavioral_contradiction: '', pressure_response: '', bottom_line: ''};
                     const res = await aiworkerApi.request(`/api/creative/projects/${projectId}/characters`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({characters: [blank], relationships: [], workflow_task_id: task.id})});
                     const data = await res.json();
                     if (!res.ok) { this.creativeWorkspace.error = data.detail || '创建空白人物版本失败'; return; }

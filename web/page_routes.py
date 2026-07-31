@@ -65,5 +65,20 @@ PAGE_ACCESS_GRANT_ROUTES: dict[str, str] = {
 }
 
 
+# Project owners preview generated project content from the review workspace
+# without being granted either authoring workspace.
+PAGE_ACCESS_ADDITIONAL_GRANT_ROUTES: dict[str, tuple[str, ...]] = {
+    "/planning/projects/{project_id}/brief": ("/review/projects",),
+    "/planning/projects/{project_id}/characters": ("/review/projects",),
+    "/writing/projects/{project_id}/outlines": ("/review/projects",),
+    "/writing/projects/{project_id}/episodes/{episode_number}/beats": (
+        "/review/projects",
+    ),
+    "/writing/projects/{project_id}/episodes/{episode_number}/scripts": (
+        "/review/projects",
+    ),
+}
+
+
 # These obsolete task pages remain registered endpoints but are not grantable.
 DENIED_PAGE_ROUTES = frozenset({"/tasks", "/planning/tasks", "/writing/tasks"})

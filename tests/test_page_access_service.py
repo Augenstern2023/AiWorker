@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from identity.schema import Principal
@@ -19,6 +21,9 @@ from web.page_routes import (
     PAGE_ACCESS_GRANT_ROUTES,
     PAGE_ROUTES,
 )
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeNavigationRepository:
@@ -192,6 +197,25 @@ def test_dynamic_project_pages_inherit_their_static_workspace_whitelist() -> Non
     assert service.can_open_page(
         principal, "/writing/projects/project-7/outlines"
     ) is False
+
+
+def test_managed_project_grant_opens_its_creative_brief_preview() -> None:
+    repository = FakeNavigationRepository()
+    repository.access_by_route["/review/projects"] = {"user-1"}
+    service = PageAccessService(repository)
+
+    assert service.can_open_page(
+        _principal(), "/planning/projects/project-7/brief"
+    ) is True
+
+
+def test_managed_project_preview_returns_generated_project_content_read_only() -> None:
+    source = (ROOT / "creative/api.py").read_text(encoding="utf-8")
+
+    assert '"project.read.managed" in principal.permissions' in source
+    assert 'viewed["preview_only"] = True' in source
+    assert "def has_managed_project_preview_access" in source
+    assert "managed_preview=has_managed_project_preview_access(request, principal)" in source
 
 
 def test_system_administrator_can_access_all_pages_even_when_globally_disabled() -> None:

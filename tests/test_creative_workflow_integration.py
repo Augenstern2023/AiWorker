@@ -281,6 +281,19 @@ def test_creative_completion_locks_each_later_stage_without_an_approval(
     assert workflow.list_task_submissions(task["id"]) == []
 
 
+def test_scene_script_completion_uses_script_episode_progress() -> None:
+    source = (Path(__file__).resolve().parents[1] / "workflow/transition_service.py").read_text(
+        encoding="utf-8"
+    )
+    completion = source.split("def complete_creative_without_review", 1)[1].split(
+        "def migrate_pending_creative_approvals", 1
+    )[0]
+
+    assert 'if resource_type == "beats"' in completion
+    assert "self.creative_adapter.beats_episode_progress(resource_id)" in completion
+    assert "self.creative_adapter.script_episode_progress(resource_id)" in completion
+
+
 def test_pending_brief_approval_is_migrated_to_a_locked_version(environment) -> None:
     _, workflow, creative, adapter, transitions, admin, owner, actors = environment
     resource_id, _ = _seed_resources(creative)["brief"]

@@ -105,7 +105,7 @@ function localDateString(date = new Date()) {
                 topicLibrary: {platform: '', lifecycleStatus: '', category: '', minScore: '', hasLocked: '', items: [], loading: false, error: '', breakdown: null},
                 adoptionNotice: {success: true, title: '', message: ''},
                 adoptionNoticeModal: null,
-                generatedContentPreview: {topic: null, project: null, stage: '', versions: [], selectedResourceId: '', snapshot: null, loading: false, error: ''},
+                generatedContentPreview: {topic: null, project: null, stage: '', versions: [], selectedVersion: 0, selectedResourceId: '', snapshot: null, loading: false, error: ''},
                 breakdownEditor: {source: '', title: '', record: null, content: {}, fieldGuide: [], saving: false, error: ''},
                 breakdownGeneration: {topic: null, source: '', jobId: '', status: '', message: '', progress: {}, coverage: [], requiresTranscription: false, notifiedStatus: '', error: '', startedAt: 0, elapsedSeconds: 0},
                 breakdownGenerationJobs: {},

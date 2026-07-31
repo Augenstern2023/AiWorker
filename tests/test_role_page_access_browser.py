@@ -35,7 +35,7 @@ def test_role_page_authorization_modal_saves_selected_routes() -> None:
         window.calls.push({url, options});
         if (url.startsWith('/api/admin/roles?')) return new Response(JSON.stringify([{
           id: 'role:writer', code: 'screenwriter', name: '编剧', description: '',
-          is_enabled: true, permissions: [], page_routes: ['/writing/projects']
+          is_enabled: true, is_system: true, permissions: [], page_routes: ['/writing/projects']
         }]), {status: 200});
         if (url === '/api/admin/permissions') return new Response('[]', {status: 200});
         if (url === '/api/admin/roles/page-catalog') return new Response(JSON.stringify([
@@ -76,6 +76,9 @@ def test_role_page_authorization_modal_saves_selected_routes() -> None:
             "element => getComputedStyle(element, '::before').content"
         )
         assert clone_icon_content not in {"none", "normal", '""'}
+        locked_status = page.locator('button[title="系统角色不可停用"]')
+        assert locked_status.is_disabled()
+        assert "bi-lock" in (locked_status.locator("i").get_attribute("class") or "")
 
         page.locator('button[title="页面授权"]').click()
         assert page.locator("#role-pages-modal").get_attribute("data-open") == "true"

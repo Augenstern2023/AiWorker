@@ -95,9 +95,11 @@ class TransitionService:
             next_task = None
             beats_progress = None
             if resource_type in {"beats", "script"}:
-                beats_progress = self.creative_adapter.beats_episode_progress(resource_id)
-                if resource_type == "script":
-                    beats_progress = self.creative_adapter.script_episode_progress(resource_id)
+                beats_progress = (
+                    self.creative_adapter.beats_episode_progress(resource_id)
+                    if resource_type == "beats"
+                    else self.creative_adapter.script_episode_progress(resource_id)
+                )
                 if not beats_progress["complete"]:
                     connection.execute(
                         update(workflow_tasks)

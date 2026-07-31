@@ -103,6 +103,12 @@ def has_creative_page_api_access(request: Request, principal: Principal) -> bool
     )
 
 
+def has_managed_project_preview_access(request: Request, principal: Principal) -> bool:
+    page_access_service = getattr(request.app.state, "page_access_service", None)
+    checker = getattr(page_access_service, "can_open_page", None)
+    return bool(callable(checker) and checker(principal, "/review/projects"))
+
+
 def creative_api_authorization(
     request: Request,
     principal: Principal = Depends(creative_api_principal),
@@ -224,6 +230,10 @@ _BEATS_FIELD_GUIDE = (
     ("行动目标", "当前节拍中人物希望立即达成的结果。"),
     ("阻力", "阻止人物达成行动目标的人、事件或条件。"),
     ("情绪变化", "节拍开始到结束时，人物情绪或关系状态的变化。"),
+    ("局面变化", "本节拍结束后不可逆改变的人物资源、关系、信息或选择。"),
+    ("代价", "人物为本节拍行动付出的具体损失或后果。"),
+    ("对抗策略", "对手在本节拍采用的具体施压或阻挠方式。"),
+    ("连续性变更", "关键道具或信息的持有人、地点、知情人和状态变化。"),
     ("转折", "改变当前局面、信息或人物选择的关键事件。"),
     ("结尾钩子", "推动观众继续观看下一个节拍或下一集的悬念。"),
     ("上游版本", "记录本集节拍依赖的 Brief、人物关系和分集大纲版本。"),
@@ -333,9 +343,17 @@ def build_beats_markdown(project: dict[str, Any], items: list[dict[str, Any]]) -
                 "",
                 f"- **情绪变化**：{beat.get('emotion_change') or '-'}",
                 "",
+                f"- **局面变化**：{beat.get('state_change') or '-'}",
+                "",
+                f"- **代价**：{beat.get('cost') or '-'}",
+                "",
+                f"- **对抗策略**：{beat.get('opposition_tactic') or '-'}",
+                "",
                 f"- **转折**：{beat.get('turn') or '-'}",
                 "",
                 f"- **结尾钩子**：{beat.get('hook') or '-'}",
+                "",
+                "- **连续性变更**：" + (json.dumps(beat.get("continuity_updates") or [], ensure_ascii=False) if beat.get("continuity_updates") else "-"),
                 "",
             ])
 
@@ -808,9 +826,19 @@ def build_creative_router(
             )
         return markdown.encode("utf-8"), "text/markdown; charset=utf-8"
 
-    def project_view(project: dict[str, Any], principal: Principal) -> dict[str, Any]:
+    def project_view(
+        project: dict[str, Any],
+        principal: Principal,
+        *,
+        managed_preview: bool = False,
+    ) -> dict[str, Any]:
         if principal.is_system_admin:
             return project
+        if managed_preview or "project.read.managed" in principal.permissions:
+            viewed = dict(project)
+            viewed["allowed_actions"] = []
+            viewed["preview_only"] = True
+            return viewed
         approved_statuses = {"approved", "locked", "brief_locked"}
         stage_permissions = {
             "blueprints": (("brief.read", "brief.read.approved"), "brief.read"),
@@ -1657,9 +1685,14 @@ def build_creative_router(
     @router.get("/projects/{project_id}")
     async def get_project(
         project_id: int,
+        request: Request,
         principal: Principal = Depends(current_principal),
     ):
-        return project_view(project_or_404(project_id), principal)
+        return project_view(
+            project_or_404(project_id),
+            principal,
+            managed_preview=has_managed_project_preview_access(request, principal),
+        )
 
     @router.get("/generated-resources")
     async def list_generated_resources(

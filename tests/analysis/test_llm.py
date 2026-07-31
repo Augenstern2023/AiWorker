@@ -18,8 +18,10 @@
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
 import asyncio
+import json
 
 import httpx
+import config
 
 from analysis.llm import (
     LLMError,
@@ -56,6 +58,24 @@ def test_parse_chat_completion_json_extracts_message_content():
     }
 
     assert parse_chat_completion_json(payload)["summary"] == "摘要"
+
+
+def test_complete_json_preserves_a_top_level_array_for_schema_specific_handling():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={"choices": [{"message": {"content": '[{"order": 1}]'}}]},
+        )
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://example.test/v1",
+        api_key="key",
+        model="test-model",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert asyncio.run(provider.complete_json([{"role": "user", "content": "test"}])) == [{"order": 1}]
 
 
 def test_normalize_llm_analysis_stabilizes_fields():
@@ -102,10 +122,10 @@ def test_responses_provider_falls_back_to_chat_completions_when_gateway_returns_
         wire_api="responses",
     )
 
-    async def unavailable(_messages, _json_mode):
+    async def unavailable(_messages, _json_mode, _model=None):
         raise LLMError("Responses API returned an empty or non-JSON response.")
 
-    async def chat_fallback(_messages, _json_mode):
+    async def chat_fallback(_messages, _json_mode, _model=None):
         return '{"ok": true}'
 
     monkeypatch.setattr(provider, "_complete_responses_text", unavailable)
@@ -147,6 +167,93 @@ def test_chat_completions_retries_transient_gateway_errors_before_succeeding():
     assert all("502" in reason for _, _, reason in retries)
 
 
+def test_chat_completions_passes_reasoning_effort_to_compatible_gateway():
+    request_body = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_body.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            request=request,
+            json={"choices": [{"message": {"content": '{"ok": true}'}}]},
+        )
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://example.test/v1",
+        api_key="key",
+        model="deepseek-v4-pro",
+        reasoning_effort="max",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert asyncio.run(provider.complete_text([{"role": "user", "content": "test"}], json_mode=True)) == '{"ok": true}'
+    assert request_body["reasoning_effort"] == "max"
+
+
+def test_chat_completions_falls_back_to_configured_model_when_primary_is_unavailable():
+    requested_models = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_models.append(json.loads(request.content)["model"])
+        if requested_models[-1] == "deepseek-v4-pro":
+            return httpx.Response(503, request=request, text="model temporarily unavailable")
+        return httpx.Response(
+            200,
+            request=request,
+            json={"choices": [{"message": {"content": '{"ok": true}'}}]},
+        )
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://example.test/v1",
+        api_key="key",
+        model="deepseek-v4-pro",
+        fallback_model="deepseek-v4-flash",
+        max_retries=0,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert asyncio.run(provider.complete_text([{"role": "user", "content": "test"}], json_mode=True)) == '{"ok": true}'
+    assert requested_models == ["deepseek-v4-pro", "deepseek-v4-flash"]
+
+
+def test_chat_completions_uses_secondary_provider_after_primary_fallback_is_unavailable():
+    primary_models = []
+    secondary_models = []
+
+    def primary_handler(request: httpx.Request) -> httpx.Response:
+        primary_models.append(json.loads(request.content)["model"])
+        return httpx.Response(503, request=request, text="model temporarily unavailable")
+
+    def secondary_handler(request: httpx.Request) -> httpx.Response:
+        secondary_models.append(json.loads(request.content)["model"])
+        return httpx.Response(
+            200,
+            request=request,
+            json={"choices": [{"message": {"content": '{"ok": true}'}}]},
+        )
+
+    secondary = OpenAICompatibleLLMProvider(
+        base_url="https://sub2api.example.test/v1",
+        api_key="sub2-key",
+        model="gpt-5.5",
+        max_retries=0,
+        transport=httpx.MockTransport(secondary_handler),
+    )
+    primary = OpenAICompatibleLLMProvider(
+        base_url="https://yunwu.example.test/v1",
+        api_key="yunwu-key",
+        model="deepseek-v4-pro",
+        fallback_model="deepseek-v4-flash",
+        fallback_provider=secondary,
+        max_retries=0,
+        transport=httpx.MockTransport(primary_handler),
+    )
+
+    assert asyncio.run(primary.complete_text([{"role": "user", "content": "test"}], json_mode=True)) == '{"ok": true}'
+    assert primary_models == ["deepseek-v4-pro", "deepseek-v4-flash"]
+    assert secondary_models == ["gpt-5.5"]
+
+
 def test_build_responses_request_body_sets_reasoning_effort():
     body = build_responses_request_body(
         "gpt-5.5",
@@ -177,3 +284,13 @@ def test_resolve_llm_settings_supports_sub2api_env(monkeypatch):
     assert settings["model"] == "gpt-5.5"
     assert settings["wire_api"] == "chat_completions"
     assert settings["reasoning_effort"] == "high"
+
+
+def test_rag_llm_uses_the_configured_global_text_model():
+    settings = resolve_llm_settings(config, prefix="RAG_LLM")
+
+    assert settings["provider"] == "sub2api"
+    assert settings["base_url"] == "http://54.92.99.171:8080/v1"
+    assert settings["model"] == "gemini-3.1-pro-high"
+    assert settings["fallback_model"] == ""
+    assert settings["reasoning_effort"] == "max"

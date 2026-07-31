@@ -143,7 +143,7 @@ window.aiworkerModules.push(() => ({
                 async openGeneratedContentPreview(topic) {
                     const stage = this.generatedLifecycleStage(topic?.lifecycle_status);
                     if (!stage || !topic?.lifecycle_project_id) return;
-                    this.generatedContentPreview = {topic, project: null, stage, versions: [], selectedResourceId: '', snapshot: null, loading: true, error: ''};
+                    this.generatedContentPreview = {topic, project: null, stage, versions: [], selectedVersion: 0, selectedResourceId: '', snapshot: null, loading: true, error: ''};
                     this.modal('generatedContentPreviewModal')?.show();
                     await this.loadGeneratedContentVersion();
                 },
@@ -171,6 +171,25 @@ window.aiworkerModules.push(() => ({
                     } finally {
                         state.loading = false;
                     }
+                },
+
+                generatedContentPreviewVersionOptions() {
+                    return [...new Set(this.generatedContentPreview.versions.map(item => Number(item.version) || 1))]
+                        .sort((left, right) => right - left);
+                },
+
+                filteredGeneratedContentVersions() {
+                    const selectedVersion = Number(this.generatedContentPreview.selectedVersion || 0);
+                    return selectedVersion
+                        ? this.generatedContentPreview.versions.filter(item => Number(item.version) === selectedVersion)
+                        : this.generatedContentPreview.versions;
+                },
+
+                filterGeneratedContentPreviewByVersion() {
+                    const versions = this.filteredGeneratedContentVersions();
+                    const selectedResourceId = String(this.generatedContentPreview.selectedResourceId || '');
+                    if (versions.some(item => String(item.resource_id) === selectedResourceId)) return;
+                    this.loadGeneratedContentVersion(versions[0]?.resource_id || '');
                 },
 
                 renderGeneratedContentPreview() {

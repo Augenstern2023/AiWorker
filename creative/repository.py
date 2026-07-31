@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from creative.script_service import validate_script
+from creative.script_service import validate_beats, validate_script
 
 
 class DuplicateTopicError(ValueError):
@@ -1273,8 +1273,11 @@ class CreativeRepository:
 
     def update_episode(self, episode_id: int, content: dict[str, Any]) -> dict[str, Any] | None:
         episode = self.get_episode(episode_id)
-        if episode and episode.get("stage") == "script":
-            content = validate_script(content)
+        if episode:
+            if episode.get("stage") == "beats":
+                content = validate_beats(content, allow_legacy=True)
+            elif episode.get("stage") == "script":
+                content = validate_script(content)
         return self._update_creative_item("creative_episodes", episode_id, content, episode=True)
 
     def lock_outline_batch(self, project_id: int, batch_id: str) -> dict[str, Any]:
@@ -1446,6 +1449,7 @@ class CreativeRepository:
         episode = self.get_episode(episode_id)
         if not episode or episode["stage"] != "beats":
             raise ValueError("单集 Beats 不存在")
+        validate_beats(episode.get("content") or {}, allow_legacy=True)
         now = time.time()
         with self._connect() as conn:
             conn.execute(

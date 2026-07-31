@@ -197,9 +197,9 @@
                     actionButton('bi-pencil', '编辑权限', 'btn-outline-light', () => openRoleEditor(role)),
                     ...(!teamMode ? [actionButton('bi-window-stack', '页面授权', 'btn-outline-info', () => openRolePages(role))] : []),
                     actionButton(
-                        role.is_enabled ? 'bi-toggle-off' : 'bi-toggle-on',
-                        role.is_enabled ? '停用角色' : '启用角色',
-                        role.is_enabled ? 'btn-outline-warning' : 'btn-outline-success',
+                        role.is_system ? 'bi-lock' : (role.is_enabled ? 'bi-toggle-off' : 'bi-toggle-on'),
+                        role.is_system ? '系统角色不可停用' : (role.is_enabled ? '停用角色' : '启用角色'),
+                        role.is_system ? 'btn-outline-secondary' : (role.is_enabled ? 'btn-outline-warning' : 'btn-outline-success'),
                         () => window.toggleRoleStatus(role),
                         role.is_system,
                     ),

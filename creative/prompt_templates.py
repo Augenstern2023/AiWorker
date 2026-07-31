@@ -12,8 +12,13 @@ import json
 from typing import Any
 
 
-PROMPT_TEMPLATE_VERSION = "phase4-v1"
+PROMPT_TEMPLATE_VERSION = "phase4-v2"
 BREAKDOWN_PROMPT_TEMPLATE_VERSION = "transcript-breakdown-v1"
+
+DRAMA_CONSTRAINTS = (
+    "每场冲突不得以重复的证据留存或口头反击收束；必须改变至少一项人物资源、关系、信息或选择。"
+    "反派每两集至少暴露一次软肋、分歧或真实代价；主角每集至少有一次不够正确但符合压力状态的反应。"
+)
 
 
 def _messages(system: str, payload: dict[str, Any]) -> list[dict[str, str]]:
@@ -37,7 +42,9 @@ def character_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
     return _messages(
         "根据已锁定 Brief 生成人物卡和人物关系。返回 characters 和 relationships 数组。"
         "人物包含 name、age_range、identity、external_tags、desire、secret、growth_arc、"
-        "dialogue_style、appearance_prompt、voice_prompt；关系包含 from、to、relation、conflict、change_arc。",
+        "dialogue_style、appearance_prompt、voice_prompt、action_goal、fear_of_loss、behavioral_contradiction、"
+        "pressure_response、bottom_line；关系包含 from、to、relation、conflict、change_arc。"
+        "为反派写出软肋、分歧或代价来源；为主角写出高压下可能做出的不够正确的选择。" + DRAMA_CONSTRAINTS,
         payload,
     )
 
@@ -54,15 +61,20 @@ def outline_messages(payload: dict[str, Any], start: int, end: int) -> list[dict
     return _messages(
         f"生成第 {start}-{end} 集分集大纲，返回 episodes 数组。每集必须包含 episode、core_event、"
         "conflict、character_progress、highlight、reversal、cliffhanger、estimated_seconds。"
-        "不得写完整正文或完整台词。",
+        "在 character_progress 中标明主角当集的压力反应，并跨两集安排反派的软肋、分歧或真实代价。"
+        "不得写完整正文或完整台词。" + DRAMA_CONSTRAINTS,
         payload,
     )
 
 
 def beats_messages(payload: dict[str, Any], episode_number: int) -> list[dict[str, str]]:
     return _messages(
-        f"为第 {episode_number} 集生成 Beats，返回 beats 数组。每项包含 order、scene、characters、"
-        "goal、obstacle、emotion_change、turn、hook。不得生成完整正文或完整台词。",
+        f"为第 {episode_number} 集生成 Beats。顶层必须返回 JSON 对象，严格使用 {{\"beats\": [...]}} 格式，"
+        "不得直接输出数组。beats 数组每项包含 order、scene、characters、"
+        "goal、obstacle、emotion_change、turn、hook、state_change、cost、opposition_tactic、continuity_updates。"
+        "每集只能生成 1-6 个 Beats，order 必须从 1 连续编号。continuity_updates 是数组；每项包含 "
+        "kind、name、event、holder、location、known_by、status，用于登记关键道具或关键信息的状态变化。"
+        "不得重复使用录音、报警或口头反击结束同类冲突。不得生成完整正文或完整台词。" + DRAMA_CONSTRAINTS,
         payload,
     )
 
@@ -73,7 +85,8 @@ def script_messages(payload: dict[str, Any], episode_number: int) -> list[dict[s
         "每场必须包含 sequence_no、scene_no、time_of_day、interior_exterior、location、props、characters、blocks。"
         "blocks 为数组，type 只能是 action、dialogue、voiceover、inner_voice、subtitle、cut；"
         "每个块必须有 text，dialogue 必须有 speaker，可选 modifier。"
-        "动作写可拍摄内容，台词单独写；不得输出 Markdown。",
+        "动作写可拍摄内容，台词单独写；必须遵守 continuity_ledger 与锁定 Beats，展示人物行为的后果，"
+        "不得用新增台词或道具绕开既定冲突代价；不得输出 Markdown。" + DRAMA_CONSTRAINTS,
         payload,
     )
 

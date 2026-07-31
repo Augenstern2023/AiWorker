@@ -47,7 +47,8 @@ def _validate_character_bundle(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("relationships 必须是数组")
     character_fields = {
         "name", "age_range", "identity", "external_tags", "desire", "secret",
-        "growth_arc", "dialogue_style", "appearance_prompt", "voice_prompt",
+        "growth_arc", "dialogue_style", "appearance_prompt", "voice_prompt", "action_goal",
+        "fear_of_loss", "behavioral_contradiction", "pressure_response", "bottom_line",
     }
     relationship_fields = {"from", "to", "relation", "conflict", "change_arc"}
     return {
@@ -80,14 +81,74 @@ def _validate_outline_chunk(payload: dict[str, Any], start: int, end: int) -> li
     return sorted(normalized, key=lambda item: int(item["episode"]))
 
 
-def _validate_beats(payload: dict[str, Any]) -> dict[str, Any]:
+_CONTINUITY_UPDATE_FIELDS = {
+    "kind", "name", "event", "holder", "location", "known_by", "status",
+}
+
+
+def _validate_continuity_updates(updates: Any) -> list[dict[str, Any]]:
+    if not isinstance(updates, list):
+        raise ValueError("连续性变更必须是数组")
+    normalized = []
+    for update in updates:
+        if not isinstance(update, dict):
+            raise ValueError("连续性变更必须是对象")
+        item = _require_fields(update, _CONTINUITY_UPDATE_FIELDS, "连续性变更")
+        if not all(str(item[key]).strip() for key in ("kind", "name", "event", "status")):
+            raise ValueError("连续性变更的类型、名称、事件和状态不能为空")
+        if not isinstance(item["known_by"], list):
+            raise ValueError("连续性变更的知情人必须是数组")
+        normalized.append(item)
+    return normalized
+
+
+def validate_beats(payload: dict[str, Any] | list[Any], *, allow_legacy: bool = False) -> dict[str, Any]:
+    if isinstance(payload, list):
+        payload = {"beats": payload}
     beats = payload.get("beats")
     if not isinstance(beats, list) or not beats:
         raise ValueError("beats 至少包含一个节拍")
-    fields = {"order", "scene", "characters", "goal", "obstacle", "emotion_change", "turn", "hook"}
-    normalized = [_require_fields(item, fields, "Beat") for item in beats]
+    enhanced_fields = {"state_change", "cost", "opposition_tactic", "continuity_updates"}
+    if allow_legacy and all(
+        isinstance(beat, dict) and not (enhanced_fields & set(beat))
+        for beat in beats
+    ):
+        return {"beats": [dict(beat) for beat in beats]}
+    if len(beats) > 6:
+        raise ValueError("每集 Beats 数量必须为 1-6 个")
+    fields = {
+        "order", "scene", "characters", "goal", "obstacle", "emotion_change", "turn", "hook",
+        "state_change", "cost", "opposition_tactic", "continuity_updates",
+    }
+    normalized = []
+    for beat in beats:
+        item = _require_fields(beat, fields, "Beat")
+        if not all(str(item[key]).strip() for key in ("scene", "goal", "obstacle", "state_change", "cost", "opposition_tactic")):
+            raise ValueError("Beat 的场景、目标、阻力、局面变化、代价和对抗策略不能为空")
+        if not isinstance(item["characters"], list):
+            raise ValueError("Beat 的出场人物必须是数组")
+        item["continuity_updates"] = _validate_continuity_updates(item["continuity_updates"])
+        normalized.append(item)
     normalized.sort(key=lambda item: int(item["order"]))
+    if [int(item["order"]) for item in normalized] != list(range(1, len(normalized) + 1)):
+        raise ValueError("Beat 序号必须从 1 连续编号")
     return {"beats": normalized}
+
+
+def build_continuity_ledger(episodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reduce ordered Beat updates into the latest state for tracked story entities."""
+    latest: dict[tuple[str, str], dict[str, Any]] = {}
+    for episode in sorted(episodes, key=lambda item: int(item.get("episode_number") or 0)):
+        beats = (episode.get("content") or {}).get("beats") or []
+        for beat in sorted(beats, key=lambda item: int(item.get("order") or 0)):
+            for update in beat.get("continuity_updates") or []:
+                if not isinstance(update, dict):
+                    continue
+                kind = str(update.get("kind") or "").strip()
+                name = str(update.get("name") or "").strip()
+                if kind and name:
+                    latest[(kind, name)] = dict(update)
+    return list(latest.values())
 
 
 def validate_script(payload: dict[str, Any]) -> dict[str, Any]:
@@ -191,17 +252,19 @@ async def generate_episode_beats(
     outline: dict[str, Any],
     characters: list[dict[str, Any]],
     episode_number: int,
+    continuity_ledger: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     payload = {
         "project": _project_context(project),
         "locked_outline": outline,
         "characters": characters,
         "episode_number": int(episode_number),
+        "continuity_ledger": continuity_ledger or [],
     }
     beats, meta = await complete_with_one_repair(
         provider,
         beats_messages(payload, int(episode_number)),
-        _validate_beats,
+        validate_beats,
     )
     meta["prompt_template_version"] = PROMPT_TEMPLATE_VERSION
     return beats, meta
@@ -214,11 +277,12 @@ async def generate_episode_script(
     characters: list[dict[str, Any]],
     beats: dict[str, Any],
     episode_number: int,
+    continuity_ledger: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     payload = {
         "project": _project_context(project), "locked_outline": outline,
         "characters": characters, "locked_beats": beats,
-        "episode_number": int(episode_number),
+        "episode_number": int(episode_number), "continuity_ledger": continuity_ledger or [],
     }
     script, meta = await complete_with_one_repair(
         provider, script_messages(payload, int(episode_number)), validate_script

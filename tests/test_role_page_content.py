@@ -262,6 +262,14 @@ def test_review_projects_lists_assigned_planning_projects_only():
     assert "/workflow`" not in script
 
 
+def test_review_project_name_opens_its_creative_brief():
+    script = _read("static/js/review/projects.js")
+
+    assert "project-name-button" in script
+    assert "`/planning/projects/${project.id}/brief`" in script
+    assert "/review/projects/${project.id}/members" not in script
+
+
 def test_admin_delivery_page_lists_generated_resources_without_delivery_registry():
     html = _read("templates/admin/deliveries.html")
     source = _read("static/js/admin/deliveries.js")

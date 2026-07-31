@@ -13,11 +13,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.testclient import TestClient
 
 from core.job import CrawlJob
-from creative.api import build_creative_router
+from creative.api import build_creative_router, creative_api_authorization
 from creative.delivery import DeliveryService, build_delivery_router
 from creative.repository import CreativeRepository
 from creative.workflow_adapter import CreativeWorkflowAdapter
@@ -36,12 +36,12 @@ class MutablePageAccessRepository:
         self.user_ids: set[str] = set()
         self.overrides: dict[tuple[str, str], bool] = {}
         self.role_routes: dict[str, set[str]] = {}
+        self.items = [{"route": "/admin/users", "is_enabled": True}]
 
     def list_items(self) -> list[dict[str, Any]]:
-        return [{"route": "/admin/users", "is_enabled": True}]
+        return list(self.items)
 
     def list_page_access_user_ids(self, route: str) -> set[str]:
-        assert route == "/admin/users"
         return set(self.user_ids)
 
     def get_page_access_override(self, user_id: str, route: str) -> bool | None:
@@ -167,6 +167,42 @@ def test_page_grant_enables_bound_user_management_apis_and_revokes_immediately(
 
     page_repository.user_ids.clear()
     assert client.get("/api/admin/users").status_code == 403
+
+
+def test_delivery_page_grant_bypasses_creative_generated_resource_permission() -> None:
+    principal = Principal(
+        user_id="delivery-user",
+        username="delivery-user",
+        display_name="Delivery User",
+        role_codes=("project_owner",),
+        permissions=frozenset(),
+        data_scope="task",
+        session_id="delivery-session",
+    )
+    page_repository = MutablePageAccessRepository()
+    page_repository.items = [{"route": "/admin/deliveries", "is_enabled": True}]
+    page_repository.role_routes["project_owner"] = {"/admin/deliveries"}
+    page_access_service = PageAccessService(
+        page_repository,
+        catalog=(
+            {
+                "page_route": "/admin/deliveries",
+                "api_routes": (("GET", "/api/creative/generated-resources"),),
+            },
+        ),
+    )
+    app = FastAPI()
+    app.state.page_access_service = page_access_service
+    request = Request({
+        "type": "http",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/api/creative/generated-resources",
+        "headers": [],
+        "app": app,
+    })
+
+    assert creative_api_authorization(request, principal) is principal
 
 
 def test_page_denial_overrides_legacy_wildcard_permission() -> None:

@@ -43,7 +43,12 @@ from creative.schema import (
     WorkflowLinkRequest,
 )
 from creative.topic_service import TopicService
-from creative.transcript_assets import find_downloaded_video_assets, find_transcript_bundle
+from creative.transcript_assets import (
+    find_downloaded_video_assets,
+    find_transcript_bundle,
+    render_transcript_bundle_text,
+    transcript_bundle_filename,
+)
 from audit.service import AuditService
 from runtime.job_manager import JobConflictError
 from identity.dependencies import current_principal, require_permission
@@ -1275,11 +1280,7 @@ def build_creative_router(
             )
         return {"project": project, "task": task}
 
-    @router.get("/topics/{topic_id}/transcripts")
-    async def preview_topic_transcripts(
-        topic_id: int,
-        _: Principal = Depends(require_permission("drama.transcript.read")),
-    ):
+    def topic_transcript_bundle_or_404(topic_id: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         topic = repository.get_topic(topic_id)
         if not topic:
             raise HTTPException(404, "topic not found")
@@ -1287,6 +1288,14 @@ def build_creative_router(
         episodes = bundle.get("episodes") or []
         if not episodes:
             raise HTTPException(404, "该剧目暂无可预览的转写")
+        return topic, episodes
+
+    @router.get("/topics/{topic_id}/transcripts")
+    async def preview_topic_transcripts(
+        topic_id: int,
+        _: Principal = Depends(require_permission("drama.transcript.read")),
+    ):
+        topic, episodes = topic_transcript_bundle_or_404(topic_id)
         return {
             "topic_id": topic_id,
             "title": topic["title"],
@@ -1302,6 +1311,23 @@ def build_creative_router(
                 for item in episodes
             ],
         }
+
+    @router.get("/topics/{topic_id}/transcripts/download")
+    async def download_topic_transcripts(
+        topic_id: int,
+        _: Principal = Depends(require_permission("drama.transcript.read")),
+    ):
+        topic, episodes = topic_transcript_bundle_or_404(topic_id)
+        body = render_transcript_bundle_text(topic["title"], episodes)
+        return Response(
+            content=body.encode("utf-8"),
+            media_type="text/plain; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename*=UTF-8\'\'{quote(transcript_bundle_filename(topic["title"], episodes))}'
+                )
+            },
+        )
 
     @router.get("/topics/{topic_id}/breakdowns")
     async def list_topic_breakdowns(

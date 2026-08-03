@@ -5,7 +5,7 @@
             <div class="modal-content">
                 <div class="modal-header">
                     <div>
-                        <h5 class="modal-title" id="topicTranscriptPreviewModalLabel"><i class="bi bi-file-earmark-text me-2"></i>剧目转写预览</h5>
+                        <h5 class="modal-title" id="topicTranscriptPreviewModalLabel"><i class="bi bi-file-earmark-text me-2"></i>剧目字幕转写预览</h5>
                         <div class="small text-muted mt-1"><span x-text="topicTranscriptPreview.topic?.title || ''"></span><span x-show="topicTranscriptPreview.episodes.length" x-text="` · 共 ${topicTranscriptPreview.episodes.length} 集`"></span></div>
 </div>
 
@@ -33,7 +33,7 @@
                         <pre class="file-preview-text topic-transcript-text" x-text="selectedTopicTranscript()?.text || ''"></pre>
                     </div>
                 </div>
-                <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button></div>
+                <div class="modal-footer"><button type="button" class="btn btn-outline-secondary me-auto" @click="downloadTopicTranscripts(topicTranscriptPreview.topic)" :disabled="!topicTranscriptPreview.episodes.length"><i class="bi bi-download me-1"></i>下载 TXT</button><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button></div>
             </div>
         </div>
     </div>

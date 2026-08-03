@@ -96,6 +96,21 @@ _CREATIVE_JOB_MONITOR: tuple[ApiRoute, ...] = _JOB_MONITOR + (
     ("POST", "/api/jobs/{job_id}/retry"),
 )
 
+_SCRIPT_REVIEWS: tuple[ApiRoute, ...] = (
+    ("GET", "/api/creative/projects"),
+    ("GET", "/api/creative/projects/{project_id}"),
+    ("GET", "/api/script-reviews"),
+    ("POST", "/api/script-reviews"),
+    ("GET", "/api/script-reviews/{review_id}"),
+    ("POST", "/api/script-reviews/{review_id}/confirm"),
+    ("POST", "/api/script-reviews/{review_id}/optimizations"),
+    ("GET", "/api/script-reviews/{review_id}/optimizations"),
+    ("GET", "/api/script-optimizations/{optimization_id}"),
+    ("GET", "/api/script-optimization-drafts/{draft_id}"),
+    ("POST", "/api/script-optimization-drafts/{draft_id}/accept"),
+    ("POST", "/api/script-optimization-drafts/{draft_id}/reject"),
+)
+
 _DRAMA_DOWNLOAD: tuple[ApiRoute, ...] = (
     ("POST", "/api/hongguo/drama/download/status"),
     ("POST", "/api/hongguo/drama/download/search"),
@@ -121,6 +136,7 @@ _SELECTION_CONTENT_WORKSPACE: tuple[ApiRoute, ...] = (
     ("GET", "/api/creative/topics/{topic_id}"),
     ("PATCH", "/api/creative/topics/{topic_id}"),
     ("GET", "/api/creative/topics/{topic_id}/transcripts"),
+    ("GET", "/api/creative/topics/{topic_id}/transcripts/download"),
     ("GET", "/api/creative/topics/{topic_id}/breakdowns"),
     ("POST", "/api/creative/breakdowns"),
     ("GET", "/api/creative/breakdowns/template"),
@@ -234,6 +250,7 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
     )
     + _CREATIVE_TASK_SUPPORT
     + _CREATIVE_JOB_MONITOR,
+    "/review/scripts": _SCRIPT_REVIEWS,
     "/review/projects": _PROJECT_MANAGEMENT,
     "/review/users": _TEAM_USERS,
     "/review/roles": _TEAM_ROLES,

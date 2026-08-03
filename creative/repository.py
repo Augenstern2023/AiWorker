@@ -211,6 +211,70 @@ class CreativeRepository:
                 BEFORE DELETE ON selection_stage_snapshots
                 BEGIN SELECT RAISE(ABORT, 'selection snapshots are immutable'); END;
             """)
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS script_reviews (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER,
+                    source_type TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    episode_numbers_json TEXT NOT NULL,
+                    source_fingerprint TEXT NOT NULL,
+                    source_payload_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    ai_verdict TEXT,
+                    report_json TEXT NOT NULL DEFAULT '{}',
+                    final_verdict TEXT,
+                    confirmation_note TEXT NOT NULL DEFAULT '',
+                    confirmed_by TEXT,
+                    confirmed_at REAL,
+                    created_by TEXT NOT NULL,
+                    job_id TEXT NOT NULL DEFAULT '',
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_script_reviews_visibility
+                ON script_reviews(project_id, created_by, created_at DESC);
+            """)
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS script_optimizations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    review_id INTEGER NOT NULL,
+                    project_id INTEGER NOT NULL,
+                    mode TEXT NOT NULL,
+                    source_fingerprint TEXT NOT NULL,
+                    selected_findings_json TEXT NOT NULL,
+                    target_episode_numbers_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    created_by TEXT NOT NULL,
+                    job_id TEXT NOT NULL DEFAULT '',
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_script_optimizations_review
+                ON script_optimizations(review_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS script_optimization_drafts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    optimization_id INTEGER NOT NULL,
+                    project_id INTEGER NOT NULL,
+                    episode_number INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    source_episode_id INTEGER,
+                    source_fingerprint TEXT NOT NULL,
+                    content_json TEXT NOT NULL,
+                    peer_draft_id INTEGER,
+                    status TEXT NOT NULL DEFAULT 'ready',
+                    accepted_episode_id INTEGER,
+                    accepted_by TEXT NOT NULL DEFAULT '',
+                    accepted_at REAL,
+                    rejection_note TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_script_optimization_drafts_task
+                ON script_optimization_drafts(optimization_id, episode_number, kind);
+            """)
             for table in (
                 "creative_projects",
                 "creative_breakdowns",
@@ -1307,6 +1371,7 @@ class CreativeRepository:
         job_id: str = "",
         generation_meta: dict[str, Any] | None = None,
         workflow_task_id: str | None = None,
+        update_project_status: bool = True,
     ) -> dict[str, Any]:
         project = self.get_project(project_id)
         if not project:
@@ -1351,10 +1416,11 @@ class CreativeRepository:
                     json.dumps(meta, ensure_ascii=False), workflow_task_id or project.get("workflow_task_id"), now, now,
                 ),
             )
-            conn.execute(
-                "UPDATE creative_projects SET status = 'beats_in_progress', updated_at = ? WHERE id = ?",
-                (now, project_id),
-            )
+            if update_project_status:
+                conn.execute(
+                    "UPDATE creative_projects SET status = 'beats_in_progress', updated_at = ? WHERE id = ?",
+                    (now, project_id),
+                )
         return self.get_episode(int(cursor.lastrowid)) or {}
 
     def create_episode_script(
@@ -1365,6 +1431,7 @@ class CreativeRepository:
         job_id: str = "",
         generation_meta: dict[str, Any] | None = None,
         workflow_task_id: str | None = None,
+        update_project_status: bool = True,
     ) -> dict[str, Any]:
         project = self.get_project(project_id)
         if not project:
@@ -1434,16 +1501,348 @@ class CreativeRepository:
                     json.dumps(meta, ensure_ascii=False), workflow_task_id or project.get("workflow_task_id"), now, now,
                 ),
             )
-            conn.execute(
-                "UPDATE creative_projects SET status = 'scripts_in_progress', updated_at = ? WHERE id = ?",
-                (now, project_id),
-            )
+            if update_project_status:
+                conn.execute(
+                    "UPDATE creative_projects SET status = 'scripts_in_progress', updated_at = ? WHERE id = ?",
+                    (now, project_id),
+                )
         return self.get_episode(int(cursor.lastrowid)) or {}
 
     def get_episode(self, episode_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM creative_episodes WHERE id = ?", (episode_id,)).fetchone()
         return self._episode(dict(row)) if row else None
+
+    def create_script_review(
+        self,
+        *,
+        source_type: str,
+        mode: str,
+        project_id: int | None,
+        episode_numbers: list[int],
+        source_fingerprint: str,
+        source_payload: dict[str, Any],
+        created_by: str,
+    ) -> dict[str, Any]:
+        now = time.time()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO script_reviews (
+                    project_id, source_type, mode, episode_numbers_json,
+                    source_fingerprint, source_payload_json, created_by, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    source_type,
+                    mode,
+                    json.dumps(episode_numbers, ensure_ascii=False),
+                    source_fingerprint,
+                    json.dumps(source_payload, ensure_ascii=False),
+                    created_by,
+                    now,
+                    now,
+                ),
+            )
+        return self.get_script_review(int(cursor.lastrowid)) or {}
+
+    def get_script_review(self, review_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM script_reviews WHERE id = ?", (review_id,)
+            ).fetchone()
+        return self._script_review(dict(row)) if row else None
+
+    def list_script_reviews(
+        self,
+        *,
+        created_by: str | None = None,
+        project_ids: set[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if created_by is not None:
+            clauses.append("created_by = ?")
+            params.append(created_by)
+        if project_ids is not None:
+            if project_ids:
+                placeholders = ",".join("?" for _ in project_ids)
+                clauses.append(f"project_id IN ({placeholders})")
+                params.extend(sorted(project_ids))
+            else:
+                clauses.append("project_id IS NULL")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM script_reviews{where} ORDER BY created_at DESC, id DESC",
+                params,
+            ).fetchall()
+        return [self._script_review(dict(row)) for row in rows]
+
+    def set_script_review_job(self, review_id: int, job_id: str) -> dict[str, Any]:
+        return self._update_script_review(review_id, {"job_id": job_id})
+
+    def start_script_review(self, review_id: int) -> dict[str, Any]:
+        return self._update_script_review(review_id, {"status": "running", "error": ""})
+
+    def complete_script_review(
+        self, review_id: int, report: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self._update_script_review(
+            review_id,
+            {
+                "status": "pending_confirmation",
+                "ai_verdict": str(report["ai_verdict"]),
+                "report_json": json.dumps(report, ensure_ascii=False),
+                "error": "",
+            },
+        )
+
+    def fail_script_review(self, review_id: int, error: str) -> dict[str, Any]:
+        return self._update_script_review(
+            review_id, {"status": "failed", "error": str(error)[:2000]}
+        )
+
+    def confirm_script_review(
+        self,
+        review_id: int,
+        final_verdict: str,
+        confirmation_note: str,
+        confirmed_by: str,
+        current_fingerprint: str,
+    ) -> dict[str, Any]:
+        if final_verdict not in {"通过", "建议修改"}:
+            raise ValueError("最终结论必须是通过或建议修改")
+        review = self.get_script_review(review_id)
+        if not review:
+            raise ValueError("审核记录不存在")
+        if review["source_fingerprint"] != current_fingerprint:
+            self.mark_script_review_stale_if_changed(review_id, current_fingerprint)
+            raise ValueError("剧本已更新，请重新审核后再确认")
+        if review["status"] != "pending_confirmation":
+            raise ValueError("该审核记录当前不能确认")
+        return self._update_script_review(
+            review_id,
+            {
+                "status": "confirmed",
+                "final_verdict": final_verdict,
+                "confirmation_note": confirmation_note.strip(),
+                "confirmed_by": confirmed_by,
+                "confirmed_at": time.time(),
+            },
+        )
+
+    def mark_script_review_stale_if_changed(
+        self, review_id: int, current_fingerprint: str
+    ) -> dict[str, Any]:
+        """Keep an unconfirmed project review from being presented as current."""
+        review = self.get_script_review(review_id)
+        if not review:
+            raise ValueError("审核记录不存在")
+        if (
+            review["source_type"] != "project"
+            or review["status"] != "pending_confirmation"
+            or review["source_fingerprint"] == current_fingerprint
+        ):
+            return review
+        return self._update_script_review(
+            review_id,
+            {"status": "stale", "error": "剧本已更新，请重新审核后再确认"},
+        )
+
+    def _update_script_review(
+        self, review_id: int, values: dict[str, Any]
+    ) -> dict[str, Any]:
+        assignments = [f"{key} = ?" for key in values]
+        params = [*values.values(), time.time(), review_id]
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE script_reviews SET {', '.join(assignments)}, updated_at = ? WHERE id = ?",
+                params,
+            )
+        return self.get_script_review(review_id) or {}
+
+    def create_script_optimization(
+        self,
+        *,
+        review_id: int,
+        project_id: int,
+        mode: str,
+        source_fingerprint: str,
+        selected_findings: list[dict[str, Any]],
+        target_episode_numbers: list[int],
+        created_by: str,
+    ) -> dict[str, Any]:
+        now = time.time()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO script_optimizations (
+                    review_id, project_id, mode, source_fingerprint,
+                    selected_findings_json, target_episode_numbers_json,
+                    created_by, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    review_id,
+                    project_id,
+                    mode,
+                    source_fingerprint,
+                    json.dumps(selected_findings, ensure_ascii=False),
+                    json.dumps(target_episode_numbers, ensure_ascii=False),
+                    created_by,
+                    now,
+                    now,
+                ),
+            )
+        return self.get_script_optimization(int(cursor.lastrowid)) or {}
+
+    def get_script_optimization(self, optimization_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM script_optimizations WHERE id = ?", (optimization_id,)
+            ).fetchone()
+            if not row:
+                return None
+            result = self._script_optimization(dict(row))
+            drafts = conn.execute(
+                "SELECT * FROM script_optimization_drafts WHERE optimization_id = ? ORDER BY episode_number, kind, id",
+                (optimization_id,),
+            ).fetchall()
+        result["drafts"] = [self._script_optimization_draft(dict(item)) for item in drafts]
+        return result
+
+    def list_script_optimizations(self, review_id: int) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM script_optimizations WHERE review_id = ? ORDER BY created_at DESC, id DESC",
+                (review_id,),
+            ).fetchall()
+        return [self.get_script_optimization(int(row["id"])) or {} for row in rows]
+
+    def start_script_optimization(self, optimization_id: int) -> dict[str, Any]:
+        return self._update_script_optimization(
+            optimization_id, {"status": "running", "error": ""}
+        )
+
+    def set_script_optimization_job(
+        self, optimization_id: int, job_id: str
+    ) -> dict[str, Any]:
+        return self._update_script_optimization(optimization_id, {"job_id": job_id})
+
+    def complete_script_optimization(
+        self, optimization_id: int, drafts: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        optimization = self.get_script_optimization(optimization_id)
+        if not optimization:
+            raise ValueError("优化任务不存在")
+        now = time.time()
+        with self._connect() as conn:
+            inserted: list[tuple[dict[str, Any], int]] = []
+            for draft in drafts:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO script_optimization_drafts (
+                        optimization_id, project_id, episode_number, kind,
+                        source_episode_id, source_fingerprint, content_json,
+                        peer_draft_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        optimization_id,
+                        int(draft.get("project_id") or optimization["project_id"]),
+                        int(draft["episode_number"]),
+                        str(draft["kind"]),
+                        draft.get("source_episode_id"),
+                        str(draft.get("source_fingerprint") or ""),
+                        json.dumps(draft.get("content") or {}, ensure_ascii=False),
+                        draft.get("peer_draft_id"),
+                        now,
+                        now,
+                    ),
+                )
+                inserted.append((draft, int(cursor.lastrowid)))
+            if optimization["mode"] == "structure":
+                pairs: dict[int, dict[str, int]] = {}
+                for draft, draft_id in inserted:
+                    kind = str(draft.get("kind") or "")
+                    if kind in {"beats", "script"}:
+                        pairs.setdefault(int(draft["episode_number"]), {})[kind] = draft_id
+                for pair in pairs.values():
+                    if "beats" in pair and "script" in pair:
+                        conn.execute(
+                            "UPDATE script_optimization_drafts SET peer_draft_id = ? WHERE id = ?",
+                            (pair["script"], pair["beats"]),
+                        )
+                        conn.execute(
+                            "UPDATE script_optimization_drafts SET peer_draft_id = ? WHERE id = ?",
+                            (pair["beats"], pair["script"]),
+                        )
+            conn.execute(
+                "UPDATE script_optimizations SET status = 'completed', error = '', updated_at = ? WHERE id = ?",
+                (now, optimization_id),
+            )
+        return self.get_script_optimization(optimization_id) or {}
+
+    def fail_script_optimization(
+        self, optimization_id: int, error: str
+    ) -> dict[str, Any]:
+        return self._update_script_optimization(
+            optimization_id, {"status": "failed", "error": str(error)[:2000]}
+        )
+
+    def get_script_optimization_draft(self, draft_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM script_optimization_drafts WHERE id = ?", (draft_id,)
+            ).fetchone()
+        return self._script_optimization_draft(dict(row)) if row else None
+
+    def accept_script_optimization_draft(
+        self, draft_id: int, episode_id: int, accepted_by: str
+    ) -> dict[str, Any]:
+        draft = self.get_script_optimization_draft(draft_id)
+        if not draft:
+            raise ValueError("优化草稿不存在")
+        if draft["status"] != "ready":
+            raise ValueError("该优化草稿当前不能采纳")
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE script_optimization_drafts
+                SET status = 'accepted', accepted_episode_id = ?, accepted_by = ?,
+                    accepted_at = ?, updated_at = ? WHERE id = ?
+                """,
+                (episode_id, accepted_by, time.time(), time.time(), draft_id),
+            )
+        return self.get_script_optimization_draft(draft_id) or {}
+
+    def reject_script_optimization_draft(
+        self, draft_id: int, rejection_note: str
+    ) -> dict[str, Any]:
+        draft = self.get_script_optimization_draft(draft_id)
+        if not draft:
+            raise ValueError("优化草稿不存在")
+        if draft["status"] != "ready":
+            raise ValueError("该优化草稿当前不能拒绝")
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE script_optimization_drafts SET status = 'rejected', rejection_note = ?, updated_at = ? WHERE id = ?",
+                (rejection_note.strip(), time.time(), draft_id),
+            )
+        return self.get_script_optimization_draft(draft_id) or {}
+
+    def _update_script_optimization(
+        self, optimization_id: int, values: dict[str, Any]
+    ) -> dict[str, Any]:
+        assignments = [f"{key} = ?" for key in values]
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE script_optimizations SET {', '.join(assignments)}, updated_at = ? WHERE id = ?",
+                [*values.values(), time.time(), optimization_id],
+            )
+        return self.get_script_optimization(optimization_id) or {}
 
     def lock_episode_beats(self, episode_id: int) -> dict[str, Any]:
         episode = self.get_episode(episode_id)
@@ -1556,6 +1955,26 @@ class CreativeRepository:
         row["content"] = json.loads(row.pop("content_json") or "{}")
         row["source_refs"] = json.loads(row.pop("source_refs_json") or "{}")
         row["generation_meta"] = json.loads(row.pop("generation_meta_json") or "{}")
+        return row
+
+    @staticmethod
+    def _script_review(row: dict[str, Any]) -> dict[str, Any]:
+        row["episode_numbers"] = json.loads(row.pop("episode_numbers_json") or "[]")
+        row["source_payload"] = json.loads(row.pop("source_payload_json") or "{}")
+        row["report"] = json.loads(row.pop("report_json") or "{}")
+        return row
+
+    @staticmethod
+    def _script_optimization(row: dict[str, Any]) -> dict[str, Any]:
+        row["selected_findings"] = json.loads(row.pop("selected_findings_json") or "[]")
+        row["target_episode_numbers"] = json.loads(
+            row.pop("target_episode_numbers_json") or "[]"
+        )
+        return row
+
+    @staticmethod
+    def _script_optimization_draft(row: dict[str, Any]) -> dict[str, Any]:
+        row["content"] = json.loads(row.pop("content_json") or "{}")
         return row
 
     @staticmethod

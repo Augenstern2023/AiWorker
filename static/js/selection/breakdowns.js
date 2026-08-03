@@ -48,6 +48,11 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
+                downloadTopicTranscripts(topic) {
+                    if (!topic?.id) return;
+                    window.open(`/api/creative/topics/${topic.id}/transcripts/download`, '_blank', 'noopener');
+                },
+
                 selectedTopicTranscript() {
                     return this.topicTranscriptPreview.episodes.find(
                         item => Number(item.episode_number) === Number(this.topicTranscriptPreview.selectedEpisode)

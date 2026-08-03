@@ -80,6 +80,34 @@ def test_build_creative_breakdown_worker_command():
     ]
 
 
+def test_build_creative_screenplay_review_worker_command():
+    assert build_worker_command(
+        ".runtime/jobs/script-review.json",
+        platform="creative",
+        crawler_type="screenplay_review",
+    ) == [
+        sys.executable,
+        "-m",
+        "screenplay_review.worker",
+        "--job-file",
+        ".runtime/jobs/script-review.json",
+    ]
+
+
+def test_build_creative_screenplay_optimization_worker_command():
+    assert build_worker_command(
+        ".runtime/jobs/script-optimization.json",
+        platform="creative",
+        crawler_type="screenplay_optimization",
+    ) == [
+        sys.executable,
+        "-m",
+        "screenplay_optimization.worker",
+        "--job-file",
+        ".runtime/jobs/script-optimization.json",
+    ]
+
+
 def test_build_data_file_operation_worker_command():
     assert build_worker_command(
         ".runtime/jobs/data-operation.json",

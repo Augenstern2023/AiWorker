@@ -22,6 +22,10 @@ def build_worker_command(job_file: str | Path, platform: str = "", crawler_type:
         return [sys.executable, "-m", "creative.breakdown_worker", "--job-file", str(job_file)]
     if platform == "creative" and crawler_type == "phase4_generate":
         return [sys.executable, "-m", "creative.phase4_worker", "--job-file", str(job_file)]
+    if platform == "creative" and crawler_type == "screenplay_review":
+        return [sys.executable, "-m", "screenplay_review.worker", "--job-file", str(job_file)]
+    if platform == "creative" and crawler_type == "screenplay_optimization":
+        return [sys.executable, "-m", "screenplay_optimization.worker", "--job-file", str(job_file)]
     if platform == "hg" and crawler_type == "drama_analysis":
         return [sys.executable, "-m", "agents.hongguo_drama_worker", "--job-file", str(job_file)]
     if platform == "hg" and crawler_type == "drama_download":

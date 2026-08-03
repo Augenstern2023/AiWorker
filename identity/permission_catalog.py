@@ -18,6 +18,7 @@ _PERMISSION_CODES = (
     "page.planning",
     "page.writing",
     "page.review",
+    "page.script_review",
     "page.team_management",
     "page.admin.delivery",
     "page.data_management",
@@ -77,6 +78,11 @@ _PERMISSION_CODES = (
     "script.edit",
     "script.version.create",
     "script.submit",
+    "script.review.generate",
+    "script.review.read",
+    "script.optimize.generate",
+    "script.optimize.read",
+    "script.optimize.accept",
     "workflow.pool.read",
     "workflow.claim",
     "workflow.task.update",
@@ -114,6 +120,7 @@ PERMISSIONS = {
     "page.planning": "访问创意策划",
     "page.writing": "访问编剧工作台",
     "page.review": "访问项目管理",
+    "page.script_review": "访问剧本审核",
     "page.team_management": "访问团队管理",
     "page.admin.delivery": "访问成果交付",
     "page.data_management": "访问数据管理",
@@ -173,6 +180,11 @@ PERMISSIONS = {
     "script.edit": "编辑场次剧本",
     "script.version.create": "创建场次剧本版本",
     "script.submit": "提交场次剧本",
+    "script.review.generate": "发起和确认剧本审核",
+    "script.review.read": "查看剧本审核报告",
+    "script.optimize.generate": "生成剧本优化草稿",
+    "script.optimize.read": "查看剧本优化草稿",
+    "script.optimize.accept": "采纳或拒绝剧本优化草稿",
     "workflow.pool.read": "查看任务池",
     "workflow.claim": "领取任务",
     "workflow.task.update": "更新任务状态",
@@ -283,6 +295,22 @@ NAVIGATION_CATALOG = (
         "label": "编剧项目",
         "route": "/writing/projects",
         "required_permission": "page.writing",
+        "sort_order": 10,
+    },
+    {
+        "id": "navigation:script-review",
+        "label": "审核中心",
+        "icon": "bi-clipboard-check",
+        "route": "/review/scripts",
+        "required_permission": "page.script_review",
+        "sort_order": 35,
+    },
+    {
+        "id": "navigation:script-review:scripts",
+        "parent_id": "navigation:script-review",
+        "label": "剧本审核",
+        "route": "/review/scripts",
+        "required_permission": "page.script_review",
         "sort_order": 10,
     },
     {
@@ -442,6 +470,9 @@ PERMISSION_DEPENDENCIES = {
     },
     "beats.edit": {"beats.read", "outline.read.approved", "page.writing"},
     "script.edit": {"script.read", "beats.read", "page.writing"},
+    "script.review.generate": {"script.review.read", "page.script_review"},
+    "script.optimize.generate": {"script.optimize.read", "page.script_review"},
+    "script.optimize.accept": {"script.optimize.read", "page.script_review"},
 
     "workflow.assign": {"workflow.read.managed", "project.read.managed", "page.review"},
     "export.create": {"approved_content.read", "page.admin.delivery"},
@@ -536,7 +567,8 @@ DEFAULT_ROLES = (
             relationship.read.approved outline.read outline.generate outline.edit
             outline.version.create outline.submit beats.read beats.generate beats.edit
             beats.version.create beats.submit script.read script.generate script.edit
-            script.version.create script.submit workflow.pool.read workflow.claim
+            script.version.create script.submit page.script_review script.review.generate
+            script.review.read script.optimize.generate script.optimize.read script.optimize.accept workflow.pool.read workflow.claim
             workflow.task.update job.create.writing job.read.project job.cancel.own""",
             "project",
         ),
@@ -547,7 +579,9 @@ DEFAULT_ROLES = (
         description="负责项目组织、任务分配、阶段流转与全局审计监督。",
         is_system=True,
         permissions=_scoped(
-            """page.review page.team_management project.read.managed project.manage project.member.manage
+            """page.review page.team_management page.script_review script.review.generate script.review.read
+            script.optimize.generate script.optimize.read script.optimize.accept
+            project.read.managed project.manage project.member.manage
             project.archive workflow.read.managed workflow.assign workflow.reassign
             workflow.reclaim workflow.cancel version.read.managed version.compare
             job.read.project page.data_management data.media.preview data.media.delete
@@ -579,7 +613,7 @@ DEFAULT_ROLE_PAGE_ROUTES: dict[str, frozenset[str]] = {
         }
     ),
     "creative_planner": frozenset({"/planning/projects"}),
-    "screenwriter": frozenset({"/writing/projects"}),
+    "screenwriter": frozenset({"/writing/projects", "/review/scripts"}),
     "project_owner": frozenset(
         {
             "/admin/roles",
@@ -591,6 +625,7 @@ DEFAULT_ROLE_PAGE_ROUTES: dict[str, frozenset[str]] = {
             "/selection/hits",
             "/selection/topics",
             "/selection/dramas",
+            "/review/scripts",
         }
     ),
 }

@@ -124,6 +124,7 @@ def test_topic_lifecycle_follows_the_complete_creation_flow(tmp_path: Path):
     assert downloaded["lifecycle_status"] == "downloaded"
     assert downloaded["lifecycle_label"] == "已下载 2 集"
     assert downloaded["downloaded_episode_count"] == 2
+    assert downloaded["transcript_episode_count"] == 2
 
     breakdown = repository.create_breakdown(topic["id"], {"title": topic["title"]}, {}, [])
     assert topic_payload(client)["lifecycle_status"] == "pending_breakdown"

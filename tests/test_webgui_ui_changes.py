@@ -120,6 +120,59 @@ def test_webgui_registers_creative_phase3_routes_and_page():
     assert '@change="changeCreativePlatform"' in html
 
 
+def test_webgui_registers_script_review_page_and_api():
+    paths = {route.path for route in WebGUI.app.routes}
+    html = _workspace_source()
+
+    assert "/review/scripts" in paths
+    assert "/api/script-reviews" in paths
+    assert "/api/script-reviews/{review_id}/confirm" in paths
+    assert "剧本审核" in html
+
+
+def test_script_review_page_renders_episode_and_cross_episode_findings():
+    script = _source("static/js/review/scripts.js")
+
+    assert "review.report.episode_reviews" in script
+    assert "review.report.cross_episode_findings" in script
+
+
+def test_script_review_uses_a_dropdown_for_single_episode_selection():
+    script = _source("static/js/review/scripts.js")
+
+    assert "mode.value === 'single'" in script
+    assert "document.createElement('select')" in script
+    assert "episodes.querySelector('select')" in script
+
+
+def test_script_review_deduplicates_core_and_episode_findings():
+    script = _source("static/js/review/scripts.js")
+
+    assert "coreFindingKeys" in script
+    assert "episodeFindings" in script
+
+
+def test_script_review_groups_report_content_with_clear_headings():
+    script = _source("static/js/review/scripts.js")
+
+    assert "修改建议" in script
+    assert "剧情概要" in script
+    assert "跨集问题" in script
+
+
+def test_script_review_can_start_and_review_optimization_drafts():
+    script = _source("static/js/review/scripts.js")
+
+    assert "/optimizations" in script
+    assert "生成优化草稿" in script
+    assert "script-optimization-drafts" in script
+
+
+def test_writing_pages_load_optimization_draft_comparison():
+    assert "optimization_draft.js" in _source("templates/writing/scripts.html")
+    assert "optimization_draft.js" in _source("templates/writing/beats.html")
+
+
 def test_webgui_does_not_register_a_standalone_breakdown_page():
     paths = {route.path for route in WebGUI.app.routes}
 
@@ -729,13 +782,17 @@ def test_creative_generation_opens_progress_modal_with_retry_controls():
 
 def test_downloaded_topic_action_opens_episode_transcript_preview():
     html = _workspace_source()
+    transcripts = _source("static/js/selection/breakdowns.js")
 
-    assert 'x-show="Number(topic.downloaded_episode_count || 0) > 0"' in html
+    assert 'x-show="Number(topic.transcript_episode_count || 0) > 0"' in html
     assert '@click="openTopicTranscriptPreview(topic)"' in html
-    assert 'title="预览剧目转写"' in html
+    assert 'title="预览字幕转写"' in html
+    assert '@click="downloadTopicTranscripts(topic)"' in html
+    assert 'title="下载字幕转写"' in html
     assert 'id="topicTranscriptPreviewModal"' in html
     assert "this.modal('topicTranscriptPreviewModal')" in html
     assert "/api/creative/topics/${topic.id}/transcripts" in html
+    assert "/api/creative/topics/${topic.id}/transcripts/download" in transcripts
     assert "selectedTopicTranscript()" in html
     assert "上一集" in html
     assert "下一集" in html

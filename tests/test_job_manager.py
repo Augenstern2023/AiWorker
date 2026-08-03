@@ -136,6 +136,43 @@ def test_job_manager_allows_different_breakdowns_to_run_together(
         )
 
 
+def test_job_manager_allows_independent_script_reviews_to_run_together(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "runtime.job_manager.launch_worker", lambda *_args, **_kwargs: FakeProcess()
+    )
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    first = CrawlJob(
+        job_id="review-a",
+        platform="creative",
+        crawler_type="screenplay_review",
+        extra={"review_id": 101},
+    )
+    manager.jobs[first.job_id] = JobState(job=first, status="running")
+    manager.processes[first.job_id] = FakeProcess()
+
+    second = manager.start_job(
+        CrawlJob(
+            job_id="review-b",
+            platform="creative",
+            crawler_type="screenplay_review",
+            extra={"review_id": 102},
+        )
+    )
+
+    assert second.job_id == "review-b"
+    with pytest.raises(JobConflictError, match="platform 'creative'"):
+        manager.start_job(
+            CrawlJob(
+                job_id="review-a-duplicate",
+                platform="creative",
+                crawler_type="screenplay_review",
+                extra={"review_id": 101},
+            )
+        )
+
+
 def test_job_manager_allows_independent_creative_generation_jobs(
     monkeypatch, tmp_path
 ):

@@ -70,6 +70,8 @@ from analysis.today_rank_api import register_today_rank_routes
 from creative.api import register_creative_routes
 from creative.repository import CreativeRepository
 from creative.transcript_assets import normalize_title
+from screenplay_review.api import register_script_review_routes
+from screenplay_optimization.api import register_script_optimization_routes
 from identity.api import build_identity_router
 from identity.password_service import PasswordService
 from identity.dependencies import current_principal, require_permission
@@ -145,6 +147,8 @@ def _api_permission(method: str, path: str) -> str | None:
     ):
         return None
     if path.startswith("/api/creative/"):
+        return None
+    if path.startswith(("/api/script-reviews", "/api/script-optimizations", "/api/script-optimization-drafts")):
         return None
     if path.startswith(("/api/rank/", "/api/hongguo/analyze-rank", "/api/douyin/analyze-rank")):
         return "rank.read"
@@ -612,6 +616,16 @@ register_creative_routes(
     runtime_dir=Path(__file__).resolve().parent / ".runtime",
     job_manager=job_manager,
     workflow_repository=workflow_repository,
+)
+register_script_review_routes(
+    app,
+    runtime_dir=Path(__file__).resolve().parent / ".runtime",
+    job_manager=job_manager,
+)
+register_script_optimization_routes(
+    app,
+    runtime_dir=Path(__file__).resolve().parent / ".runtime",
+    job_manager=job_manager,
 )
 
 # Models

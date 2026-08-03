@@ -1,0 +1,30 @@
+{% extends "layouts/base.html" %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-start gap-3 border-bottom pb-3 mb-4">
+    <div>
+        <h3 class="mb-1">剧本审核</h3>
+        <div class="small text-muted">AI 建议须经人工确认后生效</div>
+    </div>
+    <button id="script-review-refresh" class="btn btn-outline-light btn-sm" type="button" title="刷新审核记录" aria-label="刷新审核记录"><i class="bi bi-arrow-clockwise" aria-hidden="true"></i></button>
+</div>
+
+<div id="script-review-error" class="alert alert-danger d-none" role="alert"></div>
+<section class="mb-4" aria-label="发起剧本审核">
+    <div class="row g-3 align-items-end">
+        <div class="col-md-3"><label for="script-review-source" class="form-label small">来源</label><select id="script-review-source" class="form-select form-select-sm"><option value="project">创作项目</option><option value="text">粘贴文本</option></select></div>
+        <div class="col-md-3"><label for="script-review-mode" class="form-label small">审核方式</label><select id="script-review-mode" class="form-select form-select-sm"><option value="single">单集</option><option value="multiple">多集</option><option value="collection">合集</option></select></div>
+        <div id="script-review-project-wrap" class="col-md-4"><label for="script-review-project" class="form-label small">项目</label><select id="script-review-project" class="form-select form-select-sm"></select></div>
+        <div class="col-md-2"><button id="script-review-submit" class="btn btn-primary btn-sm w-100" type="button"><i class="bi bi-magic me-1" aria-hidden="true"></i>开始审核</button></div>
+    </div>
+    <div id="script-review-episodes" class="d-flex flex-wrap gap-2 mt-3"></div>
+    <div id="script-review-text-wrap" class="mt-3 d-none"><label for="script-review-text" class="form-label small">剧本文本</label><textarea id="script-review-text" class="form-control" rows="10"></textarea></div>
+</section>
+
+<section id="script-review-result" class="d-none border-top pt-4 mb-4" aria-live="polite"></section>
+<section aria-label="审核历史">
+    <h5 class="mb-3">审核历史</h5>
+    <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>来源</th><th>范围</th><th>AI 建议</th><th>人工结论</th><th>状态</th><th>时间</th><th class="text-end">操作</th></tr></thead><tbody id="script-review-history"><tr><td colspan="7" class="text-center text-muted py-4">正在读取审核记录...</td></tr></tbody></table></div>
+</section>
+{% endblock %}
+{% block scripts %}<script src="/static/js/review/scripts.js?v={{ asset_version }}"></script>{% endblock %}

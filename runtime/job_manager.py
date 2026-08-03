@@ -32,6 +32,8 @@ _CONCURRENT_DRAMA_DOWNLOAD_TYPES = frozenset(
 )
 _CONCURRENT_BREAKDOWN_TYPES = frozenset({"breakdown_generate"})
 _CONCURRENT_CREATIVE_GENERATION_TYPES = frozenset({"phase4_generate"})
+_CONCURRENT_SCREENPLAY_REVIEW_TYPES = frozenset({"screenplay_review"})
+_CONCURRENT_SCREENPLAY_OPTIMIZATION_TYPES = frozenset({"screenplay_optimization"})
 
 
 class JobConflictError(RuntimeError):
@@ -148,6 +150,12 @@ class JobManager:
             )
             if not all(existing_identity[:2]) or not all(incoming_identity[:2]):
                 return False
+        elif not job_types - _CONCURRENT_SCREENPLAY_REVIEW_TYPES:
+            existing_identity = str(existing_extra.get("review_id") or "").strip()
+            incoming_identity = str(incoming_extra.get("review_id") or "").strip()
+        elif not job_types - _CONCURRENT_SCREENPLAY_OPTIMIZATION_TYPES:
+            existing_identity = str(existing_extra.get("optimization_id") or "").strip()
+            incoming_identity = str(incoming_extra.get("optimization_id") or "").strip()
         else:
             return False
         return bool(existing_identity and incoming_identity and existing_identity != incoming_identity)

@@ -33,6 +33,7 @@ PAGE_ROUTES = (
         "page.writing",
         "场次剧本",
     ),
+    ("/review/scripts", "page.script_review", "剧本审核"),
     ("/review/projects", "page.review", "负责项目"),
     ("/review/users", "page.team_management", "团队账号"),
     ("/review/roles", "page.team_management", "角色授权"),

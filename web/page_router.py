@@ -38,6 +38,7 @@ PAGE_TEMPLATES = {
     "/writing/projects/{project_id}/outlines": "writing/outlines.html",
     "/writing/projects/{project_id}/episodes/{episode_number}/beats": "writing/beats.html",
     "/writing/projects/{project_id}/episodes/{episode_number}/scripts": "writing/scripts.html",
+    "/review/scripts": "review/scripts.html",
     "/review/projects": "review/projects.html",
     "/review/users": "admin/users.html",
     "/review/roles": "admin/roles.html",

@@ -166,6 +166,7 @@ class TopicLifecycleService:
                 else LIFECYCLE_LABELS[status]
             )
             item["downloaded_episode_count"] = episode_count
+            item["transcript_episode_count"] = transcript_count
             item["lifecycle_project_id"] = project_id
             enriched.append(item)
         return enriched
@@ -186,6 +187,7 @@ class TopicLifecycleService:
             "lifecycle_status",
             "lifecycle_label",
             "downloaded_episode_count",
+            "transcript_episode_count",
             "lifecycle_project_id",
         ):
             result[key] = lifecycle[key]

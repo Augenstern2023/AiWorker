@@ -908,8 +908,7 @@ window.aiworkerModules.push(() => ({
                         const res = await aiworkerApi.request(`/api/creative/breakdowns/${record.id}/lock`, {method: 'POST'});
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.detail || '完成拆解失败');
-                        Object.assign(record, data);
-                        record.status = data.status || 'locked';
+                        this.syncBreakdownEditorRecord(data);
                         if (this.breakdownEditor.source === 'topic-library') await this.fetchTopicLibrary();
                         if (this.breakdownEditor.source === 'creative') await this.fetchCreativeTopics();
                         alert('拆解已完成并锁定，可以创建策划项目。');

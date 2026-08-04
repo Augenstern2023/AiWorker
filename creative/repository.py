@@ -902,6 +902,60 @@ class CreativeRepository:
             )
         return self.get_project(project_id) or {}
 
+    def delete_project(self, project_id: int) -> dict[str, Any]:
+        """Permanently remove a project and every project-scoped creative record."""
+
+        with self._connect() as conn:
+            project = conn.execute(
+                "SELECT id, name, topic_id FROM creative_projects WHERE id = ? AND deleted = 0",
+                (project_id,),
+            ).fetchone()
+            if project is None:
+                raise ValueError("创作项目不存在")
+
+            delivery_paths: list[str] = []
+            delivery_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'creative_deliveries'"
+            ).fetchone()
+            if delivery_table is not None:
+                delivery_paths = [
+                    str(row["path"])
+                    for row in conn.execute(
+                        "SELECT path FROM creative_deliveries WHERE project_id = ?", (project_id,)
+                    ).fetchall()
+                    if row["path"]
+                ]
+                conn.execute("DELETE FROM creative_deliveries WHERE project_id = ?", (project_id,))
+
+            optimization_ids = [
+                int(row["id"])
+                for row in conn.execute(
+                    "SELECT id FROM script_optimizations WHERE project_id = ?", (project_id,)
+                ).fetchall()
+            ]
+            if optimization_ids:
+                placeholders = ",".join("?" for _ in optimization_ids)
+                conn.execute(
+                    f"DELETE FROM script_optimization_drafts WHERE project_id = ? OR optimization_id IN ({placeholders})",
+                    [project_id, *optimization_ids],
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM script_optimization_drafts WHERE project_id = ?", (project_id,)
+                )
+            conn.execute("DELETE FROM script_optimizations WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM script_reviews WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM creative_stage_exports WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM creative_episodes WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM creative_relationships WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM creative_characters WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM creative_blueprints WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM creative_projects WHERE id = ?", (project_id,))
+
+        result = dict(project)
+        result["delivery_paths"] = delivery_paths
+        return result
+
     def get_project(self, project_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute(
@@ -1328,6 +1382,147 @@ class CreativeRepository:
             )
         return self.get_outline_batch(project_id, batch_id)
 
+    def save_outline_batch_checkpoint(
+        self,
+        project_id: int,
+        episodes: list[dict[str, Any]],
+        series_arc: str,
+        job_id: str = "",
+        generation_meta: dict[str, Any] | None = None,
+        workflow_task_id: str | None = None,
+        *,
+        batch_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist a contiguous generated outline prefix so a failed job is recoverable."""
+        project = self.get_project(project_id)
+        if not project:
+            raise ValueError("创作项目不存在")
+        if not project.get("character_batch_id"):
+            raise ValueError("必须先锁定人物关系版本")
+        total = int(project["target_episode_count"])
+        actual = sorted(int(item.get("episode") or 0) for item in episodes)
+        expected = list(range(1, len(episodes) + 1))
+        if not episodes or actual != expected or len(episodes) > total:
+            raise ValueError(f"分集大纲检查点必须连续覆盖 1-{total} 集的前缀")
+
+        existing_rows = []
+        if batch_id:
+            existing_rows = [
+                item for item in project["episodes"]
+                if item["stage"] == "outline" and item["batch_id"] == batch_id
+            ]
+            if existing_rows and any(item["status"] != "draft" for item in existing_rows):
+                raise ValueError("已锁定的大纲批次不能写入生成检查点")
+        else:
+            batch_id = uuid.uuid4().hex
+        version = (
+            int(existing_rows[0]["version"])
+            if existing_rows
+            else 1 + max(
+                [int(item["version"]) for item in project["episodes"] if item["stage"] == "outline"] or [0]
+            )
+        )
+        existing_by_episode = {
+            int(item["episode_number"]): item for item in existing_rows
+        }
+        refs = {
+            "brief_id": project["locked_brief_id"],
+            "character_batch_id": project["character_batch_id"],
+        }
+        meta = dict(generation_meta or {})
+        if job_id:
+            meta["job_id"] = job_id
+        now = time.time()
+        with self._connect() as conn:
+            for episode in episodes:
+                content = dict(episode)
+                content["series_arc"] = series_arc
+                episode_number = int(content["episode"])
+                existing = existing_by_episode.get(episode_number)
+                if existing:
+                    conn.execute(
+                        """
+                        UPDATE creative_episodes
+                        SET content_json = ?, upstream_refs_json = ?, generation_meta_json = ?,
+                            workflow_task_id = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            json.dumps(content, ensure_ascii=False), json.dumps(refs, ensure_ascii=False),
+                            json.dumps(meta, ensure_ascii=False),
+                            workflow_task_id or project.get("workflow_task_id"), now, existing["id"],
+                        ),
+                    )
+                    continue
+                parent = conn.execute(
+                    """
+                    SELECT id FROM creative_episodes
+                    WHERE project_id = ? AND stage = 'outline' AND episode_number = ? AND batch_id != ?
+                    ORDER BY version DESC LIMIT 1
+                    """,
+                    (project_id, episode_number, batch_id),
+                ).fetchone()
+                conn.execute(
+                    """
+                    INSERT INTO creative_episodes (
+                        project_id, stage, episode_number, batch_id, version, parent_version_id, content_json,
+                        upstream_refs_json, generation_meta_json, workflow_task_id, created_at, updated_at
+                    ) VALUES (?, 'outline', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project_id, episode_number, batch_id, version, parent["id"] if parent else None,
+                        json.dumps(content, ensure_ascii=False), json.dumps(refs, ensure_ascii=False),
+                        json.dumps(meta, ensure_ascii=False), workflow_task_id or project.get("workflow_task_id"), now, now,
+                    ),
+                )
+            conn.execute(
+                "UPDATE creative_projects SET status = 'outline_draft', updated_at = ? WHERE id = ?",
+                (now, project_id),
+            )
+        return self.get_outline_batch(project_id, batch_id)
+
+    def find_resumable_outline_batch(self, project_id: int) -> dict[str, Any] | None:
+        """Return the newest compatible incomplete draft batch, if it can safely continue."""
+        project = self.get_project(project_id)
+        if not project:
+            raise ValueError("创作项目不存在")
+        total = int(project["target_episode_count"])
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for item in project["episodes"]:
+            refs = item.get("upstream_refs") or {}
+            if (
+                item["stage"] == "outline"
+                and item.get("status") == "draft"
+                and refs.get("brief_id") == project.get("locked_brief_id")
+                and refs.get("character_batch_id") == project.get("character_batch_id")
+            ):
+                groups.setdefault(str(item["batch_id"]), []).append(item)
+
+        candidates: list[tuple[tuple[int, float, int], dict[str, Any]]] = []
+        for batch_id, rows in groups.items():
+            rows.sort(key=lambda item: int(item["episode_number"]))
+            numbers = [int(item["episode_number"]) for item in rows]
+            if not rows or len(rows) >= total or numbers != list(range(1, len(rows) + 1)):
+                continue
+            content = rows[0].get("content") or {}
+            meta = rows[0].get("generation_meta") or {}
+            series_arc = str(content.get("series_arc") or "").strip()
+            stages = meta.get("stages")
+            if not series_arc or not isinstance(stages, list) or not stages:
+                continue
+            key = (
+                int(rows[0].get("version") or 0),
+                max(float(item.get("updated_at") or 0) for item in rows),
+                max(int(item["id"]) for item in rows),
+            )
+            candidates.append((key, {
+                "batch_id": batch_id,
+                "episodes": rows,
+                "series_arc": series_arc,
+                "stages": list(stages),
+            }))
+        return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
     def get_outline_batch(self, project_id: int, batch_id: str) -> dict[str, Any]:
         project = self.get_project(project_id)
         if not project:
@@ -1380,6 +1575,16 @@ class CreativeRepository:
             raise ValueError("必须先锁定分集大纲")
         if not 1 <= int(episode_number) <= int(project["target_episode_count"]):
             raise ValueError("集数超出项目范围")
+        outlines = [
+            item for item in project["episodes"]
+            if item["stage"] == "outline"
+            and int(item["episode_number"]) == int(episode_number)
+            and item.get("batch_id") == project.get("outline_batch_id")
+            and item.get("status") in {"locked", "approved"}
+        ]
+        if not outlines:
+            raise ValueError("必须先锁定当前集分集大纲")
+        outline = max(outlines, key=lambda item: (int(item.get("version") or 0), int(item["id"])))
         version = 1 + max(
             [int(item["version"]) for item in project["episodes"] if item["stage"] == "beats" and int(item["episode_number"]) == int(episode_number)] or [0]
         )
@@ -1400,6 +1605,11 @@ class CreativeRepository:
             "brief_id": project["locked_brief_id"],
             "character_batch_id": project["character_batch_id"],
             "outline_batch_id": project["outline_batch_id"],
+            "outline_id": outline["id"],
+            "outline_version": outline["version"],
+            "outline_content_fingerprint": hashlib.sha256(
+                json.dumps(outline.get("content") or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
         }
         now = time.time()
         with self._connect() as conn:
@@ -1451,6 +1661,16 @@ class CreativeRepository:
         if not locked_beats:
             raise ValueError("必须先锁定当前集 Beats")
         beats = locked_beats[0]
+        outlines = [
+            item for item in project["episodes"]
+            if item["stage"] == "outline"
+            and int(item["episode_number"]) == int(episode_number)
+            and item.get("batch_id") == project.get("outline_batch_id")
+            and item.get("status") in {"locked", "approved"}
+        ]
+        if not outlines:
+            raise ValueError("必须先锁定当前集分集大纲")
+        outline = max(outlines, key=lambda item: (int(item.get("version") or 0), int(item["id"])))
         version = 1 + max(
             [
                 int(item["version"]) for item in project["episodes"]
@@ -1477,6 +1697,11 @@ class CreativeRepository:
             "brief_id": project.get("locked_brief_id"),
             "character_batch_id": project.get("character_batch_id"),
             "outline_batch_id": project.get("outline_batch_id"),
+            "outline_id": outline["id"],
+            "outline_version": outline["version"],
+            "outline_content_fingerprint": hashlib.sha256(
+                json.dumps(outline.get("content") or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
             "beats_id": beats["id"],
             "beats_version": beats["version"],
             "beats_content_fingerprint": hashlib.sha256(
@@ -1798,6 +2023,20 @@ class CreativeRepository:
                 "SELECT * FROM script_optimization_drafts WHERE id = ?", (draft_id,)
             ).fetchone()
         return self._script_optimization_draft(dict(row)) if row else None
+
+    def list_episode_script_optimization_drafts(
+        self, project_id: int, episode_number: int, kind: str
+    ) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM script_optimization_drafts
+                WHERE project_id = ? AND episode_number = ? AND kind = ?
+                ORDER BY created_at DESC, id DESC
+                """,
+                (project_id, episode_number, kind),
+            ).fetchall()
+        return [self._script_optimization_draft(dict(row)) for row in rows]
 
     def accept_script_optimization_draft(
         self, draft_id: int, episode_id: int, accepted_by: str

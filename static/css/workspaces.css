@@ -328,6 +328,16 @@
             background: rgba(59, 149, 246, .16);
             box-shadow: 0 0 0 1px rgba(59, 149, 246, .36);
         }
+        .hongguo-rank-info-trigger {
+            min-width: 32px;
+            padding-inline: 8px;
+            color: #eaf4ff;
+        }
+        .hongguo-rank-info-modal .modal-title,
+        .hongguo-rank-info-modal .modal-section-title {
+            color: #f7f9ff;
+            font-weight: 800;
+        }
         .today-rank-table .rank-filter-btn {
             display: inline-flex;
             align-items: center;
@@ -658,6 +668,37 @@
             box-shadow: 0 2px 12px rgba(0,0,0,0.35);
             position: relative;
             z-index: 10;
+        }
+        .optimization-diff-line {
+            min-height: 1.65rem;
+            padding: .18rem .45rem;
+            border-left: 3px solid transparent;
+            color: var(--text-primary);
+            white-space: pre-wrap;
+            line-height: 1.55;
+        }
+        .optimization-diff-line + .optimization-diff-line { margin-top: 2px; }
+        .optimization-diff-heading {
+            margin-top: .7rem;
+            padding-top: .45rem;
+            border-top: 1px solid var(--border);
+            font-weight: 600;
+        }
+        .optimization-diff-heading:first-child { margin-top: 0; }
+        .optimization-diff-line.diff-removed,
+        .optimization-diff-legend.diff-removed {
+            border-left-color: #e35d6a;
+            background: rgba(227, 93, 106, .17);
+        }
+        .optimization-diff-line.diff-added,
+        .optimization-diff-legend.diff-added {
+            border-left-color: #39b980;
+            background: rgba(57, 185, 128, .17);
+        }
+        .optimization-diff-legend {
+            padding: .18rem .45rem;
+            border-left: 3px solid transparent;
+            border-radius: 2px;
         }
         @media (max-width: 767.98px) {
             :root { --sidebar-width: 58px; }

@@ -75,6 +75,8 @@ _CREATIVE_TASK_SUPPORT: tuple[ApiRoute, ...] = (
 
 _PROJECT_MANAGEMENT: tuple[ApiRoute, ...] = (
     ("GET", "/api/creative/projects"),
+    ("PATCH", "/api/creative/projects/{project_id}"),
+    ("DELETE", "/api/creative/projects/{project_id}"),
     ("GET", "/api/workflow/tasks"),
 )
 
@@ -190,6 +192,7 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
         ("POST", "/api/creative/projects"),
         ("GET", "/api/creative/projects"),
         ("PATCH", "/api/creative/projects/{project_id}"),
+        ("DELETE", "/api/creative/projects/{project_id}"),
         ("GET", "/api/creative/topics"),
         ("GET", "/api/creative/topics/{topic_id}/breakdowns"),
     ),
@@ -232,6 +235,7 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
     + _CREATIVE_JOB_MONITOR,
     "/writing/projects/{project_id}/episodes/{episode_number}/beats": (
         ("GET", "/api/creative/projects/{project_id}"),
+        ("GET", "/api/creative/projects/{project_id}/episodes/{episode_number}/optimization-drafts"),
         ("POST", "/api/creative/projects/{project_id}/episodes/{episode_number}/beats/generate"),
         ("POST", "/api/creative/projects/{project_id}/episodes/{episode_number}/beats"),
         ("PATCH", "/api/creative/episodes/{episode_id}"),
@@ -242,6 +246,7 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
     + _CREATIVE_JOB_MONITOR,
     "/writing/projects/{project_id}/episodes/{episode_number}/scripts": (
         ("GET", "/api/creative/projects/{project_id}"),
+        ("GET", "/api/creative/projects/{project_id}/episodes/{episode_number}/optimization-drafts"),
         ("POST", "/api/creative/projects/{project_id}/episodes/{episode_number}/scripts/generate"),
         ("POST", "/api/creative/projects/{project_id}/episodes/{episode_number}/scripts"),
         ("PATCH", "/api/creative/episodes/{episode_id}"),

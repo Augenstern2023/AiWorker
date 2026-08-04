@@ -446,6 +446,23 @@ window.aiworkerModules.push(() => ({
                     return (this.creativeWorkspace.project?.blueprints || []).find(item => item.id === this.creativeWorkspace.selectedBlueprintId) || null;
                 },
 
+                normalizeBlueprintContent(content) {
+                    const flatten = (value) => {
+                        if (Array.isArray(value)) return value.map(flatten).filter(Boolean).join('；');
+                        if (value && typeof value === 'object') return Object.values(value).map(flatten).filter(Boolean).join(' ');
+                        return String(value || '').trim();
+                    };
+                    const normalized = {...(content || {})};
+                    ['title', 'protagonist', 'core_conflict', 'main_goal', 'background', 'worldview', 'audience', 'cost_level']
+                        .forEach((key) => { normalized[key] = flatten(normalized[key]); });
+                    ['borrowed_elements', 'different_elements', 'first_three_hooks', 'highlights', 'revision_suggestions', 'risk_reasons']
+                        .forEach((key) => {
+                            const values = Array.isArray(normalized[key]) ? normalized[key] : [normalized[key]];
+                            normalized[key] = values.map(flatten).filter(Boolean);
+                        });
+                    return normalized;
+                },
+
                 latestCharacterBatchId() {
                     const project = this.creativeWorkspace.project;
                     if (!project) return '';
@@ -489,6 +506,18 @@ window.aiworkerModules.push(() => ({
                     return (this.creativeWorkspace.project?.episodes || [])
                         .filter(item => item.stage === 'outline' && item.batch_id === batch)
                         .sort((a, b) => Number(a.episode_number) - Number(b.episode_number));
+                },
+
+                hasResumableProjectOutlines() {
+                    const project = this.creativeWorkspace.project;
+                    const outlines = this.currentProjectOutlines();
+                    return Boolean(project && outlines.length > 0
+                        && outlines.length < Number(project.target_episode_count || 0)
+                        && this.creativeResourceEditable(outlines[0]));
+                },
+
+                outlineGenerationActionLabel() {
+                    return this.hasResumableProjectOutlines() ? '继续生成' : '生成大纲';
                 },
 
                 currentOutlineBatchStatus() {
@@ -602,6 +631,57 @@ window.aiworkerModules.push(() => ({
                     const script = this.projectEpisodeScript(episodeNumber);
                     if (!script) return '';
                     return script.status === 'locked' ? '剧本已完成' : '剧本已生成';
+                },
+
+                projectEpisodeUpdateRecords(episodeNumber) {
+                    const project = this.creativeWorkspace.project;
+                    if (!project) return [];
+                    const outlineBatchId = project.outline_batch_id;
+                    return (project.episodes || [])
+                        .filter(item => ['beats', 'script'].includes(item.stage)
+                            && Number(item.episode_number) === Number(episodeNumber)
+                            && item.upstream_refs?.outline_batch_id === outlineBatchId)
+                        .map(item => {
+                            const createdAt = Number(item.created_at || 0);
+                            const updatedAt = Number(item.updated_at || 0);
+                            const locked = ['locked', 'approved'].includes(item.status);
+                            const versioned = Number(item.version) > 1;
+                            const event = versioned && locked ? '新版本已锁定'
+                                : versioned ? '新版本生成'
+                                    : locked && updatedAt > createdAt ? '完成并锁定'
+                                        : updatedAt > createdAt ? '内容已更新' : '首次生成';
+                            return {
+                                key: `${item.stage}-${item.id}`,
+                                stage: item.stage,
+                                label: item.stage === 'beats' ? 'Beats' : '场次剧本',
+                                version: Number(item.version || 1),
+                                status: item.status,
+                                event,
+                                timestamp: updatedAt || createdAt,
+                            };
+                        })
+                        .sort((left, right) => Number(right.timestamp) - Number(left.timestamp));
+                },
+
+                hasProjectEpisodeUpdates(episodeNumber) {
+                    return this.projectEpisodeUpdateRecords(episodeNumber)
+                        .some(record => record.version > 1 || record.event !== '首次生成');
+                },
+
+                projectEpisodeUpdateSummary(episodeNumber) {
+                    const updates = this.projectEpisodeUpdateRecords(episodeNumber)
+                        .filter(record => record.version > 1 || record.event !== '首次生成');
+                    const stages = [...new Set(updates.map(record => record.stage))];
+                    const labels = stages.map(stage => stage === 'beats' ? 'Beats 更新' : '剧本更新');
+                    return labels.join(' / ');
+                },
+
+                openOutlineEpisodeUpdates(episodeNumber) {
+                    this.creativeWorkspace.outlineEpisodeUpdates = {
+                        episodeNumber: Number(episodeNumber),
+                        records: this.projectEpisodeUpdateRecords(episodeNumber),
+                    };
+                    this.modal('outlineEpisodeUpdatesModal')?.show();
                 },
 
                 projectHasGeneratedScripts() {
@@ -763,7 +843,10 @@ window.aiworkerModules.push(() => ({
                             || (project.relationships || []).some(generatedByJob);
                     }
                     if (action === 'outlines') {
-                        return (project.episodes || []).some(item => item.stage === 'outline' && item.generation_meta?.job_id === jobId);
+                        const generatedForJob = (project.episodes || []).filter(item =>
+                            item.stage === 'outline' && item.generation_meta?.job_id === jobId
+                        );
+                        return generatedForJob.length >= Number(project.target_episode_count || 0);
                     }
                     if (action === 'beats') {
                         return (project.episodes || []).some(item => item.stage === 'beats' && item.generation_meta?.job_id === jobId);
@@ -954,7 +1037,10 @@ window.aiworkerModules.push(() => ({
                     const res = await aiworkerApi.request(`/api/creative/projects/${project.id}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
                     const data = await res.json();
                     if (!res.ok) { this.creativeWorkspace.error = data.detail || '保存 Brief 参数失败'; return; }
-                    this.creativeWorkspace.project = data;
+                        data.blueprints = (data.blueprints || []).map((item) => ({
+                            ...item, content: this.normalizeBlueprintContent(item.content),
+                        }));
+                        this.creativeWorkspace.project = data;
                     await this.fetchCreativeProjects(data.id);
                 },
 
@@ -1075,9 +1161,29 @@ window.aiworkerModules.push(() => ({
                     } catch (error) { this.creativeWorkspace.error = error.message || '完成场次剧本失败'; }
                 },
 
-                creativeExportUrl(stage, format = 'md') {
-                    const id = this.creativeWorkspace.project?.id || '';
-                    return `/api/creative/projects/${id}/export?stage=${encodeURIComponent(stage)}&format=${encodeURIComponent(format)}`;
+                currentGeneratedResourceId(stage) {
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId) return '';
+                    if (stage === 'brief') return String(this.selectedProjectBlueprint()?.id || '');
+                    if (stage === 'characters') {
+                        const batchId = this.latestCharacterBatchId();
+                        return batchId ? `${projectId}:${batchId}` : '';
+                    }
+                    if (stage === 'outline') {
+                        const batchId = this.latestOutlineBatchId();
+                        return batchId ? `${projectId}:${batchId}` : '';
+                    }
+                    if (stage === 'beats') return String(this.selectedProjectBeats()?.id || '');
+                    if (stage === 'script') return String(this.selectedProjectScript()?.id || '');
+                    return '';
+                },
+
+                creativeGeneratedDownloadUrl(stage, format = 'md') {
+                    const projectId = this.creativeWorkspace.project?.id;
+                    const resourceId = this.currentGeneratedResourceId(stage);
+                    if (!projectId || !resourceId) return '#';
+                    const params = new URLSearchParams({stage, resource_id: resourceId, format});
+                    return `/api/creative/projects/${projectId}/generated-content/download?${params.toString()}`;
                 },
 
                 async resolveSourcePackageWorkflowTask(title) {

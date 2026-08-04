@@ -66,6 +66,69 @@ class WorkflowRepository:
         self.state_machine = state_machine or WorkflowStateMachine()
         # Schema managed by Alembic
 
+    def delete_project_data(self, project_id: str) -> dict[str, int]:
+        """Remove workflow records that belong exclusively to a deleted project."""
+
+        with self.identity_repository.transaction() as connection:
+            workflow_ids = {
+                str(row["id"])
+                for row in connection.execute(
+                    select(workflow_instances.c.id).where(
+                        workflow_instances.c.project_id == project_id
+                    )
+                ).mappings()
+            }
+            workflow_ids.update(
+                str(row["workflow_id"])
+                for row in connection.execute(
+                    select(workflow_tasks.c.workflow_id).where(
+                        workflow_tasks.c.project_id == project_id
+                    )
+                ).mappings()
+            )
+            task_ids: set[str] = set()
+            if workflow_ids:
+                task_ids.update(
+                    str(row["id"])
+                    for row in connection.execute(
+                        select(workflow_tasks.c.id).where(
+                            workflow_tasks.c.workflow_id.in_(workflow_ids)
+                        )
+                    ).mappings()
+                )
+            if task_ids:
+                connection.execute(
+                    delete(workflow_submissions).where(
+                        workflow_submissions.c.task_id.in_(task_ids)
+                    )
+                )
+                connection.execute(
+                    delete(workflow_task_jobs).where(
+                        workflow_task_jobs.c.task_id.in_(task_ids)
+                    )
+                )
+                connection.execute(
+                    delete(workflow_task_events).where(
+                        workflow_task_events.c.task_id.in_(task_ids)
+                    )
+                )
+                connection.execute(
+                    delete(workflow_tasks).where(workflow_tasks.c.id.in_(task_ids))
+                )
+            if workflow_ids:
+                connection.execute(
+                    delete(workflow_instances).where(workflow_instances.c.id.in_(workflow_ids))
+                )
+            connection.execute(
+                delete(workflow_project_member_events).where(
+                    workflow_project_member_events.c.project_id == project_id
+                )
+            )
+            connection.execute(
+                delete(project_members).where(project_members.c.project_id == project_id)
+            )
+        return {"workflow_count": len(workflow_ids), "task_count": len(task_ids)}
+
     def create_task(
         self,
         workflow_id: str,
@@ -206,7 +269,7 @@ class WorkflowRepository:
                 """
                 SELECT * FROM workflow_tasks
                 WHERE workflow_id = %s AND task_type = %s AND project_id = %s
-                ORDER BY created_at, id LIMIT 1
+                ORDER BY created_at DESC, id DESC LIMIT 1
                 """,
                 (workflow_id, task_type, project_id),
             ).mappings().fetchone()

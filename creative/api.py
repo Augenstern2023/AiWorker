@@ -1746,6 +1746,7 @@ def build_creative_router(
                     "resource_version": int(item["version"]),
                     "resource_status": str(item["status"]),
                     "project_id": str(project_id), "project_name": project["name"],
+                    "generated_at": float(item.get("created_at") or 0),
                 })
             character_batches = {
                 str(item["batch_id"]): item for item in project.get("characters", [])
@@ -1757,6 +1758,7 @@ def build_creative_router(
                     "resource_version": int(item["version"]),
                     "resource_status": str(item["status"]),
                     "project_id": str(project_id), "project_name": project["name"],
+                    "generated_at": float(item.get("created_at") or 0),
                 })
             outline_batches = {
                 str(item["batch_id"]): item for item in project.get("episodes", [])
@@ -1768,6 +1770,7 @@ def build_creative_router(
                     "resource_version": int(item["version"]),
                     "resource_status": str(item["status"]),
                     "project_id": str(project_id), "project_name": project["name"],
+                    "generated_at": float(item.get("created_at") or 0),
                 })
             for item in project.get("episodes", []):
                 if item.get("stage") in {"beats", "script"}:
@@ -1776,6 +1779,7 @@ def build_creative_router(
                         "resource_version": int(item["version"]),
                         "resource_status": str(item["status"]),
                         "project_id": str(project_id), "project_name": project["name"],
+                        "generated_at": float(item.get("created_at") or 0),
                     })
         return {"resources": resources}
 
@@ -1804,6 +1808,10 @@ def build_creative_router(
             role_code=role_code,
             actor=principal,
         )
+        if task["status"] not in {"pool", "assigned", "in_progress", "returned"}:
+            task = workflow_repository.create_next_task(
+                task["id"], resource_type, role_code, actor=principal
+            )
         if task["status"] == "pool" and workflow_repository.can_claim_task(
             task["id"], principal
         ):
@@ -1890,6 +1898,46 @@ def build_creative_router(
             return repository.update_project(project_id, payload.model_dump(exclude_none=True))
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @router.delete("/projects/{project_id}")
+    async def delete_project(
+        project_id: int,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        project = project_or_404(project_id)
+        if (
+            not principal.is_system_admin
+            and project.get("created_by") != principal.user_id
+        ):
+            raise HTTPException(403, "只能删除本人创建的项目")
+        try:
+            workflow_repository.delete_project_data(str(project_id))
+            removed = repository.delete_project(project_id)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(503, "项目关联任务清理失败，请稍后重试") from exc
+        for raw_path in removed.pop("delivery_paths", []):
+            try:
+                Path(raw_path).unlink(missing_ok=True)
+            except OSError:
+                continue
+        audit_service = getattr(request.app.state, "audit_service", None)
+        if isinstance(audit_service, AuditService):
+            audit_service.record(
+                actor=principal,
+                action="creative.project.delete",
+                target_type="creative_project",
+                target_id=str(project_id),
+                project_id=str(project_id),
+                before=project,
+                after=None,
+                reason=None,
+                result="success",
+                request=request,
+            )
+        return {"id": project_id, "name": removed["name"]}
 
     @router.post("/projects/{project_id}/blueprints/generate")
     async def generate_project_blueprints(

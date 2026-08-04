@@ -39,6 +39,11 @@ class OptimizationRejectRequest(BaseModel):
     rejection_note: str = ""
 
 
+class OptimizationDraftAcceptRequest(BaseModel):
+    content: dict[str, Any] | None = None
+    lock_after_accept: bool = False
+
+
 def build_script_optimization_router(
     repository: CreativeRepository,
     job_manager: Any,
@@ -74,6 +79,8 @@ def build_script_optimization_router(
         return review
 
     def assert_fresh_review(review: dict[str, Any]) -> dict[str, Any]:
+        if not bool((review.get("source_payload") or {}).get("formal")):
+            raise HTTPException(409, "该审核缺少完整分集上下文，请重新发起正式项目审核")
         project = repository.get_project(int(review.get("project_id") or 0))
         if not project:
             raise HTTPException(409, "创作项目已不存在")
@@ -160,6 +167,28 @@ def build_script_optimization_router(
         get_review_or_404(request, principal, review_id)
         return {"items": repository.list_script_optimizations(review_id)}
 
+    @router.get("/api/creative/projects/{project_id}/episodes/{episode_number}/optimization-drafts")
+    async def list_episode_drafts(
+        project_id: int,
+        episode_number: int,
+        stage: str,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, list[dict[str, Any]]]:
+        assert_permission(principal, "script.optimize.read")
+        if stage not in {"beats", "script"}:
+            raise HTTPException(400, "stage 必须是 beats 或 script")
+        project = repository.get_project(project_id)
+        if not project:
+            raise HTTPException(404, "创作项目不存在")
+        if not can_access_project(request, principal, project_id):
+            raise HTTPException(403, "没有访问此创作项目的权限")
+        return {
+            "items": repository.list_episode_script_optimization_drafts(
+                project_id, episode_number, stage
+            )
+        }
+
     @router.get("/api/script-optimizations/{optimization_id}")
     async def get_optimization(
         optimization_id: int,
@@ -193,6 +222,7 @@ def build_script_optimization_router(
     async def accept_draft(
         draft_id: int,
         request: Request,
+        payload: OptimizationDraftAcceptRequest | None = None,
         principal: Principal = Depends(current_principal),
     ) -> dict[str, Any]:
         assert_permission(principal, "script.optimize.accept")
@@ -207,7 +237,9 @@ def build_script_optimization_router(
         if not project:
             raise HTTPException(409, "创作项目已不存在")
         try:
+            accepted_content = payload.content if payload and payload.content is not None else draft["content"]
             if draft["kind"] == "beats":
+                build_project_source(project, "single", [int(draft["episode_number"])])
                 source = repository.get_episode(int(draft["source_episode_id"] or 0))
                 latest = latest_episode(project, "beats", int(draft["episode_number"]))
                 if (
@@ -218,7 +250,7 @@ def build_script_optimization_router(
                 ):
                     raise ValueError("来源 Beats 已更新，请重新生成优化草稿")
                 created = repository.create_episode_beats(
-                    int(project["id"]), int(draft["episode_number"]), draft["content"],
+                    int(project["id"]), int(draft["episode_number"]), accepted_content,
                     generation_meta={"source": "script_optimization", "optimization_id": optimization["id"], "draft_id": draft_id},
                     update_project_status=False,
                 )
@@ -231,6 +263,7 @@ def build_script_optimization_router(
                     if not beats or beats.get("status") not in {"locked", "approved"} or content_fingerprint(beats["content"]) != draft["source_fingerprint"]:
                         raise ValueError("对应 Beats 未锁定或已变化，请重新生成场次剧本草稿")
                 else:
+                    build_project_source(project, "single", [int(draft["episode_number"])])
                     source = repository.get_episode(int(draft["source_episode_id"] or 0))
                     latest = latest_episode(project, "script", int(draft["episode_number"]))
                     if (
@@ -241,10 +274,14 @@ def build_script_optimization_router(
                     ):
                         raise ValueError("来源场次剧本已更新，请重新生成优化草稿")
                 created = repository.create_episode_script(
-                    int(project["id"]), int(draft["episode_number"]), draft["content"],
+                    int(project["id"]), int(draft["episode_number"]), accepted_content,
                     generation_meta={"source": "script_optimization", "optimization_id": optimization["id"], "draft_id": draft_id},
                     update_project_status=False,
                 )
+            if payload and payload.lock_after_accept:
+                if draft["kind"] != "script":
+                    raise ValueError("仅场次剧本草稿支持应用后锁定")
+                created = repository.lock_episode_script(int(created["id"]))
             return repository.accept_script_optimization_draft(draft_id, int(created["id"]), principal.user_id)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc

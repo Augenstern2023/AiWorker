@@ -21,6 +21,7 @@ from analysis.llm import create_llm_provider_from_config
 from core.events import emit_event
 from core.job import CrawlJob
 from creative.repository import CreativeRepository
+from screenplay_review.service import build_project_source, source_fingerprint
 
 from .service import content_fingerprint, optimize_episode, report_findings
 
@@ -56,6 +57,19 @@ async def run(job: CrawlJob) -> None:
         raise ValueError("审核记录或创作项目不存在")
     repository.start_script_optimization(optimization_id)
     emit(job, "job_started", "开始生成剧本优化草稿")
+    try:
+        current_source = build_project_source(
+            project,
+            str(review["mode"]),
+            [int(number) for number in review["episode_numbers"]],
+        )
+        if source_fingerprint(current_source) != optimization["source_fingerprint"]:
+            raise ValueError("剧本已更新，请重新审核后再生成优化草稿")
+        if not current_source.get("formal"):
+            raise ValueError("该审核缺少完整分集上下文，请重新发起正式项目审核")
+    except Exception as exc:
+        repository.fail_script_optimization(optimization_id, str(exc))
+        raise
     available = report_findings(review)
     selected_by_episode: dict[int, list[dict[str, Any]]] = {}
     for selection in optimization["selected_findings"]:
@@ -65,15 +79,21 @@ async def run(job: CrawlJob) -> None:
         for number in selection.get("episode_numbers") or []:
             selected_by_episode.setdefault(int(number), []).append(finding)
     summaries = list((review.get("report") or {}).get("episode_reviews") or [])
+    context_by_episode = {
+        int(item["episode_number"]): item for item in current_source.get("episodes") or []
+    }
     generated_drafts: list[dict[str, Any]] = []
     total = len(optimization["target_episode_numbers"])
     try:
         provider = create_provider()
         for index, episode_number in enumerate(optimization["target_episode_numbers"], start=1):
-            script = _latest(project, "script", int(episode_number))
+            episode_context = context_by_episode.get(int(episode_number))
+            if not episode_context:
+                raise ValueError(f"第 {episode_number} 集场次剧本不存在")
+            script = episode_context.get("script") or {}
+            beats = episode_context.get("beats") or {}
             if not script:
                 raise ValueError(f"第 {episode_number} 集场次剧本不存在")
-            beats = _latest(project, "beats", int(episode_number))
             if optimization["mode"] == "structure" and not beats:
                 raise ValueError(f"第 {episode_number} 集 Beats 不存在")
             result = await optimize_episode(
@@ -82,6 +102,12 @@ async def run(job: CrawlJob) -> None:
                 episode_number=int(episode_number),
                 script_content=script["content"],
                 beats_content=beats["content"] if beats else None,
+                review_context={
+                    "brief": current_source.get("brief"),
+                    "characters": current_source.get("characters"),
+                    "relationships": current_source.get("relationships"),
+                    "episode": episode_context,
+                },
                 findings=selected_by_episode.get(int(episode_number), []),
                 summaries=summaries,
             )

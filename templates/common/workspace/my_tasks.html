@@ -29,3 +29,67 @@
         </tbody>
     </table>
 </div>
+
+<div class="modal fade" id="project-edit-modal" tabindex="-1" aria-labelledby="project-edit-modal-title" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <form class="modal-content" id="project-edit-form">
+            <div class="modal-header">
+                <div>
+                    <h5 class="modal-title" id="project-edit-modal-title">编辑项目</h5>
+                    <div class="small text-muted" id="project-edit-name"></div>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="project-edit-id">
+                <div class="mb-3">
+                    <label class="form-label" for="project-edit-genre">题材</label>
+                    <input class="form-control" id="project-edit-genre" maxlength="100">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label" for="project-edit-platform">目标平台</label>
+                    <input class="form-control" id="project-edit-platform" maxlength="100">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label" for="project-edit-audience">目标受众</label>
+                    <input class="form-control" id="project-edit-audience" maxlength="200">
+                </div>
+                <div class="row g-3">
+                    <div class="col-sm-6">
+                        <label class="form-label" for="project-edit-episode-count">目标集数</label>
+                        <input class="form-control" id="project-edit-episode-count" type="number" min="1" max="100" required>
+                    </div>
+                    <div class="col-sm-6">
+                        <label class="form-label" for="project-edit-duration">单集时长（秒）</label>
+                        <input class="form-control" id="project-edit-duration" type="number" min="30" max="1800" required>
+                    </div>
+                </div>
+                <div class="form-text mt-3">已锁定 Brief 的项目不能再修改这些创作参数。</div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                <button class="btn btn-primary" id="project-edit-submit" type="submit">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="modal fade" id="project-delete-modal" tabindex="-1" aria-labelledby="project-delete-modal-title" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="project-delete-modal-title">删除项目</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-2">确定删除项目“<strong id="project-delete-name"></strong>”吗？</p>
+                <p class="mb-0 text-danger">删除后将同时清除仿写方向、Brief、人物关系、大纲、Beats、场次剧本、审核与优化草稿，且无法恢复。</p>
+                <input type="hidden" id="project-delete-id">
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-danger" id="project-delete-submit">确认删除</button>
+            </div>
+        </div>
+    </div>
+</div>

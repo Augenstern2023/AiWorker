@@ -121,7 +121,7 @@ class CreativeWorkflowAdapter:
             raise KeyError(task_id)
         if task["task_type"] != resource_type:
             raise ValueError("workflow node does not match resource type")
-        if task["assignee_user_id"] != actor.user_id:
+        if task["assignee_user_id"] != actor.user_id and not actor.is_system_admin:
             raise PermissionError("only the task assignee may submit")
         draft = self._find_draft(task_id, resource_type, resource_id)
         if draft is None:
@@ -441,7 +441,7 @@ class CreativeWorkflowAdapter:
             raise KeyError(task_id)
         if task["task_type"] != resource_type:
             raise ValueError("workflow node does not match resource type")
-        if task["assignee_user_id"] != actor.user_id:
+        if task["assignee_user_id"] != actor.user_id and not actor.is_system_admin:
             raise PermissionError("only the task assignee may create this resource")
         if project_id is not None and str(task["project_id"] or "") != str(project_id):
             raise ValueError("resource does not belong to the task project")
@@ -765,7 +765,7 @@ class CreativeWorkflowAdapter:
             raise KeyError(task_id)
         if task["task_type"] != resource_type:
             raise ValueError("workflow node does not match resource type")
-        if task["assignee_user_id"] != actor.user_id:
+        if task["assignee_user_id"] != actor.user_id and not actor.is_system_admin:
             raise PermissionError("only the task assignee may submit")
         snapshot = self.snapshot(resource_type, resource_id)
         if resource_type == "breakdown":

@@ -45,6 +45,8 @@ def validate_optimization_request(
         raise ValueError("优化模式必须是 direct 或 structure")
     if review.get("source_type") != "project":
         raise ValueError("粘贴文本审核不能生成剧本优化草稿")
+    if not bool((review.get("source_payload") or {}).get("formal")):
+        raise ValueError("该审核缺少完整分集上下文，请重新发起正式项目审核")
     if review.get("status") != "confirmed" or review.get("final_verdict") != "建议修改":
         raise ValueError("仅人工确认建议修改的审核报告可以生成优化草稿")
     if not selected_findings:
@@ -58,6 +60,13 @@ def validate_optimization_request(
         finding = available.get(ref)
         if not finding:
             raise ValueError("所选审核问题不存在")
+        route = str(finding.get("change_route") or "script_only")
+        if route == "outline_revision_required":
+            raise ValueError("该问题需要先修订并锁定分集大纲，不能自动生成优化草稿")
+        if mode == "direct" and route != "script_only":
+            raise ValueError("该问题需要先优化 Beats，请选择结构优化")
+        if mode == "structure" and route != "beats_then_script":
+            raise ValueError("该问题仅需优化场次剧本，请选择直接优化")
         numbers = sorted({int(number) for number in item.get("episode_numbers") or [] if int(number) > 0})
         if not numbers:
             episode_number = finding.get("episode_number")
@@ -76,6 +85,7 @@ async def optimize_episode(
     episode_number: int,
     script_content: dict[str, Any],
     beats_content: dict[str, Any] | None,
+    review_context: dict[str, Any],
     findings: list[dict[str, Any]],
     summaries: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
@@ -86,7 +96,9 @@ async def optimize_episode(
         {
             "role": "system",
             "content": (
-                "你是短剧剧本优化助手。仅根据提供的审核问题优化指定集，保留未涉及内容的剧情意图与场次结构。"
+                "你是短剧剧本优化助手。仅根据提供的审核问题优化指定集，严格遵守冻结的 Brief、"
+                "人物关系、分集大纲和 Beats。不得改变分集大纲的核心事件、人物进展、反转或结尾钩子；"
+                "需要改变大纲时必须停止，不得擅自改写。保留未涉及内容的剧情意图与场次结构。"
                 f"输出 JSON：{output_shape}。script 必须是完整场次剧本 JSON（episode_title、scenes）；"
                 "beats 必须是完整 Beats JSON（beats）。不要输出解释性文字。"
             ),
@@ -98,6 +110,7 @@ async def optimize_episode(
                     "episode_number": episode_number,
                     "script": script_content,
                     "beats": beats_content if mode == "structure" else None,
+                    "review_context": review_context,
                     "selected_findings": findings,
                     "episode_summaries": summaries,
                 },

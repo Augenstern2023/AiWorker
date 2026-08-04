@@ -87,6 +87,34 @@ def test_douyin_today_rank_uses_switchable_rank_and_heat_boards():
     assert "setTodayRankRoute('dy', section.key)" in template
 
 
+def test_hongguo_today_rank_opens_explanations_from_an_info_icon():
+    template = _source("templates/common/workspace/selection_ranks.html")
+    page = _source("templates/selection/ranks.html")
+    modal = _source("templates/common/workspace/hongguo_rank_info_modal.html")
+    styles = _source("static/css/workspaces.css")
+
+    assert 'x-show="todayRankPlatform === \'hg\'"' in template
+    assert 'data-bs-target="#hongguoRankInfoModal"' in template
+    assert 'aria-label="查看红果榜单说明"' in template
+    assert 'bi-info-circle' in template
+    assert "推荐榜:观看/互动量及个人兴趣排名" not in template
+    assert 'hongguo_rank_info_modal.html' in page
+    assert 'id="hongguoRankInfoModal"' in modal
+    assert "榜单说明" in modal
+    assert "推荐榜:观看/互动量及个人兴趣排名" in modal
+    assert "热播榜:全局观看/互动综合热度排名" in modal
+    assert "臻果榜:根据红果已开分真人剧评分排序" in modal
+    assert "预约榜:基于红果预约/预告片播放等综合期待值排序" in modal
+    assert "新剧榜:上架3天内剧集热度值排名" in modal
+    assert "热搜榜:与前一日搜索热度值排序" in modal
+    assert "必看榜:按2025年后上线的剧集" in modal
+    assert "收藏榜:以实时累计收藏人数排名" in modal
+    assert "更新说明" in modal
+    assert "数据源于红果抓包每个工作日不定期更新" in modal
+    assert ".hongguo-rank-info-modal .modal-title" in styles
+    assert "color: #f7f9ff;" in styles
+
+
 def test_today_rank_supports_adoption_actions_and_shared_result_modal():
     rank_template = _source("templates/common/workspace/selection_ranks.html")
     rank_script = _source("static/js/selection/ranks.js")
@@ -166,11 +194,151 @@ def test_script_review_can_start_and_review_optimization_drafts():
     assert "/optimizations" in script
     assert "生成优化草稿" in script
     assert "script-optimization-drafts" in script
+    assert "编辑草稿" in script
+
+
+def test_script_review_project_selector_only_lists_projects_with_locked_outlines():
+    script = _source("static/js/review/scripts.js")
+
+    assert "filter((item) => item.outline_batch_id)" in script
+
+
+def test_partial_outline_checkpoints_do_not_mark_the_generation_job_complete():
+    script = _source("static/js/common/creative.js")
+    method = script.split("creativeProjectHasJobResult(project, action, jobId)", 1)[1].split(
+        "finishCreativeGeneration", 1
+    )[0]
+
+    assert "generatedForJob.length >= Number(project.target_episode_count || 0)" in method
+
+
+def test_partial_outline_checkpoints_cannot_be_locked_from_the_workspace():
+    template = _source("templates/common/workspace/project_outlines.html")
+
+    assert "currentProjectOutlines().length === Number(creativeWorkspace.project.target_episode_count || 0)" in template
+
+
+def test_workspace_downloads_the_current_generated_resource_instead_of_legacy_export():
+    creative = _source("static/js/common/creative.js")
+    outlines = _source("templates/common/workspace/project_outlines.html")
+    blueprints = _source("templates/common/workspace/project_blueprints.html")
+    characters = _source("templates/common/workspace/project_characters.html")
+    beats = _source("templates/common/workspace/project_beats.html")
+
+    assert "creativeGeneratedDownloadUrl(stage, format = 'md')" in creative
+    assert "generated-content/download?${params.toString()}" in creative
+    assert "/export?stage=" not in creative
+    assert "creativeGeneratedDownloadUrl('outline', 'md')" in outlines
+    assert "creativeGeneratedDownloadUrl('brief', 'md')" in blueprints
+    assert "creativeGeneratedDownloadUrl('characters', 'md')" in characters
+    assert "creativeGeneratedDownloadUrl('beats', 'md')" in beats
+
+
+def test_outline_workspace_exposes_continue_generation_for_a_saved_partial_batch():
+    script = _source("static/js/common/creative.js")
+    template = _source("templates/common/workspace/project_outlines.html")
+
+    assert "hasResumableProjectOutlines()" in script
+    assert "outlineGenerationActionLabel()" in script
+    assert "outlineGenerationActionLabel()" in template
+
+
+def test_breakdown_lock_refreshes_the_reactive_editor_record():
+    script = _source("static/js/selection/breakdowns.js")
+    method = script.split("async submitBreakdownEditor()", 1)[1].split(
+        "async saveTopicLibraryBreakdown", 1
+    )[0]
+
+    assert "this.syncBreakdownEditorRecord(data);" in method
+
+
+def test_script_review_polls_optimization_tasks_until_drafts_are_ready():
+    script = _source("static/js/review/scripts.js")
+
+    assert "scheduleOptimizationHistory" in script
+    assert "['queued', 'running'].includes(optimization.status)" in script
+
+
+def test_script_review_shows_a_progress_modal_while_the_review_runs():
+    template = _source("templates/review/scripts.html")
+    script = _source("static/js/review/scripts.js")
+
+    assert 'id="scriptReviewProgressModal"' in template
+    assert 'data-bs-backdrop="static"' in template
+    assert "reviewProgressModal" in script
+    assert "showReviewProgress" in script
+    assert "updateReviewProgress" in script
+    assert "hideReviewProgress" in script
+
+
+def test_script_review_shows_a_progress_modal_while_generating_optimization_drafts():
+    template = _source("templates/review/scripts.html")
+    script = _source("static/js/review/scripts.js")
+
+    assert 'id="scriptOptimizationProgressModal"' in template
+    assert 'id="script-optimization-progress-view-drafts"' in template
+    assert "showOptimizationProgress" in script
+    assert "updateOptimizationProgress" in script
+    assert "showOptimizationProgressError" in script
 
 
 def test_writing_pages_load_optimization_draft_comparison():
-    assert "optimization_draft.js" in _source("templates/writing/scripts.html")
+    template = _source("templates/writing/scripts.html")
+    assert "optimization_draft.js" in template
+    assert 'id="script-page-back-link"' in template
+    assert "optimization_draft.js?v={{ asset_version }}-return-review" in template
     assert "optimization_draft.js" in _source("templates/writing/beats.html")
+    script = _source("static/js/writing/optimization_draft.js")
+    assert "/optimization-drafts" in script
+    assert "AI 优化草稿" in script
+    assert "renderScriptPreview" in script
+    assert "renderBeatsPreview" in script
+    assert "当前版本" in script
+    assert "renderScriptEditor" in script
+    assert "applyOptimizationDraft" in script
+    assert "window.location.assign(reviewPageUrl())" in script
+    assert "下载草稿" in script
+    assert "renderDraftComparison" in script
+    assert "waitForScriptWorkspace" in script
+    assert "返回审核" in script
+    assert "script-page-back-link" in script
+    assert "review_id=${reviewId}" in script
+    assert "computeLineDiff" in script
+    assert "line.scope" in script
+    assert "uniqueLinePositions" in script
+    assert "diff-removed" in script
+    assert "diff-added" in script
+    assert ".optimization-diff-line.diff-removed" in _source("static/css/workspaces.css")
+    assert ".optimization-diff-line.diff-added" in _source("static/css/workspaces.css")
+
+    review_script = _source("static/js/review/scripts.js")
+    assert "review_id" in review_script
+    assert "openReview(returnReviewId)" in review_script
+    assert "&review_id=${review.id}" in review_script
+
+
+def test_my_projects_support_editing_and_permanent_deletion():
+    template = _source("templates/common/workspace/my_tasks.html")
+    script = _source("static/js/common/my_tasks.js")
+
+    assert 'id="project-edit-modal"' in template
+    assert 'id="project-delete-modal"' in template
+    assert "bi-pencil" in script
+    assert "bi-trash" in script
+    assert "method: 'PATCH'" in script
+    assert "method: 'DELETE'" in script
+    assert "删除后将同时清除" in template
+
+
+def test_new_brief_version_keeps_project_name_readonly_but_allows_setting_edits():
+    template = _source("templates/common/workspace/project_blueprints.html")
+
+    assert 'x-model="creativeWorkspace.project.name" :disabled="true"' in template
+    assert 'x-model="creativeWorkspace.project.genre" :disabled="!creativeResourceEditable(selectedProjectBlueprint())"' in template
+    assert 'x-model="creativeWorkspace.project.target_platform" :disabled="!creativeResourceEditable(selectedProjectBlueprint())"' in template
+    assert 'x-model="creativeWorkspace.project.target_audience" :disabled="!creativeResourceEditable(selectedProjectBlueprint())"' in template
+    assert 'x-model.number="creativeWorkspace.project.target_episode_count" :disabled="!creativeResourceEditable(selectedProjectBlueprint())"' in template
+    assert 'x-model.number="creativeWorkspace.project.episode_duration_seconds" :disabled="!creativeResourceEditable(selectedProjectBlueprint())"' in template
 
 
 def test_webgui_does_not_register_a_standalone_breakdown_page():
@@ -484,6 +652,7 @@ def test_topic_scene_script_preview_filters_history_by_version():
 def test_delivery_page_lists_existing_resources_without_delivery_actions():
     page = _source("templates/admin/deliveries.html")
     deliveries = _source("static/js/admin/deliveries.js")
+    creative_api = _source("creative/api.py")
 
     assert "已生成成果" in page
     assert 'id="generated-resource-list"' in page
@@ -492,11 +661,31 @@ def test_delivery_page_lists_existing_resources_without_delivery_actions():
     assert "resource_status" in deliveries
     assert "/api/creative/generated-resources" in deliveries
     assert "generated-content/download" in deliveries
-    assert "generated_resources=3" in page
+    assert "generated_resources=4" in page
     assert 'id="generated-resource-search"' in page
     assert 'id="generated-resource-stage-filter"' in page
     assert 'id="generated-resource-status-filter"' in page
+    assert 'id="generated-resource-generated-after"' in page
+    assert 'id="generated-resource-generated-before"' in page
+    assert "生成时间" in page
     assert "applyFilters" in deliveries
+    assert "generated_at" in deliveries
+    assert "formatGeneratedAt" in deliveries
+    assert '"generated_at": float(item.get("created_at") or 0)' in creative_api
+
+
+def test_outline_page_exposes_beats_and_script_update_records_per_episode():
+    page = _source("templates/writing/outlines.html")
+    outline = _source("templates/common/workspace/project_outlines.html")
+    creative = _source("static/js/common/creative.js")
+
+    assert 'id="outlineEpisodeUpdatesModal"' in page
+    assert "projectEpisodeUpdateRecords" in creative
+    assert "hasProjectEpisodeUpdates" in creative
+    assert "openOutlineEpisodeUpdates" in creative
+    assert "projectEpisodeUpdateSummary" in outline
+    assert "Beats 更新" in creative
+    assert "查看 Beats 与剧本更新记录" in outline
 
 
 def test_scene_script_workspace_distinguishes_merged_and_single_episode_downloads():
@@ -734,6 +923,13 @@ def test_blueprint_editor_exposes_generated_direction_audience():
     assert "人物卡已保存" in html
     assert "creative-save-toast" in html
     assert "creative-save-status" in html
+
+
+def test_blueprint_editor_uses_a_dropdown_to_choose_the_current_direction():
+    html = _workspace_source()
+
+    assert 'x-model.number="creativeWorkspace.selectedBlueprintId"' in html
+    assert 'x-for="item in latestProjectBlueprints()"' in html
     assert "creativeItemSaveLabel" in html
 
 

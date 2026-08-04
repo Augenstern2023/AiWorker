@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import os
+import uuid
 from pathlib import Path
 
 import pytest
@@ -15,15 +17,24 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from core.job import CrawlJob
-from creative.api import build_beats_markdown, register_creative_routes
+from creative.api import (
+    build_beats_markdown,
+    build_creative_router,
+    creative_api_principal,
+    register_creative_routes,
+)
 from creative.imitation_service import assess_similarity_risk
 from creative.repository import CreativeRepository
+from creative.workflow_adapter import CreativeWorkflowAdapter
+from identity.dependencies import current_principal
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.session_service import SessionService
 from runtime.job_state import JobState
+from system_database import SystemDatabase, SystemDatabaseSettings
 from workflow import SYSTEM_ACTOR
 from workflow.repository import WorkflowRepository
+from workflow.transition_service import TransitionService
 
 
 def seed_adopted_topic(repository: CreativeRepository) -> tuple[dict, dict]:
@@ -102,6 +113,109 @@ def test_project_keeps_explicit_target_audience_over_breakdown_value(tmp_path: P
     )
 
     assert project["target_audience"] == "18-24 岁男性观众"
+
+
+def test_deleting_project_removes_its_creative_records_and_script_review_data(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "待删除项目", 1)
+    blueprint = repository.create_blueprints(project["id"], [{"content": {"title": "方向"}}])[0]
+    repository.lock_brief(blueprint["id"])
+    characters = repository.create_character_batch(project["id"], [{"name": "主角"}], [{"relation": "同盟"}])
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(project["id"], [{"episode": 1, "summary": "开局"}], "单集弧线")
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    beats = repository.create_episode_beats(project["id"], 1, {"beats": [{"order": 1}]})
+    repository.lock_episode_beats(beats["id"])
+    repository.create_episode_script(project["id"], 1, {"episode_title": "第 1 集", "scenes": []})
+    review = repository.create_script_review(
+        source_type="project", mode="single", project_id=project["id"], episode_numbers=[1],
+        source_fingerprint="fingerprint", source_payload={}, created_by="tester",
+    )
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="direct",
+        source_fingerprint="fingerprint", selected_findings=[], target_episode_numbers=[1], created_by="tester",
+    )
+    repository.complete_script_optimization(optimization["id"], [{
+        "project_id": project["id"], "episode_number": 1, "kind": "script",
+        "source_episode_id": beats["id"], "source_fingerprint": "fingerprint", "content": {},
+    }])
+    with repository._connect() as connection:
+        connection.execute(
+            "CREATE TABLE creative_deliveries (id TEXT PRIMARY KEY, project_id INTEGER NOT NULL, path TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO creative_deliveries (id, project_id, path) VALUES ('delivery-1', ?, 'exports/project.md')",
+            (project["id"],),
+        )
+
+    removed = repository.delete_project(project["id"])
+
+    assert removed["id"] == project["id"]
+    assert removed["delivery_paths"] == ["exports/project.md"]
+    assert repository.get_project(project["id"]) is None
+    with repository._connect() as connection:
+        for table in (
+            "creative_blueprints", "creative_characters", "creative_relationships",
+            "creative_episodes", "creative_stage_exports", "script_reviews",
+            "script_optimizations", "script_optimization_drafts", "creative_deliveries",
+        ):
+            assert connection.execute(f"SELECT COUNT(*) FROM {table} WHERE project_id = ?", (project["id"],)).fetchone()[0] == 0
+
+
+def test_project_delete_api_removes_its_workflow_members_and_tasks(tmp_path: Path):
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required")
+    runtime_dir = tmp_path / ".runtime"
+    identity = IdentityRepository(SystemDatabase(SystemDatabaseSettings(postgres_url)))
+    identity.seed_defaults()
+    admin_role = identity.get_role_by_code("system_admin")
+    assert admin_role is not None
+    suffix = uuid.uuid4().hex
+    admin = identity.create_user(f"delete-project-{suffix}", "Delete Project Admin", "hash")
+    identity.replace_user_roles(admin["id"], [admin_role["id"]])
+    permissions = PermissionService(identity, SessionService(identity, secure_cookie=False))
+    principal = permissions.principal_for_user(admin["id"], f"delete-project-{suffix}")
+    assert principal is not None
+    workflow = WorkflowRepository(identity)
+    repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(
+        topic["id"], breakdown["id"], "API 删除项目", 1,
+        created_by=principal.user_id,
+    )
+    task = workflow.ensure_project_task(
+        str(project["id"]), topic["id"], task_type="brief",
+        role_code="creative_planner", actor=principal,
+    )
+    workflow.add_project_member(
+        str(project["id"]), principal.user_id, "project_owner", principal,
+    )
+    app = FastAPI()
+    app.state.identity_permission_service = permissions
+    app.dependency_overrides[creative_api_principal] = lambda: principal
+    app.dependency_overrides[current_principal] = lambda: principal
+    app.include_router(build_creative_router(
+        root=tmp_path, runtime_dir=runtime_dir, workflow_repository=workflow,
+    ))
+    client = TestClient(app)
+
+    response = client.delete(f"/api/creative/projects/{project['id']}")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == project["id"]
+    assert repository.get_project(project["id"]) is None
+    with workflow.identity_repository.connect() as connection:
+        assert connection.exec_driver_sql(
+            "SELECT COUNT(*) FROM workflow_tasks WHERE project_id = %s", (str(project["id"]),)
+        ).scalar_one() == 0
+        assert connection.exec_driver_sql(
+            "SELECT COUNT(*) FROM project_members WHERE project_id = %s", (str(project["id"]),)
+        ).scalar_one() == 0
+        assert connection.exec_driver_sql(
+            "SELECT COUNT(*) FROM workflow_instances WHERE id = %s", (task["workflow_id"],)
+        ).scalar_one() == 0
 
 
 def test_repository_backfills_empty_project_audience_from_breakdown(tmp_path: Path):
@@ -349,6 +463,73 @@ def test_locking_new_brief_keeps_history_but_invalidates_current_downstream(tmp_
     assert detail["outline_batch_id"] is None
     assert any(item["batch_id"] == people["batch_id"] for item in detail["characters"])
     assert any(item["batch_id"] == outlines["batch_id"] for item in detail["episodes"])
+
+
+def test_locked_brief_version_api_creates_a_successor_brief_task(tmp_path: Path) -> None:
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required")
+    runtime_dir = tmp_path / ".runtime"
+    database = SystemDatabase(SystemDatabaseSettings(postgres_url))
+    identity = IdentityRepository(database)
+    identity.seed_defaults()
+    admin_role = identity.get_role_by_code("system_admin")
+    assert admin_role is not None
+    suffix = uuid.uuid4().hex
+    admin = identity.create_user(f"brief-version-{suffix}", "Brief Version Admin", "hash")
+    identity.replace_user_roles(admin["id"], [admin_role["id"]])
+    principal = PermissionService(identity, SessionService(identity)).principal_for_user(
+        admin["id"], f"brief-version-{suffix}"
+    )
+    assert principal is not None
+    workflow = WorkflowRepository(identity)
+    repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "版本项目", 1)
+    brief = repository.create_blueprints(project["id"], [{"content": {"title": "初版"}}])[0]
+    task = workflow.create_task(
+        f"project:{project['id']}", "brief", "creative_planner",
+        project_id=str(project["id"]), topic_id=topic["id"], actor=SYSTEM_ACTOR,
+    )
+    task = workflow.claim_task(task["id"], principal)
+    task = workflow.start_task(task["id"], principal)
+    with repository._connect() as connection:
+        connection.execute(
+            "UPDATE creative_blueprints SET workflow_task_id = ? WHERE id = ?",
+            (task["id"], brief["id"]),
+        )
+    transitions = TransitionService(
+        workflow, creative_adapter=CreativeWorkflowAdapter(repository, workflow)
+    )
+    transitions.complete_creative_without_review(task["id"], "brief", str(brief["id"]), principal)
+
+    app = FastAPI()
+    app.dependency_overrides[creative_api_principal] = lambda: principal
+    app.dependency_overrides[current_principal] = lambda: principal
+    app.include_router(build_creative_router(
+        root=tmp_path, runtime_dir=runtime_dir, workflow_repository=workflow
+    ))
+    client = TestClient(app)
+
+    ensured = client.post(
+        f"/api/creative/projects/{project['id']}/workflow-tasks/brief/ensure"
+    )
+
+    assert ensured.status_code == 200
+    assert ensured.json()["status"] == "assigned"
+    successor_task = workflow.start_task(ensured.json()["id"], principal)
+    response = client.post(
+        f"/api/creative/blueprints/{brief['id']}/versions",
+        json={"workflow_task_id": successor_task["id"]},
+    )
+
+    assert response.status_code == 200
+    successor = response.json()
+    assert successor["parent_version_id"] == brief["id"]
+    assert successor["status"] == "draft"
+    assert successor["workflow_task_id"] == successor_task["id"]
+    assert workflow.get_task(successor_task["id"])["predecessor_task_id"] == task["id"]
+    database.dispose()
 
 
 def test_similarity_risk_uses_more_conservative_score():

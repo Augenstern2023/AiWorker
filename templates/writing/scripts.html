@@ -5,12 +5,12 @@
         <h3 class="mb-1">场次剧本</h3>
         <div class="small text-muted">项目 {{ project_id }} · 第 {{ episode_number }} 集 · 可拍摄场次、动作与台词</div>
     </div>
-    <a class="btn btn-outline-light btn-sm flex-shrink-0" href="/writing/projects/{{ project_id }}/episodes/{{ episode_number }}/beats" title="返回 Beats" aria-label="返回 Beats">
-        <i class="bi bi-arrow-left me-1" aria-hidden="true"></i>返回 Beats
+    <a id="script-page-back-link" class="btn btn-outline-light btn-sm flex-shrink-0" href="/writing/projects/{{ project_id }}/episodes/{{ episode_number }}/beats" title="返回 Beats" aria-label="返回 Beats">
+        <i class="bi bi-arrow-left me-1" aria-hidden="true"></i><span id="script-page-back-label">返回 Beats</span>
     </a>
 </div>
 {% include "common/workspace/project_progress.html" %}
 <template x-if="creativeWorkspace.project"><div>{% include "common/workspace/project_scripts.html" %}</div></template>
 {% include "common/workspace/creative_progress_modal.html" %}
 {% endblock %}
-{% block scripts %}<script src="/static/js/common/creative.js"></script><script src="/static/js/writing/scripts.js"></script><script src="/static/js/writing/optimization_draft.js"></script>{% endblock %}
+{% block scripts %}<script src="/static/js/common/creative.js"></script><script src="/static/js/writing/scripts.js"></script><script src="/static/js/writing/optimization_draft.js?v={{ asset_version }}-return-review"></script>{% endblock %}

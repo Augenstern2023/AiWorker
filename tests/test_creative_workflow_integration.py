@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -119,6 +120,51 @@ def _seed_resources(creative: CreativeRepository) -> dict[str, tuple[str, dict]]
         ),
         "beats": (str(beats["id"]), creative.get_episode(beats["id"])),
     }
+
+
+def test_system_admin_can_create_a_resource_assigned_to_another_user(tmp_path: Path) -> None:
+    task = {
+        "id": "task-1", "task_type": "brief", "assignee_user_id": "writer-1",
+        "project_id": "7", "topic_id": None, "status": "assigned",
+    }
+    adapter = CreativeWorkflowAdapter(
+        CreativeRepository(tmp_path / "creative.db"), SimpleNamespace(get_task=lambda task_id: task)
+    )
+    admin = Principal(
+        user_id="admin-1", username="admin", display_name="管理员",
+        role_codes=("system_admin",), permissions=frozenset({"*"}),
+        data_scope="all", session_id="session-admin",
+    )
+
+    checked = adapter.assert_task_for_creation("task-1", "brief", admin, project_id=7)
+
+    assert checked["assignee_user_id"] == "writer-1"
+
+
+def test_system_admin_can_lock_a_brief_assigned_to_another_user(tmp_path: Path) -> None:
+    creative = CreativeRepository(tmp_path / "creative.db")
+    resource_id, brief = _seed_resources(creative)["brief"]
+    _make_resource_draft(creative, "brief", resource_id)
+    task = {
+        "id": "task-1", "task_type": "brief", "assignee_user_id": "writer-1",
+        "project_id": str(brief["project_id"]), "topic_id": None, "status": "assigned",
+    }
+    adapter = CreativeWorkflowAdapter(
+        creative,
+        SimpleNamespace(
+            get_task=lambda task_id: task,
+            get_latest_resource_submission=lambda resource_type, resource_id: None,
+        ),
+    )
+    admin = Principal(
+        user_id="admin-1", username="admin", display_name="管理员",
+        role_codes=("system_admin",), permissions=frozenset({"*"}),
+        data_scope="all", session_id="session-admin",
+    )
+
+    adapter.lock_without_review("task-1", "brief", resource_id, admin)
+
+    assert adapter.domain_status("brief", resource_id) == "brief_locked"
 
 
 def _make_resource_draft(

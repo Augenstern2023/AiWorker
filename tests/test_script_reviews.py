@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -43,7 +44,7 @@ def _script(episode_number: int, version: int, text: str) -> dict:
     }
 
 
-def test_project_source_uses_latest_selected_script_versions() -> None:
+def test_project_source_requires_a_locked_story_context() -> None:
     project = {
         "id": 7,
         "name": "测试项目",
@@ -54,12 +55,68 @@ def test_project_source_uses_latest_selected_script_versions() -> None:
         ],
     }
 
-    source = build_project_source(project, "multiple", [1, 2])
+    with pytest.raises(ValueError, match="尚未锁定 Brief"):
+        build_project_source(project, "multiple", [1, 2])
 
-    assert source["project_id"] == 7
-    assert source["episode_numbers"] == [1, 2]
-    assert [item["version"] for item in source["episodes"]] == [2, 1]
-    assert "新版本" in source["episodes"][0]["text"]
+
+def test_project_source_freezes_the_locked_outline_beats_and_story_context() -> None:
+    project = {
+        "id": 7,
+        "name": "测试项目",
+        "locked_brief_id": 11,
+        "character_batch_id": "characters-v1",
+        "outline_batch_id": "outlines-v1",
+        "blueprints": [
+            {"id": 11, "status": "brief_locked", "version": 2, "content": {"tone": "逆袭"}}
+        ],
+        "characters": [
+            {"id": 21, "batch_id": "characters-v1", "status": "locked", "version": 1, "content": {"name": "主角"}}
+        ],
+        "relationships": [
+            {"id": 22, "batch_id": "characters-v1", "status": "locked", "version": 1, "content": {"from": "主角", "to": "反派"}}
+        ],
+        "episodes": [
+            {
+                "id": 31, "stage": "outline", "batch_id": "outlines-v1", "episode_number": 1,
+                "status": "locked", "version": 1, "content": {"episode": 1, "core_event": "主角反击"},
+            },
+            {
+                "id": 41, "stage": "beats", "episode_number": 1, "status": "locked", "version": 1,
+                "upstream_refs": {"brief_id": 11, "character_batch_id": "characters-v1", "outline_batch_id": "outlines-v1", "outline_id": 31, "outline_version": 1, "outline_content_fingerprint": "80f052f643b47fe486fa710c4035c2aa7e1bcf31639055ce8374c72a2f955901"},
+                "content": {"beats": [{"order": 1, "goal": "公开反击"}]},
+            },
+            {
+                "id": 51, "stage": "script", "episode_number": 1, "status": "draft", "version": 1,
+                "upstream_refs": {"brief_id": 11, "character_batch_id": "characters-v1", "outline_batch_id": "outlines-v1", "outline_id": 31, "outline_version": 1, "outline_content_fingerprint": "80f052f643b47fe486fa710c4035c2aa7e1bcf31639055ce8374c72a2f955901", "beats_id": 41, "beats_version": 1},
+                "content": {"episode_title": "第 1 集", "scenes": []},
+            },
+        ],
+    }
+
+    source = build_project_source(project, "single", [1])
+
+    assert source["formal"] is True
+    assert source["brief"]["id"] == 11
+    assert source["episodes"][0]["outline"]["content"]["core_event"] == "主角反击"
+    assert source["episodes"][0]["beats"]["id"] == 41
+
+
+def test_project_source_rejects_scripts_without_an_exact_outline_reference() -> None:
+    project = {
+        "id": 7, "name": "测试项目", "locked_brief_id": 11,
+        "character_batch_id": "characters-v1", "outline_batch_id": "outlines-v1",
+        "blueprints": [{"id": 11, "status": "brief_locked", "content": {}}],
+        "characters": [{"id": 21, "batch_id": "characters-v1", "status": "locked", "content": {}}],
+        "relationships": [],
+        "episodes": [
+            {"id": 31, "stage": "outline", "batch_id": "outlines-v1", "episode_number": 1, "status": "locked", "version": 1, "content": {}},
+            {"id": 41, "stage": "beats", "episode_number": 1, "status": "locked", "version": 1, "upstream_refs": {"brief_id": 11, "character_batch_id": "characters-v1", "outline_batch_id": "outlines-v1"}, "content": {}},
+            {"id": 51, "stage": "script", "episode_number": 1, "status": "draft", "version": 1, "upstream_refs": {"brief_id": 11, "character_batch_id": "characters-v1", "outline_batch_id": "outlines-v1", "beats_id": 41, "beats_version": 1}, "content": {"scenes": []}},
+        ],
+    }
+
+    with pytest.raises(ValueError, match="分集大纲版本已过期"):
+        build_project_source(deepcopy(project), "single", [1])
 
 
 @pytest.mark.parametrize(

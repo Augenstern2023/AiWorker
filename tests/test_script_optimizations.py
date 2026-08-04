@@ -131,6 +131,7 @@ def test_structure_optimization_links_beats_and_script_drafts(tmp_path) -> None:
 def test_optimization_request_expands_cross_episode_findings_to_review_scope() -> None:
     review = {
         "source_type": "project",
+        "source_payload": {"formal": True},
         "status": "confirmed",
         "final_verdict": "建议修改",
         "episode_numbers": [2, 3],
@@ -148,6 +149,26 @@ def test_optimization_request_expands_cross_episode_findings_to_review_scope() -
     )
 
     assert result["target_episode_numbers"] == [2, 3]
+
+
+def test_optimization_request_rejects_a_finding_that_requires_outline_revision() -> None:
+    review = {
+        "source_type": "project",
+        "source_payload": {"formal": True},
+        "status": "confirmed",
+        "final_verdict": "建议修改",
+        "episode_numbers": [1],
+        "report": {
+            "core_findings": [
+                {"title": "核心事件偏离大纲", "change_route": "outline_revision_required", "episode_number": 1}
+            ],
+            "episode_reviews": [],
+            "cross_episode_findings": [],
+        },
+    }
+
+    with pytest.raises(ValueError, match="需要先修订并锁定分集大纲"):
+        validate_optimization_request(review, "direct", [{"ref": "core:0"}])
 
 
 def test_text_review_cannot_create_an_optimization_task(tmp_path) -> None:
@@ -219,6 +240,170 @@ def test_accept_direct_optimization_creates_editable_script_without_status_chang
     assert accepted["status"] == "accepted"
     assert repository.get_episode(accepted["accepted_episode_id"])["content"]["episode_title"] == "优化稿"
     assert repository.get_project(project["id"])["status"] == before_status
+
+
+def test_structure_script_draft_requires_accepted_and_locked_paired_beats(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, _ = _project_with_review(repository)
+    source_beats = max(
+        (item for item in repository.get_project(project["id"])["episodes"] if item["stage"] == "beats"),
+        key=lambda item: item["version"],
+    )
+    optimized_beats = {"beats": [{"order": 1, "goal": "扩大反击"}]}
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="structure",
+        source_fingerprint=review["source_fingerprint"],
+        selected_findings=[{"ref": "core:0", "episode_numbers": [1]}],
+        target_episode_numbers=[1], created_by="admin-1",
+    )
+    completed = repository.complete_script_optimization(
+        optimization["id"],
+        [
+            {"episode_number": 1, "kind": "beats", "source_episode_id": source_beats["id"], "source_fingerprint": content_fingerprint(source_beats["content"]), "content": optimized_beats},
+            {"episode_number": 1, "kind": "script", "source_episode_id": None, "source_fingerprint": content_fingerprint(optimized_beats), "content": {"episode_title": "结构优化稿", "scenes": []}},
+        ],
+    )
+    beats_draft, script_draft = completed["drafts"]
+    client = _admin_client(repository)
+
+    assert client.post(f"/api/script-optimization-drafts/{script_draft['id']}/accept").status_code == 409
+    accepted_beats = client.post(f"/api/script-optimization-drafts/{beats_draft['id']}/accept")
+    assert accepted_beats.status_code == 200, accepted_beats.text
+    assert client.post(f"/api/script-optimization-drafts/{script_draft['id']}/accept").status_code == 409
+
+    repository.lock_episode_beats(accepted_beats.json()["accepted_episode_id"])
+    accepted_script = client.post(f"/api/script-optimization-drafts/{script_draft['id']}/accept")
+    assert accepted_script.status_code == 200, accepted_script.text
+    assert accepted_script.json()["status"] == "accepted"
+
+
+def test_structure_script_draft_is_rejected_when_accepted_beats_changes(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, _ = _project_with_review(repository)
+    source_beats = max(
+        (item for item in repository.get_project(project["id"])["episodes"] if item["stage"] == "beats"),
+        key=lambda item: item["version"],
+    )
+    optimized_beats = {"beats": [{"order": 1, "goal": "扩大反击"}]}
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="structure",
+        source_fingerprint=review["source_fingerprint"],
+        selected_findings=[{"ref": "core:0", "episode_numbers": [1]}],
+        target_episode_numbers=[1], created_by="admin-1",
+    )
+    completed = repository.complete_script_optimization(
+        optimization["id"],
+        [
+            {"episode_number": 1, "kind": "beats", "source_episode_id": source_beats["id"], "source_fingerprint": content_fingerprint(source_beats["content"]), "content": optimized_beats},
+            {"episode_number": 1, "kind": "script", "source_episode_id": None, "source_fingerprint": content_fingerprint(optimized_beats), "content": {"episode_title": "结构优化稿", "scenes": []}},
+        ],
+    )
+    beats_draft, script_draft = completed["drafts"]
+    client = _admin_client(repository)
+    accepted_beats = client.post(f"/api/script-optimization-drafts/{beats_draft['id']}/accept")
+    assert accepted_beats.status_code == 200, accepted_beats.text
+    repository.update_episode(accepted_beats.json()["accepted_episode_id"], {"beats": [{"order": 1, "goal": "改过的 Beats"}]})
+    repository.lock_episode_beats(accepted_beats.json()["accepted_episode_id"])
+
+    response = client.post(f"/api/script-optimization-drafts/{script_draft['id']}/accept")
+
+    assert response.status_code == 409
+    assert "已变化" in response.json()["detail"]
+
+
+def test_direct_drafts_for_unchanged_episodes_remain_acceptable_after_another_episode_is_adopted(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, scripts = _project_with_review(repository, episode_count=2)
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="direct",
+        source_fingerprint=review["source_fingerprint"],
+        selected_findings=[{"ref": "core:0", "episode_numbers": [1, 2]}],
+        target_episode_numbers=[1, 2], created_by="admin-1",
+    )
+    completed = repository.complete_script_optimization(
+        optimization["id"],
+        [
+            {"episode_number": number, "kind": "script", "source_episode_id": source["id"], "source_fingerprint": content_fingerprint(source["content"]), "content": {"episode_title": f"优化稿 {number}", "scenes": []}}
+            for number, source in enumerate(scripts, start=1)
+        ],
+    )
+    client = _admin_client(repository)
+
+    first = client.post(f"/api/script-optimization-drafts/{completed['drafts'][0]['id']}/accept")
+    second = client.post(f"/api/script-optimization-drafts/{completed['drafts'][1]['id']}/accept")
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+
+
+def test_direct_draft_is_rejected_when_its_source_script_has_changed(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, scripts = _project_with_review(repository)
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="direct",
+        source_fingerprint=review["source_fingerprint"],
+        selected_findings=[{"ref": "core:0", "episode_numbers": [1]}],
+        target_episode_numbers=[1], created_by="admin-1",
+    )
+    completed = repository.complete_script_optimization(
+        optimization["id"],
+        [{"episode_number": 1, "kind": "script", "source_episode_id": scripts[0]["id"], "source_fingerprint": content_fingerprint(scripts[0]["content"]), "content": {"episode_title": "优化稿", "scenes": []}}],
+    )
+    repository.create_episode_script(project["id"], 1, {"episode_title": "后续改过的原稿", "scenes": []})
+
+    response = _admin_client(repository).post(f"/api/script-optimization-drafts/{completed['drafts'][0]['id']}/accept")
+
+    assert response.status_code == 409
+    assert "来源场次剧本已更新" in response.json()["detail"]
+
+
+def test_episode_page_can_list_its_optimization_draft_entries(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, scripts = _project_with_review(repository)
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="direct",
+        source_fingerprint=review["source_fingerprint"],
+        selected_findings=[{"ref": "core:0", "episode_numbers": [1]}],
+        target_episode_numbers=[1], created_by="admin-1",
+    )
+    completed = repository.complete_script_optimization(
+        optimization["id"],
+        [{"episode_number": 1, "kind": "script", "source_episode_id": scripts[0]["id"], "source_fingerprint": content_fingerprint(scripts[0]["content"]), "content": {"episode_title": "优化稿", "scenes": []}}],
+    )
+
+    response = _admin_client(repository).get(
+        f"/api/creative/projects/{project['id']}/episodes/1/optimization-drafts?stage=script"
+    )
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["items"]] == [completed["drafts"][0]["id"]]
+
+
+def test_applying_an_edited_script_draft_creates_a_locked_script_version(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, scripts = _project_with_review(repository)
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="direct",
+        source_fingerprint=review["source_fingerprint"],
+        selected_findings=[{"ref": "core:0", "episode_numbers": [1]}],
+        target_episode_numbers=[1], created_by="admin-1",
+    )
+    completed = repository.complete_script_optimization(
+        optimization["id"],
+        [{"episode_number": 1, "kind": "script", "source_episode_id": scripts[0]["id"], "source_fingerprint": content_fingerprint(scripts[0]["content"]), "content": {"episode_title": "AI 原稿", "scenes": []}}],
+    )
+    edited_content = {"episode_title": "编剧修改后的优化稿", "scenes": []}
+
+    response = _admin_client(repository).post(
+        f"/api/script-optimization-drafts/{completed['drafts'][0]['id']}/accept",
+        json={"content": edited_content, "lock_after_accept": True},
+    )
+
+    assert response.status_code == 200, response.text
+    accepted = repository.get_episode(response.json()["accepted_episode_id"])
+    assert accepted is not None
+    assert accepted["content"] == edited_content
+    assert accepted["status"] == "locked"
 
 
 @pytest.mark.asyncio
@@ -297,6 +482,32 @@ async def test_optimization_worker_marks_task_failed_without_drafts(tmp_path, mo
     monkeypatch.setattr(optimization_worker, "create_provider", lambda: FailingProvider())
     with pytest.raises(RuntimeError, match="provider unavailable"):
         await optimization_worker.run(CrawlJob(job_id="optimization-failed", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)}))
+
+    failed = repository.get_script_optimization(optimization["id"])
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["drafts"] == []
+
+
+@pytest.mark.asyncio
+async def test_optimization_worker_rejects_a_task_when_review_source_has_changed(tmp_path, monkeypatch) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, _ = _project_with_review(repository)
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="direct",
+        source_fingerprint=review["source_fingerprint"],
+        selected_findings=[{"ref": "core:0", "episode_numbers": [1]}],
+        target_episode_numbers=[1], created_by="admin-1",
+    )
+    repository.create_episode_script(project["id"], 1, {"episode_title": "变更后的原稿", "scenes": []})
+
+    class FakeProvider:
+        async def complete_json(self, messages):
+            raise AssertionError("来源已变更时不应调用 AI")
+
+    monkeypatch.setattr(optimization_worker, "create_provider", lambda: FakeProvider())
+    with pytest.raises(ValueError, match="剧本已更新"):
+        await optimization_worker.run(CrawlJob(job_id="optimization-stale", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)}))
 
     failed = repository.get_script_optimization(optimization["id"])
     assert failed is not None

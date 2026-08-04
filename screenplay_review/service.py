@@ -24,6 +24,10 @@ RULES = (
     "首集吸引力、前三集信息、逻辑一致性、人物执行、台词/OS、"
     "爽点、节奏与跨集连续性"
 )
+APPROVED_STATUSES = frozenset({"locked", "approved"})
+FINDING_ROUTES = frozenset(
+    {"script_only", "beats_then_script", "outline_revision_required"}
+)
 
 
 def validate_review_request(payload: dict[str, Any]) -> dict[str, Any]:
@@ -66,7 +70,7 @@ def validate_review_request(payload: dict[str, Any]) -> dict[str, Any]:
 def build_project_source(
     project: dict[str, Any], mode: str, episode_numbers: list[int]
 ) -> dict[str, Any]:
-    """Freeze the latest generated script for each selected episode."""
+    """Freeze one formally valid creative context for each reviewed episode."""
     latest: dict[int, dict[str, Any]] = {}
     for item in project.get("episodes") or []:
         if item.get("stage") != "script":
@@ -87,12 +91,26 @@ def build_project_source(
     if missing:
         raise ValueError(f"第 {', '.join(str(number) for number in missing)} 集尚无场次剧本")
 
-    episodes = [_source_episode(latest[number]) for number in selected]
+    brief, characters, relationships = _project_story_context(project)
+    outline_batch_id = str(project.get("outline_batch_id") or "")
+    episodes = [
+        _source_episode_with_context(
+            latest[number],
+            _current_outline(project, number, outline_batch_id),
+            _current_beats(project, number, outline_batch_id),
+            project,
+        )
+        for number in selected
+    ]
     source = {
         "project_id": int(project["id"]),
         "project_name": str(project.get("name") or ""),
         "mode": mode,
+        "formal": True,
         "episode_numbers": selected,
+        "brief": brief,
+        "characters": characters,
+        "relationships": relationships,
         "episodes": episodes,
     }
     source["fingerprint"] = source_fingerprint(source)
@@ -107,6 +125,7 @@ def build_text_source(text: str) -> dict[str, Any]:
         "project_id": None,
         "project_name": "",
         "mode": "single",
+        "formal": False,
         "episode_numbers": [1],
         "episodes": [{"episode_number": 1, "resource_id": None, "version": None, "text": normalized}],
     }
@@ -115,8 +134,146 @@ def build_text_source(text: str) -> dict[str, Any]:
 
 
 def source_fingerprint(source: dict[str, Any]) -> str:
-    value = json.dumps(source.get("episodes") or [], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    value = json.dumps(
+        {key: value for key, value in source.items() if key != "fingerprint"},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _project_story_context(
+    project: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    brief_id = int(project.get("locked_brief_id") or 0)
+    character_batch_id = str(project.get("character_batch_id") or "")
+    if brief_id < 1:
+        raise ValueError("项目尚未锁定 Brief，无法发起正式审核")
+    if not character_batch_id:
+        raise ValueError("项目尚未锁定人物关系，无法发起正式审核")
+    brief = next(
+        (item for item in project.get("blueprints") or [] if int(item.get("id") or 0) == brief_id),
+        None,
+    )
+    if not brief or str(brief.get("status") or "") not in {"brief_locked", "approved"}:
+        raise ValueError("当前锁定 Brief 不可用，无法发起正式审核")
+    characters = [
+        item for item in project.get("characters") or []
+        if str(item.get("batch_id") or "") == character_batch_id
+    ]
+    relationships = [
+        item for item in project.get("relationships") or []
+        if str(item.get("batch_id") or "") == character_batch_id
+    ]
+    if not characters or any(str(item.get("status") or "") not in APPROVED_STATUSES for item in [*characters, *relationships]):
+        raise ValueError("当前人物关系版本未锁定，无法发起正式审核")
+    return (
+        _resource_snapshot(brief),
+        [_resource_snapshot(item) for item in characters],
+        [_resource_snapshot(item) for item in relationships],
+    )
+
+
+def _current_outline(project: dict[str, Any], episode_number: int, batch_id: str) -> dict[str, Any]:
+    if not batch_id:
+        raise ValueError("项目尚未锁定分集大纲，无法发起正式审核")
+    candidates = [
+        item for item in project.get("episodes") or []
+        if item.get("stage") == "outline"
+        and str(item.get("batch_id") or "") == batch_id
+        and int(item.get("episode_number") or 0) == episode_number
+        and str(item.get("status") or "") in APPROVED_STATUSES
+    ]
+    if not candidates:
+        raise ValueError(f"第 {episode_number} 集分集大纲未锁定，无法发起正式审核")
+    return max(candidates, key=_version_key)
+
+
+def _current_beats(project: dict[str, Any], episode_number: int, outline_batch_id: str) -> dict[str, Any]:
+    candidates = [
+        item for item in project.get("episodes") or []
+        if item.get("stage") == "beats"
+        and int(item.get("episode_number") or 0) == episode_number
+        and str(item.get("status") or "") in APPROVED_STATUSES
+    ]
+    if not candidates:
+        raise ValueError(f"第 {episode_number} 集 Beats 未锁定，无法发起正式审核")
+    beats = max(candidates, key=_version_key)
+    _assert_upstream_refs(beats, project, f"第 {episode_number} 集 Beats")
+    _assert_outline_ref(beats, _current_outline(project, episode_number, outline_batch_id), f"第 {episode_number} 集 Beats")
+    return beats
+
+
+def _source_episode_with_context(
+    script: dict[str, Any], outline: dict[str, Any], beats: dict[str, Any], project: dict[str, Any]
+) -> dict[str, Any]:
+    episode_number = int(script["episode_number"])
+    _assert_upstream_refs(script, project, f"第 {episode_number} 集场次剧本")
+    _assert_outline_ref(script, outline, f"第 {episode_number} 集场次剧本")
+    refs = script.get("upstream_refs") or {}
+    if (int(refs.get("beats_id") or 0), int(refs.get("beats_version") or 0)) != (
+        int(beats.get("id") or 0), int(beats.get("version") or 0)
+    ):
+        raise ValueError(f"第 {episode_number} 集场次剧本引用的 Beats 已过期，请重新生成场次剧本")
+    expected_beats_fingerprint = _content_fingerprint(beats.get("content") or {})
+    actual_beats_fingerprint = str(refs.get("beats_content_fingerprint") or "")
+    if actual_beats_fingerprint and actual_beats_fingerprint != expected_beats_fingerprint:
+        raise ValueError(f"第 {episode_number} 集场次剧本引用的 Beats 内容已变化，请重新生成场次剧本")
+    return {
+        **_source_episode(script),
+        "script": _resource_snapshot(script),
+        "outline": _resource_snapshot(outline),
+        "beats": _resource_snapshot(beats),
+    }
+
+
+def _assert_upstream_refs(item: dict[str, Any], project: dict[str, Any], label: str) -> None:
+    refs = item.get("upstream_refs") or {}
+    expected = {
+        "brief_id": int(project.get("locked_brief_id") or 0),
+        "character_batch_id": str(project.get("character_batch_id") or ""),
+        "outline_batch_id": str(project.get("outline_batch_id") or ""),
+    }
+    if any(str(refs.get(key) or "") != str(value) for key, value in expected.items()):
+        raise ValueError(f"{label}引用的 Brief、人物关系或分集大纲已过期，请重新生成")
+
+
+def _assert_outline_ref(item: dict[str, Any], outline: dict[str, Any], label: str) -> None:
+    refs = item.get("upstream_refs") or {}
+    expected = (
+        int(outline.get("id") or 0),
+        int(outline.get("version") or 0),
+        _content_fingerprint(outline.get("content") or {}),
+    )
+    actual = (
+        int(refs.get("outline_id") or 0),
+        int(refs.get("outline_version") or 0),
+        str(refs.get("outline_content_fingerprint") or ""),
+    )
+    if actual != expected:
+        raise ValueError(f"{label}引用的分集大纲版本已过期，请重新生成")
+
+
+def _version_key(item: dict[str, Any]) -> tuple[int, int]:
+    return int(item.get("version") or 0), int(item.get("id") or 0)
+
+
+def _content_fingerprint(content: dict[str, Any]) -> str:
+    value = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _resource_snapshot(item: dict[str, Any]) -> dict[str, Any]:
+    content = item.get("content") or {}
+    return {
+        "id": int(item.get("id") or 0),
+        "version": int(item.get("version") or 1),
+        "status": str(item.get("status") or ""),
+        "content": content,
+        "upstream_refs": item.get("upstream_refs") or {},
+        "content_fingerprint": _content_fingerprint(content),
+    }
 
 
 def normalize_review_report(payload: dict[str, Any]) -> dict[str, Any]:
@@ -201,7 +358,11 @@ def _review_messages(source: dict[str, Any]) -> list[dict[str, str]]:
                 "不得代写剧本。输出 JSON：ai_verdict、summary、core_findings、"
                 "episode_reviews、cross_episode_findings。episode_reviews 每项必须有 "
                 "episode_number、summary 和 findings。core_findings 最多 5 条；"
-                "每条问题都要给 title、rule_id、severity(P0/P1/P2)、episode_number、evidence、suggestion。\n"
+                "每条问题都要给 title、rule_id、category、severity(P0/P1/P2)、episode_number、"
+                "outline_anchor（对应的大纲字段和值）、beat_orders、evidence、suggestion、"
+                "change_route（script_only、beats_then_script、outline_revision_required）。"
+                "所有建议必须遵守冻结的分集大纲；需要改变核心事件、人物进展、反转或钩子时，"
+                "必须标记 outline_revision_required。\n"
                 f"固定规则包：{RULE_PACKAGE}，覆盖{RULES}。\n"
                 + "\n".join(checks)
             ),
@@ -220,7 +381,9 @@ def _summary_messages(source: dict[str, Any]) -> list[dict[str, str]]:
                 "设定一致性、前三集信息前置和重复拖沓；无法确认的内容标记证据不足。"
                 "输出 JSON：ai_verdict、summary、core_findings、"
                 "episode_reviews、cross_episode_findings；episode_reviews 每项必须有 episode_number、summary 和 findings；"
-                f"core_findings 最多 5 条，每条必须给出 title 和证据。固定规则包：{RULE_PACKAGE}，覆盖{RULES}。"
+                "每条问题都要给 title、category、outline_anchor、beat_orders、evidence、suggestion、"
+                "change_route；不得建议自动改写分集大纲。"
+                f"core_findings 最多 5 条。固定规则包：{RULE_PACKAGE}，覆盖{RULES}。"
             ),
         },
         {"role": "user", "content": json.dumps(source, ensure_ascii=False)},
@@ -257,11 +420,20 @@ def _source_episode(item: dict[str, Any]) -> dict[str, Any]:
 def _normalize_finding(item: dict[str, Any]) -> dict[str, Any]:
     severity = str(item.get("severity") or "P2").upper()
     rule_id = str(item.get("rule_id") or "").strip()
+    route = str(item.get("change_route") or "script_only").strip()
+    beat_orders = sorted(
+        {int(order) for order in item.get("beat_orders") or [] if str(order).isdigit() and int(order) > 0}
+    )
+    outline_anchor = item.get("outline_anchor") if isinstance(item.get("outline_anchor"), dict) else {}
     return {
         "title": str(item.get("title") or _fallback_finding_title(rule_id)).strip(),
         "severity": severity if severity in SEVERITIES else "P2",
         "rule_id": rule_id,
+        "category": str(item.get("category") or "script_detail").strip() or "script_detail",
         "episode_number": item.get("episode_number"),
+        "outline_anchor": outline_anchor,
+        "beat_orders": beat_orders,
+        "change_route": route if route in FINDING_ROUTES else "script_only",
         "evidence": str(item.get("evidence") or "证据不足").strip() or "证据不足",
         "suggestion": str(item.get("suggestion") or "").strip(),
     }

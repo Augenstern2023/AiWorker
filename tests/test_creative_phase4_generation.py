@@ -92,6 +92,40 @@ async def test_blueprint_generation_repairs_invalid_response_once():
 
 
 @pytest.mark.asyncio
+async def test_blueprint_generation_normalizes_a_structured_protagonist_to_text():
+    payload = blueprint_payload()
+    payload["blueprints"][0]["protagonist"] = {
+        "name": "林向暖", "identity": "社区药店店长"
+    }
+
+    blueprints, _ = await generate_blueprints(
+        SequentialProvider([payload]),
+        {"name": "项目"},
+        {"title": "来源"},
+        {"content": {"core_conflict": "来源冲突"}},
+        3,
+    )
+
+    assert blueprints[0]["content"]["protagonist"] == "林向暖 社区药店店长"
+
+
+@pytest.mark.asyncio
+async def test_blueprint_generation_accepts_a_chinese_risk_level_instead_of_a_score():
+    payload = blueprint_payload()
+    payload["blueprints"][0]["risk_score"] = "低"
+
+    blueprints, _ = await generate_blueprints(
+        SequentialProvider([payload]),
+        {"name": "项目"},
+        {"title": "来源"},
+        {"content": {"core_conflict": "来源冲突"}},
+        3,
+    )
+
+    assert blueprints[0]["risk_level"] == "low"
+
+
+@pytest.mark.asyncio
 async def test_structured_content_repair_does_not_repeat_exhausted_gateway_errors():
     request = httpx.Request("POST", "https://example.test/v1/chat/completions")
     response = httpx.Response(502, request=request)
@@ -190,6 +224,111 @@ async def test_outline_generation_chunks_every_ten_episodes():
     assert len(result["episodes"]) == 12
     assert progress == [(10, 12), (12, 12)]
     assert meta["chunk_size"] == 10
+
+
+@pytest.mark.asyncio
+async def test_outline_generation_accepts_a_bare_episode_array_from_the_llm():
+    provider = SequentialProvider([
+        {"series_arc": "相识、对抗、合作", "stages": ["相识", "对抗", "合作"]},
+        [outline_episode(number) for number in range(1, 3)],
+    ])
+
+    result, _ = await generate_outline_bundle(
+        provider,
+        {"name": "项目", "target_episode_count": 2},
+        {"title": "Brief"},
+        [{"content": {"name": "周晴"}}],
+        [],
+    )
+
+    assert [item["episode"] for item in result["episodes"]] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_outline_generation_fills_a_missing_duration_from_the_project_setting():
+    episodes = [outline_episode(number) for number in range(1, 3)]
+    for episode in episodes:
+        episode.pop("estimated_seconds")
+    provider = SequentialProvider([
+        {"series_arc": "相识、对抗、合作", "stages": ["相识", "对抗", "合作"]},
+        {"episodes": episodes},
+    ])
+
+    result, _ = await generate_outline_bundle(
+        provider,
+        {"name": "项目", "target_episode_count": 2, "episode_duration_seconds": 180},
+        {"title": "Brief"},
+        [{"content": {"name": "周晴"}}],
+        [],
+    )
+
+    assert [item["estimated_seconds"] for item in result["episodes"]] == [180, 180]
+
+
+@pytest.mark.asyncio
+async def test_outline_generation_continues_from_a_saved_contiguous_prefix():
+    provider = SequentialProvider([
+        {"episodes": [outline_episode(number) for number in range(11, 13)]},
+    ])
+
+    result, meta = await generate_outline_bundle(
+        provider,
+        {"name": "项目", "target_episode_count": 12},
+        {"title": "Brief"},
+        [{"content": {"name": "周晴"}}],
+        [],
+        resume_episodes=[outline_episode(number) for number in range(1, 11)],
+        resume_series_arc="相识、对抗、合作",
+        resume_stages=["相识", "对抗", "合作"],
+    )
+
+    assert len(provider.calls) == 1
+    assert [item["episode"] for item in result["episodes"]] == list(range(1, 13))
+    assert meta["resumed_from_episode"] == 10
+
+
+@pytest.mark.asyncio
+async def test_outline_generation_retries_a_malformed_chunk_before_failing_the_batch():
+    provider = SequentialProvider([
+        {"series_arc": "相识、对抗、合作", "stages": ["相识", "对抗", "合作"]},
+        {"episodes": "格式错误"},
+        {"episodes": "仍然错误"},
+        {"episodes": [outline_episode(number) for number in range(1, 3)]},
+    ])
+
+    result, _ = await generate_outline_bundle(
+        provider,
+        {"name": "项目", "target_episode_count": 2},
+        {"title": "Brief"},
+        [{"content": {"name": "周晴"}}],
+        [],
+    )
+
+    assert len(provider.calls) == 4
+    assert [item["episode"] for item in result["episodes"]] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_outline_generation_repairs_missing_text_fields_after_all_chunks():
+    incomplete = outline_episode(1)
+    incomplete.pop("conflict")
+    provider = SequentialProvider([
+        {"series_arc": "相识、对抗、合作", "stages": ["相识", "对抗", "合作"]},
+        {"episodes": [incomplete, outline_episode(2)]},
+        {"fields": {"conflict": "主角与反派围绕证据归属正面冲突"}},
+    ])
+
+    result, meta = await generate_outline_bundle(
+        provider,
+        {"name": "项目", "target_episode_count": 2},
+        {"title": "Brief"},
+        [{"content": {"name": "周晴"}}],
+        [],
+    )
+
+    assert len(provider.calls) == 3
+    assert result["episodes"][0]["conflict"] == "主角与反派围绕证据归属正面冲突"
+    assert meta["field_repair_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -413,6 +552,86 @@ def test_phase4_worker_does_not_persist_partial_blueprints_after_llm_failure(tmp
         asyncio.run(phase4_worker.run(job))
 
     assert repository.get_project(project["id"])["blueprints"] == []
+
+
+def test_phase4_worker_preserves_completed_outline_chunks_after_a_later_failure(tmp_path, monkeypatch):
+    db_path = tmp_path / ".runtime" / "creative" / "creative.db"
+    repository = CreativeRepository(db_path)
+    project = seed_worker_project(repository)
+    brief = repository.create_blueprints(project["id"], [{"content": {"title": "方向"}}])[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    provider = SequentialProvider([
+        {"series_arc": "相识、对抗、合作", "stages": ["相识", "对抗", "合作"]},
+        {"episodes": [outline_episode(number) for number in range(1, 11)]},
+        {"episodes": []},
+        {"episodes": []},
+    ])
+    monkeypatch.setattr(phase4_worker, "create_provider", lambda: provider)
+    job = CrawlJob(
+        job_id="creative-worker-outline-checkpoint",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "outlines", "project_id": project["id"],
+            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+        },
+    )
+
+    with pytest.raises(Exception, match="结构校验"):
+        asyncio.run(phase4_worker.run(job))
+
+    partial_outlines = [
+        item for item in repository.get_project(project["id"])["episodes"]
+        if item["stage"] == "outline"
+    ]
+    assert [item["episode_number"] for item in partial_outlines] == list(range(1, 11))
+    assert len({item["batch_id"] for item in partial_outlines}) == 1
+
+
+def test_phase4_worker_continues_a_saved_outline_batch_after_a_failed_job(tmp_path, monkeypatch):
+    db_path = tmp_path / ".runtime" / "creative" / "creative.db"
+    repository = CreativeRepository(db_path)
+    project = seed_worker_project(repository)
+    brief = repository.create_blueprints(project["id"], [{"content": {"title": "方向"}}])[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    failed_provider = SequentialProvider([
+        {"series_arc": "相识、对抗、合作", "stages": ["相识", "对抗", "合作"]},
+        {"episodes": [outline_episode(number) for number in range(1, 11)]},
+        {"episodes": []},
+        {"episodes": []},
+    ])
+    monkeypatch.setattr(phase4_worker, "create_provider", lambda: failed_provider)
+    failed_job = CrawlJob(
+        job_id="creative-worker-outline-failed",
+        platform="creative", crawler_type="phase4_generate",
+        extra={"action": "outlines", "project_id": project["id"], "db_path": str(db_path)},
+    )
+    with pytest.raises(Exception, match="结构校验"):
+        asyncio.run(phase4_worker.run(failed_job))
+
+    resumed_provider = SequentialProvider([
+        {"episodes": [outline_episode(number) for number in range(11, 21)]},
+    ])
+    monkeypatch.setattr(phase4_worker, "create_provider", lambda: resumed_provider)
+    resumed_job = CrawlJob(
+        job_id="creative-worker-outline-resumed",
+        platform="creative", crawler_type="phase4_generate",
+        extra={"action": "outlines", "project_id": project["id"], "db_path": str(db_path)},
+    )
+
+    asyncio.run(phase4_worker.run(resumed_job))
+
+    outlines = [
+        item for item in repository.get_project(project["id"])["episodes"]
+        if item["stage"] == "outline"
+    ]
+    assert len(resumed_provider.calls) == 1
+    assert [item["episode_number"] for item in outlines] == list(range(1, 21))
+    assert len({item["batch_id"] for item in outlines}) == 1
 
 
 def test_phase4_worker_surfaces_provider_retry_progress(tmp_path, monkeypatch):

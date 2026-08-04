@@ -96,6 +96,10 @@ def build_script_review_router(
     def refresh_staleness(review: dict[str, Any]) -> dict[str, Any]:
         if review["source_type"] != "project" or review["status"] != "pending_confirmation":
             return review
+        if not bool((review.get("source_payload") or {}).get("formal")):
+            return repository.mark_script_review_stale_if_changed(
+                review["id"], "__missing_formal_context__"
+            )
         try:
             fingerprint = source_fingerprint(current_source(review))
         except (HTTPException, ValueError):
@@ -111,18 +115,21 @@ def build_script_review_router(
         assert_permission(principal, "script.review.generate")
         try:
             data = validate_review_request(payload.model_dump())
-            if data["source_type"] == "text":
-                source = build_text_source(data["text"])
-            else:
-                project = repository.get_project(int(data["project_id"]))
-                if not project:
-                    raise HTTPException(404, "创作项目不存在")
-                assert_project_access(request, principal, int(project["id"]))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if data["source_type"] == "text":
+            source = build_text_source(data["text"])
+        else:
+            project = repository.get_project(int(data["project_id"]))
+            if not project:
+                raise HTTPException(404, "创作项目不存在")
+            assert_project_access(request, principal, int(project["id"]))
+            try:
                 source = build_project_source(
                     project, data["mode"], data["episode_numbers"]
                 )
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
 
         review = repository.create_script_review(
             source_type=data["source_type"],
@@ -200,6 +207,10 @@ def build_script_review_router(
             raise HTTPException(404, "审核记录不存在")
         if not can_read_review(request, principal, review):
             raise HTTPException(403, "没有访问此审核记录的权限")
+        if review["source_type"] != "project" or not bool(
+            (review.get("source_payload") or {}).get("formal")
+        ):
+            raise HTTPException(409, "非正式文本诊断或旧版审核不能人工确认")
         try:
             source = current_source(review)
             review = repository.mark_script_review_stale_if_changed(

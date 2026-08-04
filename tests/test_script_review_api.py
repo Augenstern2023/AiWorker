@@ -53,7 +53,7 @@ def _admin_principal() -> Principal:
     )
 
 
-def test_text_review_is_created_and_exposes_pending_confirmation(tmp_path) -> None:
+def test_text_review_is_created_as_an_unconfirmable_quick_diagnosis(tmp_path) -> None:
     repository = CreativeRepository(tmp_path / "creative.db")
     jobs = FakeJobManager()
     app = FastAPI()
@@ -90,9 +90,8 @@ def test_text_review_is_created_and_exposes_pending_confirmation(tmp_path) -> No
         json={"final_verdict": "建议修改", "confirmation_note": "补强反击动机"},
     )
 
-    assert confirmed.status_code == 200
-    assert confirmed.json()["final_verdict"] == "建议修改"
-    assert confirmed.json()["confirmed_by"] == "writer-1"
+    assert confirmed.status_code == 409
+    assert "不能人工确认" in confirmed.json()["detail"]
 
 
 def test_project_review_is_marked_stale_and_confirmation_is_rejected(tmp_path) -> None:

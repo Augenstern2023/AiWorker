@@ -33,7 +33,9 @@ def blueprint_messages(payload: dict[str, Any], count: int) -> list[dict[str, st
         "你是短剧创意策划。借鉴结构与情绪价值，但不得复制角色名、具体台词、完整剧情节点或独特表达。"
         f"生成 {count} 个明显不同的方向，返回 blueprints 数组。每项包含 title、borrowed_elements、"
         "different_elements、protagonist、core_conflict、main_goal、background、worldview、first_three_hooks、"
-        "highlights、audience、cost_level、risk_score、risk_reasons、revision_suggestions、priority。",
+        "highlights、audience、cost_level、risk_score、risk_reasons、revision_suggestions、priority。"
+        "title、protagonist、core_conflict、main_goal、background、worldview、audience、cost_level 必须是纯文本字符串；"
+        "列表字段必须是字符串数组。",
         payload,
     )
 
@@ -63,6 +65,15 @@ def outline_messages(payload: dict[str, Any], start: int, end: int) -> list[dict
         "conflict、character_progress、highlight、reversal、cliffhanger、estimated_seconds。"
         "在 character_progress 中标明主角当集的压力反应，并跨两集安排反派的软肋、分歧或真实代价。"
         "不得写完整正文或完整台词。" + DRAMA_CONSTRAINTS,
+        payload,
+    )
+
+
+def outline_field_repair_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
+    return _messages(
+        "你是短剧分集大纲编辑。仅补全输入 episode 中列出的 repair_fields，保持已生成的核心事件、"
+        "人物进展、反转和悬念不变。顶层必须返回 {\"fields\": {...}}；fields 只能包含 repair_fields 中的键，"
+        "每个值必须是非空纯文本字符串。不得重写整集或输出 Markdown。",
         payload,
     )
 

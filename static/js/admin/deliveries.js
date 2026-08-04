@@ -5,9 +5,11 @@
     const search = document.getElementById('generated-resource-search');
     const stageFilter = document.getElementById('generated-resource-stage-filter');
     const statusFilter = document.getElementById('generated-resource-status-filter');
+    const generatedAfter = document.getElementById('generated-resource-generated-after');
+    const generatedBefore = document.getElementById('generated-resource-generated-before');
     const count = document.getElementById('generated-resource-count');
     const resetFilters = document.getElementById('reset-generated-resource-filters');
-    if (!resources || !search || !stageFilter || !statusFilter || !count || !resetFilters) return;
+    if (!resources || !search || !stageFilter || !statusFilter || !generatedAfter || !generatedBefore || !count || !resetFilters) return;
 
     const stageLabels = {brief: 'Brief', characters: '人物关系', outline: '分集大纲', beats: 'Beats', script: '场次剧本'};
     const resourceStatusLabels = {draft: '草稿', locked: '已锁定', brief_locked: '已锁定', approved: '已锁定', submitted: '已提交', returned: '已退回'};
@@ -16,7 +18,7 @@
     function statusMessage(message) {
         const row = document.createElement('tr');
         const cell = document.createElement('td');
-        cell.colSpan = 6;
+        cell.colSpan = 7;
         cell.className = 'text-center text-muted py-4';
         cell.textContent = message;
         row.appendChild(cell);
@@ -38,6 +40,23 @@
         return `/api/creative/projects/${resource.project_id}/generated-content/download?${params.toString()}`;
     }
 
+    function formatGeneratedAt(timestamp) {
+        const value = Number(timestamp || 0);
+        if (!value) return '-';
+        return new Intl.DateTimeFormat('zh-CN', {
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+        }).format(new Date(value * 1000));
+    }
+
+    function isWithinGeneratedDateRange(resource) {
+        const timestamp = Number(resource.generated_at || 0) * 1000;
+        if (!timestamp) return !generatedAfter.value && !generatedBefore.value;
+        const after = generatedAfter.value ? new Date(`${generatedAfter.value}T00:00:00`).getTime() : -Infinity;
+        const before = generatedBefore.value ? new Date(`${generatedBefore.value}T23:59:59.999`).getTime() : Infinity;
+        return timestamp >= after && timestamp <= before;
+    }
+
     function resourceRow(resource) {
         const row = document.createElement('tr');
         const values = [
@@ -45,6 +64,7 @@
             stageLabels[resource.stage] || resource.stage,
             `v${resource.resource_version}`,
             resourceStatusLabels[resource.resource_status] || resource.resource_status || '-',
+            formatGeneratedAt(resource.generated_at),
         ];
         for (const value of values) {
             const cell = document.createElement('td');
@@ -88,6 +108,7 @@
                     && ['locked', 'brief_locked', 'approved'].includes(resource.resource_status);
                 if (!matchesLocked && resource.resource_status !== statusFilter.value) return false;
             }
+            if (!isWithinGeneratedDateRange(resource)) return false;
             if (!query) return true;
             const searchable = [
                 resource.project_name,
@@ -96,6 +117,7 @@
                 resource.resource_status,
                 resourceStatusLabels[resource.resource_status],
                 `v${resource.resource_version}`,
+                formatGeneratedAt(resource.generated_at),
             ].filter(Boolean).join(' ').toLocaleLowerCase();
             return searchable.includes(query);
         });
@@ -128,10 +150,14 @@
     search.addEventListener('input', applyFilters);
     stageFilter.addEventListener('change', applyFilters);
     statusFilter.addEventListener('change', applyFilters);
+    generatedAfter.addEventListener('change', applyFilters);
+    generatedBefore.addEventListener('change', applyFilters);
     resetFilters.addEventListener('click', () => {
         search.value = '';
         stageFilter.value = '';
         statusFilter.value = '';
+        generatedAfter.value = '';
+        generatedBefore.value = '';
         applyFilters();
     });
     document.getElementById('refresh-deliveries')?.addEventListener('click', refresh);

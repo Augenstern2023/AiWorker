@@ -158,6 +158,40 @@ async def run(job: CrawlJob) -> None:
     elif action == "outlines":
         brief = _locked_brief(project)
         characters, relationships = _locked_characters(project)
+        resumable = repository.find_resumable_outline_batch(project_id)
+        outline_batch_id: str | None = resumable["batch_id"] if resumable else None
+        resume_episodes = [item["content"] for item in resumable["episodes"]] if resumable else None
+        resume_series_arc = resumable["series_arc"] if resumable else None
+        resume_stages = resumable["stages"] if resumable else None
+        if resumable:
+            completed = len(resume_episodes or [])
+            total = int(project["target_episode_count"])
+            emit(job, "log", f"接续已保存的大纲草稿：从第 {completed + 1} 集继续")
+            emit(
+                job,
+                "progress",
+                f"已恢复 {completed}/{total} 集大纲",
+                payload={"stage": action, "completed": completed, "total": total},
+            )
+
+        def save_outline_checkpoint(
+            arc: dict[str, Any], episodes: list[dict[str, Any]], meta: dict[str, Any]
+        ) -> None:
+            nonlocal outline_batch_id
+            saved = repository.save_outline_batch_checkpoint(
+                project_id,
+                episodes,
+                str(arc["series_arc"]),
+                job.job_id,
+                {
+                    **meta,
+                    "stages": arc["stages"],
+                    "checkpoint_episode_count": len(episodes),
+                },
+                workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
+                batch_id=outline_batch_id,
+            )
+            outline_batch_id = saved["batch_id"]
 
         def progress(done: int, total: int) -> None:
             emit(
@@ -174,15 +208,15 @@ async def run(job: CrawlJob) -> None:
             characters,
             relationships,
             on_progress=progress,
+            on_checkpoint=save_outline_checkpoint,
             checkpoint=lambda: wait_if_paused(job),
+            resume_episodes=resume_episodes,
+            resume_series_arc=resume_series_arc,
+            resume_stages=resume_stages,
         )
-        bundle = repository.create_outline_batch(
-            project_id,
-            generated["episodes"],
-            generated["series_arc"],
-            job.job_id,
-            {**meta, "stages": generated["stages"]},
-        )
+        if outline_batch_id is None:
+            raise RuntimeError("分集大纲未创建任何生成检查点")
+        bundle = repository.get_outline_batch(project_id, outline_batch_id)
         result = {"action": action, "batch_id": bundle["batch_id"], "episode_count": len(bundle["episodes"])}
     else:
         brief = _locked_brief(project)

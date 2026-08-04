@@ -12,9 +12,36 @@
     const result = document.getElementById('script-review-result');
     const history = document.getElementById('script-review-history');
     const error = document.getElementById('script-review-error');
+    const reviewProgressElement = document.getElementById('scriptReviewProgressModal');
+    const reviewProgressScope = document.getElementById('script-review-progress-scope');
+    const reviewProgressStatus = document.getElementById('script-review-progress-status');
+    const reviewProgressValue = document.getElementById('script-review-progress-value');
+    const reviewProgressBar = document.getElementById('script-review-progress-bar');
+    const reviewProgressElapsed = document.getElementById('script-review-progress-elapsed');
+    const reviewProgressError = document.getElementById('script-review-progress-error');
+    const reviewProgressViewReport = document.getElementById('script-review-progress-view-report');
+    const optimizationProgressElement = document.getElementById('scriptOptimizationProgressModal');
+    const optimizationProgressScope = document.getElementById('script-optimization-progress-scope');
+    const optimizationProgressStatus = document.getElementById('script-optimization-progress-status');
+    const optimizationProgressValue = document.getElementById('script-optimization-progress-value');
+    const optimizationProgressBar = document.getElementById('script-optimization-progress-bar');
+    const optimizationProgressElapsed = document.getElementById('script-optimization-progress-elapsed');
+    const optimizationProgressError = document.getElementById('script-optimization-progress-error');
+    const optimizationProgressViewDrafts = document.getElementById('script-optimization-progress-view-drafts');
+    const returnReviewId = Number(new URLSearchParams(window.location.search).get('review_id') || 0);
     let activeReviewId = null;
     let reviewProjects = [];
     let selectedProject = null;
+    const optimizationTimers = new Map();
+    const reviewPollTimers = new Map();
+    const reviewProgress = { reviewId: null, startedAt: 0, elapsedTimer: null };
+    const optimizationProgress = { optimizationId: null, startedAt: 0, elapsedTimer: null };
+    const reviewProgressModal = reviewProgressElement && window.bootstrap
+        ? window.bootstrap.Modal.getOrCreateInstance(reviewProgressElement)
+        : null;
+    const optimizationProgressModal = optimizationProgressElement && window.bootstrap
+        ? window.bootstrap.Modal.getOrCreateInstance(optimizationProgressElement)
+        : null;
 
     if (!source || !mode || !project || !projectWrap || !textWrap || !text || !episodes || !submit || !result || !history || !error) return;
 
@@ -33,8 +60,178 @@
         return { queued: '等待审核', running: '审核中', pending_confirmation: '待人工确认', confirmed: '已确认', stale: '已过期', failed: '审核失败' }[value] || value || '-';
     }
 
+    function reviewScope(payload) {
+        if (payload.source_type === 'text') return '粘贴文本 · 单集审核';
+        const projectName = reviewProjects.find((item) => Number(item.id) === Number(payload.project_id))?.name || '创作项目';
+        const modeName = { single: '单集', multiple: '多集', collection: '合集' }[payload.mode] || '剧本';
+        const selected = payload.episode_numbers || [];
+        return `${projectName} · ${modeName}${selected.length ? ` · ${selected.map((number) => `第 ${number} 集`).join('、')}` : ''}`;
+    }
+
+    function formatReviewElapsed(milliseconds) {
+        const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+        const minutes = Math.floor(seconds / 60);
+        return minutes ? `${minutes} 分 ${seconds % 60} 秒` : `${seconds} 秒`;
+    }
+
+    function refreshReviewProgressElapsed() {
+        if (!reviewProgress.startedAt || !reviewProgressElapsed) return;
+        reviewProgressElapsed.textContent = `已等待 ${formatReviewElapsed(Date.now() - reviewProgress.startedAt)}`;
+    }
+
+    function showReviewProgress(scope = '') {
+        if (!reviewProgressModal) return;
+        reviewProgress.reviewId = null;
+        reviewProgress.startedAt = Date.now();
+        if (reviewProgressScope) reviewProgressScope.textContent = scope;
+        if (reviewProgressStatus) {
+            reviewProgressStatus.className = 'alert alert-info py-2';
+            reviewProgressStatus.textContent = '正在创建审核任务';
+        }
+        if (reviewProgressValue) reviewProgressValue.textContent = '正在启动';
+        if (reviewProgressBar) reviewProgressBar.className = 'progress-bar progress-bar-striped progress-bar-animated';
+        if (reviewProgressError) {
+            reviewProgressError.textContent = '';
+            reviewProgressError.classList.add('d-none');
+        }
+        reviewProgressViewReport?.classList.add('d-none');
+        refreshReviewProgressElapsed();
+        if (reviewProgress.elapsedTimer) window.clearInterval(reviewProgress.elapsedTimer);
+        reviewProgress.elapsedTimer = window.setInterval(refreshReviewProgressElapsed, 1000);
+        reviewProgressModal.show();
+    }
+
+    function hideReviewProgress() {
+        reviewProgressModal?.hide();
+    }
+
+    function updateReviewProgress(review, message = '') {
+        if (!reviewProgressModal || reviewProgress.reviewId !== review.id) return;
+        const isRunning = ['queued', 'running'].includes(review.status);
+        const completed = review.status === 'pending_confirmation';
+        const failed = review.status === 'failed';
+        if (reviewProgressStatus) {
+            reviewProgressStatus.className = `alert ${failed ? 'alert-danger' : completed ? 'alert-success' : 'alert-info'} py-2`;
+            reviewProgressStatus.textContent = message || (failed ? '审核任务失败' : completed ? '审核完成，审核报告已生成' : label(review.status));
+        }
+        if (reviewProgressValue) reviewProgressValue.textContent = failed ? '审核失败' : completed ? '审核完成' : '处理中';
+        if (reviewProgressBar) {
+            reviewProgressBar.className = `progress-bar progress-bar-striped${isRunning ? ' progress-bar-animated' : ''}${failed ? ' bg-danger' : completed ? ' bg-success' : ''}`;
+            reviewProgressBar.style.width = isRunning ? '100%' : '100%';
+        }
+        if (failed && reviewProgressError) {
+            reviewProgressError.textContent = review.error || review.error_message || '审核任务执行失败，请稍后重试。';
+            reviewProgressError.classList.remove('d-none');
+        }
+        reviewProgressViewReport?.classList.toggle('d-none', !completed);
+        if (!isRunning && reviewProgress.elapsedTimer) {
+            window.clearInterval(reviewProgress.elapsedTimer);
+            reviewProgress.elapsedTimer = null;
+            refreshReviewProgressElapsed();
+        }
+    }
+
+    function showReviewProgressError(message) {
+        if (!reviewProgressModal) return;
+        if (reviewProgressStatus) {
+            reviewProgressStatus.className = 'alert alert-danger py-2';
+            reviewProgressStatus.textContent = '创建审核任务失败';
+        }
+        if (reviewProgressValue) reviewProgressValue.textContent = '审核失败';
+        if (reviewProgressBar) reviewProgressBar.className = 'progress-bar progress-bar-striped bg-danger';
+        if (reviewProgressError) {
+            reviewProgressError.textContent = message || '创建审核任务失败，请稍后重试。';
+            reviewProgressError.classList.remove('d-none');
+        }
+        if (reviewProgress.elapsedTimer) {
+            window.clearInterval(reviewProgress.elapsedTimer);
+            reviewProgress.elapsedTimer = null;
+        }
+    }
+
+    function optimizationScope(review, modeName) {
+        return `${sourceLabel(review)} · ${modeName === 'structure' ? '结构优化' : '场次剧本优化'}`;
+    }
+
+    function refreshOptimizationProgressElapsed() {
+        if (!optimizationProgress.startedAt || !optimizationProgressElapsed) return;
+        optimizationProgressElapsed.textContent = `已等待 ${formatReviewElapsed(Date.now() - optimizationProgress.startedAt)}`;
+    }
+
+    function showOptimizationProgress(scope = '') {
+        if (!optimizationProgressModal) return;
+        optimizationProgress.optimizationId = null;
+        optimizationProgress.startedAt = Date.now();
+        if (optimizationProgressScope) optimizationProgressScope.textContent = scope;
+        if (optimizationProgressStatus) {
+            optimizationProgressStatus.className = 'alert alert-info py-2';
+            optimizationProgressStatus.textContent = '正在创建优化草稿任务';
+        }
+        if (optimizationProgressValue) optimizationProgressValue.textContent = '正在启动';
+        if (optimizationProgressBar) optimizationProgressBar.className = 'progress-bar progress-bar-striped progress-bar-animated';
+        if (optimizationProgressError) {
+            optimizationProgressError.textContent = '';
+            optimizationProgressError.classList.add('d-none');
+        }
+        optimizationProgressViewDrafts?.classList.add('d-none');
+        refreshOptimizationProgressElapsed();
+        if (optimizationProgress.elapsedTimer) window.clearInterval(optimizationProgress.elapsedTimer);
+        optimizationProgress.elapsedTimer = window.setInterval(refreshOptimizationProgressElapsed, 1000);
+        optimizationProgressModal.show();
+    }
+
+    function hideOptimizationProgress() {
+        optimizationProgressModal?.hide();
+    }
+
+    function updateOptimizationProgress(optimization) {
+        if (!optimizationProgressModal || optimizationProgress.optimizationId !== optimization.id) return;
+        const isRunning = ['queued', 'running'].includes(optimization.status);
+        const completed = optimization.status === 'completed';
+        const failed = optimization.status === 'failed';
+        if (optimizationProgressStatus) {
+            optimizationProgressStatus.className = `alert ${failed ? 'alert-danger' : completed ? 'alert-success' : 'alert-info'} py-2`;
+            optimizationProgressStatus.textContent = failed
+                ? '优化草稿生成失败'
+                : completed ? '优化草稿已生成，可进入逐集查看和对比。' : optimizationStatus(optimization.status);
+        }
+        if (optimizationProgressValue) optimizationProgressValue.textContent = failed ? '生成失败' : completed ? '生成完成' : '处理中';
+        if (optimizationProgressBar) {
+            optimizationProgressBar.className = `progress-bar progress-bar-striped${isRunning ? ' progress-bar-animated' : ''}${failed ? ' bg-danger' : completed ? ' bg-success' : ''}`;
+            optimizationProgressBar.style.width = '100%';
+        }
+        if (failed && optimizationProgressError) {
+            optimizationProgressError.textContent = optimization.error || '优化草稿任务执行失败，请稍后重试。';
+            optimizationProgressError.classList.remove('d-none');
+        }
+        optimizationProgressViewDrafts?.classList.toggle('d-none', !completed);
+        if (!isRunning && optimizationProgress.elapsedTimer) {
+            window.clearInterval(optimizationProgress.elapsedTimer);
+            optimizationProgress.elapsedTimer = null;
+            refreshOptimizationProgressElapsed();
+        }
+    }
+
+    function showOptimizationProgressError(message) {
+        if (!optimizationProgressModal) return;
+        if (optimizationProgressStatus) {
+            optimizationProgressStatus.className = 'alert alert-danger py-2';
+            optimizationProgressStatus.textContent = '创建优化草稿任务失败';
+        }
+        if (optimizationProgressValue) optimizationProgressValue.textContent = '生成失败';
+        if (optimizationProgressBar) optimizationProgressBar.className = 'progress-bar progress-bar-striped bg-danger';
+        if (optimizationProgressError) {
+            optimizationProgressError.textContent = message || '创建优化草稿任务失败，请稍后重试。';
+            optimizationProgressError.classList.remove('d-none');
+        }
+        if (optimizationProgress.elapsedTimer) {
+            window.clearInterval(optimizationProgress.elapsedTimer);
+            optimizationProgress.elapsedTimer = null;
+        }
+    }
+
     function sourceLabel(review) {
-        return review.source_type === 'text' ? '粘贴文本' : (review.source_payload?.project_name || `项目 ${review.project_id}`);
+        return review.source_type === 'text' ? '粘贴文本（非正式）' : (review.source_payload?.project_name || `项目 ${review.project_id}`);
     }
 
     function renderEpisodes() {
@@ -93,8 +290,17 @@
 
     async function loadProjects() {
         const payload = await readJson(await aiworkerApi.request('/api/creative/projects'));
-        reviewProjects = payload.items || [];
+        reviewProjects = (payload.items || []).filter((item) => item.outline_batch_id);
         project.replaceChildren();
+        if (!reviewProjects.length) {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = '暂无已锁定分集大纲的项目';
+            project.append(option);
+            selectedProject = null;
+            renderEpisodes();
+            return;
+        }
         reviewProjects.forEach((item) => {
             const option = document.createElement('option');
             option.value = String(item.id);
@@ -123,19 +329,23 @@
     async function createReview() {
         showError();
         submit.disabled = true;
+        const payload = source.value === 'text'
+            ? { source_type: 'text', mode: 'single', text: text.value }
+            : { source_type: 'project', mode: mode.value, project_id: Number(project.value), episode_numbers: selectedEpisodes() };
+        showReviewProgress(reviewScope(payload));
         try {
-            const payload = source.value === 'text'
-                ? { source_type: 'text', mode: 'single', text: text.value }
-                : { source_type: 'project', mode: mode.value, project_id: Number(project.value), episode_numbers: selectedEpisodes() };
             const created = await readJson(await aiworkerApi.request('/api/script-reviews', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
             }));
             activeReviewId = created.review.id;
+            reviewProgress.reviewId = created.review.id;
+            updateReviewProgress(created.review);
             renderReview(created.review);
             await loadHistory();
-            pollReview(activeReviewId);
+            void pollReview(activeReviewId);
         } catch (requestError) {
             showError(requestError.message);
+            showReviewProgressError(requestError.message);
         } finally {
             submit.disabled = false;
         }
@@ -156,8 +366,36 @@
         const node = document.createElement('li');
         node.className = 'mb-2';
         const evidence = item.evidence ? ` 证据：${item.evidence}` : '';
-        node.textContent = `[${item.severity || 'P2'}] ${findingTitle(item)}${evidence}${item.suggestion ? ` 建议：${item.suggestion}` : ''}`;
+        const outline = item.outline_anchor && Object.keys(item.outline_anchor).length
+            ? ` 大纲锚点：${Object.entries(item.outline_anchor).map(([key, value]) => `${key}=${value}`).join('；')}` : '';
+        const beats = (item.beat_orders || []).length ? ` Beats：${item.beat_orders.join('、')}` : '';
+        const route = { script_only: '场次细节优化', beats_then_script: '先优化 Beats', outline_revision_required: '需人工修订大纲' }[item.change_route] || '场次细节优化';
+        node.textContent = `[${item.severity || 'P2'}] ${findingTitle(item)}${outline}${beats}${evidence}${item.suggestion ? ` 建议：${item.suggestion}` : ''} · ${route}`;
         return node;
+    }
+
+    function renderReviewContext(review) {
+        const sourcePayload = review.source_payload || {};
+        if (!sourcePayload.formal) {
+            const notice = document.createElement('div');
+            notice.className = 'alert alert-info py-2 mb-3';
+            notice.textContent = '这是非正式文本诊断，不可人工确认或生成优化草稿。';
+            result.append(notice);
+            return;
+        }
+        result.append(sectionHeading('评审依据'));
+        const summary = document.createElement('div');
+        summary.className = 'small text-muted mb-2';
+        summary.textContent = `Brief v${sourcePayload.brief?.version || '-'} · 人物关系 ${sourcePayload.relationships?.length || 0} 条`;
+        result.append(summary);
+        const list = document.createElement('ul');
+        list.className = 'ps-3 small mb-3';
+        (sourcePayload.episodes || []).forEach((episode) => {
+            const item = document.createElement('li');
+            item.textContent = `第 ${episode.episode_number} 集：大纲 v${episode.outline?.version || '-'} · Beats v${episode.beats?.version || '-'} · 场次剧本 v${episode.script?.version || episode.version || '-'}`;
+            list.append(item);
+        });
+        result.append(list);
     }
 
     function appendFindingSection(parent, title, items) {
@@ -197,7 +435,7 @@
     }
 
     function renderOptimizationSection(review) {
-        if (review.status !== 'confirmed' || review.final_verdict !== '建议修改' || !review.project_id) return;
+        if (review.status !== 'confirmed' || review.final_verdict !== '建议修改' || !review.project_id || !review.source_payload?.formal) return;
         const section = document.createElement('section');
         section.className = 'border-top pt-4 mt-4';
         section.append(sectionHeading('AI 优化草稿'));
@@ -216,6 +454,7 @@
             input.className = 'form-check-input';
             input.type = 'checkbox';
             input.value = ref;
+            input.dataset.route = item.change_route || 'script_only';
             const text = document.createElement('span');
             text.className = 'form-check-label small';
             text.textContent = findingTitle(item);
@@ -239,6 +478,17 @@
             selectedFindings.append(row);
         });
         section.append(selectedFindings);
+        const syncFindingAvailability = () => {
+            [...selectedFindings.querySelectorAll('input')].forEach((input) => {
+                const route = input.dataset.route;
+                const allowed = (modeSelect.value === 'direct' && route === 'script_only')
+                    || (modeSelect.value === 'structure' && route === 'beats_then_script');
+                input.disabled = !allowed;
+                if (!allowed) input.checked = false;
+            });
+        };
+        modeSelect.addEventListener('change', syncFindingAvailability);
+        syncFindingAvailability();
         const start = document.createElement('button');
         start.type = 'button';
         start.className = 'btn btn-primary btn-sm mt-2';
@@ -252,14 +502,18 @@
                 };
             });
             start.disabled = true;
+            showOptimizationProgress(optimizationScope(review, modeSelect.value));
             try {
-                await readJson(await aiworkerApi.request(`/api/script-reviews/${review.id}/optimizations`, {
+                const created = await readJson(await aiworkerApi.request(`/api/script-reviews/${review.id}/optimizations`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ mode: modeSelect.value, findings }),
                 }));
+                optimizationProgress.optimizationId = created.optimization.id;
+                updateOptimizationProgress(created.optimization);
                 await loadOptimizationHistory(review, history);
             } catch (requestError) {
                 showError(requestError.message);
+                showOptimizationProgressError(requestError.message);
             } finally {
                 start.disabled = false;
             }
@@ -276,11 +530,29 @@
         return { queued: '等待生成', running: '生成中', completed: '已生成', failed: '生成失败', ready: '待采纳', accepted: '已采纳', rejected: '已放弃' }[value] || value;
     }
 
+    function scheduleOptimizationHistory(review, container, items) {
+        const timer = optimizationTimers.get(review.id);
+        const stillRunning = items.some((optimization) => ['queued', 'running'].includes(optimization.status));
+        if (!stillRunning) {
+            if (timer) window.clearTimeout(timer);
+            optimizationTimers.delete(review.id);
+            return;
+        }
+        if (timer) return;
+        const next = window.setTimeout(() => {
+            optimizationTimers.delete(review.id);
+            if (activeReviewId === review.id) loadOptimizationHistory(review, container);
+        }, 2000);
+        optimizationTimers.set(review.id, next);
+    }
+
     async function loadOptimizationHistory(review, container) {
         try {
             const payload = await readJson(await aiworkerApi.request(`/api/script-reviews/${review.id}/optimizations`));
             container.replaceChildren();
-            (payload.items || []).forEach((optimization) => {
+            const items = payload.items || [];
+            items.forEach((optimization) => {
+                updateOptimizationProgress(optimization);
                 const title = document.createElement('div');
                 title.className = 'small fw-semibold mt-3';
                 title.textContent = `${optimization.mode === 'structure' ? '结构优化' : '场次剧本优化'} · ${optimizationStatus(optimization.status)}`;
@@ -294,25 +566,29 @@
                     const stage = draft.kind === 'beats' ? 'beats' : 'scripts';
                     const compare = document.createElement('a');
                     compare.className = 'btn btn-outline-light btn-sm';
-                    compare.href = `/writing/projects/${optimization.project_id}/episodes/${draft.episode_number}/${stage}?optimization_draft=${draft.id}`;
-                    compare.textContent = '查看对比';
+                    compare.href = `/writing/projects/${optimization.project_id}/episodes/${draft.episode_number}/${stage}?optimization_draft=${draft.id}&review_id=${review.id}`;
+                    compare.textContent = draft.kind === 'script' && draft.status === 'ready' ? '编辑草稿' : '查看对比';
                     row.append(compare);
                     if (draft.status === 'ready') {
-                        const accept = document.createElement('button');
-                        accept.type = 'button';
-                        accept.className = 'btn btn-success btn-sm';
-                        accept.textContent = '采纳';
-                        accept.addEventListener('click', () => acceptOptimizationDraft(draft.id, review, container));
                         const reject = document.createElement('button');
                         reject.type = 'button';
                         reject.className = 'btn btn-outline-secondary btn-sm';
                         reject.textContent = '放弃';
                         reject.addEventListener('click', () => rejectOptimizationDraft(draft.id, review, container));
-                        row.append(accept, reject);
+                        if (draft.kind === 'beats') {
+                            const accept = document.createElement('button');
+                            accept.type = 'button';
+                            accept.className = 'btn btn-success btn-sm';
+                            accept.textContent = '采纳';
+                            accept.addEventListener('click', () => acceptOptimizationDraft(draft.id, review, container));
+                            row.append(accept);
+                        }
+                        row.append(reject);
                     }
                     container.append(row);
                 });
             });
+            scheduleOptimizationHistory(review, container, items);
         } catch (requestError) {
             showError(requestError.message);
         }
@@ -357,6 +633,7 @@
         const episodeNumbers = review.episode_numbers || [];
         coverage.textContent = `${{ single: '单集', multiple: '多集', collection: '合集' }[review.mode] || '审核'} · 实际覆盖 ${episodeNumbers.length} 集（${episodeNumbers.map((number) => `第 ${number} 集`).join('、') || '-'}）`;
         result.append(coverage);
+        renderReviewContext(review);
         if (!review.report || !review.report.ai_verdict) return;
         result.append(sectionHeading('修改建议'));
         const overview = document.createElement('p');
@@ -400,7 +677,7 @@
             });
         }
         appendFindingSection(result, '跨集问题', review.report.cross_episode_findings || []);
-        if (review.status === 'pending_confirmation') {
+        if (review.status === 'pending_confirmation' && review.source_payload?.formal) {
             const controls = document.createElement('div');
             controls.className = 'd-flex flex-wrap gap-2 align-items-center mt-3';
             const note = document.createElement('input');
@@ -446,19 +723,37 @@
 
     async function openReview(reviewId) {
         try {
-            renderReview(await readJson(await aiworkerApi.request(`/api/script-reviews/${reviewId}`)));
+            const review = await readJson(await aiworkerApi.request(`/api/script-reviews/${reviewId}`));
+            renderReview(review);
+            if (['queued', 'running'].includes(review.status)) {
+                showReviewProgress(`${sourceLabel(review)} · ${label(review.status)}`);
+                reviewProgress.reviewId = review.id;
+                updateReviewProgress(review);
+                void pollReview(review.id);
+            }
         } catch (requestError) {
             showError(requestError.message);
         }
     }
 
     async function pollReview(reviewId) {
+        if (reviewPollTimers.has(reviewId)) return;
         try {
             const review = await readJson(await aiworkerApi.request(`/api/script-reviews/${reviewId}`));
             if (review.id === activeReviewId) renderReview(review);
-            if (['queued', 'running'].includes(review.status)) window.setTimeout(() => pollReview(reviewId), 2000);
+            updateReviewProgress(review);
+            if (['queued', 'running'].includes(review.status)) {
+                const timer = window.setTimeout(() => {
+                    reviewPollTimers.delete(reviewId);
+                    void pollReview(reviewId);
+                }, 2000);
+                reviewPollTimers.set(reviewId, timer);
+            } else {
+                await loadHistory();
+            }
         } catch (requestError) {
             showError(requestError.message);
+            if (reviewProgress.reviewId === reviewId) showReviewProgressError(requestError.message);
         }
     }
 
@@ -485,6 +780,17 @@
     mode.addEventListener('change', renderEpisodes);
     project.addEventListener('change', loadSelectedProject);
     submit.addEventListener('click', createReview);
+    reviewProgressViewReport?.addEventListener('click', hideReviewProgress);
+    optimizationProgressViewDrafts?.addEventListener('click', hideOptimizationProgress);
     document.getElementById('script-review-refresh')?.addEventListener('click', async () => { await loadProjects(); await loadHistory(); });
-    (async () => { try { await loadProjects(); await loadHistory(); toggleSource(); } catch (requestError) { showError(requestError.message); } })();
+    (async () => {
+        try {
+            await loadProjects();
+            await loadHistory();
+            toggleSource();
+            if (returnReviewId > 0) await openReview(returnReviewId);
+        } catch (requestError) {
+            showError(requestError.message);
+        }
+    })();
 }());

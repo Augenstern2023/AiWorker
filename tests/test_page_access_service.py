@@ -153,11 +153,23 @@ def test_planning_grant_controls_project_parameter_updates_immediately() -> None
         )
         is True
     )
+    assert (
+        service.can_call_page_api(
+            principal, "DELETE", "/api/creative/projects/project-1"
+        )
+        is True
+    )
 
     repository.access_by_route["/planning/projects"] = set()
     assert (
         service.can_call_page_api(
             principal, "PATCH", "/api/creative/projects/project-1"
+        )
+        is False
+    )
+    assert (
+        service.can_call_page_api(
+            principal, "DELETE", "/api/creative/projects/project-1"
         )
         is False
     )
@@ -325,6 +337,9 @@ def test_global_disable_precedes_whitelist_and_project_owner_navigation_privileg
         ("/admin/users", "GET", "/api/admin/departments"),
         ("/admin/users", "GET", "/api/admin/roles"),
         ("/review/users", "GET", "/api/team/roles"),
+        ("/review/scripts", "POST", "/api/script-reviews/review-1/optimizations"),
+        ("/review/scripts", "GET", "/api/script-optimizations/optimization-1"),
+        ("/review/scripts", "POST", "/api/script-optimization-drafts/draft-1/accept"),
         ("/admin/departments", "GET", "/api/admin/users"),
         ("/admin/data", "GET", "/api/jobs/file-operation-1"),
         ("/admin/config", "GET", "/api/hongguo/drama/settings"),

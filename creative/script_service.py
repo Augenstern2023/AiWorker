@@ -16,6 +16,7 @@ from creative.prompt_templates import (
     PROMPT_TEMPLATE_VERSION,
     beats_messages,
     character_messages,
+    outline_field_repair_messages,
     outline_messages,
     series_arc_messages,
     script_messages,
@@ -65,7 +66,22 @@ def _validate_series_arc(payload: dict[str, Any]) -> dict[str, Any]:
     return {"series_arc": arc, "stages": stages}
 
 
-def _validate_outline_chunk(payload: dict[str, Any], start: int, end: int) -> list[dict[str, Any]]:
+_OUTLINE_TEXT_FIELDS = {
+    "core_event", "conflict", "character_progress", "highlight", "reversal", "cliffhanger",
+}
+
+
+def _normalize_outline_chunk(
+    payload: dict[str, Any] | list[Any],
+    start: int,
+    end: int,
+    *,
+    default_estimated_seconds: int | None = None,
+) -> dict[str, Any]:
+    if isinstance(payload, list):
+        payload = {"episodes": payload}
+    if not isinstance(payload, dict):
+        raise ValueError("分集大纲必须返回对象或 episodes 数组")
     episodes = payload.get("episodes")
     if not isinstance(episodes, list):
         raise ValueError("episodes 必须是数组")
@@ -73,12 +89,105 @@ def _validate_outline_chunk(payload: dict[str, Any], start: int, end: int) -> li
         "episode", "core_event", "conflict", "character_progress", "highlight",
         "reversal", "cliffhanger", "estimated_seconds",
     }
-    normalized = [_require_fields(item, fields, "分集大纲") for item in episodes]
+    normalized = []
+    missing_fields = {
+        int(episode["episode"]): sorted(
+            field for field in _OUTLINE_TEXT_FIELDS
+            if not str(episode.get(field) or "").strip()
+        )
+        for episode in episodes
+    }
+    missing_fields = {
+        episode_number: fields
+        for episode_number, fields in missing_fields.items()
+        if fields
+    }
+    for episode in episodes:
+        if not isinstance(episode, dict):
+            raise ValueError("分集大纲数组项必须是对象")
+        item = dict(episode)
+        if "episode" not in item:
+            raise ValueError("分集大纲缺少字段：['episode']")
+        episode_number = int(item["episode"])
+        missing = []
+        for field in _OUTLINE_TEXT_FIELDS:
+            if not str(item.get(field) or "").strip():
+                item[field] = ""
+                missing.append(field)
+        if "estimated_seconds" not in item and default_estimated_seconds is not None:
+            item["estimated_seconds"] = default_estimated_seconds
+        normalized.append(_require_fields(item, fields, "分集大纲"))
+        if missing:
+            missing_fields[episode_number] = sorted(missing)
     actual = sorted(int(item["episode"]) for item in normalized)
     expected = list(range(start, end + 1))
     if actual != expected:
         raise ValueError(f"分集大纲必须覆盖 {start}-{end} 集")
-    return sorted(normalized, key=lambda item: int(item["episode"]))
+    return {
+        "episodes": sorted(normalized, key=lambda item: int(item["episode"])),
+        "missing_fields": missing_fields,
+    }
+
+
+def _validate_outline_field_repair(payload: Any, fields: list[str]) -> dict[str, str]:
+    values = payload.get("fields", payload) if isinstance(payload, dict) else None
+    if not isinstance(values, dict):
+        raise ValueError("字段修复必须返回 fields 对象")
+    result = {}
+    for field in fields:
+        value = str(values.get(field) or "").strip()
+        if not value:
+            raise ValueError(f"字段修复缺少 {field}")
+        result[field] = value
+    return result
+
+
+def _outline_field_fallback(episode: dict[str, Any], field: str) -> str:
+    number = int(episode.get("episode") or 0)
+    core_event = str(episode.get("core_event") or f"第 {number} 集主线事件")
+    values = {
+        "core_event": f"第 {number} 集围绕主线危机继续推进。",
+        "conflict": f"围绕{core_event}，主角与阻力方发生正面冲突。",
+        "character_progress": "主角在压力下作出选择，人物关系随之发生变化。",
+        "highlight": "局势突然升级，形成当集爽点。",
+        "reversal": "关键判断被新信息推翻，局面出现反转。",
+        "cliffhanger": "新的风险在结尾出现，推动下一集。",
+    }
+    return values[field]
+
+
+async def _repair_outline_fields(
+    provider: Any,
+    base: dict[str, Any],
+    arc: dict[str, Any],
+    episodes: list[dict[str, Any]],
+    missing_fields: dict[int, list[str]],
+) -> list[dict[str, Any]]:
+    fallback_fields = []
+    for index, episode in enumerate(episodes):
+        fields = missing_fields.get(int(episode["episode"]))
+        if not fields:
+            continue
+        payload = {
+            **base,
+            "series_arc": arc,
+            "episode": episode,
+            "repair_fields": fields,
+            "previous_episode": episodes[index - 1] if index else None,
+            "next_episode": episodes[index + 1] if index + 1 < len(episodes) else None,
+        }
+        try:
+            repaired, _ = await complete_with_one_repair(
+                provider,
+                outline_field_repair_messages(payload),
+                lambda result, required=fields: _validate_outline_field_repair(result, required),
+                max_attempts=3,
+            )
+        except Exception:
+            repaired = {field: _outline_field_fallback(episode, field) for field in fields}
+            fallback_fields.append({"episode": int(episode["episode"]), "fields": fields})
+        episode.update(repaired)
+    return fallback_fields
 
 
 _CONTINUITY_UPDATE_FIELDS = {
@@ -214,7 +323,11 @@ async def generate_outline_bundle(
     relationships: list[dict[str, Any]],
     *,
     on_progress: Callable[[int, int], Any] | None = None,
+    on_checkpoint: Callable[[dict[str, Any], list[dict[str, Any]], dict[str, Any]], Any] | None = None,
     checkpoint: Callable[[], Any] | None = None,
+    resume_episodes: list[dict[str, Any]] | None = None,
+    resume_series_arc: str | None = None,
+    resume_stages: list[Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     total = int(project.get("target_episode_count") or 0)
     if not 1 <= total <= 100:
@@ -225,21 +338,60 @@ async def generate_outline_bundle(
         "characters": characters,
         "relationships": relationships,
     }
-    await _checkpoint(checkpoint)
-    arc, meta = await complete_with_one_repair(provider, series_arc_messages(base), _validate_series_arc)
-    episodes: list[dict[str, Any]] = []
-    for start in range(1, total + 1, 10):
+    default_estimated_seconds = max(
+        1, int(project.get("episode_duration_seconds") or 120)
+    )
+    episodes = [dict(item) for item in (resume_episodes or [])]
+    if episodes:
+        actual = sorted(int(item.get("episode") or 0) for item in episodes)
+        expected = list(range(1, len(episodes) + 1))
+        if actual != expected or len(episodes) >= total:
+            raise ValueError("可继续生成的大纲必须是未完成的连续分集前缀")
+        series_arc = str(resume_series_arc or "").strip()
+        if not series_arc or not isinstance(resume_stages, list) or not resume_stages:
+            raise ValueError("可继续生成的大纲缺少全剧阶段弧线")
+        arc = {"series_arc": series_arc, "stages": list(resume_stages)}
+        meta = {"resumed_from_episode": len(episodes)}
+    else:
+        await _checkpoint(checkpoint)
+        arc, meta = await complete_with_one_repair(
+            provider, series_arc_messages(base), _validate_series_arc
+        )
+    missing_fields: dict[int, list[str]] = {}
+    for start in range(len(episodes) + 1, total + 1, 10):
         end = min(total, start + 9)
         await _checkpoint(checkpoint)
-        chunk, chunk_meta = await complete_with_one_repair(
+        chunk_result, chunk_meta = await complete_with_one_repair(
             provider,
             outline_messages({**base, "series_arc": arc, "completed_episodes": episodes}, start, end),
-            lambda payload, chunk_start=start, chunk_end=end: _validate_outline_chunk(payload, chunk_start, chunk_end),
+            lambda payload, chunk_start=start, chunk_end=end: _normalize_outline_chunk(
+                payload,
+                chunk_start,
+                chunk_end,
+                default_estimated_seconds=default_estimated_seconds,
+            ),
+            max_attempts=4,
         )
+        chunk = chunk_result["episodes"]
         episodes.extend(chunk)
+        missing_fields.update(chunk_result["missing_fields"])
         meta.update({key: value for key, value in chunk_meta.items() if value})
+        if on_checkpoint:
+            result = on_checkpoint(arc, episodes, meta)
+            if inspect.isawaitable(result):
+                await result
         if on_progress:
             result = on_progress(len(episodes), total)
+            if inspect.isawaitable(result):
+                await result
+    fallback_fields = await _repair_outline_fields(
+        provider, base, arc, episodes, missing_fields
+    )
+    if missing_fields:
+        meta["field_repair_count"] = sum(len(fields) for fields in missing_fields.values())
+        meta["backend_fallback_fields"] = fallback_fields
+        if on_checkpoint:
+            result = on_checkpoint(arc, episodes, meta)
             if inspect.isawaitable(result):
                 await result
     meta.update({"prompt_template_version": PROMPT_TEMPLATE_VERSION, "chunk_size": 10})

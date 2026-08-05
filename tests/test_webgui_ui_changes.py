@@ -76,6 +76,12 @@ def test_webgui_registers_today_rank_route():
     assert "/favicon.ico" in paths
 
 
+def test_user_list_normalizes_datetime_values_with_short_timezone_suffix():
+    source = _source("static/js/admin/users.js")
+
+    assert r"/(?:Z|[+-]\d\d(?::?\d\d)?)$/" in source
+
+
 def test_douyin_today_rank_uses_switchable_rank_and_heat_boards():
     script = _source("static/js/selection/ranks.js")
     template = _source("templates/common/workspace/selection_ranks.html")
@@ -232,6 +238,99 @@ def test_workspace_downloads_the_current_generated_resource_instead_of_legacy_ex
     assert "creativeGeneratedDownloadUrl('brief', 'md')" in blueprints
     assert "creativeGeneratedDownloadUrl('characters', 'md')" in characters
     assert "creativeGeneratedDownloadUrl('beats', 'md')" in beats
+
+
+def test_writing_workspaces_offer_resumable_full_series_beats_and_script_generation():
+    creative = _source("static/js/common/creative.js")
+    beats = _source("templates/common/workspace/project_beats.html")
+    scripts = _source("templates/common/workspace/project_scripts.html")
+
+    assert "async generateProjectBeatsSeries()" in creative
+    assert "/beats/generate-series" in creative
+    assert "async generateProjectScriptsSeries()" in creative
+    assert "/scripts/generate-series" in creative
+    assert "canGenerateProjectScriptsSeries()" in creative
+    assert "series_generation" in creative
+    assert "generateProjectBeatsSeries" in beats
+    assert "generateProjectScriptsSeries" in scripts
+    assert "继续全剧生成" in creative
+
+
+def test_beats_workspace_uses_an_episode_selector_to_review_series_drafts():
+    creative = _source("static/js/common/creative.js")
+    beats = _source("templates/common/workspace/project_beats.html")
+
+    assert "projectBeatEpisodeLabel(episodeNumber)" in creative
+    assert "projectBeatEpisodeLabel(episodeNumber)" in beats
+    assert '<select class="form-select form-select-sm"' in beats
+
+
+def test_beats_workspace_labels_single_episode_generation_as_regeneration_when_present():
+    creative = _source("static/js/common/creative.js")
+    beats = _source("templates/common/workspace/project_beats.html")
+
+    assert "projectBeatGenerationActionLabel()" in creative
+    assert "重新生成 Beats" in creative
+    assert "projectBeatGenerationActionLabel()" in beats
+
+
+def test_beats_workspace_offers_a_confirmed_batch_lock_for_full_current_drafts():
+    creative = _source("static/js/common/creative.js")
+    beats = _source("templates/common/workspace/project_beats.html")
+
+    assert "async completeProjectBeatsBatch()" in creative
+    assert "/beats/lock" in creative
+    assert "批量完成并锁定" in beats
+    assert "canBatchLockProjectBeats()" in creative
+
+
+def test_review_findings_render_outline_anchors_with_writer_facing_labels():
+    review_script = _source("static/js/review/scripts.js")
+
+    assert "function outlineAnchorText(anchor)" in review_script
+    assert "结尾悬念" in review_script
+    assert "关联节拍" in review_script
+    assert "field=" not in review_script
+
+
+def test_structure_optimization_explains_when_no_finding_requires_beats_changes():
+    review_script = _source("static/js/review/scripts.js")
+
+    assert "当前没有需要调整 Beats 的问题" in review_script
+    assert "可选择" in review_script
+    assert "start.disabled = selectableCount === 0" in review_script
+
+
+def test_script_review_uses_text_file_upload_instead_of_a_paste_editor():
+    template = _source("templates/review/scripts.html")
+    review_script = _source("static/js/review/scripts.js")
+
+    assert 'id="script-review-file"' in template
+    assert ".markdown" in template
+    assert 'id="script-review-text"' not in template
+    assert "/api/script-reviews/file" in review_script
+    assert "X-Script-Filename" in review_script
+    assert "粘贴文本" not in review_script
+
+
+def test_review_report_offers_a_markdown_export():
+    review_script = _source("static/js/review/scripts.js")
+
+    assert "downloadReviewReport(review.id)" in review_script
+    assert "/export" in review_script
+    assert "下载审核报告" in review_script
+
+
+def test_beats_workspace_edits_continuity_updates_as_structured_fields_not_json():
+    creative = _source("static/js/common/creative.js")
+    beats = _source("templates/common/workspace/project_beats.html")
+
+    assert "addContinuityUpdate(beat)" in creative
+    assert "removeContinuityUpdate(beat, updateIndex)" in creative
+    assert "continuityUpdatesText(beat)" not in beats
+    assert "连续性变更" in beats
+    assert "知情人" in beats
+    assert "textareaRows(update.event, 24)" in beats
 
 
 def test_outline_workspace_exposes_continue_generation_for_a_saved_partial_batch():

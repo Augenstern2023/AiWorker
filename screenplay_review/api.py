@@ -11,8 +11,10 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from creative.repository import CreativeRepository
@@ -23,6 +25,7 @@ from runtime.job_manager import JobConflictError
 
 from .service import (
     build_project_source,
+    build_review_markdown,
     build_text_source,
     source_fingerprint,
     validate_review_request,
@@ -40,6 +43,31 @@ class ScriptReviewCreateRequest(BaseModel):
 class ScriptReviewConfirmRequest(BaseModel):
     final_verdict: str
     confirmation_note: str = ""
+
+
+_TEXT_SCRIPT_EXTENSIONS = frozenset({
+    ".txt", ".text", ".md", ".markdown", ".mdown", ".fountain", ".fd", ".rst",
+})
+_MAX_SCRIPT_UPLOAD_BYTES = 5 * 1024 * 1024
+
+
+def decode_script_upload(filename: str, content: bytes) -> tuple[str, str]:
+    """Validate and decode a plain-text screenplay upload without persisting its file."""
+    safe_name = Path(unquote(str(filename or "").strip())).name
+    if not safe_name or Path(safe_name).suffix.lower() not in _TEXT_SCRIPT_EXTENSIONS:
+        raise ValueError("仅支持文本剧本文件：TXT、MD、Markdown、Fountain、RST")
+    if not content:
+        raise ValueError("上传的剧本文件为空")
+    if len(content) > _MAX_SCRIPT_UPLOAD_BYTES:
+        raise ValueError("剧本文件不能超过 5 MB")
+    for encoding in ("utf-8-sig", "gb18030"):
+        try:
+            text = content.decode(encoding).strip()
+        except UnicodeDecodeError:
+            continue
+        if text:
+            return safe_name, text
+    raise ValueError("无法识别剧本文件编码，请保存为 UTF-8 或 GB18030 文本文件")
 
 
 def build_script_review_router(
@@ -106,34 +134,12 @@ def build_script_review_router(
             fingerprint = "__source_unavailable__"
         return repository.mark_script_review_stale_if_changed(review["id"], fingerprint)
 
-    @router.post("", status_code=201)
-    async def create_review(
-        payload: ScriptReviewCreateRequest,
-        request: Request,
-        principal: Principal = Depends(current_principal),
+    def queue_review(
+        source_type: str, source: dict[str, Any], principal: Principal
     ) -> dict[str, Any]:
-        assert_permission(principal, "script.review.generate")
-        try:
-            data = validate_review_request(payload.model_dump())
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        if data["source_type"] == "text":
-            source = build_text_source(data["text"])
-        else:
-            project = repository.get_project(int(data["project_id"]))
-            if not project:
-                raise HTTPException(404, "创作项目不存在")
-            assert_project_access(request, principal, int(project["id"]))
-            try:
-                source = build_project_source(
-                    project, data["mode"], data["episode_numbers"]
-                )
-            except ValueError as exc:
-                raise HTTPException(409, str(exc)) from exc
-
         review = repository.create_script_review(
-            source_type=data["source_type"],
-            mode=data["mode"],
+            source_type=source_type,
+            mode=str(source["mode"]),
             project_id=source.get("project_id"),
             episode_numbers=source["episode_numbers"],
             source_fingerprint=source["fingerprint"],
@@ -166,6 +172,47 @@ def build_script_review_router(
         review = repository.set_script_review_job(review["id"], str(state.job_id))
         return {"review": review, "job_id": state.job_id}
 
+    @router.post("", status_code=201)
+    async def create_review(
+        payload: ScriptReviewCreateRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        assert_permission(principal, "script.review.generate")
+        try:
+            data = validate_review_request(payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if data["source_type"] == "text":
+            source = build_text_source(data["text"])
+        else:
+            project = repository.get_project(int(data["project_id"]))
+            if not project:
+                raise HTTPException(404, "创作项目不存在")
+            assert_project_access(request, principal, int(project["id"]))
+            try:
+                source = build_project_source(
+                    project, data["mode"], data["episode_numbers"]
+                )
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
+
+        return queue_review(data["source_type"], source, principal)
+
+    @router.post("/file", status_code=201)
+    async def create_file_review(
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        assert_permission(principal, "script.review.generate")
+        try:
+            filename, text = decode_script_upload(
+                request.headers.get("X-Script-Filename", ""), await request.body()
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return queue_review("text", build_text_source(text, source_filename=filename), principal)
+
     @router.get("")
     async def list_reviews(
         request: Request,
@@ -179,6 +226,27 @@ def build_script_review_router(
             if can_read_review(request, principal, review)
         ]
         return {"items": items}
+
+    @router.get("/{review_id}/export")
+    async def export_review(
+        review_id: int,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ) -> PlainTextResponse:
+        assert_permission(principal, "script.review.read")
+        review = repository.get_script_review(review_id)
+        if not review:
+            raise HTTPException(404, "审核记录不存在")
+        if not can_read_review(request, principal, review):
+            raise HTTPException(403, "没有访问此审核记录的权限")
+        review = refresh_staleness(review)
+        return PlainTextResponse(
+            build_review_markdown(review),
+            media_type="text/markdown; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="script-review-{review_id}.md"'
+            },
+        )
 
     @router.get("/{review_id}")
     async def get_review(

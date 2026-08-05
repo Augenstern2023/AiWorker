@@ -119,7 +119,7 @@ function localDateString(date = new Date()) {
                     jobId: '', jobMessage: '', jobProgress: {}, jobStatus: '', paused: false, notifiedStatus: '',
                     jobLogs: [], jobLogCount: 0, showJobLogs: false,
                     jobStartedAt: 0, jobElapsedSeconds: 0,
-                    startingAction: '', activeAction: '', activeEpisode: 0,
+                    startingAction: '', activeAction: '', activeEpisode: 0, activeSeriesGeneration: false,
                     outlineEpisodeUpdates: {episodeNumber: 0, records: []},
                     saveState: {}, notice: '', noticeType: 'success', noticeTimer: null
                 },

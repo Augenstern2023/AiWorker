@@ -90,6 +90,19 @@ def beats_messages(payload: dict[str, Any], episode_number: int) -> list[dict[st
     )
 
 
+def beats_chunk_messages(payload: dict[str, Any], start: int, end: int) -> list[dict[str, str]]:
+    return _messages(
+        f"批量生成第 {start}-{end} 集 Beats。顶层必须返回 {{\"episodes\":[...]}}；episodes 必须完整覆盖 "
+        f"第 {start}-{end} 集，每项包含 episode 和 beats。beats 数组每项包含 order、scene、characters、"
+        "goal、obstacle、emotion_change、turn、hook、state_change、cost、opposition_tactic、continuity_updates。"
+        "每集只能生成 1-6 个 Beats，order 必须从 1 连续编号。continuity_updates 是数组；每项包含 "
+        "kind、name、event、holder、location、known_by、status。必须让本批后续集承接前一集的状态变化，"
+        "并严格对应同集 locked_outlines 中的核心事件、冲突、人物推进、反转和悬念。"
+        "不得重复使用录音、报警或口头反击结束同类冲突；不得生成完整正文或完整台词。" + DRAMA_CONSTRAINTS,
+        payload,
+    )
+
+
 def script_messages(payload: dict[str, Any], episode_number: int) -> list[dict[str, str]]:
     return _messages(
         f"根据第 {episode_number} 集已锁定 Beats 生成可拍摄的场次剧本，返回 episode_title 和 scenes。"
@@ -98,6 +111,18 @@ def script_messages(payload: dict[str, Any], episode_number: int) -> list[dict[s
         "每个块必须有 text，dialogue 必须有 speaker，可选 modifier。"
         "动作写可拍摄内容，台词单独写；必须遵守 continuity_ledger 与锁定 Beats，展示人物行为的后果，"
         "不得用新增台词或道具绕开既定冲突代价；不得输出 Markdown。" + DRAMA_CONSTRAINTS,
+        payload,
+    )
+
+
+def script_chunk_messages(payload: dict[str, Any], start: int, end: int) -> list[dict[str, str]]:
+    return _messages(
+        f"批量生成第 {start}-{end} 集可拍摄场次剧本。顶层必须返回 {{\"episodes\":[...]}}；episodes 必须完整覆盖 "
+        f"第 {start}-{end} 集，每项包含 episode、episode_title 和 scenes。每场必须包含 sequence_no、scene_no、"
+        "time_of_day、interior_exterior、location、props、characters、blocks。blocks 为数组，type 只能是 "
+        "action、dialogue、voiceover、inner_voice、subtitle、cut；每个块必须有 text，dialogue 必须有 speaker，"
+        "可选 modifier。严格遵守每集 locked_beats、locked_outlines、continuity_ledger，并让本批后续集承接前一集结果；"
+        "动作写可拍摄内容，台词单独写，不得用新增台词或道具绕开既定冲突代价，不得输出 Markdown。" + DRAMA_CONSTRAINTS,
         payload,
     )
 

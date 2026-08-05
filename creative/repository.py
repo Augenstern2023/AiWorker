@@ -1648,29 +1648,8 @@ class CreativeRepository:
             raise ValueError("创作项目不存在")
         if not 1 <= int(episode_number) <= int(project["target_episode_count"]):
             raise ValueError("集数超出项目范围")
-        locked_beats = sorted(
-            [
-                item for item in project["episodes"]
-                if item["stage"] == "beats"
-                and int(item["episode_number"]) == int(episode_number)
-                and item.get("status") in {"locked", "approved"}
-            ],
-            key=lambda item: (int(item.get("version") or 0), int(item["id"])),
-            reverse=True,
-        )
-        if not locked_beats:
-            raise ValueError("必须先锁定当前集 Beats")
-        beats = locked_beats[0]
-        outlines = [
-            item for item in project["episodes"]
-            if item["stage"] == "outline"
-            and int(item["episode_number"]) == int(episode_number)
-            and item.get("batch_id") == project.get("outline_batch_id")
-            and item.get("status") in {"locked", "approved"}
-        ]
-        if not outlines:
-            raise ValueError("必须先锁定当前集分集大纲")
-        outline = max(outlines, key=lambda item: (int(item.get("version") or 0), int(item["id"])))
+        beats = self._locked_beats_for_episode(project, episode_number)
+        outline = self._locked_outline_for_episode(project, episode_number)
         version = 1 + max(
             [
                 int(item["version"]) for item in project["episodes"]
@@ -1732,6 +1711,226 @@ class CreativeRepository:
                     (now, project_id),
                 )
         return self.get_episode(int(cursor.lastrowid)) or {}
+
+    def _locked_outline_for_episode(self, project: dict[str, Any], episode_number: int) -> dict[str, Any]:
+        outlines = [
+            item for item in project["episodes"]
+            if item["stage"] == "outline"
+            and int(item["episode_number"]) == int(episode_number)
+            and item.get("batch_id") == project.get("outline_batch_id")
+            and item.get("status") in {"locked", "approved"}
+        ]
+        if not outlines:
+            raise ValueError("必须先锁定当前集分集大纲")
+        return max(outlines, key=lambda item: (int(item.get("version") or 0), int(item["id"])))
+
+    def _locked_beats_for_episode(self, project: dict[str, Any], episode_number: int) -> dict[str, Any]:
+        outline = self._locked_outline_for_episode(project, episode_number)
+        beats = [
+            item for item in project["episodes"]
+            if item["stage"] == "beats"
+            and int(item["episode_number"]) == int(episode_number)
+            and item.get("status") in {"locked", "approved"}
+            and item.get("upstream_refs", {}).get("outline_batch_id") == project.get("outline_batch_id")
+            and int(item.get("upstream_refs", {}).get("outline_id") or 0) == int(outline["id"])
+            and int(item.get("upstream_refs", {}).get("outline_version") or 0) == int(outline["version"])
+            and item.get("upstream_refs", {}).get("outline_content_fingerprint")
+            == self._content_fingerprint(outline.get("content") or {})
+        ]
+        if not beats:
+            raise ValueError("必须先锁定当前集 Beats")
+        return max(beats, key=lambda item: (int(item.get("version") or 0), int(item["id"])))
+
+    def missing_current_locked_beats(self, project_id: int) -> list[int]:
+        """Return episodes without Beats locked against the current outline batch."""
+        project = self.get_project(project_id)
+        if not project:
+            raise ValueError("创作项目不存在")
+        return [
+            episode_number
+            for episode_number in range(1, int(project["target_episode_count"]) + 1)
+            if self._missing_current_locked_beats(project, episode_number)
+        ]
+
+    def _missing_current_locked_beats(self, project: dict[str, Any], episode_number: int) -> bool:
+        try:
+            self._locked_beats_for_episode(project, episode_number)
+        except ValueError:
+            return True
+        return False
+
+    @staticmethod
+    def _content_fingerprint(content: Any) -> str:
+        return hashlib.sha256(
+            json.dumps(content or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    def _locked_generation_context_refs(self, project: dict[str, Any]) -> dict[str, Any]:
+        brief = next(
+            (item for item in project["blueprints"] if item["id"] == project.get("locked_brief_id")),
+            None,
+        )
+        if not brief:
+            raise ValueError("必须先锁定 Brief")
+        character_batch_id = project.get("character_batch_id")
+        if not character_batch_id:
+            raise ValueError("必须先锁定人物关系")
+        readable_statuses = {"locked", "approved"}
+        characters = [
+            item for item in project["characters"]
+            if item.get("batch_id") == character_batch_id and item.get("status") in readable_statuses
+        ]
+        if not characters:
+            raise ValueError("必须先锁定人物关系")
+        relationships = [
+            item for item in project["relationships"]
+            if item.get("batch_id") == character_batch_id and item.get("status") in readable_statuses
+        ]
+        return {
+            "brief_id": brief["id"],
+            "brief_version": brief.get("version"),
+            "brief_content_fingerprint": self._content_fingerprint(brief.get("content") or {}),
+            "character_batch_id": character_batch_id,
+            "character_content_fingerprint": self._content_fingerprint({
+                "characters": [
+                    {"id": item["id"], "version": item.get("version"), "content": item.get("content") or {}}
+                    for item in sorted(characters, key=lambda item: int(item["id"]))
+                ],
+                "relationships": [
+                    {"id": item["id"], "version": item.get("version"), "content": item.get("content") or {}}
+                    for item in sorted(relationships, key=lambda item: int(item["id"]))
+                ],
+            }),
+        }
+
+    def _episode_generation_refs(
+        self, project: dict[str, Any], stage: str, episode_number: int
+    ) -> dict[str, Any]:
+        outline = self._locked_outline_for_episode(project, episode_number)
+        refs = {
+            **self._locked_generation_context_refs(project),
+            "outline_batch_id": project.get("outline_batch_id"),
+            "outline_id": outline["id"],
+            "outline_version": outline["version"],
+            "outline_content_fingerprint": self._content_fingerprint(outline.get("content") or {}),
+        }
+        if stage == "script":
+            beats = self._locked_beats_for_episode(project, episode_number)
+            refs.update({
+                "beats_id": beats["id"],
+                "beats_version": beats["version"],
+                "beats_content_fingerprint": self._content_fingerprint(beats.get("content") or {}),
+            })
+        return refs
+
+    def save_episode_generation_checkpoint(
+        self,
+        project_id: int,
+        stage: str,
+        items: list[tuple[int, dict[str, Any]]],
+        job_id: str = "",
+        generation_meta: dict[str, Any] | None = None,
+        workflow_task_id: str | None = None,
+        *,
+        batch_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Atomically persist one full-series generation checkpoint of episode drafts."""
+        if stage not in {"beats", "script"}:
+            raise ValueError("批量检查点仅支持 Beats 或场次剧本")
+        project = self.get_project(project_id)
+        if not project:
+            raise ValueError("创作项目不存在")
+        total = int(project["target_episode_count"])
+        episode_numbers = [int(number) for number, _ in items]
+        if not items or len(set(episode_numbers)) != len(episode_numbers):
+            raise ValueError("批量检查点必须包含不重复的剧集")
+        if any(number < 1 or number > total for number in episode_numbers):
+            raise ValueError("集数超出项目范围")
+        if stage == "beats" and not project.get("outline_batch_id"):
+            raise ValueError("必须先锁定分集大纲")
+        batch_id = batch_id or uuid.uuid4().hex
+        meta = {**(generation_meta or {}), "series_generation": True}
+        if job_id:
+            meta["job_id"] = job_id
+        existing = project["episodes"]
+        prepared = []
+        for episode_number, content in sorted(items, key=lambda item: int(item[0])):
+            episode_number = int(episode_number)
+            normalized = validate_beats(content) if stage == "beats" else validate_script(content)
+            refs = self._episode_generation_refs(project, stage, episode_number)
+            prior = [
+                item for item in existing
+                if item["stage"] == stage and int(item["episode_number"]) == episode_number
+            ]
+            version = 1 + max([int(item["version"]) for item in prior] or [0])
+            parent_id = max(prior, key=lambda item: (int(item["version"]), int(item["id"]))).get("id") if prior else None
+            prepared.append((episode_number, normalized, refs, version, parent_id))
+
+        now = time.time()
+        ids: list[int] = []
+        with self._connect() as conn:
+            for episode_number, content, refs, version, parent_id in prepared:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO creative_episodes (
+                        project_id, stage, episode_number, batch_id, version, parent_version_id, content_json,
+                        upstream_refs_json, generation_meta_json, workflow_task_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project_id, stage, episode_number, batch_id, version, parent_id,
+                        json.dumps(content, ensure_ascii=False), json.dumps(refs, ensure_ascii=False),
+                        json.dumps(meta, ensure_ascii=False), workflow_task_id or project.get("workflow_task_id"),
+                        now, now,
+                    ),
+                )
+                ids.append(int(cursor.lastrowid))
+            project_status = "beats_in_progress" if stage == "beats" else "scripts_in_progress"
+            conn.execute(
+                "UPDATE creative_projects SET status = ?, updated_at = ? WHERE id = ?",
+                (project_status, now, project_id),
+            )
+        return [self.get_episode(episode_id) or {} for episode_id in ids]
+
+    def find_resumable_episode_series(
+        self, project_id: int, stage: str
+    ) -> dict[str, Any] | None:
+        if stage not in {"beats", "script"}:
+            raise ValueError("批量续写仅支持 Beats 或场次剧本")
+        project = self.get_project(project_id)
+        if not project:
+            raise ValueError("创作项目不存在")
+        total = int(project["target_episode_count"])
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for item in project["episodes"]:
+            if (
+                item.get("stage") == stage
+                and item.get("status") == "draft"
+                and item.get("generation_meta", {}).get("series_generation")
+            ):
+                groups.setdefault(str(item["batch_id"]), []).append(item)
+        candidates: list[tuple[tuple[int, float], dict[str, Any]]] = []
+        for batch_id, rows in groups.items():
+            rows.sort(key=lambda item: int(item["episode_number"]))
+            numbers = [int(item["episode_number"]) for item in rows]
+            if not rows or len(rows) > total or numbers != list(range(1, len(rows) + 1)):
+                continue
+            try:
+                compatible = all(
+                    item.get("upstream_refs") == self._episode_generation_refs(
+                        project, stage, int(item["episode_number"])
+                    )
+                    for item in rows
+                )
+            except ValueError:
+                compatible = False
+            if not compatible:
+                continue
+            candidates.append((
+                (len(rows), max(float(item.get("updated_at") or 0) for item in rows)),
+                {"batch_id": batch_id, "episodes": rows, "completed_episode_count": len(rows)},
+            ))
+        return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
     def get_episode(self, episode_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -2095,6 +2294,67 @@ class CreativeRepository:
                 (now, now, episode_id),
             )
         return self.get_episode(episode_id) or {}
+
+    def batch_lockable_episode_beats(self, project_id: int) -> list[dict[str, Any]]:
+        """Return the latest compatible Beats draft for every project episode."""
+        project = self.get_project(project_id)
+        if not project:
+            raise ValueError("创作项目不存在")
+        outline_batch_id = str(project.get("outline_batch_id") or "")
+        if not outline_batch_id:
+            raise ValueError("必须先锁定分集大纲")
+
+        selected: list[dict[str, Any]] = []
+        missing: list[int] = []
+        stale: list[int] = []
+        for episode_number in range(1, int(project["target_episode_count"]) + 1):
+            candidates = [
+                item for item in project.get("episodes", [])
+                if item.get("stage") == "beats"
+                and int(item.get("episode_number") or 0) == episode_number
+                and str((item.get("upstream_refs") or {}).get("outline_batch_id") or "") == outline_batch_id
+                and item.get("status") in {"draft", "locked", "approved"}
+            ]
+            if not candidates:
+                missing.append(episode_number)
+                continue
+            item = max(candidates, key=lambda value: (int(value.get("version") or 0), int(value["id"])))
+            outline = self._locked_outline_for_episode(project, episode_number)
+            refs = item.get("upstream_refs") or {}
+            if (
+                int(refs.get("outline_id") or 0) != int(outline["id"])
+                or int(refs.get("outline_version") or 0) != int(outline["version"])
+                or str(refs.get("outline_content_fingerprint") or "")
+                != self._content_fingerprint(outline.get("content") or {})
+            ):
+                stale.append(episode_number)
+                continue
+            selected.append(item)
+
+        if missing:
+            raise ValueError(f"以下集数缺少当前版本 Beats 草稿：{'、'.join(map(str, missing))}")
+        if stale:
+            raise ValueError(f"以下集数 Beats 引用的分集大纲已过期：{'、'.join(map(str, stale))}")
+        drafts = [item for item in selected if item.get("status") == "draft"]
+        if not drafts:
+            raise ValueError("当前没有可批量锁定的 Beats 草稿")
+        for item in drafts:
+            validate_beats(item.get("content") or {}, allow_legacy=True)
+        return drafts
+
+    def lock_current_episode_beats_batch(self, project_id: int) -> list[dict[str, Any]]:
+        """Atomically lock all Beats drafts returned by batch_lockable_episode_beats."""
+        drafts = self.batch_lockable_episode_beats(project_id)
+        now = time.time()
+        ids = [int(item["id"]) for item in drafts]
+        placeholders = ", ".join("?" for _ in ids)
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE creative_episodes SET status = 'locked', locked_at = ?, updated_at = ? "
+                f"WHERE stage = 'beats' AND status = 'draft' AND id IN ({placeholders})",
+                (now, now, *ids),
+            )
+        return [self.get_episode(episode_id) or {} for episode_id in ids]
 
     def lock_episode_script(self, episode_id: int) -> dict[str, Any]:
         episode = self.get_episode(episode_id)

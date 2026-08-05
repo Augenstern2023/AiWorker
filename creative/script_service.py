@@ -14,12 +14,14 @@ from typing import Any, Callable
 from creative.imitation_service import complete_with_one_repair
 from creative.prompt_templates import (
     PROMPT_TEMPLATE_VERSION,
+    beats_chunk_messages,
     beats_messages,
     character_messages,
     outline_field_repair_messages,
     outline_messages,
     series_arc_messages,
     script_messages,
+    script_chunk_messages,
 )
 
 
@@ -405,11 +407,16 @@ async def generate_episode_beats(
     characters: list[dict[str, Any]],
     episode_number: int,
     continuity_ledger: list[dict[str, Any]] | None = None,
+    *,
+    brief: dict[str, Any] | None = None,
+    relationships: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     payload = {
         "project": _project_context(project),
+        "locked_brief": brief or {},
         "locked_outline": outline,
         "characters": characters,
+        "relationships": relationships or [],
         "episode_number": int(episode_number),
         "continuity_ledger": continuity_ledger or [],
     }
@@ -422,6 +429,70 @@ async def generate_episode_beats(
     return beats, meta
 
 
+def _normalize_episode_generation_chunk(
+    payload: dict[str, Any] | list[Any],
+    episode_numbers: list[int],
+    validator: Callable[[dict[str, Any]], dict[str, Any]],
+    label: str,
+) -> list[tuple[int, dict[str, Any]]]:
+    if isinstance(payload, list):
+        payload = {"episodes": payload}
+    if not isinstance(payload, dict) or not isinstance(payload.get("episodes"), list):
+        raise ValueError(f"{label}批量结果必须包含 episodes 数组")
+    rows = payload["episodes"]
+    numbers = [int(item.get("episode") or 0) for item in rows if isinstance(item, dict)]
+    if len(rows) != len(episode_numbers) or sorted(numbers) != episode_numbers:
+        raise ValueError(f"{label}批量结果必须完整覆盖第 {episode_numbers[0]}-{episode_numbers[-1]} 集")
+    normalized: list[tuple[int, dict[str, Any]]] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            raise ValueError(f"{label}批量结果的每集必须是对象")
+        episode_number = int(item["episode"])
+        content = {key: value for key, value in item.items() if key != "episode"}
+        normalized.append((episode_number, validator(content)))
+    return sorted(normalized, key=lambda item: item[0])
+
+
+def _episode_chunk_numbers(outlines: list[dict[str, Any]]) -> list[int]:
+    numbers = sorted(int(item.get("episode_number") or 0) for item in outlines)
+    if not numbers or len(numbers) > 10 or numbers != list(range(numbers[0], numbers[-1] + 1)):
+        raise ValueError("批量生成必须使用不超过 10 集的连续分集大纲")
+    return numbers
+
+
+async def generate_episode_beats_chunk(
+    provider: Any,
+    project: dict[str, Any],
+    brief: dict[str, Any],
+    outlines: list[dict[str, Any]],
+    characters: list[dict[str, Any]],
+    relationships: list[dict[str, Any]],
+    *,
+    continuity_ledger: list[dict[str, Any]] | None = None,
+) -> tuple[list[tuple[int, dict[str, Any]]], dict[str, Any]]:
+    episode_numbers = _episode_chunk_numbers(outlines)
+    payload = {
+        "project": _project_context(project),
+        "locked_brief": brief,
+        "locked_outlines": [
+            {"episode_number": int(item["episode_number"]), "content": item.get("content") or {}}
+            for item in sorted(outlines, key=lambda item: int(item["episode_number"]))
+        ],
+        "characters": characters,
+        "relationships": relationships,
+        "continuity_ledger": continuity_ledger or [],
+    }
+    generated, meta = await complete_with_one_repair(
+        provider,
+        beats_chunk_messages(payload, episode_numbers[0], episode_numbers[-1]),
+        lambda result: _normalize_episode_generation_chunk(
+            result, episode_numbers, validate_beats, "Beats"
+        ),
+    )
+    meta.update({"prompt_template_version": PROMPT_TEMPLATE_VERSION, "chunk_size": len(episode_numbers)})
+    return generated, meta
+
+
 async def generate_episode_script(
     provider: Any,
     project: dict[str, Any],
@@ -430,10 +501,14 @@ async def generate_episode_script(
     beats: dict[str, Any],
     episode_number: int,
     continuity_ledger: list[dict[str, Any]] | None = None,
+    *,
+    brief: dict[str, Any] | None = None,
+    relationships: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     payload = {
-        "project": _project_context(project), "locked_outline": outline,
+        "project": _project_context(project), "locked_brief": brief or {}, "locked_outline": outline,
         "characters": characters, "locked_beats": beats,
+        "relationships": relationships or [],
         "episode_number": int(episode_number), "continuity_ledger": continuity_ledger or [],
     }
     script, meta = await complete_with_one_repair(
@@ -441,3 +516,43 @@ async def generate_episode_script(
     )
     meta["prompt_template_version"] = PROMPT_TEMPLATE_VERSION
     return script, meta
+
+
+async def generate_episode_script_chunk(
+    provider: Any,
+    project: dict[str, Any],
+    brief: dict[str, Any],
+    outlines: list[dict[str, Any]],
+    characters: list[dict[str, Any]],
+    relationships: list[dict[str, Any]],
+    beats_by_episode: dict[int, dict[str, Any]],
+    *,
+    continuity_ledger: list[dict[str, Any]] | None = None,
+) -> tuple[list[tuple[int, dict[str, Any]]], dict[str, Any]]:
+    episode_numbers = _episode_chunk_numbers(outlines)
+    if sorted(beats_by_episode) != episode_numbers:
+        raise ValueError("场次剧本批量生成缺少当前集已锁定 Beats")
+    payload = {
+        "project": _project_context(project),
+        "locked_brief": brief,
+        "locked_outlines": [
+            {"episode_number": int(item["episode_number"]), "content": item.get("content") or {}}
+            for item in sorted(outlines, key=lambda item: int(item["episode_number"]))
+        ],
+        "characters": characters,
+        "relationships": relationships,
+        "locked_beats": [
+            {"episode_number": episode_number, "content": beats_by_episode[episode_number]}
+            for episode_number in episode_numbers
+        ],
+        "continuity_ledger": continuity_ledger or [],
+    }
+    generated, meta = await complete_with_one_repair(
+        provider,
+        script_chunk_messages(payload, episode_numbers[0], episode_numbers[-1]),
+        lambda result: _normalize_episode_generation_chunk(
+            result, episode_numbers, validate_script, "场次剧本"
+        ),
+    )
+    meta.update({"prompt_template_version": PROMPT_TEMPLATE_VERSION, "chunk_size": len(episode_numbers)})
+    return generated, meta

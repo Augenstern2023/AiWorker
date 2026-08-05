@@ -513,6 +513,140 @@ def test_postgres_login_creates_a_session(
     assert response.json()["user"]["username"] == username
 
 
+def test_postgres_registration_creates_a_disabled_user_pending_activation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required for PostgreSQL tests")
+    if make_url(postgres_url).database == "aiworker_system":
+        raise ValueError("tests must not run against the aiworker_system database")
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
+    command.upgrade(Config("alembic.ini"), "head")
+    database = SystemDatabase(SystemDatabaseSettings(postgres_url))
+    repository = IdentityRepository(database)
+    repository.seed_defaults()
+    app = FastAPI()
+    app.include_router(
+        build_identity_router(
+            repository,
+            SessionService(repository),
+            AuditService(repository),
+        )
+    )
+    client = TestClient(app)
+    username = f"registration-user-{uuid.uuid4()}"
+    payload = {
+        "username": username,
+        "display_name": "注册运营",
+        "password": "Registration-Strong-123!",
+        "role_codes": ["selection_operator", "screenwriter"],
+        "email": "registration@example.com",
+        "phone": "13800138000",
+        "gender": "female",
+    }
+
+    page = client.get("/register")
+    response = client.post("/api/auth/register", json=payload)
+
+    assert page.status_code == 200
+    assert 'id="register-form"' in page.text
+    assert response.status_code == 201
+    assert response.json() == {"detail": "注册申请已提交，请等待管理员激活"}
+    users = repository.list_users(username=username)
+    assert len(users) == 1
+    assert users[0]["username"] == username
+    assert users[0]["status"] == "disabled"
+    assert users[0]["role_codes"] == ["screenwriter", "selection_operator"]
+    assert users[0]["email"] == "registration@example.com"
+    assert users[0]["phone"] == "13800138000"
+    assert users[0]["gender"] == "female"
+    assert client.post(
+        "/api/auth/login",
+        json={"username": username, "password": payload["password"]},
+    ).status_code == 401
+    assert client.post("/api/auth/register", json=payload).status_code == 409
+
+
+def test_postgres_registration_rejects_privileged_role_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required for PostgreSQL tests")
+    if make_url(postgres_url).database == "aiworker_system":
+        raise ValueError("tests must not run against the aiworker_system database")
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
+    command.upgrade(Config("alembic.ini"), "head")
+    database = SystemDatabase(SystemDatabaseSettings(postgres_url))
+    repository = IdentityRepository(database)
+    repository.seed_defaults()
+    app = FastAPI()
+    app.include_router(build_identity_router(repository, SessionService(repository)))
+    response = TestClient(app).post(
+        "/api/auth/register",
+        json={
+            "username": f"registration-admin-{uuid.uuid4()}",
+            "display_name": "越权注册",
+            "password": "Registration-Strong-123!",
+            "role_codes": ["system_admin"],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "所选角色不可注册"}
+
+
+def test_postgres_admin_user_list_marks_other_users_as_deletable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required for PostgreSQL tests")
+    if make_url(postgres_url).database == "aiworker_system":
+        raise ValueError("tests must not run against the aiworker_system database")
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
+    command.upgrade(Config("alembic.ini"), "head")
+    database = SystemDatabase(SystemDatabaseSettings(postgres_url))
+    repository = IdentityRepository(database)
+    repository.seed_defaults()
+    password_service = PasswordService()
+    admin_username = f"delete-admin-{uuid.uuid4()}"
+    target_username = f"delete-target-{uuid.uuid4()}"
+    admin = repository.create_user(
+        admin_username,
+        "Delete Administrator",
+        password_service.hash("Delete-Admin-123!"),
+    )
+    target = repository.create_user(
+        target_username,
+        "Delete Target",
+        password_service.hash("Delete-Target-123!"),
+    )
+    admin_role = repository.get_role_by_code("system_admin")
+    assert admin_role is not None
+    repository.replace_user_roles(admin["id"], [admin_role["id"]])
+    app = FastAPI()
+    app.include_router(
+        build_identity_router(
+            repository,
+            SessionService(repository),
+            password_service=password_service,
+        )
+    )
+    client = TestClient(app)
+
+    assert client.post(
+        "/api/auth/login",
+        json={"username": admin_username, "password": "Delete-Admin-123!"},
+    ).status_code == 200
+    users = client.get("/api/admin/users").json()
+    can_delete = {user["id"]: user["can_delete"] for user in users}
+
+    assert can_delete[admin["id"]] is False
+    assert can_delete[target["id"]] is True
+
+
 def test_postgres_role_management_endpoints_return_catalog_data(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

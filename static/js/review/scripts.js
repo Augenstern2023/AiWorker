@@ -5,8 +5,8 @@
     const mode = document.getElementById('script-review-mode');
     const project = document.getElementById('script-review-project');
     const projectWrap = document.getElementById('script-review-project-wrap');
-    const textWrap = document.getElementById('script-review-text-wrap');
-    const text = document.getElementById('script-review-text');
+    const fileWrap = document.getElementById('script-review-file-wrap');
+    const scriptFile = document.getElementById('script-review-file');
     const episodes = document.getElementById('script-review-episodes');
     const submit = document.getElementById('script-review-submit');
     const result = document.getElementById('script-review-result');
@@ -43,7 +43,7 @@
         ? window.bootstrap.Modal.getOrCreateInstance(optimizationProgressElement)
         : null;
 
-    if (!source || !mode || !project || !projectWrap || !textWrap || !text || !episodes || !submit || !result || !history || !error) return;
+    if (!source || !mode || !project || !projectWrap || !fileWrap || !scriptFile || !episodes || !submit || !result || !history || !error) return;
 
     function showError(message = '') {
         error.textContent = message;
@@ -61,7 +61,7 @@
     }
 
     function reviewScope(payload) {
-        if (payload.source_type === 'text') return '粘贴文本 · 单集审核';
+        if (payload.source_type === 'text') return '剧本文件 · 单集审核';
         const projectName = reviewProjects.find((item) => Number(item.id) === Number(payload.project_id))?.name || '创作项目';
         const modeName = { single: '单集', multiple: '多集', collection: '合集' }[payload.mode] || '剧本';
         const selected = payload.episode_numbers || [];
@@ -231,7 +231,9 @@
     }
 
     function sourceLabel(review) {
-        return review.source_type === 'text' ? '粘贴文本（非正式）' : (review.source_payload?.project_name || `项目 ${review.project_id}`);
+        return review.source_type === 'text'
+            ? `剧本文件：${review.source_payload?.source_filename || '未命名文件'}（非正式）`
+            : (review.source_payload?.project_name || `项目 ${review.project_id}`);
     }
 
     function renderEpisodes() {
@@ -311,12 +313,12 @@
     }
 
     function toggleSource() {
-        const pasted = source.value === 'text';
-        projectWrap.classList.toggle('d-none', pasted);
-        textWrap.classList.toggle('d-none', !pasted);
-        episodes.classList.toggle('d-none', pasted || mode.value === 'collection');
-        mode.disabled = pasted;
-        if (pasted) mode.value = 'single';
+        const uploading = source.value === 'text';
+        projectWrap.classList.toggle('d-none', uploading);
+        fileWrap.classList.toggle('d-none', !uploading);
+        episodes.classList.toggle('d-none', uploading || mode.value === 'collection');
+        mode.disabled = uploading;
+        if (uploading) mode.value = 'single';
         renderEpisodes();
     }
 
@@ -328,15 +330,27 @@
 
     async function createReview() {
         showError();
+        const file = source.value === 'text' ? scriptFile.files?.[0] : null;
+        if (source.value === 'text' && !file) {
+            showError('请选择剧本文件');
+            return;
+        }
         submit.disabled = true;
         const payload = source.value === 'text'
-            ? { source_type: 'text', mode: 'single', text: text.value }
+            ? { source_type: 'text', mode: 'single' }
             : { source_type: 'project', mode: mode.value, project_id: Number(project.value), episode_numbers: selectedEpisodes() };
         showReviewProgress(reviewScope(payload));
         try {
-            const created = await readJson(await aiworkerApi.request('/api/script-reviews', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
-            }));
+            const response = source.value === 'text'
+                ? await aiworkerApi.request('/api/script-reviews/file', {
+                    method: 'POST',
+                    headers: {'X-Script-Filename': encodeURIComponent(file.name), 'Content-Type': file.type || 'text/plain'},
+                    body: file,
+                })
+                : await aiworkerApi.request('/api/script-reviews', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
+                });
+            const created = await readJson(response);
             activeReviewId = created.review.id;
             reviewProgress.reviewId = created.review.id;
             updateReviewProgress(created.review);
@@ -362,15 +376,40 @@
         }[prefix] || '审核问题待补充';
     }
 
+    function outlineFieldLabel(field) {
+        return {
+            core_event: '核心事件',
+            conflict: '冲突',
+            character_progress: '人物推进',
+            highlight: '爽点',
+            reversal: '反转',
+            cliffhanger: '结尾悬念',
+            estimated_seconds: '预计时长',
+        }[field] || '大纲要点';
+    }
+
+    function outlineAnchorText(anchor) {
+        if (!anchor || typeof anchor !== 'object') return '';
+        const valueText = (value) => Array.isArray(value) ? value.join('、') : String(value ?? '').trim();
+        if (anchor.field) {
+            const value = valueText(anchor.value);
+            return value ? `${outlineFieldLabel(String(anchor.field))}：${value}` : outlineFieldLabel(String(anchor.field));
+        }
+        return Object.entries(anchor)
+            .filter(([, value]) => valueText(value))
+            .map(([key, value]) => `${outlineFieldLabel(key)}：${valueText(value)}`)
+            .join('；');
+    }
+
     function finding(item) {
         const node = document.createElement('li');
         node.className = 'mb-2';
         const evidence = item.evidence ? ` 证据：${item.evidence}` : '';
-        const outline = item.outline_anchor && Object.keys(item.outline_anchor).length
-            ? ` 大纲锚点：${Object.entries(item.outline_anchor).map(([key, value]) => `${key}=${value}`).join('；')}` : '';
-        const beats = (item.beat_orders || []).length ? ` Beats：${item.beat_orders.join('、')}` : '';
+        const anchorText = outlineAnchorText(item.outline_anchor);
+        const outline = anchorText ? ` 对应大纲：${anchorText}` : '';
+        const beats = (item.beat_orders || []).length ? ` 关联节拍：第 ${item.beat_orders.join('、第 ')} 节` : '';
         const route = { script_only: '场次细节优化', beats_then_script: '先优化 Beats', outline_revision_required: '需人工修订大纲' }[item.change_route] || '场次细节优化';
-        node.textContent = `[${item.severity || 'P2'}] ${findingTitle(item)}${outline}${beats}${evidence}${item.suggestion ? ` 建议：${item.suggestion}` : ''} · ${route}`;
+        node.textContent = `[${item.severity || 'P2'}] ${findingTitle(item)}${outline}${beats}${evidence}${item.suggestion ? ` 建议：${item.suggestion}` : ''} · 处理方式：${route}`;
         return node;
     }
 
@@ -477,19 +516,34 @@
             }
             selectedFindings.append(row);
         });
-        section.append(selectedFindings);
+        const availability = document.createElement('div');
+        availability.className = 'small text-muted mb-2';
+        section.append(selectedFindings, availability);
+        let start;
         const syncFindingAvailability = () => {
+            let selectableCount = 0;
             [...selectedFindings.querySelectorAll('input')].forEach((input) => {
                 const route = input.dataset.route;
                 const allowed = (modeSelect.value === 'direct' && route === 'script_only')
                     || (modeSelect.value === 'structure' && route === 'beats_then_script');
                 input.disabled = !allowed;
                 if (!allowed) input.checked = false;
+                if (allowed) selectableCount += 1;
             });
+            if (selectableCount === 0) {
+                availability.className = 'small text-warning mb-2';
+                availability.textContent = modeSelect.value === 'structure'
+                    ? '当前没有需要调整 Beats 的问题。本次审核均可直接优化场次剧本，请切换为“直接优化场次剧本”。'
+                    : '当前没有可直接优化的场次问题；请选择结构优化，或先修订并锁定分集大纲。';
+            } else {
+                availability.className = 'small text-muted mb-2';
+                availability.textContent = `当前模式可选择 ${selectableCount} 条问题。`;
+            }
+            if (start) start.disabled = selectableCount === 0;
         };
         modeSelect.addEventListener('change', syncFindingAvailability);
         syncFindingAvailability();
-        const start = document.createElement('button');
+        start = document.createElement('button');
         start.type = 'button';
         start.className = 'btn btn-primary btn-sm mt-2';
         start.textContent = '生成优化草稿';
@@ -519,6 +573,7 @@
             }
         });
         section.append(start);
+        syncFindingAvailability();
         const history = document.createElement('div');
         history.className = 'mt-3';
         section.append(history);
@@ -614,6 +669,23 @@
         }
     }
 
+    async function downloadReviewReport(reviewId) {
+        try {
+            const response = await aiworkerApi.request(`/api/script-reviews/${reviewId}/export`);
+            if (!response.ok) {
+                const payload = await response.json().catch(() => ({}));
+                throw new Error(payload.detail || '下载审核报告失败');
+            }
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(await response.blob());
+            link.download = `script-review-${reviewId}.md`;
+            link.click();
+            URL.revokeObjectURL(link.href);
+        } catch (requestError) {
+            showError(requestError.message);
+        }
+    }
+
     function renderReview(review) {
         activeReviewId = review.id;
         result.replaceChildren();
@@ -626,7 +698,17 @@
         const status = document.createElement('span');
         status.className = 'badge text-bg-secondary';
         status.textContent = label(review.status);
-        heading.append(title, status);
+        const actions = document.createElement('div');
+        actions.className = 'd-flex gap-2 align-items-center';
+        const download = document.createElement('button');
+        download.type = 'button';
+        download.className = 'btn btn-outline-light btn-sm';
+        download.title = '下载审核报告';
+        download.setAttribute('aria-label', '下载审核报告');
+        download.innerHTML = '<i class="bi bi-download" aria-hidden="true"></i>';
+        download.addEventListener('click', () => downloadReviewReport(review.id));
+        actions.append(download, status);
+        heading.append(title, actions);
         result.append(heading);
         const coverage = document.createElement('div');
         coverage.className = 'small text-muted mb-3';

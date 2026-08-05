@@ -25,7 +25,9 @@ from creative.script_service import (
     build_continuity_ledger,
     generate_character_bundle,
     generate_episode_beats,
+    generate_episode_beats_chunk,
     generate_episode_script,
+    generate_episode_script_chunk,
     generate_outline_bundle,
 )
 
@@ -117,6 +119,9 @@ async def run(job: CrawlJob) -> None:
     inputs = repository.get_project_inputs(project_id)
     project = inputs["project"]
     provider = create_provider()
+    series_generation = bool(extra.get("series")) and action in {"beats", "script"}
+    total_episodes = int(project.get("target_episode_count") or 0) if series_generation else 1
+    retry_completed = 0
 
     def report_retry(retry_number: int, max_retries: int, reason: str) -> None:
         emit(
@@ -126,8 +131,8 @@ async def run(job: CrawlJob) -> None:
             "warning",
             {
                 "stage": action,
-                "completed": 0,
-                "total": 1,
+                "completed": retry_completed,
+                "total": total_episodes,
                 "indeterminate": True,
                 "retry_attempt": retry_number,
                 "max_retries": max_retries,
@@ -136,7 +141,7 @@ async def run(job: CrawlJob) -> None:
 
     setattr(provider, "retry_callback", report_retry)
     emit(job, "job_started", f"开始生成：{action}")
-    emit(job, "progress", "准备模型请求", payload={"stage": action, "completed": 0, "total": 1})
+    emit(job, "progress", "准备模型请求", payload={"stage": action, "completed": 0, "total": total_episodes})
     await wait_if_paused(job)
 
     if action == "blueprints":
@@ -218,9 +223,84 @@ async def run(job: CrawlJob) -> None:
             raise RuntimeError("分集大纲未创建任何生成检查点")
         bundle = repository.get_outline_batch(project_id, outline_batch_id)
         result = {"action": action, "batch_id": bundle["batch_id"], "episode_count": len(bundle["episodes"])}
+    elif series_generation:
+        brief = _locked_brief(project)
+        characters, relationships = _locked_characters(project)
+        if action == "script":
+            missing_beats = repository.missing_current_locked_beats(project_id)
+            if missing_beats:
+                raise ValueError(f"全剧场次剧本生成前必须锁定全部 Beats；未锁定集数：{','.join(map(str, missing_beats))}")
+        resumable = repository.find_resumable_episode_series(project_id, action)
+        series_batch_id: str | None = resumable["batch_id"] if resumable else None
+        completed = int(resumable["completed_episode_count"]) if resumable else 0
+        generated_beats = list(resumable["episodes"]) if resumable and action == "beats" else []
+        if completed:
+            emit(job, "log", f"接续已保存的{action}草稿：从第 {completed + 1} 集继续")
+            emit(
+                job, "progress", f"已恢复 {completed}/{total_episodes} 集",
+                payload={"stage": action, "completed": completed, "total": total_episodes},
+            )
+        for start in range(completed + 1, total_episodes + 1, 10):
+            end = min(total_episodes, start + 9)
+            retry_completed = start - 1
+            await wait_if_paused(job)
+            outlines = [
+                item for item in project["episodes"]
+                if item["stage"] == "outline"
+                and item.get("batch_id") == project.get("outline_batch_id")
+                and start <= int(item["episode_number"]) <= end
+                and item.get("status") in {"locked", "approved"}
+            ]
+            if sorted(int(item["episode_number"]) for item in outlines) != list(range(start, end + 1)):
+                raise ValueError(f"未找到第 {start}-{end} 集的锁定大纲")
+            if action == "beats":
+                prior = [
+                    item for item in project["episodes"]
+                    if item["stage"] == "beats"
+                    and item.get("status") in {"locked", "approved"}
+                    and int(item["episode_number"]) < start
+                ] + generated_beats
+                checkpoint_items, meta = await generate_episode_beats_chunk(
+                    provider, project, brief, outlines, characters, relationships,
+                    continuity_ledger=build_continuity_ledger(prior),
+                )
+            else:
+                beats_by_episode = {
+                    episode_number: repository._locked_beats_for_episode(project, episode_number)["content"]
+                    for episode_number in range(start, end + 1)
+                }
+                checkpoint_items, meta = await generate_episode_script_chunk(
+                    provider, project, brief, outlines, characters, relationships, beats_by_episode,
+                    continuity_ledger=_continuity_ledger_through(project, start - 1),
+                )
+            saved = repository.save_episode_generation_checkpoint(
+                project_id, action, checkpoint_items, job.job_id,
+                {
+                    **meta,
+                    "series_generation": True,
+                    "chunk_size": 10,
+                    "checkpoint_start": start,
+                    "checkpoint_end": end,
+                    "checkpoint_episode_count": end,
+                },
+                workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
+                batch_id=series_batch_id,
+            )
+            series_batch_id = saved[0]["batch_id"]
+            if action == "beats":
+                generated_beats.extend(saved)
+            emit(
+                job, "progress", f"已生成并保存第 {start}-{end} 集{'Beats' if action == 'beats' else '场次剧本'}",
+                payload={"stage": action, "completed": end, "total": total_episodes, "chunk_start": start, "chunk_end": end},
+            )
+        result = {
+            "action": action, "series_generation": True, "batch_id": series_batch_id,
+            "episode_count": total_episodes, "resumed_from_episode": completed,
+            "brief_id": brief["id"],
+        }
     else:
         brief = _locked_brief(project)
-        characters, _ = _locked_characters(project)
+        characters, relationships = _locked_characters(project)
         episode_number = int(extra.get("episode_number") or 0)
         outline = next(
             (
@@ -241,23 +321,22 @@ async def run(job: CrawlJob) -> None:
                 characters,
                 episode_number,
                 continuity_ledger=_continuity_ledger_before(project, episode_number),
+                brief=brief,
+                relationships=relationships,
             )
             resource = repository.create_episode_beats(project_id, episode_number, generated, job.job_id, meta)
         else:
-            candidates = sorted(
-                [item for item in project["episodes"] if item["stage"] == "beats" and int(item["episode_number"]) == episode_number and item.get("status") in {"locked", "approved"}],
-                key=lambda item: (int(item.get("version") or 0), int(item["id"])), reverse=True,
-            )
-            if not candidates:
-                raise ValueError("必须先锁定当前集 Beats")
+            beats = repository._locked_beats_for_episode(project, episode_number)
             generated, meta = await generate_episode_script(
                 provider,
                 project,
                 outline,
                 characters,
-                candidates[0]["content"],
+                beats["content"],
                 episode_number,
                 continuity_ledger=_continuity_ledger_through(project, episode_number),
+                brief=brief,
+                relationships=relationships,
             )
             resource = repository.create_episode_script(project_id, episode_number, generated, job.job_id, meta)
         result = {"action": action, "episode_id": resource["id"], "episode_number": episode_number, "brief_id": brief["id"]}
@@ -271,7 +350,7 @@ async def run(job: CrawlJob) -> None:
         encoding="utf-8",
     )
     emit(job, "artifact", "Phase 4 生成记录", payload={"path": str(report_path), "artifact_type": "json"})
-    emit(job, "progress", "生成完成", payload={"stage": action, "completed": 1, "total": 1})
+    emit(job, "progress", "生成完成", payload={"stage": action, "completed": total_episodes, "total": total_episodes})
     emit(job, "job_finished", "创作内容生成完成", payload=result)
 
 

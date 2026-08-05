@@ -53,6 +53,9 @@ from web.page_routes import PAGE_ROUTES
 
 AUTHENTICATION_ERROR = "用户名或密码错误"
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "templates" / "auth"
+REGISTRATION_ROLE_CODES = frozenset(
+    {"selection_operator", "creative_planner", "screenwriter"}
+)
 
 
 class SetupRequest(BaseModel):
@@ -64,6 +67,16 @@ class SetupRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=128)
     password: str
+
+
+class RegistrationRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    display_name: str = Field(min_length=1, max_length=128)
+    password: str
+    role_codes: list[str] = Field(min_length=1)
+    email: str | None = Field(default=None, max_length=254)
+    phone: str | None = Field(default=None, max_length=32)
+    gender: Literal["unspecified", "male", "female"] = "unspecified"
 
 
 class ChangePasswordRequest(BaseModel):
@@ -159,6 +172,10 @@ def build_identity_router(
     def login_page() -> HTMLResponse:
         return HTMLResponse(_read_template("login.html"))
 
+    @router.get("/register", response_class=HTMLResponse)
+    def register_page() -> HTMLResponse:
+        return HTMLResponse(_read_template("register.html"))
+
     @router.get("/setup", response_class=HTMLResponse)
     def setup_page() -> HTMLResponse:
         if repository.count_active_system_admins() > 0:
@@ -240,6 +257,69 @@ def build_identity_router(
             raise HTTPException(status_code=409, detail="系统已经完成初始化")
         assert response is not None
         return response
+
+    @router.post("/api/auth/register", status_code=201)
+    def register(payload: RegistrationRequest, request: Request) -> dict[str, str]:
+        username = payload.username.strip()
+        display_name = payload.display_name.strip()
+        role_codes = {code.strip().casefold() for code in payload.role_codes if code.strip()}
+        if not username or not display_name:
+            raise HTTPException(status_code=422, detail="用户名和显示名称不能为空")
+        if not role_codes:
+            raise HTTPException(status_code=422, detail="请至少选择一个角色")
+        if not role_codes <= REGISTRATION_ROLE_CODES:
+            raise HTTPException(status_code=422, detail="所选角色不可注册")
+        try:
+            password_hash = password_service.hash(payload.password)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        try:
+            with repository.transaction() as connection:
+                role_rows = connection.execute(
+                    select(roles_table.c.id, roles_table.c.code).where(
+                        roles_table.c.code.in_(role_codes),
+                        roles_table.c.is_enabled == 1,
+                        roles_table.c.is_deleted == 0,
+                    )
+                ).mappings().all()
+                if {role["code"] for role in role_rows} != role_codes:
+                    raise HTTPException(status_code=422, detail="所选角色不可用")
+                user = repository.create_user(
+                    username,
+                    display_name,
+                    password_hash,
+                    email=payload.email,
+                    phone=payload.phone,
+                    gender=payload.gender,
+                    connection=connection,
+                )
+                connection.execute(
+                    update(users_table)
+                    .where(users_table.c.id == user["id"])
+                    .values(status="disabled", updated_at=func.now())
+                )
+                repository.replace_user_roles(
+                    user["id"], [role["id"] for role in role_rows], connection=connection
+                )
+                record_audit(
+                    actor=None,
+                    action="user.register",
+                    target_type="user",
+                    target_id=user["id"],
+                    before=None,
+                    after={
+                        "username": username,
+                        "role_codes": sorted(role_codes),
+                        "status": "disabled",
+                    },
+                    result="success",
+                    request=request,
+                    connection=connection,
+                )
+                return {"detail": "注册申请已提交，请等待管理员激活"}
+        except IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="用户名已存在") from exc
 
     @router.post("/api/auth/login")
     def login(payload: LoginRequest, request: Request) -> JSONResponse:
@@ -428,15 +508,19 @@ def build_identity_router(
         department_id: str | None = None,
         gender: str | None = None,
         status: str | None = None,
-        _: Principal = Depends(admin_read),
+        principal: Principal = Depends(admin_read),
     ) -> list[dict[str, Any]]:
-        return repository.list_users(
+        users = repository.list_users(
             username=username,
             role_code=role_code,
             department_id=department_id,
             gender=gender,
             status=status,
         )
+        return [
+            {**user, "can_delete": user["id"] != principal.user_id}
+            for user in users
+        ]
 
     @router.get("/api/admin/users/export")
     def export_users(

@@ -27,7 +27,7 @@
     async function responseError(response, fallback) { const data = await response.json().catch(() => ({})); return data.detail || data.message || fallback; }
     function selectedRoleIds() { return Array.from(elements.roles.selectedOptions, option => option.value); }
     function filterParameters() { return new URLSearchParams(new FormData(elements.filters)); }
-    function formatDate(value) { return value ? String(value).replace('T', ' ').replace(/\.\d+(?=[+-]\d\d:\d\d$)/, '').replace(/[+-]\d\d:\d\d$/, '') : '-'; }
+    function formatDate(value) { return value ? String(value).replace('T', ' ').replace(/\.\d+(?=(?:Z|[+-]\d\d(?::?\d\d)?$))/, '').replace(/(?:Z|[+-]\d\d(?::?\d\d)?)$/, '') : '-'; }
     function actionButton(icon, label, style, handler) { const button = document.createElement('button'); button.type = 'button'; button.className = `btn btn-sm ${style}`; button.title = label; button.setAttribute('aria-label', label); const glyph = document.createElement('i'); glyph.className = `bi ${icon}`; button.appendChild(glyph); button.addEventListener('click', handler); return button; }
     function flatten(items, output = []) { for (const item of items) { output.push(item); flatten(item.children || [], output); } return output; }
     function renderRoleOptions(selectedCodes = []) { const selected = new Set(selectedCodes); const available = teamMode ? roles.filter(role => role.can_assign) : roles; elements.roles.replaceChildren(...available.map(role => { const option = new Option(`${role.name} (${role.code})`, role.id); option.selected = selected.has(role.code); return option; })); }

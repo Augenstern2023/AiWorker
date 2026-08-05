@@ -410,6 +410,22 @@ class CreativeWorkflowAdapter:
             resource = self.creative_repository.lock_episode_script(int(resource_id))
         return {"resource": resource, "snapshot": snapshot}
 
+    def lock_beats_batch_without_review(
+        self, task_id: str, project_id: int, actor: Principal
+    ) -> dict[str, Any]:
+        """Validate every current Beats draft before one repository-level batch lock."""
+        drafts = self.creative_repository.batch_lockable_episode_beats(project_id)
+        snapshots: list[dict[str, Any]] = []
+        for draft in drafts:
+            resource_id = str(draft["id"])
+            self._assert_task(task_id, "beats", resource_id, actor)
+            self.assert_editable("beats", resource_id)
+            snapshot = self.snapshot("beats", resource_id)
+            self._assert_current_upstream("beats", resource_id, snapshot)
+            snapshots.append(snapshot)
+        resources = self.creative_repository.lock_current_episode_beats_batch(project_id)
+        return {"resources": resources, "snapshots": snapshots}
+
     def lock_submitted_without_review(
         self, resource_type: str, resource_id: str
     ) -> dict:

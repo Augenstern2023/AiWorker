@@ -156,13 +156,13 @@ def creative_api_authorization(
         elif "/blueprints/generate" in path:
             permissions = ("blueprint.generate",)
         elif "/characters" in path:
-            permissions = (("character.generate",) if path.endswith("/generate") else ("character.edit",))
+            permissions = (("character.generate",) if path.endswith(("/generate", "/generate-series")) else ("character.edit",))
         elif "/outlines" in path:
-            permissions = (("outline.generate",) if path.endswith("/generate") else ("outline.edit",))
+            permissions = (("outline.generate",) if path.endswith(("/generate", "/generate-series")) else ("outline.edit",))
         elif "/scripts" in path:
-            permissions = (("script.generate",) if path.endswith("/generate") else ("script.edit",))
+            permissions = (("script.generate",) if path.endswith(("/generate", "/generate-series")) else ("script.edit",))
         elif "/beats" in path:
-            permissions = (("beats.generate",) if path.endswith("/generate") else ("beats.edit",))
+            permissions = (("beats.generate",) if path.endswith(("/generate", "/generate-series")) else ("beats.edit",))
         else:
             permissions = ("project.edit.own_draft",)
     elif path.startswith("/blueprints"):
@@ -388,6 +388,39 @@ def build_beats_markdown(project: dict[str, Any], items: list[dict[str, Any]]) -
                 "",
             ])
     return "\n".join(lines)
+
+
+def build_outline_markdown(project: dict[str, Any], items: list[dict[str, Any]]) -> str:
+    """Render outline episodes as a concise, writer-readable Markdown document."""
+    lines = [
+        f"# {project['name']}",
+        "",
+        "- 创作阶段：分集大纲",
+        f"- 共 {len(items)} 集",
+        "",
+    ]
+    fields = (
+        ("core_event", "核心事件"),
+        ("conflict", "冲突"),
+        ("character_progress", "人物推进"),
+        ("highlight", "爽点"),
+        ("reversal", "反转"),
+        ("cliffhanger", "结尾悬念"),
+    )
+    ordered_items = sorted(
+        items,
+        key=lambda item: int(item.get("episode_number") or (item.get("content") or {}).get("episode") or 0),
+    )
+    for item in ordered_items:
+        content = item.get("content") or {}
+        episode_number = int(item.get("episode_number") or content.get("episode") or 0)
+        lines.extend([f"## 第 {episode_number} 集", ""])
+        for key, label in fields:
+            lines.extend([f"- **{label}**：{content.get(key) or '-'}", ""])
+        estimated_seconds = content.get("estimated_seconds")
+        if estimated_seconds not in (None, ""):
+            lines.extend([f"- **预计时长**：{estimated_seconds} 秒", ""])
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def build_script_text(
@@ -824,6 +857,8 @@ def build_creative_router(
             return build_script_text(project, snapshot.get("content") or {}, episode_number=int(snapshot.get("episode_number") or 0)).encode("utf-8"), "text/plain; charset=utf-8"
         if stage == "beats":
             markdown = build_beats_markdown(project, content)
+        elif stage == "outline":
+            markdown = build_outline_markdown(project, content)
         else:
             markdown = "\n".join(
                 [f"# {project['name']}", "", f"- 阶段：{stage}", ""]
@@ -2220,6 +2255,27 @@ def build_creative_router(
             workflow_task_id=workflow_task_id,
         )
 
+    @router.post("/projects/{project_id}/beats/generate-series")
+    async def generate_project_beats_series(
+        project_id: int,
+        request: Request,
+        payload: WorkflowLinkRequest | None = None,
+        principal: Principal | None = Depends(creative_job_principal),
+    ):
+        project = project_or_404(project_id)
+        if not project.get("outline_batch_id"):
+            raise HTTPException(409, "必须先锁定分集大纲")
+        workflow_task_id = validate_task(
+            payload.workflow_task_id if payload else None,
+            "beats", principal, project_id=project_id,
+        )
+        total = int(project["target_episode_count"])
+        return create_generation_job(
+            project_id, "beats", principal, request,
+            series=True, chunk_size=10, episode_start=1, episode_end=total,
+            workflow_task_id=workflow_task_id,
+        )
+
     @router.post("/projects/{project_id}/episodes/{episode_number}/beats")
     async def create_project_episode_beats(
         project_id: int,
@@ -2260,6 +2316,24 @@ def build_creative_router(
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
+    @router.post("/projects/{project_id}/beats/lock")
+    async def lock_project_beats_batch(
+        project_id: int,
+        payload: CreativeLockRequest,
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        try:
+            return workflow_transitions.complete_creative_beats_batch_without_review(
+                payload.workflow_task_id, project_id, principal
+            )
+        except KeyError as exc:
+            raise HTTPException(404, "creative resource or workflow task not found") from exc
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @router.post("/projects/{project_id}/episodes/{episode_number}/scripts/generate")
     async def generate_episode_script(
         project_id: int, episode_number: int, request: Request,
@@ -2267,11 +2341,35 @@ def build_creative_router(
         principal: Principal | None = Depends(creative_job_principal),
     ):
         project = project_or_404(project_id)
-        locked = [item for item in project["episodes"] if item["stage"] == "beats" and int(item["episode_number"]) == episode_number and item.get("status") in {"locked", "approved"}]
-        if not locked:
+        if episode_number in repository.missing_current_locked_beats(project_id):
             raise HTTPException(409, "必须先锁定当前集 Beats")
         workflow_task_id = validate_task(payload.workflow_task_id if payload else None, "script", principal, project_id=project_id)
         return create_generation_job(project_id, "script", principal, request, episode_number=episode_number, workflow_task_id=workflow_task_id)
+
+    @router.post("/projects/{project_id}/scripts/generate-series")
+    async def generate_project_scripts_series(
+        project_id: int,
+        request: Request,
+        payload: WorkflowLinkRequest | None = None,
+        principal: Principal | None = Depends(creative_job_principal),
+    ):
+        project = project_or_404(project_id)
+        if not project.get("outline_batch_id"):
+            raise HTTPException(409, "必须先锁定分集大纲")
+        total = int(project["target_episode_count"])
+        missing = repository.missing_current_locked_beats(project_id)
+        if missing:
+            missing_text = "、".join(str(number) for number in missing)
+            raise HTTPException(409, f"全剧场次剧本生成前必须锁定全部 Beats；未锁定集数：{missing_text}")
+        workflow_task_id = validate_task(
+            payload.workflow_task_id if payload else None,
+            "script", principal, project_id=project_id,
+        )
+        return create_generation_job(
+            project_id, "script", principal, request,
+            series=True, chunk_size=10, episode_start=1, episode_end=total,
+            workflow_task_id=workflow_task_id,
+        )
 
     @router.post("/projects/{project_id}/episodes/{episode_number}/scripts")
     async def create_project_episode_script(project_id: int, episode_number: int, payload: EpisodeBeatsRequest, principal: Principal = Depends(current_principal)):

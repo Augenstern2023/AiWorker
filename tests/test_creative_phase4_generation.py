@@ -14,6 +14,7 @@ import httpx
 import pytest
 
 from core.job import CrawlJob
+from creative import api as creative_api
 from creative import phase4_worker
 from creative.api import build_beats_markdown
 from creative.imitation_service import generate_blueprints
@@ -23,6 +24,7 @@ from creative.repository import CreativeRepository
 from creative.script_service import (
     build_continuity_ledger,
     generate_character_bundle,
+    generate_episode_beats_chunk,
     generate_episode_beats,
     generate_outline_bundle,
     validate_beats,
@@ -200,6 +202,57 @@ def outline_episode(number: int) -> dict:
         "cliffhanger": "新问题出现",
         "estimated_seconds": 120,
     }
+
+
+def valid_beat_content() -> dict:
+    return {"beats": [{
+        "order": 1, "scene": "大厅", "characters": ["主角"], "goal": "守住证据",
+        "obstacle": "反派阻拦", "emotion_change": "犹豫到坚定", "turn": "证据公开",
+        "hook": "新威胁出现", "state_change": "局势逆转", "cost": "主角失去退路",
+        "opposition_tactic": "公开施压", "continuity_updates": [],
+    }]}
+
+
+def valid_script_content(episode_number: int = 1) -> dict:
+    return {
+        "episode_title": f"第 {episode_number} 集",
+        "scenes": [{
+            "sequence_no": 1,
+            "scene_no": 1,
+            "time_of_day": "日",
+            "interior_exterior": "内",
+            "location": "办公室",
+            "props": [],
+            "characters": ["主角"],
+            "blocks": [{"type": "action", "text": "主角守住证据"}],
+        }],
+    }
+
+
+@pytest.mark.asyncio
+async def test_beats_series_requests_one_model_response_per_ten_episode_chunk():
+    provider = SequentialProvider([{
+        "episodes": [
+            {"episode": number, **valid_beat_content()}
+            for number in range(1, 11)
+        ]
+    }])
+
+    generated, _ = await generate_episode_beats_chunk(
+        provider,
+        {"name": "项目", "target_episode_count": 10},
+        {"content": {"title": "锁定 Brief"}},
+        [{"episode_number": number, "content": outline_episode(number)} for number in range(1, 11)],
+        [{"content": {"name": "主角"}}],
+        [],
+        continuity_ledger=[],
+    )
+
+    assert [episode_number for episode_number, _ in generated] == list(range(1, 11))
+    assert len(provider.calls) == 1
+    prompt_payload = provider.calls[0][1]["content"]
+    assert "locked_brief" in prompt_payload
+    assert "locked_outlines" in prompt_payload
 
 
 @pytest.mark.asyncio
@@ -454,6 +507,81 @@ def test_worker_only_injects_locked_prior_beats_into_the_next_episode_ledger():
     assert phase4_worker._continuity_ledger_before(project, 1) == []
 
 
+def test_series_beats_checkpoint_uses_one_batch_and_is_resumable(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = seed_worker_project(repository)
+    repository.update_project(project["id"], {"target_episode_count": 2})
+    brief = repository.create_blueprints(project["id"], [{"content": {"title": "方向"}}])[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(
+        project["id"], [outline_episode(1), outline_episode(2)], "全剧弧线"
+    )
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+
+    saved = repository.save_episode_generation_checkpoint(
+        project["id"], "beats", [(1, valid_beat_content())], "batch-job-1",
+        {"series_generation": True}, batch_id="series-beats-1",
+    )
+
+    assert [item["episode_number"] for item in saved] == [1]
+    assert saved[0]["batch_id"] == "series-beats-1"
+    resumed = repository.find_resumable_episode_series(project["id"], "beats")
+    assert resumed["batch_id"] == "series-beats-1"
+    assert resumed["completed_episode_count"] == 1
+    repository.save_episode_generation_checkpoint(
+        project["id"], "beats", [(2, valid_beat_content())], "batch-job-2",
+        {"series_generation": True}, batch_id="series-beats-1",
+    )
+    completed = repository.find_resumable_episode_series(project["id"], "beats")
+    assert completed["completed_episode_count"] == 2
+
+
+def test_script_series_checkpoint_rejects_beats_from_an_old_outline_batch(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = seed_worker_project(repository)
+    repository.update_project(project["id"], {"target_episode_count": 1})
+    brief = repository.create_blueprints(project["id"], [{"content": {"title": "方向"}}])[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    first_outlines = repository.create_outline_batch(
+        project["id"], [outline_episode(1)], "第一版全剧弧线"
+    )
+    repository.lock_outline_batch(project["id"], first_outlines["batch_id"])
+    beats = repository.create_episode_beats(project["id"], 1, valid_beat_content())
+    repository.lock_episode_beats(beats["id"])
+
+    new_outlines = repository.create_outline_batch(
+        project["id"], [outline_episode(1)], "第二版全剧弧线"
+    )
+    repository.lock_outline_batch(project["id"], new_outlines["batch_id"])
+
+    with pytest.raises(ValueError, match="必须先锁定当前集 Beats"):
+        repository.save_episode_generation_checkpoint(
+            project["id"], "script", [(1, valid_script_content())], "script-series-job"
+        )
+
+
+def test_series_checkpoint_freezes_brief_and_character_content_fingerprints(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = seed_worker_project(repository)
+    repository.update_project(project["id"], {"target_episode_count": 1})
+    brief = repository.create_blueprints(project["id"], [{"content": {"title": "方向"}}])[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(project["id"], [outline_episode(1)], "全剧弧线")
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    saved = repository.save_episode_generation_checkpoint(
+        project["id"], "beats", [(1, valid_beat_content())], "beats-series-job"
+    )
+
+    assert len(saved[0]["upstream_refs"]["brief_content_fingerprint"]) == 64
+    assert len(saved[0]["upstream_refs"]["character_content_fingerprint"]) == 64
+
+
 def test_beats_markdown_exports_story_changes_and_continuity_updates():
     markdown = build_beats_markdown(
         {"name": "项目"},
@@ -477,6 +605,41 @@ def test_beats_markdown_exports_story_changes_and_continuity_updates():
         assert label in markdown
 
 
+def test_outline_markdown_exports_only_the_readable_episode_outline_fields():
+    markdown = creative_api.build_outline_markdown(
+        {"name": "大纲导出项目"},
+        [{
+            "episode_number": 1,
+            "batch_id": "outline-batch",
+            "version": 2,
+            "content": {
+                "core_event": "主角意外拿到关键证据",
+                "conflict": "对手抢先封锁证人",
+                "character_progress": "主角从犹豫变为主动反击",
+                "highlight": "证据在直播中公开",
+                "reversal": "证人其实是对手的人",
+                "cliffhanger": "主角收到匿名威胁",
+                "estimated_seconds": 120,
+            },
+            "generation_meta": {"job_id": "should-not-export"},
+            "upstream_refs": {"brief_id": 99},
+        }],
+    )
+
+    assert markdown.startswith("# 大纲导出项目\n")
+    assert "- 创作阶段：分集大纲" in markdown
+    assert "## 第 1 集" in markdown
+    assert "**核心事件**：主角意外拿到关键证据" in markdown
+    assert "**冲突**：对手抢先封锁证人" in markdown
+    assert "**人物推进**：主角从犹豫变为主动反击" in markdown
+    assert "**爽点**：证据在直播中公开" in markdown
+    assert "**反转**：证人其实是对手的人" in markdown
+    assert "**结尾悬念**：主角收到匿名威胁" in markdown
+    assert "**预计时长**：120 秒" in markdown
+    assert "should-not-export" not in markdown
+    assert "brief_id" not in markdown
+
+
 def test_story_constraints_are_present_in_all_generation_prompts():
     payload = {"project": {"name": "项目"}}
     prompts = (
@@ -491,7 +654,7 @@ def test_story_constraints_are_present_in_all_generation_prompts():
         assert "反派每两集至少暴露一次软肋" in messages[0]["content"]
 
 
-def seed_worker_project(repository: CreativeRepository) -> dict:
+def seed_worker_project(repository: CreativeRepository, episode_count: int = 20) -> dict:
     topic = repository.upsert_topics([{
         "platform": "hg", "job_id": "rank", "source_path": "rank.json",
         "captured_at": "2026-07-17", "title": "来源剧", "description": "逆袭",
@@ -501,7 +664,28 @@ def seed_worker_project(repository: CreativeRepository) -> dict:
     repository.update_topic(topic["id"], "adopted")
     breakdown = repository.create_breakdown(topic["id"], {"core_conflict": "来源冲突"}, {}, [])
     repository.lock_breakdown(breakdown["id"])
-    return repository.create_project(topic["id"], breakdown["id"], "Worker 项目", 20)
+    return repository.create_project(topic["id"], breakdown["id"], "Worker 项目", episode_count)
+
+
+def test_batch_lock_beats_locks_all_current_drafts_and_skips_existing_locked_items(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = seed_worker_project(repository, episode_count=2)
+    brief = repository.create_blueprints(project["id"], [{"content": {"title": "方向"}}])[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(
+        project["id"], [outline_episode(1), outline_episode(2)], "全剧弧线"
+    )
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    first = repository.create_episode_beats(project["id"], 1, valid_beat_content())
+    second = repository.create_episode_beats(project["id"], 2, valid_beat_content())
+    repository.lock_episode_beats(first["id"])
+
+    locked = repository.lock_current_episode_beats_batch(project["id"])
+
+    assert [item["episode_number"] for item in locked] == [2]
+    assert repository.get_episode(second["id"])["status"] == "locked"
 
 
 def test_phase4_worker_persists_generation_and_report(tmp_path, monkeypatch):
@@ -632,6 +816,88 @@ def test_phase4_worker_continues_a_saved_outline_batch_after_a_failed_job(tmp_pa
     assert len(resumed_provider.calls) == 1
     assert [item["episode_number"] for item in outlines] == list(range(1, 21))
     assert len({item["batch_id"] for item in outlines}) == 1
+
+
+def test_phase4_worker_saves_series_beats_in_ten_episode_checkpoints(tmp_path, monkeypatch):
+    db_path = tmp_path / ".runtime" / "creative" / "creative.db"
+    repository = CreativeRepository(db_path)
+    project = seed_worker_project(repository)
+    repository.update_project(project["id"], {"target_episode_count": 12})
+    brief = repository.create_blueprints(project["id"], [{"content": {"title": "方向"}}])[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(
+        project["id"], [outline_episode(number) for number in range(1, 13)], "全剧弧线"
+    )
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    provider = SequentialProvider([
+        {"episodes": [{"episode": number, **valid_beat_content()} for number in range(1, 11)]},
+        {"episodes": [{"episode": number, **valid_beat_content()} for number in range(11, 13)]},
+    ])
+    events = []
+    monkeypatch.setattr(phase4_worker, "create_provider", lambda: provider)
+    monkeypatch.setattr(
+        phase4_worker, "emit",
+        lambda job, event, message, level="info", payload=None: events.append(
+            {"event": event, "message": message, "payload": payload or {}},
+        ),
+    )
+    job = CrawlJob(
+        job_id="creative-worker-series-beats", platform="creative", crawler_type="phase4_generate",
+        extra={
+            "action": "beats", "series": True, "project_id": project["id"],
+            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+        },
+    )
+
+    asyncio.run(phase4_worker.run(job))
+
+    beats = [item for item in repository.get_project(project["id"])["episodes"] if item["stage"] == "beats"]
+    assert [item["episode_number"] for item in beats] == list(range(1, 13))
+    assert len({item["batch_id"] for item in beats}) == 1
+    assert len(provider.calls) == 2
+    assert any(item["payload"].get("completed") == 10 for item in events)
+    assert any(item["payload"].get("completed") == 12 for item in events)
+
+
+def test_phase4_worker_saves_series_scripts_after_all_current_beats_are_locked(tmp_path, monkeypatch):
+    db_path = tmp_path / ".runtime" / "creative" / "creative.db"
+    repository = CreativeRepository(db_path)
+    project = seed_worker_project(repository)
+    repository.update_project(project["id"], {"target_episode_count": 12})
+    brief = repository.create_blueprints(project["id"], [{"content": {"title": "方向"}}])[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(
+        project["id"], [outline_episode(number) for number in range(1, 13)], "全剧弧线"
+    )
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    for episode_number in range(1, 13):
+        beats = repository.create_episode_beats(project["id"], episode_number, valid_beat_content())
+        repository.lock_episode_beats(beats["id"])
+    provider = SequentialProvider([
+        {"episodes": [{"episode": number, **valid_script_content(number)} for number in range(1, 11)]},
+        {"episodes": [{"episode": number, **valid_script_content(number)} for number in range(11, 13)]},
+    ])
+    monkeypatch.setattr(phase4_worker, "create_provider", lambda: provider)
+    job = CrawlJob(
+        job_id="creative-worker-series-scripts", platform="creative", crawler_type="phase4_generate",
+        extra={
+            "action": "script", "series": True, "project_id": project["id"],
+            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+        },
+    )
+
+    asyncio.run(phase4_worker.run(job))
+
+    scripts = [item for item in repository.get_project(project["id"])["episodes"] if item["stage"] == "script"]
+    assert [item["episode_number"] for item in scripts] == list(range(1, 13))
+    assert {item["status"] for item in scripts} == {"draft"}
+    assert len({item["batch_id"] for item in scripts}) == 1
+    assert len(provider.calls) == 2
+    assert "locked_beats" in provider.calls[0][1]["content"]
 
 
 def test_phase4_worker_surfaces_provider_retry_progress(tmp_path, monkeypatch):

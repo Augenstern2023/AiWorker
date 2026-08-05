@@ -16,8 +16,11 @@ import pytest
 
 from core.job import CrawlJob
 from creative.repository import CreativeRepository
+from screenplay_review.api import decode_script_upload
 from screenplay_review import worker
 from screenplay_review.service import (
+    _review_messages,
+    build_review_markdown,
     build_text_source,
     build_project_source,
     normalize_review_report,
@@ -99,6 +102,52 @@ def test_project_source_freezes_the_locked_outline_beats_and_story_context() -> 
     assert source["brief"]["id"] == 11
     assert source["episodes"][0]["outline"]["content"]["core_event"] == "主角反击"
     assert source["episodes"][0]["beats"]["id"] == 41
+
+
+def test_formal_review_prompt_requires_an_independent_beats_audit() -> None:
+    messages = _review_messages({"formal": True, "episode_numbers": [1], "episodes": [{}]})
+
+    assert "逐项核对 Beats" in messages[0]["content"]
+    assert "beats_then_script" in messages[0]["content"]
+
+
+def test_uploaded_script_text_accepts_markdown_and_common_chinese_encoding() -> None:
+    filename, text = decode_script_upload("第一集.markdown", "# 第一集\n主角登场".encode("gb18030"))
+
+    assert filename == "第一集.markdown"
+    assert "主角登场" in text
+
+
+def test_uploaded_script_text_rejects_non_text_extensions() -> None:
+    with pytest.raises(ValueError, match="仅支持文本剧本文件"):
+        decode_script_upload("剧本.docx", b"not a document")
+
+
+def test_review_report_exports_as_writer_facing_markdown() -> None:
+    markdown = build_review_markdown({
+        "id": 12,
+        "source_type": "text",
+        "mode": "single",
+        "status": "pending_confirmation",
+        "episode_numbers": [1],
+        "source_payload": {"source_filename": "第一集.md", "formal": False},
+        "report": {
+            "ai_verdict": "建议修改",
+            "summary": "钩子有效，但转折不足。",
+            "core_findings": [{
+                "severity": "P1", "title": "结尾钩子不清晰",
+                "outline_anchor": {"field": "cliffhanger", "value": "收到匿名短信"},
+                "beat_orders": [3], "evidence": "结尾没有明确威胁。",
+                "suggestion": "补足威胁来源。", "change_route": "script_only",
+            }],
+            "episode_reviews": [], "cross_episode_findings": [],
+        },
+    })
+
+    assert markdown.startswith("# 剧本审核报告 #12")
+    assert "剧本文件：第一集.md（非正式）" in markdown
+    assert "对应大纲：结尾悬念：收到匿名短信" in markdown
+    assert "field=" not in markdown
 
 
 def test_project_source_rejects_scripts_without_an_exact_outline_reference() -> None:

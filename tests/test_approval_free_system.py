@@ -81,3 +81,11 @@ def test_creative_lock_routes_are_available_without_approval_router(tmp_path: Pa
     assert "/api/creative/projects/{project_id}/characters/{batch_id}/lock" in paths
     assert "/api/creative/projects/{project_id}/outlines/{batch_id}/lock" in paths
     assert "/api/creative/episodes/{episode_id}/lock" in paths
+    assert "/api/creative/projects/{project_id}/beats/generate-series" in paths
+    assert "/api/creative/projects/{project_id}/scripts/generate-series" in paths
+
+
+def test_series_generation_routes_require_generation_permissions():
+    source = (ROOT / "creative" / "api.py").read_text(encoding="utf-8")
+
+    assert "path.endswith((\"/generate\", \"/generate-series\"))" in source

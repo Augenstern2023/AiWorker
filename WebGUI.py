@@ -120,7 +120,9 @@ WEB_LOG_MAX_BYTES = 5 * 1024 * 1024
 WEB_LOG_BACKUP_COUNT = 5
 WEB_LOG_PATH = WORKSPACE_ROOT / "logs" / "webgui.log"
 UNSAFE_HTTP_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
-CSRF_EXEMPT_PATHS = frozenset({"/api/auth/login", "/api/auth/setup"})
+CSRF_EXEMPT_PATHS = frozenset(
+    {"/api/auth/login", "/api/auth/register", "/api/auth/setup"}
+)
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 BACKUP_FILENAME_PATTERN = re.compile(r"^data_backup_[A-Za-z0-9_-]+\.json$")
 DRAMA_PLAYER_TOKEN_SECRET = os.getenv("AIWORKER_DRAMA_PLAYER_TOKEN_SECRET", uuid.uuid4().hex).encode("utf-8")

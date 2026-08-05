@@ -22,12 +22,14 @@ import json
 
 import httpx
 import config
+import pytest
 
 from analysis.llm import (
     LLMError,
     OpenAICompatibleLLMProvider,
     build_responses_request_body,
     build_video_analysis_messages,
+    create_llm_provider_from_config,
     normalize_llm_analysis,
     parse_chat_completion_json,
     parse_json_object,
@@ -286,11 +288,53 @@ def test_resolve_llm_settings_supports_sub2api_env(monkeypatch):
     assert settings["reasoning_effort"] == "high"
 
 
+def test_provider_uses_configured_request_timeout_for_long_generation():
+    class DummyConfig:
+        LLM_PROVIDER = "openai-compatible"
+        LLM_ENV_KEY = "LLM_API_KEY"
+        LLM_BASE_URL = "https://example.test/v1"
+        LLM_API_KEY = "key"
+        LLM_MODEL = "deepseek-v4-flash-0731"
+        LLM_FALLBACK_MODEL = ""
+        LLM_WIRE_API = "chat_completions"
+        LLM_REASONING_EFFORT = "max"
+        LLM_TIMEOUT_SECONDS = 600
+        LLM_SECONDARY_PROVIDER = ""
+
+    provider = create_llm_provider_from_config(DummyConfig)
+
+    assert provider.timeout == 600
+
+
+def test_chat_completions_reports_the_configured_timeout_after_retries():
+    retries = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("", request=_request)
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://example.test/v1",
+        api_key="key",
+        model="test-model",
+        timeout=600,
+        max_retries=1,
+        retry_base_delay=0,
+        transport=httpx.MockTransport(handler),
+        retry_callback=lambda number, total, reason: retries.append((number, total, reason)),
+    )
+
+    with pytest.raises(LLMError, match="模型响应超时（600 秒）"):
+        asyncio.run(provider.complete_text([{"role": "user", "content": "test"}]))
+
+    assert retries == [(1, 1, "模型响应超时（600 秒）")]
+
+
 def test_rag_llm_uses_the_configured_global_text_model():
     settings = resolve_llm_settings(config, prefix="RAG_LLM")
 
-    assert settings["provider"] == "sub2api"
-    assert settings["base_url"] == "http://54.92.99.171:8080/v1"
-    assert settings["model"] == "gemini-3.1-pro-high"
+    assert settings["provider"] == "openai-compatible"
+    assert settings["base_url"] == "https://yunwu.ai/v1"
+    assert settings["model"] == "deepseek-v4-flash-0731"
     assert settings["fallback_model"] == ""
     assert settings["reasoning_effort"] == "max"
+    assert settings["timeout_seconds"] == 600

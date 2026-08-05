@@ -30,6 +30,10 @@ class LLMError(RuntimeError):
     pass
 
 
+class LLMTimeoutError(LLMError):
+    pass
+
+
 class LLMProvider:
     async def analyze_video(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         raise NotImplementedError
@@ -156,12 +160,19 @@ class OpenAICompatibleLLMProvider(LLMProvider):
                     response.raise_for_status()
                     return response
                 except Exception as exc:
+                    reason = (
+                        f"模型响应超时（{self.timeout} 秒）"
+                        if isinstance(exc, httpx.TimeoutException)
+                        else str(exc)
+                    )
                     if not is_retryable_llm_exception(exc) or attempt >= self.max_retries:
+                        if isinstance(exc, httpx.TimeoutException):
+                            raise LLMTimeoutError(reason) from exc
                         raise
                     retry_number = attempt + 1
                     if self.retry_callback:
                         try:
-                            self.retry_callback(retry_number, self.max_retries, str(exc))
+                            self.retry_callback(retry_number, self.max_retries, reason)
                         except Exception:
                             pass
                     delay = self.retry_base_delay * (2 ** (retry_number - 1))
@@ -171,6 +182,8 @@ class OpenAICompatibleLLMProvider(LLMProvider):
 
 
 def is_retryable_llm_exception(exc: Exception) -> bool:
+    if isinstance(exc, LLMTimeoutError):
+        return True
     if isinstance(exc, httpx.HTTPStatusError):
         status = int(exc.response.status_code)
         return status in {408, 409, 425, 429} or 500 <= status <= 599
@@ -232,6 +245,10 @@ def resolve_llm_settings(config_module: Any, prefix: str = "LLM") -> Dict[str, s
             or getattr(config_module, "LLM_REASONING_EFFORT", "")
             or defaults["reasoning_effort"]
         ),
+        "timeout_seconds": _timeout_seconds(
+            getattr(config_module, f"{prefix}_TIMEOUT_SECONDS", "")
+            or getattr(config_module, "LLM_TIMEOUT_SECONDS", "")
+        ),
     }
 
 
@@ -259,7 +276,15 @@ def resolve_secondary_llm_settings(config_module: Any, prefix: str = "LLM") -> D
         "fallback_model": setting("FALLBACK_MODEL"),
         "wire_api": setting("WIRE_API") or defaults["wire_api"],
         "reasoning_effort": setting("REASONING_EFFORT") or defaults["reasoning_effort"],
+        "timeout_seconds": _timeout_seconds(setting("TIMEOUT_SECONDS")),
     }
+
+
+def _timeout_seconds(value: Any, default: int = 180) -> int:
+    try:
+        return max(1, int(value or default))
+    except (TypeError, ValueError):
+        return default
 
 
 def create_llm_provider_from_config(config_module: Any, prefix: str = "LLM") -> OpenAICompatibleLLMProvider:
@@ -275,6 +300,7 @@ def create_llm_provider_from_config(config_module: Any, prefix: str = "LLM") -> 
             provider_name=secondary_settings["provider"],
             wire_api=secondary_settings["wire_api"],
             reasoning_effort=secondary_settings["reasoning_effort"],
+            timeout=secondary_settings["timeout_seconds"],
         )
     return OpenAICompatibleLLMProvider(
         base_url=settings["base_url"],
@@ -285,6 +311,7 @@ def create_llm_provider_from_config(config_module: Any, prefix: str = "LLM") -> 
         provider_name=settings["provider"],
         wire_api=settings["wire_api"],
         reasoning_effort=settings["reasoning_effort"],
+        timeout=settings["timeout_seconds"],
     )
 
 

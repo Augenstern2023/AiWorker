@@ -117,13 +117,14 @@ def build_project_source(
     return source
 
 
-def build_text_source(text: str) -> dict[str, Any]:
+def build_text_source(text: str, *, source_filename: str = "") -> dict[str, Any]:
     normalized = str(text or "").strip()
     if not normalized:
         raise ValueError("请粘贴剧本文本")
     source = {
         "project_id": None,
         "project_name": "",
+        "source_filename": str(source_filename or "").strip(),
         "mode": "single",
         "formal": False,
         "episode_numbers": [1],
@@ -141,6 +142,103 @@ def source_fingerprint(source: dict[str, Any]) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _review_source_label(review: dict[str, Any]) -> str:
+    payload = review.get("source_payload") or {}
+    if review.get("source_type") == "text":
+        return f"剧本文件：{payload.get('source_filename') or '未命名文件'}（非正式）"
+    return str(payload.get("project_name") or f"项目 {review.get('project_id') or '-'}")
+
+
+def _outline_anchor_text(anchor: Any) -> str:
+    if not isinstance(anchor, dict) or not anchor:
+        return ""
+    labels = {
+        "core_event": "核心事件", "conflict": "冲突", "character_progress": "人物推进",
+        "highlight": "爽点", "reversal": "反转", "cliffhanger": "结尾悬念",
+        "estimated_seconds": "预计时长",
+    }
+    value_text = lambda value: "、".join(map(str, value)) if isinstance(value, list) else str(value or "").strip()
+    if anchor.get("field"):
+        value = value_text(anchor.get("value"))
+        label = labels.get(str(anchor["field"]), "大纲要点")
+        return f"{label}：{value}" if value else label
+    return "；".join(
+        f"{labels.get(str(key), '大纲要点')}：{value_text(value)}"
+        for key, value in anchor.items() if value_text(value)
+    )
+
+
+def _finding_markdown(item: dict[str, Any]) -> str:
+    title = str(item.get("title") or "审核问题待补充").strip()
+    parts = [f"- [{str(item.get('severity') or 'P2').upper()}] {title}"]
+    anchor = _outline_anchor_text(item.get("outline_anchor"))
+    if anchor:
+        parts.append(f"对应大纲：{anchor}")
+    beats = [str(number) for number in item.get("beat_orders") or [] if str(number).strip()]
+    if beats:
+        parts.append(f"关联节拍：第 {'、第 '.join(beats)} 节")
+    if item.get("evidence"):
+        parts.append(f"证据：{str(item['evidence']).strip()}")
+    if item.get("suggestion"):
+        parts.append(f"建议：{str(item['suggestion']).strip()}")
+    route = {
+        "script_only": "场次细节优化", "beats_then_script": "先优化 Beats",
+        "outline_revision_required": "需人工修订大纲",
+    }.get(str(item.get("change_route") or "script_only"), "场次细节优化")
+    parts.append(f"处理方式：{route}")
+    return "；".join(parts)
+
+
+def build_review_markdown(review: dict[str, Any]) -> str:
+    """Render an audit report as a portable, writer-facing Markdown file."""
+    report = review.get("report") or {}
+    payload = review.get("source_payload") or {}
+    mode = {"single": "单集", "multiple": "多集", "collection": "合集"}.get(
+        str(review.get("mode") or ""), "审核"
+    )
+    episodes = "、".join(f"第 {number} 集" for number in review.get("episode_numbers") or []) or "-"
+    lines = [
+        f"# 剧本审核报告 #{review.get('id') or '-'}",
+        "",
+        f"- 来源：{_review_source_label(review)}",
+        f"- 审核范围：{mode} · {episodes}",
+        f"- 审核状态：{review.get('status') or '-'}",
+        "",
+        "## 审核结论",
+        "",
+        f"AI 建议：{report.get('ai_verdict') or review.get('ai_verdict') or '-'}",
+    ]
+    if report.get("summary"):
+        lines.extend(["", str(report["summary"]).strip()])
+    if not payload.get("formal"):
+        lines.extend(["", "> 本报告为非正式快速诊断，不可人工确认或生成优化草稿。"])
+    else:
+        lines.extend(["", "## 评审依据", ""])
+        lines.append(
+            f"Brief v{(payload.get('brief') or {}).get('version') or '-'} · 人物关系 {len(payload.get('relationships') or [])} 条"
+        )
+        for episode in payload.get("episodes") or []:
+            lines.append(
+                f"- 第 {episode.get('episode_number') or '-'} 集：大纲 v{(episode.get('outline') or {}).get('version') or '-'} · "
+                f"Beats v{(episode.get('beats') or {}).get('version') or '-'} · 场次剧本 v{(episode.get('script') or {}).get('version') or episode.get('version') or '-'}"
+            )
+
+    sections = [
+        ("核心问题", report.get("core_findings") or []),
+        ("跨集问题", report.get("cross_episode_findings") or []),
+    ]
+    for heading, findings in sections:
+        if findings:
+            lines.extend(["", f"## {heading}", ""])
+            lines.extend(_finding_markdown(item) for item in findings if isinstance(item, dict))
+    for episode_review in report.get("episode_reviews") or []:
+        findings = episode_review.get("findings") or [] if isinstance(episode_review, dict) else []
+        if findings:
+            lines.extend(["", f"## 第 {episode_review.get('episode_number') or '-'} 集问题", ""])
+            lines.extend(_finding_markdown(item) for item in findings if isinstance(item, dict))
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _project_story_context(
@@ -344,8 +442,15 @@ def _review_messages(source: dict[str, Any]) -> list[dict[str, str]]:
     episode_numbers = {int(number) for number in source.get("episode_numbers") or []}
     checks = [
         "检查剧情逻辑、人物执行、台词与 OS、爽点、节奏和结尾钩子。",
-        "只基于提供的剧本给结论；无法确认的项目写证据不足。",
     ]
+    if source.get("formal"):
+        checks.extend([
+            "正式项目审核必须逐项核对 Beats 是否落实既定大纲：场景目标、阻力、人物行动、转折和连续性安排能否支撑场次剧本。",
+            "Beats 本身存在缺失、矛盾、顺序失当或不足以支撑既定大纲时，必须标记 beats_then_script；"
+            "仅台词、镜头、动作、场次细节的问题才标记 script_only。",
+        ])
+    else:
+        checks.append("只基于提供的剧本给结论；无法确认的项目写证据不足。")
     if 1 in episode_numbers:
         checks.append("第 1 集必须执行首集生死线：故事、主角、冲突、调性、情绪点和结尾钩子。")
     if {1, 2, 3}.issubset(episode_numbers):
@@ -383,6 +488,8 @@ def _summary_messages(source: dict[str, Any]) -> list[dict[str, str]]:
                 "episode_reviews、cross_episode_findings；episode_reviews 每项必须有 episode_number、summary 和 findings；"
                 "每条问题都要给 title、category、outline_anchor、beat_orders、evidence、suggestion、"
                 "change_route；不得建议自动改写分集大纲。"
+                "汇总时保留逐集对 Beats 的归因：Beats 本身需要调整才标记 beats_then_script，"
+                "仅场次细节问题标记 script_only。"
                 f"core_findings 最多 5 条。固定规则包：{RULE_PACKAGE}，覆盖{RULES}。"
             ),
         },

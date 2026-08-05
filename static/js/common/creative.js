@@ -524,13 +524,51 @@ window.aiworkerModules.push(() => ({
                     return this.currentProjectOutlines()[0]?.status || 'draft';
                 },
 
-                selectedProjectBeats() {
+                projectBeatsForEpisode(episodeNumber) {
                     const items = (this.creativeWorkspace.project?.episodes || [])
                         .filter(item => item.stage === 'beats'
-                            && Number(item.episode_number) === Number(this.creativeWorkspace.selectedEpisode)
+                            && Number(item.episode_number) === Number(episodeNumber)
                             && item.upstream_refs?.outline_batch_id === this.creativeWorkspace.project?.outline_batch_id)
                         .sort((a, b) => Number(b.version) - Number(a.version));
                     return items[0] || null;
+                },
+
+                selectedProjectBeats() {
+                    return this.projectBeatsForEpisode(this.creativeWorkspace.selectedEpisode);
+                },
+
+                projectBeatEpisodeLabel(episodeNumber) {
+                    const item = this.projectBeatsForEpisode(episodeNumber);
+                    if (!item) return `第 ${episodeNumber} 集 · 未生成`;
+                    return `第 ${episodeNumber} 集 · v${item.version} · ${this.creativeWorkflowStatusLabel(item.status)}`;
+                },
+
+                projectBeatGenerationActionLabel() {
+                    return this.selectedProjectBeats() ? '重新生成 Beats' : '生成 Beats';
+                },
+
+                projectBeatsGenerationProgress() {
+                    const project = this.creativeWorkspace.project;
+                    const generated = new Set((project?.episodes || []).filter(item =>
+                        item.stage === 'beats'
+                        && item.upstream_refs?.outline_batch_id === project?.outline_batch_id
+                    ).map(item => Number(item.episode_number)));
+                    return {generated: generated.size, required: Number(project?.target_episode_count || 0)};
+                },
+
+                batchLockableProjectBeats() {
+                    const total = Number(this.creativeWorkspace.project?.target_episode_count || 0);
+                    return Array.from({length: total}, (_, index) => index + 1)
+                        .map((episodeNumber) => this.projectBeatsForEpisode(episodeNumber))
+                        .filter((item) => item?.status === 'draft');
+                },
+
+                canBatchLockProjectBeats() {
+                    const total = Number(this.creativeWorkspace.project?.target_episode_count || 0);
+                    if (!total) return false;
+                    const items = Array.from({length: total}, (_, index) => this.projectBeatsForEpisode(index + 1));
+                    return items.every((item) => item && ['draft', 'locked', 'approved'].includes(item.status))
+                        && this.batchLockableProjectBeats().length > 0;
                 },
 
                 selectedProjectScript() {
@@ -567,19 +605,16 @@ window.aiworkerModules.push(() => ({
                         .sort((a, b) => Number(b.version) - Number(a.version))[0] || null;
                 },
 
-                continuityUpdatesText(beat) {
-                    return JSON.stringify(beat.continuity_updates || [], null, 2);
+                addContinuityUpdate(beat) {
+                    if (!Array.isArray(beat.continuity_updates)) beat.continuity_updates = [];
+                    beat.continuity_updates.push({
+                        kind: 'information', name: '', event: '', holder: '', location: '', known_by: [], status: 'active',
+                    });
                 },
 
-                setContinuityUpdates(beat, value) {
-                    try {
-                        const updates = JSON.parse(value);
-                        if (!Array.isArray(updates)) throw new Error('连续性变更必须是数组');
-                        beat.continuity_updates = updates;
-                        this.creativeWorkspace.error = '';
-                    } catch (error) {
-                        this.creativeWorkspace.error = error.message || '连续性变更必须是合法 JSON 数组';
-                    }
+                removeContinuityUpdate(beat, updateIndex) {
+                    if (!Array.isArray(beat.continuity_updates)) return;
+                    beat.continuity_updates.splice(Number(updateIndex), 1);
                 },
 
                 projectContinuityLedger() {
@@ -695,7 +730,7 @@ window.aiworkerModules.push(() => ({
                     return `/api/creative/projects/${projectId}/scripts/download`;
                 },
 
-                async startCreativeGeneration(url, body = {}, action = '') {
+                async startCreativeGeneration(url, body = {}, action = '', options = {}) {
                     this.creativeWorkspace.error = '';
                     this.creativeWorkspace.startingAction = action;
                     this.creativeWorkspace.jobMessage = '正在创建生成任务';
@@ -710,7 +745,9 @@ window.aiworkerModules.push(() => ({
                     this.creativeWorkspace.jobLogCount = 0;
                     this.creativeWorkspace.showJobLogs = false;
                     this.creativeWorkspace.activeAction = action;
+                    this.creativeWorkspace.activeSeriesGeneration = Boolean(options.series);
                     this.creativeWorkspace.activeEpisode = ['beats', 'script'].includes(action)
+                        && !this.creativeWorkspace.activeSeriesGeneration
                         ? Number(this.creativeWorkspace.selectedEpisode || 0)
                         : 0;
                     this.creativeGenerationProgressModal.show();
@@ -778,6 +815,28 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
+                hasResumableProjectSeries(stage) {
+                    return (this.creativeWorkspace.project?.episodes || []).some(item =>
+                        item.stage === stage && item.status === 'draft' && item.generation_meta?.series_generation
+                    );
+                },
+
+                seriesGenerationActionLabel(stage) {
+                    return this.hasResumableProjectSeries(stage) ? '继续全剧生成' : '全剧批量生成';
+                },
+
+                async generateProjectBeatsSeries() {
+                    try {
+                        const task = await this.resolveCreativeWorkflowTask('beats', this.creativeWorkspace.project.id);
+                        return this.startCreativeGeneration(
+                            `/api/creative/projects/${this.creativeWorkspace.project.id}/beats/generate-series`,
+                            {workflow_task_id: task.id}, 'beats', {series: true}
+                        );
+                    } catch (e) {
+                        window.dispatchEvent(new CustomEvent('aiworker:toast', {detail: {message: e.message, type: 'error'}}));
+                    }
+                },
+
                 async generateProjectScript() {
                     try {
                         if (!this.currentEpisodeHasLockedBeats()) {
@@ -786,6 +845,46 @@ window.aiworkerModules.push(() => ({
                         const episode = Number(this.creativeWorkspace.selectedEpisode || 0);
                         const task = await this.resolveCreativeWorkflowTask('script', this.creativeWorkspace.project.id);
                         return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/episodes/${episode}/scripts/generate`, {workflow_task_id: task.id}, 'script');
+                    } catch (e) {
+                        window.dispatchEvent(new CustomEvent('aiworker:toast', {detail: {message: e.message, type: 'error'}}));
+                    }
+                },
+
+                lockedProjectBeatsProgress() {
+                    const project = this.creativeWorkspace.project;
+                    const required = Number(project?.target_episode_count || 0);
+                    const locked = new Set((project?.episodes || []).filter(item =>
+                        item.stage === 'beats' && ['locked', 'approved'].includes(item.status)
+                        && item.upstream_refs?.outline_batch_id === project?.outline_batch_id
+                    ).map(item => Number(item.episode_number)));
+                    return {
+                        required, locked: locked.size,
+                        missing: Array.from({length: required}, (_, index) => index + 1)
+                            .filter(number => !locked.has(number)),
+                    };
+                },
+
+                canGenerateProjectScriptsSeries() {
+                    const progress = this.lockedProjectBeatsProgress();
+                    return progress.required > 0 && progress.missing.length === 0;
+                },
+
+                projectScriptsSeriesBlockReason() {
+                    const progress = this.lockedProjectBeatsProgress();
+                    if (!progress.required) return '请先锁定分集大纲';
+                    return progress.missing.length
+                        ? `需先锁定全部 Beats，缺少第 ${progress.missing.join('、')} 集`
+                        : '';
+                },
+
+                async generateProjectScriptsSeries() {
+                    try {
+                        if (!this.canGenerateProjectScriptsSeries()) throw new Error(this.projectScriptsSeriesBlockReason());
+                        const task = await this.resolveCreativeWorkflowTask('script', this.creativeWorkspace.project.id);
+                        return this.startCreativeGeneration(
+                            `/api/creative/projects/${this.creativeWorkspace.project.id}/scripts/generate-series`,
+                            {workflow_task_id: task.id}, 'script', {series: true}
+                        );
                     } catch (e) {
                         window.dispatchEvent(new CustomEvent('aiworker:toast', {detail: {message: e.message, type: 'error'}}));
                     }
@@ -822,6 +921,7 @@ window.aiworkerModules.push(() => ({
                     if (this.creativeWorkspace.startingAction === action) return true;
                     const isActiveRunning = this.creativeWorkspace.activeAction === action && this.creativeJobRunning();
                     if (!isActiveRunning) return false;
+                    if (this.creativeWorkspace.activeSeriesGeneration) return true;
                     return !['beats', 'script'].includes(action)
                         || Number(this.creativeWorkspace.activeEpisode) === Number(this.creativeWorkspace.selectedEpisode);
                 },
@@ -830,6 +930,7 @@ window.aiworkerModules.push(() => ({
                     if (this.creativeWorkspace.startingAction) return true;
                     const isActiveRunning = this.creativeWorkspace.activeAction === action && this.creativeJobRunning();
                     if (!isActiveRunning) return false;
+                    if (this.creativeWorkspace.activeSeriesGeneration) return true;
                     return !['beats', 'script'].includes(action)
                         || Number(this.creativeWorkspace.activeEpisode) === Number(this.creativeWorkspace.selectedEpisode);
                 },
@@ -849,7 +950,16 @@ window.aiworkerModules.push(() => ({
                         return generatedForJob.length >= Number(project.target_episode_count || 0);
                     }
                     if (action === 'beats') {
-                        return (project.episodes || []).some(item => item.stage === 'beats' && item.generation_meta?.job_id === jobId);
+                        const generated = (project.episodes || []).filter(item => item.stage === 'beats' && item.generation_meta?.job_id === jobId);
+                        return this.creativeWorkspace.activeSeriesGeneration
+                            ? generated.length >= Number(project.target_episode_count || 0)
+                            : generated.length > 0;
+                    }
+                    if (action === 'script') {
+                        const generated = (project.episodes || []).filter(item => item.stage === 'script' && item.generation_meta?.job_id === jobId);
+                        return this.creativeWorkspace.activeSeriesGeneration
+                            ? generated.length >= Number(project.target_episode_count || 0)
+                            : generated.length > 0;
                     }
                     return false;
                 },
@@ -861,6 +971,7 @@ window.aiworkerModules.push(() => ({
                     this.creativeWorkspace.startingAction = '';
                     this.creativeWorkspace.activeAction = '';
                     this.creativeWorkspace.activeEpisode = 0;
+                    this.creativeWorkspace.activeSeriesGeneration = false;
                     this.creativeWorkspace.paused = false;
                     this.creativeWorkspace.notifiedStatus = 'succeeded';
                 },
@@ -909,6 +1020,7 @@ window.aiworkerModules.push(() => ({
                             this.creativeWorkspace.startingAction = '';
                             this.creativeWorkspace.activeAction = '';
                             this.creativeWorkspace.activeEpisode = 0;
+                            this.creativeWorkspace.activeSeriesGeneration = false;
                             this.creativeWorkspace.paused = false;
                             alert(`创作任务${job.status === 'cancelled' ? '已取消' : '失败'}：${job.message || ''}`);
                         }
@@ -1148,6 +1260,29 @@ window.aiworkerModules.push(() => ({
                         await this.selectCreativeProject(this.creativeWorkspace.project.id);
                         this.showCreativeNotice('Beats 已完成并锁定');
                     } catch (error) { this.creativeWorkspace.error = error.message || '完成 Beats 失败'; }
+                },
+
+                async completeProjectBeatsBatch() {
+                    const items = this.batchLockableProjectBeats();
+                    if (!items.length) return;
+                    const episodes = items.map((item) => Number(item.episode_number)).sort((a, b) => a - b);
+                    const scope = episodes.length === 1 ? `第 ${episodes[0]} 集` : `第 ${episodes[0]}-${episodes.at(-1)} 集`;
+                    if (!window.confirm(`将完成并锁定 ${scope}，共 ${episodes.length} 集当前 Beats 草稿。已锁定集会跳过，锁定后不能直接编辑。是否继续？`)) return;
+                    try {
+                        const projectId = this.creativeWorkspace.project.id;
+                        const task = await this.resolveCreativeWorkflowTask('beats', projectId);
+                        const response = await aiworkerApi.request(`/api/creative/projects/${projectId}/beats/lock`, {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({workflow_task_id: task.id}),
+                        });
+                        const payload = await response.json();
+                        if (!response.ok) throw new Error(payload.detail || '批量锁定 Beats 失败');
+                        await this.selectCreativeProject(projectId);
+                        this.showCreativeNotice(`已完成并锁定 ${payload.resources?.length || episodes.length} 集 Beats`);
+                    } catch (error) {
+                        this.creativeWorkspace.error = error.message || '批量锁定 Beats 失败';
+                    }
                 },
 
                 async completeProjectScript() {

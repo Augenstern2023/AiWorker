@@ -57,7 +57,7 @@
     }
 
     function label(value) {
-        return { queued: '等待审核', running: '审核中', pending_confirmation: '待人工确认', confirmed: '已确认', stale: '已过期', failed: '审核失败' }[value] || value || '-';
+        return { queued: '等待审核', running: '审核中', cancelled: '已取消', pending_confirmation: '待人工确认', confirmed: '已确认', stale: '已过期', failed: '审核失败' }[value] || value || '-';
     }
 
     function reviewScope(payload) {
@@ -109,18 +109,20 @@
         if (!reviewProgressModal || reviewProgress.reviewId !== review.id) return;
         const isRunning = ['queued', 'running'].includes(review.status);
         const completed = review.status === 'pending_confirmation';
+        const cancelled = review.status === 'cancelled';
         const failed = review.status === 'failed';
+        const unsuccessful = failed || cancelled;
         if (reviewProgressStatus) {
-            reviewProgressStatus.className = `alert ${failed ? 'alert-danger' : completed ? 'alert-success' : 'alert-info'} py-2`;
-            reviewProgressStatus.textContent = message || (failed ? '审核任务失败' : completed ? '审核完成，审核报告已生成' : label(review.status));
+            reviewProgressStatus.className = `alert ${failed ? 'alert-danger' : cancelled ? 'alert-warning' : completed ? 'alert-success' : 'alert-info'} py-2`;
+            reviewProgressStatus.textContent = message || (failed ? '审核任务失败' : cancelled ? '审核已取消' : completed ? '审核完成，审核报告已生成' : label(review.status));
         }
-        if (reviewProgressValue) reviewProgressValue.textContent = failed ? '审核失败' : completed ? '审核完成' : '处理中';
+        if (reviewProgressValue) reviewProgressValue.textContent = failed ? '审核失败' : cancelled ? '已取消' : completed ? '审核完成' : '处理中';
         if (reviewProgressBar) {
-            reviewProgressBar.className = `progress-bar progress-bar-striped${isRunning ? ' progress-bar-animated' : ''}${failed ? ' bg-danger' : completed ? ' bg-success' : ''}`;
+            reviewProgressBar.className = `progress-bar progress-bar-striped${isRunning ? ' progress-bar-animated' : ''}${failed ? ' bg-danger' : cancelled ? ' bg-warning' : completed ? ' bg-success' : ''}`;
             reviewProgressBar.style.width = isRunning ? '100%' : '100%';
         }
-        if (failed && reviewProgressError) {
-            reviewProgressError.textContent = review.error || review.error_message || '审核任务执行失败，请稍后重试。';
+        if (unsuccessful && reviewProgressError) {
+            reviewProgressError.textContent = review.error || review.error_message || (cancelled ? '审核任务已取消。' : '审核任务执行失败，请稍后重试。');
             reviewProgressError.classList.remove('d-none');
         }
         reviewProgressViewReport?.classList.toggle('d-none', !completed);
@@ -236,6 +238,28 @@
             : (review.source_payload?.project_name || `项目 ${review.project_id}`);
     }
 
+    function reviewEpisodeCheckboxes() {
+        return [...episodes.querySelectorAll('input[name="script-review-episode"]')];
+    }
+
+    function syncSelectAllReviewEpisodes() {
+        const button = episodes.querySelector('#script-review-select-all-episodes');
+        const checkboxes = reviewEpisodeCheckboxes();
+        if (!button || !checkboxes.length) return;
+        const allSelected = checkboxes.every((input) => input.checked);
+        button.setAttribute('aria-pressed', String(allSelected));
+        button.innerHTML = allSelected
+            ? '<i class="bi bi-x-square me-1" aria-hidden="true"></i>取消全选'
+            : '<i class="bi bi-check2-square me-1" aria-hidden="true"></i>全选';
+    }
+
+    function toggleAllReviewEpisodes() {
+        const checkboxes = reviewEpisodeCheckboxes();
+        const selectAll = checkboxes.length > 0 && !checkboxes.every((input) => input.checked);
+        checkboxes.forEach((input) => { input.checked = selectAll; });
+        syncSelectAllReviewEpisodes();
+    }
+
     function renderEpisodes() {
         episodes.replaceChildren();
         if (source.value !== 'project' || !selectedProject || mode.value === 'collection') return;
@@ -262,6 +286,14 @@
             episodes.append(select);
             return;
         }
+        const selectAll = document.createElement('button');
+        selectAll.id = 'script-review-select-all-episodes';
+        selectAll.type = 'button';
+        selectAll.className = 'btn btn-outline-light btn-sm';
+        selectAll.title = '全选可审核集数';
+        selectAll.setAttribute('aria-label', '全选可审核集数');
+        selectAll.addEventListener('click', toggleAllReviewEpisodes);
+        episodes.append(selectAll);
         episodeNumbers.forEach((episodeNumber) => {
             const wrap = document.createElement('label');
             wrap.className = 'form-check form-check-inline m-0';
@@ -270,12 +302,14 @@
             input.type = 'checkbox';
             input.name = 'script-review-episode';
             input.value = String(episodeNumber);
+            input.addEventListener('change', syncSelectAllReviewEpisodes);
             const caption = document.createElement('span');
             caption.className = 'form-check-label small';
             caption.textContent = `第 ${episodeNumber} 集`;
             wrap.append(input, caption);
             episodes.append(wrap);
         });
+        syncSelectAllReviewEpisodes();
     }
 
     async function loadSelectedProject() {
@@ -716,12 +750,23 @@
         coverage.textContent = `${{ single: '单集', multiple: '多集', collection: '合集' }[review.mode] || '审核'} · 实际覆盖 ${episodeNumbers.length} 集（${episodeNumbers.map((number) => `第 ${number} 集`).join('、') || '-'}）`;
         result.append(coverage);
         renderReviewContext(review);
-        if (!review.report || !review.report.ai_verdict) return;
-        result.append(sectionHeading('修改建议'));
-        const overview = document.createElement('p');
-        overview.className = 'mb-3';
-        overview.textContent = `AI 建议：${review.ai_verdict}。${review.report.summary || ''}`;
-        result.append(overview);
+        if (!review.report) return;
+        const partial = review.report.partial === true;
+        if (!partial && !review.report.ai_verdict) return;
+        if (partial) {
+            const notice = document.createElement('div');
+            notice.className = 'alert alert-warning py-2 mb-3';
+            const completed = Number(review.report.completed_episode_count || 0);
+            const total = Number(review.report.total_episode_count || episodeNumbers.length || 0);
+            notice.textContent = `阶段性报告：已完成 ${completed}/${total} 集逐集审核，跨集汇总尚未完成。请继续或重新发起审核后获取最终结论。`;
+            result.append(notice);
+        } else {
+            result.append(sectionHeading('修改建议'));
+            const overview = document.createElement('p');
+            overview.className = 'mb-3';
+            overview.textContent = `AI 建议：${review.ai_verdict}。${review.report.summary || ''}`;
+            result.append(overview);
+        }
         const coreFindings = review.report.core_findings || [];
         const coreFindingKeys = new Set(coreFindings.map(findingKey));
         const findings = document.createElement('ul');
@@ -818,6 +863,21 @@
         }
     }
 
+    async function deleteReview(reviewId) {
+        if (!window.confirm('确定删除这条审核记录及其未采纳的优化草稿吗？此操作不可恢复。')) return;
+        try {
+            await readJson(await aiworkerApi.request(`/api/script-reviews/${reviewId}`, { method: 'DELETE' }));
+            if (activeReviewId === reviewId) {
+                activeReviewId = null;
+                result.replaceChildren();
+                result.classList.add('d-none');
+            }
+            await loadHistory();
+        } catch (requestError) {
+            showError(requestError.message);
+        }
+    }
+
     async function pollReview(reviewId) {
         if (reviewPollTimers.has(reviewId)) return;
         try {
@@ -851,6 +911,16 @@
                 const action = document.createElement('td'); action.className = 'text-end';
                 const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-outline-light btn-sm'; button.title = '查看审核报告'; button.innerHTML = '<i class="bi bi-eye" aria-hidden="true"></i>';
                 button.addEventListener('click', () => openReview(review.id)); action.append(button); row.append(action); history.append(row);
+                if (!['queued', 'running'].includes(review.status)) {
+                    const remove = document.createElement('button');
+                    remove.type = 'button';
+                    remove.className = 'btn btn-outline-danger btn-sm ms-2';
+                    remove.title = '删除审核记录';
+                    remove.setAttribute('aria-label', '删除审核记录');
+                    remove.innerHTML = '<i class="bi bi-trash" aria-hidden="true"></i>';
+                    remove.addEventListener('click', () => deleteReview(review.id));
+                    action.append(remove);
+                }
             });
             if (!history.children.length) history.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">暂无审核记录</td></tr>';
         } catch (requestError) {

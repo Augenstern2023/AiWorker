@@ -129,3 +129,90 @@ def test_project_review_is_marked_stale_and_confirmation_is_rejected(tmp_path) -
     assert detail.status_code == 200
     assert detail.json()["status"] == "stale"
     assert confirmation.status_code == 409
+
+
+def test_completed_review_history_can_be_deleted_by_its_owner(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    review = repository.create_script_review(
+        source_type="text",
+        mode="single",
+        project_id=None,
+        episode_numbers=[1],
+        source_fingerprint="review-fingerprint",
+        source_payload={"episode_numbers": [1]},
+        created_by="writer-1",
+    )
+    repository.complete_script_review(
+        review["id"],
+        {
+            "ai_verdict": "通过",
+            "summary": "结构清楚。",
+            "core_findings": [],
+            "episode_reviews": [],
+            "cross_episode_findings": [],
+        },
+    )
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = _principal
+    app.include_router(build_script_review_router(repository, FakeJobManager()))
+    client = TestClient(app)
+
+    deleted = client.delete(f"/api/script-reviews/{review['id']}")
+
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True, "id": review["id"]}
+    assert repository.get_script_review(review["id"]) is None
+    assert client.get(f"/api/script-reviews/{review['id']}").status_code == 404
+
+
+def test_running_review_history_cannot_be_deleted(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    review = repository.create_script_review(
+        source_type="text",
+        mode="single",
+        project_id=None,
+        episode_numbers=[1],
+        source_fingerprint="review-fingerprint",
+        source_payload={"episode_numbers": [1]},
+        created_by="writer-1",
+    )
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = _principal
+    app.include_router(build_script_review_router(repository, FakeJobManager()))
+    client = TestClient(app)
+
+    response = client.delete(f"/api/script-reviews/{review['id']}")
+
+    assert response.status_code == 409
+    assert "审核仍在执行" in response.json()["detail"]
+
+
+def test_cancelled_job_updates_its_review_history_status(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    review = repository.create_script_review(
+        source_type="text",
+        mode="single",
+        project_id=None,
+        episode_numbers=[1],
+        source_fingerprint="review-fingerprint",
+        source_payload={"episode_numbers": [1]},
+        created_by="writer-1",
+    )
+    repository.set_script_review_job(review["id"], "cancelled-review-job")
+    repository.start_script_review(review["id"])
+
+    class CancelledJobManager(FakeJobManager):
+        def get_job(self, job_id: str) -> dict:
+            assert job_id == "cancelled-review-job"
+            return {"status": "cancelled", "message": "任务已取消"}
+
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = _principal
+    app.include_router(build_script_review_router(repository, CancelledJobManager()))
+    client = TestClient(app)
+
+    current = client.get(f"/api/script-reviews/{review['id']}")
+
+    assert current.status_code == 200
+    assert current.json()["status"] == "cancelled"
+    assert "已取消" in current.json()["error"]

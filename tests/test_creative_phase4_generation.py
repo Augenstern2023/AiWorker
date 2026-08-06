@@ -19,7 +19,7 @@ from creative import phase4_worker
 from creative.api import build_beats_markdown
 from creative.imitation_service import generate_blueprints
 from creative.imitation_service import complete_with_one_repair
-from creative.prompt_templates import character_messages, outline_messages, beats_messages, script_messages
+from creative.prompt_templates import blueprint_messages, character_messages, outline_messages, beats_messages, script_messages
 from creative.repository import CreativeRepository
 from creative.script_service import (
     build_continuity_ledger,
@@ -51,6 +51,7 @@ def blueprint_payload(count: int = 3):
         "blueprints": [
             {
                 "title": f"方向 {index}",
+                "imitation_reason": "目标受众偏好高压逆袭与身份反差，适合采用这一结构方向。",
                 "borrowed_elements": ["逆袭节奏"],
                 "different_elements": ["职业和背景全部替换"],
                 "protagonist": f"主角 {index}",
@@ -71,6 +72,12 @@ def blueprint_payload(count: int = 3):
         ],
         "provider": "test-llm",
     }
+
+
+def test_blueprint_prompt_requires_an_imitation_reason_for_each_direction() -> None:
+    messages = blueprint_messages({}, 3)
+
+    assert "imitation_reason" in messages[0]["content"]
 
 
 @pytest.mark.asyncio

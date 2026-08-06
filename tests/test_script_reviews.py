@@ -402,3 +402,64 @@ async def test_review_worker_persists_ai_report_for_confirmation(tmp_path, monke
     assert completed["status"] == "pending_confirmation"
     assert completed["report"]["ai_verdict"] == "通过"
     assert (Path("data") / "script_reviews" / "review-job-1" / "report.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_review_worker_keeps_a_viewable_checkpoint_when_multi_episode_review_is_interrupted(
+    tmp_path, monkeypatch
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    source = {
+        "fingerprint": "checkpoint-source",
+        "mode": "multiple",
+        "formal": False,
+        "episode_numbers": [1, 2],
+        "episodes": [
+            {"episode_number": 1, "resource_id": 1, "version": 1, "text": "第一集"},
+            {"episode_number": 2, "resource_id": 2, "version": 1, "text": "第二集"},
+        ],
+    }
+    review = repository.create_script_review(
+        source_type="text",
+        mode="multiple",
+        project_id=None,
+        episode_numbers=[1, 2],
+        source_fingerprint=source["fingerprint"],
+        source_payload=source,
+        created_by="writer-1",
+    )
+
+    class InterruptedProvider:
+        calls = 0
+
+        async def complete_json(self, messages):
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("服务中断")
+            return {
+                "ai_verdict": "建议修改",
+                "summary": "第一集钩子有效。",
+                "core_findings": [{"title": "结尾钩子", "evidence": "危机出现", "suggestion": "加强威胁"}],
+                "episode_reviews": [],
+                "cross_episode_findings": [],
+            }
+
+    monkeypatch.setattr(worker, "create_provider", lambda: InterruptedProvider())
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(RuntimeError, match="服务中断"):
+        await worker.run(
+            CrawlJob(
+                job_id="review-checkpoint-job",
+                platform="creative",
+                crawler_type="screenplay_review",
+                extra={"review_id": review["id"], "db_path": str(repository.db_path)},
+            )
+        )
+
+    interrupted = repository.get_script_review(review["id"])
+    assert interrupted is not None
+    assert interrupted["status"] == "failed"
+    assert interrupted["report"]["partial"] is True
+    assert interrupted["report"]["completed_episode_count"] == 1
+    assert interrupted["report"]["total_episode_count"] == 2
+    assert interrupted["report"]["episode_reviews"][0]["episode_number"] == 1

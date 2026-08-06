@@ -124,3 +124,11 @@ def test_build_data_file_operation_worker_command():
 
 def test_build_worker_env_sets_utf8():
     assert build_worker_env()["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_build_worker_env_removes_playwright_incompatible_node_proxy_option(monkeypatch):
+    monkeypatch.setenv("NODE_OPTIONS", "--max-old-space-size=4096 --use-env-proxy")
+
+    environment = build_worker_env()
+
+    assert environment["NODE_OPTIONS"] == "--max-old-space-size=4096"

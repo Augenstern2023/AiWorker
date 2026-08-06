@@ -423,6 +423,83 @@ def test_today_rank_reads_hongguo_csv_exports(tmp_path):
     assert data["heat_growth_top"][0]["heat_delta"] == 600000
 
 
+def test_today_rank_reads_date_from_suffixed_hongguo_export_directory(tmp_path):
+    exports = tmp_path / "exports"
+    write_csv(
+        exports / "20260713_top10" / "top10_rankings.csv",
+        [["红果短剧热播榜", "1", "历史导出剧", "都市", "", "无", "无", "1w", "无", "100w", "无", "无", "无", "无", "无", ""]],
+    )
+
+    data = TodayRankService(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", limit=10)
+
+    assert data["date"] == "2026-07-13"
+    assert data["available_dates"] == ["2026-07-13"]
+
+
+def test_today_rank_merges_hongguo_json_history_with_newer_csv_export(tmp_path):
+    write_json(
+        tmp_path / "data/hg/jobs/hg-job/rank/hongguo_hot_rank_20260707_090000.json",
+        {
+            "captured_at": "2026-07-07 09:00:00",
+            "records": [
+                {
+                    "rank": {
+                        "rowNum": 1,
+                        "play_name": "历史剧",
+                        "book_id": "history-1",
+                        "play_type": "短剧",
+                        "like_count": "100",
+                        "internal_heat_score": 100,
+                    }
+                }
+            ],
+        },
+    )
+    exports = tmp_path / "exports"
+    write_csv(
+        exports / "20260708/top10_rankings.csv",
+        [["红果短剧热播榜", "1", "今日剧", "都市", "", "无", "无", "1w", "无", "100w", "无", "无", "无", "无", "无", ""]],
+    )
+
+    data = TodayRankService(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", limit=10)
+
+    assert data["available_dates"] == ["2026-07-08", "2026-07-07"]
+    assert data["previous_snapshot"]["date"] == "2026-07-07"
+    assert data["previous_snapshot"]["record_count"] == 1
+
+
+def test_today_rank_prefers_hongguo_csv_export_over_import_on_same_date(tmp_path):
+    write_json(
+        tmp_path / "data/hg/jobs/hg-job/rank/hongguo_hot_rank_20260708_180000.json",
+        {
+            "captured_at": "2026-07-08 18:00:00",
+            "records": [
+                {
+                    "rank": {
+                        "rowNum": 1,
+                        "play_name": "旧导入剧",
+                        "book_id": "import-1",
+                        "play_type": "短剧",
+                        "like_count": "100",
+                        "internal_heat_score": 100,
+                    }
+                }
+            ],
+        },
+    )
+    exports = tmp_path / "exports"
+    write_csv(
+        exports / "20260708/top10_rankings.csv",
+        [["红果短剧热播榜", "1", "CSV权威剧", "都市", "", "无", "无", "1w", "无", "100w", "无", "无", "无", "无", "无", ""]],
+    )
+
+    data = TodayRankService(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", limit=10)
+
+    assert data["available_dates"] == ["2026-07-08"]
+    assert data["current_entries"][0]["title"] == "CSV权威剧"
+    assert data["selected_snapshot"]["source_path"].endswith("top10_rankings.csv")
+
+
 def test_today_rank_returns_dynamic_columns_for_each_rank_table(tmp_path):
     exports = tmp_path / "exports"
     write_csv(

@@ -164,6 +164,44 @@ def test_webgui_registers_script_review_page_and_api():
     assert "剧本审核" in html
 
 
+def test_webgui_registers_independent_writer_agent_workbench():
+    paths = {route.path for route in WebGUI.app.routes}
+    template = _source("templates/review/writer_agent.html")
+    script = _source("static/js/review/writer_agent.js")
+
+    assert "/review/writer-agent" in paths
+    assert "/api/writer-agent/sessions" in paths
+    assert "/api/writer-agent/sessions/{session_id}/export" in paths
+    assert "/api/writer-agent/sessions/{session_id}/reports/{report_id}/export" in paths
+    assert "编剧大师" in template
+    assert "writer-agent-file" in template
+    assert ".docx,.pdf" in template
+    assert "/api/writer-agent/sessions/file" in script
+    assert "renderReport" in script
+
+
+def test_writer_agent_uses_three_panel_chat_and_report_history_layout():
+    template = _source("templates/review/writer_agent.html")
+    script = _source("static/js/review/writer_agent.js")
+
+    assert "writer-agent-layout" in template
+    assert "writer-agent-session-detail" in template
+    assert "writer-agent-reports" in template
+    assert "writer-agent-composer" in template
+    assert "renderReportFiles" in script
+    assert "/reports/${reportId}/export" in script
+
+
+def test_writer_agent_shows_an_immediate_thinking_state_while_waiting_for_a_reply():
+    template = _source("templates/review/writer_agent.html")
+    script = _source("static/js/review/writer_agent.js")
+
+    assert "writer-agent-thinking" in template
+    assert "beginThinking" in script
+    assert "正在梳理结构与人物关系" in script
+    assert "pendingMessage" in script
+
+
 def test_script_review_page_renders_episode_and_cross_episode_findings():
     script = _source("static/js/review/scripts.js")
 
@@ -194,6 +232,73 @@ def test_script_review_groups_report_content_with_clear_headings():
     assert "跨集问题" in script
 
 
+def test_script_review_renders_a_partial_report_after_an_interrupted_run():
+    script = _source("static/js/review/scripts.js")
+
+    assert "阶段性报告" in script
+    assert "completed_episode_count" in script
+    assert "跨集汇总尚未完成" in script
+
+
+def test_script_review_history_offers_a_delete_action_for_finished_records():
+    script = _source("static/js/review/scripts.js")
+
+    assert "/api/script-reviews/${reviewId}" in script
+    assert "删除审核记录" in script
+    assert "bi-trash" in script
+
+
+def test_script_review_labels_cancelled_reviews_as_cancelled_not_running():
+    script = _source("static/js/review/scripts.js")
+
+    assert "cancelled: '已取消'" in script
+
+
+def test_blueprint_table_shows_why_each_imitation_direction_was_generated():
+    blueprint_template = _source("templates/common/workspace/project_blueprints.html")
+    creative_script = _source("static/js/common/creative.js")
+
+    assert "仿制原因" in blueprint_template
+    assert "imitationReason(item.content)" in blueprint_template
+    assert "imitationReason(selectedProjectBlueprint().content)" in blueprint_template
+    assert "imitationReason(content)" in creative_script
+
+
+def test_character_workspace_can_choose_among_locked_brief_directions():
+    template = _source("templates/common/workspace/project_characters.html")
+    script = _source("static/js/common/creative.js")
+
+    assert "创作方向（锁定 Brief）" in template
+    assert "availableLockedBriefs()" in template
+    assert "selectCharacterBrief" in template
+    assert "/briefs/${briefId}/select" in script
+
+
+def test_locking_a_brief_saves_edited_project_episode_count_first():
+    script = _source("static/js/common/creative.js")
+    method = script.split("async completeProjectBrief()", 1)[1].split("async createBlankCharacterBatch", 1)[0]
+
+    assert method.index("await this.saveCreativeProjectSettings()") < method.index("completeCreativeResource('brief'")
+
+
+def test_outline_workspace_can_choose_locked_brief_and_character_versions():
+    template = _source("templates/common/workspace/project_outlines.html")
+    script = _source("static/js/common/creative.js")
+
+    assert "创作方向（锁定 Brief）" in template
+    assert "人物关系版本（已锁定）" in template
+    assert "availableLockedCharacterBatches()" in template
+    assert "selectOutlineCharacterBatch" in template
+    assert "/character-batches/${batchId}/select" in script
+
+
+def test_outline_workspace_explains_when_current_direction_has_no_locked_character_batch():
+    template = _source("templates/common/workspace/project_outlines.html")
+
+    assert "暂无与当前创作方向匹配的已锁定人物关系" in template
+    assert "前往人物关系" in template
+
+
 def test_script_review_can_start_and_review_optimization_drafts():
     script = _source("static/js/review/scripts.js")
 
@@ -207,6 +312,14 @@ def test_script_review_project_selector_only_lists_projects_with_locked_outlines
     script = _source("static/js/review/scripts.js")
 
     assert "filter((item) => item.outline_batch_id)" in script
+
+
+def test_script_review_multi_episode_picker_has_a_select_all_control():
+    script = _source("static/js/review/scripts.js")
+
+    assert "script-review-select-all-episodes" in script
+    assert "toggleAllReviewEpisodes" in script
+    assert "取消全选" in script
 
 
 def test_partial_outline_checkpoints_do_not_mark_the_generation_job_complete():
@@ -340,6 +453,35 @@ def test_outline_workspace_exposes_continue_generation_for_a_saved_partial_batch
     assert "hasResumableProjectOutlines()" in script
     assert "outlineGenerationActionLabel()" in script
     assert "outlineGenerationActionLabel()" in template
+
+
+def test_outline_workspace_calls_generation_a_regeneration_after_a_locked_current_outline():
+    script = _source("static/js/common/creative.js")
+    method = script.split("outlineGenerationActionLabel()", 1)[1].split(
+        "currentOutlineBatchStatus() {", 1
+    )[0]
+
+    assert "重新生成" in method
+    assert "['locked', 'approved']" in method
+
+
+def test_outline_workspace_prefers_the_locked_outline_batch_over_old_drafts():
+    script = _source("static/js/common/creative.js")
+    function_start = script.index("latestOutlineBatchId()")
+    function_end = script.index("currentProjectOutlines()", function_start)
+    function = script[function_start:function_end]
+
+    assert function.index("if (project.outline_batch_id && compatible.some") < function.index("const drafts")
+
+
+def test_outline_workspace_does_not_resume_a_draft_from_an_old_direction_or_character_batch():
+    script = _source("static/js/common/creative.js")
+    function_start = script.index("latestOutlineBatchId()")
+    function_end = script.index("currentProjectOutlines()", function_start)
+    function = script[function_start:function_end]
+
+    assert "item.upstream_refs?.brief_id" in function
+    assert "item.upstream_refs?.character_batch_id" in function
 
 
 def test_breakdown_lock_refreshes_the_reactive_editor_record():

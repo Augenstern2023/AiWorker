@@ -69,9 +69,22 @@ async def run(job: CrawlJob) -> None:
             payload={"stage": "script_review", "completed": completed, "total": total},
         )
 
+    def checkpoint(report: dict[str, Any]) -> None:
+        repository.checkpoint_script_review(review_id, report)
+
     try:
+        prior_report = review.get("report") or {}
+        completed_episodes = (
+            prior_report.get("episode_reviews")
+            if prior_report.get("partial") is True
+            else None
+        )
         report = await review_source(
-            create_provider(), review["source_payload"], on_progress=progress
+            create_provider(),
+            review["source_payload"],
+            on_progress=progress,
+            on_checkpoint=checkpoint,
+            initial_episode_reviews=completed_episodes,
         )
         completed = repository.complete_script_review(review_id, report)
     except Exception as exc:

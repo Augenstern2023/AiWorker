@@ -134,6 +134,28 @@ def build_script_review_router(
             fingerprint = "__source_unavailable__"
         return repository.mark_script_review_stale_if_changed(review["id"], fingerprint)
 
+    def refresh_runtime_status(review: dict[str, Any]) -> dict[str, Any]:
+        """Keep review history in sync when the worker is cancelled outside its process."""
+        if review.get("status") not in {"queued", "running"} or not review.get("job_id"):
+            return review
+        try:
+            job = job_manager.get_job(str(review["job_id"]))
+        except Exception:
+            return review
+        job_status = str(job.get("status") or "")
+        if job_status == "cancelled":
+            return repository.cancel_script_review(
+                review["id"], str(job.get("message") or "审核任务已取消")
+            )
+        if job_status == "failed":
+            return repository.fail_script_review(
+                review["id"], str(job.get("message") or "审核任务执行失败")
+            )
+        return review
+
+    def refresh_review(review: dict[str, Any]) -> dict[str, Any]:
+        return refresh_staleness(refresh_runtime_status(review))
+
     def queue_review(
         source_type: str, source: dict[str, Any], principal: Principal
     ) -> dict[str, Any]:
@@ -221,7 +243,7 @@ def build_script_review_router(
         assert_permission(principal, "script.review.read")
         candidates = repository.list_script_reviews()
         items = [
-            refresh_staleness(review)
+            refresh_review(review)
             for review in candidates
             if can_read_review(request, principal, review)
         ]
@@ -239,7 +261,7 @@ def build_script_review_router(
             raise HTTPException(404, "审核记录不存在")
         if not can_read_review(request, principal, review):
             raise HTTPException(403, "没有访问此审核记录的权限")
-        review = refresh_staleness(review)
+        review = refresh_review(review)
         return PlainTextResponse(
             build_review_markdown(review),
             media_type="text/markdown; charset=utf-8",
@@ -260,7 +282,24 @@ def build_script_review_router(
             raise HTTPException(404, "审核记录不存在")
         if not can_read_review(request, principal, review):
             raise HTTPException(403, "没有访问此审核记录的权限")
-        return refresh_staleness(review)
+        return refresh_review(review)
+
+    @router.delete("/{review_id}")
+    async def delete_review(
+        review_id: int,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        assert_permission(principal, "script.review.generate")
+        review = repository.get_script_review(review_id)
+        if not review:
+            raise HTTPException(404, "审核记录不存在")
+        if not can_read_review(request, principal, review):
+            raise HTTPException(403, "没有访问此审核记录的权限")
+        if review["status"] in {"queued", "running"}:
+            raise HTTPException(409, "审核仍在执行，无法删除")
+        repository.delete_script_review(review_id)
+        return {"deleted": True, "id": review_id}
 
     @router.post("/{review_id}/confirm")
     async def confirm_review(

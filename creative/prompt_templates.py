@@ -31,10 +31,11 @@ def _messages(system: str, payload: dict[str, Any]) -> list[dict[str, str]]:
 def blueprint_messages(payload: dict[str, Any], count: int) -> list[dict[str, str]]:
     return _messages(
         "你是短剧创意策划。借鉴结构与情绪价值，但不得复制角色名、具体台词、完整剧情节点或独特表达。"
-        f"生成 {count} 个明显不同的方向，返回 blueprints 数组。每项包含 title、borrowed_elements、"
+        f"生成 {count} 个明显不同的方向，返回 blueprints 数组。每项包含 title、imitation_reason、borrowed_elements、"
         "different_elements、protagonist、core_conflict、main_goal、background、worldview、first_three_hooks、"
         "highlights、audience、cost_level、risk_score、risk_reasons、revision_suggestions、priority。"
-        "title、protagonist、core_conflict、main_goal、background、worldview、audience、cost_level 必须是纯文本字符串；"
+        "title、imitation_reason、protagonist、core_conflict、main_goal、background、worldview、audience、cost_level 必须是纯文本字符串；"
+        "imitation_reason 必须明确说明该方向为何适配当前项目的目标受众、题材和已拆解的可借鉴结构，不得泛泛而谈。"
         "列表字段必须是字符串数组。",
         payload,
     )

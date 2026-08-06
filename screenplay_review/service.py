@@ -399,6 +399,8 @@ async def review_source(
     source: dict[str, Any],
     *,
     on_progress: Any = None,
+    on_checkpoint: Any = None,
+    initial_episode_reviews: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Ask the configured LLM for a bounded, evidence-based review report."""
     episodes = list(source.get("episodes") or [])
@@ -411,31 +413,79 @@ async def review_source(
         await _report_progress(on_progress, 1, 1)
         return report
 
-    episode_reports: list[dict[str, Any]] = []
+    completed_by_episode = {
+        int(item.get("episode_number") or 0): item
+        for item in (initial_episode_reviews or [])
+        if isinstance(item, dict) and int(item.get("episode_number") or 0) > 0
+    }
+    episode_reports = [
+        completed_by_episode[number]
+        for number in sorted(completed_by_episode)
+        if any(int(episode.get("episode_number") or 0) == number for episode in episodes)
+    ]
     total = len(episodes) + 1
     for index, episode in enumerate(episodes, start=1):
+        episode_number = int(episode["episode_number"])
+        if episode_number in completed_by_episode:
+            await _report_progress(on_progress, index, total)
+            continue
         episode_source = {
             **source,
             "mode": "single",
-            "episode_numbers": [int(episode["episode_number"])],
+            "episode_numbers": [episode_number],
             "episodes": [episode],
         }
-        episode_reports.append(
-            normalize_review_report(
-                await provider.complete_json(_review_messages(episode_source))
-            )
+        episode_report = normalize_review_report(
+            await provider.complete_json(_review_messages(episode_source))
+        )
+        completed = {
+            "episode_number": episode_number,
+            "summary": episode_report["summary"],
+            "findings": episode_report["core_findings"],
+        }
+        completed_by_episode[episode_number] = completed
+        episode_reports.append(completed)
+        await _report_checkpoint(
+            on_checkpoint,
+            build_partial_review_report(episode_reports, len(episodes)),
         )
         await _report_progress(on_progress, index, total)
 
     combined = {
         **source,
-        "episode_reports": episode_reports,
+        "episode_reports": [
+            {
+                "episode_number": item["episode_number"],
+                "summary": item.get("summary") or "",
+                "core_findings": item.get("findings") or [],
+            }
+            for item in episode_reports
+        ],
     }
     report = normalize_review_report(
         await provider.complete_json(_summary_messages(combined))
     )
     await _report_progress(on_progress, total, total)
     return report
+
+
+def build_partial_review_report(
+    episode_reviews: list[dict[str, Any]], total_episode_count: int
+) -> dict[str, Any]:
+    """Make completed per-episode results readable before the final aggregation."""
+    completed = len(episode_reviews)
+    return {
+        "partial": True,
+        "completed_episode_count": completed,
+        "total_episode_count": total_episode_count,
+        "summary": (
+            f"已完成 {completed}/{total_episode_count} 集逐集审核，"
+            "跨集汇总尚未完成。"
+        ),
+        "core_findings": [],
+        "episode_reviews": episode_reviews,
+        "cross_episode_findings": [],
+    }
 
 
 def _review_messages(source: dict[str, Any]) -> list[dict[str, str]]:
@@ -501,6 +551,14 @@ async def _report_progress(callback: Any, completed: int, total: int) -> None:
     if callback is None:
         return
     result = callback(completed, total)
+    if inspect.isawaitable(result):
+        await result
+
+
+async def _report_checkpoint(callback: Any, report: dict[str, Any]) -> None:
+    if callback is None:
+        return
+    result = callback(report)
     if inspect.isawaitable(result):
         await result
 

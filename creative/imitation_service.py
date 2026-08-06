@@ -98,13 +98,13 @@ def _validate_blueprints(payload: dict[str, Any], count: int) -> list[dict[str, 
     if not isinstance(items, list) or len(items) != count:
         raise ValueError(f"blueprints 必须包含 {count} 项")
     required = {
-        "title", "borrowed_elements", "different_elements", "protagonist", "core_conflict", "main_goal",
+        "title", "imitation_reason", "borrowed_elements", "different_elements", "protagonist", "core_conflict", "main_goal",
         "background", "worldview", "first_three_hooks", "highlights", "audience", "cost_level",
         "risk_score", "revision_suggestions", "priority",
     }
     normalized: list[dict[str, Any]] = []
     text_fields = {
-        "title", "protagonist", "core_conflict", "main_goal", "background",
+        "title", "imitation_reason", "protagonist", "core_conflict", "main_goal", "background",
         "worldview", "audience", "cost_level",
     }
     list_fields = {

@@ -113,6 +113,17 @@ _SCRIPT_REVIEWS: tuple[ApiRoute, ...] = (
     ("POST", "/api/script-optimization-drafts/{draft_id}/reject"),
 )
 
+_WRITER_AGENT: tuple[ApiRoute, ...] = (
+    ("GET", "/api/writer-agent/sessions"),
+    ("POST", "/api/writer-agent/sessions"),
+    ("POST", "/api/writer-agent/sessions/file"),
+    ("POST", "/api/writer-agent/sessions/{session_id}/materials/file"),
+    ("GET", "/api/writer-agent/sessions/{session_id}"),
+    ("POST", "/api/writer-agent/sessions/{session_id}/messages"),
+    ("GET", "/api/writer-agent/sessions/{session_id}/export"),
+    ("GET", "/api/writer-agent/sessions/{session_id}/reports/{report_id}/export"),
+)
+
 _DRAMA_DOWNLOAD: tuple[ApiRoute, ...] = (
     ("POST", "/api/hongguo/drama/download/status"),
     ("POST", "/api/hongguo/drama/download/search"),
@@ -256,6 +267,7 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
     + _CREATIVE_TASK_SUPPORT
     + _CREATIVE_JOB_MONITOR,
     "/review/scripts": _SCRIPT_REVIEWS,
+    "/review/writer-agent": _WRITER_AGENT,
     "/review/projects": _PROJECT_MANAGEMENT,
     "/review/users": _TEAM_USERS,
     "/review/roles": _TEAM_ROLES,

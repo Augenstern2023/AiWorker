@@ -44,6 +44,14 @@ def build_worker_command(job_file: str | Path, platform: str = "", crawler_type:
 def build_worker_env() -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
+    node_options = env.get("NODE_OPTIONS", "")
+    filtered_node_options = [
+        option for option in node_options.split() if option != "--use-env-proxy"
+    ]
+    if filtered_node_options:
+        env["NODE_OPTIONS"] = " ".join(filtered_node_options)
+    else:
+        env.pop("NODE_OPTIONS", None)
     return env
 
 

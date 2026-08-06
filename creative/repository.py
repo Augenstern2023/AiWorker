@@ -1223,6 +1223,49 @@ class CreativeRepository:
             )
         return self.get_blueprint(blueprint_id) or {}
 
+    def select_locked_brief(self, project_id: int, blueprint_id: int) -> dict[str, Any]:
+        """Switch the active story direction to another already locked Brief."""
+        project = self.get_project(project_id)
+        if not project:
+            raise ValueError("创作项目不存在")
+        brief = self.get_blueprint(blueprint_id)
+        if not brief or int(brief.get("project_id") or 0) != project_id:
+            raise ValueError("仿制方向不存在")
+        if brief.get("status") != "brief_locked":
+            raise ValueError("只能选择已锁定的 Brief 版本")
+        content = brief.get("content") or {}
+        episode_count = project["target_episode_count"]
+        episode_duration = project["episode_duration_seconds"]
+        try:
+            candidate_count = int(content.get("target_episode_count") or episode_count)
+            if 1 <= candidate_count <= 100:
+                episode_count = candidate_count
+        except (TypeError, ValueError):
+            pass
+        try:
+            candidate_duration = int(content.get("episode_duration_seconds") or episode_duration)
+            if 30 <= candidate_duration <= 1800:
+                episode_duration = candidate_duration
+        except (TypeError, ValueError):
+            pass
+
+        if int(project.get("locked_brief_id") or 0) == blueprint_id:
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE creative_projects SET target_episode_count = ?, episode_duration_seconds = ?, "
+                    "updated_at = ? WHERE id = ?",
+                    (episode_count, episode_duration, time.time(), project_id),
+                )
+            return self.get_project(project_id) or {}
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE creative_projects SET locked_brief_id = ?, character_batch_id = NULL, "
+                "outline_batch_id = NULL, target_episode_count = ?, episode_duration_seconds = ?, "
+                "status = 'brief_locked', updated_at = ? WHERE id = ?",
+                (blueprint_id, episode_count, episode_duration, time.time(), project_id),
+            )
+        return self.get_project(project_id) or {}
+
     def create_character_batch(
         self,
         project_id: int,
@@ -1324,6 +1367,34 @@ class CreativeRepository:
                 (batch_id, now, project_id),
             )
         return self.get_character_batch(project_id, batch_id)
+
+    def select_locked_character_batch(self, project_id: int, batch_id: str) -> dict[str, Any]:
+        """Use a compatible locked character batch as the active outline context."""
+        project = self.get_project(project_id)
+        if not project:
+            raise ValueError("创作项目不存在")
+        if not project.get("locked_brief_id"):
+            raise ValueError("必须先选择已锁定的 Brief")
+
+        batch = self.get_character_batch(project_id, batch_id)
+        characters = batch["characters"]
+        if not characters:
+            raise ValueError("人物关系版本至少需要一个人物")
+        if any(item.get("status") not in {"locked", "approved"} for item in characters):
+            raise ValueError("只能选择已锁定的人物关系版本")
+        active_brief_id = int(project["locked_brief_id"])
+        if any(int((item.get("source_refs") or {}).get("brief_id") or 0) != active_brief_id for item in characters):
+            raise ValueError("所选人物关系版本不属于当前锁定 Brief")
+
+        if project.get("character_batch_id") == batch_id:
+            return project
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE creative_projects SET character_batch_id = ?, outline_batch_id = NULL, "
+                "status = 'characters_locked', updated_at = ? WHERE id = ?",
+                (batch_id, time.time(), project_id),
+            )
+        return self.get_project(project_id) or {}
 
     def create_outline_batch(
         self,
@@ -2004,6 +2075,31 @@ class CreativeRepository:
             ).fetchall()
         return [self._script_review(dict(row)) for row in rows]
 
+    def delete_script_review(self, review_id: int) -> None:
+        """Remove one review and its review-scoped optimization drafts."""
+        with self._connect() as conn:
+            review = conn.execute(
+                "SELECT id FROM script_reviews WHERE id = ?", (review_id,)
+            ).fetchone()
+            if review is None:
+                raise ValueError("审核记录不存在")
+            optimization_ids = [
+                int(row["id"])
+                for row in conn.execute(
+                    "SELECT id FROM script_optimizations WHERE review_id = ?", (review_id,)
+                ).fetchall()
+            ]
+            if optimization_ids:
+                placeholders = ",".join("?" for _ in optimization_ids)
+                conn.execute(
+                    f"DELETE FROM script_optimization_drafts WHERE optimization_id IN ({placeholders})",
+                    optimization_ids,
+                )
+            conn.execute(
+                "DELETE FROM script_optimizations WHERE review_id = ?", (review_id,)
+            )
+            conn.execute("DELETE FROM script_reviews WHERE id = ?", (review_id,))
+
     def set_script_review_job(self, review_id: int, job_id: str) -> dict[str, Any]:
         return self._update_script_review(review_id, {"job_id": job_id})
 
@@ -2023,9 +2119,31 @@ class CreativeRepository:
             },
         )
 
+    def checkpoint_script_review(
+        self, review_id: int, report: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Persist a resumable, non-final report while a review is still running."""
+        return self._update_script_review(
+            review_id,
+            {
+                "status": "running",
+                "report_json": json.dumps(report, ensure_ascii=False),
+                "error": "",
+            },
+        )
+
     def fail_script_review(self, review_id: int, error: str) -> dict[str, Any]:
         return self._update_script_review(
             review_id, {"status": "failed", "error": str(error)[:2000]}
+        )
+
+    def cancel_script_review(self, review_id: int, reason: str = "") -> dict[str, Any]:
+        return self._update_script_review(
+            review_id,
+            {
+                "status": "cancelled",
+                "error": str(reason or "审核任务已取消")[:2000],
+            },
         )
 
     def confirm_script_review(

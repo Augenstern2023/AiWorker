@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from pathlib import Path
@@ -463,6 +464,75 @@ def test_locking_new_brief_keeps_history_but_invalidates_current_downstream(tmp_
     assert detail["outline_batch_id"] is None
     assert any(item["batch_id"] == people["batch_id"] for item in detail["characters"])
     assert any(item["batch_id"] == outlines["batch_id"] for item in detail["episodes"])
+
+
+def test_selecting_another_locked_brief_repoints_character_generation_context(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "方向切换", 1)
+    first = repository.create_blueprints(project["id"], [{
+        "content": {"title": "方向一"}, "risk_score": 10, "risk_level": "low",
+    }])[0]
+    repository.lock_brief(first["id"])
+    people = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
+    repository.lock_character_batch(project["id"], people["batch_id"])
+    second = repository.create_blueprint_version(first["id"])
+    repository.update_blueprint(second["id"], {"title": "方向二"})
+    repository.lock_brief(second["id"])
+
+    selected = repository.select_locked_brief(project["id"], first["id"])
+
+    assert selected["locked_brief_id"] == first["id"]
+    assert selected["character_batch_id"] is None
+    assert selected["outline_batch_id"] is None
+
+
+def test_selecting_locked_brief_restores_its_frozen_episode_count(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "方向集数切换", 96)
+    first = repository.create_blueprints(project["id"], [{
+        "content": {"title": "96 集方向"}, "risk_score": 10, "risk_level": "low",
+    }])[0]
+    repository.lock_brief(first["id"])
+    second = repository.create_blueprint_version(first["id"])
+    repository.lock_brief(second["id"])
+    with repository._connect() as connection:
+        content = dict(repository.get_blueprint(second["id"])["content"])
+        content["target_episode_count"] = 30
+        connection.execute(
+            "UPDATE creative_blueprints SET content_json = ? WHERE id = ?",
+            (json.dumps(content, ensure_ascii=False), second["id"]),
+        )
+        connection.execute(
+            "UPDATE creative_projects SET target_episode_count = 96 WHERE id = ?",
+            (project["id"],),
+        )
+
+    repository.select_locked_brief(project["id"], first["id"])
+    selected = repository.select_locked_brief(project["id"], second["id"])
+
+    assert selected["locked_brief_id"] == second["id"]
+    assert selected["target_episode_count"] == 30
+
+
+def test_selecting_another_locked_character_batch_repoints_outline_context(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "人物版本切换", 1)
+    brief = repository.create_blueprints(project["id"], [{
+        "content": {"title": "方向"}, "risk_score": 10, "risk_level": "low",
+    }])[0]
+    repository.lock_brief(brief["id"])
+    first = repository.create_character_batch(project["id"], [{"name": "主角一"}], [])
+    repository.lock_character_batch(project["id"], first["batch_id"])
+    second = repository.create_character_batch(project["id"], [{"name": "主角二"}], [])
+    repository.lock_character_batch(project["id"], second["batch_id"])
+
+    selected = repository.select_locked_character_batch(project["id"], first["batch_id"])
+
+    assert selected["character_batch_id"] == first["batch_id"]
+    assert selected["outline_batch_id"] is None
 
 
 def test_locked_brief_version_api_creates_a_successor_brief_task(tmp_path: Path) -> None:

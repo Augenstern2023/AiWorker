@@ -15,7 +15,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -118,10 +118,10 @@ class TodayRankService:
 
     def list_snapshots(self, platform: str) -> list[RankSnapshot]:
         if platform == "hg":
-            csv_snapshots = self._list_hongguo_csv_snapshots()
-            if csv_snapshots:
-                return csv_snapshots
-            return self._list_hongguo_import_snapshots()
+            return self._merge_hongguo_snapshots(
+                self._list_hongguo_import_snapshots(),
+                self._list_hongguo_csv_snapshots(),
+            )
 
         pattern = RANK_PATTERNS[platform]
         snapshots: list[RankSnapshot] = []
@@ -130,6 +130,24 @@ class TodayRankService:
             if snapshot:
                 snapshots.append(snapshot)
         return sorted(snapshots, key=lambda item: (item.captured_at, str(item.source_path)))
+
+    @staticmethod
+    def _merge_hongguo_snapshots(
+        imported_snapshots: list[RankSnapshot],
+        csv_snapshots: list[RankSnapshot],
+    ) -> list[RankSnapshot]:
+        """Keep one snapshot per day, with the external CSV export as the authority."""
+        by_date: dict[date, RankSnapshot] = {}
+        for snapshot in imported_snapshots:
+            date = snapshot.captured_at.date()
+            previous = by_date.get(date)
+            if previous is None or snapshot.captured_at >= previous.captured_at:
+                by_date[date] = snapshot
+        for snapshot in csv_snapshots:
+            # CSV exports are the current operational source and supersede imports
+            # for the same calendar day, regardless of their capture time.
+            by_date[snapshot.captured_at.date()] = snapshot
+        return sorted(by_date.values(), key=lambda item: (item.captured_at, str(item.source_path)))
 
     def _list_hongguo_import_snapshots(self) -> list[RankSnapshot]:
         snapshots: list[RankSnapshot] = []
@@ -1327,9 +1345,10 @@ def _parse_datetime_from_filename(path: Path) -> datetime | None:
 
 def _parse_datetime_from_export_path(path: Path) -> datetime | None:
     for part in reversed(path.parts):
-        if re.fullmatch(r"\d{8}", part):
+        match = re.search(r"(?<!\d)(\d{8})(?!\d)", part)
+        if match:
             try:
-                return datetime.strptime(part + " 00:00:00", "%Y%m%d %H:%M:%S")
+                return datetime.strptime(match.group(1) + " 00:00:00", "%Y%m%d %H:%M:%S")
             except ValueError:
                 return None
     return None

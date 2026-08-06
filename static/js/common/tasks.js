@@ -115,7 +115,7 @@ function localDateString(date = new Date()) {
                 creativeWorkspace: {
                     projects: [], eligibleTopics: [], lockedBreakdowns: [], project: null, loading: false, error: '', step: 'blueprints',
                     create: {topic_id: '', breakdown_id: '', name: '', target_platform: '', target_episode_count: 20, creation_request_id: ''},
-                    directionCount: 3, selectedBlueprintId: null, selectedEpisode: 1,
+                    directionCount: 3, selectedBlueprintId: null, selectedCharacterBriefId: null, selectedOutlineBriefId: null, selectedOutlineCharacterBatchId: null, selectedEpisode: 1,
                     jobId: '', jobMessage: '', jobProgress: {}, jobStatus: '', paused: false, notifiedStatus: '',
                     jobLogs: [], jobLogCount: 0, showJobLogs: false,
                     jobStartedAt: 0, jobElapsedSeconds: 0,

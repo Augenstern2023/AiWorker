@@ -2056,6 +2056,26 @@ def build_creative_router(
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
+    @router.post("/projects/{project_id}/briefs/{blueprint_id}/select")
+    async def select_project_brief(
+        project_id: int,
+        blueprint_id: int,
+    ):
+        try:
+            return repository.select_locked_brief(project_id, blueprint_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post("/projects/{project_id}/character-batches/{batch_id}/select")
+    async def select_project_character_batch(
+        project_id: int,
+        batch_id: str,
+    ):
+        try:
+            return repository.select_locked_character_batch(project_id, batch_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @router.post("/projects/{project_id}/characters/generate")
     async def generate_project_characters(
         project_id: int,

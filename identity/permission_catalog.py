@@ -314,6 +314,14 @@ NAVIGATION_CATALOG = (
         "sort_order": 10,
     },
     {
+        "id": "navigation:script-review:writer-agent",
+        "parent_id": "navigation:script-review",
+        "label": "编剧大师",
+        "route": "/review/writer-agent",
+        "required_permission": "page.script_review",
+        "sort_order": 20,
+    },
+    {
         "id": "navigation:review",
         "label": "项目管理",
         "icon": "bi-kanban",

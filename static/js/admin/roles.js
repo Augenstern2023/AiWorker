@@ -16,6 +16,7 @@
         pagesForm: document.getElementById('role-pages-form'),
         pagesRoleId: document.getElementById('role-pages-role-id'),
         pagesRoleName: document.getElementById('role-pages-role-name'),
+        pagesSystemNotice: document.getElementById('role-pages-system-notice'),
         pages: document.getElementById('role-pages-list'),
         pagesError: document.getElementById('role-pages-error'),
         filters: document.getElementById('role-filters'),
@@ -116,7 +117,7 @@
         });
     }
 
-    function renderRolePages(grantedRoutes = []) {
+    function renderRolePages(grantedRoutes = [], readOnly = false) {
         const granted = new Set(grantedRoutes);
         elements.pages.replaceChildren(...pageCatalog.map((page) => {
             const wrapper = document.createElement('div');
@@ -128,6 +129,7 @@
             checkbox.className = 'form-check-input role-page-toggle flex-shrink-0 mt-1';
             checkbox.value = page.route;
             checkbox.checked = granted.has(page.route);
+            checkbox.disabled = readOnly;
             const copy = document.createElement('span');
             copy.className = 'role-page-option-copy d-block flex-grow-1';
             const text = document.createElement('span');
@@ -144,11 +146,16 @@
     }
 
     function openRolePages(role) {
+        const isSystemAdmin = role.code === 'system_admin';
         showError(elements.pagesError);
         elements.pagesForm.reset();
         elements.pagesRoleId.value = role.id;
         elements.pagesRoleName.textContent = `${role.name}（${role.code}）`;
-        renderRolePages(role.page_routes || []);
+        elements.pagesForm.dataset.systemAdmin = String(isSystemAdmin);
+        elements.pagesSystemNotice.hidden = !isSystemAdmin;
+        elements.pagesSystemNotice.textContent = isSystemAdmin ? '系统管理员默认拥有全部页面访问权限。' : '';
+        elements.pagesForm.querySelector('button[type="submit"]').disabled = isSystemAdmin;
+        renderRolePages(isSystemAdmin ? pageCatalog.map((page) => page.route) : (role.page_routes || []), isSystemAdmin);
         pagesEditor.show();
     }
 
@@ -329,6 +336,7 @@
     elements.pagesForm?.addEventListener('submit', async (event) => {
         event.preventDefault();
         showError(elements.pagesError);
+        if (elements.pagesForm.dataset.systemAdmin === 'true') return;
         const roleId = elements.pagesRoleId.value;
         const page_routes = Array.from(
             elements.pages.querySelectorAll('.role-page-toggle:checked'),

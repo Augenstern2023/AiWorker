@@ -684,6 +684,16 @@ window.aiworkerModules.push(() => ({
                     return this.projectEpisodeScript(this.creativeWorkspace.selectedEpisode);
                 },
 
+                projectScriptGenerationActionLabel() {
+                    const episode = Number(this.creativeWorkspace.selectedEpisode || 0);
+                    const hasPriorScript = (this.creativeWorkspace.project?.episodes || []).some(item =>
+                        item.stage === 'script' && Number(item.episode_number) === episode
+                    );
+                    return this.selectedProjectScript() || hasPriorScript
+                        ? '重新生成场次剧本'
+                        : '生成场次剧本';
+                },
+
                 scriptWorkspaceEmptyMessage() {
                     const currentBeats = this.lockedProjectEpisodeBeats(
                         this.creativeWorkspace.selectedEpisode
@@ -924,9 +934,37 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
+                isCompatibleProjectSeriesEpisode(stage, item) {
+                    const project = this.creativeWorkspace.project;
+                    const refs = item?.upstream_refs || {};
+                    const episode = Number(item?.episode_number || 0);
+                    if (!project || !episode || refs.outline_batch_id !== project.outline_batch_id) return false;
+                    if (stage === 'beats') {
+                        const outline = (project.episodes || []).find(candidate =>
+                            candidate.stage === 'outline'
+                            && candidate.batch_id === project.outline_batch_id
+                            && Number(candidate.episode_number) === episode
+                            && ['locked', 'approved'].includes(candidate.status)
+                        );
+                        return Boolean(outline
+                            && Number(refs.outline_id) === Number(outline.id)
+                            && Number(refs.outline_version) === Number(outline.version));
+                    }
+                    if (stage === 'script') {
+                        const beats = this.lockedProjectEpisodeBeats(episode);
+                        return Boolean(beats
+                            && Number(refs.beats_id) === Number(beats.id)
+                            && Number(refs.beats_version) === Number(beats.version));
+                    }
+                    return false;
+                },
+
                 hasResumableProjectSeries(stage) {
                     return (this.creativeWorkspace.project?.episodes || []).some(item =>
-                        item.stage === stage && item.status === 'draft' && item.generation_meta?.series_generation
+                        item.stage === stage
+                        && item.status === 'draft'
+                        && item.generation_meta?.series_generation
+                        && this.isCompatibleProjectSeriesEpisode(stage, item)
                     );
                 },
 
@@ -1322,7 +1360,10 @@ window.aiworkerModules.push(() => ({
                 async saveProjectRelationship(item) { await this.saveCreativeItem(`/api/creative/relationships/${item.id}`, item, '人物关系已保存', `relationship-${item.id}`); },
                 async saveProjectEpisode(item) {
                     const saved = await this.saveCreativeItem(`/api/creative/episodes/${item.id}`, item, '分集内容已保存', `episode-${item.id}`);
-                    if (saved && item.stage === 'script') await this.refreshCreativeTopicLibrary();
+                    if (saved && item.stage === 'script') {
+                        await this.selectCreativeProject(this.creativeWorkspace.project.id);
+                        await this.refreshCreativeTopicLibrary();
+                    }
                 },
                 async saveCreativeItem(url, item, successMessage, saveKey) {
                     this.creativeWorkspace.error = '';
@@ -1399,17 +1440,6 @@ window.aiworkerModules.push(() => ({
                     } catch (error) {
                         this.creativeWorkspace.error = error.message || '批量锁定 Beats 失败';
                     }
-                },
-
-                async completeProjectScript() {
-                    const item = this.selectedProjectScript();
-                    if (!item) return;
-                    try {
-                        await this.completeCreativeResource('script', item.id, this.creativeWorkspace.project.id);
-                        await this.selectCreativeProject(this.creativeWorkspace.project.id);
-                        await this.refreshCreativeTopicLibrary();
-                        this.showCreativeNotice('场次剧本已完成并锁定');
-                    } catch (error) { this.creativeWorkspace.error = error.message || '完成场次剧本失败'; }
                 },
 
                 currentGeneratedResourceId(stage) {

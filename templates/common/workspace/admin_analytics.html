@@ -1,107 +1,88 @@
 <section>
             <div class="d-flex align-items-center justify-content-between mb-3">
-                <h3 class="mb-0">分析看板</h3>
+                <h3 class="mb-0">周报看板</h3>
                 <div class="d-flex gap-2">
-                    <select class="form-select form-select-sm" style="width: 130px;" x-model="analyticsPlatform" @change="reloadAnalyticsDashboard">
+                    <select class="form-select form-select-sm" style="width: 130px;" x-model="analyticsPlatform" @change="refreshAnalyticsDashboard">
                         <option value="">全部平台</option>
                         <option value="dy">抖音</option>
                         <option value="hg">红果</option>
                     </select>
-                    <input class="form-control form-control-sm" style="width: 145px;" type="date" x-model="analyticsDate" @change="reloadAnalyticsDashboard">
-                    <button class="btn btn-outline-light btn-sm" @click="analyticsDate = ''; reloadAnalyticsDashboard()">全部日期</button>
-                    <button class="btn btn-outline-secondary btn-sm" @click="refreshAnalyticsDashboard(true)" :disabled="analyticsLoading">
+                    <button class="btn btn-outline-secondary btn-sm" @click="refreshAnalyticsDashboard" :disabled="weeklyReportLoading">
                         <i class="bi bi-arrow-clockwise me-1"></i>刷新
-                    </button>
-                    <button class="btn btn-primary btn-sm" @click="syncAllAnalytics" :disabled="analyticsLoading">
-                        <i class="bi bi-database-add me-1"></i>同步全部
                     </button>
                 </div>
             </div>
             <div class="alert alert-danger" x-show="analyticsError" x-text="analyticsError"></div>
-            <div class="alert alert-secondary" x-show="analyticsSyncResult">
-                <span>最近同步：</span><strong x-text="analyticsSyncResult?.job_id || '-'"></strong>
-                <span class="ms-3">剧目：</span><span x-text="analyticsSyncResult?.drama_count || 0"></span>
-                <span class="ms-3">文件：</span><span x-text="analyticsSyncResult?.artifact_count || 0"></span>
-            </div>
-
-            <div class="row g-3 mb-3">
-                <div class="col-md-3">
-                    <div class="card metric-card"><div class="card-body"><div class="text-muted">剧目数</div><div class="metric-value" x-text="analyticsOverview.drama_count || 0"></div></div></div>
-                </div>
-                <div class="col-md-3">
-                    <div class="card metric-card"><div class="card-body"><div class="text-muted">评论数</div><div class="metric-value" x-text="analyticsOverview.comment_count || 0"></div></div></div>
-                </div>
-                <div class="col-md-3">
-                    <div class="card metric-card"><div class="card-body"><div class="text-muted">转写数</div><div class="metric-value" x-text="analyticsOverview.transcript_count || 0"></div></div></div>
-                </div>
-                <div class="col-md-3">
-                    <div class="card metric-card"><div class="card-body"><div class="text-muted">任务数</div><div class="metric-value" x-text="analyticsOverview.task_count || 0"></div></div></div>
-                </div>
-            </div>
 
             <div class="row g-3 mb-3">
                 <div class="col-xl-6">
-                    <div class="card"><div class="card-header">题材分布</div><div class="card-body"><div id="categoryChart" class="chart-box"></div></div></div>
+                    <div class="card"><div class="card-header">题材标签分布</div><div class="card-body"><div id="categoryChart" class="chart-box"></div></div></div>
                 </div>
                 <div class="col-xl-6">
-                    <div class="card"><div class="card-header">热度趋势</div><div class="card-body"><div id="trendChart" class="chart-box"></div></div></div>
-                </div>
-                <div class="col-xl-6">
-                    <div class="card"><div class="card-header">评论情绪</div><div class="card-body"><div id="sentimentChart" class="chart-box"></div></div></div>
-                </div>
-                <div class="col-xl-6">
-                    <div class="card">
-                        <div class="card-header">高频卖点</div>
-                        <div class="card-body">
-                            <div class="selling-point-list">
-                                <template x-for="item in (analyticsTags.selling_points || []).slice(0, 20)" :key="item.tag">
-                                    <div class="selling-point-item">
-                                        <div class="selling-point-text" x-text="item.tag"></div>
-                                        <span class="badge bg-primary align-self-start" x-text="item.count"></span>
-                                    </div>
-                                </template>
-                                <div class="text-muted text-center py-4" x-show="!(analyticsTags.selling_points || []).length">暂无卖点数据</div>
-                            </div>
-                        </div>
-                    </div>
+                    <div class="card"><div class="card-header d-flex justify-content-between gap-2"><span>推荐剧目指标趋势</span><small class="text-muted text-end" x-text="weeklyReport?.recommendation_metrics?.source_label || '来源：推荐剧目周报数据'"></small></div><div class="card-body"><div id="trendChart" class="chart-box"></div></div></div>
                 </div>
             </div>
 
             <div class="card">
-                <div class="card-header">剧目指标</div>
-                <div class="table-responsive scroll-pane">
-                    <table class="table table-sm table-hover align-middle mb-0">
-                        <thead>
-                            <tr>
-                                <th>剧名</th>
-                                <th style="width: 80px;">平台</th>
-                                <th style="width: 110px;">时间</th>
-                                <th style="width: 90px;">题材</th>
-                                <th style="width: 80px;">排名</th>
-                                <th style="width: 110px;">点赞</th>
-                                <th style="width: 110px;">评论</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <template x-for="item in analyticsDramas" :key="`${item.platform}-${item.job_id}-${item.source_path}-${item.record_id}-${item.title}`">
-                                <tr>
-                                    <td>
-                                        <div class="fw-semibold" x-text="item.title"></div>
-                                        <small class="text-muted" x-text="(item.selling_points || []).slice(0, 2).join(' / ')"></small>
-                                    </td>
-                                    <td x-text="item.platform"></td>
-                                    <td x-text="item.captured_at || '-'"></td>
-                                    <td x-text="item.category || '-'"></td>
-                                    <td x-text="item.rank || '-'"></td>
-                                    <td x-text="item.like_count || 0"></td>
-                                    <td x-text="item.comment_count || 0"></td>
-                                </tr>
+                <div class="card-header d-flex align-items-center justify-content-between">
+                    <span>周报预览</span>
+                    <div class="d-flex align-items-center gap-2">
+                        <select class="form-select form-select-sm" style="width: 230px;" :value="weeklyReport?.report_id || ''" @change="selectWeeklyReport($event.target.value)">
+                            <template x-for="item in weeklyReports" :key="item.report_id">
+                                <option :value="item.report_id" x-text="`${item.platform === 'dy' ? '抖音' : '红果'} · ${item.period?.start || '-'} 至 ${item.period?.end || '-'}`"></option>
                             </template>
-                            <tr x-show="analyticsDramas.length === 0">
-                                <td colspan="7" class="text-center text-muted py-4">暂无剧目指标</td>
-                            </tr>
-                        </tbody>
-                    </table>
+                        </select>
+                        <button class="btn btn-outline-secondary btn-sm btn-icon" @click="fetchWeeklyReports" :disabled="weeklyReportLoading" title="刷新周度报告" aria-label="刷新周度报告"><i class="bi bi-arrow-clockwise"></i></button>
+                        <button class="btn btn-outline-secondary btn-sm btn-icon" @click="weeklyReportExport('markdown')" :disabled="!weeklyReport" title="导出 Markdown" aria-label="导出 Markdown"><i class="bi bi-file-earmark-text"></i></button>
+                        <button class="btn btn-outline-success btn-sm btn-icon" @click="weeklyReportExport('excel')" :disabled="!weeklyReport" title="导出 Excel" aria-label="导出 Excel"><i class="bi bi-file-earmark-spreadsheet"></i></button>
+                    </div>
                 </div>
+                <div class="card-body" x-show="weeklyReport">
+                    <div class="d-flex flex-wrap gap-3 small text-secondary mb-3">
+                        <span>周期：<strong class="text-light" x-text="`${weeklyReport?.period?.start || '-'} 至 ${weeklyReport?.period?.end || '-'}`"></strong></span>
+                        <span>有效快照：<strong class="text-light" x-text="`${weeklyReport?.data_quality?.snapshot_days || 0}/${weeklyReport?.data_quality?.expected_weekdays || 5}`"></strong></span>
+                        <span>最新数据：<strong class="text-light" x-text="weeklyReport?.data_quality?.latest_snapshot_at || '-'"></strong></span>
+                        <span class="text-warning" x-show="weeklyReport?.data_quality?.is_stale">数据延迟</span>
+                    </div>
+                    <p class="mb-3" x-text="weeklyReport?.llm?.content?.management_summary || weeklyReport?.summary?.management_summary || ''"></p>
+                    <section class="border-top pt-3 mb-3">
+                        <h6 class="mb-2">综合趋势观察</h6>
+                        <p class="mb-0 text-light text-wrap" style="white-space: pre-line; line-height: 1.7;" x-text="weeklyReport?.llm?.content?.trend_analysis || weeklyReport?.summary?.trend_analysis || ''"></p>
+                    </section>
+                    <div class="table-responsive scroll-pane">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead><tr><th>热剧推荐</th><th>榜单</th><th>排名</th><th>推荐分</th><th>状态</th><th>标签</th><th style="min-width: 270px;">推荐说明</th></tr></thead>
+                            <tbody>
+                                <template x-for="item in (weeklyReport?.recommendations || [])" :key="`${item.board}-${item.title}`">
+                                    <tr><td class="fw-semibold" x-text="item.title"></td><td x-text="item.board"></td><td x-text="item.current_rank"></td><td x-text="item.score"></td><td x-text="item.recommendation"></td><td x-text="(item.tags || []).join(' / ') || '-'"></td><td class="text-secondary text-wrap" x-text="item.reason"></td></tr>
+                                </template>
+                                <tr x-show="!(weeklyReport?.recommendations || []).length"><td colspan="7" class="text-center text-muted py-3">暂无可推荐剧目</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="row g-3 mt-1 border-top pt-3">
+                        <div class="col-lg-6">
+                            <h6 class="mb-2">标签升温</h6>
+                            <div class="d-flex flex-wrap gap-2">
+                                <template x-for="item in (weeklyReport?.tags?.theme_tags || []).filter(item => item.net_change >= 0).slice(0, 8)" :key="item.tag">
+                                    <span class="badge text-bg-light border" x-text="`${item.tag} ${item.net_change > 0 ? '+' : ''}${item.net_change}`"></span>
+                                </template>
+                                <span class="text-muted small" x-show="!(weeklyReport?.tags?.theme_tags || []).length">暂无标签数据</span>
+                            </div>
+                        </div>
+                        <div class="col-lg-6">
+                            <h6 class="mb-2">榜单变动</h6>
+                            <div class="d-flex flex-wrap gap-3 small">
+                                <span>新上榜 <strong x-text="weeklyReport?.movements?.summary?.new_entries || 0"></strong></span>
+                                <span>下榜 <strong x-text="weeklyReport?.movements?.summary?.dropped_entries || 0"></strong></span>
+                                <span>上升 <strong x-text="weeklyReport?.movements?.summary?.rank_up || 0"></strong></span>
+                                <span>下降 <strong x-text="weeklyReport?.movements?.summary?.rank_down || 0"></strong></span>
+                                <span>热度指标 <strong x-text="weeklyReport?.heat_analysis?.metric_label || '-'"></strong></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-body text-muted" x-show="!weeklyReport && !weeklyReportLoading">暂无完整周度数据，自动任务会在下个完整数据周生成报告。</div>
+                <div class="card-body text-danger small" x-show="weeklyReportError" x-text="weeklyReportError"></div>
             </div>
         </section>

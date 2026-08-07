@@ -26,10 +26,41 @@ RANK_PATTERNS = {
     "hg": "data/hg/jobs/*/rank/hongguo*.json",
 }
 DEFAULT_HONGGUO_EXPORTS_ROOT = Path(os.environ.get("HONGGUO_EXPORTS_DIR", r"E:\hg\exports"))
+DEFAULT_HONGGUO_RAW_ROOT = Path(os.environ.get("HONGGUO_RAW_DIR", r"E:\hg\raw"))
 HONGGUO_SECTION_ORDER = ["全部", "真人剧", "漫剧", "AI剧"]
 HONGGUO_RANKING_ORDER = ["热播榜", "推荐榜", "必看榜", "热搜榜", "收藏榜", "新剧榜", "预约榜", "高分臻果榜"]
 DOUYIN_RANKING_ORDER = ["榜单", "热榜"]
 logger = logging.getLogger("aiworker.web.today_rank")
+HONGGUO_CSV_SECTION_BY_SELECTED = {
+    "all": "红果",
+    "human": "真人剧",
+    "comic_series_rank": "漫剧",
+    "ai_playlet": "AI剧",
+}
+HONGGUO_CSV_RANKING_BY_SUB = {
+    "ranklist_hot_sc": "推荐榜",
+    "ranklist_hot_play_sc": "热播榜",
+    "ranklist_prestige": "高分臻果榜",
+    "ranklist_subscribe": "预约榜",
+    "ranklist_new_rank_sc": "新剧榜",
+    "ranklist_hot_search_sc": "热搜榜",
+    "ranklist_must_watch": "必看榜",
+    "ranklist_followed": "收藏榜",
+    "human_hot_play": "热播榜",
+    "human_new_rank": "新剧榜",
+    "human_hot_search": "热搜榜",
+    "human_must_watch": "必看榜",
+    "human_followed": "收藏榜",
+    "comic_series_hot_play": "热播榜",
+    "comic_series_new_rank": "新剧榜",
+    "comic_series_hot_search": "热搜榜",
+    "comic_series_hot_rank": "热门榜",
+    "ai_playlet_hot_play": "热播榜",
+    "ai_playlet_new_rank": "新剧榜",
+    "ai_playlet_hot_search": "热搜榜",
+    "ai_playlet_must_watch": "必看榜",
+    "ai_playlet_followed": "收藏榜",
+}
 
 RANK_COMMON_COLUMNS = (
     {"key": "rank", "label": "排名", "kind": "rank", "width": 55},
@@ -58,6 +89,12 @@ RANK_CHANGE_COLUMNS = (
     {"key": "previous_rank", "label": "上期排名", "kind": "metric", "width": 90},
     {"key": "rank_delta", "label": "排名变化", "kind": "rank_delta", "width": 105},
 )
+
+
+def _hongguo_raw_root_for_exports(exports_root: Path) -> Path:
+    if exports_root == DEFAULT_HONGGUO_EXPORTS_ROOT:
+        return DEFAULT_HONGGUO_RAW_ROOT
+    return exports_root.parent / "raw"
 
 
 @dataclass(frozen=True)
@@ -89,6 +126,7 @@ class TodayRankService:
             self.hongguo_exports_root = DEFAULT_HONGGUO_EXPORTS_ROOT
         else:
             self.hongguo_exports_root = self.root / "exports"
+        self.hongguo_raw_root = _hongguo_raw_root_for_exports(self.hongguo_exports_root)
 
     def get_today_rank(self, platform: str, date: str = "", limit: int = 10) -> dict[str, Any]:
         platform = platform.strip().lower()
@@ -166,7 +204,10 @@ class TodayRankService:
             snapshot = self._load_hongguo_csv_snapshot(path)
             if snapshot:
                 snapshots.append(snapshot)
-        return sorted(snapshots, key=lambda item: (item.captured_at, str(item.source_path)))
+        return _enrich_hongguo_csv_snapshots(
+            sorted(snapshots, key=lambda item: (item.captured_at, str(item.source_path))),
+            self.hongguo_raw_root,
+        )
 
     def _load_hongguo_csv_snapshot(self, path: Path) -> RankSnapshot | None:
         try:
@@ -183,6 +224,7 @@ class TodayRankService:
             for index, row in enumerate(rows)
             if (record := _normalize_hongguo_csv_record(row, path, self.root, job_id, captured_at, index)) is not None
         ]
+        _assign_missing_hongguo_csv_ranks(normalized)
         _suppress_hongguo_csv_unavailable_metrics(normalized)
         validation = _validate_records(normalized)
         snapshot = RankSnapshot(
@@ -227,6 +269,7 @@ class TodayRankService:
                 )
                 is not None
             ]
+            _assign_missing_hongguo_csv_ranks(normalized)
         else:
             normalized = [
                 record
@@ -698,14 +741,19 @@ def _normalize_hongguo_csv_record(
     captured_at: datetime,
     index: int,
 ) -> dict[str, Any] | None:
-    rank = int(_parse_number(_first_text(record.get("排名"), record.get("rank")))) or index + 1
+    rank = int(_parse_number(_first_text(record.get("排名"), record.get("rank"))) or 0)
     title = _first_text(record.get("剧名"), record.get("title"), record.get("play_name"))
+    series_id = _first_text(record.get("series_id"), record.get("短剧ID"), record.get("book_id"), record.get("id"))
     ranking_type = _first_text(record.get("榜单类型"), record.get("ranking_type"), record.get("rank_type"))
+    if not ranking_type:
+        ranking_type = _hongguo_csv_ranking_type_from_flow(record)
+    if not title:
+        title = series_id
     if not title or not ranking_type:
         return None
 
     board_section, board_type, normalized_ranking_type = _parse_hongguo_csv_ranking_type(ranking_type)
-    identity = f"{board_section}|{board_type}|{title}"
+    identity = f"{board_section}|{board_type}|{series_id or title}"
     tags_text = _first_text(record.get("标签"), record.get("tags"), record.get("category"))
     heat = _parse_csv_optional_number(_first_text(record.get("热度"), record.get("heat")))
     like_count = _parse_csv_optional_number(_first_text(record.get("点赞"), record.get("like_count")))
@@ -720,6 +768,7 @@ def _normalize_hongguo_csv_record(
     return {
         "id": identity,
         "record_id": identity,
+        "series_id": series_id,
         "platform": "hg",
         "job_id": job_id,
         "source_path": _relative_path(path, root),
@@ -771,6 +820,248 @@ def _parse_hongguo_csv_ranking_type(value: Any) -> tuple[str, str, str]:
     board_type = board_type or normalized or "未分类"
     rank_list = f"{section}{board_type}" if section != "全部" else f"全部{board_type}"
     return section, board_type, rank_list
+
+
+def _hongguo_csv_ranking_type_from_flow(record: dict[str, Any]) -> str:
+    selected = _clean_text(record.get("selected_items"))
+    sub_selected = _clean_text(record.get("sub_selected_items"))
+    section_prefix = HONGGUO_CSV_SECTION_BY_SELECTED.get(selected, "")
+    board_type = HONGGUO_CSV_RANKING_BY_SUB.get(sub_selected)
+    if not board_type and selected in {"human", "comic_series_rank", "ai_playlet"}:
+        board_type = "推荐榜"
+    if not board_type:
+        return ""
+    if section_prefix == "红果":
+        return board_type if board_type == "高分臻果榜" else f"红果{board_type}"
+    return f"{section_prefix}{board_type}"
+
+
+def _assign_missing_hongguo_csv_ranks(records: list[dict[str, Any]]) -> None:
+    counters: dict[str, int] = {}
+    for record in records:
+        group = _clean_text(record.get("rank_list") or record.get("group"))
+        if not group:
+            continue
+        counters[group] = counters.get(group, 0) + 1
+        if not int(record.get("rank") or 0):
+            record["rank"] = counters[group]
+
+
+def _enrich_hongguo_csv_snapshots(snapshots: list[RankSnapshot], raw_root: Path | None = None) -> list[RankSnapshot]:
+    metadata_by_series: dict[str, dict[str, Any]] = {}
+    for snapshot in snapshots:
+        for record in snapshot.records:
+            series_id = _clean_text(record.get("series_id"))
+            title = _clean_text(record.get("title"))
+            if series_id and title and title != series_id:
+                metadata_by_series.setdefault(series_id, record)
+
+    if raw_root:
+        for series_id, metadata in _hongguo_raw_metadata_by_series(snapshots, raw_root, metadata_by_series).items():
+            existing = metadata_by_series.get(series_id)
+            if existing:
+                metadata_by_series[series_id] = _merge_hongguo_metadata(existing, metadata)
+            else:
+                metadata_by_series[series_id] = metadata
+
+    if not metadata_by_series:
+        return snapshots
+
+    enriched: list[RankSnapshot] = []
+    for snapshot in snapshots:
+        records: list[dict[str, Any]] = []
+        changed = False
+        for record in snapshot.records:
+            series_id = _clean_text(record.get("series_id"))
+            metadata = metadata_by_series.get(series_id)
+            if not metadata:
+                records.append(record)
+                continue
+            item = dict(record)
+            for key in ("title", "subject", "topic_tags", "selling_points", "description", "hot_comment", "cover_url"):
+                if _has_display_value(item.get(key)):
+                    continue
+                value = metadata.get(key)
+                if _has_display_value(value):
+                    item[key] = value
+                    changed = True
+            if item.get("title") == series_id and _clean_text(metadata.get("title")):
+                item["title"] = metadata["title"]
+                changed = True
+            records.append(item)
+        if changed:
+            enriched.append(
+                RankSnapshot(
+                    platform=snapshot.platform,
+                    job_id=snapshot.job_id,
+                    source_path=snapshot.source_path,
+                    captured_at=snapshot.captured_at,
+                    records=records,
+                    validation=_validate_records(records),
+                )
+            )
+        else:
+            enriched.append(snapshot)
+    return enriched
+
+
+def _hongguo_raw_metadata_by_series(
+    snapshots: list[RankSnapshot],
+    raw_root: Path,
+    existing_metadata: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    if not raw_root.exists():
+        return {}
+
+    ids_by_date: dict[str, set[str]] = {}
+    for snapshot in snapshots:
+        date_key = snapshot.captured_at.strftime("%Y%m%d")
+        for record in snapshot.records:
+            series_id = _clean_text(record.get("series_id"))
+            if not series_id or not _needs_hongguo_csv_metadata(record, existing_metadata.get(series_id)):
+                continue
+            ids_by_date.setdefault(date_key, set()).add(series_id)
+
+    metadata: dict[str, dict[str, Any]] = {}
+    for date_key, series_ids in ids_by_date.items():
+        folder = raw_root / f"mitm_responses_{date_key}"
+        metadata.update(_load_hongguo_raw_metadata_folder(folder, series_ids))
+    return metadata
+
+
+def _needs_hongguo_csv_metadata(record: dict[str, Any], known_metadata: dict[str, Any] | None = None) -> bool:
+    series_id = _clean_text(record.get("series_id"))
+    if not series_id:
+        return False
+    if _clean_text(record.get("title")) == series_id and not _has_display_value((known_metadata or {}).get("title")):
+        return True
+    for key in ("subject", "topic_tags", "selling_points", "description", "hot_comment", "cover_url"):
+        if _has_display_value(record.get(key)):
+            continue
+        if not _has_display_value((known_metadata or {}).get(key)):
+            return True
+    return False
+
+
+def _load_hongguo_raw_metadata_folder(folder: Path, series_ids: set[str]) -> dict[str, dict[str, Any]]:
+    if not folder.exists() or not series_ids:
+        return {}
+
+    metadata: dict[str, dict[str, Any]] = {}
+    remaining = set(series_ids)
+    for path in sorted(folder.glob("*.json")):
+        try:
+            text = path.read_text(encoding="utf-8-sig", errors="ignore")
+        except OSError as exc:
+            logger.warning("红果原始响应读取失败：source=%s error=%s", path, exc)
+            continue
+        if not any(series_id in text for series_id in remaining):
+            continue
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            logger.warning("红果原始响应解析失败：source=%s error=%s", path, exc)
+            continue
+        for item in _walk_json_objects(payload):
+            record = _hongguo_raw_item_metadata(item)
+            series_id = _clean_text(record.get("series_id")) if record else ""
+            if not series_id or series_id not in remaining:
+                continue
+            existing = metadata.get(series_id)
+            metadata[series_id] = _merge_hongguo_metadata(existing, record) if existing else record
+    return metadata
+
+
+def _walk_json_objects(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_json_objects(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_json_objects(child)
+
+
+def _hongguo_raw_item_metadata(item: dict[str, Any]) -> dict[str, Any] | None:
+    series_id = _first_text(item.get("series_id"), item.get("recommend_group_id"), item.get("book_id"), item.get("id"))
+    title = _first_text(item.get("title"), item.get("play_name"), item.get("book_name"), item.get("name"))
+    if not series_id or not title:
+        return None
+
+    tags = _hongguo_raw_tags(item)
+    description = _first_text(item.get("video_desc"), item.get("desc"), item.get("description"), item.get("abstract"))
+    return {
+        "__quality": _hongguo_raw_metadata_quality(item, title, description, tags),
+        "series_id": series_id,
+        "title": title,
+        "subject": " / ".join(tags),
+        "topic_tags": tags,
+        "selling_points": [description] if description else [],
+        "description": description,
+        "cover_url": _first_text(item.get("cover"), item.get("cover_url"), item.get("horiz_cover")),
+    }
+
+
+def _hongguo_raw_metadata_quality(item: dict[str, Any], title: str, description: str, tags: list[str]) -> int:
+    score = 0
+    if _has_display_value(description):
+        score += 4
+    if tags:
+        score += 3
+    if any(_has_display_value(item.get(key)) for key in ("rec_text_item", "play_cnt", "score", "sub_title")):
+        score += 2
+    if len(title) <= 60:
+        score += 2
+    elif not description and len(title) > 80:
+        score -= 4
+    return score
+
+
+def _hongguo_raw_tags(item: dict[str, Any]) -> list[str]:
+    tags: list[str] = []
+    for entry in item.get("sub_title_list") if isinstance(item.get("sub_title_list"), list) else []:
+        if isinstance(entry, dict):
+            text = _clean_text(entry.get("content") or entry.get("name"))
+        else:
+            text = _clean_text(entry)
+        if text and text not in tags:
+            tags.append(text)
+
+    sub_title = _clean_text(item.get("sub_title"))
+    if sub_title:
+        for part in _split_hongguo_tags(sub_title):
+            if part and not re.search(r"全\d+集", part) and part not in tags:
+                tags.append(part)
+
+    category_schema = item.get("category_schema")
+    if isinstance(category_schema, str) and category_schema.strip().startswith("["):
+        try:
+            category_schema = json.loads(category_schema)
+        except json.JSONDecodeError:
+            category_schema = []
+    if isinstance(category_schema, list):
+        for entry in category_schema:
+            if not isinstance(entry, dict):
+                continue
+            text = _clean_text(entry.get("name"))
+            if text and text not in tags:
+                tags.append(text)
+    return tags
+
+
+def _merge_hongguo_metadata(base: dict[str, Any] | None, update: dict[str, Any]) -> dict[str, Any]:
+    result = dict(base or {})
+    base_quality = int(result.get("__quality") or 0)
+    update_quality = int(update.get("__quality") or 0)
+    for key, value in update.items():
+        if key == "title" and "__quality" in result and update_quality > base_quality and _has_display_value(value):
+            result[key] = value
+            continue
+        if _has_display_value(result.get(key)):
+            continue
+        if _has_display_value(value):
+            result[key] = value
+    return result
 
 
 def _suppress_hongguo_csv_unavailable_metrics(records: list[dict[str, Any]]) -> None:

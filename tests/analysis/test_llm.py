@@ -48,6 +48,15 @@ def test_parse_json_object_uses_last_valid_object_after_think_block():
     assert parse_json_object(text) == {"summary": "摘要"}
 
 
+def test_parse_json_object_repairs_unescaped_dialogue_quotes_from_a_model_response():
+    text = '{"episode_title":"测试","line":"她说："现在走""}'
+
+    assert parse_json_object(text) == {
+        "episode_title": "测试",
+        "line": '她说："现在走"',
+    }
+
+
 def test_parse_chat_completion_json_extracts_message_content():
     payload = {
         "choices": [
@@ -299,11 +308,15 @@ def test_provider_uses_configured_request_timeout_for_long_generation():
         LLM_WIRE_API = "chat_completions"
         LLM_REASONING_EFFORT = "max"
         LLM_TIMEOUT_SECONDS = 600
+        LLM_MAX_RETRIES = 4
+        LLM_RETRY_BASE_DELAY = 2
         LLM_SECONDARY_PROVIDER = ""
 
     provider = create_llm_provider_from_config(DummyConfig)
 
     assert provider.timeout == 600
+    assert provider.max_retries == 4
+    assert provider.retry_base_delay == 2
 
 
 def test_chat_completions_reports_the_configured_timeout_after_retries():
@@ -329,12 +342,9 @@ def test_chat_completions_reports_the_configured_timeout_after_retries():
     assert retries == [(1, 1, "模型响应超时（600 秒）")]
 
 
-def test_rag_llm_uses_the_configured_global_text_model():
+def test_rag_llm_inherits_the_global_text_model_settings():
+    primary_settings = resolve_llm_settings(config)
     settings = resolve_llm_settings(config, prefix="RAG_LLM")
 
-    assert settings["provider"] == "openai-compatible"
-    assert settings["base_url"] == "https://yunwu.ai/v1"
-    assert settings["model"] == "deepseek-v4-flash-0731"
-    assert settings["fallback_model"] == ""
-    assert settings["reasoning_effort"] == "max"
-    assert settings["timeout_seconds"] == 600
+    for field in ("provider", "base_url", "model", "fallback_model", "wire_api", "reasoning_effort", "timeout_seconds"):
+        assert settings[field] == primary_settings[field]

@@ -613,6 +613,96 @@ def test_today_rank_hongguo_csv_ignores_board_level_unavailable_favorite(tmp_pat
     assert hot["validation"]["missing_favorite_count"] == 1
 
 
+def test_today_rank_reads_sparse_hongguo_history_csv_with_flow_metadata(tmp_path):
+    exports = tmp_path / "exports"
+    sparse_header = (
+        "榜单类型,排名,series_id,剧名,标签,简介,评分,分享,点赞,收藏,热度,推荐指数,"
+        "评分人数,期待指数,热搜指数,最高热度,热评,source_flow,selected_items,sub_selected_items,offset"
+    )
+    write_text(
+        exports / "20260805_top10" / "top10_rankings.csv",
+        "\n".join(
+            [
+                sparse_header,
+                ",,series-a,,,,无,无,1w,无,100w,99w,无,无,无,无,,797,all,ranklist_hot_sc,",
+                ",,series-b,,,,无,无,2w,无,200w,88w,无,无,无,无,,808,all,ranklist_hot_play_sc,",
+                ",,series-c,,,,无,无,3w,无,300w,77w,无,无,无,无,,843,human,human_hot_play,",
+            ]
+        ),
+    )
+    write_text(
+        exports / "20260806_top10" / "top10_rankings.csv",
+        "\n".join(
+            [
+                sparse_header,
+                "红果推荐榜,1,series-a,推荐历史剧,都市,简介,无,无,1w,无,100w,99w,无,无,无,无,,797,all,ranklist_hot_sc,",
+                "红果热播榜,1,series-b,热播历史剧,逆袭,简介,无,无,2w,无,200w,88w,无,无,无,无,,808,all,ranklist_hot_play_sc,",
+                "真人剧热播榜,1,series-c,真人历史剧,甜宠,简介,无,无,3w,无,300w,77w,无,无,无,无,,843,human,human_hot_play,",
+            ]
+        ),
+    )
+
+    data = TodayRankService(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", date="2026-08-05", limit=10)
+
+    assert data["summary"]["current_count"] == 3
+    sections = {section["label"]: section for section in data["sections"]}
+    recommend = next(item for item in sections["全部"]["rankings"] if item["label"] == "推荐榜")
+    hot = next(item for item in sections["全部"]["rankings"] if item["label"] == "热播榜")
+    real_hot = next(item for item in sections["真人剧"]["rankings"] if item["label"] == "热播榜")
+    assert recommend["current_entries"][0]["rank"] == 1
+    assert recommend["current_entries"][0]["title"] == "推荐历史剧"
+    assert hot["current_entries"][0]["title"] == "热播历史剧"
+    assert real_hot["current_entries"][0]["title"] == "真人历史剧"
+
+
+def test_today_rank_enriches_sparse_hongguo_history_csv_from_raw_mitm_response(tmp_path):
+    exports = tmp_path / "exports"
+    sparse_header = (
+        "榜单类型,排名,series_id,剧名,标签,简介,评分,分享,点赞,收藏,热度,推荐指数,"
+        "评分人数,期待指数,热搜指数,最高热度,热评,source_flow,selected_items,sub_selected_items,offset"
+    )
+    write_text(
+        exports / "20260731_top10" / "top10_rankings.csv",
+        "\n".join(
+            [
+                sparse_header,
+                ",,series-raw,,,,无,无,12w,无,500w,900w,无,无,无,无,,610,all,ranklist_hot_play_sc,",
+            ]
+        ),
+    )
+    write_json(
+        tmp_path / "raw" / "mitm_responses_20260731" / "response.json",
+        {
+            "data": {
+                "cell_view": {
+                    "cell_data": [
+                        {
+                            "video_data": [
+                                {
+                                    "series_id": "series-raw",
+                                    "title": "原始响应剧名",
+                                    "video_desc": "来自 MITM 原始响应的简介",
+                                    "sub_title_list": [{"content": "漫剧"}, {"content": "玄幻"}],
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        },
+    )
+
+    data = TodayRankService(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", date="2026-07-31", limit=10)
+
+    sections = {section["label"]: section for section in data["sections"]}
+    hot = next(item for item in sections["全部"]["rankings"] if item["label"] == "热播榜")
+    entry = hot["current_entries"][0]
+    assert entry["title"] == "原始响应剧名"
+    assert entry["description"] == "来自 MITM 原始响应的简介"
+    assert entry["topic_tags"] == ["漫剧", "玄幻"]
+    assert entry["subject"] == "漫剧 / 玄幻"
+
+
 def test_today_rank_date_filter_and_missing_previous(tmp_path):
     write_json(
         tmp_path / "data/dy/jobs/only/rank/douyin_series_rank_20260702_100000.json",
@@ -749,6 +839,11 @@ def write_csv(path, rows):
     for row in rows:
         lines.append(",".join(row))
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_text(path, content):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
 
 
 def dy_record(rank, title, series_id, heat_text="100", like_count="10"):

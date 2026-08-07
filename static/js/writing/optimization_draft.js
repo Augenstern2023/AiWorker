@@ -87,7 +87,7 @@
     function blockLabel(block) {
         return {
             action: '动作', dialogue: '台词', voiceover: '画外音',
-            inner_voice: '内心独白', subtitle: '字幕', cut: '切镜',
+            inner_voice: '内心独白', cut: '切镜',
         }[block.type] || '内容';
     }
 
@@ -432,7 +432,7 @@
                 typeWrap.className = 'col-md-2';
                 const typeSelect = document.createElement('select');
                 typeSelect.className = 'form-select form-select-sm';
-                [['action', '动作'], ['dialogue', '台词'], ['voiceover', '画外音'], ['inner_voice', '内心独白'], ['subtitle', '字幕'], ['cut', '切镜']].forEach(([value, label]) => {
+                [['action', '动作'], ['dialogue', '台词'], ['voiceover', '画外音'], ['inner_voice', '内心独白'], ['cut', '切镜']].forEach(([value, label]) => {
                     const option = document.createElement('option');
                     option.value = value;
                     option.textContent = label;

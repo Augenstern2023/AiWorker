@@ -266,6 +266,14 @@ NAVIGATION_CATALOG = (
         "sort_order": 50,
     },
     {
+        "id": "navigation:selection:analytics",
+        "parent_id": "navigation:selection",
+        "label": "数据分析",
+        "route": "/admin/analytics",
+        "required_permission": "analytics.read",
+        "sort_order": 60,
+    },
+    {
         "id": "navigation:planning",
         "label": "创意策划",
         "icon": "bi-lightbulb",

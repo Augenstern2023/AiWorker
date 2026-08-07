@@ -313,6 +313,7 @@ def test_global_disable_precedes_whitelist_and_project_owner_navigation_privileg
     ("page_route", "method", "api_path"),
     (
         ("/selection/dashboard", "GET", "/api/creative/topics"),
+        ("/selection/dashboard", "GET", "/api/analytics/overview"),
         ("/selection/ranks", "POST", "/api/jobs"),
         ("/selection/ranks", "GET", "/api/jobs/rank-refresh-1"),
         ("/selection/hits", "GET", "/api/creative/topics/topic-1"),
@@ -407,7 +408,7 @@ def test_page_grant_includes_the_apis_used_by_that_page(
     assert service.can_call_page_api(_principal(), method, api_path) is True
 
 
-def test_page_grants_do_not_expose_unrelated_analytics_or_qrcode_operations() -> None:
+def test_page_grants_do_not_expose_analytics_without_the_analytics_page_grant() -> None:
     repository = FakeNavigationRepository()
     repository.access_by_route.update(
         {
@@ -424,10 +425,7 @@ def test_page_grants_do_not_expose_unrelated_analytics_or_qrcode_operations() ->
         service.can_call_page_api(principal, "POST", "/api/analytics/sync-all")
         is None
     )
-    assert (
-        service.can_call_page_api(principal, "GET", "/api/analytics/dramas")
-        is None
-    )
+    assert service.can_call_page_api(principal, "GET", "/api/analytics/dramas") is None
     assert service.can_call_page_api(principal, "GET", "/api/qrcode/status") is False
     assert (
         service.can_call_page_api(

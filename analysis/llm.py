@@ -24,6 +24,7 @@ import re
 from typing import Any, Callable, Dict, List
 
 import httpx
+from json_repair import repair_json
 
 
 class LLMError(RuntimeError):
@@ -249,6 +250,14 @@ def resolve_llm_settings(config_module: Any, prefix: str = "LLM") -> Dict[str, s
             getattr(config_module, f"{prefix}_TIMEOUT_SECONDS", "")
             or getattr(config_module, "LLM_TIMEOUT_SECONDS", "")
         ),
+        "max_retries": _max_retries(
+            getattr(config_module, f"{prefix}_MAX_RETRIES", "")
+            or getattr(config_module, "LLM_MAX_RETRIES", "")
+        ),
+        "retry_base_delay": _retry_base_delay(
+            getattr(config_module, f"{prefix}_RETRY_BASE_DELAY", "")
+            or getattr(config_module, "LLM_RETRY_BASE_DELAY", "")
+        ),
     }
 
 
@@ -277,12 +286,28 @@ def resolve_secondary_llm_settings(config_module: Any, prefix: str = "LLM") -> D
         "wire_api": setting("WIRE_API") or defaults["wire_api"],
         "reasoning_effort": setting("REASONING_EFFORT") or defaults["reasoning_effort"],
         "timeout_seconds": _timeout_seconds(setting("TIMEOUT_SECONDS")),
+        "max_retries": _max_retries(setting("MAX_RETRIES")),
+        "retry_base_delay": _retry_base_delay(setting("RETRY_BASE_DELAY")),
     }
 
 
 def _timeout_seconds(value: Any, default: int = 180) -> int:
     try:
         return max(1, int(value or default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _max_retries(value: Any, default: int = 2) -> int:
+    try:
+        return max(0, min(5, int(value or default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _retry_base_delay(value: Any, default: float = 1.0) -> float:
+    try:
+        return max(0.0, min(30.0, float(value or default)))
     except (TypeError, ValueError):
         return default
 
@@ -301,6 +326,8 @@ def create_llm_provider_from_config(config_module: Any, prefix: str = "LLM") -> 
             wire_api=secondary_settings["wire_api"],
             reasoning_effort=secondary_settings["reasoning_effort"],
             timeout=secondary_settings["timeout_seconds"],
+            max_retries=secondary_settings["max_retries"],
+            retry_base_delay=secondary_settings["retry_base_delay"],
         )
     return OpenAICompatibleLLMProvider(
         base_url=settings["base_url"],
@@ -312,6 +339,8 @@ def create_llm_provider_from_config(config_module: Any, prefix: str = "LLM") -> 
         wire_api=settings["wire_api"],
         reasoning_effort=settings["reasoning_effort"],
         timeout=settings["timeout_seconds"],
+        max_retries=settings["max_retries"],
+        retry_base_delay=settings["retry_base_delay"],
     )
 
 
@@ -396,6 +425,9 @@ def parse_json_object(text: str) -> Dict[str, Any]:
                 return json.loads(candidate)
             except json.JSONDecodeError:
                 continue
+        repaired = repair_json(text, return_objects=True)
+        if isinstance(repaired, (dict, list)):
+            return repaired
         raise
 
 

@@ -7,12 +7,14 @@
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
 
 from contextlib import contextmanager
+import json
 
 from sqlalchemy import create_engine, text
 
 from creative.api import build_merged_script_download, build_script_text
 from creative.delivery import DeliveryService
 from creative.repository import CreativeRepository
+from creative.script_service import validate_script
 from creative.lifecycle_service import TopicLifecycleService, script_resource_fingerprint
 from identity.schema import Principal
 import pytest
@@ -125,6 +127,127 @@ def test_script_text_retains_cut_direction() -> None:
     assert "【切镜：定格在主角按住账本的手上。】" in text
 
 
+def test_merged_script_download_excludes_scripts_from_a_superseded_outline_context() -> None:
+    project = {
+        "name": "当前项目",
+        "target_episode_count": 3,
+        "locked_brief_id": 20,
+        "character_batch_id": "characters-current",
+        "outline_batch_id": "outline-current",
+        "episodes": [
+            {"stage": "beats", "episode_number": 1, "version": 2, "id": 101, "status": "locked"},
+            {
+                "stage": "script", "episode_number": 1, "version": 3, "id": 201,
+                "status": "draft", "content": {"episode_title": "当前版本", "scenes": []},
+                "upstream_refs": {
+                    "brief_id": 20, "character_batch_id": "characters-current",
+                    "outline_batch_id": "outline-current", "beats_id": 101, "beats_version": 2,
+                },
+            },
+            {"stage": "beats", "episode_number": 96, "version": 1, "id": 102, "status": "locked"},
+            {
+                "stage": "script", "episode_number": 96, "version": 1, "id": 202,
+                "status": "draft", "content": {"episode_title": "旧版本", "scenes": []},
+                "upstream_refs": {
+                    "brief_id": 10, "character_batch_id": "characters-old",
+                    "outline_batch_id": "outline-old", "beats_id": 102, "beats_version": 1,
+                },
+            },
+        ],
+    }
+
+    filename, text = build_merged_script_download(project)
+
+    assert filename == "当前项目第1集-第1集场次剧本v3.txt"
+    assert "第 1 集:当前版本" in text
+    assert "第 96 集:旧版本" not in text
+
+
+def test_script_validation_normalizes_episode_scene_style_sequence_numbers() -> None:
+    script = validate_script({
+        "episode_title": "第21集",
+        "scenes": [{
+            "sequence_no": "21-1",
+            "scene_no": "1",
+            "time_of_day": "夜",
+            "interior_exterior": "内",
+            "location": "值班室",
+            "props": [],
+            "characters": ["主角"],
+            "blocks": [{"type": "action", "text": "主角翻开档案。"}],
+        }],
+    })
+
+    assert script["scenes"][0]["sequence_no"] == 1
+    assert script["scenes"][0]["scene_no"] == 1
+
+
+def test_script_validation_rejects_subtitle_blocks() -> None:
+    with pytest.raises(ValueError, match="内容块类型无效"):
+        validate_script({
+            "episode_title": "第1集",
+            "scenes": [{
+                "sequence_no": 1,
+                "scene_no": 1,
+                "time_of_day": "夜",
+                "interior_exterior": "内",
+                "location": "值班室",
+                "props": [],
+                "characters": ["主角"],
+                "blocks": [{"type": "subtitle", "text": "三年后"}],
+            }],
+        })
+
+
+def test_repository_hides_legacy_subtitle_blocks_when_loading_script(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic = repository.upsert_topics([{
+        "platform": "hg", "job_id": "job-1", "source_path": "rank.json",
+        "captured_at": "2026-07-30", "title": "旧字幕剧", "description": "",
+        "category": "都市", "rank_type": "热播榜", "score": 90,
+        "confidence": "high", "score_details": {}, "recommendation": "推荐", "evidence": [],
+    }])[0]
+    repository.update_topic(topic["id"], "adopted")
+    breakdown = repository.create_breakdown(topic["id"], {"title": "旧字幕剧"}, {}, [])
+    repository.lock_breakdown(breakdown["id"])
+    project = repository.create_project(topic["id"], breakdown["id"], "旧字幕项目", 1)
+    brief = repository.create_blueprints(project["id"], [{"content": {"title": "方向"}, "risk_score": 1, "risk_level": "low"}])[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(project["id"], [{"episode": 1}], "弧线")
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    beats = repository.create_episode_beats(project["id"], 1, {"beats": [{"order": 1}]})
+    repository.lock_episode_beats(beats["id"])
+    script = repository.create_episode_script(project["id"], 1, {
+        "episode_title": "开局", "scenes": [{
+            "sequence_no": 1, "scene_no": 1, "time_of_day": "日",
+            "interior_exterior": "内", "location": "客厅", "props": [],
+            "characters": ["主角"], "blocks": [{"type": "action", "text": "主角进门。"}],
+        }],
+    })
+    legacy_content = {
+        "episode_title": "开局", "scenes": [{
+            "sequence_no": 1, "scene_no": 1, "time_of_day": "日",
+            "interior_exterior": "内", "location": "客厅", "props": [],
+            "characters": ["主角"], "blocks": [
+                {"type": "subtitle", "text": "三年后"},
+                {"type": "action", "text": "主角进门。"},
+            ],
+        }],
+    }
+    with repository._connect() as conn:
+        conn.execute(
+            "UPDATE creative_episodes SET content_json = ? WHERE id = ?",
+            (json.dumps(legacy_content, ensure_ascii=False), script["id"]),
+        )
+
+    loaded = repository.get_episode(script["id"])
+
+    assert [block["type"] for block in loaded["content"]["scenes"][0]["blocks"]] == ["action"]
+    assert "字幕" not in build_script_text(project, loaded["content"], episode_number=1)
+
+
 def test_combined_script_download_uses_current_scripts_and_episode_dividers() -> None:
     project = {
         "name": "项目名称",
@@ -176,7 +299,7 @@ def test_combined_script_download_uses_current_scripts_and_episode_dividers() ->
 
     filename, text = build_merged_script_download(project)
 
-    assert filename == "聚宝盆第1集-第3集.txt"
+    assert filename == "聚宝盆第1集-第3集场次剧本v1.txt"
     assert "========== 第 1 集 ==========" in text
     assert "========== 第 3 集 ==========" in text
     assert "第 1 集:开局" in text
@@ -250,6 +373,48 @@ def test_scene_script_save_validates_structured_content(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="场次剧本缺少"):
         repository.update_episode(script["id"], {"episode_title": "开局", "scenes": []})
+
+
+def test_saving_changed_scene_script_creates_a_new_version(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic = repository.upsert_topics([{
+        "platform": "hg", "job_id": "job-1", "source_path": "rank.json",
+        "captured_at": "2026-07-30", "title": "版本剧", "description": "",
+        "category": "都市", "rank_type": "热播榜", "score": 90,
+        "confidence": "high", "score_details": {}, "recommendation": "推荐", "evidence": [],
+    }])[0]
+    repository.update_topic(topic["id"], "adopted")
+    breakdown = repository.create_breakdown(topic["id"], {"title": "版本剧"}, {}, [])
+    repository.lock_breakdown(breakdown["id"])
+    project = repository.create_project(topic["id"], breakdown["id"], "版本项目", 1)
+    brief = repository.create_blueprints(project["id"], [{"content": {"title": "方向"}, "risk_score": 1, "risk_level": "low"}])[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(project["id"], [{"episode": 1}], "弧线")
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    beats = repository.create_episode_beats(project["id"], 1, {"beats": [{"order": 1}]})
+    repository.lock_episode_beats(beats["id"])
+    initial = repository.create_episode_script(project["id"], 1, {
+        "episode_title": "初稿", "scenes": [{"sequence_no": 1, "scene_no": 1,
+        "time_of_day": "日", "interior_exterior": "内", "location": "客厅",
+        "props": [], "characters": ["主角"], "blocks": [{"type": "action", "text": "进门。"}]}],
+    })
+    changed_content = {
+        "episode_title": "修订稿", "scenes": [{"sequence_no": 1, "scene_no": 1,
+        "time_of_day": "日", "interior_exterior": "内", "location": "客厅",
+        "props": [], "characters": ["主角"], "blocks": [{"type": "action", "text": "主角推门而入。"}]}],
+    }
+
+    revised = repository.update_episode(initial["id"], changed_content)
+    unchanged = repository.update_episode(revised["id"], changed_content)
+
+    assert revised["id"] != initial["id"]
+    assert revised["version"] == 2
+    assert revised["parent_version_id"] == initial["id"]
+    assert repository.get_episode(initial["id"])["content"]["episode_title"] == "初稿"
+    assert unchanged["id"] == revised["id"]
+    assert unchanged["version"] == 2
 
 
 def test_draft_delivery_preview_does_not_export_or_complete_workflow(

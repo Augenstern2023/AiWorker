@@ -12,7 +12,7 @@ import json
 from typing import Any
 
 
-PROMPT_TEMPLATE_VERSION = "phase4-v2"
+PROMPT_TEMPLATE_VERSION = "phase4-v3"
 BREAKDOWN_PROMPT_TEMPLATE_VERSION = "transcript-breakdown-v1"
 
 DRAMA_CONSTRAINTS = (
@@ -108,7 +108,8 @@ def script_messages(payload: dict[str, Any], episode_number: int) -> list[dict[s
     return _messages(
         f"根据第 {episode_number} 集已锁定 Beats 生成可拍摄的场次剧本，返回 episode_title 和 scenes。"
         "每场必须包含 sequence_no、scene_no、time_of_day、interior_exterior、location、props、characters、blocks。"
-        "blocks 为数组，type 只能是 action、dialogue、voiceover、inner_voice、subtitle、cut；"
+        "sequence_no 和 scene_no 必须为正整数（如 1），不能写成“21-1”等集数-场次组合。"
+        "blocks 为数组，type 只能是 action、dialogue、voiceover、inner_voice、cut；"
         "每个块必须有 text，dialogue 必须有 speaker，可选 modifier。"
         "动作写可拍摄内容，台词单独写；必须遵守 continuity_ledger 与锁定 Beats，展示人物行为的后果，"
         "不得用新增台词或道具绕开既定冲突代价；不得输出 Markdown。" + DRAMA_CONSTRAINTS,
@@ -120,8 +121,9 @@ def script_chunk_messages(payload: dict[str, Any], start: int, end: int) -> list
     return _messages(
         f"批量生成第 {start}-{end} 集可拍摄场次剧本。顶层必须返回 {{\"episodes\":[...]}}；episodes 必须完整覆盖 "
         f"第 {start}-{end} 集，每项包含 episode、episode_title 和 scenes。每场必须包含 sequence_no、scene_no、"
-        "time_of_day、interior_exterior、location、props、characters、blocks。blocks 为数组，type 只能是 "
-        "action、dialogue、voiceover、inner_voice、subtitle、cut；每个块必须有 text，dialogue 必须有 speaker，"
+        "time_of_day、interior_exterior、location、props、characters、blocks。sequence_no 和 scene_no 必须为正整数"
+        "（如 1），不能写成“21-1”等集数-场次组合。blocks 为数组，type 只能是 "
+        "action、dialogue、voiceover、inner_voice、cut；每个块必须有 text，dialogue 必须有 speaker，"
         "可选 modifier。严格遵守每集 locked_beats、locked_outlines、continuity_ledger，并让本批后续集承接前一集结果；"
         "动作写可拍摄内容，台词单独写，不得用新增台词或道具绕开既定冲突代价，不得输出 Markdown。" + DRAMA_CONSTRAINTS,
         payload,

@@ -169,7 +169,10 @@ _SELECTION_TOPIC_ASSIGNMENT: tuple[ApiRoute, ...] = (
 )
 
 _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
-    "/selection/dashboard": (("GET", "/api/creative/topics"),),
+    "/selection/dashboard": (
+        ("GET", "/api/creative/topics"),
+        ("GET", "/api/analytics/overview"),
+    ),
     "/selection/ranks": (
         ("GET", "/api/rank/today"),
         ("POST", "/api/jobs"),
@@ -301,6 +304,11 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
         ("GET", "/api/hongguo/drama/settings"),
         ("PUT", "/api/hongguo/drama/settings"),
         ("POST", "/api/hongguo/drama/test"),
+    ),
+    "/admin/analytics": (
+        ("GET", "/api/analytics/weekly-reports"),
+        ("GET", "/api/analytics/weekly-reports/{report_id}"),
+        ("GET", "/api/analytics/weekly-reports/{report_id}/export"),
     ),
     "/admin/data": (
         ("GET", "/api/files"),

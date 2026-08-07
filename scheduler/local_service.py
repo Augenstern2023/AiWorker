@@ -36,6 +36,7 @@ _JOB_TYPES = {
     "asset_download": frozenset(
         {"drama_download", "douyin_fallback_analysis", "drama_reviews"}
     ),
+    "weekly_report": frozenset({"weekly_report"}),
 }
 _RETRY_DELAYS = (timedelta(minutes=1), timedelta(minutes=5), timedelta(minutes=15))
 
@@ -79,6 +80,22 @@ class ScheduleAlert:
     severity: str
     message: str
     created_at: datetime
+
+
+def build_default_weekly_report_schedule() -> ScheduleDefinition:
+    """Return the system-owned weekly report schedule for bootstrap callers."""
+    return ScheduleDefinition(
+        id="weekly-trend-report",
+        name="周度流行趋势报告",
+        job_type="weekly_report",
+        payload={"platform": "analytics", "crawler_type": "weekly_report"},
+        trigger_type="cron",
+        trigger_config={"day_of_week": "mon", "hour": 10, "minute": 0},
+        timezone="Asia/Shanghai",
+        is_enabled=True,
+        created_by="system",
+        updated_by="system",
+    )
 
 
 class ScheduleRepository(Protocol):
@@ -392,6 +409,8 @@ class LocalScheduleService:
         crawler_type = str(payload.get("crawler_type") or "")
         if crawler_type not in allowed_types:
             raise ValueError("scheduled job payload is not allowed for its job type")
+        if definition.job_type == "weekly_report" and payload.get("platform") != "analytics":
+            raise ValueError("weekly_report schedules must use the analytics platform")
         payload["job_id"] = str(payload.get("job_id") or uuid.uuid4())
         job = CrawlJob.from_dict(payload)
         job.extra = dict(job.extra)

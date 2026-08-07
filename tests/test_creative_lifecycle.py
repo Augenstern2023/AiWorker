@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import unquote
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -186,7 +187,7 @@ def test_scene_script_download_api_returns_delivery_txt(tmp_path: Path):
         "episode_title": "开局", "scenes": [{
             "sequence_no": 1, "scene_no": 1, "time_of_day": "日",
             "interior_exterior": "内", "location": "客厅", "props": [],
-            "characters": ["主角"], "blocks": [{"type": "subtitle", "text": "三年后"}],
+            "characters": ["主角"], "blocks": [{"type": "action", "text": "主角走进客厅。"}],
         }],
     })
     download = client.get(
@@ -196,7 +197,8 @@ def test_scene_script_download_api_returns_delivery_txt(tmp_path: Path):
 
     assert download.status_code == 200
     assert download.headers["content-type"].startswith("text/plain")
-    assert "【字幕：三年后】" in download.text
+    assert "第1集场次剧本v1.txt" in unquote(download.headers["content-disposition"])
+    assert "△ 主角走进客厅。" in download.text
 
 
 def test_merged_scene_script_download_returns_current_episodes_in_one_txt(tmp_path: Path):
@@ -236,9 +238,26 @@ def test_merged_scene_script_download_returns_current_episodes_in_one_txt(tmp_pa
     assert download.status_code == 200
     assert download.headers["content-type"].startswith("text/plain")
     assert "filename*=UTF-8''" in download.headers["content-disposition"]
+    assert "合并剧本接口剧第1集-第3集场次剧本v1.txt" in unquote(download.headers["content-disposition"])
     assert "========== 第 1 集 ==========" in download.text
     assert "========== 第 3 集 ==========" in download.text
     assert download.text.index("第 1 集:开局") < download.text.index("第 3 集:转折")
+
+    repository.create_episode_script(project["id"], 1, {
+        "episode_title": "开局重写", "scenes": [{
+            "sequence_no": 1, "scene_no": 1, "time_of_day": "日",
+            "interior_exterior": "内", "location": "客厅", "props": [],
+            "characters": ["主角"],
+            "blocks": [{"type": "action", "text": "第1集新版本内容。"}],
+        }],
+    })
+
+    updated_download = client.get(f"/api/creative/projects/{project['id']}/scripts/download")
+
+    assert "合并剧本接口剧第1集-第3集场次剧本v1-v2.txt" in unquote(
+        updated_download.headers["content-disposition"]
+    )
+    assert "第 1 集:开局重写" in updated_download.text
 
 def test_generating_today_hits_returns_only_unadopted_recommendations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

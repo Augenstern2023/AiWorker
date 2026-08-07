@@ -66,7 +66,7 @@ def test_webgui_registers_analytics_routes():
     assert "/api/analytics/overview" in paths
     assert "/api/analytics/dramas" in paths
     assert "/api/analytics/assets" in paths
-    assert "/api/analytics/sync-all" in paths
+    assert "/api/analytics/sync-all" not in paths
 
 
 def test_webgui_registers_today_rank_route():
@@ -1066,6 +1066,43 @@ def test_scene_script_workspace_hides_scripts_tied_to_superseded_beats():
     assert "scriptWorkspaceEmptyMessage()" in creative
     assert "当前仅有基于 Beats v${olderScriptBeatsVersion || '未知'} 的旧场次剧本；当前 Beats 为 v${currentBeats.version}" in creative
     assert 'x-text="scriptWorkspaceEmptyMessage()"' in scripts
+
+
+def test_scene_script_workspace_calls_generation_a_regeneration_when_locked_beats_changed():
+    creative = _source("static/js/common/creative.js")
+    scripts = _source("templates/common/workspace/project_scripts.html")
+
+    assert "projectScriptGenerationActionLabel()" in creative
+    assert "重新生成场次剧本" in creative
+    assert 'x-text="creativeActionRunning(\'script\') ? \'生成中\' : projectScriptGenerationActionLabel()"' in scripts
+
+
+def test_scene_script_workspace_records_versions_without_a_lock_action():
+    creative = _source("static/js/common/creative.js")
+    scripts = _source("templates/common/workspace/project_scripts.html")
+
+    assert "完成并锁定" not in scripts
+    assert "completeProjectScript" not in scripts
+    assert "completeProjectScript" not in creative
+    assert "生成版本" in scripts
+
+
+def test_saving_a_scene_script_reloads_its_new_version():
+    creative = _source("static/js/common/creative.js")
+    save_method = creative.split("async saveProjectEpisode(item)", 1)[1].split(
+        "async saveCreativeItem", 1
+    )[0]
+
+    assert "await this.selectCreativeProject(this.creativeWorkspace.project.id);" in save_method
+
+
+def test_script_series_generation_does_not_offer_resume_for_an_old_beats_version():
+    creative = _source("static/js/common/creative.js")
+    scripts = _source("templates/common/workspace/project_scripts.html")
+
+    assert "isCompatibleProjectSeriesEpisode(stage, item)" in creative
+    assert "refs.beats_id" in creative
+    assert "全剧生成中" in scripts
 
 
 def test_continuity_ledger_renders_known_status_codes_in_chinese():

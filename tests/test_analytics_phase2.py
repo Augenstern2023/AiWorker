@@ -141,21 +141,15 @@ def test_analytics_api_sync_and_query(tmp_path):
     assert assets_response.json()["jobs"][0]["job_id"] == "job-1"
 
 
-def test_analytics_api_sync_all_scans_dy_and_hg_jobs(tmp_path):
-    _write_dy_job(tmp_path)
-    _write_hg_job_without_heat(tmp_path)
+def test_analytics_api_does_not_expose_bulk_sync(tmp_path):
     app = FastAPI()
     _authorize_admin(app)
     app.include_router(build_analytics_router(root=tmp_path, runtime_dir=tmp_path / ".runtime"))
     client = TestClient(app)
 
     sync_response = client.post("/api/analytics/sync-all", json={"platforms": ["dy", "hg"]})
-    overview_response = client.get("/api/analytics/overview")
 
-    assert sync_response.status_code == 200
-    assert sync_response.json()["synced_jobs"] == 2
-    assert overview_response.json()["task_count"] == 2
-    assert overview_response.json()["drama_count"] == 3
+    assert sync_response.status_code == 404
 
 
 def test_classify_sentiment_rule_based():

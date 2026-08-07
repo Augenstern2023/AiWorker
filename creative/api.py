@@ -24,6 +24,7 @@ from creative.hit_breakdown import breakdown_field_guide, personalize_breakdown_
 from creative.imitation_service import assess_similarity_risk
 from creative.lifecycle_service import TopicLifecycleService, content_fingerprint
 from creative.repository import CreativeRepository, DuplicateTopicError
+from creative.script_service import normalize_script_content, validate_script
 from creative.selection_stage_service import SelectionStageService
 from creative.workflow_adapter import CreativeWorkflowAdapter
 
@@ -427,6 +428,7 @@ def build_script_text(
     project: dict[str, Any], content: dict[str, Any], *, episode_number: int
 ) -> str:
     """Render a structured episode script in the delivery TXT format."""
+    content = normalize_script_content(content)
     title = str(content.get("episode_title") or f"第 {episode_number} 集").strip()
     lines = [f"第 {episode_number} 集:{title}", ""]
     for scene in content.get("scenes") or []:
@@ -455,8 +457,6 @@ def build_script_text(
                 rendered = f"{speaker}(内心OS):{text}"
             elif block_type == "voiceover":
                 rendered = f"画外音（{speaker}）：{text}" if speaker else f"画外音：{text}"
-            elif block_type == "subtitle":
-                rendered = f"【字幕：{text}】"
             elif block_type == "cut":
                 rendered = f"【切镜：{text}】" if text else "【切镜】"
             else:
@@ -465,13 +465,34 @@ def build_script_text(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def script_download_filename(
+    project: dict[str, Any], episode_number: int, version: int, format: str = "txt"
+) -> str:
+    drama_name = str(project.get("topic_title") or project.get("name") or "剧本").strip()
+    safe_name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", drama_name).strip(" .") or "剧本"
+    return f"{safe_name}第{episode_number}集场次剧本v{version}.{format}"
+
+
 def build_merged_script_download(project: dict[str, Any]) -> tuple[str, str]:
-    """Build one TXT download from the latest scripts for current locked Beats."""
+    """Build one TXT download from scripts compatible with the current project context."""
+    target_episode_count = int(project.get("target_episode_count") or 0)
+    if target_episode_count < 1:
+        target_episode_count = max(
+            (int(item.get("episode_number") or 0) for item in project.get("episodes") or []),
+            default=0,
+        )
+    current_context = {
+        "brief_id": project.get("locked_brief_id"),
+        "character_batch_id": project.get("character_batch_id"),
+        "outline_batch_id": project.get("outline_batch_id"),
+    }
     locked_beats: dict[int, dict[str, Any]] = {}
     for item in project.get("episodes") or []:
         if item.get("stage") != "beats" or item.get("status") not in {"locked", "approved"}:
             continue
         episode_number = int(item.get("episode_number") or 0)
+        if not 1 <= episode_number <= target_episode_count:
+            continue
         current = locked_beats.get(episode_number)
         if current is None or (
             int(item.get("version") or 0), int(item.get("id") or 0)
@@ -485,8 +506,12 @@ def build_merged_script_download(project: dict[str, Any]) -> tuple[str, str]:
         if item.get("stage") != "script" or item.get("status") not in {"draft", "locked", "approved"}:
             continue
         episode_number = int(item.get("episode_number") or 0)
+        if not 1 <= episode_number <= target_episode_count:
+            continue
         beats = locked_beats.get(episode_number)
         refs = item.get("upstream_refs") or {}
+        if any(refs.get(key) != value for key, value in current_context.items()):
+            continue
         if beats is None or (
             int(refs.get("beats_id") or 0), int(refs.get("beats_version") or 0)
         ) != (int(beats.get("id") or 0), int(beats.get("version") or 0)):
@@ -504,9 +529,14 @@ def build_merged_script_download(project: dict[str, Any]) -> tuple[str, str]:
         raise ValueError("尚无可下载的已生成场次剧本")
 
     episode_numbers = [int(item["episode_number"]) for item in ordered_scripts]
+    versions = sorted({int(item.get("version") or 1) for item in ordered_scripts})
+    version_label = f"v{versions[0]}" if len(versions) == 1 else "-".join(f"v{version}" for version in versions)
     drama_name = str(project.get("topic_title") or project.get("name") or "剧本").strip()
     safe_name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", drama_name).strip(" .") or "剧本"
-    filename = f"{safe_name}第{episode_numbers[0]}集-第{episode_numbers[-1]}集.txt"
+    filename = (
+        f"{safe_name}第{episode_numbers[0]}集-第{episode_numbers[-1]}集"
+        f"场次剧本{version_label}.txt"
+    )
     sections = []
     for item in ordered_scripts:
         episode_number = int(item["episode_number"])
@@ -1887,11 +1917,21 @@ def build_creative_router(
         project = project_or_404(project_id)
         _, _, snapshot = generated_stage_snapshot(project, stage, resource_id)
         body, media_type = serialize_generated_stage(project, stage, snapshot, format)
+        if stage == "script":
+            filename = script_download_filename(
+                project,
+                int(snapshot.get("episode_number") or 0),
+                int(snapshot.get("version") or 1),
+                format,
+            )
+            content_disposition = f"attachment; filename*=UTF-8''{quote(filename)}"
+        else:
+            content_disposition = f'attachment; filename="project-{project_id}-{stage}.{format}"'
         return Response(
             content=body,
             media_type=media_type,
             headers={
-                "Content-Disposition": f'attachment; filename="project-{project_id}-{stage}.{format}"'
+                "Content-Disposition": content_disposition
             },
         )
 
@@ -2395,7 +2435,9 @@ def build_creative_router(
     async def create_project_episode_script(project_id: int, episode_number: int, payload: EpisodeBeatsRequest, principal: Principal = Depends(current_principal)):
         try:
             workflow_task_id = validate_task(payload.workflow_task_id, "script", principal, project_id=project_id)
-            return repository.create_episode_script(project_id, episode_number, payload.content, workflow_task_id=workflow_task_id)
+            return repository.create_episode_script(
+                project_id, episode_number, validate_script(payload.content), workflow_task_id=workflow_task_id
+            )
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 

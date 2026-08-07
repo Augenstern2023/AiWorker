@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from creative.script_service import validate_beats, validate_script
+from creative.script_service import normalize_script_content, validate_beats, validate_script
 
 
 class DuplicateTopicError(ValueError):
@@ -1608,7 +1608,44 @@ class CreativeRepository:
                 content = validate_beats(content, allow_legacy=True)
             elif episode.get("stage") == "script":
                 content = validate_script(content)
+                return self._create_script_revision_if_changed(episode, content)
         return self._update_creative_item("creative_episodes", episode_id, content, episode=True)
+
+    def _create_script_revision_if_changed(
+        self, episode: dict[str, Any], content: dict[str, Any]
+    ) -> dict[str, Any]:
+        if episode.get("status") != "draft":
+            raise ValueError("已完成的版本不能原地修改")
+        if json.dumps(episode.get("content") or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")) == json.dumps(
+            content, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ):
+            return episode
+
+        now = time.time()
+        metadata = dict(episode.get("generation_meta") or {})
+        metadata.update({"manual_revision": True, "revision_source_id": int(episode["id"])})
+        with self._connect() as conn:
+            version_row = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 AS version FROM creative_episodes "
+                "WHERE project_id = ? AND stage = 'script' AND episode_number = ?",
+                (int(episode["project_id"]), int(episode["episode_number"])),
+            ).fetchone()
+            cursor = conn.execute(
+                """
+                INSERT INTO creative_episodes (
+                    project_id, stage, episode_number, batch_id, version, parent_version_id, content_json,
+                    upstream_refs_json, generation_meta_json, workflow_task_id, created_at, updated_at
+                ) VALUES (?, 'script', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(episode["project_id"]), int(episode["episode_number"]), uuid.uuid4().hex,
+                    int(version_row["version"]), int(episode["id"]),
+                    json.dumps(content, ensure_ascii=False),
+                    json.dumps(episode.get("upstream_refs") or {}, ensure_ascii=False),
+                    json.dumps(metadata, ensure_ascii=False), episode.get("workflow_task_id"), now, now,
+                ),
+            )
+        return self.get_episode(int(cursor.lastrowid)) or {}
 
     def lock_outline_batch(self, project_id: int, batch_id: str) -> dict[str, Any]:
         project = self.get_project(project_id)
@@ -2592,11 +2629,15 @@ class CreativeRepository:
     @staticmethod
     def _script_optimization_draft(row: dict[str, Any]) -> dict[str, Any]:
         row["content"] = json.loads(row.pop("content_json") or "{}")
+        if row.get("kind") == "script":
+            row["content"] = normalize_script_content(row["content"])
         return row
 
     @staticmethod
     def _episode(row: dict[str, Any]) -> dict[str, Any]:
         row["content"] = json.loads(row.pop("content_json") or "{}")
+        if row.get("stage") == "script":
+            row["content"] = normalize_script_content(row["content"])
         row["upstream_refs"] = json.loads(row.pop("upstream_refs_json") or "{}")
         row["generation_meta"] = json.loads(row.pop("generation_meta_json") or "{}")
         return row

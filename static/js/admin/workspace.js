@@ -1,3 +1,5 @@
+const RECOMMENDATION_SERIES_COLORS = ['#22c55e', '#3b95f6', '#f59e0b', '#f97316', '#e879f9'];
+
 window.aiworkerModules = window.aiworkerModules || [];
 window.aiworkerModules.push(() => ({
                 async fetchFiles({reset = false, cursor = null} = {}) {
@@ -38,149 +40,65 @@ window.aiworkerModules.push(() => ({
                     document.getElementById('crawlerSettings')?.scrollIntoView({behavior: 'smooth', block: 'start'});
                 },
 
-                selectedJobPlatform() {
-                    const job = this.jobs.find(item => item.job_id === this.selectedJobId);
-                    if (job && ['dy', 'hg'].includes(job.platform)) return job.platform;
-                    return 'dy';
+                async refreshAnalyticsDashboard() {
+                    this.analyticsError = '';
+                    await this.fetchWeeklyReports();
+                    this.$nextTick(() => {
+                        this.renderAnalyticsCharts();
+                        setTimeout(() => this.resizeAnalyticsCharts(), 80);
+                    });
                 },
 
-                async syncAnalyticsJob() {
-                    if (!this.selectedJobId) {
-                        this.analyticsError = '请选择一个 Job';
-                        return;
-                    }
-                    this.analyticsLoading = true;
-                    this.analyticsError = '';
-                    this.analyticsSyncResult = null;
+                async fetchWeeklyReports() {
+                    this.weeklyReportLoading = true;
+                    this.weeklyReportError = '';
                     try {
-                        const res = await aiworkerApi.request('/api/analytics/sync', {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({
-                                job_id: this.selectedJobId,
-                                platform: this.selectedJobPlatform(),
-                                rebuild: true
-                            })
-                        });
+                        const params = new URLSearchParams();
+                        if (this.analyticsPlatform) params.set('platform', this.analyticsPlatform);
+                        const res = await aiworkerApi.request(`/api/analytics/weekly-reports?${params.toString()}`);
                         const data = await res.json();
-                        if (!res.ok) throw new Error(data.detail || data.message || '同步失败');
-                        this.analyticsSyncResult = data;
-                        await this.reloadAnalyticsDashboard();
+                        if (!res.ok) throw new Error(data.detail || '加载周度报告失败');
+                        this.weeklyReports = data.items || [];
+                        const selected = this.weeklyReport?.report_id;
+                        const report = this.weeklyReports.find(item => item.report_id === selected) || this.weeklyReports[0] || null;
+                        this.weeklyReport = report;
                     } catch (e) {
-                        this.analyticsError = e.message || '同步失败';
+                        this.weeklyReports = [];
+                        this.weeklyReport = null;
+                        this.weeklyReportError = e.message || '加载周度报告失败';
                     } finally {
-                        this.analyticsLoading = false;
+                        this.weeklyReportLoading = false;
                     }
                 },
 
-                async fetchAnalyticsAssets() {
+                async selectWeeklyReport(reportId) {
+                    if (!reportId) return;
                     try {
-                        const res = await aiworkerApi.request('/api/analytics/assets');
-                        this.analyticsAssets = await res.json();
-                    } catch (e) {
-                        this.analyticsAssets = {overview: {}, jobs: [], platform_distribution: []};
-                    }
-                },
-
-                async refreshAnalyticsDashboard(syncCurrent = true) {
-                    this.analyticsError = '';
-                    if (syncCurrent) {
-                        this.analyticsLoading = true;
-                        try {
-                            const platforms = this.analyticsPlatform ? [this.analyticsPlatform] : ['dy', 'hg'];
-                            const res = await aiworkerApi.request('/api/analytics/sync-all', {
-                                method: 'POST',
-                                headers: {'Content-Type': 'application/json'},
-                                body: JSON.stringify({platforms})
-                            });
-                            const data = await res.json();
-                            if (!res.ok) throw new Error(data.detail || data.message || '同步失败');
-                            this.analyticsSyncResult = {
-                                status: data.status,
-                                job_id: this.analyticsPlatform ? `${this.analyticsPlatform} 全部任务 ${data.synced_jobs || 0} 个` : `全部任务 ${data.synced_jobs || 0} 个`,
-                                drama_count: data.drama_count || 0,
-                                artifact_count: data.artifact_count || 0
-                            };
-                        } catch (e) {
-                            this.analyticsError = e.message || '同步失败';
-                        } finally {
-                            this.analyticsLoading = false;
-                        }
-                    }
-                    await this.reloadAnalyticsDashboard();
-                },
-
-                async syncAllAnalytics() {
-                    this.analyticsLoading = true;
-                    this.analyticsError = '';
-                    try {
-                        const res = await aiworkerApi.request('/api/analytics/sync-all', {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({platforms: ['dy', 'hg']})
-                        });
+                        const res = await aiworkerApi.request(`/api/analytics/weekly-reports/${encodeURIComponent(reportId)}`);
                         const data = await res.json();
-                        if (!res.ok) throw new Error(data.detail || data.message || '同步全部失败');
-                        this.analyticsSyncResult = {
-                            status: data.status,
-                            job_id: `全部任务 ${data.synced_jobs || 0} 个`,
-                            drama_count: data.drama_count || 0,
-                            artifact_count: data.artifact_count || 0
-                        };
-                        this.analyticsPlatform = '';
-                        await this.reloadAnalyticsDashboard();
+                        if (!res.ok) throw new Error(data.detail || '加载周报详情失败');
+                        this.weeklyReport = data;
+                        this.$nextTick(() => this.renderAnalyticsCharts());
                     } catch (e) {
-                        this.analyticsError = e.message || '同步全部失败';
-                    } finally {
-                        this.analyticsLoading = false;
+                        this.weeklyReportError = e.message || '加载周报详情失败';
                     }
                 },
 
-                async reloadAnalyticsDashboard() {
-                    const baseParams = [];
-                    if (this.analyticsPlatform) baseParams.push(`platform=${encodeURIComponent(this.analyticsPlatform)}`);
-                    const nonce = `_=${Date.now()}`;
-                    const commonSuffix = `?${[...baseParams, nonce].join('&')}`;
-                    const dramaParams = [...baseParams, nonce];
-                    if (this.analyticsDate) dramaParams.push(`date=${encodeURIComponent(this.analyticsDate)}`);
-                    const dramaSuffix = `?${dramaParams.join('&')}`;
-                    try {
-                        const [overviewRes, tagsRes, trendsRes, sentimentRes, dramasRes] = await Promise.all([
-                            aiworkerApi.request(`/api/analytics/overview${commonSuffix}`),
-                            aiworkerApi.request(`/api/analytics/tags${commonSuffix}`),
-                            aiworkerApi.request(`/api/analytics/trends${commonSuffix}&metric=heat`),
-                            aiworkerApi.request(`/api/analytics/sentiment${commonSuffix}`),
-                            aiworkerApi.request(`/api/analytics/dramas${dramaSuffix}&sort=heat&limit=30`)
-                        ]);
-                        this.analyticsOverview = await overviewRes.json();
-                        this.analyticsTags = await tagsRes.json();
-                        this.analyticsTrends = await trendsRes.json();
-                        const sentiment = await sentimentRes.json();
-                        const dramas = await dramasRes.json();
-                        this.analyticsSentiment = sentiment.items || [];
-                        this.analyticsDramas = dramas.items || [];
-                        this.$nextTick(() => {
-                            this.renderAnalyticsCharts();
-                            setTimeout(() => this.resizeAnalyticsCharts(), 80);
-                        });
-                    } catch (e) {
-                        this.analyticsOverview = {};
-                        this.analyticsTags = {categories: [], selling_points: [], hooks: [], plot_tags: []};
-                        this.analyticsTrends = {points: []};
-                        this.analyticsSentiment = [];
-                        this.analyticsDramas = [];
-                    }
+                weeklyReportExport(format) {
+                    const reportId = this.weeklyReport?.report_id;
+                    if (!reportId) return;
+                    window.open(`/api/analytics/weekly-reports/${encodeURIComponent(reportId)}/export?format=${encodeURIComponent(format)}`, '_blank', 'noopener');
                 },
 
                 renderAnalyticsCharts() {
                     if (!window.echarts) return;
-                    this.renderPieChart('categoryChart', this.analyticsTags.categories || [], '题材');
-                    this.renderSentimentChart();
+                    this.renderPieChart('categoryChart', this.analyticsCategoryRows(), '题材标签');
                     this.renderTrendChart();
                 },
 
                 resizeAnalyticsCharts() {
-                    ['categoryChart', 'trendChart', 'sentimentChart'].forEach(id => {
+                    if (!window.echarts) return;
+                    ['categoryChart', 'trendChart'].forEach(id => {
                         const el = document.getElementById(id);
                         if (!el || !echarts.getInstanceByDom(el)) return;
                         echarts.getInstanceByDom(el).resize();
@@ -221,22 +139,22 @@ window.aiworkerModules.push(() => ({
                     });
                 },
 
-                renderSentimentChart() {
-                    const el = document.getElementById('sentimentChart');
-                    if (!el) return;
-                    const chart = echarts.getInstanceByDom(el) || echarts.init(el);
-                    chart.clear();
-                    const labels = {positive: '正面', neutral: '中性', negative: '负面'};
-                    chart.setOption({
-                        backgroundColor: 'transparent',
-                        tooltip: {trigger: 'item'},
-                        series: [{
-                            type: 'pie',
-                            radius: '65%',
-                            data: (this.analyticsSentiment || []).map(item => ({name: labels[item.sentiment] || item.sentiment, value: item.count || 0})),
-                            label: {color: '#f1f4f8'}
-                        }]
-                    });
+                analyticsCategoryRows() {
+                    return this.weeklyReport?.tags?.theme_tags || [];
+                },
+
+                analyticsTrendData() {
+                    return {
+                        points: this.weeklyReport?.recommendation_metrics?.points || [],
+                        series: this.weeklyReport?.recommendation_metrics?.series || [],
+                    };
+                },
+
+                formatAnalyticsMetric(value) {
+                    const amount = Number(value || 0);
+                    if (Math.abs(amount) >= 100000000) return `${(amount / 100000000).toFixed(1)}亿`;
+                    if (Math.abs(amount) >= 10000) return `${(amount / 10000).toFixed(1)}万`;
+                    return String(amount);
                 },
 
                 renderTrendChart() {
@@ -244,14 +162,37 @@ window.aiworkerModules.push(() => ({
                     if (!el) return;
                     const chart = echarts.getInstanceByDom(el) || echarts.init(el);
                     chart.clear();
-                    const points = this.analyticsTrends.points || [];
+                    const trend = this.analyticsTrendData();
+                    const points = trend.points;
                     chart.setOption({
                         backgroundColor: 'transparent',
-                        tooltip: {trigger: 'axis'},
-                        grid: {left: 55, right: 20, top: 20, bottom: 35},
-                        xAxis: {type: 'category', data: points.map(item => item.date), axisLabel: {color: '#9aa4b2'}},
-                        yAxis: {type: 'value', axisLabel: {color: '#9aa4b2'}},
-                        series: [{name: this.analyticsTrends.metric || 'value', type: 'line', smooth: true, data: points.map(item => item.value || 0), itemStyle: {color: '#20c997'}, areaStyle: {opacity: .12}}]
+                        color: RECOMMENDATION_SERIES_COLORS,
+                        tooltip: {
+                            trigger: 'axis',
+                            formatter: params => {
+                                const date = params[0]?.axisValue || '';
+                                const rows = params.map(point => {
+                                    const item = trend.series[point.seriesIndex];
+                                    if (!item) return '';
+                                    const raw = item.values[point.dataIndex];
+                                    return `${point.marker}${item.title} · ${item.metric_label}：${this.formatAnalyticsMetric(raw)}（周均 ${this.formatAnalyticsMetric(item.weekly_average)}，指数 ${point.value}）`;
+                                }).filter(Boolean);
+                                return [date, ...rows].join('<br/>');
+                            },
+                        },
+                        legend: {top: 0, type: 'scroll', textStyle: {color: '#dbe4ee'}},
+                        grid: {left: 16, right: 24, top: 50, bottom: 48, containLabel: true},
+                        xAxis: {type: 'category', boundaryGap: false, data: points, axisLabel: {color: '#9aa4b2', hideOverlap: true}},
+                        yAxis: {type: 'value', name: '周均=100', nameTextStyle: {color: '#9aa4b2'}, axisLabel: {color: '#9aa4b2'}},
+                        series: trend.series.map((item, index) => ({
+                            name: `${item.title} · ${item.metric_label}`,
+                            type: 'line',
+                            smooth: true,
+                            data: item.index_values,
+                            showSymbol: true,
+                            itemStyle: {color: RECOMMENDATION_SERIES_COLORS[index % RECOMMENDATION_SERIES_COLORS.length]},
+                            lineStyle: {width: 2},
+                        })),
                     });
                 },
 

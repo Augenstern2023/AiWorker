@@ -43,6 +43,7 @@ PAGE_ROUTES = (
     ("/admin/users", "*", "用户管理"),
     ("/admin/roles", "*", "角色管理"),
     ("/admin/config", "*", "系统配置"),
+    ("/admin/analytics", "analytics.read", "数据分析"),
     ("/admin/data", "page.data_management", "数据管理"),
     ("/admin/drama-player", "page.data_management", "已下载剧目播放"),
     ("/admin/jobs", "*", "机器任务"),

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import inspect
+import re
 from typing import Any, Callable
 
 from creative.imitation_service import complete_with_one_repair
@@ -39,6 +40,26 @@ def _require_fields(item: dict[str, Any], required: set[str], label: str) -> dic
     if missing:
         raise ValueError(f"{label}缺少字段：{sorted(missing)}")
     return dict(item)
+
+
+def _normalize_scene_number(value: Any, field_label: str) -> int:
+    """Accept common episode-scene labels while persisting a stable numeric field."""
+    if isinstance(value, bool):
+        raise ValueError(f"场次的{field_label}必须是正整数")
+    if isinstance(value, int):
+        number = value
+    else:
+        text = str(value or "").strip()
+        if text.isdigit():
+            number = int(text)
+        else:
+            composite = re.fullmatch(r"(?:第\s*)?\d+\s*[-_/]\s*(\d+)\s*(?:段|场)?", text)
+            if not composite:
+                raise ValueError(f"场次的{field_label}必须是正整数，不能使用“{text}”")
+            number = int(composite.group(1))
+    if number < 1:
+        raise ValueError(f"场次的{field_label}必须是大于 0 的整数")
+    return number
 
 
 def _validate_character_bundle(payload: dict[str, Any]) -> dict[str, Any]:
@@ -272,7 +293,9 @@ def validate_script(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = []
     for scene in scenes:
         item = _require_fields(scene, required, "场次")
-        key = (int(item["sequence_no"]), int(item["scene_no"]))
+        item["sequence_no"] = _normalize_scene_number(item["sequence_no"], "段号")
+        item["scene_no"] = _normalize_scene_number(item["scene_no"], "场号")
+        key = (item["sequence_no"], item["scene_no"])
         if key in seen:
             raise ValueError("场次编号不能重复")
         seen.add(key)
@@ -285,7 +308,7 @@ def validate_script(payload: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("每场至少包含一个内容块")
         for block in blocks:
             kind = str(block.get("type") or "")
-            if kind not in {"action", "dialogue", "voiceover", "inner_voice", "subtitle", "cut"}:
+            if kind not in {"action", "dialogue", "voiceover", "inner_voice", "cut"}:
                 raise ValueError("内容块类型无效")
             if kind != "cut" and not str(block.get("text") or "").strip():
                 raise ValueError("内容块缺少文本")
@@ -293,6 +316,34 @@ def validate_script(payload: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("台词缺少人物")
         normalized.append(item)
     return {"episode_title": title, "scenes": sorted(normalized, key=lambda item: (int(item["sequence_no"]), int(item["scene_no"]))) }
+
+
+def normalize_script_content(payload: dict[str, Any]) -> dict[str, Any]:
+    """Hide obsolete subtitle blocks from persisted scene scripts without rewriting history."""
+    content = dict(payload) if isinstance(payload, dict) else {}
+    scenes = content.get("scenes")
+    if not isinstance(scenes, list):
+        return content
+
+    normalized_scenes = []
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            normalized_scenes.append(scene)
+            continue
+        normalized_scene = dict(scene)
+        blocks = scene.get("blocks")
+        if isinstance(blocks, list):
+            normalized_scene["blocks"] = [
+                dict(block) if isinstance(block, dict) else block
+                for block in blocks
+                if not (
+                    isinstance(block, dict)
+                    and str(block.get("type") or "").strip().lower() == "subtitle"
+                )
+            ]
+        normalized_scenes.append(normalized_scene)
+    content["scenes"] = normalized_scenes
+    return content
 
 
 async def _checkpoint(callback: Callable[[], Any] | None) -> None:

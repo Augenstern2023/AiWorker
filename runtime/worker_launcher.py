@@ -16,6 +16,8 @@ from pathlib import Path
 
 
 def build_worker_command(job_file: str | Path, platform: str = "", crawler_type: str = "") -> list[str]:
+    if platform == "analytics" and crawler_type == "weekly_report":
+        return [sys.executable, "-m", "agents.weekly_report_worker", "--job-file", str(job_file)]
     if platform == "data" and crawler_type == "file_operation":
         return [sys.executable, "-m", "agents.data_file_operation_worker", "--job-file", str(job_file)]
     if platform == "creative" and crawler_type == "breakdown_generate":

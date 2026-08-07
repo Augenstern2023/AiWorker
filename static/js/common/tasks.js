@@ -1,10 +1,3 @@
-function localDateString(date = new Date()) {
-            const year = date.getFullYear();
-            const month = String(date.getMonth() + 1).padStart(2, '0');
-            const day = String(date.getDate()).padStart(2, '0');
-            return `${year}-${month}-${day}`;
-        }
-
         function creativePlatformPreference() {
             try {
                 return window.localStorage.getItem('aiworker.selection.hits.platform') === 'hg' ? 'hg' : 'dy';
@@ -126,16 +119,12 @@ function localDateString(date = new Date()) {
                 dramaDownload: {title: '', topic: null, source: 'hongguo', fallbackReason: '', candidates: [], selectedCandidate: null, selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], relatedVideos: [], missingEpisodes: [], seriesRangeLabel: '', seriesWarnings: [], selectedEpisodes: [], allEpisodes: false, episodesExpanded: true, searching: false, episodesLoading: false, starting: false, error: '', jobId: '', jobStatus: '', progress: {}, progressMessage: '', paused: false, finished: false, background: false, showFiles: false, logs: [], logCount: 0, videoPreviewPath: '', videoPreviewUrl: '', videoPreviewError: ''},
                 dramaReviews: {topic: null, title: '', platform: 'hg', limit: 100, allReviews: false, format: 'csv', jobId: '', status: '', reviewCount: 0, sourceTotal: 0, items: [], loading: false, polling: false, error: ''},
                 dramaReviewJobs: {},
-                analyticsOverview: {},
-                analyticsTags: {categories: [], selling_points: [], hooks: [], plot_tags: []},
-                analyticsTrends: {points: []},
-                analyticsSentiment: [],
-                analyticsDramas: [],
                 analyticsPlatform: '',
-                analyticsDate: localDateString(),
-                analyticsLoading: false,
                 analyticsError: '',
-                analyticsSyncResult: null,
+                weeklyReports: [],
+                weeklyReport: null,
+                weeklyReportLoading: false,
+                weeklyReportError: '',
                 todayRankPlatform: 'dy',
                 todayRankDate: '',
                 todayRankSectionKey: '榜单',
@@ -272,7 +261,7 @@ function localDateString(date = new Date()) {
                     }
                     if (this.page === 'admin-data') await this.fetchFiles();
                     if (this.page === 'admin-drama-player') await this.fetchDramaPlayerLibrary();
-                    if (this.page === 'admin-analytics') await this.refreshAnalyticsDashboard(false);
+                    if (this.page === 'admin-analytics') await this.refreshAnalyticsDashboard();
                     if (this.page === 'admin-jobs') {
                         await this.loadConfig();
                         await this.fetchQrcodeStatus();
@@ -281,7 +270,7 @@ function localDateString(date = new Date()) {
                     }
                     this.initTooltips();
                     if (this.page === 'admin-jobs') setInterval(() => this.fetchLogs(), 1000);
-                    setInterval(() => this.fetchJobs(), 2000);
+                    if (this.page !== 'admin-analytics') setInterval(() => this.fetchJobs(), 2000);
                     if (this.tickCreativeGenerationElapsed) setInterval(() => this.tickCreativeGenerationElapsed(), 1000);
                     if (this.tickBreakdownGenerationElapsed) setInterval(() => this.tickBreakdownGenerationElapsed(), 1000);
                 },

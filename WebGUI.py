@@ -91,7 +91,7 @@ from agents.douyin_drama_fallback import DouyinDramaFallbackClient, DouyinFallba
 from core.job import CrawlJob
 from rag.api import register_rag_routes
 from runtime.job_manager import JobConflictError, JobManager, JobNotFoundError
-from scheduler.local_service import LocalScheduleService
+from scheduler.local_service import LocalScheduleService, build_default_weekly_report_schedule
 from scheduler.api import build_schedule_router
 from scheduler.audit import SystemScheduleAuditWriter
 from scheduler.repository import PostgresScheduleRepository
@@ -460,8 +460,11 @@ async def lifespan(app: FastAPI):
             schedule_database.dispose()
             schedule_database = None
         else:
+            schedule_repository = PostgresScheduleRepository(schedule_database)
+            if not any(item.id == "weekly-trend-report" for item in schedule_repository.list_definitions()):
+                schedule_repository.create_definition(build_default_weekly_report_schedule())
             local_schedule_service = LocalScheduleService(
-                PostgresScheduleRepository(schedule_database),
+                schedule_repository,
                 job_manager,
                 audit_writer=SystemScheduleAuditWriter(audit_service),
             )

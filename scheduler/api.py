@@ -31,7 +31,7 @@ from scheduler.local_service import ScheduleDefinition
 
 class SchedulePayload(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    job_type: Literal["crawl", "ranking_update", "asset_download"]
+    job_type: Literal["crawl", "ranking_update", "asset_download", "weekly_report"]
     payload: dict[str, Any]
     trigger_type: Literal["cron", "date"]
     trigger_config: dict[str, Any]

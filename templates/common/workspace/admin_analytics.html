@@ -24,10 +24,10 @@
             </div>
 
             <div class="card">
-                <div class="card-header d-flex align-items-center justify-content-between">
+                <div class="card-header d-flex align-items-center justify-content-between weekly-report-card-header">
                     <span>周报预览</span>
-                    <div class="d-flex align-items-center gap-2">
-                        <select class="form-select form-select-sm" style="width: 230px;" :value="weeklyReport?.report_id || ''" @change="selectWeeklyReport($event.target.value)">
+                    <div class="weekly-report-controls">
+                        <select class="form-select form-select-sm weekly-report-selector" :value="weeklyReport?.report_id || ''" @change="selectWeeklyReport($event.target.value)" aria-label="选择周度报告">
                             <template x-for="item in weeklyReports" :key="item.report_id">
                                 <option :value="item.report_id" x-text="`${item.platform === 'dy' ? '抖音' : '红果'} · ${item.period?.start || '-'} 至 ${item.period?.end || '-'}`"></option>
                             </template>

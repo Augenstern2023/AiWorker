@@ -21,7 +21,7 @@ def run_job(job: CrawlJob) -> int:
     worker_id = "weekly-report-worker"
     emit_event("log", job_id=job.job_id, worker_id=worker_id, platform="analytics", message="开始生成周度流行趋势报告")
     service = WeeklyReportService(root=Path.cwd())
-    reports = service.generate_all_latest(with_llm=True)
+    reports = service.generate_all_available(with_llm=True)
     for report in reports:
         if report.get("status") in {"ready", "unchanged"}:
             for path, artifact_type in ((report.get("markdown_path"), "markdown"), (report.get("excel_path"), "excel")):

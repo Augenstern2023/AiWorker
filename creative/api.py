@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import csv
 from datetime import datetime
+from io import BytesIO, StringIO
 import json
 from pathlib import Path
 import re
@@ -17,7 +19,8 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from openpyxl import Workbook
 from pydantic import BaseModel
 
 from creative.hit_breakdown import breakdown_field_guide, personalize_breakdown_field_guide
@@ -632,6 +635,81 @@ def build_creative_router(
     workspace_root = Path(root).resolve()
     lifecycle_service = TopicLifecycleService(repository, workspace_root, job_manager)
 
+    def topic_library_items(
+        principal: Principal,
+        platform: str = "",
+        status: str = "",
+        category: str = "",
+        min_score: float | None = None,
+        max_score: float | None = None,
+        captured_date: str = "",
+        has_locked_breakdown: bool | None = None,
+        lifecycle_status: str = "",
+        limit: int | None = None,
+    ) -> list[dict]:
+        approved_context_only = (
+            not principal.is_system_admin and "topic.read" not in principal.permissions
+        )
+        if approved_context_only:
+            status = "adopted"
+            has_locked_breakdown = True
+        topics = repository.list_topics(
+            platform=platform,
+            status=status,
+            category=category,
+            min_score=min_score,
+            max_score=max_score,
+            captured_date=captured_date,
+            has_locked_breakdown=has_locked_breakdown,
+            limit=limit,
+        )
+        items = lifecycle_service.enrich_topics(topics)
+        for item in items:
+            if item.get("latest_breakdown_id"):
+                workflow_adapter.reconcile_resource(
+                    "breakdown", str(item["latest_breakdown_id"])
+                )
+        if any(item.get("latest_breakdown_id") for item in items):
+            topics = repository.list_topics(
+                platform=platform,
+                status=status,
+                category=category,
+                min_score=min_score,
+                max_score=max_score,
+                captured_date=captured_date,
+                has_locked_breakdown=has_locked_breakdown,
+                limit=limit,
+            )
+            items = lifecycle_service.enrich_topics(topics)
+        if lifecycle_status:
+            items = [item for item in items if item.get("lifecycle_status") == lifecycle_status]
+        return items
+
+    def topic_breakdown_export_label(topic: dict) -> str:
+        if not topic.get("latest_breakdown_id"):
+            return "未拆解"
+        version = topic.get("latest_breakdown_version")
+        suffix = f" v{version}" if version else ""
+        if topic.get("latest_breakdown_status") in {"locked", "approved"}:
+            return f"已锁定{suffix}"
+        if topic.get("locked_breakdown_id"):
+            return f"草稿{suffix} · 已有批准版"
+        return f"草稿{suffix} · 待提交"
+
+    def topic_export_row(topic: dict) -> list[str]:
+        source_platforms = topic.get("source_platforms") or [topic.get("platform")]
+        score = topic.get("score")
+        return [
+            str(topic.get("title") or ""),
+            str(topic.get("description") or ""),
+            "、".join(str(platform) for platform in source_platforms if platform),
+            str(topic.get("rank_type") or "-"),
+            str(topic.get("category") or "-"),
+            f"{float(score or 0):.1f}",
+            str(topic.get("lifecycle_label") or topic.get("status") or "-"),
+            topic_breakdown_export_label(topic),
+        ]
+
     def creative_resource_scope(
         request: Request,
         principal: Principal = Depends(creative_api_principal),
@@ -1179,14 +1257,9 @@ def build_creative_router(
         all: bool = False,
         limit: int = Query(50, ge=1, le=500),
     ):
-        approved_context_only = (
-            not principal.is_system_admin and "topic.read" not in principal.permissions
-        )
-        if approved_context_only:
-            status = "adopted"
-            has_locked_breakdown = True
         repository_limit = None if all else (500 if lifecycle_status else limit)
-        topics = repository.list_topics(
+        items = topic_library_items(
+            principal=principal,
             platform=platform,
             status=status,
             category=category,
@@ -1194,30 +1267,80 @@ def build_creative_router(
             max_score=max_score,
             captured_date=captured_date,
             has_locked_breakdown=has_locked_breakdown,
+            lifecycle_status=lifecycle_status,
             limit=repository_limit,
         )
-        items = lifecycle_service.enrich_topics(topics)
-        for item in items:
-            if item.get("latest_breakdown_id"):
-                workflow_adapter.reconcile_resource(
-                    "breakdown", str(item["latest_breakdown_id"])
-                )
-        if any(item.get("latest_breakdown_id") for item in items):
-            topics = repository.list_topics(
-                platform=platform,
-                status=status,
-                category=category,
-                min_score=min_score,
-                max_score=max_score,
-                captured_date=captured_date,
-                has_locked_breakdown=has_locked_breakdown,
-                limit=repository_limit,
-            )
-            items = lifecycle_service.enrich_topics(topics)
-        if lifecycle_status:
-            items = [item for item in items if item.get("lifecycle_status") == lifecycle_status]
         return {"items": items if all else items[:limit]}
 
+    @router.get("/topics/export")
+    async def export_topics(
+        principal: Principal = Depends(current_principal),
+        format: str = "excel",
+        platform: str = "",
+        status: str = "",
+        category: str = "",
+        min_score: float | None = Query(None, ge=0, le=100),
+        max_score: float | None = Query(None, ge=0, le=100),
+        captured_date: str = "",
+        has_locked_breakdown: bool | None = None,
+        lifecycle_status: str = "",
+    ):
+        export_format = format.lower()
+        if export_format not in {"csv", "excel", "xlsx"}:
+            raise HTTPException(400, "format must be csv or excel")
+        items = topic_library_items(
+            principal=principal,
+            platform=platform,
+            status=status,
+            category=category,
+            min_score=min_score,
+            max_score=max_score,
+            captured_date=captured_date,
+            has_locked_breakdown=has_locked_breakdown,
+            lifecycle_status=lifecycle_status,
+            limit=None,
+        )
+        headers = ["选题", "简介", "来源", "榜单", "题材", "推荐分", "状态", "拆解版本"]
+        rows = [topic_export_row(item) for item in items]
+
+        if export_format == "csv":
+            content = StringIO(newline="")
+            writer = csv.writer(content)
+            writer.writerow(headers)
+            writer.writerows(rows)
+            return StreamingResponse(
+                iter([content.getvalue().encode("utf-8-sig")]),
+                media_type="text/csv",
+                headers={
+                    "Content-Disposition": (
+                        f"attachment; filename*=UTF-8''{quote('选题库导出.csv')}"
+                    )
+                },
+            )
+
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "选题库"
+        worksheet.append(headers)
+        for row in rows:
+            worksheet.append(row)
+        worksheet.freeze_panes = "A2"
+        for column, width in zip("ABCDEFGH", (28, 48, 18, 16, 16, 12, 24, 24)):
+            worksheet.column_dimensions[column].width = width
+        output = BytesIO()
+        workbook.save(output)
+        output.seek(0)
+        return StreamingResponse(
+            output,
+            media_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            headers={
+                "Content-Disposition": (
+                    f"attachment; filename*=UTF-8''{quote('选题库导出.xlsx')}"
+                )
+            },
+        )
 
     @router.get("/topics/{topic_id}")
     async def get_topic(

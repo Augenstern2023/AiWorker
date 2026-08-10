@@ -16,7 +16,9 @@
 # 详细许可条款请参阅项目根目录下的LICENSE文件。
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
-from writer_agent.service import build_writer_report_markdown, normalize_writer_report
+import json
+
+from writer_agent.service import build_writer_report_markdown, normalize_writer_report, writer_messages
 
 
 def test_writer_agent_normalizes_a_structured_writer_report():
@@ -63,3 +65,20 @@ def test_writer_agent_tolerates_malformed_model_fields():
     assert report["scores"]["overall"] == 0
     assert report["strengths"] == []
     assert report["findings"][0]["priority"] == "P2"
+
+
+def test_writer_agent_conversation_prompt_does_not_request_a_review_or_scores():
+    messages = writer_messages(
+        "第 30 集：主角在法宝失控后选择向师叔坦白。",
+        [{"role": "user", "content": "我想保留师徒关系的轻松感。"}],
+        "这一段怎样让转折更自然？",
+        review_requested=False,
+        material_name="第1-30集场次剧本.txt",
+        material_catalog=[{"name": "第1-10集.docx", "length": 1000}, {"name": "第1-30集场次剧本.txt", "length": 3000}],
+    )
+
+    assert '"scores"' not in messages[0]["content"]
+    payload = json.loads(messages[-1]["content"])
+    assert payload["当前材料"]["name"] == "第1-30集场次剧本.txt"
+    assert payload["当前材料"]["content"].startswith("第 30 集")
+    assert payload["材料目录"][-1]["name"] == "第1-30集场次剧本.txt"

@@ -700,6 +700,22 @@
             border-left: 3px solid transparent;
             border-radius: 2px;
         }
+        .weekly-report-card-header {
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .weekly-report-controls {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            flex-wrap: wrap;
+            gap: 8px;
+            flex-shrink: 0;
+        }
+        .weekly-report-selector {
+            flex: 0 1 300px;
+            width: 300px;
+        }
         @media (max-width: 767.98px) {
             :root { --sidebar-width: 58px; }
             .sidebar > .p-4 { padding: 14px 8px !important; text-align: center; }
@@ -723,4 +739,14 @@
             .creative-project-workspace tbody td { border: 0; padding: 4px 0; white-space: normal !important; }
             .creative-project-workspace .btn-group { width: 100%; margin-top: 12px; }
             .creative-project-workspace .btn-group .btn { flex: 1 1 50%; }
+        }
+        @media (max-width: 575.98px) {
+            .weekly-report-card-header > span,
+            .weekly-report-controls {
+                width: 100%;
+            }
+            .weekly-report-selector {
+                flex-basis: 100%;
+                width: 100%;
+            }
         }

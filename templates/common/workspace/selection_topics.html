@@ -1,12 +1,23 @@
 <section>
-            <div class="d-flex align-items-center justify-content-between mb-3">
+            <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
                 <div>
                     <h3 class="mb-1">选题库</h3>
                     <div class="small text-muted">已采纳的爆款选题，作为后续创作的唯一入口</div>
                 </div>
-                <button class="btn btn-outline-secondary btn-sm" @click="fetchTopicLibrary()" :disabled="topicLibrary.loading">
-                    <i class="bi bi-arrow-clockwise me-1"></i>刷新
-                </button>
+                <div class="d-flex align-items-center gap-2">
+                    <div class="dropdown">
+                        <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="导出选题库" aria-label="导出选题库">
+                            <i class="bi bi-download"></i>
+                        </button>
+                        <ul class="dropdown-menu dropdown-menu-end">
+                            <li><button class="dropdown-item" type="button" @click="exportTopicLibrary('excel')"><i class="bi bi-file-earmark-excel me-2"></i>Excel</button></li>
+                            <li><button class="dropdown-item" type="button" @click="exportTopicLibrary('csv')"><i class="bi bi-filetype-csv me-2"></i>CSV</button></li>
+                        </ul>
+                    </div>
+                    <button class="btn btn-outline-secondary btn-sm" @click="fetchTopicLibrary()" :disabled="topicLibrary.loading" title="刷新选题库" aria-label="刷新选题库">
+                        <i class="bi bi-arrow-clockwise"></i>
+                    </button>
+                </div>
             </div>
             <div class="card mb-3">
                 <div class="card-body">

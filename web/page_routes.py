@@ -51,7 +51,6 @@ PAGE_ROUTES = (
     ("/admin/audit", "*", "审计日志"),
     ("/admin/departments", "*", "组织架构"),
     ("/admin/navigation", "*", "导航配置"),
-    ("/admin/schedules", "*", "调度中心"),
 )
 
 

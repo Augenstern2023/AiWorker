@@ -394,8 +394,6 @@ def test_global_disable_precedes_whitelist_and_project_owner_navigation_privileg
             "GET",
             "/api/workflow/tasks",
         ),
-        ("/admin/schedules", "GET", "/api/jobs/scheduled-job-1"),
-        ("/admin/schedules", "GET", "/api/jobs/scheduled-job-1/logs"),
     ),
 )
 def test_page_grant_includes_the_apis_used_by_that_page(

@@ -42,6 +42,20 @@ def test_analytics_page_is_a_weekly_report_dashboard_without_legacy_sync():
     assert "weeklyReport?.recommendation_metrics?.points" in script
 
 
+def test_weekly_report_selector_keeps_the_full_period_visible():
+    root = Path(__file__).resolve().parents[1]
+    template = (root / "templates/common/workspace/admin_analytics.html").read_text(
+        encoding="utf-8"
+    )
+    styles = (root / "static/css/workspaces.css").read_text(encoding="utf-8")
+
+    assert "weekly-report-controls" in template
+    assert "weekly-report-selector" in template
+    assert ".weekly-report-selector" in styles
+    assert "flex: 0 1 300px" in styles
+    assert ".weekly-report-controls" in styles
+
+
 def test_weekly_report_is_reachable_from_the_navigation_and_bound_to_analytics_api():
     page = next(item for item in PAGE_ROUTES if item[0] == "/admin/analytics")
     nav = next(item for item in NAVIGATION_CATALOG if item["route"] == "/admin/analytics")

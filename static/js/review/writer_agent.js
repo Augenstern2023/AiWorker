@@ -4,6 +4,8 @@
     const sessionsElement = document.getElementById('writer-agent-sessions');
     const errorElement = document.getElementById('writer-agent-error');
     const refreshButton = document.getElementById('writer-agent-refresh');
+    const reportsToggleButton = document.getElementById('writer-agent-toggle-reports');
+    const layoutElement = document.querySelector('.writer-agent-layout');
     const newButton = document.getElementById('writer-agent-new');
     const detailElement = document.getElementById('writer-agent-session-detail');
     const titleElement = document.getElementById('writer-agent-session-title');
@@ -25,14 +27,25 @@
     let thinkingTimer = null;
     const thinkingStages = [
         '正在阅读你提交的材料',
+        '正在结合材料与对话上下文',
         '正在梳理结构与人物关系',
-        '正在推演冲突、节奏与钩子',
-        '正在生成结构化评审',
+        '正在生成本轮答复',
     ];
+    const materialReceiptPrompt = '我刚提交了创作材料。请确认已读取，并结合当前材料简要说明可以继续讨论的方向。';
 
     if (!sessionsElement || !errorElement || !detailElement || !titleElement || !materialNameElement || !emptyElement || !conversation || !messageInput || !fileInput || !attachButton || !fileNameElement || !sendButton || !reportsElement || !reportStatus) return;
 
     function showError(message = '') { errorElement.textContent = message; errorElement.classList.toggle('d-none', !message); }
+
+    function toggleReportsPanel() {
+        const isHidden = layoutElement.classList.toggle('reports-hidden');
+        reportsToggleButton.title = isHidden ? '展开评审报告' : '隐藏评审报告';
+        reportsToggleButton.setAttribute('aria-label', reportsToggleButton.title);
+        reportsToggleButton.setAttribute('aria-pressed', String(!isHidden));
+        const icon = reportsToggleButton.querySelector('i');
+        icon.className = isHidden ? 'bi bi-layout-sidebar-inset' : 'bi bi-layout-sidebar-inset-reverse';
+        icon.setAttribute('aria-hidden', 'true');
+    }
 
     async function readJson(response) {
         const payload = await response.json().catch(() => ({}));
@@ -163,6 +176,7 @@
         emptyElement.classList.toggle('d-none', Boolean(messages.length) || showTemporaryMessages);
         conversation.classList.toggle('d-none', !messages.length && !showTemporaryMessages);
         messages.forEach((message) => {
+            if (message.display_user_message === false) return;
             if (message.kind === 'material') { conversation.append(renderMaterialMessage(message)); return; }
             const article = document.createElement('article');
             article.className = `writer-agent-message${message.role === 'user' ? ' is-user' : ''}`;
@@ -227,10 +241,10 @@
         } catch (error) { showError(error.message); }
     }
 
-    async function ask(message, showPendingMessage = true) {
+    async function ask(message, showPendingMessage = true, displayUserMessage = true) {
         beginThinking(message, showPendingMessage);
         try {
-            const updated = await readJson(await aiworkerApi.request(`/api/writer-agent/sessions/${activeSession.id}/messages`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message})}));
+            const updated = await readJson(await aiworkerApi.request(`/api/writer-agent/sessions/${activeSession.id}/messages`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message, display_user_message: displayUserMessage})}));
             endThinking(false);
             updateSession(updated);
         } catch (error) {
@@ -249,7 +263,6 @@
             ? await aiworkerApi.request('/api/writer-agent/sessions/file', {method: 'POST', headers: {'X-Writer-Filename': encodeURIComponent(file.name)}, body: file})
             : await aiworkerApi.request('/api/writer-agent/sessions', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title: deriveTitle(content), content})});
         updateSession(await readJson(response));
-        await ask('请对这份材料做一次全面的短剧/漫剧编剧评审，先给出评分和最重要的优化方向。', false);
     }
 
     async function appendUploadedMaterial(file) {
@@ -264,9 +277,12 @@
             showError(); setBusy(true);
             if (!activeSession) {
                 await createInitialSession(file, message);
+                if (file && message) await ask(message, true);
+                else await ask(materialReceiptPrompt, false, false);
             } else {
                 if (file) await appendUploadedMaterial(file);
-                await ask(message || '请结合刚刚提交的补充材料继续评审，并指出最需要修改的部分。', Boolean(message));
+                if (message) await ask(message, true);
+                else if (file) await ask(materialReceiptPrompt, false, false);
             }
             messageInput.value = ''; clearAttachment();
         } catch (error) { showError(error.message); } finally { setBusy(false); }
@@ -286,6 +302,7 @@
     sendButton.addEventListener('click', sendMessage);
     messageInput.addEventListener('keydown', (event) => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); sendMessage(); } });
     refreshButton.addEventListener('click', () => loadSessions(false));
+    reportsToggleButton.addEventListener('click', toggleReportsPanel);
     newButton.addEventListener('click', () => { activeSession = null; clearAttachment(); messageInput.value = ''; renderActiveSession(); messageInput.focus(); });
     loadSessions(true);
 })();

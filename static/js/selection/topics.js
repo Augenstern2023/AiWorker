@@ -28,6 +28,21 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
+                topicLibraryExportParams(format) {
+                    const params = new URLSearchParams({status: 'adopted', format});
+                    if (this.topicLibrary.platform) params.set('platform', this.topicLibrary.platform);
+                    if (this.topicLibrary.lifecycleStatus) params.set('lifecycle_status', this.topicLibrary.lifecycleStatus);
+                    if (this.topicLibrary.category.trim()) params.set('category', this.topicLibrary.category.trim());
+                    if (this.topicLibrary.minScore !== '') params.set('min_score', this.topicLibrary.minScore);
+                    if (this.topicLibrary.hasLocked !== '') params.set('has_locked_breakdown', this.topicLibrary.hasLocked);
+                    return params;
+                },
+
+                exportTopicLibrary(format) {
+                    const params = this.topicLibraryExportParams(format);
+                    window.open(`/api/creative/topics/export?${params.toString()}`, '_blank', 'noopener');
+                },
+
                 async fetchTopicLibrary() {
                     this.topicLibrary.loading = true;
                     this.topicLibrary.error = '';

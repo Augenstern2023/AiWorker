@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from io import BytesIO
@@ -81,6 +82,15 @@ class FakeProvider:
         }
 
 
+class CapturingProvider(FakeProvider):
+    def __init__(self) -> None:
+        self.messages = []
+
+    async def complete_json(self, messages):
+        self.messages = messages
+        return await super().complete_json(messages)
+
+
 def _client(tmp_path, user_id: str = "writer-1") -> TestClient:
     app = FastAPI()
     app.dependency_overrides[current_principal] = lambda: _principal(user_id)
@@ -150,7 +160,8 @@ def test_writer_agent_persists_chat_report_and_exports_markdown(tmp_path, monkey
 
     historical_export = client.get(f"/api/writer-agent/sessions/{created.json()['id']}/reports/{report_id}/export")
     assert historical_export.status_code == 200
-    assert len(second.json()["reports"]) == 2
+    assert len(second.json()["reports"]) == 1
+    assert "report_id" not in second.json()["messages"][-1]
 
     missing_report = client.get(f"/api/writer-agent/sessions/{created.json()['id']}/reports/missing/export")
     assert missing_report.status_code == 404
@@ -169,6 +180,53 @@ def test_writer_agent_adds_uploaded_material_to_an_existing_session(tmp_path) ->
     assert updated.status_code == 200
     assert updated.json()["messages"][-1]["kind"] == "material"
     assert "补充材料" in updated.json()["content"]
+
+
+def test_writer_agent_normal_chat_uses_the_latest_material_without_creating_a_report(tmp_path, monkeypatch) -> None:
+    provider = CapturingProvider()
+    monkeypatch.setattr(writer_agent_api, "create_provider", lambda: provider)
+    client = _client(tmp_path)
+    created = client.post("/api/writer-agent/sessions", json={"content": "旧剧本：主角在婚礼上反击。", "title": "旧剧本"})
+    session_id = created.json()["id"]
+    client.post(
+        f"/api/writer-agent/sessions/{session_id}/materials/file",
+        content="新剧本：师叔的法宝失控，主角决定坦白。".encode("utf-8"),
+        headers={"X-Writer-Filename": quote("第1-30集.txt")},
+    )
+
+    response = client.post(f"/api/writer-agent/sessions/{session_id}/messages", json={"message": "这一段转折怎样更自然？"})
+
+    assert response.status_code == 200
+    assert response.json()["reports"] == []
+    assert "report_id" not in response.json()["messages"][-1]
+    assert '"scores"' not in provider.messages[0]["content"]
+    request_payload = json.loads(provider.messages[-1]["content"])
+    assert request_payload["当前材料"]["name"] == "第1-30集.txt"
+    assert request_payload["当前材料"]["content"].startswith("新剧本")
+    assert "旧剧本：主角在婚礼上反击。" not in request_payload["当前材料"]["content"]
+
+
+def test_writer_agent_can_store_a_hidden_material_receipt_prompt(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(writer_agent_api, "create_provider", lambda: FakeProvider())
+    client = _client(tmp_path)
+    created = client.post(
+        "/api/writer-agent/sessions/file",
+        content="第一集：主角在婚礼上被当众羞辱。".encode("utf-8"),
+        headers={"X-Writer-Filename": "episode-1.md"},
+    )
+
+    response = client.post(
+        f"/api/writer-agent/sessions/{created.json()['id']}/messages",
+        json={
+            "message": "我刚提交了创作材料。请确认已读取，并结合当前材料简要说明可以继续讨论的方向。",
+            "display_user_message": False,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["reports"] == []
+    assert response.json()["messages"][-2]["display_user_message"] is False
+    assert response.json()["messages"][-1]["role"] == "assistant"
 
 
 def test_writer_agent_migrates_legacy_sessions_to_report_history(tmp_path) -> None:

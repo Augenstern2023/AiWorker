@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 
@@ -30,6 +31,7 @@ SCORE_LABELS = {
     "pacing": "节奏",
     "hook": "钩子",
 }
+_REVIEW_REQUEST_PATTERN = re.compile(r"评审|审核|评分|打分|评估|诊断|审稿|review", re.IGNORECASE)
 
 
 def _score(value: Any) -> int:
@@ -68,8 +70,20 @@ def normalize_writer_report(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def writer_messages(content: str, history: list[dict[str, str]], user_message: str) -> list[dict[str, str]]:
-    contract = {
+def is_review_request(user_message: str) -> bool:
+    return bool(_REVIEW_REQUEST_PATTERN.search(user_message or ""))
+
+
+def writer_messages(
+    content: str,
+    history: list[dict[str, Any]],
+    user_message: str,
+    *,
+    review_requested: bool = True,
+    material_name: str = "当前创作材料",
+    material_catalog: list[dict[str, Any]] | None = None,
+) -> list[dict[str, str]]:
+    review_contract = {
         "reply": "以短剧/漫剧编剧大师身份给出的本轮答复",
         "scores": {"overall": 0, "structure": 0, "character": 0, "pacing": 0, "hook": 0},
         "summary": "结构化总评",
@@ -77,9 +91,20 @@ def writer_messages(content: str, history: list[dict[str, str]], user_message: s
         "findings": [{"priority": "P1/P2", "dimension": "剧情结构/人物/节奏/爽点/钩子", "title": "问题", "evidence": "输入中的证据", "suggestion": "可执行改法", "route": "下一步处理"}],
         "next_questions": ["有助于继续创作的追问"],
     }
+    contract = review_contract if review_requested else {"reply": "结合当前材料与对话上下文给出的直接答复"}
+    mode_instruction = (
+        "用户已明确要求评审；给出评分、结构化诊断和可执行优化意见。"
+        if review_requested else
+        "用户未要求评审。只直接回答本轮问题，不输出评分、总评、评审报告或固定诊断栏目。"
+    )
+    conversation_history = [
+        {"role": str(item.get("role") or "user"), "content": str(item.get("content") or "")}
+        for item in history[-12:]
+        if item.get("kind") != "material"
+    ]
     return [
-        {"role": "system", "content": "你是短剧/漫剧编剧大师。只依据用户提供的内容，不编造已发生剧情。每轮都给出评分、结构化诊断和可执行优化意见；保持大纲意图，除非明确建议人工改大纲。只返回 JSON：" + json.dumps(contract, ensure_ascii=False)},
-        {"role": "user", "content": json.dumps({"创作材料": content, "历史对话": history[-12:], "本轮问题": user_message}, ensure_ascii=False)},
+        {"role": "system", "content": "你是短剧/漫剧编剧大师。当前材料是剧情事实的唯一来源，材料目录只用于辨认文件，不得据此推断剧情、集数或版本。历史对话中的助手说法不是事实证据；与当前材料冲突时，以当前材料为准。不得编造未提供的剧情、人物或集数。" + mode_instruction + "只返回 JSON：" + json.dumps(contract, ensure_ascii=False)},
+        {"role": "user", "content": json.dumps({"当前材料": {"name": material_name, "content": content}, "材料目录": material_catalog or [], "历史对话": conversation_history, "本轮问题": user_message}, ensure_ascii=False)},
     ]
 
 

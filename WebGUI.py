@@ -91,10 +91,6 @@ from agents.douyin_drama_fallback import DouyinDramaFallbackClient, DouyinFallba
 from core.job import CrawlJob
 from rag.api import register_rag_routes
 from runtime.job_manager import JobConflictError, JobManager, JobNotFoundError
-from scheduler.local_service import LocalScheduleService, build_default_weekly_report_schedule
-from scheduler.api import build_schedule_router
-from scheduler.audit import SystemScheduleAuditWriter
-from scheduler.repository import PostgresScheduleRepository
 from system_database import SystemDatabase, SystemDatabaseSettings
 from web.navigation_repository import NavigationRepository
 from web.navigation_api import build_navigation_router
@@ -447,56 +443,15 @@ job_manager = JobManager(cwd=Path(__file__).resolve().parent)
 async def lifespan(app: FastAPI):
     backend_logger.info("Web GUI started")
     cleanup_task = asyncio.create_task(_periodic_data_operation_cleanup())
-    schedule_database: SystemDatabase | None = None
-    local_schedule_service: LocalScheduleService | None = None
-    scheduled_job_ids: set[str] = set()
-    try:
-        schedule_database = SystemDatabase(SystemDatabaseSettings.from_environment())
-        database_health = schedule_database.health()
-        if not database_health.schema_current:
-            backend_logger.error(
-                "Local scheduler disabled because the PostgreSQL system schema is unavailable or outdated"
-            )
-            schedule_database.dispose()
-            schedule_database = None
-        else:
-            schedule_repository = PostgresScheduleRepository(schedule_database)
-            if not any(item.id == "weekly-trend-report" for item in schedule_repository.list_definitions()):
-                schedule_repository.create_definition(build_default_weekly_report_schedule())
-            local_schedule_service = LocalScheduleService(
-                schedule_repository,
-                job_manager,
-                audit_writer=SystemScheduleAuditWriter(audit_service),
-            )
-            local_schedule_service.start()
-            app.state.local_schedule_service = local_schedule_service
-            app.state.schedule_repository = local_schedule_service.repository
-    except ValueError:
-        backend_logger.info("Local scheduler disabled because PostgreSQL system database is not configured")
-    except Exception:
-        backend_logger.exception("Local scheduler disabled because it could not start")
-        if schedule_database is not None:
-            schedule_database.dispose()
-            schedule_database = None
     try:
         yield
     finally:
-        if local_schedule_service is not None:
-            local_schedule_service.shutdown()
-            scheduled_job_ids = (
-                local_schedule_service.cancel_active_runs_for_process_shutdown()
-            )
-        if schedule_database is not None:
-            schedule_database.dispose()
         cleanup_task.cancel()
         with suppress(asyncio.CancelledError):
             await cleanup_task
         backend_logger.info("Web GUI shutting down")
         for job in job_manager.list_jobs():
-            if (
-                job["job_id"] not in scheduled_job_ids
-                and job["status"] in {"pending", "running", "stopping"}
-            ):
+            if job["status"] in {"pending", "running", "stopping"}:
                 try:
                     job_manager.stop(job["job_id"])
                 except Exception:
@@ -604,7 +559,6 @@ app.include_router(
 )
 app.include_router(build_audit_router(audit_service))
 app.include_router(build_navigation_router())
-app.include_router(build_schedule_router())
 if system_database is not None:
     app.include_router(
         build_organization_router(DepartmentService(system_database), audit_service)

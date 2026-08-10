@@ -225,8 +225,5 @@ def _import_order(source_counts: dict[str, int]) -> tuple[str, ...]:
         "workflow_submissions",
         "approval_records",
         "audit_logs",
-        "scheduling_definitions",
-        "scheduling_runs",
-        "scheduling_alerts",
     )
     return tuple(table for table in preferred_order if table in source_counts)

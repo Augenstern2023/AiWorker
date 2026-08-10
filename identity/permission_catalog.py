@@ -462,16 +462,6 @@ NAVIGATION_CATALOG = (
         "sort_order": 70,
         "is_system": True,
     },
-    {
-        "id": "navigation:admin:schedules",
-        "parent_id": "navigation:admin",
-        "label": "调度中心",
-        "icon": "bi-clock-history",
-        "route": "/admin/schedules",
-        "required_permission": "*",
-        "sort_order": 80,
-        "is_system": True,
-    },
 )
 
 PERMISSION_DEPENDENCIES = {

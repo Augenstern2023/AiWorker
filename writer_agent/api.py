@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 from io import BytesIO
@@ -33,7 +34,7 @@ from identity.dependencies import current_principal
 from identity.schema import Principal
 from pydantic import BaseModel
 
-from .service import build_writer_report_markdown, normalize_writer_report, writer_messages
+from .service import build_writer_report_markdown, is_review_request, normalize_writer_report, writer_messages
 
 
 _TEXT_UPLOAD_EXTENSIONS = frozenset({
@@ -41,6 +42,7 @@ _TEXT_UPLOAD_EXTENSIONS = frozenset({
 })
 _DOCUMENT_UPLOAD_EXTENSIONS = frozenset({".docx", ".pdf"})
 _MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+_SUPPLEMENT_MARKER = re.compile(r"\n\n\[补充材料：(?P<name>[^\]]+)\]\n")
 
 
 class SessionCreateRequest(BaseModel):
@@ -50,6 +52,7 @@ class SessionCreateRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+    display_user_message: bool = True
 
 
 class WriterAgentStore:
@@ -140,24 +143,27 @@ class WriterAgentStore:
         session_id: int,
         user_id: str | None,
         messages: list[dict[str, Any]],
-        report: dict[str, Any],
+        report: dict[str, Any] | None,
     ) -> dict[str, Any]:
         session = self.get(session_id, user_id)
         if not session:
             return {}
         reports = list(session.get("reports") or [])
-        report_entry = {
-            "id": f"report-{len(reports) + 1}",
-            "created_at": time.time(),
-            "report": report,
-        }
-        reports.append(report_entry)
-        if messages and messages[-1].get("role") == "assistant":
-            messages[-1]["report_id"] = report_entry["id"]
+        latest_report = dict(session.get("report") or {})
+        if report is not None:
+            report_entry = {
+                "id": f"report-{len(reports) + 1}",
+                "created_at": time.time(),
+                "report": report,
+            }
+            reports.append(report_entry)
+            latest_report = report
+            if messages and messages[-1].get("role") == "assistant":
+                messages[-1]["report_id"] = report_entry["id"]
         with self._connect() as conn:
             conn.execute(
                 "UPDATE writer_agent_sessions SET messages_json = ?, report_json = ?, reports_json = ?, updated_at = ? WHERE id = ?" if user_id is None else "UPDATE writer_agent_sessions SET messages_json = ?, report_json = ?, reports_json = ?, updated_at = ? WHERE id = ? AND user_id = ?",
-                (json.dumps(messages, ensure_ascii=False), json.dumps(report, ensure_ascii=False), json.dumps(reports, ensure_ascii=False), time.time(), session_id) if user_id is None else (json.dumps(messages, ensure_ascii=False), json.dumps(report, ensure_ascii=False), json.dumps(reports, ensure_ascii=False), time.time(), session_id, user_id),
+                (json.dumps(messages, ensure_ascii=False), json.dumps(latest_report, ensure_ascii=False), json.dumps(reports, ensure_ascii=False), time.time(), session_id) if user_id is None else (json.dumps(messages, ensure_ascii=False), json.dumps(latest_report, ensure_ascii=False), json.dumps(reports, ensure_ascii=False), time.time(), session_id, user_id),
             )
         return self.get(session_id, user_id) or {}
 
@@ -245,6 +251,22 @@ def _material_message(name: str, content: str) -> dict[str, Any]:
     }
 
 
+def _session_materials(session: dict[str, Any]) -> list[dict[str, Any]]:
+    content = str(session.get("content") or "")
+    first_name = str(session.get("filename") or session.get("title") or "已粘贴创作材料")
+    matches = list(_SUPPLEMENT_MARKER.finditer(content))
+    materials: list[dict[str, Any]] = []
+    initial_content = content[:matches[0].start()] if matches else content
+    if initial_content.strip():
+        materials.append({"name": first_name, "content": initial_content.strip()})
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+        material_content = content[match.end():end].strip()
+        if material_content:
+            materials.append({"name": match.group("name").strip(), "content": material_content})
+    return materials or [{"name": first_name, "content": content}]
+
+
 def build_writer_agent_router(runtime_dir: str | Path = ".runtime") -> APIRouter:
     store = WriterAgentStore(Path(runtime_dir) / "writer_agent" / "writer_agent.db")
     router = APIRouter(prefix="/api/writer-agent", tags=["writer-agent"])
@@ -316,12 +338,30 @@ def build_writer_agent_router(runtime_dir: str | Path = ".runtime") -> APIRouter
         if not message:
             raise HTTPException(400, "请输入要讨论的问题")
         history = list(session.get("messages") or [])
+        materials = _session_materials(session)
+        current_material = materials[-1]
+        review_requested = is_review_request(message)
+        material_catalog = [{"name": item["name"], "length": len(item["content"])} for item in materials]
         try:
-            raw = await create_provider().complete_json(writer_messages(session["content"], history, message))
+            raw = await create_provider().complete_json(writer_messages(
+                current_material["content"], history, message,
+                review_requested=review_requested,
+                material_name=current_material["name"],
+                material_catalog=material_catalog,
+            ))
         except Exception as exc:
             raise HTTPException(503, f"编剧大师暂时无法响应：{exc}") from exc
-        report = normalize_writer_report(raw if isinstance(raw, dict) else {})
-        history.extend([{"role": "user", "content": message}, {"role": "assistant", "content": report["reply"]}])
+        payload_data = raw if isinstance(raw, dict) else {}
+        report = normalize_writer_report(payload_data) if review_requested else None
+        reply = report["reply"] if report is not None else str(payload_data.get("reply") or "我已结合当前材料与上下文整理回答。").strip()
+        history.extend([
+            {
+                "role": "user",
+                "content": message,
+                "display_user_message": payload.display_user_message,
+            },
+            {"role": "assistant", "content": reply},
+        ])
         return store.save_turn(session_id, session_user_id(principal), history, report)
 
     @router.get("/sessions/{session_id}/export")

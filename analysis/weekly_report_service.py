@@ -29,7 +29,7 @@ from analysis.today_rank_service import RankSnapshot, TodayRankService
 PLATFORMS = frozenset({"dy", "hg"})
 WEEKDAY_COUNT = 5
 RECOMMENDATION_LIMIT = 5
-REPORT_VERSION = 8
+REPORT_VERSION = 10
 NON_THEME_TAGS = frozenset({"短剧", "漫剧", "真人剧", "AI剧", "AI短剧", "3D", "2D", "竖屏", "横屏"})
 
 
@@ -130,12 +130,37 @@ class WeeklyReportService:
         return report
 
     def generate_latest(self, platform: str, as_of: datetime | None = None, with_llm: bool = True) -> dict[str, Any]:
-        report = self.build_latest(platform, as_of=as_of, with_llm=with_llm)
-        if report["status"] != "ready":
-            return report
+        platform = platform.strip().lower()
+        if platform not in PLATFORMS:
+            raise ValueError("platform must be dy or hg")
+        snapshots = self._complete_week_snapshots(platform, as_of or datetime.now())
+        if snapshots is None:
+            return {"platform": platform, "status": "insufficient_data"}
+        return self._generate_snapshots(platform, snapshots, with_llm=with_llm)
+
+    def generate_all_available(
+        self,
+        platform: str = "",
+        as_of: datetime | None = None,
+        with_llm: bool = True,
+    ) -> list[dict[str, Any]]:
+        selected_platforms = (platform.strip().lower(),) if platform else tuple(sorted(PLATFORMS))
+        if any(value not in PLATFORMS for value in selected_platforms):
+            raise ValueError("platform must be dy or hg")
+        now = as_of or datetime.now()
+        reports: list[dict[str, Any]] = []
+        for value in selected_platforms:
+            for snapshots in self._complete_weeks_snapshots(value, now):
+                reports.append(self._generate_snapshots(value, snapshots, with_llm=with_llm))
+        return reports
+
+    def _generate_snapshots(self, platform: str, snapshots: list[RankSnapshot], with_llm: bool) -> dict[str, Any]:
+        report = self._build_report(platform, snapshots)
         existing = self.repository.get(report["report_id"])
         if existing and existing.get("source_fingerprint") == report["source_fingerprint"]:
             return {**existing, "status": "unchanged"}
+        if with_llm:
+            report["llm"] = self._llm_summary(report)
         markdown_path, excel_path = self._write_exports(report)
         return self.repository.upsert(report, markdown_path, excel_path)
 
@@ -163,6 +188,10 @@ class WeeklyReportService:
         return next((item for item in self.list_reports(report["platform"], as_of=as_of) if item["report_id"] == report_id), report)
 
     def _complete_week_snapshots(self, platform: str, as_of: datetime) -> list[RankSnapshot] | None:
+        weeks = self._complete_weeks_snapshots(platform, as_of)
+        return weeks[0] if weeks else None
+
+    def _complete_weeks_snapshots(self, platform: str, as_of: datetime) -> list[list[RankSnapshot]]:
         by_day: dict[date, RankSnapshot] = {}
         for snapshot in self.rank_service.list_snapshots(platform):
             if snapshot.captured_at > as_of:
@@ -176,12 +205,13 @@ class WeeklyReportService:
             if week_start + timedelta(days=6) >= as_of.date():
                 continue
             weeks[week_start][snapshot_day] = snapshot
+        complete_weeks: list[list[RankSnapshot]] = []
         for week_start in sorted(weeks, reverse=True):
             days = weeks[week_start]
             weekdays = [week_start + timedelta(days=offset) for offset in range(WEEKDAY_COUNT)]
             if all(day in days for day in weekdays):
-                return [days[day] for day in weekdays]
-        return None
+                complete_weeks.append([days[day] for day in weekdays])
+        return complete_weeks
 
     def _build_report(self, platform: str, snapshots: list[RankSnapshot]) -> dict[str, Any]:
         week_start = snapshots[0].captured_at.date()
@@ -458,41 +488,50 @@ def _recommendation_metrics(
     snapshots: list[RankSnapshot],
 ) -> dict[str, Any]:
     metric_labels = {"heat": "热度", "like_count": "点赞", "favorite_count": "收藏", "comment_count": "评论"}
-    series: list[dict[str, Any]] = []
+    candidates: list[tuple[dict[str, Any], list[dict[str, Any] | None]]] = []
     for item in recommendations:
         days = boards.get(str(item.get("board") or ""), [])
         identity = str(item.get("identity") or "")
         records = [day.get(identity) if identity else None for day in days]
-        metric = next(
-            (
-                name
-                for name in ("heat", "like_count", "favorite_count", "comment_count")
-                if any(record and _number(record.get(name)) > 0 for record in records)
-            ),
-            None,
-        )
-        if metric is None:
-            continue
-        values = [_number(record.get(metric)) if record else None for record in records]
-        observed = [value for value in values if value is not None and value > 0]
-        if not observed:
-            continue
-        weekly_average = round(sum(observed) / len(observed), 1)
+        if records:
+            candidates.append((item, records))
+
+    metric_candidates = {
+        name: [
+            (item, records)
+            for item, records in candidates
+            if all(record is not None and _number(record.get(name)) > 0 for record in records)
+        ]
+        for name in metric_labels
+    }
+    selected_metric = max(
+        metric_labels,
+        key=lambda name: (len(metric_candidates[name]), -list(metric_labels).index(name)),
+    )
+    selected = metric_candidates[selected_metric]
+    series: list[dict[str, Any]] = []
+    for item, records in selected:
+        values = [_number(record.get(selected_metric)) for record in records if record is not None]
+        weekly_average = round(sum(values) / len(values), 1)
         series.append(
             {
                 "title": item["title"],
                 "board": item["board"],
-                "metric": metric,
-                "metric_label": metric_labels[metric],
+                "metric": selected_metric,
+                "metric_label": metric_labels[selected_metric],
                 "weekly_average": weekly_average,
                 "values": values,
-                "index_values": [round(value * 100 / weekly_average, 1) if value is not None else None for value in values],
+                "index_values": [round(value * 100 / weekly_average, 1) for value in values],
             }
         )
+    source_label = (
+        f"来源：推荐剧目的完整非零{metric_labels[selected_metric]}指标；全部曲线统一为{metric_labels[selected_metric]}，每部剧周均=100"
+        if series else "暂无同时满足完整非零要求的推荐剧目指标"
+    )
     return {
         "unit": "weekly_average_index",
         "source": "recommended_dramas",
-        "source_label": "来源：推荐剧目的榜单快照指标；每部剧周均=100",
+        "source_label": source_label,
         "points": [snapshot.captured_at.strftime("%Y-%m-%d") for snapshot in snapshots],
         "series": series,
     }

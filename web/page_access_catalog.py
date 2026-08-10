@@ -382,20 +382,6 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
         ("GET", "/api/admin/navigation/{item_id}/accounts"),
         ("PUT", "/api/admin/navigation/{item_id}/accounts"),
     ),
-    "/admin/schedules": (
-        ("GET", "/api/admin/schedules"),
-        ("POST", "/api/admin/schedules"),
-        ("PATCH", "/api/admin/schedules/{schedule_id}"),
-        ("POST", "/api/admin/schedules/{schedule_id}/enabled"),
-        ("DELETE", "/api/admin/schedules/{schedule_id}"),
-        ("POST", "/api/admin/schedules/{schedule_id}/trigger"),
-        ("GET", "/api/admin/schedules/{schedule_id}/runs"),
-        ("GET", "/api/admin/schedules/{schedule_id}/alerts"),
-        ("POST", "/api/admin/schedule-runs/{run_id}/retry"),
-        ("POST", "/api/admin/schedule-runs/{run_id}/cancel"),
-        ("GET", "/api/jobs/{job_id}"),
-        ("GET", "/api/jobs/{job_id}/logs"),
-    ),
 }
 
 

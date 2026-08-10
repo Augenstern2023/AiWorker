@@ -56,7 +56,6 @@ PAGE_TEMPLATES = {
     "/admin/audit": "admin/audit.html",
     "/admin/departments": "admin/departments.html",
     "/admin/navigation": "admin/navigation.html",
-    "/admin/schedules": "admin/schedules.html",
 }
 
 

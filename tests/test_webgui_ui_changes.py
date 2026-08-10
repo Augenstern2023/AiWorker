@@ -192,6 +192,23 @@ def test_writer_agent_uses_three_panel_chat_and_report_history_layout():
     assert "/reports/${reportId}/export" in script
 
 
+def test_writer_agent_does_not_start_an_automatic_review_after_material_upload():
+    script = _source("static/js/review/writer_agent.js")
+
+    assert "请对这份材料做一次全面的短剧/漫剧编剧评审" not in script
+    assert "请结合刚刚提交的补充材料继续评审" not in script
+
+
+def test_writer_agent_can_expand_and_hide_the_review_reports_panel():
+    template = _source("templates/review/writer_agent.html")
+    script = _source("static/js/review/writer_agent.js")
+
+    assert "writer-agent-toggle-reports" in template
+    assert "writer-agent-layout.reports-hidden" in template
+    assert "toggleReportsPanel" in script
+    assert "reports-hidden" in script
+
+
 def test_writer_agent_shows_an_immediate_thinking_state_while_waiting_for_a_reply():
     template = _source("templates/review/writer_agent.html")
     script = _source("static/js/review/writer_agent.js")
@@ -728,6 +745,23 @@ def test_today_hits_only_load_unadopted_recommendations_and_adoption_moves_them_
     assert "updateCreativeTopic(topic, 'adopted')" in section
     assert "createCreativeBreakdown(topic)" not in section
     assert "topic.status === 'adopted'" not in section
+
+
+def test_topic_library_offers_filtered_csv_and_excel_exports():
+    topics = _source("static/js/selection/topics.js")
+    section = _source("templates/common/workspace/selection_topics.html")
+
+    assert "topicLibraryExportParams(format)" in topics
+    assert "async fetchTopicLibrary" in topics
+    assert "params.set('platform', this.topicLibrary.platform)" in topics
+    assert "params.set('lifecycle_status', this.topicLibrary.lifecycleStatus)" in topics
+    assert "params.set('category', this.topicLibrary.category.trim())" in topics
+    assert "params.set('min_score', this.topicLibrary.minScore)" in topics
+    assert "params.set('has_locked_breakdown', this.topicLibrary.hasLocked)" in topics
+    assert "`/api/creative/topics/export?${params.toString()}`" in topics
+    assert '@click="exportTopicLibrary(\'csv\')"' in section
+    assert '@click="exportTopicLibrary(\'excel\')"' in section
+    assert "导出选题库" in section
 
 
 def test_today_hits_restores_the_last_selected_platform_after_refresh():

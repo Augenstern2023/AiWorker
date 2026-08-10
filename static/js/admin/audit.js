@@ -44,7 +44,7 @@
         const [domain] = action.split('.', 1);
         const domainLabels = {
             navigation: '导航配置', organization: '组织架构', role: '角色权限',
-            schedule: '调度中心', user: '用户管理', workflow: '工作流',
+            user: '用户管理', workflow: '工作流',
         };
         return [domainLabels[domain] || action, `系统记录的 ${action} 操作`];
     }

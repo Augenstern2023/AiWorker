@@ -74,6 +74,47 @@ def test_theme_tags_aggregate_subject_tags_and_exclude_format_labels():
     assert "漫剧" not in tags
 
 
+def test_recommendation_chart_falls_back_to_a_complete_nonzero_metric(tmp_path):
+    for day, heat in (
+        ("2026-08-03", 100),
+        ("2026-08-04", 120),
+        ("2026-08-05", 0),
+        ("2026-08-06", 160),
+        ("2026-08-07", 180),
+    ):
+        record = _record(1, "指标切换剧", "metric-fallback", 100)
+        record["heat_text"] = str(heat)
+        _write_snapshot(tmp_path, day, [record])
+
+    report = WeeklyReportService(root=tmp_path).build_latest("dy", as_of=datetime(2026, 8, 10, 23, 59))
+    series = report["recommendation_metrics"]["series"]
+
+    assert series[0]["metric"] == "like_count"
+    assert all(value is not None and value > 0 for value in series[0]["values"])
+
+
+def test_recommendation_chart_uses_one_metric_for_every_displayed_drama(tmp_path):
+    for index, day in enumerate(("2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07")):
+        heat_drama = _record(1, "热度剧", "heat-drama", 100)
+        heat_drama.update({"like_count": "0", "favorite_count": "0", "comment_count": "0"})
+        like_dramas = []
+        for rank, title, series_id in ((2, "点赞剧甲", "like-a"), (3, "点赞剧乙", "like-b")):
+            record = _record(rank, title, series_id, 100)
+            record.update({
+                "heat_text": "0" if index == 2 else "100",
+                "favorite_count": "0",
+                "comment_count": "0",
+            })
+            like_dramas.append(record)
+        _write_snapshot(tmp_path, day, [heat_drama, *like_dramas])
+
+    report = WeeklyReportService(root=tmp_path).build_latest("dy", as_of=datetime(2026, 8, 10, 23, 59))
+    series = report["recommendation_metrics"]["series"]
+
+    assert [item["title"] for item in series] == ["点赞剧甲", "点赞剧乙"]
+    assert {item["metric"] for item in series} == {"like_count"}
+
+
 def test_reports_insufficient_data_when_no_complete_week_exists(tmp_path):
     for day in ("2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06"):
         _write_snapshot(tmp_path, day, [_record(1, "剧目", "series-1", 100)])
@@ -149,6 +190,21 @@ def test_historical_report_is_marked_stale_when_a_new_complete_week_exists(tmp_p
     reports = service.list_reports("dy", as_of=datetime(2026, 8, 17, 23, 59))
 
     assert reports[0]["data_quality"]["is_stale"] is True
+
+
+def test_generates_every_available_complete_week_for_historical_backfill(tmp_path):
+    for title, days in (
+        ("七月剧", ("2026-07-13", "2026-07-14", "2026-07-15", "2026-07-16", "2026-07-17")),
+        ("八月剧", ("2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07")),
+    ):
+        for day in days:
+            _write_snapshot(tmp_path, day, [_record(1, title, title, 100)])
+
+    service = WeeklyReportService(root=tmp_path, runtime_dir=tmp_path / ".runtime")
+    reports = service.generate_all_available("dy", as_of=datetime(2026, 8, 10, 23, 59), with_llm=False)
+
+    assert [report["report_id"] for report in reports] == ["dy-2026-08-03", "dy-2026-07-13"]
+    assert [report["report_id"] for report in service.list_reports("dy")] == ["dy-2026-08-03", "dy-2026-07-13"]
 
 
 def _write_snapshot(root: Path, day: str, records: list[dict], suffix: str = "100000") -> None:

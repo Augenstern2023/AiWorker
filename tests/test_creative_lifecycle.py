@@ -8,12 +8,15 @@
 
 from __future__ import annotations
 
+import csv
+from io import BytesIO, StringIO
 import json
 from pathlib import Path
 from urllib.parse import unquote
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 
 from core.job import CrawlJob
 from creative.api import creative_api_principal, register_creative_routes
@@ -59,11 +62,15 @@ def build_client(tmp_path: Path) -> tuple[TestClient, CreativeRepository, Lifecy
     return TestClient(app), CreativeRepository(runtime_dir / "creative" / "creative.db"), manager
 
 
-def seed_topic(repository: CreativeRepository, title: str = "生命周期短剧") -> dict:
+def seed_topic(
+    repository: CreativeRepository,
+    title: str = "生命周期短剧",
+    platform: str = "hg",
+) -> dict:
     return repository.upsert_topics([{
-        "platform": "hg",
+        "platform": platform,
         "job_id": f"rank-{title}",
-        "source_path": f"data/hg/{title}.json",
+        "source_path": f"data/{platform}/{title}.json",
         "captured_at": "2026-07-21",
         "title": title,
         "description": "生命周期测试",
@@ -462,6 +469,42 @@ def test_topic_library_can_load_every_adopted_topic_without_a_page_limit(tmp_pat
 
     assert response.status_code == 200
     assert len(response.json()["items"]) == 501
+
+
+def test_topic_library_exports_filtered_topics_as_csv_and_excel(tmp_path: Path):
+    client, repository, _ = build_client(tmp_path)
+    exported_topic = seed_topic(repository, "导出目标短剧", platform="hg")
+    other_topic = seed_topic(repository, "不应导出的短剧", platform="dy")
+    repository.update_topic(exported_topic["id"], "adopted")
+    repository.update_topic(other_topic["id"], "adopted")
+
+    csv_response = client.get(
+        "/api/creative/topics/export",
+        params={"format": "csv", "status": "adopted", "platform": "hg"},
+    )
+
+    assert csv_response.status_code == 200
+    assert "attachment" in csv_response.headers["content-disposition"]
+    assert csv_response.headers["content-type"].startswith("text/csv")
+    csv_rows = list(csv.reader(StringIO(csv_response.content.decode("utf-8-sig"))))
+    assert csv_rows[0] == ["选题", "简介", "来源", "榜单", "题材", "推荐分", "状态", "拆解版本"]
+    assert "操作" not in csv_rows[0]
+    assert [row[0] for row in csv_rows[1:]] == ["导出目标短剧"]
+
+    excel_response = client.get(
+        "/api/creative/topics/export",
+        params={"format": "excel", "status": "adopted", "platform": "hg"},
+    )
+
+    assert excel_response.status_code == 200
+    assert "attachment" in excel_response.headers["content-disposition"]
+    assert excel_response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    worksheet = load_workbook(BytesIO(excel_response.content)).active
+    assert [cell.value for cell in worksheet[1]] == csv_rows[0]
+    assert "操作" not in [cell.value for cell in worksheet[1]]
+    assert [cell.value for cell in worksheet[2]][0] == "导出目标短剧"
 
 
 def test_downloaded_videos_advance_an_adopted_topic_to_pending_breakdown(tmp_path: Path):

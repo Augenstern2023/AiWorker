@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-import time
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -22,7 +22,16 @@ from identity.schema import Principal
 from .navigation_service import PAGE_ROUTES, NavigationService
 
 
-ASSET_VERSION = str(time.time_ns())
+STATIC_ASSET_ROOT = Path(__file__).resolve().parents[1] / "static"
+
+
+def static_asset_version() -> str:
+    """Invalidate browser assets whenever a workspace script or stylesheet changes."""
+    latest_mtime_ns = max(
+        (path.stat().st_mtime_ns for path in STATIC_ASSET_ROOT.rglob("*") if path.is_file()),
+        default=0,
+    )
+    return str(latest_mtime_ns)
 
 
 PAGE_TEMPLATES = {
@@ -280,7 +289,7 @@ def _template_context(
                 or "data.media.preview" in principal.permissions
             )
         ),
-        "asset_version": ASSET_VERSION,
+        "asset_version": static_asset_version(),
         "csrf_token": csrf_token,
         "show_tasks": bool(
             principal and navigation_service.can_open(principal, "/tasks")

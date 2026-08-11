@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +22,7 @@ from identity.dependencies import current_principal
 from identity.schema import Principal
 from web.navigation_service import NavigationService
 from web.page_access_service import PageAccessService
+from web import page_router
 from web.page_router import build_page_router
 
 
@@ -74,6 +76,20 @@ def _principal(
         data_scope="task",
         session_id=f"session-{user_id}",
     )
+
+
+def test_asset_version_changes_when_a_static_file_changes(tmp_path: Path, monkeypatch):
+    asset = tmp_path / "selection-topics.js"
+    asset.write_text("first", encoding="utf-8")
+    monkeypatch.setattr(page_router, "STATIC_ASSET_ROOT", tmp_path)
+    os.utime(asset, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+
+    first_version = page_router.static_asset_version()
+
+    asset.write_text("second", encoding="utf-8")
+    os.utime(asset, ns=(1_700_000_002_000_000_000, 1_700_000_002_000_000_000))
+
+    assert page_router.static_asset_version() != first_version
 
 
 @pytest.fixture

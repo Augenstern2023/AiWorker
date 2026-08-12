@@ -11,26 +11,29 @@
             </button>
         </div>
     </div>
-    <div class="alert alert-danger" x-show="creative.error" x-text="creative.error"></div>
-    <div class="creative-topic-table">
-        <table class="table table-sm table-hover align-middle mb-0">
-            <thead><tr><th>剧目</th><th>简介</th><th>平台</th><th>题材</th><th>推荐分 <button type="button" class="btn btn-link btn-sm p-0 text-muted score-help" data-bs-toggle="tooltip" data-bs-placement="top" title="由热度、增长、新鲜度和平台适配加权计算；数据缺失时会动态归一化" aria-label="推荐分计算说明"><i class="bi bi-info-circle"></i></button></th><th>状态</th><th style="width: 270px;">操作</th></tr></thead>
-            <tbody>
-                <template x-for="topic in creative.items" :key="topic.id">
-                    <tr>
-                        <td><div class="fw-semibold" x-text="topic.title"></div><small class="text-muted" x-text="topic.recommendation"></small></td>
-                        <td class="topic-desc-cell" :title="topic.description"><small class="topic-desc-clamp" x-text="topic.description || '-'"></small></td>
-                        <td x-text="topic.platform"></td><td x-text="topic.category || '-' "></td>
-                        <td x-text="topic.score.toFixed(1)"></td>
-                        <td><span class="badge bg-warning text-dark">待采纳</span></td>
-                        <td>
-                            <button class="btn btn-sm btn-outline-success me-1" @click="updateCreativeTopic(topic, 'adopted')">采纳</button>
-                            <button class="btn btn-sm btn-outline-secondary" @click="updateCreativeTopic(topic, 'rejected')">不跟进</button>
-                        </td>
-                    </tr>
-                </template>
-                <tr x-show="!creative.loading && creative.items.length === 0"><td colspan="7" class="text-center text-muted py-4">暂无候选选题，先生成 Top10</td></tr>
-            </tbody>
-        </table>
+    <div aria-live="polite" aria-atomic="true">
+        <div class="alert alert-danger" x-show="creative.error" x-text="creative.error"></div>
+        <div class="ui-skeleton" style="height:240px;width:100%;" x-show="creative.loading && creative.items.length === 0"></div>
+        <div class="creative-topic-table" x-show="!creative.loading || creative.items.length > 0">
+            <table class="table table-sm table-hover align-middle mb-0">
+                <thead><tr><th>剧目</th><th>简介</th><th>平台</th><th>题材</th><th>推荐分 <button type="button" class="btn btn-link btn-sm p-0 text-muted score-help" data-bs-toggle="tooltip" data-bs-placement="top" title="由热度、增长、新鲜度和平台适配加权计算；数据缺失时会动态归一化" aria-label="推荐分计算说明"><i class="bi bi-info-circle"></i></button></th><th>状态</th><th style="width: 270px;">操作</th></tr></thead>
+                <tbody>
+                    <template x-for="topic in creative.items" :key="topic.id">
+                        <tr>
+                            <td><div class="fw-semibold" x-text="topic.title"></div><small class="text-muted" x-text="topic.recommendation"></small></td>
+                            <td class="topic-desc-cell" :title="topic.description"><small class="topic-desc-clamp" x-text="topic.description || '-'"></small></td>
+                            <td x-text="topic.platform"></td><td x-text="topic.category || '-' "></td>
+                            <td x-text="topic.score.toFixed(1)"></td>
+                            <td><span class="badge bg-warning text-dark">待采纳</span></td>
+                            <td>
+                                <button class="btn btn-sm btn-outline-success me-1" @click="updateCreativeTopic(topic, 'adopted')">采纳</button>
+                                <button class="btn btn-sm btn-outline-secondary" @click="updateCreativeTopic(topic, 'rejected')">不跟进</button>
+                            </td>
+                        </tr>
+                    </template>
+                    <tr x-show="!creative.loading && creative.items.length === 0"><td colspan="7" class="text-center text-muted py-4">暂无候选选题，先生成 Top10</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </section>

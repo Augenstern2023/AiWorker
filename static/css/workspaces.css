@@ -716,7 +716,9 @@
             flex: 0 1 300px;
             width: 300px;
         }
-        @media (max-width: 767.98px) {
+        :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+        .sidebar :focus-visible { outline-color: #fff; }
+        @media (min-width: 768px) and (max-width: 1023.98px) {
             :root { --sidebar-width: 58px; }
             .sidebar > .p-4 { padding: 14px 8px !important; text-align: center; }
             .sidebar h4 { font-size: 0; }
@@ -726,6 +728,20 @@
             .sidebar .nav-link span { display: none !important; }
             .sidebar .nav-link { justify-content: center; padding: 13px 8px; }
             .sidebar .nav-link i { font-size: 19px; }
+        }
+        @media (max-width: 767.98px) {
+            .sidebar { position: fixed; top: 0; bottom: 0; left: 0; z-index: 1045;
+                       width: min(280px, 84vw); transform: translateX(-100%);
+                       transition: transform .18s ease; overflow-y: auto; }
+            body.sidebar-open .sidebar { transform: translateX(0); box-shadow: 0 0 40px rgba(0,0,0,.5); }
+            .sidebar-backdrop { position: fixed; inset: 0; z-index: 1040;
+                                background: rgba(0,0,0,.45); opacity: 0; pointer-events: none;
+                                transition: opacity .18s ease; }
+            body.sidebar-open .sidebar-backdrop { opacity: 1; pointer-events: auto; }
+            body.sidebar-open { overflow: hidden; }
+            .mobile-topbar { display: flex; align-items: center; gap: 8px;
+                             padding: 8px 12px; border-bottom: 1px solid var(--border);
+                             background: var(--bg-panel); }
             .main-content { padding: 14px 12px; }
             .creative-project-workspace .d-flex { flex-wrap: wrap; }
             .creative-project-workspace table,
@@ -739,6 +755,38 @@
             .creative-project-workspace tbody td { border: 0; padding: 4px 0; white-space: normal !important; }
             .creative-project-workspace .btn-group { width: 100%; margin-top: 12px; }
             .creative-project-workspace .btn-group .btn { flex: 1 1 50%; }
+        }
+        .mobile-topbar { display: none; }
+        .ui-pagination .page-item.active .page-link { background: var(--accent); border-color: var(--accent); }
+        .ui-pagination .page-link { background: transparent; color: var(--text); border-color: var(--border); }
+        .ui-pagination .page-link:hover { background: rgba(59, 149, 246, .12); color: var(--accent); }
+        .admin-table thead th { position: sticky; top: 0; z-index: 2; background: var(--bg-panel); border-bottom: 2px solid var(--accent); }
+        @media (max-width: 767.98px) {
+            .admin-table .col-actions { position: sticky; right: 0; background: var(--bg-panel); }
+            .admin-table th, .admin-table td { white-space: nowrap; }
+        }
+        .ui-toast { min-width: 280px; max-width: min(360px, calc(100vw - 32px));
+                    background: var(--bg-panel); color: var(--text);
+                    border: 1px solid var(--border); border-radius: 6px;
+                    box-shadow: 0 10px 28px rgba(0,0,0,.32); }
+        .ui-toast .toast-header { background: transparent; color: var(--text); border-bottom: 1px solid var(--border); }
+        .ui-toast.toast-success { border-color: #36a269; }
+        .ui-toast.toast-danger { border-color: #e35d6a; }
+        .ui-toast.toast-warning { border-color: #e5a32d; }
+        .ui-toast.toast-info { border-color: var(--accent); }
+        .ui-skeleton { position: relative; overflow: hidden; background: var(--bg-panel-2); border-radius: 6px; }
+        .ui-skeleton::after { content: ''; position: absolute; inset: 0;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,.06), transparent);
+            animation: ui-shimmer 1.4s infinite; }
+        @keyframes ui-shimmer { 100% { transform: translateX(100%); } }
+        .ui-state-card { padding: 16px; border: 1px solid var(--border); border-radius: 8px;
+                         background: var(--bg-panel); }
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { transition-duration: 0.01ms !important;
+                                     animation-duration: 0.01ms !important;
+                                     animation-iteration-count: 1 !important;
+                                     scroll-behavior: auto !important; }
+            .ui-skeleton::after { animation: none; }
         }
         @media (max-width: 575.98px) {
             .weekly-report-card-header > span,

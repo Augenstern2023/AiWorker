@@ -17,11 +17,23 @@ window.aiworkerModules.push(() => ({
                     this.creative.loading = true;
                     this.creative.error = '';
                     try {
-                        const res = await aiworkerApi.request(`/api/creative/topics?platform=${encodeURIComponent(this.creative.platform)}&status=pending_review`);
+                        const cacheKey = `creative:topics:hits:${this.creative.platform}`;
+                        const cached = window.aiworkerUi?.readCache(cacheKey);
+                        if (cached && !cached.stale) {
+                            this.creative.items = cached.value;
+                            this.creative.loading = false;
+                            return;
+                        }
+                        const res = await window.aiworkerUi.requestKey(cacheKey, async (signal) => {
+                            return aiworkerApi.request(`/api/creative/topics?platform=${encodeURIComponent(this.creative.platform)}&status=pending_review`, {signal});
+                        });
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.detail || '读取选题失败');
-                        this.creative.items = data.items || [];
+                        const items = data.items || [];
+                        this.creative.items = items;
+                        window.aiworkerUi?.writeCache(cacheKey, items, {ttlMs: 30000});
                     } catch (e) {
+                        if (window.aiworkerApi?.isAbortError(e)) return;
                         this.creative.error = e.message || '读取选题失败';
                     } finally {
                         this.creative.loading = false;
@@ -47,17 +59,29 @@ window.aiworkerModules.push(() => ({
                     this.topicLibrary.loading = true;
                     this.topicLibrary.error = '';
                     try {
+                        const cacheKey = `creative:topics:library:${this.topicLibrary.platform}:${this.topicLibrary.lifecycleStatus}:${this.topicLibrary.category}:${this.topicLibrary.minScore}:${this.topicLibrary.hasLocked}`;
+                        const cached = window.aiworkerUi?.readCache(cacheKey);
+                        if (cached && !cached.stale) {
+                            this.topicLibrary.items = cached.value;
+                            this.topicLibrary.loading = false;
+                            return;
+                        }
                         const params = new URLSearchParams({status: 'adopted', all: 'true'});
                         if (this.topicLibrary.platform) params.set('platform', this.topicLibrary.platform);
                         if (this.topicLibrary.lifecycleStatus) params.set('lifecycle_status', this.topicLibrary.lifecycleStatus);
                         if (this.topicLibrary.category.trim()) params.set('category', this.topicLibrary.category.trim());
                         if (this.topicLibrary.minScore !== '') params.set('min_score', this.topicLibrary.minScore);
                         if (this.topicLibrary.hasLocked !== '') params.set('has_locked_breakdown', this.topicLibrary.hasLocked);
-                        const res = await aiworkerApi.request(`/api/creative/topics?${params.toString()}`);
+                        const res = await window.aiworkerUi.requestKey(cacheKey, async (signal) => {
+                            return aiworkerApi.request(`/api/creative/topics?${params.toString()}`, {signal});
+                        });
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.detail || '读取选题库失败');
-                        this.topicLibrary.items = data.items || [];
+                        const items = data.items || [];
+                        this.topicLibrary.items = items;
+                        window.aiworkerUi?.writeCache(cacheKey, items, {ttlMs: 30000});
                     } catch (e) {
+                        if (window.aiworkerApi?.isAbortError(e)) return;
                         this.topicLibrary.error = e.message || '读取选题库失败';
                     } finally {
                         this.topicLibrary.loading = false;

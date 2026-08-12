@@ -9,6 +9,13 @@
         function appData() {
             const workspace = {
                 page: document.body.dataset.workspacePage || '',
+                JOB_POLL_INTERVAL_MS: 5000,
+                pageNeedsJobPolling() {
+                    return this.page === 'admin-jobs'
+                        || ['selection-hits', 'selection-topics', 'selection-dramas'].includes(this.page)
+                        || this.page.startsWith('planning-')
+                        || this.page.startsWith('writing-');
+                },
                 workflowTasks: [],
                 workflowTaskError: '',
                 workflowTaskWindow: {
@@ -215,7 +222,7 @@
                         );
                     }
 
-                    await this.fetchJobs();
+                    if (this.pageNeedsJobPolling()) await this.fetchJobs();
                     if (this.page === 'selection-ranks') {
                         this.parseTodayRankHash(false);
                         window.addEventListener('hashchange', () => this.parseTodayRankHash(true));
@@ -270,9 +277,20 @@
                     }
                     this.initTooltips();
                     if (this.page === 'admin-jobs') setInterval(() => this.fetchLogs(), 1000);
-                    if (this.page !== 'admin-analytics') setInterval(() => this.fetchJobs(), 2000);
+                    if (this.pageNeedsJobPolling()) setInterval(() => this.fetchJobs(), this.JOB_POLL_INTERVAL_MS);
                     if (this.tickCreativeGenerationElapsed) setInterval(() => this.tickCreativeGenerationElapsed(), 1000);
                     if (this.tickBreakdownGenerationElapsed) setInterval(() => this.tickBreakdownGenerationElapsed(), 1000);
+                    this.initBeforeUnload();
+                },
+
+                initBeforeUnload() {
+                    window.addEventListener('beforeunload', (e) => {
+                        const unsaved = Object.values(this.creativeWorkspace?.saveState || {}).filter(v => v === 'saving').length;
+                        if (unsaved > 0) {
+                            e.preventDefault();
+                            e.returnValue = '有未保存的编辑内容，确定离开吗？';
+                        }
+                    });
                 },
 
                 initTooltips() {

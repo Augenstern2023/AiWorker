@@ -352,6 +352,9 @@ window.aiworkerModules.push(() => ({
                     this.creativeWorkspace.noticeTimer = setTimeout(() => {
                         this.creativeWorkspace.notice = '';
                     }, 3000);
+                    if (window.aiworkerUi) {
+                        window.aiworkerUi.showToast({kind: type === 'success' ? 'success' : 'danger', title: type === 'success' ? '消息' : '错误', message});
+                    }
                 },
 
                 creativeWorkflowStatusLabel(status) {
@@ -871,8 +874,12 @@ window.aiworkerModules.push(() => ({
                         : 0;
                     this.creativeGenerationProgressModal.show();
                     try {
-                        const res = await aiworkerApi.request(url, {
-                            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+                        const projectId = this.creativeWorkspace.project?.id;
+                        const requestKey = `creative:generate:${projectId || 'unknown'}:${action}`;
+                        const res = await (window.aiworkerUi?.requestKey || (async (_, fn) => fn()))(requestKey, async (signal) => {
+                            return aiworkerApi.request(url, {
+                                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body), signal
+                            });
                         });
                         const data = await res.json();
                         if (!res.ok || data.status === 'error') throw new Error(data.detail || data.message || '创建生成任务失败');
@@ -886,6 +893,7 @@ window.aiworkerModules.push(() => ({
                         }
                         await this.fetchJobs();
                     } catch (e) {
+                        if (window.aiworkerApi?.isAbortError(e)) return;
                         this.creativeWorkspace.error = e.message || '创建生成任务失败';
                         this.showCreativeNotice(this.creativeWorkspace.error, 'error');
                     } finally {

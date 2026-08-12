@@ -1,4 +1,10 @@
 {% extends "layouts/base.html" %}
 
+{% block page_header %}
+<div class="d-flex align-items-center justify-content-between mb-3">
+    <div><h3 class="mb-1">后台任务</h3><div class="small text-muted">查看和管理 Worker 与机器任务</div></div>
+</div>
+{% endblock %}
+
 {% block content %}{% include "common/workspace/admin_jobs.html" %}{% include "common/workspace/admin_data_modals.html" %}{% endblock %}
 {% block scripts %}<script src="/static/js/admin/workspace.js"></script><script src="/static/js/admin/jobs.js"></script>{% endblock %}

@@ -12,7 +12,7 @@
 </form>
 {% endif %}
 <div class="d-flex align-items-center justify-content-between mb-2"><span class="small text-muted" id="role-total" aria-live="polite">正在加载角色...</span></div>
-<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>{% if team_mode %}<th>角色</th><th>代码</th><th>权限数</th><th>状态</th>{% else %}<th>角色</th><th>代码</th><th>说明</th><th>权限数</th><th>状态</th><th>创建时间</th>{% endif %}<th>操作</th></tr></thead><tbody id="role-list"><tr><td colspan="{{ 5 if team_mode else 7 }}" class="text-center text-muted py-4">正在加载角色...</td></tr></tbody></table></div>
+<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>{% if team_mode %}<th>角色</th><th>代码</th><th>权限数</th><th>状态</th>{% else %}<th>角色</th><th>代码</th><th>说明</th><th>权限数</th><th>状态</th><th>创建时间</th>{% endif %}<th>操作</th></tr></thead><tbody id="role-list"><tr id="role-list-skeleton" aria-hidden="true"><td colspan="7"><div class="ui-skeleton" style="height:20px;width:60%;margin:8px 0;"></div><div class="ui-skeleton" style="height:14px;width:40%;"></div></td></tr></tbody></table></div>
 
 <div class="modal fade" id="role-editor-modal" tabindex="-1" aria-labelledby="role-editor-title" aria-hidden="true"><div class="modal-dialog modal-xl modal-dialog-centered"><form class="modal-content" id="role-editor-form"><div class="modal-header"><h5 class="modal-title" id="role-editor-title">新建角色</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button></div><div class="modal-body">
     <input type="hidden" id="role-id">

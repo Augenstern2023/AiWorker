@@ -190,6 +190,8 @@
             showProjectSelectionRequired();
             return;
         }
+        const btn = document.getElementById(format === 'csv' ? 'export-audit-csv' : 'export-audit-xlsx');
+        if (window.aiworkerUi) window.aiworkerUi.setButtonLoading(btn, {loading: true, label: '导出中…'});
         try {
             const params = filterParameters();
             params.set('format', format);
@@ -200,8 +202,12 @@
             link.download = `audit-export.${format}`;
             link.click();
             URL.revokeObjectURL(link.href);
+            if (window.aiworkerUi) window.aiworkerUi.showToast({kind: 'success', title: '导出成功', message: '审计日志已导出。'});
         } catch (error) {
             showListError(error.message || '审计日志导出失败');
+            if (window.aiworkerUi) window.aiworkerUi.showToast({kind: 'danger', title: '导出失败', message: error.message || '审计日志导出失败'});
+        } finally {
+            if (window.aiworkerUi) window.aiworkerUi.setButtonLoading(btn, {loading: false});
         }
     }
 

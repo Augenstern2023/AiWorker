@@ -3,7 +3,7 @@
         <h3 class="mb-1">我的项目</h3>
         <div class="small text-muted">查看被分配的项目及当前进度</div>
     </div>
-    <button class="btn btn-outline-secondary btn-sm" id="refresh-my-tasks" title="刷新">
+    <button class="btn btn-outline-secondary btn-sm" id="refresh-my-tasks" title="刷新" aria-label="刷新项目列表">
         <i class="bi bi-arrow-clockwise"></i>
     </button>
 </div>
@@ -11,9 +11,9 @@
 
 <div class="d-flex align-items-center justify-content-between mb-3">
     <h5 class="mb-0">我被分配的项目</h5>
-    <span class="badge bg-secondary" id="project-count">0</span>
+    <span class="badge bg-secondary" id="project-count" aria-live="polite">0</span>
 </div>
-<div class="table-responsive">
+<div class="table-responsive" id="my-tasks-table-container" aria-busy="true">
     <table class="table table-sm align-middle">
         <thead>
             <tr>
@@ -25,7 +25,12 @@
             </tr>
         </thead>
         <tbody id="my-project-list">
-            <tr><td colspan="5" class="text-center text-muted py-4">正在加载项目...</td></tr>
+            <tr id="my-tasks-skeleton" aria-hidden="true">
+                <td colspan="5">
+                    <div class="ui-skeleton" style="height:20px;width:60%;margin:8px 0;"></div>
+                    <div class="ui-skeleton" style="height:14px;width:40%;"></div>
+                </td>
+            </tr>
         </tbody>
     </table>
 </div>

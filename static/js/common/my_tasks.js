@@ -4,6 +4,8 @@
     const projectList = document.getElementById('my-project-list');
     const errorBox = document.getElementById('my-tasks-error');
     const refreshBtn = document.getElementById('refresh-my-tasks');
+    const tableContainer = document.getElementById('my-tasks-table-container');
+    const skeleton = document.getElementById('my-tasks-skeleton');
     const editForm = document.getElementById('project-edit-form');
     const editModalElement = document.getElementById('project-edit-modal');
     const deleteModalElement = document.getElementById('project-delete-modal');
@@ -43,6 +45,11 @@
         errorBox.classList.toggle('d-none', !message);
     }
 
+    function setLoading(visible) {
+        if (tableContainer) tableContainer.setAttribute('aria-busy', String(visible));
+        if (skeleton) skeleton.style.display = visible ? '' : 'none';
+    }
+
     function formatDate(value) {
         if (!value) return '-';
         const date = new Date(value * 1000);
@@ -68,10 +75,10 @@
     function iconButton(icon, label, className, onClick) {
         const button = document.createElement('button');
         button.type = 'button';
-        button.className = `btn btn-sm ${className}`;
+        button.className = 'btn btn-sm ' + className;
         button.title = label;
         button.setAttribute('aria-label', label);
-        button.innerHTML = `<i class="bi ${icon}" aria-hidden="true"></i>`;
+        button.innerHTML = '<i class="bi ' + icon + '" aria-hidden="true"></i>';
         button.addEventListener('click', onClick);
         return button;
     }
@@ -98,12 +105,12 @@
     function renderProjects(projects) {
         const countEl = document.getElementById('project-count');
         if (countEl) countEl.textContent = String(projects.length);
-        const projectHref = (projectId) => (
-            window.location.pathname.startsWith('/writing/')
-                ? `/writing/projects/${projectId}/outlines`
-                : `/planning/projects/${projectId}/brief`
-        );
-        const rows = projects.length ? projects.map((project) => {
+        const projectHref = function (projectId) {
+            return window.location.pathname.startsWith('/writing/')
+                ? '/writing/projects/' + projectId + '/outlines'
+                : '/planning/projects/' + projectId + '/brief';
+        };
+        const rows = projects.length ? projects.map(function (project) {
             const row = document.createElement('tr');
             const actions = document.createElement('td');
             actions.className = 'text-end';
@@ -117,8 +124,8 @@
             link.innerHTML = '<i class="bi bi-folder2-open" aria-hidden="true"></i>';
             actionGroup.append(
                 link,
-                iconButton('bi-pencil', '编辑项目参数', 'btn-outline-secondary', () => openEdit(project)),
-                iconButton('bi-trash', '删除项目', 'btn-outline-danger', () => openDelete(project)),
+                iconButton('bi-pencil', '编辑项目参数', 'btn-outline-secondary', function () { openEdit(project); }),
+                iconButton('bi-trash', '删除项目', 'btn-outline-danger', function () { openDelete(project); }),
             );
             actions.appendChild(actionGroup);
             row.append(
@@ -129,7 +136,7 @@
                 actions,
             );
             return row;
-        }) : [(() => {
+        }) : [function () {
             const row = document.createElement('tr');
             const cell = document.createElement('td');
             cell.colSpan = 5;
@@ -137,34 +144,39 @@
             cell.textContent = '暂无被分配的项目';
             row.appendChild(cell);
             return row;
-        })()];
+        }()];
         projectList.replaceChildren(...rows);
     }
 
     async function load() {
         showError();
+        setLoading(true);
         try {
             const response = await aiworkerApi.request('/api/creative/projects');
             if (!response.ok) {
-                throw new Error(await response.json().then((payload) => payload.detail || '读取项目失败'));
+                var errPayload = await response.json().catch(function () { return {}; });
+                throw new Error(errPayload.detail || '读取项目失败');
             }
-            const payload = await response.json();
-            renderProjects(Array.isArray(payload.items) ? payload.items : []);
+            var data = await response.json();
+            renderProjects(Array.isArray(data.items) ? data.items : []);
         } catch (reason) {
             showError(reason.message || '读取项目失败');
             renderProjects([]);
+        } finally {
+            setLoading(false);
         }
     }
 
     refreshBtn?.addEventListener('click', load);
-    editForm?.addEventListener('submit', async (event) => {
+    editForm?.addEventListener('submit', async function (event) {
         event.preventDefault();
         const projectId = editFields.id.value;
         if (!projectId) return;
         showError();
-        editFields.submit.disabled = true;
+        const submitBtn = editFields.submit;
+        if (window.aiworkerUi) window.aiworkerUi.setButtonLoading(submitBtn, {loading: true, label: '保存中…'});
         try {
-            const response = await aiworkerApi.request(`/api/creative/projects/${projectId}`, {
+            const response = await aiworkerApi.request('/api/creative/projects/' + projectId, {
                 method: 'PATCH',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
@@ -175,31 +187,48 @@
                     episode_duration_seconds: Number(editFields.duration.value),
                 }),
             });
-            if (!response.ok) throw new Error(await responseError(response, '保存项目失败'));
+            if (!response.ok) {
+                var detail = await response.json().catch(function () { return {}; });
+                throw new Error(detail.detail || detail.message || '保存项目失败');
+            }
             editModal?.hide();
+            if (window.aiworkerUi) {
+                window.aiworkerUi.invalidateCache('creative:project:');
+                window.aiworkerUi.showToast({kind: 'success', title: '保存成功', message: '项目参数已更新。'});
+            }
             await load();
         } catch (reason) {
             showError(reason.message || '保存项目失败');
+            if (window.aiworkerUi) window.aiworkerUi.showToast({kind: 'danger', title: '保存失败', message: reason.message || '保存项目失败'});
         } finally {
-            editFields.submit.disabled = false;
+            if (window.aiworkerUi) window.aiworkerUi.setButtonLoading(submitBtn, {loading: false});
         }
     });
-    deleteFields.submit?.addEventListener('click', async () => {
+    deleteFields.submit?.addEventListener('click', async function () {
         const projectId = deleteFields.id.value;
         if (!projectId) return;
         showError();
-        deleteFields.submit.disabled = true;
+        const submitBtn = deleteFields.submit;
+        if (window.aiworkerUi) window.aiworkerUi.setButtonLoading(submitBtn, {loading: true, label: '删除中…'});
         try {
-            const response = await aiworkerApi.request(`/api/creative/projects/${projectId}`, {
+            const response = await aiworkerApi.request('/api/creative/projects/' + projectId, {
                 method: 'DELETE',
             });
-            if (!response.ok) throw new Error(await responseError(response, '删除项目失败'));
+            if (!response.ok) {
+                var detail = await response.json().catch(function () { return {}; });
+                throw new Error(detail.detail || detail.message || '删除项目失败');
+            }
             deleteModal?.hide();
+            if (window.aiworkerUi) {
+                window.aiworkerUi.invalidateCache('creative:project:');
+                window.aiworkerUi.showToast({kind: 'success', title: '删除成功', message: '项目已删除。'});
+            }
             await load();
         } catch (reason) {
             showError(reason.message || '删除项目失败');
+            if (window.aiworkerUi) window.aiworkerUi.showToast({kind: 'danger', title: '删除失败', message: reason.message || '删除项目失败'});
         } finally {
-            deleteFields.submit.disabled = false;
+            if (window.aiworkerUi) window.aiworkerUi.setButtonLoading(submitBtn, {loading: false});
         }
     });
     load();

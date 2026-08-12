@@ -25,7 +25,12 @@
                 </tr>
             </thead>
             <tbody id="managed-project-list">
-                <tr><td colspan="6" class="text-center text-muted py-4">正在加载负责项目...</td></tr>
+                <tr id="managed-project-skeleton" aria-hidden="true">
+                    <td colspan="6">
+                        <div class="ui-skeleton" style="height:20px;width:60%;margin:8px 0;"></div>
+                        <div class="ui-skeleton" style="height:14px;width:40%;"></div>
+                    </td>
+                </tr>
             </tbody>
         </table>
     </div>

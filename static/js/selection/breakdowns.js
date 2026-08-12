@@ -13,6 +13,7 @@ window.aiworkerModules.push(() => ({
                             return;
                         }
                         Object.assign(topic, data);
+                        window.aiworkerUi?.invalidateCache('creative:topics:');
                         await this.fetchTopicLibrary();
                         if (status === 'adopted') this.showAdoptionNotice(true, data.title || topic.title, '已收录至选题库。');
                     } catch (error) {
@@ -959,6 +960,7 @@ window.aiworkerModules.push(() => ({
                         Object.assign(topic, data);
                         this.creative.items = this.creative.items.filter(item => item.id !== topic.id);
                         if (status === 'adopted') this.showAdoptionNotice(true, data.title || topic.title, '已收录至选题库。');
+                        window.aiworkerUi?.invalidateCache('creative:topics:');
                     } catch (error) {
                         if (status === 'adopted') this.showAdoptionNotice(false, topic.title, error.message || '采纳接口错误，请稍后重试。');
                         else alert(error.message || '更新失败');

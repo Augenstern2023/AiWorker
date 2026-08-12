@@ -2243,3 +2243,177 @@ async def test_config_form_rejects_search_without_keywords(tmp_path, monkeypatch
     response = await WebGUI.save_config_form(payload)
 
     assert response.status_code == 400
+
+
+def test_workspace_shell_has_live_region_and_toast_container():
+    base = _source("templates/layouts/base.html")
+    assert 'id="ui-live-region"' in base and 'aria-live="polite"' in base
+    assert 'id="ui-toast-region"' in base
+    assert "ui-state.js" in base
+
+
+def test_workspace_shell_has_accessible_mobile_drawer_controls():
+    base = _source("templates/layouts/base.html")
+    assert 'id="sidebar-toggle"' in base
+    assert 'aria-controls="workspace-sidebar"' in base
+    assert 'aria-expanded' in base
+    assert 'id="sidebar-backdrop"' in base
+    assert "Escape" in base
+
+
+def test_workspace_shell_has_unified_context_bar_block():
+    base = _source("templates/layouts/base.html")
+    assert "{% block page_header %}{% endblock %}" in base
+
+
+def test_api_layer_exposes_structured_errors_and_request_ids():
+    api = _source("static/js/common/api.js")
+    assert "class ApiError" in api
+    assert "X-Request-ID" in api
+    assert "isAbortError" in api
+    assert "window.location.assign('/login')" in api
+    assert "aiworker:permission-denied" in api
+    assert "throw error" in api
+
+
+def test_ui_state_module_exposes_the_shared_api():
+    ui = _source("static/js/common/ui-state.js")
+    for fn in ("requestKey", "cancelRequest", "readCache", "writeCache",
+               "invalidateCache", "announce", "showToast", "setButtonLoading"):
+        assert fn in ui
+
+
+def test_jobs_polling_is_scoped_to_pages_that_consume_job_state():
+    tasks = _source("static/js/common/tasks.js")
+    assert "pageNeedsJobPolling()" in tasks
+    assert "if (this.pageNeedsJobPolling())" in tasks
+
+
+def test_dashboard_no_longer_uses_limit_500():
+    dashboard = _source("static/js/selection/dashboard.js")
+    assert "limit=500" not in dashboard
+    assert "limit=50" in dashboard
+    assert "requestKey" in dashboard
+
+
+def test_dashboard_uses_independent_requests():
+    dashboard = _source("static/js/selection/dashboard.js")
+    assert "overviewKey" in dashboard
+    assert "analyticsKey" in dashboard
+    assert "isAbortError" in dashboard
+
+
+def test_dashboard_template_has_skeleton():
+    html = _source("templates/selection/dashboard.html")
+    assert "ui-skeleton" in html
+    assert "aria-live" in html
+    assert "page_header" in html
+
+
+def test_my_tasks_uses_set_button_loading():
+    script = _source("static/js/common/my_tasks.js")
+    assert "setButtonLoading" in script
+    assert "invalidateCache" in script
+    assert "showToast" in script
+
+
+def test_my_tasks_template_has_skeleton_and_aria_busy():
+    html = _source("templates/common/workspace/my_tasks.html")
+    assert "ui-skeleton" in html
+    assert "aria-busy" in html
+    assert 'id="my-tasks-skeleton"' in html
+
+
+def test_selection_hits_uses_request_key_and_cache():
+    topics = _source("static/js/selection/topics.js")
+    assert "requestKey" in topics
+    assert "readCache" in topics
+    assert "writeCache" in topics
+
+
+def test_breakdowns_invalidates_creative_topics_cache():
+    breakdowns = _source("static/js/selection/breakdowns.js")
+    assert "invalidateCache('creative:topics:')" in breakdowns
+
+
+def test_selection_hits_template_has_skeleton():
+    html = _source("templates/common/workspace/selection_hits.html")
+    assert "ui-skeleton" in html
+    assert "aria-live" in html
+
+
+def test_selection_topics_template_has_skeleton():
+    html = _source("templates/common/workspace/selection_topics.html")
+    assert "ui-skeleton" in html
+
+
+def test_creative_uses_show_toast_and_request_key():
+    script = _source("static/js/common/creative.js")
+    assert "showToast" in script
+    assert "requestKey" in script
+
+
+def test_creative_has_beforeunload_protection():
+    script = _source("static/js/common/tasks.js")
+    assert "beforeunload" in script
+    assert "returnValue" in script
+
+
+def test_planning_pages_use_page_header_block():
+    for name in ("planning/brief.html", "planning/characters.html",
+                 "writing/outlines.html", "writing/beats.html", "writing/scripts.html"):
+        html = _source(f"templates/{name}")
+        assert "{% block page_header %}" in html, f"{name} missing page_header block"
+
+
+def test_editable_templates_show_lock_info():
+    for name in ("project_blueprints.html", "project_characters.html"):
+        html = _source(f"templates/common/workspace/{name}")
+        assert "bi-lock" in html
+
+
+def test_review_scripts_template_has_skeleton():
+    html = _source("templates/review/scripts.html")
+    assert "ui-skeleton" in html
+
+
+def test_review_projects_template_has_skeleton():
+    html = _source("templates/review/projects.html")
+    assert "ui-skeleton" in html
+
+
+def test_admin_users_uses_set_button_loading():
+    script = _source("static/js/admin/users.js")
+    assert "setButtonLoading" in script
+
+
+def test_admin_users_template_has_skeleton():
+    html = _source("templates/admin/users.html")
+    assert "ui-skeleton" in html
+
+
+def test_admin_audit_uses_set_button_loading():
+    script = _source("static/js/admin/audit.js")
+    assert "setButtonLoading" in script
+
+
+def test_admin_audit_template_has_skeleton():
+    html = _source("templates/admin/audit.html")
+    assert "ui-skeleton" in html
+
+
+def test_admin_pages_have_skeleton():
+    for name in ("admin/roles.html", "admin/deliveries.html"):
+        html = _source(f"templates/{name}")
+        assert "ui-skeleton" in html, f"{name} missing skeleton"
+
+
+def test_admin_jobs_uses_page_header_block():
+    html = _source("templates/admin/jobs.html")
+    assert "{% block page_header %}" in html
+
+
+def test_workspace_css_has_admin_table_styles():
+    css = _source("static/css/workspaces.css")
+    assert "admin-table thead th" in css
+    assert "ui-pagination" in css

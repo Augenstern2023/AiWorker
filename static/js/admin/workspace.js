@@ -272,6 +272,16 @@ window.aiworkerModules.push(() => ({
                     this.batchDeleteMode = false;
                 },
 
+                startBatchDownload() {
+                    this.clearFileSelection();
+                    this.batchDownloadMode = true;
+                },
+
+                cancelBatchDownload() {
+                    this.clearFileSelection();
+                    this.batchDownloadMode = false;
+                },
+
                 toggleFileSelection(path, selected) {
                     if (this.filePage.selectionMode === 'all_matching') {
                         if (selected) this.filePage.excludedPaths = this.filePage.excludedPaths.filter(item => item !== path);

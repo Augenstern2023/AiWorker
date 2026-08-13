@@ -274,11 +274,13 @@ window.aiworkerModules.push(() => ({
 
                 startBatchDownload() {
                     this.clearFileSelection();
+                    this.filePage.operation = {operation: 'archive', status: 'preparing', progress: {completed: 0, total: 0, succeeded: 0, failed: 0}};
                     this.batchDownloadMode = true;
                 },
 
                 cancelBatchDownload() {
                     this.clearFileSelection();
+                    this.filePage.operation = null;
                     this.batchDownloadMode = false;
                 },
 
@@ -356,6 +358,13 @@ window.aiworkerModules.push(() => ({
                         } else if (job.status === 'succeeded' && operation.operation === 'delete') {
                             this.clearFileSelection();
                             await this.fetchFiles({reset: true});
+                        } else if (job.status === 'succeeded' && operation.operation === 'archive') {
+                            const progress = operation.progress || {};
+                            progress.succeeded = progress.succeeded ?? progress.completed ?? 0;
+                            progress.failed = progress.failed ?? 0;
+                            operation.progress = progress;
+                        } else if (['failed', 'cancelled'].includes(job.status) && operation.operation === 'archive') {
+                            this.cancelBatchDownload();
                         }
                     } catch (error) {
                         operation.status = 'failed';

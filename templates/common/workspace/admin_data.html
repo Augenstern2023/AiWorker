@@ -39,9 +39,14 @@
                     <button class="btn btn-outline-light btn-sm" @click="fetchFiles({reset: true})">刷新</button>
                 </div>
             </div>
-            <div class="alert alert-info d-flex align-items-center justify-content-between mb-3" x-show="filePage.operation?.operation === 'archive'">
-                <span x-text="`批量下载：${filePage.operation?.status || '运行中'} (${filePage.operation?.progress?.completed || 0}/${filePage.operation?.progress?.total || 0}，成功 ${filePage.operation?.progress?.succeeded || 0}，失败 ${filePage.operation?.progress?.failed || 0})`"></span>
-                <button class="btn btn-sm btn-outline-primary" x-show="filePage.operation?.status === 'succeeded'" @click="downloadFileOperation"><i class="bi bi-download"></i><span class="visually-hidden">下载压缩包</span></button>
+            <div x-show="batchDownloadMode && filePage.operation?.operation === 'archive'" x-cloak>
+                <div class="alert alert-info d-flex align-items-center justify-content-between mb-3">
+                    <span x-text="`批量下载：${filePage.operation?.status || '运行中'} (${filePage.operation?.progress?.completed || 0}/${filePage.operation?.progress?.total || 0}，成功 ${filePage.operation?.progress?.succeeded || 0}，失败 ${filePage.operation?.progress?.failed || 0})`"></span>
+                    <div class="d-flex align-items-center gap-2">
+                        <button class="btn btn-sm btn-outline-primary" x-show="filePage.operation?.status === 'succeeded'" @click="downloadFileOperation"><i class="bi bi-download"></i><span class="visually-hidden">下载压缩包</span></button>
+                        <button class="btn btn-sm btn-outline-secondary" @click="cancelBatchDownload" title="收起批量下载状态"><i class="bi bi-x-lg"></i><span class="visually-hidden">收起</span></button>
+                    </div>
+                </div>
             </div>
             {% if can_manage_data or can_preview_data %}<div class="d-flex justify-content-end" x-show="filteredFiles.length && (batchDeleteMode || batchDownloadMode || selectedFileCount() > 0)">
                 <label class="form-check small"><input class="form-check-input me-1" type="checkbox" :checked="filePage.selectionMode === 'all_matching'" @change="toggleAllMatchingFiles($event.target.checked)">全选当前结果 <span x-text="`(${filePage.total})`"></span></label>

@@ -52,6 +52,7 @@
                 filePage: {total: 0, currentCursor: null, nextCursor: null, cursorHistory: [], loading: false, searchTimer: null, selectionMode: 'explicit', selectionFilter: 'all', selectionQuery: '', excludedPaths: [], operation: null},
                 dramaPlayer: {dramas: [], selectedDramaId: '', selectedEpisodeId: '', loading: false, error: '', playbackError: '', autoNext: true, speed: 1, lastSavedAt: 0},
                 batchDeleteMode: false,
+                batchDownloadMode: false,
                 filePreviewModal: null,
                 previewFile: {status: 'idle', file: null, kind: '', url: '', content: '', message: ''},
                 topicTranscriptPreviewModal: null,

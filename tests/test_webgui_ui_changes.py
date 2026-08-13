@@ -1995,6 +1995,18 @@ def test_data_management_template_supports_multi_file_download():
     assert "bi bi-file-earmark-zip" in html
 
 
+def test_batch_download_status_is_hidden_until_batch_download_is_started():
+    template = _source("templates/common/workspace/admin_data.html")
+    script = _source("static/js/admin/workspace.js")
+
+    status_condition = "batchDownloadMode && filePage.operation?.operation === 'archive'"
+    assert f'<div x-show="{status_condition}" x-cloak>' in template
+    status_tag = template.split(status_condition, 1)[0].rsplit("<div", 1)[-1]
+    assert "d-flex" not in status_tag
+    assert "this.filePage.operation = {operation: 'archive'" in script
+    assert "this.filePage.operation = null" in script
+
+
 def test_data_management_file_checkboxes_follow_the_selected_path_array():
     html = _source("templates/common/workspace/admin_data.html")
 

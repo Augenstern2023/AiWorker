@@ -4,35 +4,42 @@ window.aiworkerModules = window.aiworkerModules || [];
 window.aiworkerModules.push(() => ({
                 async fetchFiles({reset = false, cursor = null} = {}) {
                     const page = this.filePage;
+                    const requestedQuery = this.fileSearch.trim();
+                    const requestSequence = ++page.requestSequence;
                     if (reset) {
                         page.cursorHistory = [];
                         page.currentCursor = null;
                         this.clearFileSelection();
                     }
+                    page.error = '';
                     page.loading = true;
                     try {
                         const params = new URLSearchParams({
                             filter: this.fileFilter,
-                            query: this.fileSearch.trim(),
+                            query: requestedQuery,
                             limit: '100',
                         });
                         if (cursor) params.set('cursor', cursor);
                         const res = await aiworkerApi.request(`/api/files/page?${params}`);
                         if (!res.ok) throw new Error('文件加载失败');
                         const data = await res.json();
+                        if (requestSequence !== page.requestSequence) return;
                         this.files = data.items || [];
                         this.filteredFiles = this.files;
                         page.total = Number(data.total || 0);
                         page.currentCursor = cursor;
                         page.nextCursor = data.next_cursor || null;
+                        page.appliedQuery = requestedQuery;
                     } catch (e) {
+                        if (requestSequence !== page.requestSequence) return;
                         this.files = [];
                         this.filteredFiles = [];
                         page.total = 0;
                         page.currentCursor = null;
                         page.nextCursor = null;
+                        page.error = '文件加载失败，请重试';
                     } finally {
-                        page.loading = false;
+                        if (requestSequence === page.requestSequence) page.loading = false;
                     }
                 },
 
@@ -198,7 +205,23 @@ window.aiworkerModules.push(() => ({
 
                 applyFileSearch() {
                     clearTimeout(this.filePage.searchTimer);
+                    this.filePage.requestSequence += 1;
+                    this.filePage.error = '';
+                    this.filePage.loading = true;
                     this.filePage.searchTimer = setTimeout(() => this.fetchFiles({reset: true}), 250);
+                },
+
+                fileSearchStatus() {
+                    const page = this.filePage;
+                    const pendingQuery = this.fileSearch.trim();
+                    if (page.loading) {
+                        return pendingQuery ? `正在检索“${pendingQuery}”…` : '正在加载文件…';
+                    }
+                    if (page.error) return page.error;
+                    if (page.appliedQuery) {
+                        return `已按文件名或路径检索“${page.appliedQuery}”，找到 ${page.total} 个文件`;
+                    }
+                    return `共 ${page.total} 个文件`;
                 },
 
                 clearFileSelection() {

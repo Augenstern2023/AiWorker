@@ -49,7 +49,7 @@
                 files: [],
                 filteredFiles: [],
                 selectedFilePaths: [],
-                filePage: {total: 0, currentCursor: null, nextCursor: null, cursorHistory: [], loading: false, searchTimer: null, selectionMode: 'explicit', selectionFilter: 'all', selectionQuery: '', excludedPaths: [], operation: null},
+                filePage: {total: 0, currentCursor: null, nextCursor: null, cursorHistory: [], loading: false, searchTimer: null, requestSequence: 0, selectionMode: 'explicit', selectionFilter: 'all', selectionQuery: '', excludedPaths: [], operation: null, error: '', appliedQuery: ''},
                 dramaPlayer: {dramas: [], selectedDramaId: '', selectedEpisodeId: '', loading: false, error: '', playbackError: '', autoNext: true, speed: 1, lastSavedAt: 0},
                 batchDeleteMode: false,
                 batchDownloadMode: false,

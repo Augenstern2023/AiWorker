@@ -104,6 +104,43 @@ def test_identity_repository_uses_postgresql_system_database(
     assert audit.query(action="postgres.verify")[0]["actor_display_name"] == "PostgreSQL User"
 
 
+def test_seed_defaults_preserves_configured_permissions_for_existing_system_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required for PostgreSQL tests")
+    if make_url(postgres_url).database == "aiworker_system":
+        raise ValueError("tests must not run against the aiworker_system database")
+
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
+    command.upgrade(Config("alembic.ini"), "head")
+    database = SystemDatabase(SystemDatabaseSettings(postgres_url))
+    repository = IdentityRepository(database)
+    repository.seed_defaults()
+    role = repository.get_role_by_code("screenwriter")
+    assert role is not None
+    original = repository.list_role_permissions(role["id"])
+    configured = [{"permission_code": "topic.read", "data_scope": "project"}]
+
+    try:
+        repository.replace_role_permissions(
+            role["id"], [("topic.read", "project")]
+        )
+        repository.seed_defaults()
+
+        assert repository.list_role_permissions(role["id"]) == configured
+    finally:
+        repository.replace_role_permissions(
+            role["id"],
+            [
+                (item["permission_code"], item["data_scope"])
+                for item in original
+            ],
+        )
+        database.dispose()
+
+
 def test_workflow_event_serializes_datetime_details_on_postgresql(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

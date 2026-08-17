@@ -144,22 +144,22 @@ class IdentityRepository:
                         func.lower(roles.c.code) == role.code.lower()
                     )
                 ).scalar_one()
-                # Default-role grants are system-owned.
-                connection.execute(
-                    delete(role_permissions).where(
-                        role_permissions.c.role_id == stored_role_id
-                    )
-                )
-                for permission_code, data_scope in self._expanded_permissions(role.permissions):
-                    connection.execute(
-                        pg_insert(role_permissions)
-                        .values(role_id=stored_role_id, permission_code=permission_code, data_scope=data_scope)
-                        .on_conflict_do_update(
-                            index_elements=["role_id", "permission_code"],
-                            set_={"data_scope": data_scope},
-                        )
-                    )
                 if existing_role_id is None:
+                    for permission_code, data_scope in self._expanded_permissions(
+                        role.permissions
+                    ):
+                        connection.execute(
+                            pg_insert(role_permissions)
+                            .values(
+                                role_id=stored_role_id,
+                                permission_code=permission_code,
+                                data_scope=data_scope,
+                            )
+                            .on_conflict_do_update(
+                                index_elements=["role_id", "permission_code"],
+                                set_={"data_scope": data_scope},
+                            )
+                        )
                     for route in DEFAULT_ROLE_PAGE_ROUTES.get(role.code, ()):
                         connection.execute(
                             pg_insert(role_page_access)

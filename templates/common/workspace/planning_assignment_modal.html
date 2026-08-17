@@ -2,28 +2,29 @@
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
             <div class="modal-header">
-                <div><h2 class="modal-title fs-5" id="planningAssignmentModalTitle">分配策划任务</h2><div class="small text-muted" x-text="planningAssignment.topic?.title || ''"></div></div>
+                <div><h2 class="modal-title fs-5" id="planningAssignmentModalTitle">创建项目及任务</h2><div class="small text-muted" x-text="planningAssignment.topic?.title || ''"></div></div>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
             </div>
             <div class="modal-body">
-                <div class="text-center text-muted py-4" x-show="planningAssignment.loading"><span class="spinner-border spinner-border-sm me-2"></span>正在读取策划用户</div>
+                <div class="text-center text-muted py-4" x-show="planningAssignment.loading"><span class="spinner-border spinner-border-sm me-2"></span>正在读取团队成员</div>
                 <div class="alert alert-danger" x-show="planningAssignment.error" x-text="planningAssignment.error"></div>
                 <template x-if="planningAssignment.result">
                     <div>
-                        <div class="alert alert-success"><i class="bi bi-check-circle me-1"></i>策划任务已分配，项目已加入“负责项目”。</div>
-                        <div class="border-top border-bottom py-3"><div class="small text-muted">项目</div><div class="fw-semibold" x-text="planningAssignment.result.project.name"></div><div class="small text-muted mt-2" x-text="`Brief 任务：${workflowTaskStatusLabel(planningAssignment.result.task.status)}`"></div></div>
+                        <div class="alert alert-success"><i class="bi bi-check-circle me-1"></i>项目及任务已创建，已加入策划项目、编剧项目与负责项目。</div>
+                        <div class="border-top border-bottom py-3"><div class="small text-muted">项目</div><div class="fw-semibold" x-text="planningAssignment.result.project.name"></div><div class="small text-muted mt-2" x-text="`已创建 ${planningAssignment.result.tasks?.length || 0} 个阶段任务`"></div></div>
                     </div>
                 </template>
                 <div x-show="!planningAssignment.loading && !planningAssignment.result">
-                    <div class="mb-3"><label class="form-label" for="planning-assignee">创意策划</label><select class="form-select" id="planning-assignee" x-model="planningAssignment.assigneeUserId"><option value="">选择策划用户</option><template x-for="candidate in planningAssignment.candidates" :key="candidate.user_id"><option :value="candidate.user_id" x-text="`${candidate.display_name}（${candidate.username}）`"></option></template></select></div>
                     <div class="mb-3"><label class="form-label" for="planning-project-name">项目名称</label><input class="form-control" id="planning-project-name" x-model="planningAssignment.name"></div>
-                    <div class="row g-3"><div class="col-6"><label class="form-label" for="planning-target-platform">目标平台</label><select class="form-select" id="planning-target-platform" x-model="planningAssignment.targetPlatform"><option value="">待定</option><option value="dy">抖音</option><option value="hg">红果</option></select></div><div class="col-6"><label class="form-label" for="planning-episode-count">目标集数</label><input class="form-control" id="planning-episode-count" type="number" min="1" max="100" x-model.number="planningAssignment.targetEpisodeCount"></div></div>
+                    <div class="row g-3 mb-3"><div class="col-6"><label class="form-label" for="planning-target-platform">目标平台</label><select class="form-select" id="planning-target-platform" x-model="planningAssignment.targetPlatform"><option value="">待定</option><option value="dy">抖音</option><option value="hg">红果</option></select></div><div class="col-6"><label class="form-label" for="planning-episode-count">目标集数</label><input class="form-control" id="planning-episode-count" type="number" min="1" max="100" x-model.number="planningAssignment.targetEpisodeCount"></div></div>
+                    <div class="mb-3"><label class="form-label" for="planning-planner-members">策划团队成员</label><select class="form-select" id="planning-planner-members" x-model="planningAssignment.plannerMemberIds" multiple size="4"><template x-for="candidate in planningAssignment.plannerCandidates || []" :key="candidate.user_id"><option :value="candidate.user_id" x-text="`${candidate.display_name}（${candidate.username}）`"></option></template></select><div class="form-text small" x-show="!(planningAssignment.plannerCandidates || []).length">暂无可用的创意策划用户</div></div>
+                    <div class="mb-3"><label class="form-label" for="planning-writer-members">编剧团队成员</label><select class="form-select" id="planning-writer-members" x-model="planningAssignment.writerMemberIds" multiple size="4"><template x-for="candidate in planningAssignment.writerCandidates || []" :key="candidate.user_id"><option :value="candidate.user_id" x-text="`${candidate.display_name}（${candidate.username}）`"></option></template></select><div class="form-text small" x-show="!(planningAssignment.writerCandidates || []).length">暂无可用的编剧用户</div></div>
                 </div>
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">关闭</button>
-                <button type="button" class="btn btn-primary" x-show="!planningAssignment.result" @click="submitPlanningAssignment" :disabled="planningAssignment.loading || planningAssignment.saving || !planningAssignment.assigneeUserId || !planningAssignment.name.trim()"><span class="spinner-border spinner-border-sm me-1" x-show="planningAssignment.saving"></span><i class="bi bi-person-check me-1" x-show="!planningAssignment.saving"></i>确认分配</button>
-                <button type="button" class="btn btn-primary" x-show="planningAssignment.result" @click="openManagedPlanningProject"><i class="bi bi-folder2-open me-1"></i>查看负责项目</button>
+                <button type="button" class="btn btn-primary" x-show="!planningAssignment.result" @click="submitCreateProject" :disabled="planningAssignment.loading || planningAssignment.saving || !planningAssignment.name.trim()"><span class="spinner-border spinner-border-sm me-1" x-show="planningAssignment.saving"></span><i class="bi bi-folder-plus me-1" x-show="!planningAssignment.saving"></i>创建项目及任务</button>
+                <button type="button" class="btn btn-primary" x-show="planningAssignment.result" @click="openCreatedProject"><i class="bi bi-folder2-open me-1"></i>打开项目</button>
             </div>
         </div>
     </div>

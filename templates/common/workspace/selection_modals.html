@@ -277,35 +277,6 @@
         </div>
     </div>
 
-    <div class="modal fade" id="assignmentModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title"><i class="bi bi-person-plus me-2"></i>人员分配</h5>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="mb-3"><span class="text-muted">剧目：</span><strong x-text="assignment.topic?.title"></strong></div>
-                    <div class="mb-3"><span class="text-muted">分配角色：</span><strong x-text="assignment.role === 'creative_planner' ? '创意策划' : '编剧'"></strong></div>
-                    <div class="alert alert-danger py-2" x-show="assignment.error" x-text="assignment.error"></div>
-                    <label class="form-label">选择用户</label>
-                    <select class="form-select" x-model="assignment.selectedUserId">
-                        <option value="">-- 请选择 --</option>
-                        <template x-for="user in assignment.candidates" :key="user.id">
-                            <option :value="user.id" x-text="user.display_name || user.username"></option>
-                        </template>
-                    </select>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
-                    <button type="button" class="btn btn-primary" @click="submitAssignment" :disabled="!assignment.selectedUserId || assignment.saving">
-                        <span x-show="assignment.saving" class="spinner-border spinner-border-sm me-1"></span>分配任务
-                    </button>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <div class="modal fade" id="generatedContentPreviewModal" tabindex="-1" aria-labelledby="generatedContentPreviewModalLabel" aria-hidden="true">
         <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable"><div class="modal-content">
             <div class="modal-header"><div><h5 class="modal-title" id="generatedContentPreviewModalLabel"><i class="bi bi-file-earmark-richtext me-2"></i>已生成内容预览</h5><div class="small text-muted mt-1" x-text="generatedContentPreview.project?.name || generatedContentPreview.topic?.title || ''"></div></div><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button></div>

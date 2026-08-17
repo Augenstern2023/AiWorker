@@ -536,7 +536,7 @@ def test_project_creation_is_idempotent_and_bootstraps_one_brief_pool_task(
     assert second.json()["id"] != first.json()["id"]
 
 
-def test_project_owner_assigns_locked_topic_to_planner_and_manages_project(
+def test_project_owner_creates_locked_topic_project_with_team_and_manages_it(
     tmp_path: Path,
 ) -> None:
     runtime = tmp_path / ".runtime"
@@ -545,15 +545,15 @@ def test_project_owner_assigns_locked_topic_to_planner_and_manages_project(
     owner_role = identity.get_role_by_code("project_owner")
     planner_role = identity.get_role_by_code("creative_planner")
     assert owner_role is not None and planner_role is not None
-    owner_user = identity.create_user("owner-assign-topic", "项目负责人", "hash")
-    planner_user = identity.create_user("planner-assignee", "创意策划甲", "hash")
+    owner_user = identity.create_user("owner-create-topic", "项目负责人", "hash")
+    planner_user = identity.create_user("planner-member", "创意策划甲", "hash")
     identity.replace_user_roles(owner_user["id"], [owner_role["id"]])
     identity.replace_user_roles(planner_user["id"], [planner_role["id"]])
     permission_service = PermissionService(identity, SessionService(identity))
     owner = permission_service.principal_for_user(owner_user["id"], "owner-session")
     assert owner is not None
     repository = CreativeRepository(runtime / "creative/creative.db")
-    topic = _topic(repository, "负责人分配短剧")
+    topic = _topic(repository, "负责人创建短剧")
     repository.decide_topic(topic["id"], "adopted", "", owner.user_id)
     material = repository.append_selection_stage_snapshot(
         "source_package",
@@ -578,14 +578,14 @@ def test_project_owner_assigns_locked_topic_to_planner_and_manages_project(
     app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
     client = TestClient(app)
     payload = {
-        "assignee_user_id": planner_user["id"],
-        "name": "负责人创建的策划项目",
+        "name": "负责人创建的项目",
         "target_platform": "hg",
         "target_episode_count": 20,
-        "creation_request_id": "owner-assignment-1",
+        "planner_member_ids": [planner_user["id"]],
+        "creation_request_id": "owner-create-1",
     }
 
-    assigned = client.post(
+    created = client.post(
         f"/api/creative/topics/{topic['id']}/planning-assignment",
         json=payload,
     )
@@ -594,12 +594,16 @@ def test_project_owner_assigns_locked_topic_to_planner_and_manages_project(
         json=payload,
     )
 
-    assert assigned.status_code == 200, assigned.text
+    assert created.status_code == 200, created.text
     assert repeated.status_code == 200, repeated.text
-    assert repeated.json()["project"]["id"] == assigned.json()["project"]["id"]
-    assert assigned.json()["task"]["status"] == "assigned"
-    assert assigned.json()["task"]["assignee_user_id"] == planner_user["id"]
-    project_id = str(assigned.json()["project"]["id"])
+    assert repeated.json()["project"]["id"] == created.json()["project"]["id"]
+    tasks = created.json()["tasks"]
+    assert {task["task_type"] for task in tasks} == {
+        "brief", "characters", "outline", "beats", "script"
+    }
+    assert all(task["status"] == "pool" for task in tasks)
+    assert all(task["assignee_user_id"] is None for task in tasks)
+    project_id = str(created.json()["project"]["id"])
     workflow = WorkflowRepository(identity)
     members = workflow.list_project_members(project_id)
     assert {

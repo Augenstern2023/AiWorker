@@ -50,6 +50,25 @@ def test_weekly_report_api_lists_detail_and_exports(tmp_path):
     assert "8月3日-8月9日" in unquote(excel.headers["content-disposition"])
 
 
+def test_weekly_report_api_backfills_new_complete_week_before_listing(tmp_path, monkeypatch):
+    _write_complete_week(tmp_path)
+    app = FastAPI()
+    principal = Principal("admin", "admin", "管理员", ("system_admin",), frozenset({"*"}), "all", "session")
+    app.dependency_overrides[current_principal] = lambda: principal
+    app.dependency_overrides[permission_service_for_request] = lambda: None
+    app.include_router(build_analytics_router(root=tmp_path, runtime_dir=tmp_path / ".runtime"))
+    monkeypatch.setattr(
+        "analysis.weekly_report_service.datetime",
+        _FixedDateTime,
+    )
+
+    listing = TestClient(app).get("/api/analytics/weekly-reports?platform=dy")
+
+    assert listing.status_code == 200
+    assert listing.json()["items"][0]["report_id"] == "dy-2026-08-03"
+    assert Path(listing.json()["items"][0]["markdown_path"]).is_file()
+
+
 def test_legacy_sync_all_endpoint_is_not_exposed(tmp_path):
     app = FastAPI()
     principal = Principal("admin", "admin", "管理员", ("system_admin",), frozenset({"*"}), "all", "session")
@@ -65,3 +84,9 @@ def _write_complete_week(root: Path) -> None:
         path = root / "data" / "dy" / "jobs" / f"job-{offset}" / "rank" / f"douyin_series_rank_2026080{offset + 2}_100000.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"captured_at": f"{day} 10:00:00", "records": [{"rank": 6 - offset, "title": "周报剧", "series_id": "week-1", "rank_category": "短剧", "tab": "榜单", "heat_text": str(offset * 100), "like_count": str(offset * 20)}]}, ensure_ascii=False), encoding="utf-8")
+
+
+class _FixedDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 8, 10, 23, 59, tzinfo=tz)

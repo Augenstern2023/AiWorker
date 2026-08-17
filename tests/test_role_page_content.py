@@ -372,7 +372,7 @@ def test_selection_topics_includes_planning_assignment_modal():
     assert 'common/workspace/planning_assignment_modal.html' in topics
 
 
-def test_review_projects_lists_assigned_planning_projects_only():
+def test_review_projects_lists_managed_projects_only():
     page = _read("templates/review/projects.html")
     script = _read("static/js/review/projects.js")
 
@@ -380,7 +380,7 @@ def test_review_projects_lists_assigned_planning_projects_only():
     assert "待决策选题" not in page
     assert "workflow-bootstrap-topics" not in page
     assert "/api/creative/projects" in script
-    assert "/api/workflow/tasks" in script
+    assert "task.assignee_user_id" not in script
     assert "/api/creative/topics/workflow-candidates" not in script
     assert "/workflow`" not in script
 

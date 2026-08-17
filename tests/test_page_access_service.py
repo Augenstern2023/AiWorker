@@ -221,6 +221,19 @@ def test_managed_project_grant_opens_its_creative_brief_preview() -> None:
     ) is True
 
 
+def test_writing_project_grant_opens_read_only_planning_stages() -> None:
+    repository = FakeNavigationRepository()
+    repository.access_by_route["/writing/projects"] = {"user-1"}
+    service = PageAccessService(repository)
+
+    assert service.can_open_page(
+        _principal(), "/planning/projects/project-7/brief"
+    ) is True
+    assert service.can_open_page(
+        _principal(), "/planning/projects/project-7/characters"
+    ) is True
+
+
 def test_managed_project_preview_returns_generated_project_content_read_only() -> None:
     source = (ROOT / "creative/api.py").read_text(encoding="utf-8")
 

@@ -28,8 +28,10 @@
                 },
                 planningAssignment: {
                     topic: null,
-                    candidates: [],
-                    assigneeUserId: '',
+                    plannerCandidates: [],
+                    writerCandidates: [],
+                    plannerMemberIds: [],
+                    writerMemberIds: [],
                     name: '',
                     targetPlatform: '',
                     targetEpisodeCount: 20,
@@ -76,7 +78,6 @@
                 qrcodeLoggingIn: false,
                 audioModal: null,
                 dramaDownloadModal: null,
-                assignment: { topic: null, role: '', candidates: [], selectedUserId: '', saving: false, error: '' },
                 audioAnalysis: {status: 'idle'},
                 dramaAnalysis: {
                     title: '',

@@ -128,55 +128,10 @@ window.aiworkerModules.push(() => ({
                     }[status] || '';
                 },
 
-                workflowAssignmentForStage(topic) {
-                    return {
-                        pending_character_relationships: {
-                            task_type: 'characters',
-                            role_code: 'creative_planner',
-                            role_label: '创意策划',
-                            task_label: '人物关系'
-                        },
-                        pending_episode_outlines: {
-                            task_type: 'outline',
-                            role_code: 'screenwriter',
-                            role_label: '编剧',
-                            task_label: '分集大纲'
-                        },
-                        pending_beats: {
-                            task_type: 'beats',
-                            role_code: 'screenwriter',
-                            role_label: '编剧',
-                            task_label: 'Beats 脚本'
-                        },
-                        pending_script: {
-                            task_type: 'script',
-                            role_code: 'screenwriter',
-                            role_label: '编剧',
-                            task_label: '场次剧本'
-                        }
-                    }[topic?.lifecycle_status || topic?.status] || null;
-                },
-
-                async openStageWorkflowAssignment(topic) {
-                    const assignment = this.workflowAssignmentForStage(topic);
+                async openTopicProject(topic) {
                     const projectId = topic?.lifecycle_project_id;
-                    if (!assignment || !projectId) return;
-                    this.topicLibrary.error = '';
-                    try {
-                        const response = await aiworkerApi.request('/api/workflow/tasks');
-                        const tasks = await response.json();
-                        if (!response.ok) throw new Error(tasks.detail || '读取项目任务失败');
-                        const task = (tasks || []).find(item =>
-                            String(item.project_id || '') === String(projectId)
-                            && item.task_type === assignment.task_type
-                            && item.role_code === assignment.role_code
-                            && ['pool', 'assigned', 'returned'].includes(item.status)
-                        );
-                        if (!task) throw new Error(`当前项目未找到可分配的${assignment.task_label}任务，请刷新后重试`);
-                        await this.openWorkflowTaskWindow(task);
-                    } catch (error) {
-                        this.topicLibrary.error = error.message || '读取项目任务失败';
-                    }
+                    if (!projectId) return;
+                    window.location.assign(`/planning/projects/${encodeURIComponent(projectId)}/brief`);
                 },
 
                 async openGeneratedContentPreview(topic) {
@@ -306,11 +261,13 @@ window.aiworkerModules.push(() => ({
                     return `${topic.title}（${this.breakdownStatusLabel(topic)}）`;
                 },
 
-                async openPlanningAssignment(topic) {
+                async openCreateProject(topic) {
                     this.planningAssignment = {
                         topic,
-                        candidates: [],
-                        assigneeUserId: '',
+                        plannerCandidates: [],
+                        writerCandidates: [],
+                        plannerMemberIds: [],
+                        writerMemberIds: [],
                         name: `${topic.title}创作项目`,
                         targetPlatform: (topic.source_platforms || [topic.platform])[0] || '',
                         targetEpisodeCount: 20,
@@ -324,28 +281,31 @@ window.aiworkerModules.push(() => ({
                     this.planningAssignmentModal = this.modal('planningAssignmentModal');
                     this.planningAssignmentModal?.show();
                     try {
-                        const params = new URLSearchParams({
-                            role_code: 'creative_planner',
-                            task_type: 'brief'
-                        });
-                        const response = await aiworkerApi.request(
-                            `/api/workflow/assignment-candidates?${params.toString()}`
-                        );
-                        const payload = await response.json();
-                        if (!response.ok) throw new Error(payload.detail || '读取策划用户失败');
-                        this.planningAssignment.candidates = payload || [];
-                        this.planningAssignment.assigneeUserId = payload[0]?.user_id || '';
-                        if (!payload.length) throw new Error('暂无可分配的创意策划用户');
+                        const [planner, writer] = await Promise.all([
+                            this.loadProjectMemberCandidates('creative_planner'),
+                            this.loadProjectMemberCandidates('screenwriter')
+                        ]);
+                        this.planningAssignment.plannerCandidates = planner;
+                        this.planningAssignment.writerCandidates = writer;
                     } catch (error) {
-                        this.planningAssignment.error = error.message || '读取策划用户失败';
+                        this.planningAssignment.error = error.message || '读取团队成员失败';
                     } finally {
                         this.planningAssignment.loading = false;
                     }
                 },
 
-                async submitPlanningAssignment() {
+                async loadProjectMemberCandidates(roleCode) {
+                    const response = await aiworkerApi.request(
+                        `/api/creative/projects/member-candidates?role_code=${encodeURIComponent(roleCode)}`
+                    );
+                    const payload = await response.json();
+                    if (!response.ok) throw new Error(payload.detail || '读取团队成员失败');
+                    return payload || [];
+                },
+
+                async submitCreateProject() {
                     const state = this.planningAssignment;
-                    if (!state.topic || !state.assigneeUserId || state.saving) return;
+                    if (!state.topic || state.saving) return;
                     state.saving = true;
                     state.error = '';
                     try {
@@ -355,70 +315,30 @@ window.aiworkerModules.push(() => ({
                                 method: 'POST',
                                 headers: {'Content-Type': 'application/json'},
                                 body: JSON.stringify({
-                                    assignee_user_id: state.assigneeUserId,
                                     name: state.name.trim(),
                                     target_platform: state.targetPlatform,
                                     target_episode_count: Number(state.targetEpisodeCount || 20),
+                                    planner_member_ids: state.plannerMemberIds,
+                                    writer_member_ids: state.writerMemberIds,
                                     creation_request_id: state.creationRequestId
                                 })
                             }
                         );
                         const payload = await response.json();
-                        if (!response.ok) throw new Error(payload.detail || '分配策划任务失败');
+                        if (!response.ok) throw new Error(payload.detail || '创建项目及任务失败');
                         state.result = payload;
                         await this.fetchTopicLibrary();
                     } catch (error) {
-                        state.error = error.message || '分配策划任务失败';
+                        state.error = error.message || '创建项目及任务失败';
                     } finally {
                         state.saving = false;
                     }
                 },
 
-                openManagedPlanningProject() {
+                openCreatedProject() {
                     const projectId = this.planningAssignment.result?.project?.id;
                     if (!projectId) return;
-                    window.location.assign(`/review/projects?project_id=${encodeURIComponent(projectId)}`);
-                },
-
-                async openAssignmentModal(topic, role) {
-                    const a = this.assignment;
-                    a.topic = topic;
-                    a.role = role;
-                    a.selectedUserId = "";
-                    a.error = "";
-                    a.candidates = [];
-                    a.saving = false;
-                    this.modal("assignmentModal")?.show();
-                    try {
-                        const params = new URLSearchParams({ role_code: role, task_type: role === "creative_planner" ? "brief" : "outline" });
-                        const response = await aiworkerApi.request("/api/workflow/assignment-candidates?" + params.toString());
-                        const payload = await response.json();
-                        if (!response.ok) throw new Error(payload.detail || "读取用户列表失败");
-                        a.candidates = payload || [];
-                        a.selectedUserId = payload[0]?.user_id || "";
-                        if (!payload.length) throw new Error("暂无可分配的" + (role === "creative_planner" ? "创意策划" : "编剧") + "用户");
-                    } catch (e) {
-                        a.error = e.message;
-                    }
-                },
-
-                async submitAssignment() {
-                    const a = this.assignment;
-                    if (!a?.selectedUserId || !a?.topic) return;
-                    a.saving = true;
-                    a.error = "";
-                    try {
-                        const body = { topic_id: a.topic.id, assignee_user_id: a.selectedUserId, role_code: a.role, task_type: a.role === "creative_planner" ? "brief" : "outline" };
-                        const res = await aiworkerApi.request("/api/workflow/create-assignment", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body) });
-                        const data = await res.json();
-                        if (!res.ok) throw new Error(data.detail || "分配失败");
-                        this.modal("assignmentModal")?.hide();
-                        await this.fetchTopicLibrary();
-                    } catch (e) {
-                        a.error = e.message;
-                    } finally {
-                        a.saving = false;
-                    }
+                    window.location.assign(`/planning/projects/${encodeURIComponent(projectId)}/brief`);
                 },
 
 }));

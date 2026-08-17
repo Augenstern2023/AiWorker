@@ -40,7 +40,9 @@ _PERMISSION_CODES = (
     "breakdown.version.create",
     "breakdown.submit",
     "project.read.assigned",
+    "project.read.established",
     "project.read.managed",
+    "project.write.established.writing",
     "project.create",
     "project.edit.own_draft",
     "project.manage",
@@ -142,7 +144,9 @@ PERMISSIONS = {
     "breakdown.version.create": "创建剧目拆解版本",
     "breakdown.submit": "提交剧目拆解",
     "project.read.assigned": "查看参与项目",
+    "project.read.established": "查看已设立项目",
     "project.read.managed": "查看负责项目",
+    "project.write.established.writing": "领取已设立项目编剧阶段",
     "project.create": "创建项目",
     "project.edit.own_draft": "编辑本人草稿项目",
     "project.manage": "管理项目",
@@ -569,7 +573,7 @@ DEFAULT_ROLES = (
         description="依据已完成的创作方案完成全剧大纲、单集节拍与场次剧本。",
         is_system=True,
         permissions=_scoped(
-            """page.writing project.read.assigned brief.read.approved character.read.approved
+            """page.writing project.read.assigned project.read.established project.write.established.writing project.create brief.read.approved character.read.approved
             relationship.read.approved outline.read outline.generate outline.edit
             outline.version.create outline.submit beats.read beats.generate beats.edit
             beats.version.create beats.submit script.read script.generate script.edit
@@ -587,7 +591,7 @@ DEFAULT_ROLES = (
         permissions=_scoped(
             """page.review page.team_management page.script_review script.review.generate script.review.read
             script.optimize.generate script.optimize.read script.optimize.accept
-            project.read.managed project.manage project.member.manage
+            project.read.managed project.create project.manage project.member.manage
             project.archive workflow.read.managed workflow.assign workflow.reassign
             workflow.reclaim workflow.cancel version.read.managed version.compare
             job.read.project page.data_management data.media.preview data.media.delete

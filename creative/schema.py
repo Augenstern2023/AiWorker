@@ -27,10 +27,11 @@ class ProjectCreateRequest(BaseModel):
 
 
 class PlanningAssignmentRequest(BaseModel):
-    assignee_user_id: str = Field(min_length=1)
     name: str = Field(min_length=1, max_length=200)
     target_platform: str = ""
     target_episode_count: int = Field(20, ge=1, le=100)
+    planner_member_ids: list[str] = Field(default_factory=list)
+    writer_member_ids: list[str] = Field(default_factory=list)
     creation_request_id: str = Field(min_length=1, max_length=200)
 
 

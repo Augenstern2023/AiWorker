@@ -67,11 +67,17 @@ PAGE_ACCESS_GRANT_ROUTES: dict[str, str] = {
 }
 
 
-# Project owners preview generated project content from the review workspace
-# without being granted either authoring workspace.
+# Project owners preview generated content from the review workspace, while
+# assigned writers may follow a topic link back to the project Brief.
 PAGE_ACCESS_ADDITIONAL_GRANT_ROUTES: dict[str, tuple[str, ...]] = {
-    "/planning/projects/{project_id}/brief": ("/review/projects",),
-    "/planning/projects/{project_id}/characters": ("/review/projects",),
+    "/planning/projects/{project_id}/brief": (
+        "/review/projects",
+        "/writing/projects",
+    ),
+    "/planning/projects/{project_id}/characters": (
+        "/review/projects",
+        "/writing/projects",
+    ),
     "/writing/projects/{project_id}/outlines": ("/review/projects",),
     "/writing/projects/{project_id}/episodes/{episode_number}/beats": (
         "/review/projects",

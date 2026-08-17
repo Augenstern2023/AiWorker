@@ -60,7 +60,12 @@ from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.schema import Principal
 from system_database import SystemDatabase, SystemDatabaseSettings
-from workflow.repository import SYSTEM_ACTOR, WorkflowRepository
+from workflow.repository import (
+    ESTABLISHED_WRITING_PERMISSION,
+    ESTABLISHED_WRITING_TASK_TYPES,
+    SYSTEM_ACTOR,
+    WorkflowRepository,
+)
 from workflow.transition_service import TransitionService
 
 
@@ -118,6 +123,13 @@ def has_managed_project_preview_access(request: Request, principal: Principal) -
     return bool(callable(checker) and checker(principal, "/review/projects"))
 
 
+def established_writing_ensure_resource(path: str) -> str | None:
+    match = re.fullmatch(
+        r"/projects/\d+/workflow-tasks/(outline|beats|script)/ensure", path
+    )
+    return match.group(1) if match else None
+
+
 def creative_api_authorization(
     request: Request,
     principal: Principal = Depends(creative_api_principal),
@@ -128,7 +140,7 @@ def creative_api_authorization(
     permissions: tuple[str, ...] | None
     if path.startswith("/topics"):
         if path.endswith("/planning-assignment"):
-            permissions = ("project.manage", "workflow.assign")
+            permissions = ("project.create",)
         elif path == "/topics/workflow-candidates":
             permissions = ("project.manage",)
         elif path.endswith("/transcripts"):
@@ -153,8 +165,16 @@ def creative_api_authorization(
             else ("breakdown.edit", "project.manage")
         )
     elif path.startswith("/projects"):
-        if method == "GET":
-            permissions = ("project.read.assigned", "project.read.managed")
+        if path == "/projects/member-candidates":
+            permissions = ("project.create",)
+        elif method == "POST" and established_writing_ensure_resource(path):
+            permissions = (ESTABLISHED_WRITING_PERMISSION,)
+        elif method == "GET":
+            permissions = (
+                "project.read.assigned",
+                "project.read.established",
+                "project.read.managed",
+            )
         elif path == "/projects":
             permissions = ("project.create",)
         elif "/blueprints/generate" in path:
@@ -189,17 +209,28 @@ def creative_api_authorization(
     ):
         raise HTTPException(403, "没有执行此操作的权限")
     match = re.match(r"/projects/(\d+)(?:/|$)", path)
-    if match and not principal.is_system_admin and not page_api_authorized:
+    if match and not principal.is_system_admin:
         permission_service = getattr(
             request.app.state, "identity_permission_service", None
         )
         if not isinstance(permission_service, PermissionService):
             raise HTTPException(500, "identity permission service is not configured")
         project_id = match.group(1)
-        if not (
-            permission_service.can_access_assigned_project(principal, project_id)
-            or permission_service.can_access_managed_project(principal, project_id)
-        ):
+        can_claim_established_writing = bool(
+            method == "POST"
+            and established_writing_ensure_resource(path)
+            and ESTABLISHED_WRITING_PERMISSION in principal.permissions
+        )
+        can_access = (
+            permission_service.can_read_project(principal, project_id)
+            if method == "GET"
+            else (
+                permission_service.can_access_assigned_project(principal, project_id)
+                or permission_service.can_access_managed_project(principal, project_id)
+                or can_claim_established_writing
+            )
+        )
+        if not can_access:
             raise HTTPException(403, "只能访问当前分配或管理的项目")
     return principal
 
@@ -685,6 +716,30 @@ def build_creative_router(
             items = [item for item in items if item.get("lifecycle_status") == lifecycle_status]
         return items
 
+    def add_topic_project_access(
+        request: Request,
+        principal: Principal,
+        items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        permission_service = getattr(
+            request.app.state, "identity_permission_service", None
+        )
+        for item in items:
+            project_id = item.get("lifecycle_project_id")
+            item["can_open_project"] = bool(
+                project_id
+                and (
+                    principal.is_system_admin
+                    or (
+                        isinstance(permission_service, PermissionService)
+                        and permission_service.can_read_project(
+                            principal, str(project_id)
+                        )
+                    )
+                )
+            )
+        return items
+
     def topic_breakdown_export_label(topic: dict) -> str:
         if not topic.get("latest_breakdown_id"):
             return "未拆解"
@@ -756,15 +811,25 @@ def build_creative_router(
             )
             if not isinstance(permission_service, PermissionService):
                 raise HTTPException(500, "identity permission service is not configured")
-            if not (
-                permission_service.can_access_assigned_project(
-                    principal, str(project_id)
+            can_claim_established_writing = bool(
+                request.method.upper() == "POST"
+                and established_writing_ensure_resource(path)
+                and ESTABLISHED_WRITING_PERMISSION in principal.permissions
+            )
+            can_access = (
+                permission_service.can_read_project(principal, str(project_id))
+                if request.method.upper() == "GET"
+                else (
+                    permission_service.can_access_assigned_project(
+                        principal, str(project_id)
+                    )
+                    or permission_service.can_access_managed_project(
+                        principal, str(project_id)
+                    )
+                    or can_claim_established_writing
                 )
-                or permission_service.can_access_managed_project(
-                    principal, str(project_id)
-                )
-                or has_creative_page_api_access(request, principal)
-            ):
+            )
+            if not can_access:
                 raise HTTPException(403, "只能访问当前分配或管理的项目")
 
     router.dependencies.append(Depends(creative_resource_scope))
@@ -821,14 +886,7 @@ def build_creative_router(
         )
         if not isinstance(permission_service, PermissionService):
             raise HTTPException(500, "identity permission service is not configured")
-        if not (
-            permission_service.can_access_assigned_project(
-                principal, str(project_id)
-            )
-            or permission_service.can_access_managed_project(
-                principal, str(project_id)
-            )
-        ):
+        if not permission_service.can_read_project(principal, str(project_id)):
             raise HTTPException(403, "只能访问当前分配或管理的项目")
 
     def assert_project_owner_preview_access(
@@ -982,7 +1040,17 @@ def build_creative_router(
     ) -> dict[str, Any]:
         if principal.is_system_admin:
             return project
-        if managed_preview or "project.read.managed" in principal.permissions:
+        has_active_membership = any(
+            member["user_id"] == principal.user_id
+            and member["status"] == "active"
+            for member in workflow_repository.list_project_members(str(project["id"]))
+        )
+        read_only_portfolio_preview = not has_active_membership and (
+            managed_preview
+            or "project.read.managed" in principal.permissions
+            or "project.read.established" in principal.permissions
+        )
+        if read_only_portfolio_preview:
             viewed = dict(project)
             viewed["allowed_actions"] = []
             viewed["preview_only"] = True
@@ -1245,6 +1313,7 @@ def build_creative_router(
 
     @router.get("/topics")
     async def list_topics(
+        request: Request,
         principal: Principal = Depends(current_principal),
         platform: str = "",
         status: str = "",
@@ -1270,6 +1339,7 @@ def build_creative_router(
             lifecycle_status=lifecycle_status,
             limit=repository_limit,
         )
+        add_topic_project_access(request, principal, items)
         return {"items": items if all else items[:limit]}
 
     @router.get("/topics/export")
@@ -1369,28 +1439,16 @@ def build_creative_router(
         topic_id: int,
         payload: PlanningAssignmentRequest,
         request: Request,
-        principal: Principal = Depends(current_principal),
+        principal: Principal = Depends(require_permission("project.create")),
     ):
         topic = repository.get_topic(topic_id)
         if topic is None:
             raise HTTPException(404, "选题不存在")
         if topic.get("status") != "adopted":
-            raise HTTPException(409, "只有已采纳选题可以分配策划任务")
+            raise HTTPException(409, "只有已采纳选题可以创建项目及任务")
         breakdown = repository.get_latest_locked_breakdown(topic_id)
         if breakdown is None:
             raise HTTPException(409, "请先完成并锁定剧目拆解")
-        try:
-            candidates = workflow_repository.list_role_assignment_candidates(
-                "creative_planner", "brief", principal
-            )
-        except PermissionError as exc:
-            raise HTTPException(403, str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
-        if payload.assignee_user_id not in {
-            item["user_id"] for item in candidates
-        }:
-            raise HTTPException(422, "所选账号不是可用的创意策划")
 
         existing = repository.get_project_by_creation_request_id(
             principal.user_id, payload.creation_request_id
@@ -1399,8 +1457,14 @@ def build_creative_router(
             int(existing["topic_id"]) != topic_id
             or int(existing["breakdown_id"]) != int(breakdown["id"])
         ):
-            raise HTTPException(409, "该创建请求已用于其他策划项目")
+            raise HTTPException(409, "该创建请求已用于其他项目")
         try:
+            planner_member_ids = _validate_members(
+                principal, payload.planner_member_ids, "creative_planner"
+            )
+            writer_member_ids = _validate_members(
+                principal, payload.writer_member_ids, "screenwriter"
+            )
             project = existing or repository.create_project(
                 topic_id,
                 int(breakdown["id"]),
@@ -1411,36 +1475,27 @@ def build_creative_router(
                 created_by=principal.user_id,
             )
             project_id = str(project["id"])
-            task = workflow_repository.ensure_project_task(
-                project_id,
-                topic_id,
-                task_type="brief",
-                role_code="creative_planner",
-                actor=principal,
-            )
-            repository.reconcile_project_workflow_task(task["id"], int(project_id))
             workflow_repository.add_project_member(
                 project_id,
                 principal.user_id,
                 "project_owner",
                 principal,
+                allow_creator_bootstrap=True,
             )
-            workflow_repository.add_project_member(
-                project_id,
-                payload.assignee_user_id,
-                "creative_planner",
-                principal,
-            )
-            task = workflow_repository.get_task(task["id"]) or task
-            if task.get("assignee_user_id") is None and task["status"] == "pool":
-                task = workflow_repository.assign_task(
-                    task["id"], payload.assignee_user_id, principal
+            for member_id in planner_member_ids:
+                workflow_repository.add_project_member(
+                    project_id, member_id, "creative_planner", principal
                 )
-            elif task.get("assignee_user_id") != payload.assignee_user_id:
-                raise ValueError("该创建请求已经分配给其他策划用户")
+            for member_id in writer_member_ids:
+                workflow_repository.add_project_member(
+                    project_id, member_id, "screenwriter", principal
+                )
+            tasks = _ensure_stage_tasks(
+                project_id, topic_id, principal
+            )
             project = repository.get_project(int(project_id)) or project
         except KeyError as exc:
-            raise HTTPException(404, "策划项目或任务不存在") from exc
+            raise HTTPException(404, "创作项目或任务不存在") from exc
         except PermissionError as exc:
             raise HTTPException(403, str(exc)) from exc
         except ValueError as exc:
@@ -1450,7 +1505,7 @@ def build_creative_router(
         if isinstance(audit_service, AuditService):
             audit_service.record(
                 actor=principal,
-                action="project.planning.assign",
+                action="project.create",
                 target_type="project",
                 target_id=project_id,
                 project_id=project_id,
@@ -1458,15 +1513,98 @@ def build_creative_router(
                 after={
                     "topic_id": topic_id,
                     "breakdown_id": breakdown["id"],
-                    "task_id": task["id"],
-                    "assignee_user_id": payload.assignee_user_id,
+                    "task_ids": [task["id"] for task in tasks],
+                    "planner_member_ids": payload.planner_member_ids,
+                    "writer_member_ids": payload.writer_member_ids,
                     "creation_request_id": payload.creation_request_id,
                 },
                 reason=None,
                 result="success",
                 request=request,
             )
-        return {"project": project, "task": task}
+        return {"project": project, "tasks": tasks}
+
+    def _validate_members(
+        principal: Principal,
+        member_ids: list[str],
+        role_code: str,
+    ) -> list[str]:
+        """Validate selected ids against the exact list shown by the candidates API."""
+        task_type_by_role = {
+            "creative_planner": "brief",
+            "screenwriter": "outline",
+        }
+        task_type = task_type_by_role.get(role_code)
+        if task_type is None:
+            raise ValueError("unsupported project member role")
+        candidates = workflow_repository.list_role_assignment_candidates(
+            role_code,
+            task_type,
+            principal,
+            required_permission="project.create",
+        )
+        candidate_ids = {item["user_id"] for item in candidates}
+        selected = list(
+            dict.fromkeys(
+                str(raw).strip() for raw in (member_ids or []) if str(raw).strip()
+            )
+        )
+        if any(user_id not in candidate_ids for user_id in selected):
+            raise ValueError(f"所选账号不是可用的{role_code}成员")
+        return selected
+
+    def _ensure_stage_tasks(
+        project_id: str,
+        topic_id: int,
+        principal: Principal,
+    ) -> list[dict[str, Any]]:
+        """Create all creative stage workflow tasks in the project task pool."""
+        stage_roles = [
+            ("brief", "creative_planner"),
+            ("characters", "creative_planner"),
+            ("outline", "screenwriter"),
+            ("beats", "screenwriter"),
+            ("script", "screenwriter"),
+        ]
+        tasks: list[dict[str, Any]] = []
+        for task_type, role_code in stage_roles:
+            task = workflow_repository.ensure_project_task(
+                project_id,
+                topic_id,
+                task_type=task_type,
+                role_code=role_code,
+                actor=principal,
+            )
+            if task_type == "brief":
+                repository.reconcile_project_workflow_task(
+                    task["id"], int(project_id)
+                )
+            tasks.append(task)
+        return tasks
+
+    @router.get("/projects/member-candidates")
+    async def list_project_member_candidates(
+        role_code: str,
+        principal: Principal = Depends(require_permission("project.create")),
+    ) -> list[dict[str, Any]]:
+        task_type_by_role = {
+            "creative_planner": "brief",
+            "screenwriter": "outline",
+        }
+        task_type = task_type_by_role.get(role_code)
+        if task_type is None:
+            raise HTTPException(400, "unsupported project member role")
+        try:
+            return workflow_repository.list_role_assignment_candidates(
+                role_code,
+                task_type,
+                principal,
+                required_permission="project.create",
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     def topic_transcript_bundle_or_404(topic_id: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         topic = repository.get_topic(topic_id)
@@ -1756,7 +1894,7 @@ def build_creative_router(
     async def create_project(
         payload: ProjectCreateRequest,
         request: Request,
-        principal: Principal = Depends(current_principal),
+        principal: Principal = Depends(require_permission("project.create")),
     ):
         try:
             workflow_task_id = payload.workflow_task_id or ""
@@ -1765,7 +1903,23 @@ def build_creative_router(
                 raise HTTPException(
                     409, "project creation requires an approved breakdown"
                 )
-            task = workflow_repository.get_task(workflow_task_id) if workflow_task_id else None
+            if int(breakdown["topic_id"]) != payload.topic_id:
+                raise HTTPException(409, "breakdown belongs to another topic")
+            task = None
+            if workflow_task_id:
+                try:
+                    task = workflow_adapter.assert_task_for_creation(
+                        workflow_task_id,
+                        "brief",
+                        principal,
+                        topic_id=payload.topic_id,
+                    )
+                except KeyError as exc:
+                    raise HTTPException(404, "workflow task not found") from exc
+                except PermissionError as exc:
+                    raise HTTPException(403, str(exc)) from exc
+                except ValueError as exc:
+                    raise HTTPException(409, str(exc)) from exc
             project = (
                 repository.get_project_by_creation_workflow_task_id(workflow_task_id)
                 if workflow_task_id else repository.get_project_by_creation_request_id(
@@ -1813,24 +1967,37 @@ def build_creative_router(
                     creation_request_id=payload.creation_request_id,
                     created_by=principal.user_id,
                 )
+            resolved_project = repository.get_project(int(project["id"])) or project
+            if resolved_project.get("created_by") == principal.user_id:
+                workflow_repository.add_project_member(
+                    str(resolved_project["id"]),
+                    principal.user_id,
+                    "project_owner",
+                    principal,
+                    allow_creator_bootstrap=True,
+                )
             if workflow_task_id and bound_id is None:
                 try:
                     workflow_repository.bind_workflow_project(
                         workflow_task_id,
-                        str(project["id"]),
+                        str(resolved_project["id"]),
                         principal,
+                        expected_task_type="brief",
+                        expected_topic_id=payload.topic_id,
+                        require_creator_assignment=True,
                     )
+                except PermissionError as exc:
+                    raise HTTPException(403, str(exc)) from exc
+                except ValueError as exc:
+                    raise HTTPException(409, str(exc)) from exc
                 except Exception as exc:
                     raise HTTPException(
                         503,
                         "project created but workflow binding requires reconciliation",
                     ) from exc
-            resolved_project = repository.get_project(int(project["id"])) or project
-            if not workflow_task_id:
-                task = workflow_repository.ensure_project_task(
-                    str(project["id"]), payload.topic_id,
-                    task_type="brief", role_code="creative_planner",
-                    actor=principal,
+            if resolved_project.get("created_by") == principal.user_id:
+                _ensure_stage_tasks(
+                    str(resolved_project["id"]), payload.topic_id, principal
                 )
             if is_existing_project:
                 assert_project_read_access(
@@ -1885,13 +2052,8 @@ def build_creative_router(
                 item
                 for item in items
                 if isinstance(permission_service, PermissionService)
-                and (
-                    permission_service.can_access_assigned_project(
-                        principal, str(item["id"])
-                    )
-                    or permission_service.can_access_managed_project(
-                        principal, str(item["id"])
-                    )
+                and permission_service.can_read_project(
+                    principal, str(item["id"])
                 )
             ]
         return {"items": items}
@@ -1922,9 +2084,12 @@ def build_creative_router(
         page_authorized = has_creative_page_api_access(request, principal)
         for summary in repository.list_projects():
             project_id = int(summary["id"])
-            if not principal.is_system_admin and not page_authorized and not (
-                permission_service.can_access_assigned_project(principal, str(project_id))
-                or permission_service.can_access_managed_project(principal, str(project_id))
+            if (
+                not principal.is_system_admin
+                and not page_authorized
+                and not permission_service.can_read_project(
+                    principal, str(project_id)
+                )
             ):
                 continue
             project = project_or_404(project_id)
@@ -1987,23 +2152,42 @@ def build_creative_router(
         role_code = role_by_resource.get(resource_type)
         if role_code is None:
             raise HTTPException(400, "unsupported creative resource type")
-        assert_project_generation_access(project_id, principal)
-        project = project_or_404(project_id)
-        task = workflow_repository.ensure_project_task(
-            str(project_id),
-            int(project["topic_id"]),
-            task_type=resource_type,
-            role_code=role_code,
-            actor=principal,
+        can_claim_established_writing = bool(
+            resource_type in ESTABLISHED_WRITING_TASK_TYPES
+            and ESTABLISHED_WRITING_PERMISSION in principal.permissions
         )
-        if task["status"] not in {"pool", "assigned", "in_progress", "returned"}:
-            task = workflow_repository.create_next_task(
-                task["id"], resource_type, role_code, actor=principal
+        if not can_claim_established_writing:
+            assert_project_generation_access(project_id, principal)
+        project = project_or_404(project_id)
+        try:
+            task = workflow_repository.ensure_project_task(
+                str(project_id),
+                int(project["topic_id"]),
+                task_type=resource_type,
+                role_code=role_code,
+                actor=principal,
             )
-        if task["status"] == "pool" and workflow_repository.can_claim_task(
-            task["id"], principal
-        ):
-            task = workflow_repository.claim_task(task["id"], principal)
+            if task["status"] not in {"pool", "assigned", "in_progress", "returned"}:
+                task = workflow_repository.create_next_task(
+                    task["id"], resource_type, role_code, actor=principal
+                )
+            if task["status"] == "pool":
+                if workflow_repository.can_claim_task(task["id"], principal):
+                    task = workflow_repository.claim_task(task["id"], principal)
+                elif can_claim_established_writing:
+                    raise HTTPException(409, "该创作阶段已由其他编剧处理")
+            if (
+                can_claim_established_writing
+                and task["status"] in {"assigned", "in_progress", "returned"}
+                and task.get("assignee_user_id") != principal.user_id
+            ):
+                raise HTTPException(409, "该创作阶段已由其他编剧处理")
+        except HTTPException:
+            raise
+        except (PermissionError, ValueError) as exc:
+            if can_claim_established_writing:
+                raise HTTPException(409, "该创作阶段已由其他编剧处理") from exc
+            raise
         return task
 
     @router.get("/projects/{project_id}/generated-content")

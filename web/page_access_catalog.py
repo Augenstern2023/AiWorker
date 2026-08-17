@@ -163,6 +163,7 @@ _SELECTION_CONTENT_WORKSPACE: tuple[ApiRoute, ...] = (
 
 _SELECTION_TOPIC_ASSIGNMENT: tuple[ApiRoute, ...] = (
     ("POST", "/api/creative/topics/{topic_id}/planning-assignment"),
+    ("GET", "/api/creative/projects/member-candidates"),
     ("GET", "/api/workflow/tasks"),
     ("GET", "/api/workflow/assignment-candidates"),
     ("POST", "/api/workflow/create-assignment"),

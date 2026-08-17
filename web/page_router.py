@@ -298,6 +298,9 @@ def _template_context(
             principal
             and navigation_service.can_open(principal, "/planning/projects")
         ),
+        "can_open_writing_projects": bool(
+            principal and navigation_service.can_open(principal, "/writing/projects")
+        ),
         **request.path_params,
     }
 

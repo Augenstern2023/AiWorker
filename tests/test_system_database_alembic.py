@@ -135,6 +135,115 @@ def test_baseline_keeps_text_primary_keys(postgres_url, monkeypatch):
         engine.dispose()
 
 
+def test_project_creator_permission_backfill_includes_disabled_builtin_roles(
+    postgres_url, monkeypatch
+):
+    """Re-enabling a built-in creator role must not lose project.create."""
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    command.upgrade(config, "head")
+    engine = create_engine(postgres_url)
+    try:
+        with engine.begin() as connection:
+            role_id = connection.execute(
+                text("SELECT id FROM roles WHERE lower(code) = 'screenwriter'")
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "DELETE FROM role_permissions WHERE role_id = :role_id "
+                    "AND permission_code = 'project.create'"
+                ),
+                {"role_id": role_id},
+            )
+            connection.execute(
+                text("UPDATE roles SET is_enabled = 0 WHERE id = :role_id"),
+                {"role_id": role_id},
+            )
+
+        command.downgrade(config, "0009_project_creator_permission")
+        command.upgrade(config, "head")
+
+        with engine.connect() as connection:
+            scope = connection.execute(
+                text(
+                    "SELECT data_scope FROM role_permissions "
+                    "WHERE role_id = :role_id AND permission_code = 'project.create'"
+                ),
+                {"role_id": role_id},
+            ).scalar_one_or_none()
+        assert scope == "project"
+    finally:
+        with engine.begin() as connection:
+            connection.execute(
+                text("UPDATE roles SET is_enabled = 1 WHERE lower(code) = 'screenwriter'")
+            )
+        command.upgrade(config, "head")
+        engine.dispose()
+
+
+def test_writer_stage_permission_migration_preserves_admin_owned_grants(
+    postgres_url, monkeypatch
+):
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    command.upgrade(config, "head")
+    engine = create_engine(postgres_url)
+    custom_permission = f"custom.writer-stage-{uuid.uuid4()}"
+    try:
+        with engine.begin() as connection:
+            role_id = connection.execute(
+                text("SELECT id FROM roles WHERE lower(code) = 'screenwriter'")
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO permissions (code, label) VALUES (:code, '后台自定义权限')"
+                ),
+                {"code": custom_permission},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO role_permissions (role_id, permission_code, data_scope) "
+                    "VALUES (:role_id, :code, 'project')"
+                ),
+                {"role_id": role_id, "code": custom_permission},
+            )
+
+        command.downgrade(config, "0011_writer_established_read")
+
+        with engine.connect() as connection:
+            grants = dict(
+                connection.execute(
+                    text(
+                        "SELECT permission_code, data_scope FROM role_permissions "
+                        "WHERE role_id = :role_id AND permission_code IN "
+                        "('project.write.established.writing', :custom_permission)"
+                    ),
+                    {
+                        "role_id": role_id,
+                        "custom_permission": custom_permission,
+                    },
+                ).all()
+            )
+        assert grants == {
+            "project.write.established.writing": "project",
+            custom_permission: "project",
+        }
+    finally:
+        command.upgrade(config, "head")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "DELETE FROM role_permissions WHERE permission_code = :code"
+                ),
+                {"code": custom_permission},
+            )
+            connection.execute(
+                text("DELETE FROM permissions WHERE code = :code"),
+                {"code": custom_permission},
+            )
+        engine.dispose()
+
+
 def test_role_page_access_migration_round_trips_existing_account_grants(
     postgres_url, monkeypatch
 ):

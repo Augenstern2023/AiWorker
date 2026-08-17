@@ -164,6 +164,16 @@ class PermissionService:
             ).mappings().first()
         return row is not None
 
+    def can_read_project(self, principal: Principal, project_id: str) -> bool:
+        """Allow portfolio read access without granting assigned-project mutations."""
+        if principal.data_scope == "all" or "project_owner" in principal.role_codes:
+            return True
+        if "project.read.established" in principal.permissions:
+            return True
+        return self.can_access_assigned_project(
+            principal, project_id
+        ) or self.can_access_managed_project(principal, project_id)
+
     def can_access_managed_project(
         self, principal: Principal, project_id: str
     ) -> bool:

@@ -189,7 +189,9 @@ def test_historical_report_is_marked_stale_when_a_new_complete_week_exists(tmp_p
 
     reports = service.list_reports("dy", as_of=datetime(2026, 8, 17, 23, 59))
 
-    assert reports[0]["data_quality"]["is_stale"] is True
+    historical = next(report for report in reports if report["report_id"] == "dy-2026-08-03")
+    assert reports[0]["report_id"] == "dy-2026-08-10"
+    assert historical["data_quality"]["is_stale"] is True
 
 
 def test_generates_every_available_complete_week_for_historical_backfill(tmp_path):

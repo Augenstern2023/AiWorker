@@ -167,9 +167,16 @@ class WeeklyReportService:
     def generate_all_latest(self, as_of: datetime | None = None, with_llm: bool = True) -> list[dict[str, Any]]:
         return [self.generate_latest(platform, as_of=as_of, with_llm=with_llm) for platform in sorted(PLATFORMS)]
 
-    def list_reports(self, platform: str = "", as_of: datetime | None = None) -> list[dict[str, Any]]:
-        reports = self.repository.list(platform=platform)
+    def list_reports(
+        self,
+        platform: str = "",
+        as_of: datetime | None = None,
+        ensure_generated: bool = True,
+    ) -> list[dict[str, Any]]:
         now = as_of or datetime.now()
+        if ensure_generated:
+            self.generate_all_available(platform=platform, as_of=now, with_llm=False)
+        reports = self.repository.list(platform=platform)
         latest_week_by_platform: dict[str, str] = {}
         for value in (platform,) if platform else PLATFORMS:
             snapshots = self._complete_week_snapshots(value, now)
@@ -185,7 +192,16 @@ class WeeklyReportService:
         report = self.repository.get(report_id)
         if report is None:
             return None
-        return next((item for item in self.list_reports(report["platform"], as_of=as_of) if item["report_id"] == report_id), report)
+        return next(
+            (
+                item
+                for item in self.list_reports(
+                    report["platform"], as_of=as_of, ensure_generated=False
+                )
+                if item["report_id"] == report_id
+            ),
+            report,
+        )
 
     def _complete_week_snapshots(self, platform: str, as_of: datetime) -> list[RankSnapshot] | None:
         weeks = self._complete_weeks_snapshots(platform, as_of)

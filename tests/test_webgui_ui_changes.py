@@ -856,32 +856,32 @@ def test_closing_a_completed_review_modal_syncs_its_row_action_state():
     assert "['completed', 'failed'].includes(state.status)" in creative
 
 
-def test_topic_library_assigns_each_pending_stage_to_its_workflow_role():
+def test_topic_library_unifies_project_creation_and_open_actions():
     topics = _source("static/js/selection/topics.js")
     table = _source("templates/common/workspace/selection_topics.html")
-    task_modal = _source("templates/common/workspace/workflow_task_modal.html")
 
-    assert "workflowAssignmentForStage(topic)" in topics
-    assert "pending_character_relationships" in topics
-    assert "task_type: 'characters'" in topics
-    assert "role_code: 'creative_planner'" in topics
-    assert "pending_episode_outlines" in topics
-    assert "task_type: 'outline'" in topics
-    assert "pending_beats" in topics
-    assert "task_type: 'beats'" in topics
-    assert "role_code: 'screenwriter'" in topics
-    assert '@click="openStageWorkflowAssignment(topic)"' in table
-    assert ":title=\"workflowAssignmentForStage(topic)?.role_label" in table
-    assert "stageWorkflowAssignmentLabel" in task_modal
+    assert "openCreateProject(topic)" in topics
+    assert "submitCreateProject" in topics
+    assert "openTopicProject(topic)" in topics
+    assert "loadProjectMemberCandidates" in topics
+    assert "planner_member_ids" in topics
+    assert "writer_member_ids" in topics
+    assert "openStageWorkflowAssignment(topic)" not in topics
+    assert "workflowAssignmentForStage" not in topics
+    assert '@click="openCreateProject(topic)"' in table
+    assert '@click="openTopicProject(topic)"' in table
+    assert "分配创意策划" not in table
 
 
-def test_planning_assignment_refreshes_the_topic_library_after_success():
+def test_create_project_refreshes_the_topic_library_after_success():
     topics = _source("static/js/selection/topics.js")
-    submit_method = topics.split("async submitPlanningAssignment()", 1)[1].split(
-        "openManagedPlanningProject()", 1
+    submit_method = topics.split("async submitCreateProject()", 1)[1].split(
+        "openCreatedProject()", 1
     )[0]
 
     assert "await this.fetchTopicLibrary();" in submit_method
+    assert "planner_member_ids" in submit_method
+    assert "writer_member_ids" in submit_method
 
 
 def test_saving_a_scene_script_refreshes_topic_library_state():

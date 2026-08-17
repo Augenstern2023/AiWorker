@@ -40,6 +40,9 @@ OWNER_PROJECT_ROLES = frozenset({"owner", "project_owner"})
 _MANAGED_PROJECT_ROLES = OWNER_PROJECT_ROLES | frozenset(
     {"manager", "project_manager"}
 )
+ESTABLISHED_WRITING_PERMISSION = "project.write.established.writing"
+ESTABLISHED_WRITING_TASK_TYPES = frozenset({"outline", "beats", "script"})
+ACTIVE_TASK_STATUSES = frozenset({"assigned", "in_progress", "returned"})
 SYSTEM_ACTOR = Principal(
     user_id="workflow:system",
     username="workflow-system",
@@ -265,6 +268,18 @@ class WorkflowRepository:
         actor_id = self._actor_id(actor)
         with self.identity_repository.transaction() as connection:
             self._ensure_system_actor(connection, actor_id)
+            self._ensure_workflow(
+                connection,
+                workflow_id,
+                task_type,
+                project_id,
+                topic_id,
+                actor_id,
+            )
+            connection.exec_driver_sql(
+                "SELECT id FROM workflow_instances WHERE id = %s FOR UPDATE",
+                (workflow_id,),
+            ).mappings().fetchone()
             existing = connection.exec_driver_sql(
                 """
                 SELECT * FROM workflow_tasks
@@ -275,14 +290,6 @@ class WorkflowRepository:
             ).mappings().fetchone()
             if existing is not None:
                 return self._task_dict(existing)
-            self._ensure_workflow(
-                connection,
-                workflow_id,
-                task_type,
-                project_id,
-                topic_id,
-                actor_id,
-            )
             role = connection.exec_driver_sql(
                 "SELECT 1 FROM roles WHERE code = %s  "
                 "AND is_enabled = 1 AND is_deleted = 0",
@@ -331,13 +338,32 @@ class WorkflowRepository:
         task_id: str,
         project_id: str,
         creator: Principal | dict[str, Any],
+        *,
+        expected_task_type: str | None = None,
+        expected_topic_id: int | None = None,
+        require_creator_assignment: bool = False,
     ) -> dict[str, Any]:
         creator_id = self._actor_id(creator)
         with self.identity_repository.transaction() as connection:
             task = self._require_task(connection, task_id)
             if task["project_id"] not in {None, project_id}:
                 raise ValueError("workflow task is already linked to another project")
-            self._live_actor(connection, creator_id)
+            live_creator = self._live_actor(connection, creator_id)
+            if expected_task_type is not None and task["task_type"] != expected_task_type:
+                raise ValueError("workflow node does not match project creation")
+            if expected_topic_id is not None and task["topic_id"] != expected_topic_id:
+                raise ValueError("workflow task belongs to another topic")
+            if (
+                require_creator_assignment
+                and not live_creator["is_system_admin"]
+                and task["assignee_user_id"] != creator_id
+            ):
+                raise PermissionError("only the task assignee may create this project")
+            if (
+                (expected_task_type is not None or require_creator_assignment)
+                and task["status"] not in {"assigned", "in_progress", "returned"}
+            ):
+                raise ValueError("workflow task is not open for project creation")
             self._ensure_system_actor(connection, SYSTEM_ACTOR.user_id)
             connection.exec_driver_sql(
                 "UPDATE workflow_instances SET project_id = %s, resource_type = 'project', "
@@ -719,6 +745,23 @@ class WorkflowRepository:
                 rows = connection.exec_driver_sql(
                     "SELECT * FROM workflow_tasks ORDER BY created_at, id"
                 ).mappings().fetchall()
+                established_projects = {
+                    str(row["project_id"])
+                    for row in connection.exec_driver_sql(
+                        "SELECT DISTINCT project_id FROM project_members "
+                        "WHERE status = 'active'"
+                    ).mappings()
+                }
+                active_stage_keys = {
+                    (str(row["project_id"]), str(row["task_type"]))
+                    for row in rows
+                    if row["project_id"] is not None
+                    and row["status"] in ACTIVE_TASK_STATUSES
+                    and row["assignee_id"] is not None
+                }
+                can_claim_established_writing = (
+                    ESTABLISHED_WRITING_PERMISSION in live_actor["permissions"]
+                )
                 rows = [
                     row
                     for row in rows
@@ -739,6 +782,16 @@ class WorkflowRepository:
                                 and row["project_id"] in managed_projects
                             )
                             or row["project_id"] in assigned_projects
+                            or (
+                                can_claim_established_writing
+                                and str(row["project_id"]) in established_projects
+                                and row["task_type"] in ESTABLISHED_WRITING_TASK_TYPES
+                                and (
+                                    str(row["project_id"]),
+                                    str(row["task_type"]),
+                                )
+                                not in active_stage_keys
+                            )
                         )
                     )
                     or (
@@ -791,8 +844,20 @@ class WorkflowRepository:
                 and task["task_type"] not in live_actor["claimable_task_types"]
             ):
                 return False
-            return task["project_id"] is None or self._is_active_project_member(
-                connection, task["project_id"], actor_id
+            if (
+                task["project_id"] is not None
+                and task["task_type"] in ESTABLISHED_WRITING_TASK_TYPES
+                and self._writing_stage_has_active_task(connection, task)
+            ):
+                return False
+            return (
+                task["project_id"] is None
+                or self._is_active_project_member(
+                    connection, task["project_id"], actor_id
+                )
+                or self._can_claim_established_writing_stage(
+                    connection, task, live_actor
+                )
             )
 
     def can_assign_task(
@@ -816,6 +881,20 @@ class WorkflowRepository:
             task = self._require_task(connection, task_id)
             live_actor = self._live_actor(connection, actor_id)
             if (
+                task["project_id"] is not None
+                and task["task_type"] in ESTABLISHED_WRITING_TASK_TYPES
+                and not live_actor["is_system_admin"]
+            ):
+                self._lock_established_project(connection, task["project_id"])
+                if self._writing_stage_has_active_task(connection, task):
+                    raise PermissionError("writing stage is already being handled")
+            can_claim_established_writing = (
+                task["project_id"] is not None
+                and self._can_claim_established_writing_stage(
+                    connection, task, live_actor
+                )
+            )
+            if (
                 task["role_code"] == "project_owner"
                 and not live_actor["is_system_admin"]
             ):
@@ -826,6 +905,7 @@ class WorkflowRepository:
                 and not self._is_active_project_member(
                     connection, task["project_id"], actor_id
                 )
+                and not can_claim_established_writing
             ):
                 raise PermissionError("actor must be an active project member")
             to_status = self.state_machine.transition(task, "claim", live_actor)
@@ -840,6 +920,10 @@ class WorkflowRepository:
             )
             if cursor.rowcount != 1:
                 raise ValueError("task has already been claimed")
+            if can_claim_established_writing:
+                self._ensure_writer_membership_for_claim(
+                    connection, task["project_id"], actor_id
+                )
             self._record_event(
                 connection,
                 task_id,
@@ -926,6 +1010,8 @@ class WorkflowRepository:
         role_code: str,
         task_type: str,
         actor: Principal | dict[str, Any],
+        *,
+        required_permission: str = "workflow.assign",
     ) -> list[dict[str, Any]]:
         normalized_role = role_code.strip()
         normalized_task = task_type.strip()
@@ -934,8 +1020,13 @@ class WorkflowRepository:
         actor_id = self._actor_id(actor)
         with self.identity_repository.connect() as connection:
             live_actor = self._live_actor(connection, actor_id)
-            if not live_actor["is_system_admin"] and "workflow.assign" not in live_actor["permissions"]:
-                raise PermissionError("workflow.assign permission is required")
+            if (
+                not live_actor["is_system_admin"]
+                and required_permission not in live_actor["permissions"]
+            ):
+                raise PermissionError(
+                    f"{required_permission} permission is required"
+                )
             rows = connection.exec_driver_sql(
                 """
                 SELECT DISTINCT u.id, u.username, u.display_name
@@ -989,6 +1080,7 @@ class WorkflowRepository:
         actor: Principal | dict[str, Any],
         *,
         status: str = "active",
+        allow_creator_bootstrap: bool = False,
     ) -> dict[str, Any]:
         if status not in {"active", "inactive"}:
             raise ValueError("project member status must be active or inactive")
@@ -1001,13 +1093,26 @@ class WorkflowRepository:
                 "SELECT 1 FROM project_members WHERE project_id = %s LIMIT 1",
                 (project_id,),
             ).mappings().fetchone()
-            is_owner_bootstrap = (
+            has_owner = connection.exec_driver_sql(
+                "SELECT 1 FROM project_members WHERE project_id = %s "
+                "AND project_role IN ('owner', 'project_owner') "
+                "AND status = 'active' LIMIT 1",
+                (project_id,),
+            ).mappings().fetchone()
+            is_global_owner_bootstrap = (
                 has_members is None
                 and actor_id == user_id
                 and project_role in OWNER_PROJECT_ROLES
                 and "project_owner" in live_actor["role_codes"]
             )
-            if not is_owner_bootstrap:
+            is_creator_bootstrap = (
+                allow_creator_bootstrap
+                and has_owner is None
+                and actor_id == user_id
+                and project_role in OWNER_PROJECT_ROLES
+                and "project.create" in live_actor["permissions"]
+            )
+            if not (is_global_owner_bootstrap or is_creator_bootstrap):
                 self._assert_project_manager(connection, project_id, live_actor)
             user = connection.exec_driver_sql(
                 """
@@ -1361,6 +1466,111 @@ class WorkflowRepository:
                 (project_id, actor_id),
             ).mappings().fetchone()
             is not None
+        )
+
+    @staticmethod
+    def _writing_stage_has_active_task(
+        connection: Connection, task: dict[str, Any]
+    ) -> bool:
+        """Return whether another writer already owns this project stage."""
+
+        project_id = task.get("project_id")
+        task_type = task.get("task_type")
+        if project_id is None or task_type not in ESTABLISHED_WRITING_TASK_TYPES:
+            return False
+        return (
+            connection.exec_driver_sql(
+                """
+                SELECT 1 FROM workflow_tasks
+                WHERE project_id = %s AND task_type = %s AND id <> %s
+                  AND status IN ('assigned', 'in_progress', 'returned')
+                  AND assignee_id IS NOT NULL
+                LIMIT 1
+                """,
+                (project_id, task_type, task["id"]),
+            ).mappings().fetchone()
+            is not None
+        )
+
+    @staticmethod
+    def _can_claim_established_writing_stage(
+        connection: Connection,
+        task: dict[str, Any],
+        actor: dict[str, Any],
+    ) -> bool:
+        project_id = task.get("project_id")
+        if (
+            project_id is None
+            or task.get("task_type") not in ESTABLISHED_WRITING_TASK_TYPES
+            or ESTABLISHED_WRITING_PERMISSION not in actor["permissions"]
+        ):
+            return False
+        return (
+            connection.exec_driver_sql(
+                """
+                SELECT 1 FROM project_members
+                WHERE project_id = %s AND status = 'active'
+                LIMIT 1
+                """,
+                (project_id,),
+            ).mappings().fetchone()
+            is not None
+        )
+
+    @staticmethod
+    def _lock_established_project(connection: Connection, project_id: str) -> None:
+        """Serialize stage claims by locking this established project's members."""
+
+        connection.exec_driver_sql(
+            """
+            SELECT id FROM project_members
+            WHERE project_id = %s AND status = 'active'
+            ORDER BY id
+            FOR UPDATE
+            """,
+            (project_id,),
+        ).mappings().fetchall()
+
+    def _ensure_writer_membership_for_claim(
+        self, connection: Connection, project_id: str, actor_id: str
+    ) -> None:
+        existing = connection.exec_driver_sql(
+            """
+            SELECT * FROM project_members
+            WHERE project_id = %s AND user_id = %s
+              AND project_role = 'screenwriter'
+            FOR UPDATE
+            """,
+            (project_id, actor_id),
+        ).mappings().fetchone()
+        if existing is not None and existing["status"] == "active":
+            return
+
+        membership_id = str(existing["id"]) if existing else str(uuid.uuid4())
+        connection.exec_driver_sql(
+            """
+            INSERT INTO project_members
+                (id, project_id, user_id, project_role, status, added_by)
+            VALUES (%s, %s, %s, 'screenwriter', 'active', %s)
+            ON CONFLICT(project_id, user_id, project_role) DO UPDATE SET
+                status = 'active',
+                added_by = excluded.added_by,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (membership_id, project_id, actor_id, actor_id),
+        )
+        member = connection.exec_driver_sql(
+            "SELECT * FROM project_members WHERE id = %s", (membership_id,)
+        ).mappings().fetchone()
+        assert member is not None
+        self._record_project_member_event(
+            connection,
+            project_id,
+            membership_id,
+            "project_member.update" if existing else "project_member.add",
+            actor_id,
+            dict(existing) if existing else None,
+            dict(member),
         )
 
     @staticmethod

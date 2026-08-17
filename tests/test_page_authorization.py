@@ -214,6 +214,19 @@ def test_managed_project_page_grant_allows_its_creative_brief_preview(page_app):
     assert client.get("/planning/projects/project-1/brief").status_code == 200
 
 
+def test_writer_can_open_read_only_planning_pages_from_a_project(page_app):
+    principal = _principal(roles=("screenwriter",))
+    page_app[1].access_by_route["/writing/projects"] = {principal.user_id}
+    client = _client(page_app, principal)
+
+    response = client.get("/planning/projects/project-1/brief")
+    characters_response = client.get("/planning/projects/project-1/characters")
+
+    assert response.status_code == 200
+    assert 'href="/writing/projects">项目列表</a>' in response.text
+    assert characters_response.status_code == 200
+
+
 def test_managed_project_page_grant_keeps_project_preview_navigation_available(
     page_app,
 ):

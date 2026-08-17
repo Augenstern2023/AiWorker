@@ -28,6 +28,8 @@ from audit.service import AuditService
 from audit.api import build_audit_router
 from creative.api import register_creative_routes
 from identity.api import build_identity_router
+import identity.repository as identity_repository_module
+from identity.permission_catalog import RoleSeed
 from identity.password_service import PasswordService
 from identity.dependencies import current_principal
 from identity.permission_service import PermissionService
@@ -117,28 +119,52 @@ def test_seed_defaults_preserves_configured_permissions_for_existing_system_role
     command.upgrade(Config("alembic.ini"), "head")
     database = SystemDatabase(SystemDatabaseSettings(postgres_url))
     repository = IdentityRepository(database)
-    repository.seed_defaults()
-    role = repository.get_role_by_code("screenwriter")
-    assert role is not None
-    original = repository.list_role_permissions(role["id"])
-    configured = [{"permission_code": "topic.read", "data_scope": "project"}]
+    role_code = f"seed-preservation-{uuid.uuid4()}"
+    role_id: str | None = None
+    role_seed = RoleSeed(
+        code=role_code,
+        name="Seed Preservation Role",
+        description="Temporary role for seed lifecycle verification.",
+        is_system=True,
+        permissions=(("outline.edit", "project"),),
+    )
+    monkeypatch.setattr(
+        identity_repository_module,
+        "DEFAULT_ROLES",
+        (*identity_repository_module.DEFAULT_ROLES, role_seed),
+    )
+    default_permissions = [
+        {"permission_code": "brief.read.approved", "data_scope": "project"},
+        {"permission_code": "character.read.approved", "data_scope": "project"},
+        {"permission_code": "outline.edit", "data_scope": "project"},
+        {"permission_code": "outline.read", "data_scope": "project"},
+        {"permission_code": "page.writing", "data_scope": "project"},
+    ]
+    configured_permissions = [
+        {"permission_code": "topic.read", "data_scope": "all"}
+    ]
 
     try:
+        assert repository.get_role_by_code(role_code) is None
+        repository.seed_defaults()
+        role = repository.get_role_by_code(role_code)
+        assert role is not None
+        role_id = role["id"]
+        assert repository.list_role_permissions(role_id) == default_permissions
+
         repository.replace_role_permissions(
-            role["id"], [("topic.read", "project")]
+            role_id, [("topic.read", "all")]
         )
         repository.seed_defaults()
 
-        assert repository.list_role_permissions(role["id"]) == configured
+        assert repository.list_role_permissions(role_id) == configured_permissions
     finally:
-        repository.replace_role_permissions(
-            role["id"],
-            [
-                (item["permission_code"], item["data_scope"])
-                for item in original
-            ],
-        )
-        database.dispose()
+        try:
+            if role_id is not None:
+                with database.transaction() as connection:
+                    connection.execute(delete(roles).where(roles.c.id == role_id))
+        finally:
+            database.dispose()
 
 
 def test_workflow_event_serializes_datetime_details_on_postgresql(

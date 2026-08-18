@@ -181,6 +181,68 @@ def test_responses_provider_falls_back_to_chat_completions_when_gateway_returns_
     assert asyncio.run(provider.complete_text([{"role": "user", "content": "test"}], json_mode=True)) == '{"ok": true}'
 
 
+def test_responses_unsupported_falls_back_to_same_sub2api_chat_completions():
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.url.path, json.loads(request.content)))
+        if request.url.path.endswith("/responses"):
+            return httpx.Response(404, request=request, text="route not found")
+        return httpx.Response(
+            200,
+            request=request,
+            json={"choices": [{"message": {"content": '{"ok": true}'}}]},
+        )
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://sub2api.example.test/v1",
+        api_key="key",
+        model="gpt-5.6-sol",
+        provider_name="sub2api",
+        wire_api="responses",
+        reasoning_effort="auto",
+        max_retries=0,
+        transport=httpx.MockTransport(handler),
+    )
+    messages = [{"role": "user", "content": "请完成人物设计和分集规划"}]
+
+    assert asyncio.run(provider.complete_text(messages, json_mode=True)) == '{"ok": true}'
+    assert [path for path, _ in requests] == [
+        "/v1/responses",
+        "/v1/chat/completions",
+    ]
+    assert requests[0][1]["model"] == requests[1][1]["model"] == "gpt-5.6-sol"
+    assert requests[0][1]["reasoning"] == {"effort": "high"}
+    assert requests[1][1]["reasoning_effort"] == "high"
+    assert "temperature" not in requests[1][1]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_responses_auth_errors_do_not_fall_back_to_chat_completions(status):
+    paths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return httpx.Response(status, request=request, text="denied")
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://sub2api.example.test/v1",
+        api_key="key",
+        model="gpt-5.6-sol",
+        wire_api="responses",
+        max_retries=0,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(
+            provider.complete_text(
+                [{"role": "user", "content": "普通分析"}]
+            )
+        )
+    assert paths == ["/v1/responses"]
+
+
 def test_chat_completions_retries_transient_gateway_errors_before_succeeding():
     attempts = 0
     retries = []
@@ -287,8 +349,8 @@ def test_chat_completions_uses_secondary_provider_after_primary_fallback_is_unav
         transport=httpx.MockTransport(secondary_handler),
     )
     primary = OpenAICompatibleLLMProvider(
-        base_url="https://yunwu.example.test/v1",
-        api_key="yunwu-key",
+        base_url="https://primary.example.test/v1",
+        api_key="primary-key",
         model="deepseek-v4-pro",
         fallback_model="deepseek-v4-flash",
         fallback_provider=secondary,
@@ -314,7 +376,7 @@ def test_build_responses_request_body_sets_reasoning_effort():
     assert body["text"]["format"]["type"] == "json_object"
 
 
-def test_resolve_llm_settings_supports_sub2api_env(monkeypatch):
+def test_resolve_llm_settings_defaults_to_sub2api_gpt_5p6_sol(monkeypatch):
     class DummyConfig:
         LLM_PROVIDER = "sub2api"
         LLM_BASE_URL = ""
@@ -328,9 +390,9 @@ def test_resolve_llm_settings_supports_sub2api_env(monkeypatch):
     assert settings["provider"] == "sub2api"
     assert settings["base_url"] == "http://54.92.99.171:8080/v1"
     assert settings["api_key"] == "secret"
-    assert settings["model"] == "gpt-5.5"
-    assert settings["wire_api"] == "chat_completions"
-    assert settings["reasoning_effort"] == "high"
+    assert settings["model"] == "gpt-5.6-sol"
+    assert settings["wire_api"] == "responses"
+    assert settings["reasoning_effort"] == "auto"
 
 
 def test_provider_uses_configured_request_timeout_for_long_generation():

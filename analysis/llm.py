@@ -141,9 +141,9 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         if self.wire_api == "responses":
             try:
                 return await self._complete_responses_text(messages, json_mode, model)
-            except LLMError:
-                # Some OpenAI-compatible gateways expose /responses but return an empty body.
-                # Their Chat Completions endpoint remains compatible with the same request.
+            except Exception as exc:
+                if not is_responses_api_unsupported_exception(exc):
+                    raise
                 return await self._complete_chat_completions_text(messages, json_mode, model)
         return await self._complete_chat_completions_text(messages, json_mode, model)
 
@@ -173,16 +173,17 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        request_body = {
+        request_body: Dict[str, Any] = {
             "model": model or self.model,
             "messages": messages,
-            "temperature": 0.2,
         }
         reasoning_effort = resolve_reasoning_effort(
             self.reasoning_effort, messages
         )
         if reasoning_effort:
             request_body["reasoning_effort"] = reasoning_effort
+        if reasoning_effort == "none":
+            request_body["temperature"] = 0.2
         if json_mode:
             request_body["response_format"] = {"type": "json_object"}
         endpoint = f"{self.base_url}/chat/completions"
@@ -245,6 +246,15 @@ def is_model_unavailable_exception(exc: Exception) -> bool:
     return "model" in message and any(marker in message for marker in ("not found", "unavailable", "does not exist", "unsupported"))
 
 
+def is_responses_api_unsupported_exception(exc: Exception) -> bool:
+    if isinstance(exc, LLMError):
+        return True
+    return (
+        isinstance(exc, httpx.HTTPStatusError)
+        and int(exc.response.status_code) in {404, 405, 415, 422}
+    )
+
+
 def select_reasoning_effort(messages: List[Dict[str, str]]) -> str:
     text = "\n".join(
         str(message.get("content", "")) for message in messages
@@ -279,9 +289,9 @@ def provider_defaults(provider: str) -> Dict[str, str]:
             "name": "sub2api",
             "base_url": "http://54.92.99.171:8080/v1",
             "env_key": "SUB2API_KEY",
-            "model": "gpt-5.5",
-            "wire_api": "chat_completions",
-            "reasoning_effort": "high",
+            "model": "gpt-5.6-sol",
+            "wire_api": "responses",
+            "reasoning_effort": "auto",
         }
     return {
         "name": provider or "openai-compatible",

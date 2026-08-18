@@ -6,9 +6,9 @@
 
 ## 数据与接口
 
-`creative_topics` 增加 `rank_source` 字段，保存候选所属的一级榜单来源。`rank_type` 继续保存具体榜单名称，保持现有数据含义。榜单记录转换为候选时按平台归一化来源：抖音取 `tab`；红果取 `board_section`。
+`creative_topics` 增加 `rank_source` 字段，保存候选命中的具体榜单名称。榜单记录转换为候选时按平台归一化来源：抖音取 `tab`；红果组合 `board_section` 与具体榜名。同一剧目命中多个榜单时按榜单原始顺序去重，并用 `|` 连接，例如 `榜单|热榜`、`真人剧热播榜|真人剧推荐榜`。`rank_type` 保留首个具体榜单名称，兼容现有数据含义。
 
-`POST /api/creative/topics/generate` 增加 `rank_source`，仅从对应来源的今日榜单 section 生成候选。`GET /api/creative/topics` 增加同名筛选参数，确保同一天其他来源的待采纳候选不会混入当前列表。缺失来源参数时使用平台默认值，兼容现有调用。
+`POST /api/creative/topics/generate` 增加 `rank_source` 选择条件。服务遍历全部 section、按剧名合并多榜命中信息，再筛选出包含所选来源的候选。`GET /api/creative/topics` 增加同名筛选参数，确保同一天其他来源的待采纳候选不会混入当前列表。缺失来源参数时使用平台默认值，兼容现有调用。
 
 ## 界面与状态
 

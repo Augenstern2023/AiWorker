@@ -14,6 +14,12 @@ from typing import Any
 from analysis.today_rank_service import TodayRankService
 
 
+RANK_SOURCE_OPTIONS = {
+    "dy": ("榜单", "热榜"),
+    "hg": ("全部", "真人剧", "漫剧", "AI剧"),
+}
+
+
 def _number(value: Any) -> float | None:
     try:
         return float(value) if value is not None else None
@@ -25,15 +31,109 @@ class TopicService:
     def __init__(self, root: str) -> None:
         self.rank_service = TodayRankService(root=root)
 
-    def generate(self, platform: str, date: str = "", limit: int = 10) -> list[dict[str, Any]]:
+    def generate(
+        self,
+        platform: str,
+        date: str = "",
+        limit: int = 10,
+        rank_source: str = "",
+    ) -> list[dict[str, Any]]:
+        selected_source = self.normalize_rank_source(platform, rank_source)
         response = self.rank_service.get_today_rank(platform=platform, date=date, limit=50)
-        entries = response.get("current_entries") or []
-        topics = [
-            self.rank_entry_to_topic(entry, response)
-            for entry in entries
-            if str(entry.get("title") or "").strip()
-        ]
+        candidates = self._rank_candidates(response, platform)
+        topics = []
+        for candidate in candidates:
+            if selected_source not in candidate["sections"]:
+                continue
+            topic = self.rank_entry_to_topic(candidate["entry"], response)
+            topic["rank_type"] = candidate["sources"][0]
+            topic["rank_source"] = "|".join(candidate["sources"])
+            topics.append(topic)
         return sorted(topics, key=lambda item: item["score"], reverse=True)[: max(1, min(limit, 50))]
+
+    @staticmethod
+    def normalize_rank_source(platform: str, rank_source: str = "") -> str:
+        options = RANK_SOURCE_OPTIONS.get(str(platform or "").strip().lower())
+        if options is None:
+            raise ValueError("platform must be dy or hg")
+        source = str(rank_source or "").strip() or options[0]
+        if source not in options:
+            raise ValueError(f"invalid rank_source for {platform}")
+        return source
+
+    def _rank_candidates(
+        self,
+        response: dict[str, Any],
+        platform: str,
+    ) -> list[dict[str, Any]]:
+        candidates: dict[str, dict[str, Any]] = {}
+        sections = response.get("sections") or []
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            section_name = str(section.get("key") or section.get("label") or "").strip()
+            for ranking in section.get("rankings") or []:
+                if not isinstance(ranking, dict):
+                    continue
+                source = self._ranking_source(platform, section_name, ranking)
+                for entry in ranking.get("current_entries") or []:
+                    self._merge_rank_candidate(candidates, entry, section_name, source)
+
+        if not candidates:
+            default_source = self.normalize_rank_source(platform)
+            for entry in response.get("current_entries") or []:
+                source = self._entry_rank_source(platform, entry) or default_source
+                self._merge_rank_candidate(candidates, entry, default_source, source)
+        return list(candidates.values())
+
+    @staticmethod
+    def _ranking_source(
+        platform: str,
+        section_name: str,
+        ranking: dict[str, Any],
+    ) -> str:
+        label = str(ranking.get("label") or ranking.get("key") or section_name).strip()
+        if platform == "dy":
+            return section_name or label
+        if label.startswith(section_name):
+            return label
+        return f"{section_name}{label}"
+
+    @staticmethod
+    def _entry_rank_source(platform: str, entry: dict[str, Any]) -> str:
+        if platform == "dy":
+            return str(entry.get("tab") or entry.get("rank_list") or "").strip()
+        return str(entry.get("rank_list") or entry.get("group") or "").strip()
+
+    @staticmethod
+    def _merge_rank_candidate(
+        candidates: dict[str, dict[str, Any]],
+        entry: Any,
+        section_name: str,
+        source: str,
+    ) -> None:
+        if not isinstance(entry, dict):
+            return
+        title = str(entry.get("title") or "").strip()
+        key = "".join(title.split()).casefold()
+        if not key:
+            return
+        candidate = candidates.get(key)
+        if candidate is None:
+            candidates[key] = {
+                "entry": dict(entry),
+                "sections": [section_name],
+                "sources": [source],
+            }
+            return
+        if section_name and section_name not in candidate["sections"]:
+            candidate["sections"].append(section_name)
+        if source and source not in candidate["sources"]:
+            candidate["sources"].append(source)
+        current_rank = int(candidate["entry"].get("rank") or 999999)
+        incoming_rank = int(entry.get("rank") or 999999)
+        if incoming_rank < current_rank:
+            candidate["entry"] = dict(entry)
 
     def find_rank_entry(self, platform: str, date: str, record_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
         response = self.rank_service.get_today_rank(platform=platform, date=date, limit=50)
@@ -78,7 +178,9 @@ class TopicService:
             "platform": platform, "job_id": job_id, "source_path": source_path,
             "captured_at": captured_at, "title": title,
             "description": str(entry.get("description") or "").strip(),
-            "category": subject, "rank_type": rank_type, "score": round(score, 1),
+            "category": subject, "rank_type": rank_type,
+            "rank_source": self._entry_rank_source(platform, entry) or rank_type,
+            "score": round(score, 1),
             "confidence": "high" if growth is not None else "medium",
             "score_details": {**details, "available_weight": total_weight},
             "recommendation": f"当前排名 {entry.get('rank') or '-'}" + (

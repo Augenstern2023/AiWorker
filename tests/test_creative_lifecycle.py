@@ -296,6 +296,111 @@ def test_generating_today_hits_returns_only_unadopted_recommendations(
     assert response.json()["items"][0]["status"] == "pending_review"
 
 
+def test_topic_service_filters_hongguo_source_and_joins_duplicate_board_names(
+    tmp_path: Path,
+):
+    service = TopicService(root=str(tmp_path))
+    response = {
+        "date": "2026-08-18",
+        "selected_snapshot": {
+            "platform": "hg",
+            "job_id": "hg-rank",
+            "source_path": "exports/20260818/top10_rankings.csv",
+        },
+        "previous_snapshot": None,
+        "current_entries": [],
+        "sections": [
+            {
+                "key": "真人剧",
+                "rankings": [
+                    {
+                        "section": "真人剧",
+                        "label": "热播榜",
+                        "current_entries": [
+                            {"title": "真人多榜剧", "rank": 2, "subject": "都市"}
+                        ],
+                    },
+                    {
+                        "section": "真人剧",
+                        "label": "推荐榜",
+                        "current_entries": [
+                            {"title": "真人多榜剧", "rank": 1, "subject": "都市"}
+                        ],
+                    },
+                ],
+            },
+            {
+                "key": "漫剧",
+                "rankings": [
+                    {
+                        "section": "漫剧",
+                        "label": "热播榜",
+                        "current_entries": [
+                            {"title": "漫剧候选", "rank": 1, "subject": "玄幻"}
+                        ],
+                    }
+                ],
+            },
+        ],
+    }
+    service.rank_service.get_today_rank = lambda **_kwargs: response
+
+    topics = service.generate("hg", rank_source="真人剧", limit=10)
+
+    assert [item["title"] for item in topics] == ["真人多榜剧"]
+    assert topics[0]["rank_source"] == "真人剧热播榜|真人剧推荐榜"
+
+
+def test_topic_service_filters_douyin_source_and_keeps_cross_board_provenance(
+    tmp_path: Path,
+):
+    service = TopicService(root=str(tmp_path))
+    response = {
+        "date": "2026-08-18",
+        "selected_snapshot": {
+            "platform": "dy",
+            "job_id": "dy-rank",
+            "source_path": "data/dy/jobs/rank.json",
+        },
+        "previous_snapshot": None,
+        "current_entries": [],
+        "sections": [
+            {
+                "key": "榜单",
+                "rankings": [
+                    {
+                        "section": "榜单",
+                        "label": "榜单",
+                        "current_entries": [
+                            {"title": "跨榜候选", "rank": 1, "subject": "都市"}
+                        ],
+                    }
+                ],
+            },
+            {
+                "key": "热榜",
+                "rankings": [
+                    {
+                        "section": "热榜",
+                        "label": "热榜",
+                        "current_entries": [
+                            {"title": "跨榜候选", "rank": 3, "subject": "都市"},
+                            {"title": "热榜独有", "rank": 1, "subject": "甜宠"},
+                        ],
+                    }
+                ],
+            },
+        ],
+    }
+    service.rank_service.get_today_rank = lambda **_kwargs: response
+
+    topics = service.generate("dy", rank_source="热榜", limit=10)
+
+    assert {item["title"] for item in topics} == {"跨榜候选", "热榜独有"}
+    cross_board = next(item for item in topics if item["title"] == "跨榜候选")
+    assert cross_board["rank_source"] == "榜单|热榜"
+
+
 def test_adopting_rank_entry_creates_an_adopted_topic_and_rejects_duplicates(
     tmp_path: Path,
 ):

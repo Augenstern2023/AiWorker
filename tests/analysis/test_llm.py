@@ -127,10 +127,26 @@ def test_build_video_analysis_messages_contains_json_payload():
         ("请从短文本中提取标题并分类。", "low"),
         ("请总结本周数据并给出常规分析。", "medium"),
         ("请完成人物设计、故事梗概和分集规划。", "high"),
+        (
+            "根据已锁定 Beats 生成可拍摄的场次剧本，返回 episode_title 和 scenes。",
+            "high",
+        ),
         ("请审核剧本逻辑，交叉核验人物动机和时间线。", "xhigh"),
+        (
+            "你是短剧编剧审稿助手。根据逐集审核和剧本，汇总审核报告。",
+            "xhigh",
+        ),
         ("请深度优化剧本并审核全部伏笔。" + "长上下文" * 8000, "max"),
     ],
-    ids=["extraction", "analysis", "creation", "review", "deep-long-review"],
+    ids=[
+        "extraction",
+        "analysis",
+        "creation",
+        "production-script",
+        "review",
+        "script-editor-review",
+        "deep-long-review",
+    ],
 )
 def test_select_reasoning_effort_routes_representative_tasks(content, expected):
     messages = [{"role": "user", "content": content}]

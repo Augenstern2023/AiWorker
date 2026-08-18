@@ -42,18 +42,26 @@ LOW_REASONING_MARKERS = (
 )
 HIGH_REASONING_MARKERS = (
     "人物设计",
+    "人物关系",
     "故事梗概",
     "分集",
+    "分集大纲",
     "剧本生成",
+    "场次剧本",
     "创作",
     "策划",
+    "beats",
     "screenplay",
     "outline",
 )
 DEEP_REASONING_MARKERS = (
     "审核剧本",
     "剧本审核",
+    "审稿",
+    "评审",
+    "审核报告",
     "深度优化",
+    "剧本优化",
     "交叉核验",
     "时间线",
     "review screenplay",

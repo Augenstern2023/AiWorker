@@ -27,6 +27,42 @@ import httpx
 from json_repair import repair_json
 
 
+SUPPORTED_REASONING_EFFORTS = frozenset(
+    {"none", "low", "medium", "high", "xhigh", "max"}
+)
+LOW_REASONING_MARKERS = (
+    "提取",
+    "抽取",
+    "分类",
+    "格式转换",
+    "修复json",
+    "extract",
+    "classify",
+    "format",
+)
+HIGH_REASONING_MARKERS = (
+    "人物设计",
+    "故事梗概",
+    "分集",
+    "剧本生成",
+    "创作",
+    "策划",
+    "screenplay",
+    "outline",
+)
+DEEP_REASONING_MARKERS = (
+    "审核剧本",
+    "剧本审核",
+    "深度优化",
+    "交叉核验",
+    "时间线",
+    "review screenplay",
+    "optimize screenplay",
+)
+LONG_CONTEXT_CHARS = 20_000
+MAX_CONTEXT_CHARS = 30_000
+
+
 class LLMError(RuntimeError):
     pass
 
@@ -120,7 +156,9 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             model or self.model,
             messages,
             json_mode=json_mode,
-            reasoning_effort=self.reasoning_effort,
+            reasoning_effort=resolve_reasoning_effort(
+                self.reasoning_effort, messages
+            ),
         )
         endpoint = f"{self.base_url}/responses"
         response = await self._post_with_retry(endpoint, headers, request_body)
@@ -140,8 +178,11 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             "messages": messages,
             "temperature": 0.2,
         }
-        if self.reasoning_effort:
-            request_body["reasoning_effort"] = self.reasoning_effort
+        reasoning_effort = resolve_reasoning_effort(
+            self.reasoning_effort, messages
+        )
+        if reasoning_effort:
+            request_body["reasoning_effort"] = reasoning_effort
         if json_mode:
             request_body["response_format"] = {"type": "json_object"}
         endpoint = f"{self.base_url}/chat/completions"
@@ -202,6 +243,34 @@ def is_model_unavailable_exception(exc: Exception) -> bool:
         return False
     message = exc.response.text.lower()
     return "model" in message and any(marker in message for marker in ("not found", "unavailable", "does not exist", "unsupported"))
+
+
+def select_reasoning_effort(messages: List[Dict[str, str]]) -> str:
+    text = "\n".join(
+        str(message.get("content", "")) for message in messages
+    )
+    normalized = text.lower()
+    if any(marker in normalized for marker in DEEP_REASONING_MARKERS):
+        return "max" if len(text) >= MAX_CONTEXT_CHARS else "xhigh"
+    if any(marker in normalized for marker in HIGH_REASONING_MARKERS):
+        return "xhigh" if len(text) >= LONG_CONTEXT_CHARS else "high"
+    if len(text) >= LONG_CONTEXT_CHARS:
+        return "high"
+    if (
+        any(marker in normalized for marker in LOW_REASONING_MARKERS)
+        and len(text) < 8_000
+    ):
+        return "low"
+    return "medium"
+
+
+def resolve_reasoning_effort(
+    configured: str, messages: List[Dict[str, str]]
+) -> str:
+    normalized = str(configured or "auto").strip().lower()
+    if normalized in SUPPORTED_REASONING_EFFORTS:
+        return normalized
+    return select_reasoning_effort(messages)
 
 
 def provider_defaults(provider: str) -> Dict[str, str]:

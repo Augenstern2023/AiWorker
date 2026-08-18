@@ -34,7 +34,9 @@ from analysis.llm import (
     parse_chat_completion_json,
     parse_json_object,
     parse_responses_text,
+    resolve_reasoning_effort,
     resolve_llm_settings,
+    select_reasoning_effort,
 )
 
 
@@ -117,6 +119,40 @@ def test_build_video_analysis_messages_contains_json_payload():
     assert messages[0]["role"] == "system"
     assert messages[1]["role"] == "user"
     assert "标题" in messages[1]["content"]
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ("请从短文本中提取标题并分类。", "low"),
+        ("请总结本周数据并给出常规分析。", "medium"),
+        ("请完成人物设计、故事梗概和分集规划。", "high"),
+        ("请审核剧本逻辑，交叉核验人物动机和时间线。", "xhigh"),
+        ("请深度优化剧本并审核全部伏笔。" + "长上下文" * 8000, "max"),
+    ],
+    ids=["extraction", "analysis", "creation", "review", "deep-long-review"],
+)
+def test_select_reasoning_effort_routes_representative_tasks(content, expected):
+    messages = [{"role": "user", "content": content}]
+
+    assert select_reasoning_effort(messages) == expected
+
+
+@pytest.mark.parametrize(
+    "configured", ["none", "low", "medium", "high", "xhigh", "max"]
+)
+def test_resolve_reasoning_effort_preserves_explicit_override(configured):
+    messages = [
+        {"role": "user", "content": "请深度优化剧本" + "长上下文" * 8000}
+    ]
+
+    assert resolve_reasoning_effort(configured, messages) == configured
+
+
+def test_resolve_reasoning_effort_treats_invalid_configuration_as_auto():
+    messages = [{"role": "user", "content": "请提取标题并分类"}]
+
+    assert resolve_reasoning_effort("turbo", messages) == "low"
 
 
 def test_parse_responses_text_reads_output_text():

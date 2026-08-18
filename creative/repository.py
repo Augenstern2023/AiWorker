@@ -48,7 +48,7 @@ class CreativeRepository:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     platform TEXT NOT NULL, job_id TEXT NOT NULL, source_path TEXT NOT NULL,
                     captured_at TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', category TEXT,
-                    rank_type TEXT NOT NULL DEFAULT '',
+                    rank_type TEXT NOT NULL DEFAULT '', rank_source TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'pending_review', score REAL NOT NULL,
                     confidence TEXT NOT NULL, score_details_json TEXT NOT NULL,
                     recommendation TEXT NOT NULL, evidence_json TEXT NOT NULL,
@@ -62,6 +62,8 @@ class CreativeRepository:
                 conn.execute("ALTER TABLE creative_topics ADD COLUMN source_platforms_json TEXT NOT NULL DEFAULT '[]'")
             if "rank_type" not in columns:
                 conn.execute("ALTER TABLE creative_topics ADD COLUMN rank_type TEXT NOT NULL DEFAULT ''")
+            if "rank_source" not in columns:
+                conn.execute("ALTER TABLE creative_topics ADD COLUMN rank_source TEXT NOT NULL DEFAULT ''")
             if "description" not in columns:
                 conn.execute("ALTER TABLE creative_topics ADD COLUMN description TEXT NOT NULL DEFAULT ''")
             labels = tuple(self._NON_GENRE_LABELS)
@@ -424,17 +426,18 @@ class CreativeRepository:
             for topic in topics:
                 conn.execute("""
                     INSERT INTO creative_topics (
-                        platform, job_id, source_path, captured_at, title, description, category, rank_type, score,
+                        platform, job_id, source_path, captured_at, title, description, category, rank_type, rank_source, score,
                         confidence, score_details_json, recommendation, evidence_json, source_platforms_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(platform, job_id, source_path, title) DO UPDATE SET
-                        captured_at=excluded.captured_at, description=excluded.description, category=excluded.category, rank_type=excluded.rank_type, score=excluded.score, confidence=excluded.confidence,
+                        captured_at=excluded.captured_at, description=excluded.description, category=excluded.category, rank_type=excluded.rank_type, rank_source=excluded.rank_source, score=excluded.score, confidence=excluded.confidence,
                         score_details_json=excluded.score_details_json, recommendation=excluded.recommendation,
                         evidence_json=excluded.evidence_json, source_platforms_json=excluded.source_platforms_json,
                         updated_at=excluded.updated_at
                 """, (
                     topic["platform"], topic["job_id"], topic["source_path"], topic["captured_at"],
-                    topic["title"], topic.get("description", ""), topic.get("category", ""), topic.get("rank_type", ""), topic["score"], topic["confidence"],
+                    topic["title"], topic.get("description", ""), topic.get("category", ""), topic.get("rank_type", ""),
+                    topic.get("rank_source", topic.get("rank_type", "")), topic["score"], topic["confidence"],
                     json.dumps(topic["score_details"], ensure_ascii=False), topic["recommendation"],
                     json.dumps(topic["evidence"], ensure_ascii=False),
                     json.dumps(sorted({str(topic.get("platform") or "")}), ensure_ascii=False), now, now,
@@ -456,15 +459,16 @@ class CreativeRepository:
             cursor = conn.execute(
                 """
                 INSERT INTO creative_topics (
-                    platform, job_id, source_path, captured_at, title, description, category, rank_type,
+                    platform, job_id, source_path, captured_at, title, description, category, rank_type, rank_source,
                     status, score, confidence, score_details_json, recommendation, evidence_json,
                     source_platforms_json, decision_note, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'adopted', ?, ?, ?, ?, ?, ?, '', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'adopted', ?, ?, ?, ?, ?, ?, '', ?, ?)
                 """,
                 (
                     topic["platform"], topic["job_id"], topic["source_path"], topic["captured_at"],
                     topic["title"], topic.get("description", ""), topic.get("category", ""),
-                    topic.get("rank_type", ""), topic["score"], topic["confidence"],
+                    topic.get("rank_type", ""), topic.get("rank_source", topic.get("rank_type", "")),
+                    topic["score"], topic["confidence"],
                     json.dumps(topic["score_details"], ensure_ascii=False), topic["recommendation"],
                     json.dumps(topic["evidence"], ensure_ascii=False),
                     json.dumps(sorted({str(topic.get("platform") or "")}), ensure_ascii=False), now, now,
@@ -503,6 +507,7 @@ class CreativeRepository:
         self,
         platform: str = "",
         status: str = "",
+        rank_source: str = "",
         category: str = "",
         min_score: float | None = None,
         max_score: float | None = None,
@@ -532,7 +537,7 @@ class CreativeRepository:
         latest_version_expr = "(SELECT version FROM creative_breakdowns b WHERE b.topic_id = creative_topics.id ORDER BY b.version DESC, b.id DESC LIMIT 1)"
         latest_status_expr = "(SELECT status FROM creative_breakdowns b WHERE b.topic_id = creative_topics.id ORDER BY b.version DESC, b.id DESC LIMIT 1)"
         limit_clause = ""
-        if limit is not None:
+        if limit is not None and not rank_source:
             params.append(max(1, min(limit, 500)))
             limit_clause = "LIMIT ?"
         with self._connect() as conn:
@@ -551,6 +556,11 @@ class CreativeRepository:
                 params,
             ).fetchall()
         merged = self._merge_topics([self._topic(dict(row)) for row in rows])
+        if rank_source:
+            merged = [
+                item for item in merged
+                if self._matches_rank_source(item, rank_source)
+            ]
         if status:
             merged = [item for item in merged if item.get("status") == status]
         if has_locked_breakdown is True:
@@ -2650,6 +2660,8 @@ class CreativeRepository:
         row["score_details"].pop("production_cost", None)
         raw_platforms = json.loads(row.pop("source_platforms_json", "[]") or "[]")
         row["source_platforms"] = sorted({str(item) for item in raw_platforms if str(item)}) or [str(row.get("platform") or "")]
+        if not str(row.get("rank_source") or "").strip():
+            row["rank_source"] = str(row.get("rank_type") or "").strip()
         if str(row.get("category") or "").strip() in CreativeRepository._NON_GENRE_LABELS:
             row["category"] = "待补充"
         return row
@@ -2675,6 +2687,9 @@ class CreativeRepository:
                 continue
             current["source_platforms"] = sorted(set(current.get("source_platforms", [])) | set(topic.get("source_platforms", [])) | {str(topic.get("platform") or "")})
             current["source_paths"] = sorted(set(current.get("source_paths", [])) | ({topic["source_path"]} if topic.get("source_path") else set()))
+            current["rank_source"] = CreativeRepository._join_rank_sources(
+                current.get("rank_source"), topic.get("rank_source")
+            )
             evidence = current.setdefault("evidence", [])
             seen = {json.dumps(item, ensure_ascii=False, sort_keys=True) for item in evidence}
             for item in topic.get("evidence") or []:
@@ -2702,6 +2717,28 @@ class CreativeRepository:
         for topic in merged.values():
             topic.pop("_decision_updated_at", None)
         return list(merged.values())
+
+    @staticmethod
+    def _join_rank_sources(*values: Any) -> str:
+        sources: list[str] = []
+        for value in values:
+            for source in str(value or "").split("|"):
+                source = source.strip()
+                if source and source not in sources:
+                    sources.append(source)
+        return "|".join(sources)
+
+    @staticmethod
+    def _matches_rank_source(topic: dict[str, Any], rank_source: str) -> bool:
+        selected = str(rank_source or "").strip()
+        sources = [
+            source.strip()
+            for source in str(topic.get("rank_source") or topic.get("rank_type") or "").split("|")
+            if source.strip()
+        ]
+        if str(topic.get("platform") or "") == "hg":
+            return any(source.startswith(selected) for source in sources)
+        return selected in sources
 
     @staticmethod
     def _title_key(value: Any) -> str:

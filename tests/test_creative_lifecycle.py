@@ -401,6 +401,85 @@ def test_topic_service_filters_douyin_source_and_keeps_cross_board_provenance(
     assert cross_board["rank_source"] == "榜单|热榜"
 
 
+def test_repository_filters_topics_by_rank_source_token_prefix(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    common = {
+        "platform": "hg",
+        "job_id": "hg-rank",
+        "source_path": "exports/20260818/top10_rankings.csv",
+        "captured_at": "2026-08-18",
+        "description": "来源筛选测试",
+        "category": "都市",
+        "rank_type": "热播榜",
+        "score": 90,
+        "confidence": "high",
+        "score_details": {},
+        "recommendation": "推荐",
+        "evidence": [],
+    }
+    repository.upsert_topics([
+        {
+            **common,
+            "title": "真人多榜剧",
+            "rank_source": "真人剧热播榜|真人剧推荐榜",
+        },
+        {**common, "title": "漫剧候选", "rank_source": "漫剧热播榜"},
+        {**common, "title": "AI剧候选", "rank_source": "AI剧热播榜"},
+    ])
+
+    assert [
+        item["title"] for item in repository.list_topics(rank_source="真人剧")
+    ] == ["真人多榜剧"]
+    assert [
+        item["title"] for item in repository.list_topics(rank_source="漫剧")
+    ] == ["漫剧候选"]
+
+
+def test_generate_topics_api_uses_and_returns_selected_rank_source(tmp_path: Path):
+    client, _, _ = build_client(tmp_path)
+    rank_path = (
+        tmp_path
+        / "data/dy/jobs/rank-source/rank/douyin_series_rank_20260818_100000.json"
+    )
+    rank_path.parent.mkdir(parents=True)
+    rank_path.write_text(
+        json.dumps(
+            {
+                "captured_at": "2026-08-18 10:00:00",
+                "records": [
+                    {
+                        "series_id": "ranking-only",
+                        "title": "榜单候选",
+                        "rank": 1,
+                        "rank_category": "短剧",
+                        "tab": "榜单",
+                        "heat_text": "100",
+                    },
+                    {
+                        "series_id": "heat-only",
+                        "title": "热榜候选",
+                        "rank": 1,
+                        "rank_category": "短剧",
+                        "tab": "热榜",
+                        "heat_text": "100",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.post(
+        "/api/creative/topics/generate",
+        json={"platform": "dy", "rank_source": "热榜", "limit": 10},
+    )
+
+    assert response.status_code == 200
+    assert [item["title"] for item in response.json()["items"]] == ["热榜候选"]
+    assert response.json()["items"][0]["rank_source"] == "热榜"
+
+
 def test_adopting_rank_entry_creates_an_adopted_topic_and_rejects_duplicates(
     tmp_path: Path,
 ):

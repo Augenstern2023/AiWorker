@@ -775,6 +775,26 @@ def test_today_hits_restores_the_last_selected_platform_after_refresh():
     assert "@change=\"changeCreativePlatform\"" in section
 
 
+def test_today_hits_switches_generation_and_display_by_rank_source():
+    tasks = _source("static/js/common/tasks.js")
+    topics = _source("static/js/selection/topics.js")
+    breakdowns = _source("static/js/selection/breakdowns.js")
+    section = _source("templates/common/workspace/selection_hits.html")
+
+    assert "creativeRankSourcePreference" in tasks
+    assert "rankSource: creativeRankSourcePreference" in tasks
+    assert "['榜单', '热榜']" in tasks
+    assert "['全部', '真人剧', '漫剧', 'AI剧']" in tasks
+    assert "changeCreativeRankSource" in topics
+    assert "rank_source=${encodeURIComponent(this.creative.rankSource)}" in topics
+    assert "rank_source: this.creative.rankSource" in breakdowns
+    assert 'aria-label="榜单来源"' in section
+    assert "creativeRankSourceOptions()" in section
+    assert "榜单来源" in section
+    assert "topic.rank_source || topic.rank_type || '-'" in section
+    assert "topic.platform" not in section
+
+
 def test_today_hits_initial_load_generates_the_latest_top_ten():
     tasks = _source("static/js/common/tasks.js")
     hits_init = tasks.split("} else if (this.page === 'selection-hits') {", 1)[1].split(

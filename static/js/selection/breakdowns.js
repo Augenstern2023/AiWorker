@@ -934,7 +934,11 @@ window.aiworkerModules.push(() => ({
                     try {
                         const res = await aiworkerApi.request('/api/creative/topics/generate', {
                             method: 'POST', headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({platform: this.creative.platform, limit: 10})
+                            body: JSON.stringify({
+                                platform: this.creative.platform,
+                                rank_source: this.creative.rankSource,
+                                limit: 10
+                            })
                         });
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.detail || '生成选题失败');

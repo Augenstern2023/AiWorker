@@ -6,6 +6,23 @@
             }
         }
 
+        function creativeRankSourceOptionsForPlatform(platform) {
+            return platform === 'hg'
+                ? ['全部', '真人剧', '漫剧', 'AI剧']
+                : ['榜单', '热榜'];
+        }
+
+        function creativeRankSourcePreference(platform) {
+            const normalizedPlatform = platform === 'hg' ? 'hg' : 'dy';
+            const options = creativeRankSourceOptionsForPlatform(normalizedPlatform);
+            try {
+                const stored = window.localStorage.getItem(`aiworker.selection.hits.rank-source.${normalizedPlatform}`);
+                return options.includes(stored) ? stored : options[0];
+            } catch (_) {
+                return options[0];
+            }
+        }
+
         function appData() {
             const workspace = {
                 page: document.body.dataset.workspacePage || '',
@@ -103,7 +120,11 @@
                     settings: {config_url: '', has_activation_code: false},
                     activationCode: ''
                 },
-                creative: {platform: creativePlatformPreference(), items: [], loading: false, error: '', breakdown: null},
+                creative: {
+                    platform: creativePlatformPreference(),
+                    rankSource: creativeRankSourcePreference(creativePlatformPreference()),
+                    items: [], loading: false, error: '', breakdown: null
+                },
                 topicLibrary: {platform: '', lifecycleStatus: '', category: '', minScore: '', hasLocked: '', items: [], loading: false, error: '', breakdown: null},
                 adoptionNotice: {success: true, title: '', message: ''},
                 adoptionNoticeModal: null,

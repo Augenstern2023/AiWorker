@@ -22,6 +22,7 @@ import os
 import json
 import re
 from typing import Any, Callable, Dict, List
+from urllib.parse import urlsplit
 
 import httpx
 from json_repair import repair_json
@@ -79,6 +80,18 @@ class LLMTimeoutError(LLMError):
     pass
 
 
+class ResponsesAPIUnsupportedError(LLMError):
+    pass
+
+
+class LLMIncompleteResponseError(LLMError):
+    pass
+
+
+class LLMRefusalError(LLMError):
+    pass
+
+
 class LLMProvider:
     async def analyze_video(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         raise NotImplementedError
@@ -130,6 +143,12 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             raise LLMError("LLM_BASE_URL is required.")
         if not self.api_key:
             raise LLMError("LLM_API_KEY is required.")
+        if self.provider_name.lower() == "sub2api" and not is_secure_llm_base_url(
+            self.base_url
+        ):
+            raise LLMError(
+                "Sub2api LLM_BASE_URL must use HTTPS or a loopback tunnel."
+            )
 
         try:
             return await self._complete_text_with_model(self.model, messages, json_mode)
@@ -173,7 +192,9 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         try:
             payload = response.json()
         except ValueError as exc:
-            raise LLMError("Responses API returned an empty or non-JSON response.") from exc
+            raise ResponsesAPIUnsupportedError(
+                "Responses API returned an empty or non-JSON response."
+            ) from exc
         return parse_responses_text(payload)
 
     async def _complete_chat_completions_text(self, messages: List[Dict[str, str]], json_mode: bool, model: str | None = None) -> str:
@@ -255,12 +276,23 @@ def is_model_unavailable_exception(exc: Exception) -> bool:
 
 
 def is_responses_api_unsupported_exception(exc: Exception) -> bool:
-    if isinstance(exc, LLMError):
+    if isinstance(exc, ResponsesAPIUnsupportedError):
         return True
     return (
         isinstance(exc, httpx.HTTPStatusError)
         and int(exc.response.status_code) in {404, 405, 415, 422}
     )
+
+
+def is_secure_llm_base_url(base_url: str) -> bool:
+    parsed = urlsplit(str(base_url or "").strip())
+    if parsed.scheme.lower() == "https":
+        return True
+    return parsed.scheme.lower() == "http" and (parsed.hostname or "").lower() in {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }
 
 
 def select_reasoning_effort(messages: List[Dict[str, str]]) -> str:
@@ -295,7 +327,7 @@ def provider_defaults(provider: str) -> Dict[str, str]:
     if provider == "sub2api":
         return {
             "name": "sub2api",
-            "base_url": "http://54.92.99.171:8080/v1",
+            "base_url": "",
             "env_key": "SUB2API_KEY",
             "model": "gpt-5.6-sol",
             "wire_api": "responses",
@@ -326,7 +358,6 @@ def resolve_llm_settings(config_module: Any, prefix: str = "LLM") -> Dict[str, s
         "base_url": str(getattr(config_module, f"{prefix}_BASE_URL", "") or getattr(config_module, "LLM_BASE_URL", "") or defaults["base_url"]),
         "api_key": api_key,
         "model": str(getattr(config_module, f"{prefix}_MODEL", "") or getattr(config_module, "LLM_MODEL", "") or defaults["model"]),
-        "fallback_model": str(getattr(config_module, f"{prefix}_FALLBACK_MODEL", "") or getattr(config_module, "LLM_FALLBACK_MODEL", "")),
         "wire_api": str(getattr(config_module, f"{prefix}_WIRE_API", "") or getattr(config_module, "LLM_WIRE_API", "") or defaults["wire_api"]),
         "reasoning_effort": str(
             getattr(config_module, f"{prefix}_REASONING_EFFORT", "")
@@ -345,36 +376,6 @@ def resolve_llm_settings(config_module: Any, prefix: str = "LLM") -> Dict[str, s
             getattr(config_module, f"{prefix}_RETRY_BASE_DELAY", "")
             or getattr(config_module, "LLM_RETRY_BASE_DELAY", "")
         ),
-    }
-
-
-def resolve_secondary_llm_settings(config_module: Any, prefix: str = "LLM") -> Dict[str, str] | None:
-    secondary_prefix = f"{prefix}_SECONDARY"
-
-    def setting(name: str) -> str:
-        return str(
-            getattr(config_module, f"{secondary_prefix}_{name}", "")
-            or getattr(config_module, f"LLM_SECONDARY_{name}", "")
-            or ""
-        )
-
-    provider = setting("PROVIDER")
-    if not provider:
-        return None
-    defaults = provider_defaults(provider)
-    env_key = setting("ENV_KEY") or defaults["env_key"]
-    api_key = setting("API_KEY") or os.getenv(env_key, "")
-    return {
-        "provider": provider,
-        "base_url": setting("BASE_URL") or defaults["base_url"],
-        "api_key": api_key,
-        "model": setting("MODEL") or defaults["model"],
-        "fallback_model": setting("FALLBACK_MODEL"),
-        "wire_api": setting("WIRE_API") or defaults["wire_api"],
-        "reasoning_effort": setting("REASONING_EFFORT") or defaults["reasoning_effort"],
-        "timeout_seconds": _timeout_seconds(setting("TIMEOUT_SECONDS")),
-        "max_retries": _max_retries(setting("MAX_RETRIES")),
-        "retry_base_delay": _retry_base_delay(setting("RETRY_BASE_DELAY")),
     }
 
 
@@ -401,27 +402,12 @@ def _retry_base_delay(value: Any, default: float = 1.0) -> float:
 
 def create_llm_provider_from_config(config_module: Any, prefix: str = "LLM") -> OpenAICompatibleLLMProvider:
     settings = resolve_llm_settings(config_module, prefix=prefix)
-    secondary_settings = resolve_secondary_llm_settings(config_module, prefix=prefix)
-    secondary_provider = None
-    if secondary_settings and secondary_settings["api_key"]:
-        secondary_provider = OpenAICompatibleLLMProvider(
-            base_url=secondary_settings["base_url"],
-            api_key=secondary_settings["api_key"],
-            model=secondary_settings["model"],
-            fallback_model=secondary_settings["fallback_model"],
-            provider_name=secondary_settings["provider"],
-            wire_api=secondary_settings["wire_api"],
-            reasoning_effort=secondary_settings["reasoning_effort"],
-            timeout=secondary_settings["timeout_seconds"],
-            max_retries=secondary_settings["max_retries"],
-            retry_base_delay=secondary_settings["retry_base_delay"],
-        )
     return OpenAICompatibleLLMProvider(
         base_url=settings["base_url"],
         api_key=settings["api_key"],
         model=settings["model"],
-        fallback_model=settings["fallback_model"],
-        fallback_provider=secondary_provider,
+        fallback_model="",
+        fallback_provider=None,
         provider_name=settings["provider"],
         wire_api=settings["wire_api"],
         reasoning_effort=settings["reasoning_effort"],
@@ -482,10 +468,22 @@ def parse_chat_completion_text(response_json: Dict[str, Any]) -> str:
 
 
 def parse_responses_text(response_json: Dict[str, Any]) -> str:
+    if response_json.get("status") == "incomplete":
+        details = response_json.get("incomplete_details") or {}
+        reason = (
+            details.get("reason", "unknown")
+            if isinstance(details, dict)
+            else str(details)
+        )
+        raise LLMIncompleteResponseError(
+            f"Responses API response is incomplete: {reason}."
+        )
+
     if response_json.get("output_text"):
         return str(response_json["output_text"]).strip()
 
     pieces: List[str] = []
+    refusals: List[str] = []
     for item in response_json.get("output") or []:
         if not isinstance(item, dict):
             continue
@@ -494,8 +492,14 @@ def parse_responses_text(response_json: Dict[str, Any]) -> str:
                 continue
             if content.get("type") in {"output_text", "text"} and content.get("text"):
                 pieces.append(str(content["text"]))
+            if content.get("type") == "refusal" and content.get("refusal"):
+                refusals.append(str(content["refusal"]))
     if pieces:
         return "".join(pieces).strip()
+    if refusals:
+        raise LLMRefusalError(
+            f"Responses API request was refused: {'; '.join(refusals)}"
+        )
     raise LLMError("Responses API response has no output text.")
 
 

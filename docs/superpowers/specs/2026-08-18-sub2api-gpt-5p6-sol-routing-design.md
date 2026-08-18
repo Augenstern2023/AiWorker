@@ -20,14 +20,12 @@
 | --- | --- | --- |
 | `LLM_PROVIDER` | `sub2api` | 唯一文本 LLM 服务商 |
 | `LLM_ENV_KEY` | `SUB2API_KEY` | 凭据只从环境读取 |
-| `LLM_BASE_URL` | `http://54.92.99.171:8080/v1` | 复用现有 Sub2api 地址 |
+| `LLM_BASE_URL` | 必须显式配置 | 只接受 HTTPS 地址或本机加密隧道的 loopback 地址 |
 | `LLM_MODEL` | `gpt-5.6-sol` | 固定目标模型 |
-| `LLM_FALLBACK_MODEL` | 空 | 不切换模型 |
 | `LLM_WIRE_API` | `responses` | 优先使用 Responses API |
 | `LLM_REASONING_EFFORT` | `auto` | 启用任务级自动路由 |
-| `LLM_SECONDARY_PROVIDER` | 空 | 禁止切换到其他服务商 |
 
-其余 `LLM_SECONDARY_*` 项从运行时配置中移除或清空。RAG 文本生成继续继承全局 LLM 配置；ASR 和 Embedding 保持现状。
+代码和运行时配置不再暴露 fallback model 或 `LLM_SECONDARY_*` 入口。RAG 文本生成继续继承全局 LLM 配置；ASR 和 Embedding 保持现状。公网明文 HTTP 会在发送 Authorization header 前被拒绝。
 
 ## 自动推理强度路由
 
@@ -51,7 +49,7 @@
 
 Sub2api 请求优先发送到同一 base URL 的 `/responses`，使用 `reasoning: {"effort": "<selected>"}`。若网关明确表示 Responses API 不可用，例如返回 404、405、415、422，或返回空的非 JSON 响应，则在同一 Sub2api、同一模型、同一推理强度下回退到 `/chat/completions`，使用 `reasoning_effort` 字段。
 
-鉴权失败、权限不足和配额错误不触发协议回退。特别是 401、403 不应被掩盖为 Chat Completions 重试；错误应直接返回调用方。现有临时网络错误重试策略保持不变。
+鉴权失败、权限不足、配额错误、超时、Responses `incomplete` 状态和模型拒绝不触发协议回退。特别是 401、403 不应被掩盖为 Chat Completions 重试；错误应直接返回调用方。现有临时网络错误重试策略保持不变。
 
 不配置备用模型和备用 provider，因此任何兼容回退都不会离开 Sub2api，也不会切换到非 `gpt-5.6-sol` 模型。
 
@@ -67,6 +65,7 @@ Sub2api 请求优先发送到同一 base URL 的 `/responses`，使用 `reasonin
 ## 错误处理与可观测性
 
 - 缺少 `SUB2API_KEY` 时，继续在请求前抛出明确的密钥缺失错误。
+- 缺少安全 `LLM_BASE_URL`，或配置公网明文 HTTP 时，在发出请求前失败。
 - 401、403、429 和服务端错误保留原始 HTTP 状态，沿用现有错误展示。
 - 协议回退仅处理已定义的不兼容证据，不吞掉业务错误或鉴权错误。
 - provider 名称保持 `sub2api`，使生成结果中的 provider 元数据可用于确认实际线路。
@@ -82,8 +81,9 @@ Sub2api 请求优先发送到同一 base URL 的 `/responses`，使用 `reasonin
 - 验证 Responses 与 Chat Completions 请求体使用本次任务计算出的相同强度。
 - 验证 Responses 协议不兼容时仅回退到同一 Sub2api Chat Completions。
 - 验证 401、403 不触发协议回退。
-- 验证没有 secondary provider 时不会执行跨服务商回退。
-- 验证 `config` 的运行时解析结果为 Sub2api、`gpt-5.6-sol`、`responses`、`auto`，且备用 provider 为空。
+- 验证超时、`incomplete` 和 refusal 不触发协议回退。
+- 验证旧 secondary/fallback 配置不会进入生产 provider。
+- 验证 `config` 的运行时解析结果为 Sub2api、`gpt-5.6-sol`、`responses`、`auto`。
 
 完成定向测试后，运行 LLM、RAG 和共用 provider 的相关测试集，再执行文件头检查。
 

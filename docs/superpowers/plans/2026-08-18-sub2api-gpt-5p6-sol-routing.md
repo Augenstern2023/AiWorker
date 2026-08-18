@@ -4,7 +4,7 @@
 
 **目标：** 移除云雾与 OpenCode 文本 LLM 线路，将所有共用 LLM 工作流切换到 Sub2api `gpt-5.6-sol`，并按每次请求的任务复杂度自动选择推理强度。
 
-**架构：** 在 `analysis.llm` 内加入无外部调用的确定性任务路由器，由消息内容和长度选择 `low`、`medium`、`high`、`xhigh` 或 `max`。Provider 优先调用同一 Sub2api 的 Responses API，仅在协议不兼容时回退同一服务商的 Chat Completions；运行时 `.env` 和代码默认值统一为 Sub2api，且不配置备用模型或备用 provider。
+**架构：** 在 `analysis.llm` 内加入无外部调用的确定性任务路由器，由消息内容和长度选择 `low`、`medium`、`high`、`xhigh` 或 `max`。Provider 优先调用同一 Sub2api 的 Responses API，仅在协议不兼容时回退同一服务商的 Chat Completions；运行时 `.env` 和代码默认值统一为 Sub2api，并移除备用模型与备用 provider 配置入口。Sub2api base URL 必须是 HTTPS 或本机加密隧道地址。
 
 **技术栈：** Python 3.11、httpx、pytest、python-dotenv、uv
 
@@ -220,7 +220,7 @@ uv run pytest tests/analysis/test_llm.py -k "defaults_to_sub2api_gpt_5p6_sol or 
 ```python
 {
     "name": "sub2api",
-    "base_url": "http://54.92.99.171:8080/v1",
+    "base_url": "",
     "env_key": "SUB2API_KEY",
     "model": "gpt-5.6-sol",
     "wire_api": "responses",
@@ -232,7 +232,7 @@ uv run pytest tests/analysis/test_llm.py -k "defaults_to_sub2api_gpt_5p6_sol or 
 
 ```python
 def is_responses_api_unsupported_exception(exc: Exception) -> bool:
-    if isinstance(exc, LLMError):
+    if isinstance(exc, ResponsesAPIUnsupportedError):
         return True
     return (
         isinstance(exc, httpx.HTTPStatusError)
@@ -242,7 +242,7 @@ def is_responses_api_unsupported_exception(exc: Exception) -> bool:
 
 `_complete_text_with_model` 捕获异常后先调用该函数；返回 `False` 时原样抛出。Chat Completions 在推理强度不为 `none` 时不发送 `temperature`，避免推理模型的采样参数与推理参数冲突。
 
-保持 `resolve_secondary_llm_settings` 的通用能力，但默认配置和本机运行时不再启用 secondary provider；不要删除与本次运行无关的通用扩展接口。
+删除 `resolve_secondary_llm_settings` 及 `LLM_SECONDARY_*` 生产配置入口；provider 工厂固定不注入备用模型或备用 provider。
 
 - [ ] **步骤 4：运行任务 2 定向测试**
 
@@ -278,8 +278,7 @@ git commit -m "fix: route LLM workloads through Sub2api GPT-5.6 Sol"
 LLM_PROVIDER=sub2api
 LLM_ENV_KEY=SUB2API_KEY
 LLM_MODEL=gpt-5.6-sol
-LLM_FALLBACK_MODEL=
-LLM_BASE_URL=http://54.92.99.171:8080/v1
+LLM_BASE_URL=<HTTPS Sub2api URL，或本机加密隧道 URL>
 LLM_API_KEY=
 LLM_WIRE_API=responses
 LLM_REASONING_EFFORT=auto
@@ -295,10 +294,10 @@ LLM_RETRY_BASE_DELAY=2
 运行一个只输出非敏感字段的配置检查：
 
 ```powershell
-uv run python -c "import config; from analysis.llm import resolve_llm_settings, resolve_secondary_llm_settings; s=resolve_llm_settings(config); print({k:s[k] for k in ('provider','base_url','model','fallback_model','wire_api','reasoning_effort')}); print('api_key_set=', bool(s['api_key'])); print('secondary=', resolve_secondary_llm_settings(config))"
+uv run python -c "import config; from analysis.llm import resolve_llm_settings; s=resolve_llm_settings(config); print({k:s[k] for k in ('provider','base_url','model','wire_api','reasoning_effort')}); print('api_key_set=', bool(s['api_key']))"
 ```
 
-预期：provider 为 `sub2api`，model 为 `gpt-5.6-sol`，wire API 为 `responses`，reasoning effort 为 `auto`，`api_key_set=True`，secondary 为 `None`。
+预期：provider 为 `sub2api`，model 为 `gpt-5.6-sol`，wire API 为 `responses`，reasoning effort 为 `auto`，`api_key_set=True`。
 
 - [ ] **步骤 3：运行相关回归测试**
 

@@ -190,6 +190,95 @@
             border-radius: 6px;
             box-shadow: 0 10px 28px rgba(0, 0, 0, .32);
         }
+        .outline-workspace { min-width: 0; max-width: 100%; }
+        .outline-list-toolbar {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 12px; margin-bottom: 12px;
+        }
+        .outline-search-wrap {
+            position: relative; flex: 1 1 360px; max-width: 520px; min-width: 220px;
+        }
+        .outline-search-input { padding-left: 34px; padding-right: 58px; }
+        .outline-search-icon {
+            position: absolute; z-index: 2; top: 50%; left: 11px;
+            color: var(--muted); transform: translateY(-50%); pointer-events: none;
+        }
+        .outline-search-count {
+            position: absolute; top: 50%; right: 10px; color: var(--muted);
+            font-size: 11px; transform: translateY(-50%); pointer-events: none;
+        }
+        .outline-batch-actions,
+        .outline-episode-actions,
+        .outline-episode-identity {
+            display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+        }
+        .outline-episode-list { display: grid; gap: 9px; min-width: 0; }
+        .outline-episode-card {
+            min-width: 0; overflow: hidden; background: #1e222c;
+            border: 1px solid #30394a; border-radius: 7px;
+            transition: border-color .15s ease, background-color .15s ease, box-shadow .15s ease;
+        }
+        .outline-episode-card:hover {
+            background: #202631; border-color: rgba(83, 155, 255, .62);
+        }
+        .outline-episode-card.is-expanded {
+            border-color: rgba(83, 155, 255, .72);
+            box-shadow: inset 3px 0 0 rgba(59, 149, 246, .78);
+        }
+        .outline-episode-header {
+            display: grid; grid-template-columns: auto minmax(160px, 1fr) auto;
+            align-items: center; gap: 10px; min-height: 52px; padding: 8px 10px;
+        }
+        .outline-episode-identity { min-width: 0; }
+        .outline-episode-number { color: #f2f5fa; font-weight: 700; white-space: nowrap; }
+        .outline-script-status { color: #a7f3c3 !important; background: #1c5635 !important; }
+        .outline-update-status {
+            display: inline-flex; align-items: center; gap: 4px; padding: .25em .55em;
+            color: #9dcbff; font: inherit; font-size: .75em; font-weight: 600;
+            line-height: 1; background: #173b65; border: 0;
+            border-radius: var(--bs-border-radius-pill);
+        }
+        .outline-update-status:hover { color: #d6e9ff; background: #1d4d83; }
+        .outline-episode-toggle {
+            display: flex; align-items: center; gap: 10px; min-width: 0; padding: 7px 8px;
+            color: var(--text); text-align: left; background: transparent;
+            border: 0; border-radius: 5px;
+        }
+        .outline-episode-toggle:hover { background: rgba(59, 149, 246, .08); }
+        .outline-episode-toggle:focus-visible { outline-offset: 0; }
+        .outline-event-preview {
+            min-width: 0; overflow: hidden; color: #c3ccd9;
+            text-overflow: ellipsis; white-space: nowrap;
+        }
+        .outline-toggle-icon {
+            flex: 0 0 auto; color: #78b1ff; transition: transform .15s ease;
+        }
+        .outline-episode-card.is-expanded .outline-toggle-icon { transform: rotate(180deg); }
+        .outline-episode-actions { flex-wrap: nowrap; }
+        .outline-episode-details {
+            padding: 12px; border-top: 1px solid rgba(83, 155, 255, .22);
+        }
+        .outline-field-grid {
+            display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px; min-width: 0;
+        }
+        .outline-field-group {
+            min-width: 0; padding: 10px; background: #191d26;
+            border: 1px solid #2b3545; border-radius: 6px;
+        }
+        .outline-field-label {
+            display: block; margin-bottom: 6px; color: #79b2ff;
+            font-size: 12px; font-weight: 700;
+        }
+        .outline-field-textarea {
+            width: 100%; min-height: 88px; max-height: 180px;
+            overflow-y: auto; line-height: 1.45; resize: vertical;
+        }
+        .outline-empty-state {
+            padding: 28px 16px; color: var(--muted); text-align: center;
+            background: rgba(30, 34, 44, .7); border: 1px dashed #30394a;
+            border-radius: 7px;
+        }
         .approval-readonly-field {
             min-height: 38px;
             padding: 8px 10px;
@@ -742,7 +831,7 @@
             .mobile-topbar { display: flex; align-items: center; gap: 8px;
                              padding: 8px 12px; border-bottom: 1px solid var(--border);
                              background: var(--bg-panel); }
-            .main-content { padding: 14px 12px; }
+            .main-content { margin-left: 0; padding: 14px 12px; }
             .creative-project-workspace .d-flex { flex-wrap: wrap; }
             .creative-project-workspace table,
             .creative-project-workspace thead,
@@ -755,6 +844,31 @@
             .creative-project-workspace tbody td { border: 0; padding: 4px 0; white-space: normal !important; }
             .creative-project-workspace .btn-group { width: 100%; margin-top: 12px; }
             .creative-project-workspace .btn-group .btn { flex: 1 1 50%; }
+            .outline-list-toolbar { align-items: stretch; flex-direction: column; }
+            .outline-section-heading {
+                align-items: flex-start !important; flex-wrap: wrap; gap: 12px;
+            }
+            .outline-section-heading > div:first-child { flex: 1 0 100%; }
+            .outline-primary-actions {
+                display: grid !important;
+                flex: 1 0 100%;
+                grid-template-columns: repeat(3, minmax(80px, 1fr));
+                width: 100%;
+            }
+            .outline-primary-actions .btn { min-width: 0; white-space: nowrap; }
+            .outline-search-wrap {
+                flex-basis: auto; width: 100%; max-width: none; min-width: 0;
+            }
+            .outline-batch-actions {
+                display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%;
+            }
+            .outline-episode-header {
+                grid-template-columns: minmax(0, 1fr) auto; gap: 7px;
+            }
+            .outline-episode-toggle {
+                grid-column: 1 / -1; grid-row: 2; padding-inline: 4px;
+            }
+            .outline-field-grid { grid-template-columns: minmax(0, 1fr); }
         }
         .mobile-topbar { display: none; }
         .ui-pagination .page-item.active .page-link { background: var(--accent); border-color: var(--accent); }

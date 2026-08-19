@@ -845,6 +845,17 @@
             .creative-project-workspace .btn-group { width: 100%; margin-top: 12px; }
             .creative-project-workspace .btn-group .btn { flex: 1 1 50%; }
             .outline-list-toolbar { align-items: stretch; flex-direction: column; }
+            .outline-section-heading {
+                align-items: flex-start !important; flex-wrap: wrap; gap: 12px;
+            }
+            .outline-section-heading > div:first-child { flex: 1 0 100%; }
+            .outline-primary-actions {
+                display: grid !important;
+                flex: 1 0 100%;
+                grid-template-columns: repeat(3, minmax(80px, 1fr));
+                width: 100%;
+            }
+            .outline-primary-actions .btn { min-width: 0; white-space: nowrap; }
             .outline-search-wrap {
                 flex-basis: auto; width: 100%; max-width: none; min-width: 0;
             }

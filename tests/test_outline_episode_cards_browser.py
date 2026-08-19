@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -361,6 +362,11 @@ def test_outline_field_grid_is_responsive_without_horizontal_page_overflow(
     )
     assert len(desktop_columns.split()) == 2
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    screenshot_dir = os.getenv("AIWORKER_OUTLINE_SCREENSHOT_DIR")
+    if screenshot_dir:
+        output_dir = Path(screenshot_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=output_dir / "outline-cards-desktop.png", full_page=True)
 
     page.set_viewport_size({"width": 390, "height": 844})
     mobile_columns = page.evaluate(
@@ -368,3 +374,20 @@ def test_outline_field_grid_is_responsive_without_horizontal_page_overflow(
     )
     assert len(mobile_columns.split()) == 1
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    primary_action_boxes = page.locator(
+        ".outline-workspace > .d-flex:first-child > .d-flex > .btn:visible"
+    ).evaluate_all(
+        "elements => elements.map(element => ({width: element.offsetWidth, height: element.offsetHeight}))"
+    )
+    assert primary_action_boxes
+    assert all(box["width"] >= 80 and box["height"] <= 44 for box in primary_action_boxes)
+    heading_copy_box = page.locator(
+        ".outline-section-heading > div:first-child"
+    ).bounding_box()
+    primary_actions_box = page.locator(".outline-primary-actions").bounding_box()
+    assert heading_copy_box is not None and primary_actions_box is not None
+    assert primary_actions_box["y"] >= heading_copy_box["y"] + heading_copy_box["height"]
+    if screenshot_dir:
+        page.screenshot(
+            path=Path(screenshot_dir) / "outline-cards-mobile.png", full_page=True
+        )

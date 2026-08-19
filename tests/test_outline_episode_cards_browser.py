@@ -88,9 +88,7 @@ def outline_state_page() -> Iterator[Page]:
             """
             ([items]) => {
               window.state = Object.assign({
-                creativeWorkspace: {
-                  outlineQuery: '', expandedOutlineEpisodes: {}, outlineCardContextKey: ''
-                },
+                creativeWorkspace: {},
                 outlineItems: items,
                 currentProjectOutlines() { return this.outlineItems; }
               }, window.aiworkerModules.at(-1)?.());

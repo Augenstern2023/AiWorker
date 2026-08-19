@@ -1,7 +1,9 @@
 # 分集大纲折叠卡片 UI 设计规格
 
-**日期：** 2026-08-19  
-**页面：** `/writing/projects/{project_id}/outlines`  
+**日期：** 2026-08-19
+
+**页面：** `/writing/projects/{project_id}/outlines`
+
 **范围：** 仅优化分集大纲列表区域，不改变页面路由、后端接口、生成流程或版本规则
 
 ## 目标

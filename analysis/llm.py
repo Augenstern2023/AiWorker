@@ -108,6 +108,7 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         provider_name: str = "openai-compatible",
         wire_api: str = "chat_completions",
         reasoning_effort: str = "",
+        allow_insecure_http: bool = False,
         timeout: int = 180,
         max_retries: int = 2,
         retry_base_delay: float = 1.0,
@@ -122,6 +123,7 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         self.provider_name = provider_name
         self.wire_api = wire_api
         self.reasoning_effort = reasoning_effort
+        self.allow_insecure_http = bool(allow_insecure_http)
         self.timeout = timeout
         self.max_retries = max(0, min(5, int(max_retries)))
         self.retry_base_delay = max(0.0, float(retry_base_delay))
@@ -143,8 +145,10 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             raise LLMError("LLM_BASE_URL is required.")
         if not self.api_key:
             raise LLMError("LLM_API_KEY is required.")
-        if self.provider_name.lower() == "sub2api" and not is_secure_llm_base_url(
-            self.base_url
+        if (
+            self.provider_name.lower() == "sub2api"
+            and not self.allow_insecure_http
+            and not is_secure_llm_base_url(self.base_url)
         ):
             raise LLMError(
                 "Sub2api LLM_BASE_URL must use HTTPS or a loopback tunnel."
@@ -343,7 +347,7 @@ def provider_defaults(provider: str) -> Dict[str, str]:
     }
 
 
-def resolve_llm_settings(config_module: Any, prefix: str = "LLM") -> Dict[str, str]:
+def resolve_llm_settings(config_module: Any, prefix: str = "LLM") -> Dict[str, Any]:
     provider = str(getattr(config_module, f"{prefix}_PROVIDER", "") or getattr(config_module, "LLM_PROVIDER", "") or "minimax")
     defaults = provider_defaults(provider)
     env_key = str(getattr(config_module, f"{prefix}_ENV_KEY", "") or getattr(config_module, "LLM_ENV_KEY", "") or defaults["env_key"])
@@ -364,6 +368,10 @@ def resolve_llm_settings(config_module: Any, prefix: str = "LLM") -> Dict[str, s
             or getattr(config_module, "LLM_REASONING_EFFORT", "")
             or defaults["reasoning_effort"]
         ),
+        "allow_insecure_http": _boolean_setting(
+            getattr(config_module, f"{prefix}_ALLOW_INSECURE_HTTP", "")
+            or getattr(config_module, "LLM_ALLOW_INSECURE_HTTP", "")
+        ),
         "timeout_seconds": _timeout_seconds(
             getattr(config_module, f"{prefix}_TIMEOUT_SECONDS", "")
             or getattr(config_module, "LLM_TIMEOUT_SECONDS", "")
@@ -377,6 +385,12 @@ def resolve_llm_settings(config_module: Any, prefix: str = "LLM") -> Dict[str, s
             or getattr(config_module, "LLM_RETRY_BASE_DELAY", "")
         ),
     }
+
+
+def _boolean_setting(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _timeout_seconds(value: Any, default: int = 180) -> int:
@@ -411,6 +425,7 @@ def create_llm_provider_from_config(config_module: Any, prefix: str = "LLM") -> 
         provider_name=settings["provider"],
         wire_api=settings["wire_api"],
         reasoning_effort=settings["reasoning_effort"],
+        allow_insecure_http=settings["allow_insecure_http"],
         timeout=settings["timeout_seconds"],
         max_retries=settings["max_retries"],
         retry_base_delay=settings["retry_base_delay"],

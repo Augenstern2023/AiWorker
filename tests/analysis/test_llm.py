@@ -371,6 +371,32 @@ def test_sub2api_rejects_public_plaintext_http_before_sending_credentials():
     assert requests == []
 
 
+def test_sub2api_allows_public_plaintext_http_when_explicitly_enabled():
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, request=request, json={"output_text": "ok"})
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="http://203.0.113.10:8080/v1",
+        api_key="key",
+        model="gpt-5.6-sol",
+        provider_name="sub2api",
+        wire_api="responses",
+        allow_insecure_http=True,
+        max_retries=0,
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = asyncio.run(
+        provider.complete_text([{"role": "user", "content": "普通分析"}])
+    )
+
+    assert result == "ok"
+    assert [request.url.path for request in requests] == ["/v1/responses"]
+
+
 def test_responses_timeout_does_not_fall_back_to_chat_completions():
     paths = []
 
@@ -638,6 +664,18 @@ def test_configured_provider_ignores_legacy_secondary_route():
     assert provider.model == "gpt-5.6-sol"
     assert provider.fallback_model == ""
     assert provider.fallback_provider is None
+
+
+def test_configured_provider_propagates_insecure_http_opt_in():
+    class DummyConfig:
+        LLM_PROVIDER = "sub2api"
+        LLM_BASE_URL = "http://203.0.113.10:8080/v1"
+        LLM_API_KEY = "key"
+        LLM_ALLOW_INSECURE_HTTP = "true"
+
+    provider = create_llm_provider_from_config(DummyConfig)
+
+    assert provider.allow_insecure_http is True
 
 
 def test_provider_uses_configured_request_timeout_for_long_generation():

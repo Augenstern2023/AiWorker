@@ -955,3 +955,61 @@
                 width: 100%;
             }
         }
+
+        .original-project-modal .modal-body,
+        .original-brief-workspace,
+        .creative-project-list { min-width: 0; }
+        .original-reference-panel {
+            border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px;
+        }
+        .original-reference-panel summary { cursor: pointer; font-weight: 600; }
+        .original-reference-list {
+            display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 16px;
+            max-height: 180px; overflow-y: auto;
+        }
+        .project-source-cell { max-width: 360px; overflow-wrap: anywhere; }
+        .original-direction-grid td { max-width: 260px; overflow-wrap: anywhere; }
+        .variant-instruction { flex: 1 1 260px; min-width: 180px; }
+
+        @media (max-width: 767.98px) {
+            .creative-project-list,
+            .original-brief-workspace,
+            .original-direction-editor { max-width: 100%; overflow-x: clip; }
+            .project-list-table-wrap { overflow: visible; }
+            .project-list-table,
+            .project-list-table thead,
+            .project-list-table tbody,
+            .project-list-table tr,
+            .project-list-table th,
+            .project-list-table td,
+            .original-direction-grid table,
+            .original-direction-grid thead,
+            .original-direction-grid tbody,
+            .original-direction-grid tr,
+            .original-direction-grid th,
+            .original-direction-grid td { display: block; width: 100% !important; }
+            .project-list-table thead,
+            .original-direction-grid thead { display: none; }
+            .project-list-table tbody tr,
+            .original-direction-grid tbody tr {
+                border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+                margin-bottom: 10px; background: var(--bg-panel);
+            }
+            .project-list-table tbody td,
+            .original-direction-grid tbody td {
+                border: 0; padding: 4px 0; max-width: none; white-space: normal !important;
+                overflow-wrap: anywhere;
+            }
+            .original-direction-grid td[data-label]::before {
+                content: attr(data-label) "："; color: var(--text-muted); font-size: .78rem;
+            }
+            .original-direction-toolbar { align-items: stretch !important; flex-direction: column; }
+            .original-direction-actions { width: 100%; flex-wrap: wrap; }
+            .original-direction-actions .btn { flex: 1 1 auto; min-height: 38px; }
+            .variant-instruction { flex-basis: 100%; width: 100%; min-width: 0; }
+            .original-reference-list { grid-template-columns: 1fr; }
+            #originalProjectModal .modal-dialog { margin: .5rem; max-width: calc(100% - 1rem); }
+            #originalProjectModal textarea,
+            #originalProjectModal input,
+            #originalProjectModal select { max-width: 100%; }
+        }

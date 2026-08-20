@@ -688,21 +688,19 @@ def test_drama_material_jobs_send_exact_source_topic_and_task():
     assert "Promise.all" in resolver
 
 
-def test_project_table_uses_name_navigation_without_redundant_action_column():
+def test_project_table_shares_original_mode_source_and_open_action():
     section = _source("templates/common/workspace/project_list.html")
     html = section + _source("static/css/workspaces.css")
-    project_table = section.split('<table class="table table-sm align-middle mb-4">', 1)[1].split("</table>", 1)[0]
+    project_table = section.split('<table class="table table-sm align-middle mb-4 project-list-table">', 1)[1].split("</table>", 1)[0]
 
-    assert ">操作</th>" not in project_table
-    assert 'title="打开项目"' not in project_table
-    assert "bi-arrow-right" not in project_table
+    assert "创作模式" in project_table
+    assert "创作来源" in project_table
+    assert "更新时间/操作" in project_table
     assert 'class="project-name-button"' in project_table
     assert ':href="`/planning/projects/${project.id}/brief`"' in project_table
-    assert '@click.stop="selectCreativeProject(project.id)"' not in project_table
-    assert ':aria-current="creativeWorkspace.project?.id === project.id ? \'page\' : null"' not in project_table
     assert ".creative-project-row.table-active" in html
     assert ".project-name-button:focus-visible" in html
-    assert 'colspan="5"' in project_table
+    assert 'colspan="6"' in project_table
 
 
 def test_creative_project_creation_supports_selecting_a_locked_breakdown_version():

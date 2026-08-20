@@ -265,6 +265,53 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
+                setOriginalBoundaries(value) {
+                    this.creativeWorkspace.originalCreate.content_boundaries = String(value || '')
+                        .split(/[,，\n]/).map(item => item.trim()).filter(Boolean);
+                },
+
+                toggleOriginalReference(resourceType, resourceId, checked) {
+                    const refs = this.creativeWorkspace.originalCreate.reference_refs;
+                    const key = `${resourceType}:${Number(resourceId)}`;
+                    const filtered = refs.filter(item => `${item.resource_type}:${Number(item.resource_id)}` !== key);
+                    if (checked) filtered.push({resource_type: resourceType, resource_id: Number(resourceId)});
+                    this.creativeWorkspace.originalCreate.reference_refs = filtered.slice(0, 10);
+                },
+
+                async createOriginalProject() {
+                    const source = this.creativeWorkspace.originalCreate;
+                    if (!String(source.seed_text || '').trim() || source.saving) return;
+                    source.saving = true;
+                    source.error = '';
+                    try {
+                        if (!source.creation_request_id) {
+                            source.creation_request_id = globalThis.crypto?.randomUUID?.()
+                                || `original-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+                        }
+                        const payload = {
+                            seed_text: String(source.seed_text).trim(), name: String(source.name || '').trim(),
+                            genre: String(source.genre || '').trim(), target_platform: String(source.target_platform || ''),
+                            target_audience: String(source.target_audience || '').trim(),
+                            target_episode_count: Number(source.target_episode_count || 20),
+                            episode_duration_seconds: Number(source.episode_duration_seconds || 120),
+                            cost_level: String(source.cost_level || ''),
+                            content_boundaries: [...source.content_boundaries],
+                            reference_refs: source.reference_refs.map(item => ({resource_type: item.resource_type, resource_id: Number(item.resource_id)})),
+                            creation_request_id: source.creation_request_id,
+                        };
+                        const response = await aiworkerApi.request('/api/creative/projects/original', {
+                            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+                        });
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '创建原创项目失败');
+                        window.location.assign(`/planning/projects/${data.id}/brief?generate_original=1`);
+                    } catch (e) {
+                        source.error = e.message || '创建原创项目失败';
+                    } finally {
+                        source.saving = false;
+                    }
+                },
+
                 openCreativeProject(project) {
                     if (!project?.id) return;
                     window.location.assign(`/planning/projects/${project.id}/brief`);
@@ -282,6 +329,8 @@ window.aiworkerModules.push(() => ({
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.detail || '读取项目失败');
                         this.creativeWorkspace.project = data;
+                        this.creativeWorkspace.selectedSeedId = data.seed?.id || null;
+                        this.creativeWorkspace.preservedBlueprintIds = [];
                         this.reconcileCreativeGenerationState(data);
                         const candidates = this.latestProjectBlueprints();
                         if (!candidates.some(item => item.id === this.creativeWorkspace.selectedBlueprintId)) {
@@ -311,6 +360,46 @@ window.aiworkerModules.push(() => ({
                         characters_draft: '人物草稿', characters_locked: '人物已锁定', outline_draft: '大纲草稿',
                         outline_locked: '大纲已锁定', beats_in_progress: 'Beats 制作中', archived: '已归档'
                     }[status] || status || '-';
+                },
+
+                creativeProjectModeLabel(project) {
+                    return project?.creation_mode === 'original' ? '原创' : '仿写';
+                },
+
+                creativeProjectSource(project) {
+                    if (project?.creation_mode === 'original') {
+                        return project.seed?.seed_text || project.seed_summary || '原创灵感';
+                    }
+                    return project?.topic_title || '-';
+                },
+
+                togglePreservedBlueprint(blueprintId, checked) {
+                    const ids = this.creativeWorkspace.preservedBlueprintIds.filter(id => Number(id) !== Number(blueprintId));
+                    if (checked) ids.push(Number(blueprintId));
+                    this.creativeWorkspace.preservedBlueprintIds = ids;
+                },
+
+                async saveOriginalSeed() {
+                    const project = this.creativeWorkspace.project;
+                    const seed = project?.seed;
+                    if (!project || project.creation_mode !== 'original' || !seed) return;
+                    const body = {
+                        seed_text: String(seed.seed_text || '').trim(),
+                        constraints: seed.constraints || {},
+                        reference_refs: seed.reference_refs || [],
+                    };
+                    const frozen = seed.status === 'frozen';
+                    const url = frozen
+                        ? `/api/creative/projects/${project.id}/seeds/versions`
+                        : `/api/creative/seeds/${seed.id}`;
+                    const response = await aiworkerApi.request(url, {
+                        method: frozen ? 'POST' : 'PATCH',
+                        headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+                    });
+                    const data = await response.json();
+                    if (!response.ok) throw new Error(data.detail || '保存原创种子失败');
+                    project.seed = data;
+                    this.creativeWorkspace.selectedSeedId = data.id;
                 },
 
                 riskLabel(level) { return {low: '低', medium: '中', high: '高'}[level] || level || '-'; },
@@ -905,10 +994,30 @@ window.aiworkerModules.push(() => ({
                 async generateProjectBlueprints() {
                     try {
                         const task = await this.resolveCreativeWorkflowTask('brief', this.creativeWorkspace.project.id);
+                        const body = {count: Number(this.creativeWorkspace.directionCount || 3), workflow_task_id: task.id};
+                        if (this.creativeWorkspace.project.creation_mode === 'original') {
+                            body.preserve_blueprint_ids = [...this.creativeWorkspace.preservedBlueprintIds];
+                        }
                         return this.startCreativeGeneration(
                             `/api/creative/projects/${this.creativeWorkspace.project.id}/blueprints/generate`,
-                            {count: Number(this.creativeWorkspace.directionCount || 3), workflow_task_id: task.id},
+                            body,
                             'blueprints'
+                        );
+                    } catch (e) {
+                        window.dispatchEvent(new CustomEvent('aiworker:toast', {detail: {message: e.message, type: 'error'}}));
+                    }
+                },
+
+                async deriveOriginalDirection(item = null) {
+                    const parent = item || this.selectedProjectBlueprint();
+                    const instruction = String(this.creativeWorkspace.variantInstruction || '').trim();
+                    if (!parent || !instruction) return;
+                    try {
+                        const task = await this.resolveCreativeWorkflowTask('brief', this.creativeWorkspace.project.id);
+                        return this.startCreativeGeneration(
+                            `/api/creative/blueprints/${parent.id}/derive`,
+                            {instruction, workflow_task_id: task.id},
+                            'blueprint_variant'
                         );
                     } catch (e) {
                         window.dispatchEvent(new CustomEvent('aiworker:toast', {detail: {message: e.message, type: 'error'}}));

@@ -200,7 +200,10 @@ def test_project_brief_long_text_controls_wrap_without_clipping():
     markup = blueprint.replace(
         '<template x-if="selectedProjectBlueprint()"><div class="border-top pt-3">',
         '<div class="border-top pt-3">',
-    ).replace("</div></template>", "</div>")
+    ).replace("</div></template>", "</div>").replace(
+        '<template x-if="creativeWorkspace.project?.creation_mode !== \'original\'"><div class="imitation-brief-workspace">',
+        '<div class="imitation-brief-workspace">',
+    ).replace("</div>\n</template>\n</div>\n", "</div>\n</div>\n")
     fields = (
         ("creativeWorkspace.project.target_audience", 16),
         ("selectedProjectBlueprint().content.protagonist", 24),

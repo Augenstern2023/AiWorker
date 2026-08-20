@@ -132,6 +132,7 @@ def test_frozen_seed_is_immutable_and_next_version_points_to_it(tmp_path):
 
     assert frozen["status"] == "frozen"
     assert repository.update_seed(first_seed["id"], {"seed_text": "不能覆盖"}) is None
+    assert repository.update_seed(first_seed["id"], {}) is None
     assert second_seed["version"] == 2
     assert second_seed["parent_version_id"] == first_seed["id"]
     assert repository.get_seed(second_seed["id"])["seed_text"] == "升级后的原创种子"
@@ -139,6 +140,17 @@ def test_frozen_seed_is_immutable_and_next_version_points_to_it(tmp_path):
         first_seed["id"],
         second_seed["id"],
     ]
+
+
+def test_deleting_original_project_removes_its_seed_versions(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = ready_original_project(repository)
+
+    deleted = repository.delete_project(project["id"])
+
+    assert deleted["id"] == project["id"]
+    assert repository.get_project(project["id"]) is None
+    assert repository.list_seeds(project["id"]) == []
 
 
 def test_original_blueprints_persist_direction_type_and_seed_source(tmp_path):

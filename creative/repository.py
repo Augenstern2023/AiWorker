@@ -1076,8 +1076,11 @@ class CreativeRepository:
     ) -> dict[str, Any] | None:
         allowed = {"seed_text", "constraints", "reference_refs"}
         updates = {key: value for key, value in values.items() if key in allowed}
+        seed = self.get_seed(seed_id)
+        if seed is None or seed["status"] != "draft":
+            return None
         if not updates:
-            return self.get_seed(seed_id)
+            return seed
         assignments: list[str] = []
         params: list[Any] = []
         for key, value in updates.items():
@@ -1272,6 +1275,7 @@ class CreativeRepository:
             conn.execute("DELETE FROM creative_relationships WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_characters WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_blueprints WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM creative_seeds WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_projects WHERE id = ?", (project_id,))
 
         result = dict(project)

@@ -14,6 +14,8 @@ from typing import Any
 
 PROMPT_TEMPLATE_VERSION = "phase4-v4"
 BREAKDOWN_PROMPT_TEMPLATE_VERSION = "transcript-breakdown-v1"
+ORIGINAL_PROMPT_TEMPLATE_VERSION = "original-direction-v1"
+ORIGINAL_VARIANT_PROMPT_TEMPLATE_VERSION = "original-direction-variant-v1"
 
 DRAMA_CONSTRAINTS = (
     "每场冲突不得以重复的证据留存或口头反击收束；必须改变至少一项人物资源、关系、信息或选择。"
@@ -37,6 +39,31 @@ def blueprint_messages(payload: dict[str, Any], count: int) -> list[dict[str, st
         "title、imitation_reason、protagonist、core_conflict、main_goal、background、worldview、audience、cost_level 必须是纯文本字符串；"
         "imitation_reason 必须明确说明该方向为何适配当前项目的目标受众、题材和已拆解的可借鉴结构，不得泛泛而谈。"
         "列表字段必须是字符串数组。",
+        payload,
+    )
+
+
+def original_direction_messages(
+    payload: dict[str, Any], count: int
+) -> list[dict[str, str]]:
+    return _messages(
+        "你是原创短剧策划。根据一句话种子独立发展故事，不得复用市场参考中的专有角色、情节、"
+        "台词或表达。"
+        f"生成 {count} 个差异明显的原创方向，返回 directions 数组。每项必须包含 title、logline、"
+        "theme、protagonist、protagonist_desire、protagonist_flaw、pressure_response、"
+        "main_opposition、core_conflict、main_goal、background、worldview、story_engine、"
+        "first_three_hooks、highlights、differentiators、audience、market_fit、cost_level、"
+        "originality_statement、risks、assumptions、open_questions。"
+        "其中 first_three_hooks、highlights、differentiators、risks、assumptions、open_questions 是字符串数组，"
+        "其他字段是非空字符串。方向之间至少在主角、背景、冲突发动机、关系结构和情绪回报中的两个维度不同。",
+        payload,
+    )
+
+
+def original_variant_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
+    return _messages(
+        "你是原创短剧策划。按变体要求从父方向派生一个新方向，但仍须保持独立原创。"
+        "返回 direction 对象，字段契约与原创方向一致；不得复用市场参考中的专有角色、情节、台词或表达。",
         payload,
     )
 

@@ -78,7 +78,13 @@ class ProjectUpdateRequest(BaseModel):
 
 class BlueprintGenerateRequest(BaseModel):
     count: int = Field(3, ge=3, le=5)
+    preserve_blueprint_ids: list[int] = Field(default_factory=list, max_length=5)
     workflow_task_id: str | None = None
+
+
+class BlueprintDeriveRequest(BaseModel):
+    instruction: str = Field(min_length=1, max_length=500)
+    workflow_task_id: str = Field(min_length=1)
 
 
 class BlueprintUpdateRequest(BaseModel):

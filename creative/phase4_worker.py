@@ -20,6 +20,10 @@ from analysis.llm import create_llm_provider_from_config
 from core.events import emit_event
 from core.job import CrawlJob
 from creative.imitation_service import generate_blueprints
+from creative.original_direction_service import (
+    derive_original_direction,
+    generate_original_directions,
+)
 from creative.repository import CreativeRepository
 from creative.script_service import (
     build_continuity_ledger,
@@ -113,7 +117,7 @@ async def run(job: CrawlJob) -> None:
     action = str(extra.get("action") or "").strip()
     project_id = int(extra.get("project_id") or 0)
     db_path = Path(str(extra.get("db_path") or ".runtime/creative/creative.db"))
-    if action not in {"blueprints", "characters", "outlines", "outline_overview", "beats", "script"} or project_id < 1:
+    if action not in {"blueprints", "blueprint_variant", "characters", "outlines", "outline_overview", "beats", "script"} or project_id < 1:
         raise ValueError("Phase 4 任务缺少有效 action 或 project_id")
 
     repository = CreativeRepository(db_path)
@@ -147,9 +151,58 @@ async def run(job: CrawlJob) -> None:
 
     if action == "blueprints":
         count = int(extra.get("count") or 3)
-        generated, meta = await generate_blueprints(provider, project, inputs["topic"], inputs["breakdown"], count)
-        resources = repository.create_blueprints(project_id, generated, job.job_id, meta)
+        if project.get("creation_mode") == "original":
+            seed = repository.get_seed(int(extra.get("seed_id") or 0))
+            if seed is None or seed.get("status") != "frozen":
+                raise ValueError("原创方向任务缺少已冻结的种子版本")
+            generated, meta = await generate_original_directions(
+                provider, project, seed,
+                list(extra.get("market_context") or []),
+                list(extra.get("blocked_terms") or []),
+                count,
+            )
+            source_refs = {
+                "seed_id": seed["id"],
+                "seed_version": seed["version"],
+                "reference_ids": [
+                    f"{item.get('resource_type')}:{item.get('resource_id')}"
+                    for item in list(extra.get("reference_snapshot") or [])
+                ],
+            }
+            resources = repository.create_blueprints(
+                project_id, generated, job.job_id, meta,
+                workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
+                direction_type="original", source_refs=source_refs,
+            )
+        else:
+            generated, meta = await generate_blueprints(
+                provider, project, inputs["topic"], inputs["breakdown"], count
+            )
+            resources = repository.create_blueprints(project_id, generated, job.job_id, meta)
         result: dict[str, Any] = {"action": action, "blueprint_ids": [item["id"] for item in resources]}
+    elif action == "blueprint_variant":
+        seed = repository.get_seed(int(extra.get("seed_id") or 0))
+        if seed is None or seed.get("status") != "frozen":
+            raise ValueError("原创方向任务缺少已冻结的种子版本")
+        parent = repository.get_blueprint(int(extra.get("parent_blueprint_id") or 0))
+        if (
+            parent is None
+            or int(parent.get("project_id") or 0) != project_id
+            or parent.get("direction_type") != "original"
+        ):
+            raise ValueError("派生任务缺少有效原创父方向")
+        generated, meta = await derive_original_direction(
+            provider, project, seed, parent,
+            instruction=str(extra.get("instruction") or ""),
+            market_context=list(extra.get("market_context") or []),
+            blocked_terms=list(extra.get("blocked_terms") or []),
+        )
+        resources = repository.create_blueprints(
+            project_id, [generated], job.job_id, meta,
+            workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
+            direction_type="original", source_refs=generated["source_refs"],
+        )
+        result = {"action": action, "blueprint_ids": [resources[0]["id"]]}
     elif action == "characters":
         brief = _locked_brief(project)
         generated, meta = await generate_character_bundle(provider, project, brief)

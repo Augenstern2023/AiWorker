@@ -27,6 +27,7 @@ from creative.hit_breakdown import breakdown_field_guide, personalize_breakdown_
 from creative.imitation_service import assess_similarity_risk
 from creative.lifecycle_service import TopicLifecycleService, content_fingerprint
 from creative.market_reference_service import MarketReferenceService
+from creative.original_direction_service import validate_original_direction_content
 from creative.original_project_service import OriginalProjectService
 from creative.outline_overview import SERIES_OVERVIEW_FIELD_LABELS, read_series_overview
 from creative.repository import CreativeRepository, DuplicateTopicError
@@ -35,6 +36,7 @@ from creative.selection_stage_service import SelectionStageService
 from creative.workflow_adapter import CreativeWorkflowAdapter
 
 from creative.schema import (
+    BlueprintDeriveRequest,
     BlueprintGenerateRequest,
     BlueprintUpdateRequest,
     BriefLockRequest,
@@ -2597,6 +2599,57 @@ def build_creative_router(
         workflow_task_id = validate_task(
             payload.workflow_task_id, "brief", principal, project_id=project_id
         )
+        project = project_or_404(project_id)
+        if project.get("creation_mode") == "original":
+            preserved_ids = list(dict.fromkeys(payload.preserve_blueprint_ids))
+            if len(preserved_ids) != len(payload.preserve_blueprint_ids):
+                raise HTTPException(409, "保留方向不能重复")
+            for blueprint_id in preserved_ids:
+                blueprint = repository.get_blueprint(blueprint_id)
+                if (
+                    blueprint is None
+                    or int(blueprint.get("project_id") or 0) != project_id
+                    or blueprint.get("direction_type") != "original"
+                    or blueprint.get("status") != "draft"
+                ):
+                    raise HTTPException(409, f"不可保留原创方向：{blueprint_id}")
+            missing_count = payload.count - len(preserved_ids)
+            if missing_count <= 0:
+                raise HTTPException(409, "已保留方向数已达到目标，无需补生成")
+            seed = repository.get_current_seed(project_id)
+            if seed is None:
+                raise HTTPException(409, "原创项目缺少种子")
+            try:
+                bundle = market_reference_service.resolve(
+                    list(seed.get("reference_refs") or []),
+                    can_read=lambda kind, identifier: can_read_market_reference(
+                        request, principal, kind, identifier
+                    ),
+                )
+                frozen_seed = repository.freeze_seed(int(seed["id"]))
+            except PermissionError as exc:
+                raise HTTPException(403, str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            return create_generation_job(
+                project_id,
+                "blueprints",
+                principal,
+                request,
+                count=missing_count,
+                target_count=payload.count,
+                preserve_blueprint_ids=preserved_ids,
+                seed_id=frozen_seed["id"],
+                market_context=bundle.context,
+                blocked_terms=bundle.blocked_terms,
+                reference_snapshot=[
+                    {**item, "captured_at": bundle.captured_at}
+                    for item in bundle.source_refs
+                ],
+                workflow_task_id=workflow_task_id,
+            )
+        if payload.preserve_blueprint_ids:
+            raise HTTPException(409, "仿写方向不支持保留补生成")
         return create_generation_job(
             project_id,
             "blueprints",
@@ -2606,18 +2659,75 @@ def build_creative_router(
             workflow_task_id=workflow_task_id,
         )
 
+    @router.post("/blueprints/{blueprint_id}/derive")
+    async def derive_project_blueprint(
+        blueprint_id: int,
+        payload: BlueprintDeriveRequest,
+        request: Request,
+        principal: Principal | None = Depends(creative_job_principal),
+    ):
+        parent = repository.get_blueprint(blueprint_id)
+        if parent is None:
+            raise HTTPException(404, "原创方向不存在")
+        project_id = int(parent["project_id"])
+        if parent.get("direction_type") != "original":
+            raise HTTPException(409, "只有原创方向可以派生")
+        workflow_task_id = validate_task(
+            payload.workflow_task_id, "brief", principal, project_id=project_id
+        )
+        seed = repository.get_current_seed(project_id)
+        if seed is None:
+            raise HTTPException(409, "原创项目缺少种子")
+        try:
+            bundle = market_reference_service.resolve(
+                list(seed.get("reference_refs") or []),
+                can_read=lambda kind, identifier: can_read_market_reference(
+                    request, principal, kind, identifier
+                ),
+            )
+            frozen_seed = repository.freeze_seed(int(seed["id"]))
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return create_generation_job(
+            project_id,
+            "blueprint_variant",
+            principal,
+            request,
+            seed_id=frozen_seed["id"],
+            parent_blueprint_id=blueprint_id,
+            instruction=payload.instruction,
+            market_context=bundle.context,
+            blocked_terms=bundle.blocked_terms,
+            reference_snapshot=[
+                {**item, "captured_at": bundle.captured_at}
+                for item in bundle.source_refs
+            ],
+            workflow_task_id=workflow_task_id,
+        )
+
     @router.patch("/blueprints/{blueprint_id}")
     async def update_blueprint(blueprint_id: int, payload: BlueprintUpdateRequest):
         current = repository.get_blueprint(blueprint_id)
         if not current:
             raise HTTPException(404, "blueprint not found")
-        inputs = repository.get_project_inputs(int(current["project_id"]))
-        risk = assess_similarity_risk(inputs["breakdown"].get("content") or {}, payload.content)
         try:
             workflow_adapter.assert_editable("brief", str(blueprint_id))
+            if current.get("direction_type") == "original":
+                content = validate_original_direction_content(
+                    payload.content, market_context=[], blocked_terms=[]
+                )
+                risk = {"risk_score": 0, "risk_level": "low"}
+            else:
+                inputs = repository.get_project_inputs(int(current["project_id"]))
+                content = payload.content
+                risk = assess_similarity_risk(
+                    inputs["breakdown"].get("content") or {}, content
+                )
             return repository.update_blueprint(
                 blueprint_id,
-                payload.content,
+                content,
                 risk_score=risk["risk_score"],
                 risk_level=risk["risk_level"],
                 difference_note=payload.difference_note,

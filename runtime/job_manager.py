@@ -138,16 +138,27 @@ class JobManager:
             existing_identity = str(existing_extra.get("topic_id") or "").strip()
             incoming_identity = str(incoming_extra.get("topic_id") or "").strip()
         elif not job_types - _CONCURRENT_CREATIVE_GENERATION_TYPES:
-            existing_identity = (
-                str(existing_extra.get("project_id") or "").strip(),
-                str(existing_extra.get("action") or "").strip(),
-                str(existing_extra.get("episode_number") or "").strip(),
-            )
-            incoming_identity = (
-                str(incoming_extra.get("project_id") or "").strip(),
-                str(incoming_extra.get("action") or "").strip(),
-                str(incoming_extra.get("episode_number") or "").strip(),
-            )
+            def creative_identity(extra):
+                action = str(extra.get("action") or "").strip()
+                original_key = (
+                    str(extra.get("seed_id") or "").strip()
+                    if action in {"blueprints", "blueprint_variant"}
+                    else str(extra.get("episode_number") or "").strip()
+                )
+                parent_key = (
+                    str(extra.get("parent_blueprint_id") or "").strip()
+                    if action == "blueprint_variant"
+                    else ""
+                )
+                return (
+                    str(extra.get("project_id") or "").strip(),
+                    action,
+                    original_key,
+                    parent_key,
+                )
+
+            existing_identity = creative_identity(existing_extra)
+            incoming_identity = creative_identity(incoming_extra)
             if not all(existing_identity[:2]) or not all(incoming_identity[:2]):
                 return False
         elif not job_types - _CONCURRENT_SCREENPLAY_REVIEW_TYPES:

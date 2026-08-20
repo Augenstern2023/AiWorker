@@ -263,6 +263,52 @@ def test_job_manager_rejects_duplicate_creative_generation_job(
         )
 
 
+@pytest.mark.parametrize(
+    ("existing_extra", "independent_extra"),
+    [
+        (
+            {"project_id": 1, "action": "blueprints", "seed_id": 7},
+            {"project_id": 1, "action": "blueprints", "seed_id": 8},
+        ),
+        (
+            {
+                "project_id": 1, "action": "blueprint_variant", "seed_id": 7,
+                "parent_blueprint_id": 11,
+            },
+            {
+                "project_id": 1, "action": "blueprint_variant", "seed_id": 7,
+                "parent_blueprint_id": 12,
+            },
+        ),
+    ],
+)
+def test_original_direction_jobs_use_seed_and_parent_in_conflict_identity(
+    monkeypatch, tmp_path, existing_extra, independent_extra,
+):
+    monkeypatch.setattr(
+        "runtime.job_manager.launch_worker", lambda *_args, **_kwargs: FakeProcess()
+    )
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    first = CrawlJob(
+        job_id="original-direction-first", platform="creative",
+        crawler_type="phase4_generate", extra=existing_extra,
+    )
+    manager.jobs[first.job_id] = JobState(job=first, status="running")
+    manager.processes[first.job_id] = FakeProcess()
+
+    independent = manager.start_job(CrawlJob(
+        job_id="original-direction-independent", platform="creative",
+        crawler_type="phase4_generate", extra=independent_extra,
+    ))
+
+    assert independent.job_id == "original-direction-independent"
+    with pytest.raises(JobConflictError, match="platform 'creative'"):
+        manager.start_job(CrawlJob(
+            job_id="original-direction-duplicate", platform="creative",
+            crawler_type="phase4_generate", extra=existing_extra,
+        ))
+
+
 def test_job_manager_normalizes_job_ownership_in_extra_and_public_state(
     monkeypatch, tmp_path
 ):

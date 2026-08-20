@@ -1626,14 +1626,15 @@ class CreativeRepository:
                 INSERT INTO creative_blueprints (
                     project_id, candidate_group_id, version, parent_version_id, content_json,
                     risk_score, risk_level, difference_note, source_refs_json,
-                    generation_meta_json, workflow_task_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    direction_type, generation_meta_json, workflow_task_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     current["project_id"], current["candidate_group_id"], int(version_row["version"]) + 1,
                     blueprint_id, json.dumps(current["content"], ensure_ascii=False),
                     current["risk_score"], current["risk_level"], current["difference_note"],
                     json.dumps(current["source_refs"], ensure_ascii=False),
+                    current["direction_type"],
                     json.dumps(current["generation_meta"], ensure_ascii=False),
                     workflow_task_id or current.get("workflow_task_id"), now, now,
                 ),
@@ -1647,7 +1648,11 @@ class CreativeRepository:
         if current["status"] == "brief_locked":
             return current
         note = difference_note.strip() or str(current.get("difference_note") or "").strip()
-        if current["risk_level"] == "high" and not note:
+        if (
+            current["direction_type"] == "imitation"
+            and current["risk_level"] == "high"
+            and not note
+        ):
             raise ValueError("高风险方向必须填写差异化修改说明")
         project = self.get_project(int(current["project_id"]))
         if not project:

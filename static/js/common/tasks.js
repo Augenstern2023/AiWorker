@@ -280,6 +280,25 @@
                             this.creativeWorkspace.create.topic_id = Number(topicId);
                             await this.syncCreativeProjectSource();
                         }
+                        if (this.page === 'planning-brief') {
+                            const params = new URLSearchParams(window.location.search);
+                            if (params.get('generate_original') === '1') {
+                                params.delete('generate_original');
+                                const query = params.toString();
+                                window.history.replaceState(
+                                    window.history.state,
+                                    '',
+                                    `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`
+                                );
+                                const project = this.creativeWorkspace.project;
+                                if (
+                                    project?.creation_mode === 'original'
+                                    && !(project.blueprints || []).length
+                                ) {
+                                    await this.generateProjectBlueprints();
+                                }
+                            }
+                        }
                         const episode = window.location.pathname.match(/\/episodes\/(\d+)\/(?:beats|scripts)/)?.[1];
                         if (episode) this.creativeWorkspace.selectedEpisode = Number(episode);
                         if (

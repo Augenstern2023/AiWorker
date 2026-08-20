@@ -122,6 +122,23 @@ async def test_invalid_candidates_are_repaired_without_dropping_valid_ones() -> 
 
 
 @pytest.mark.asyncio
+async def test_original_generation_rejects_partial_repair_result() -> None:
+    first = direction("情绪公司", "林岚", "未来公司", "情绪考核")
+    duplicate = direction("情绪公司甲", "林岚", "未来公司", "情绪考核")
+    provider = FakeProvider([
+        {"directions": [first]},
+        {"directions": [duplicate]},
+    ])
+
+    with pytest.raises(LLMError, match="未达到请求数"):
+        await generate_original_directions(
+            provider, PROJECT, SEED, [], [], count=3,
+        )
+
+    assert provider.call_count == 2
+
+
+@pytest.mark.asyncio
 async def test_original_direction_rejects_blocked_source_terms() -> None:
     blocked = valid_directions()
     blocked[0]["protagonist"] = "顾清歌"

@@ -181,6 +181,80 @@ def test_writer_can_submit_a_lightweight_original_project_request() -> None:
     assert "raw_content" not in str(request["body"])
 
 
+def test_original_brief_query_starts_direction_generation_once() -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route(
+            "**/planning/projects/9/brief?generate_original=1",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="text/html",
+                body=(
+                    '<body data-workspace-page="planning-brief">'
+                    '<div id="creativeGenerationProgressModal"></div>'
+                    '</body>'
+                ),
+            ),
+        )
+        page.goto("http://aiworker.test/planning/projects/9/brief?generate_original=1")
+        page.add_script_tag(
+            content="""
+            window.bootstrap = {Modal: {getOrCreateInstance: () => ({show() {}})}};
+            window.__originalDirectionRequests = [];
+            window.aiworkerApi = {
+              request: async (url, options = {}) => {
+                if (url === '/api/creative/projects') {
+                  return {ok: true, json: async () => ({items: [{id: 9}]})};
+                }
+                if (url.startsWith('/api/creative/topics?')) {
+                  return {ok: true, json: async () => ({items: []})};
+                }
+                if (url === '/api/creative/projects/9') {
+                  return {ok: true, json: async () => ({
+                    id: 9, creation_mode: 'original', target_episode_count: 20,
+                    seed: {id: 7, status: 'frozen'}, blueprints: []
+                  })};
+                }
+                if (url === '/api/workflow/tasks') {
+                  return {ok: true, json: async () => []};
+                }
+                if (url === '/api/creative/projects/9/workflow-tasks/brief/ensure') {
+                  return {ok: true, json: async () => ({id: 'brief-9', status: 'in_progress'})};
+                }
+                if (url === '/api/creative/projects/9/blueprints/generate') {
+                  window.__originalDirectionRequests.push({url, options});
+                  return {ok: true, json: async () => ({job: {job_id: 'original-9', status: 'queued'}})};
+                }
+                throw new Error(`unexpected request: ${url}`);
+              },
+              isAbortError: () => false,
+            };
+            """
+        )
+        page.add_script_tag(content=_source("static/js/common/tasks.js"))
+        page.add_script_tag(content=_source("static/js/common/creative.js"))
+        result = page.evaluate(
+            """async () => {
+                const workspace = appData();
+                workspace.fetchJobs = async () => {};
+                workspace.initTooltips = () => {};
+                workspace.initBeforeUnload = () => {};
+                await workspace.init();
+                await workspace.init();
+                return {
+                  requests: window.__originalDirectionRequests,
+                  search: window.location.search,
+                };
+            }"""
+        )
+        browser.close()
+
+    assert len(result["requests"]) == 1
+    assert result["requests"][0]["url"] == "/api/creative/projects/9/blueprints/generate"
+    assert "generate_original" not in result["search"]
+
+
 def test_original_direction_workspace_has_no_horizontal_overflow_at_390px() -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)

@@ -201,6 +201,11 @@ async def generate_original_directions(
                 second, accepted, market_context=market_context,
                 blocked_terms=blocked_terms, limit=int(count),
             )
+            if len(accepted) < int(count):
+                raise LLMError(
+                    "原创方向补救后仍未达到请求数："
+                    f"需要 {int(count)} 个，得到 {len(accepted)} 个"
+                )
     except LLMError:
         raise
     except Exception as exc:

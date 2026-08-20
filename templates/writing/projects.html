@@ -5,4 +5,4 @@
 {% set show_topic_creation = false %}
 {% include "common/workspace/project_list.html" %}
 {% endblock %}
-{% block scripts %}<script src="/static/js/common/creative.js"></script>{% endblock %}
+{% block scripts %}<script src="/static/js/common/creative.js?v={{ asset_version }}"></script>{% endblock %}

@@ -197,7 +197,7 @@ class WorkflowRepository:
 
     def ensure_topic_task(
         self,
-        topic_id: int,
+        topic_id: int | None,
         *,
         task_type: str,
         role_code: str,

@@ -34,6 +34,7 @@ class CreativeRepository:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._migrate_project_table_if_needed(self.db_path)
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
@@ -41,6 +42,96 @@ class CreativeRepository:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
+
+    @staticmethod
+    def _migrate_project_table_if_needed(db_path: str | Path) -> None:
+        """Rebuild legacy project constraints so originals can omit source records."""
+        conn = sqlite3.connect(db_path)
+        try:
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'creative_projects'"
+            ).fetchone()
+            if table is None:
+                return
+            columns = {
+                row[1]: row for row in conn.execute("PRAGMA table_info(creative_projects)")
+            }
+            topic_is_not_null = bool(columns.get("topic_id") and columns["topic_id"][3])
+            if not topic_is_not_null and "creation_mode" in columns:
+                return
+
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute("BEGIN IMMEDIATE")
+            for index in (
+                "idx_creative_projects_topic",
+                "uq_creative_projects_workflow_task",
+                "uq_creative_projects_creation_workflow_task",
+                "uq_creative_projects_creation_request",
+            ):
+                conn.execute(f"DROP INDEX IF EXISTS {index}")
+            conn.execute("""
+                CREATE TABLE creative_projects_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    topic_id INTEGER,
+                    breakdown_id INTEGER,
+                    name TEXT NOT NULL,
+                    genre TEXT NOT NULL DEFAULT '',
+                    target_platform TEXT NOT NULL DEFAULT '',
+                    target_audience TEXT NOT NULL DEFAULT '',
+                    target_episode_count INTEGER NOT NULL DEFAULT 20,
+                    episode_duration_seconds INTEGER NOT NULL DEFAULT 120,
+                    status TEXT NOT NULL DEFAULT 'created',
+                    locked_brief_id INTEGER,
+                    character_batch_id TEXT,
+                    outline_batch_id TEXT,
+                    workflow_task_id TEXT,
+                    creation_workflow_task_id TEXT,
+                    creation_request_id TEXT,
+                    created_by TEXT NOT NULL DEFAULT 'local',
+                    deleted INTEGER NOT NULL DEFAULT 0,
+                    creation_mode TEXT NOT NULL DEFAULT 'imitation'
+                        CHECK (creation_mode IN ('imitation', 'original')),
+                    bootstrap_status TEXT NOT NULL DEFAULT 'ready'
+                        CHECK (bootstrap_status IN ('pending', 'ready', 'failed')),
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    FOREIGN KEY(topic_id) REFERENCES creative_topics(id),
+                    FOREIGN KEY(breakdown_id) REFERENCES creative_breakdowns(id),
+                    CHECK (
+                        (creation_mode = 'imitation' AND topic_id IS NOT NULL AND breakdown_id IS NOT NULL)
+                        OR
+                        (creation_mode = 'original' AND topic_id IS NULL AND breakdown_id IS NULL)
+                    )
+                )
+            """)
+            conn.execute("""
+                INSERT INTO creative_projects_new (
+                    id, topic_id, breakdown_id, name, genre, target_platform,
+                    target_audience, target_episode_count, episode_duration_seconds,
+                    status, locked_brief_id, character_batch_id, outline_batch_id,
+                    workflow_task_id, creation_workflow_task_id, creation_request_id,
+                    created_by, deleted, creation_mode, bootstrap_status, created_at, updated_at
+                )
+                SELECT
+                    id, topic_id, breakdown_id, name, genre, target_platform,
+                    target_audience, target_episode_count, episode_duration_seconds,
+                    status, locked_brief_id, character_batch_id, outline_batch_id,
+                    workflow_task_id, creation_workflow_task_id, creation_request_id,
+                    created_by, deleted, 'imitation', 'ready', created_at, updated_at
+                FROM creative_projects
+            """)
+            conn.execute("DROP TABLE creative_projects")
+            conn.execute("ALTER TABLE creative_projects_new RENAME TO creative_projects")
+            conn.commit()
+            conn.execute("PRAGMA foreign_keys = ON")
+            if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise sqlite3.IntegrityError("creative project migration introduced foreign key errors")
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
@@ -101,7 +192,7 @@ class CreativeRepository:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS creative_projects (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    topic_id INTEGER NOT NULL, breakdown_id INTEGER NOT NULL,
+                    topic_id INTEGER, breakdown_id INTEGER,
                     name TEXT NOT NULL, genre TEXT NOT NULL DEFAULT '',
                     target_platform TEXT NOT NULL DEFAULT '', target_audience TEXT NOT NULL DEFAULT '',
                     target_episode_count INTEGER NOT NULL DEFAULT 20,
@@ -111,9 +202,18 @@ class CreativeRepository:
                     workflow_task_id TEXT, creation_workflow_task_id TEXT,
                     creation_request_id TEXT,
                     created_by TEXT NOT NULL DEFAULT 'local', deleted INTEGER NOT NULL DEFAULT 0,
+                    creation_mode TEXT NOT NULL DEFAULT 'imitation'
+                        CHECK (creation_mode IN ('imitation', 'original')),
+                    bootstrap_status TEXT NOT NULL DEFAULT 'ready'
+                        CHECK (bootstrap_status IN ('pending', 'ready', 'failed')),
                     created_at REAL NOT NULL, updated_at REAL NOT NULL,
                     FOREIGN KEY(topic_id) REFERENCES creative_topics(id),
-                    FOREIGN KEY(breakdown_id) REFERENCES creative_breakdowns(id)
+                    FOREIGN KEY(breakdown_id) REFERENCES creative_breakdowns(id),
+                    CHECK (
+                        (creation_mode = 'imitation' AND topic_id IS NOT NULL AND breakdown_id IS NOT NULL)
+                        OR
+                        (creation_mode = 'original' AND topic_id IS NULL AND breakdown_id IS NULL)
+                    )
                 )
             """)
             conn.execute("""
@@ -124,10 +224,30 @@ class CreativeRepository:
                     status TEXT NOT NULL DEFAULT 'draft', content_json TEXT NOT NULL,
                     risk_score REAL NOT NULL DEFAULT 0, risk_level TEXT NOT NULL DEFAULT 'low',
                     difference_note TEXT NOT NULL DEFAULT '', source_refs_json TEXT NOT NULL DEFAULT '{}',
+                    direction_type TEXT NOT NULL DEFAULT 'imitation',
                     generation_meta_json TEXT NOT NULL DEFAULT '{}', locked_at REAL,
                     created_at REAL NOT NULL, updated_at REAL NOT NULL,
                     FOREIGN KEY(project_id) REFERENCES creative_projects(id),
                     UNIQUE(project_id, candidate_group_id, version)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS creative_seeds (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL,
+                    version INTEGER NOT NULL,
+                    parent_version_id INTEGER,
+                    status TEXT NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft', 'frozen')),
+                    seed_text TEXT NOT NULL,
+                    constraints_json TEXT NOT NULL DEFAULT '{}',
+                    reference_refs_json TEXT NOT NULL DEFAULT '[]',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    locked_at REAL,
+                    FOREIGN KEY(project_id) REFERENCES creative_projects(id),
+                    FOREIGN KEY(parent_version_id) REFERENCES creative_seeds(id),
+                    UNIQUE(project_id, version)
                 )
             """)
             conn.execute("""
@@ -315,6 +435,17 @@ class CreativeRepository:
                     "PRAGMA table_info(creative_projects)"
                 ).fetchall()
             }
+            blueprint_columns = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(creative_blueprints)"
+                ).fetchall()
+            }
+            if "direction_type" not in blueprint_columns:
+                conn.execute(
+                    "ALTER TABLE creative_blueprints "
+                    "ADD COLUMN direction_type TEXT NOT NULL DEFAULT 'imitation'"
+                )
             if "creation_workflow_task_id" not in project_columns:
                 conn.execute(
                     "ALTER TABLE creative_projects "
@@ -843,6 +974,171 @@ class CreativeRepository:
                 return self.get_project(int(existing["id"])) or {}
         return self.get_project(int(cursor.lastrowid)) or {}
 
+    def create_original_project(
+        self,
+        *,
+        seed_text: str,
+        name: str,
+        target_episode_count: int,
+        target_platform: str = "",
+        genre: str = "",
+        target_audience: str = "",
+        episode_duration_seconds: int = 120,
+        constraints: dict[str, Any] | None = None,
+        reference_refs: list[dict[str, Any]] | None = None,
+        created_by: str,
+        creation_request_id: str,
+    ) -> dict[str, Any]:
+        if not 1 <= int(target_episode_count) <= 100:
+            raise ValueError("目标集数必须在 1-100 之间")
+        if not 30 <= int(episode_duration_seconds) <= 1800:
+            raise ValueError("单集时长必须在 30-1800 秒之间")
+        if not seed_text.strip():
+            raise ValueError("原创种子不能为空")
+        now = time.time()
+        normalized_request_id = creation_request_id.strip()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if normalized_request_id:
+                existing = conn.execute(
+                    "SELECT id FROM creative_projects "
+                    "WHERE created_by = ? AND creation_request_id = ? AND deleted = 0",
+                    (created_by, normalized_request_id),
+                ).fetchone()
+                if existing is not None:
+                    return self.get_project(int(existing["id"])) or {}
+            cursor = conn.execute(
+                """
+                INSERT INTO creative_projects (
+                    topic_id, breakdown_id, name, genre, target_platform, target_audience,
+                    target_episode_count, episode_duration_seconds, creation_request_id,
+                    created_by, creation_mode, bootstrap_status, created_at, updated_at
+                ) VALUES (NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'original', 'pending', ?, ?)
+                """,
+                (
+                    name.strip(), genre.strip(), target_platform.strip(), target_audience.strip(),
+                    int(target_episode_count), int(episode_duration_seconds),
+                    normalized_request_id or None, created_by, now, now,
+                ),
+            )
+            project_id = int(cursor.lastrowid)
+            conn.execute(
+                """
+                INSERT INTO creative_seeds (
+                    project_id, version, parent_version_id, status, seed_text,
+                    constraints_json, reference_refs_json, created_at, updated_at
+                ) VALUES (?, 1, NULL, 'draft', ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id, seed_text.strip(), json.dumps(constraints or {}, ensure_ascii=False),
+                    json.dumps(reference_refs or [], ensure_ascii=False), now, now,
+                ),
+            )
+        return self.get_project(project_id) or {}
+
+    def mark_project_bootstrap_status(
+        self, project_id: int, status: str
+    ) -> dict[str, Any]:
+        if status not in {"pending", "ready", "failed"}:
+            raise ValueError("invalid bootstrap status")
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE creative_projects SET bootstrap_status = ?, updated_at = ? "
+                "WHERE id = ? AND deleted = 0",
+                (status, time.time(), project_id),
+            )
+        return self.get_project(project_id) or {}
+
+    def get_current_seed(self, project_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM creative_seeds WHERE project_id = ? "
+                "ORDER BY version DESC, id DESC LIMIT 1",
+                (project_id,),
+            ).fetchone()
+        return self._seed(dict(row)) if row else None
+
+    def get_seed(self, seed_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM creative_seeds WHERE id = ?", (seed_id,)).fetchone()
+        return self._seed(dict(row)) if row else None
+
+    def list_seeds(self, project_id: int) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM creative_seeds WHERE project_id = ? ORDER BY version, id",
+                (project_id,),
+            ).fetchall()
+        return [self._seed(dict(row)) for row in rows]
+
+    def update_seed(
+        self, seed_id: int, values: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        allowed = {"seed_text", "constraints", "reference_refs"}
+        updates = {key: value for key, value in values.items() if key in allowed}
+        if not updates:
+            return self.get_seed(seed_id)
+        assignments: list[str] = []
+        params: list[Any] = []
+        for key, value in updates.items():
+            column = {
+                "seed_text": "seed_text",
+                "constraints": "constraints_json",
+                "reference_refs": "reference_refs_json",
+            }[key]
+            assignments.append(f"{column} = ?")
+            params.append(
+                value.strip() if key == "seed_text" else json.dumps(value, ensure_ascii=False)
+            )
+        params.extend([time.time(), seed_id])
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE creative_seeds SET {', '.join(assignments)}, updated_at = ? "
+                "WHERE id = ? AND status = 'draft'",
+                params,
+            )
+        return self.get_seed(seed_id) if cursor.rowcount else None
+
+    def freeze_seed(self, seed_id: int) -> dict[str, Any]:
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE creative_seeds SET status = 'frozen', locked_at = ?, updated_at = ? "
+                "WHERE id = ? AND status = 'draft'",
+                (now, now, seed_id),
+            )
+        seed = self.get_seed(seed_id)
+        if seed is None:
+            raise ValueError("原创种子不存在")
+        return seed
+
+    def create_seed_version(self, project_id: int, **values: Any) -> dict[str, Any]:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            parent = conn.execute(
+                "SELECT * FROM creative_seeds WHERE project_id = ? ORDER BY version DESC, id DESC LIMIT 1",
+                (project_id,),
+            ).fetchone()
+            if parent is None:
+                raise ValueError("原创项目种子不存在")
+            now = time.time()
+            cursor = conn.execute(
+                """
+                INSERT INTO creative_seeds (
+                    project_id, version, parent_version_id, status, seed_text,
+                    constraints_json, reference_refs_json, created_at, updated_at
+                ) VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id, int(parent["version"]) + 1, int(parent["id"]),
+                    str(values.get("seed_text", parent["seed_text"])).strip(),
+                    json.dumps(values.get("constraints", json.loads(parent["constraints_json"])), ensure_ascii=False),
+                    json.dumps(values.get("reference_refs", json.loads(parent["reference_refs_json"])), ensure_ascii=False),
+                    now, now,
+                ),
+            )
+        return self.get_seed(int(cursor.lastrowid)) or {}
+
     def get_project_by_creation_request_id(
         self, created_by: str, creation_request_id: str
     ) -> dict[str, Any] | None:
@@ -865,7 +1161,7 @@ class CreativeRepository:
         return str(content.get("target_audience") or "").strip()
 
     def list_projects(self, topic_id: int | None = None) -> list[dict[str, Any]]:
-        clauses = ["p.deleted = 0"]
+        clauses = ["p.deleted = 0", "p.bootstrap_status = 'ready'"]
         params: list[Any] = []
         if topic_id is not None:
             clauses.append("p.topic_id = ?")
@@ -874,7 +1170,7 @@ class CreativeRepository:
             rows = conn.execute(
                 f"""
                 SELECT p.*, t.title AS topic_title
-                FROM creative_projects p JOIN creative_topics t ON t.id = p.topic_id
+                FROM creative_projects p LEFT JOIN creative_topics t ON t.id = p.topic_id
                 WHERE {' AND '.join(clauses)} ORDER BY p.updated_at DESC, p.id DESC
                 """,
                 params,
@@ -989,8 +1285,8 @@ class CreativeRepository:
                 SELECT p.*, t.title AS topic_title, t.description AS topic_description,
                        t.source_platforms_json, b.version AS breakdown_version
                 FROM creative_projects p
-                JOIN creative_topics t ON t.id = p.topic_id
-                JOIN creative_breakdowns b ON b.id = p.breakdown_id
+                LEFT JOIN creative_topics t ON t.id = p.topic_id
+                LEFT JOIN creative_breakdowns b ON b.id = p.breakdown_id
                 WHERE p.id = ? AND p.deleted = 0
                 """,
                 (project_id,),
@@ -1020,6 +1316,15 @@ class CreativeRepository:
                     (project_id,),
                 ).fetchall()
             ]
+            if project["creation_mode"] == "original":
+                project["topic"] = {}
+                project["breakdown"] = {}
+                seed = conn.execute(
+                    "SELECT * FROM creative_seeds WHERE project_id = ? "
+                    "ORDER BY version DESC, id DESC LIMIT 1",
+                    (project_id,),
+                ).fetchone()
+                project["seed"] = self._seed(dict(seed)) if seed else None
         project["allowed_actions"] = self._allowed_project_actions(project)
         return project
 
@@ -1094,6 +1399,13 @@ class CreativeRepository:
         project = self.get_project(project_id)
         if not project:
             raise ValueError("创作项目不存在")
+        if project["creation_mode"] == "original":
+            return {
+                "project": project,
+                "topic": {},
+                "breakdown": {},
+                "seed": project.get("seed"),
+            }
         topic = self.get_topic(int(project["topic_id"]))
         breakdown = self.get_breakdown(int(project["breakdown_id"]))
         return {"project": project, "topic": topic or {}, "breakdown": breakdown or {}}
@@ -1114,6 +1426,8 @@ class CreativeRepository:
         job_id: str = "",
         generation_meta: dict[str, Any] | None = None,
         workflow_task_id: str | None = None,
+        direction_type: str = "imitation",
+        source_refs: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         if not 1 <= len(items) <= 5:
             raise ValueError("仿制方向数量必须在 1-5 之间")
@@ -1121,7 +1435,9 @@ class CreativeRepository:
         if not project:
             raise ValueError("创作项目不存在")
         now = time.time()
-        refs = {"topic_id": project["topic_id"], "breakdown_id": project["breakdown_id"]}
+        refs = source_refs or {
+            "topic_id": project["topic_id"], "breakdown_id": project["breakdown_id"]
+        }
         meta = dict(generation_meta or {})
         if job_id:
             meta["job_id"] = job_id
@@ -1132,15 +1448,17 @@ class CreativeRepository:
                     """
                     INSERT INTO creative_blueprints (
                         project_id, candidate_group_id, content_json, risk_score, risk_level,
-                        difference_note, source_refs_json, generation_meta_json, workflow_task_id, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        difference_note, source_refs_json, direction_type, generation_meta_json,
+                        workflow_task_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         project_id, uuid.uuid4().hex,
                         json.dumps(item.get("content") or item, ensure_ascii=False),
                         float(item.get("risk_score") or 0), str(item.get("risk_level") or "low"),
                         str(item.get("difference_note") or ""), json.dumps(refs, ensure_ascii=False),
-                        json.dumps(meta, ensure_ascii=False), workflow_task_id or project.get("workflow_task_id"), now, now,
+                        direction_type, json.dumps(meta, ensure_ascii=False),
+                        workflow_task_id or project.get("workflow_task_id"), now, now,
                     ),
                 )
                 ids.append(int(cursor.lastrowid))
@@ -2840,6 +3158,12 @@ class CreativeRepository:
         row["content"] = json.loads(row.pop("content_json") or "{}")
         row["source_refs"] = json.loads(row.pop("source_refs_json") or "{}")
         row["generation_meta"] = json.loads(row.pop("generation_meta_json") or "{}")
+        return row
+
+    @staticmethod
+    def _seed(row: dict[str, Any]) -> dict[str, Any]:
+        row["constraints"] = json.loads(row.pop("constraints_json") or "{}")
+        row["reference_refs"] = json.loads(row.pop("reference_refs_json") or "[]")
         return row
 
     @staticmethod

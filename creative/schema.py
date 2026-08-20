@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -24,6 +24,37 @@ class ProjectCreateRequest(BaseModel):
     episode_duration_seconds: int = Field(120, ge=30, le=1800)
     workflow_task_id: str | None = None
     creation_request_id: str = ""
+
+
+class MarketReferenceRequest(BaseModel):
+    resource_type: Literal["topic", "breakdown"]
+    resource_id: int = Field(ge=1)
+
+
+class OriginalProjectCreateRequest(BaseModel):
+    seed_text: str = Field(min_length=2, max_length=500)
+    name: str = Field(default="", max_length=200)
+    genre: str = Field(default="", max_length=100)
+    target_platform: str = Field(default="", max_length=30)
+    target_audience: str = Field(default="", max_length=500)
+    target_episode_count: int = Field(20, ge=1, le=100)
+    episode_duration_seconds: int = Field(120, ge=30, le=1800)
+    cost_level: str = Field(default="", max_length=30)
+    content_boundaries: list[str] = Field(default_factory=list, max_length=20)
+    reference_refs: list[MarketReferenceRequest] = Field(default_factory=list, max_length=10)
+    creation_request_id: str = Field(min_length=1, max_length=200)
+
+
+class SeedUpdateRequest(BaseModel):
+    seed_text: str | None = Field(None, min_length=2, max_length=500)
+    constraints: dict[str, Any] | None = None
+    reference_refs: list[MarketReferenceRequest] | None = Field(None, max_length=10)
+
+
+class SeedVersionRequest(BaseModel):
+    seed_text: str = Field(min_length=2, max_length=500)
+    constraints: dict[str, Any] = Field(default_factory=dict)
+    reference_refs: list[MarketReferenceRequest] = Field(default_factory=list, max_length=10)
 
 
 class PlanningAssignmentRequest(BaseModel):

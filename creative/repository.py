@@ -1180,6 +1180,24 @@ class CreativeRepository:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_projects_for_bootstrap(
+        self, created_by: str, status: str | None = None
+    ) -> list[dict[str, Any]]:
+        clauses = ["deleted = 0", "created_by = ?", "creation_mode = 'original'"]
+        params: list[Any] = [created_by]
+        if status is not None:
+            if status not in {"pending", "ready", "failed"}:
+                raise ValueError("invalid bootstrap status")
+            clauses.append("bootstrap_status = ?")
+            params.append(status)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT id FROM creative_projects WHERE {' AND '.join(clauses)} "
+                "ORDER BY created_at, id",
+                params,
+            ).fetchall()
+        return [self.get_project(int(row["id"])) or {} for row in rows]
+
     def update_project(self, project_id: int, values: dict[str, Any]) -> dict[str, Any]:
         project = self.get_project(project_id)
         if not project:

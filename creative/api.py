@@ -26,6 +26,8 @@ from pydantic import BaseModel
 from creative.hit_breakdown import breakdown_field_guide, personalize_breakdown_field_guide
 from creative.imitation_service import assess_similarity_risk
 from creative.lifecycle_service import TopicLifecycleService, content_fingerprint
+from creative.market_reference_service import MarketReferenceService
+from creative.original_project_service import OriginalProjectService
 from creative.outline_overview import SERIES_OVERVIEW_FIELD_LABELS, read_series_overview
 from creative.repository import CreativeRepository, DuplicateTopicError
 from creative.script_service import normalize_script_content, validate_script
@@ -43,9 +45,12 @@ from creative.schema import (
     EpisodeBeatsRequest,
     OutlineBatchRequest,
     OutlineOverviewRequest,
+    OriginalProjectCreateRequest,
     PlanningAssignmentRequest,
     ProjectCreateRequest,
     ProjectUpdateRequest,
+    SeedUpdateRequest,
+    SeedVersionRequest,
     WorkflowLinkRequest,
 )
 from creative.topic_service import TopicService
@@ -154,7 +159,7 @@ def uses_project_member_stage_authorization(path: str, method: str) -> bool:
     return bool(
         re.match(
             r"/(?:"
-            r"blueprints|briefs|characters|character-batches|outlines|"
+            r"blueprints|briefs|seeds|characters|character-batches|outlines|"
             r"beats|scripts|episodes/\d+/(?:beats|scripts)|"
             r"workflow-tasks/(?:brief|characters|outline|beats|script)"
             r")(?:/|$)",
@@ -198,7 +203,7 @@ def creative_api_authorization(
             else ("breakdown.edit", "project.manage")
         )
     elif path.startswith("/projects"):
-        if path == "/projects/member-candidates":
+        if path in {"/projects/member-candidates", "/projects/original"}:
             permissions = ("project.create",)
         elif method == "POST" and established_writing_ensure_resource(path):
             permissions = (ESTABLISHED_WRITING_PERMISSION,)
@@ -230,6 +235,8 @@ def creative_api_authorization(
         permissions = ("relationship.edit",)
     elif path.startswith("/episodes"):
         permissions = (("script.edit", "beats.edit") if path.endswith("/lock") else ("outline.edit",))
+    elif path.startswith("/seeds"):
+        permissions = None
     elif path == "/workflow/submit":
         permissions = None
     else:
@@ -710,6 +717,10 @@ def build_creative_router(
     service = TopicService(str(root))
     workspace_root = Path(root).resolve()
     lifecycle_service = TopicLifecycleService(repository, workspace_root, job_manager)
+    market_reference_service = MarketReferenceService(repository)
+    original_project_service = OriginalProjectService(
+        repository, workflow_repository, market_reference_service
+    )
 
     def topic_library_items(
         principal: Principal,
@@ -1667,7 +1678,7 @@ def build_creative_router(
 
     def _ensure_stage_tasks(
         project_id: str,
-        topic_id: int,
+        topic_id: int | None,
         principal: Principal,
     ) -> list[dict[str, Any]]:
         """Create all creative stage workflow tasks in the project task pool."""
@@ -1693,6 +1704,21 @@ def build_creative_router(
                 )
             tasks.append(task)
         return tasks
+
+    def can_read_market_reference(
+        request: Request, principal: Principal, resource_type: str, resource_id: int
+    ) -> bool:
+        del resource_id
+        if principal.is_system_admin or has_creative_page_api_access(request, principal):
+            return True
+        if resource_type == "topic":
+            return bool(
+                {"topic.read", "breakdown.read.approved", "brief.read.approved"}
+                & principal.permissions
+            )
+        return bool(
+            {"breakdown.read", "breakdown.read.approved"} & principal.permissions
+        )
 
     @router.get("/projects/member-candidates")
     async def list_project_member_candidates(
@@ -2129,6 +2155,95 @@ def build_creative_router(
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
+    @router.post("/projects/original")
+    async def create_original_project(
+        payload: OriginalProjectCreateRequest,
+        request: Request,
+        principal: Principal = Depends(require_permission("project.create")),
+    ):
+        try:
+            project, created = original_project_service.create(
+                payload,
+                principal,
+                can_read_reference=lambda kind, identifier: can_read_market_reference(
+                    request, principal, kind, identifier
+                ),
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(503, "原创项目初始化失败，请重试") from exc
+        return JSONResponse(project, status_code=201 if created else 200)
+
+    @router.get("/projects/{project_id}/seeds")
+    async def list_project_seeds(
+        project_id: int,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        assert_project_read_access(request, project_id, principal)
+        project = project_or_404(project_id)
+        if project.get("creation_mode") != "original":
+            raise HTTPException(409, "只有原创项目拥有原创种子")
+        return {"items": repository.list_seeds(project_id)}
+
+    @router.patch("/seeds/{seed_id}")
+    async def update_original_seed(
+        seed_id: int,
+        payload: SeedUpdateRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        seed = repository.get_seed(seed_id)
+        if seed is None:
+            raise HTTPException(404, "原创种子不存在")
+        assert_project_generation_access(int(seed["project_id"]), principal)
+        values = payload.model_dump(exclude_none=True)
+        if "reference_refs" in values:
+            bundle = market_reference_service.resolve(
+                [item.model_dump() for item in payload.reference_refs or []],
+                can_read=lambda kind, identifier: can_read_market_reference(
+                    request, principal, kind, identifier
+                ),
+            )
+            values["reference_refs"] = bundle.source_refs
+        updated = repository.update_seed(seed_id, values)
+        if updated is None:
+            raise HTTPException(409, "已冻结的原创种子不能修改")
+        return updated
+
+    @router.post("/projects/{project_id}/seeds/versions")
+    async def create_original_seed_version(
+        project_id: int,
+        payload: SeedVersionRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        assert_project_generation_access(project_id, principal)
+        project = project_or_404(project_id)
+        if project.get("creation_mode") != "original":
+            raise HTTPException(409, "只有原创项目可以创建种子版本")
+        try:
+            bundle = market_reference_service.resolve(
+                [item.model_dump() for item in payload.reference_refs],
+                can_read=lambda kind, identifier: can_read_market_reference(
+                    request, principal, kind, identifier
+                ),
+            )
+            seed = repository.create_seed_version(
+                project_id,
+                seed_text=payload.seed_text,
+                constraints=payload.constraints,
+                reference_refs=bundle.source_refs,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return JSONResponse(seed, status_code=201)
+
     @router.get("/projects")
     async def list_projects(
         request: Request,
@@ -2136,6 +2251,7 @@ def build_creative_router(
         participating_only: bool = False,
         principal: Principal = Depends(current_principal),
     ):
+        original_project_service.reconcile_pending_for_actor(principal)
         items = repository.list_projects(topic_id=topic_id)
         for item in items:
             task_id = str(item.get("creation_workflow_task_id") or "")

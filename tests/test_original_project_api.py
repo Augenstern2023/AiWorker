@@ -1,0 +1,305 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) 2025 relakkes@gmail.com
+#
+# This file is part of MediaCrawler project.
+# Repository: https://github.com/NanmiCoder/MediaCrawler
+# GitHub: https://github.com/NanmiCoder
+# Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
+
+from __future__ import annotations
+
+from collections.abc import Callable
+import os
+from pathlib import Path
+import uuid
+
+from alembic import command
+from alembic.config import Config
+import pytest
+from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
+from sqlalchemy.engine import make_url
+
+from creative.api import build_creative_router
+from creative.repository import CreativeRepository
+from identity.permission_service import PermissionService
+from identity.repository import IdentityRepository
+from identity.session_service import SessionService
+from system_database import SystemDatabase, SystemDatabaseSettings
+from workflow.repository import WorkflowRepository
+
+
+def original_project_payload(creation_request_id: str) -> dict[str, object]:
+    return {
+        "seed_text": "未来公司按照员工情绪发工资", "name": "情绪公司",
+        "genre": "都市奇幻", "target_platform": "hg",
+        "target_audience": "18-35 岁职场观众", "target_episode_count": 20,
+        "episode_duration_seconds": 120, "cost_level": "low",
+        "content_boundaries": ["不美化职场霸凌"], "reference_refs": [],
+        "creation_request_id": creation_request_id,
+    }
+
+
+class FailOnce:
+    """Fail only the first bootstrap task while retaining real persistence."""
+
+    def __init__(self, wrapped: Callable[..., object]) -> None:
+        self.wrapped = wrapped
+        self.failed = False
+
+    def __call__(self, *args: object, **kwargs: object) -> object:
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("bootstrap failed")
+        return self.wrapped(*args, **kwargs)
+
+
+def _request() -> Request:
+    return Request({"type": "http", "method": "GET", "headers": []})
+
+
+def _client_for_user(
+    app: FastAPI, sessions: SessionService, user_id: str
+) -> TestClient:
+    raw_token, _ = sessions.create_session(user_id, _request())
+    client = TestClient(app)
+    client.cookies.set(sessions.cookie_name, raw_token)
+    return client
+
+
+@pytest.fixture
+def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required")
+    if make_url(postgres_url).database == "aiworker_system":
+        raise ValueError("tests must not run against production")
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
+    command.upgrade(Config("alembic.ini"), "head")
+    identity = IdentityRepository(SystemDatabase(SystemDatabaseSettings(postgres_url)))
+    identity.seed_defaults()
+    owner_role = identity.get_role_by_code("project_owner")
+    operator_role = identity.get_role_by_code("selection_operator")
+    assert owner_role is not None
+    assert operator_role is not None
+    owner = identity.create_user(
+        f"original-owner-{uuid.uuid4().hex}", "原创创建者", "hash"
+    )
+    identity.replace_user_roles(owner["id"], [owner_role["id"], operator_role["id"]])
+    denied = identity.create_user(
+        f"original-denied-{uuid.uuid4().hex}", "无权限用户", "hash"
+    )
+    identity.replace_user_roles(denied["id"], [operator_role["id"]])
+    sessions = SessionService(identity, secure_cookie=False)
+    permissions = PermissionService(identity, sessions)
+    workflow = WorkflowRepository(identity)
+    runtime_dir = tmp_path / "runtime"
+    app = FastAPI()
+    app.state.identity_permission_service = permissions
+    app.include_router(
+        build_creative_router(
+            root=tmp_path, runtime_dir=runtime_dir, workflow_repository=workflow
+        )
+    )
+    owner_client = _client_for_user(app, sessions, owner["id"])
+    owner_principal = permissions.principal_for_user(owner["id"], "original-owner")
+    assert owner_principal is not None
+    repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
+    # The workflow test database is shared while each creative SQLite database
+    # is per-test. Avoid reusing a project_id from another test's workflow rows.
+    with repository._connect() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO sqlite_sequence(name, seq) VALUES ('creative_projects', ?)",
+            (int(uuid.uuid4().int % 1_000_000_000) + 1_000_000_000,),
+        )
+    owner_client.repository = repository
+    owner_client.workflow = workflow
+    owner_client.principal = owner_principal
+    owner_client.denied_client = _client_for_user(app, sessions, denied["id"])
+
+    def cleanup() -> None:
+        for project in owner_client.repository.list_projects_for_bootstrap(
+            owner_principal.user_id
+        ):
+            workflow.delete_project_data(str(project["id"]))
+        for user_id in (owner["id"], denied["id"]):
+            if identity.get_user(user_id) is not None:
+                identity.soft_delete_user(user_id)
+
+    request.addfinalizer(cleanup)
+    return owner_client
+
+
+def create_original_project(client: TestClient, request_id: str) -> dict[str, object]:
+    response = client.post(
+        "/api/creative/projects/original", json=original_project_payload(request_id)
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_original_create_api_is_idempotent_and_bootstraps_empty_topic_tasks(
+    client: TestClient,
+) -> None:
+    task_ids_before_create = {
+        task["id"] for task in client.workflow.list_tasks(client.principal)
+    }
+    first = client.post(
+        "/api/creative/projects/original", json=original_project_payload("same-request")
+    )
+    second = client.post(
+        "/api/creative/projects/original", json=original_project_payload("same-request")
+    )
+
+    assert first.status_code == 201, first.text
+    assert second.status_code == 200, second.text
+    first_project = first.json()
+    second_project = second.json()
+    assert second_project["id"] == first_project["id"]
+    assert first_project["creation_mode"] == "original"
+    assert first_project["bootstrap_status"] == "ready"
+    tasks = [
+        task for task in client.workflow.list_tasks(client.principal)
+        if task["id"] not in task_ids_before_create
+    ]
+    assert {task["task_type"] for task in tasks} == {
+        "brief", "characters", "outline", "beats", "script",
+    }
+    assert all(task["topic_id"] is None for task in tasks)
+
+
+def test_original_create_api_returns_503_then_retries_the_same_failed_project(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        client.workflow,
+        "ensure_project_task",
+        FailOnce(client.workflow.ensure_project_task),
+    )
+
+    failed = client.post(
+        "/api/creative/projects/original", json=original_project_payload("retry-request")
+    )
+    hidden = client.get("/api/creative/projects")
+    retried = client.post(
+        "/api/creative/projects/original", json=original_project_payload("retry-request")
+    )
+
+    assert failed.status_code == 503
+    assert failed.json()["detail"] == "原创项目初始化失败，请重试"
+    assert hidden.status_code == 200, hidden.text
+    assert hidden.json()["items"] == []
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["bootstrap_status"] == "ready"
+    assert len(client.repository.list_projects()) == 1
+
+
+def test_frozen_seed_patch_returns_conflict_and_new_version_uses_it_as_parent(
+    client: TestClient,
+) -> None:
+    project = create_original_project(client, "seed-version-request")
+    seeds = client.get(f"/api/creative/projects/{project['id']}/seeds")
+    assert seeds.status_code == 200, seeds.text
+    seed_v1 = seeds.json()["items"][0]
+    client.repository.freeze_seed(seed_v1["id"])
+
+    frozen_update = client.patch(
+        f"/api/creative/seeds/{seed_v1['id']}",
+        json={"seed_text": "冻结后不应修改"},
+    )
+    version = client.post(
+        f"/api/creative/projects/{project['id']}/seeds/versions",
+        json={"seed_text": "未来公司给情绪发工资", "constraints": {}},
+    )
+
+    assert frozen_update.status_code == 409
+    assert version.status_code == 201, version.text
+    assert version.json()["version"] == 2
+    assert version.json()["parent_version_id"] == seed_v1["id"]
+
+
+def test_project_list_api_reconciles_current_users_pending_original_project(
+    client: TestClient,
+) -> None:
+    pending = client.repository.create_original_project(
+        seed_text="未来公司按照员工情绪发工资",
+        name="崩溃遗留项目",
+        target_episode_count=20,
+        created_by=client.principal.user_id,
+        creation_request_id="crash-left-pending",
+    )
+
+    listed = client.get("/api/creative/projects")
+
+    assert listed.status_code == 200, listed.text
+    assert [item["id"] for item in listed.json()["items"]] == [pending["id"]]
+    assert client.repository.get_project(pending["id"])["bootstrap_status"] == "ready"
+
+
+def test_original_routes_enforce_create_and_reference_permissions_and_keep_imitation_create(
+    client: TestClient,
+) -> None:
+    denied = client.denied_client.post(
+        "/api/creative/projects/original", json=original_project_payload("denied")
+    )
+    forbidden_reference = client.post(
+        "/api/creative/projects/original",
+        json={
+            **original_project_payload("missing-reference"),
+            "reference_refs": [{"resource_type": "topic", "resource_id": 99999}],
+        },
+    )
+    topic = client.repository.upsert_topics([{
+        "platform": "hg", "job_id": "imitation", "source_path": "rank.json",
+        "captured_at": "2026-08-19", "title": "仿写来源", "description": "",
+        "category": "都市", "rank_type": "热播榜", "score": 90,
+        "confidence": "high", "score_details": {}, "recommendation": "adopt", "evidence": [],
+    }])[0]
+    client.repository.update_topic(topic["id"], "adopted")
+    breakdown = client.repository.create_breakdown(topic["id"], {"hook": "冲突"}, {}, [])
+    with client.repository._connect() as connection:
+        connection.execute(
+            "UPDATE creative_breakdowns SET status = 'approved' WHERE id = ?",
+            (breakdown["id"],),
+        )
+    imitation = client.post("/api/creative/projects", json={
+        "topic_id": topic["id"], "breakdown_id": breakdown["id"], "name": "仿写项目",
+        "target_episode_count": 20, "creation_request_id": "imitation-regression",
+    })
+
+    assert denied.status_code == 403
+    assert forbidden_reference.status_code == 409
+    assert "市场参考不存在" in forbidden_reference.json()["detail"]
+    assert imitation.status_code == 200, imitation.text
+    assert imitation.json()["creation_mode"] == "imitation"
+
+
+def test_original_create_rejects_an_idempotency_key_owned_by_an_imitation_project(
+    client: TestClient,
+) -> None:
+    topic = client.repository.upsert_topics([{
+        "platform": "hg", "job_id": "request-id-collision", "source_path": "rank.json",
+        "captured_at": "2026-08-19", "title": "请求键冲突来源", "description": "",
+        "category": "都市", "rank_type": "热播榜", "score": 90,
+        "confidence": "high", "score_details": {}, "recommendation": "adopt", "evidence": [],
+    }])[0]
+    client.repository.update_topic(topic["id"], "adopted")
+    breakdown = client.repository.create_breakdown(topic["id"], {"hook": "冲突"}, {}, [])
+    with client.repository._connect() as connection:
+        connection.execute(
+            "UPDATE creative_breakdowns SET status = 'approved' WHERE id = ?",
+            (breakdown["id"],),
+        )
+    imitation = client.post("/api/creative/projects", json={
+        "topic_id": topic["id"], "breakdown_id": breakdown["id"], "name": "既有仿写项目",
+        "target_episode_count": 20, "creation_request_id": "cross-mode-request-id",
+    })
+    assert imitation.status_code == 200, imitation.text
+
+    original = client.post(
+        "/api/creative/projects/original",
+        json=original_project_payload("cross-mode-request-id"),
+    )
+
+    assert original.status_code == 409
+    assert "其他项目模式" in original.json()["detail"]

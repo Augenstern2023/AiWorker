@@ -19,6 +19,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _source(relative_path: str) -> str:
+    return (ROOT / relative_path).read_text(encoding="utf-8")
+
+
 def render_workspace_template(
     template_name: str, permissions: set[str] | None = None
 ) -> str:
@@ -33,6 +37,69 @@ def render_workspace_template(
         navigation_items=[],
         request=SimpleNamespace(url=SimpleNamespace(path="/projects")),
     )
+
+
+def mount_original_project_form(page) -> None:
+    modal = render_workspace_template("common/workspace/original_project_modal.html")
+    page.set_content(
+        '<main x-data="appData()" '
+        'x-init="creativeWorkspace.eligibleTopics = window.__eligibleTopics">'
+        f"{modal}</main>"
+    )
+    page.add_script_tag(
+        content="""
+        window.__eligibleTopics = [{
+          id: 23, title: '市场样本', raw_content: '绝不能提交的原始内容',
+          locked_breakdown_id: 31, locked_breakdown_version: 2
+        }];
+        window.__lastOriginalProjectRequest = null;
+        window.aiworkerApi = {
+          request(url, options = {}) {
+            window.__lastOriginalProjectRequest = {
+              url, method: options.method || 'GET', body: JSON.parse(options.body || '{}')
+            };
+            return new Promise(() => {});
+          }
+        };
+        """
+    )
+    page.add_script_tag(content=_source("static/js/common/creative.js"))
+    page.add_script_tag(content=_source("static/js/common/tasks.js"))
+    page.add_script_tag(content=_source("static/js/alpine.min.js"))
+
+
+def mount_blueprint_workspace(page) -> None:
+    blueprint = _source("templates/common/workspace/project_blueprints.html")
+    bootstrap_css = _source("static/css/bootstrap.min.css")
+    workspace_css = _source("static/css/workspaces.css")
+    page.set_content(
+        f"<style>{bootstrap_css}{workspace_css}</style>"
+        '<main x-data="appData()" '
+        'x-init="creativeWorkspace.project = window.__project; '
+        'creativeWorkspace.selectedBlueprintId = window.__project.blueprints[0].id">'
+        f"{blueprint}</main>"
+    )
+    page.add_script_tag(
+        content="""
+        window.__project = {
+          id: 9, creation_mode: 'original', seed: {id: 7, version: 1, status: 'frozen'},
+          blueprints: [{
+            id: 11, version: 1, status: 'draft', risk_level: 'low', risk_score: 0,
+            content: {
+              title: '情绪公司', theme: '人在制度中保持选择', protagonist: '林岚',
+              core_conflict: '情绪考核', differentiators: ['情绪劳动具象化'],
+              cost_level: 'low', risks: ['设定解释成本'], logline: '未来公司按情绪发工资',
+              story_engine: '每集解决一种情绪考核', originality_statement: '独立发展',
+              assumptions: ['观众理解情绪积分'], open_questions: ['制度从何而来']
+            }
+          }]
+        };
+        window.aiworkerApi = {request: async () => ({ok: true, json: async () => ({})})};
+        """
+    )
+    page.add_script_tag(content=_source("static/js/common/creative.js"))
+    page.add_script_tag(content=_source("static/js/common/tasks.js"))
+    page.add_script_tag(content=_source("static/js/alpine.min.js"))
 
 
 @pytest.mark.parametrize(
@@ -90,17 +157,40 @@ def test_original_brief_does_not_mount_imitation_only_fields() -> None:
         browser.close()
 
 
-def test_original_javascript_posts_lightweight_payload_and_preserves_candidates() -> None:
-    source = (ROOT / "static/js/common/creative.js").read_text(encoding="utf-8")
-    assert "createOriginalProject" in source
-    assert "/api/creative/projects/original" in source
-    assert "preserve_blueprint_ids" in source
-    assert "create_seed_version" not in source
-    assert "/seeds/versions" in source
+def test_writer_can_submit_a_lightweight_original_project_request() -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        mount_original_project_form(page)
+        page.locator("#original-seed-text").fill("未来公司按照员工情绪发工资")
+        page.get_by_text("可选市场参考", exact=True).click()
+        page.get_by_label("使用《市场样本》的锁定拆解 v2").check()
+        page.locator('button:has-text("创建并生成方向")').click(force=True)
+        page.wait_for_function("window.__lastOriginalProjectRequest !== null")
+        request = page.evaluate("window.__lastOriginalProjectRequest")
+        browser.close()
+
+    assert request["url"] == "/api/creative/projects/original"
+    assert request["method"] == "POST"
+    assert request["body"]["seed_text"] == "未来公司按照员工情绪发工资"
+    assert request["body"]["target_episode_count"] == 20
+    assert request["body"]["creation_request_id"]
+    assert request["body"]["reference_refs"] == [
+        {"resource_type": "breakdown", "resource_id": 31}
+    ]
+    assert "raw_content" not in str(request["body"])
 
 
-def test_original_mobile_layout_has_no_fixed_comparison_width() -> None:
-    source = (ROOT / "static/css/workspaces.css").read_text(encoding="utf-8")
-    assert ".original-direction-grid" in source
-    assert "max-width: 767.98px" in source
-    assert "overflow-wrap: anywhere" in source
+def test_original_direction_workspace_has_no_horizontal_overflow_at_390px() -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        mount_blueprint_workspace(page)
+        page.get_by_text("原创方向与 Brief", exact=True).wait_for()
+        dimensions = page.evaluate(
+            "({scrollWidth: document.documentElement.scrollWidth, "
+            "clientWidth: document.documentElement.clientWidth})"
+        )
+        browser.close()
+
+    assert dimensions["scrollWidth"] <= dimensions["clientWidth"]

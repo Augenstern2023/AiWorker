@@ -222,6 +222,30 @@ def test_delivery_page_grant_bypasses_creative_generated_resource_permission() -
     assert creative_api_authorization(request, principal) is principal
 
 
+def test_original_project_create_path_uses_project_create_permission() -> None:
+    principal = Principal(
+        user_id="original-creator",
+        username="original-creator",
+        display_name="Original Creator",
+        role_codes=(),
+        permissions=frozenset({"project.create"}),
+        data_scope="task",
+        session_id="original-creator-session",
+    )
+    app = FastAPI()
+    app.state.page_access_service = None
+    request = Request({
+        "type": "http",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/creative/projects/original",
+        "headers": [],
+        "app": app,
+    })
+
+    assert creative_api_authorization(request, principal) is principal
+
+
 def test_page_denial_overrides_legacy_wildcard_permission() -> None:
     app, _, _ = _secured_identity_app(permissions=frozenset({"*"}))
     client = _session_client(app)

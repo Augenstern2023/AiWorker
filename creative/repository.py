@@ -989,6 +989,36 @@ class CreativeRepository:
         created_by: str,
         creation_request_id: str,
     ) -> dict[str, Any]:
+        project, _ = self.ensure_original_project(
+            seed_text=seed_text,
+            name=name,
+            target_episode_count=target_episode_count,
+            target_platform=target_platform,
+            genre=genre,
+            target_audience=target_audience,
+            episode_duration_seconds=episode_duration_seconds,
+            constraints=constraints,
+            reference_refs=reference_refs,
+            created_by=created_by,
+            creation_request_id=creation_request_id,
+        )
+        return project
+
+    def ensure_original_project(
+        self,
+        *,
+        seed_text: str,
+        name: str,
+        target_episode_count: int,
+        target_platform: str = "",
+        genre: str = "",
+        target_audience: str = "",
+        episode_duration_seconds: int = 120,
+        constraints: dict[str, Any] | None = None,
+        reference_refs: list[dict[str, Any]] | None = None,
+        created_by: str,
+        creation_request_id: str,
+    ) -> tuple[dict[str, Any], bool]:
         if not 1 <= int(target_episode_count) <= 100:
             raise ValueError("目标集数必须在 1-100 之间")
         if not 30 <= int(episode_duration_seconds) <= 1800:
@@ -1001,40 +1031,94 @@ class CreativeRepository:
             conn.execute("BEGIN IMMEDIATE")
             if normalized_request_id:
                 existing = conn.execute(
-                    "SELECT id FROM creative_projects "
+                    "SELECT id, creation_mode FROM creative_projects "
                     "WHERE created_by = ? AND creation_request_id = ? AND deleted = 0",
                     (created_by, normalized_request_id),
                 ).fetchone()
                 if existing is not None:
-                    return self.get_project(int(existing["id"])) or {}
-            cursor = conn.execute(
-                """
-                INSERT INTO creative_projects (
-                    topic_id, breakdown_id, name, genre, target_platform, target_audience,
-                    target_episode_count, episode_duration_seconds, creation_request_id,
-                    created_by, creation_mode, bootstrap_status, created_at, updated_at
-                ) VALUES (NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'original', 'pending', ?, ?)
-                """,
-                (
-                    name.strip(), genre.strip(), target_platform.strip(), target_audience.strip(),
-                    int(target_episode_count), int(episode_duration_seconds),
-                    normalized_request_id or None, created_by, now, now,
-                ),
-            )
-            project_id = int(cursor.lastrowid)
-            conn.execute(
-                """
-                INSERT INTO creative_seeds (
-                    project_id, version, parent_version_id, status, seed_text,
-                    constraints_json, reference_refs_json, created_at, updated_at
-                ) VALUES (?, 1, NULL, 'draft', ?, ?, ?, ?, ?)
-                """,
-                (
-                    project_id, seed_text.strip(), json.dumps(constraints or {}, ensure_ascii=False),
-                    json.dumps(reference_refs or [], ensure_ascii=False), now, now,
-                ),
-            )
-        return self.get_project(project_id) or {}
+                    if existing["creation_mode"] != "original":
+                        raise ValueError("创建请求标识已用于其他项目模式")
+                    project_id = int(existing["id"])
+                    created = False
+                else:
+                    project_id, created = self._insert_original_project(
+                        conn,
+                        seed_text=seed_text,
+                        name=name,
+                        target_episode_count=target_episode_count,
+                        target_platform=target_platform,
+                        genre=genre,
+                        target_audience=target_audience,
+                        episode_duration_seconds=episode_duration_seconds,
+                        constraints=constraints,
+                        reference_refs=reference_refs,
+                        created_by=created_by,
+                        creation_request_id=normalized_request_id,
+                        now=now,
+                    )
+            else:
+                project_id, created = self._insert_original_project(
+                    conn,
+                    seed_text=seed_text,
+                    name=name,
+                    target_episode_count=target_episode_count,
+                    target_platform=target_platform,
+                    genre=genre,
+                    target_audience=target_audience,
+                    episode_duration_seconds=episode_duration_seconds,
+                    constraints=constraints,
+                    reference_refs=reference_refs,
+                    created_by=created_by,
+                    creation_request_id=normalized_request_id,
+                    now=now,
+                )
+        return self.get_project(project_id) or {}, created
+
+    @staticmethod
+    def _insert_original_project(
+        conn: sqlite3.Connection,
+        *,
+        seed_text: str,
+        name: str,
+        target_episode_count: int,
+        target_platform: str,
+        genre: str,
+        target_audience: str,
+        episode_duration_seconds: int,
+        constraints: dict[str, Any] | None,
+        reference_refs: list[dict[str, Any]] | None,
+        created_by: str,
+        creation_request_id: str,
+        now: float,
+    ) -> tuple[int, bool]:
+        cursor = conn.execute(
+            """
+            INSERT INTO creative_projects (
+                topic_id, breakdown_id, name, genre, target_platform, target_audience,
+                target_episode_count, episode_duration_seconds, creation_request_id,
+                created_by, creation_mode, bootstrap_status, created_at, updated_at
+            ) VALUES (NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'original', 'pending', ?, ?)
+            """,
+            (
+                name.strip(), genre.strip(), target_platform.strip(), target_audience.strip(),
+                int(target_episode_count), int(episode_duration_seconds),
+                creation_request_id or None, created_by, now, now,
+            ),
+        )
+        project_id = int(cursor.lastrowid)
+        conn.execute(
+            """
+            INSERT INTO creative_seeds (
+                project_id, version, parent_version_id, status, seed_text,
+                constraints_json, reference_refs_json, created_at, updated_at
+            ) VALUES (?, 1, NULL, 'draft', ?, ?, ?, ?, ?)
+            """,
+            (
+                project_id, seed_text.strip(), json.dumps(constraints or {}, ensure_ascii=False),
+                json.dumps(reference_refs or [], ensure_ascii=False), now, now,
+            ),
+        )
+        return project_id, True
 
     def mark_project_bootstrap_status(
         self, project_id: int, status: str

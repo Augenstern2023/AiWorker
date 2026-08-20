@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from threading import Lock
 from typing import Any
 
 from creative.market_reference_service import MarketReferenceService
@@ -36,6 +37,7 @@ class OriginalProjectService:
         self.creative_repository = creative_repository
         self.workflow_repository = workflow_repository
         self.market_reference_service = market_reference_service
+        self._create_lock = Lock()
 
     def create(
         self,
@@ -48,14 +50,8 @@ class OriginalProjectService:
         bundle = self.market_reference_service.resolve(
             raw_refs, can_read=can_read_reference
         )
-        project = self.creative_repository.get_project_by_creation_request_id(
-            actor.user_id, payload.creation_request_id
-        )
-        if project is not None and project.get("creation_mode") != "original":
-            raise ValueError("创建请求标识已用于其他项目模式")
-        created = project is None
-        if project is None:
-            project = self.creative_repository.create_original_project(
+        with self._create_lock:
+            project, created = self.creative_repository.ensure_original_project(
                 seed_text=payload.seed_text,
                 name=payload.name,
                 genre=payload.genre,
@@ -71,16 +67,16 @@ class OriginalProjectService:
                 created_by=actor.user_id,
                 creation_request_id=payload.creation_request_id,
             )
-        try:
-            self._bootstrap(project, actor)
-        except Exception:
-            self.creative_repository.mark_project_bootstrap_status(
-                int(project["id"]), "failed"
+            try:
+                self._bootstrap(project, actor)
+            except Exception:
+                self.creative_repository.mark_project_bootstrap_status(
+                    int(project["id"]), "failed"
+                )
+                raise
+            ready = self.creative_repository.mark_project_bootstrap_status(
+                int(project["id"]), "ready"
             )
-            raise
-        ready = self.creative_repository.mark_project_bootstrap_status(
-            int(project["id"]), "ready"
-        )
         return ready, created
 
     def reconcile_pending_for_actor(self, actor: Principal) -> list[dict[str, Any]]:

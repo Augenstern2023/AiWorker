@@ -9,8 +9,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
+import threading
 import uuid
 
 from alembic import command
@@ -21,6 +23,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.engine import make_url
 
 from creative.api import build_creative_router
+from creative.market_reference_service import MarketReferenceService
 from creative.repository import CreativeRepository
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
@@ -90,6 +93,18 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.Fixt
         f"original-denied-{uuid.uuid4().hex}", "无权限用户", "hash"
     )
     identity.replace_user_roles(denied["id"], [operator_role["id"]])
+    creator_role = identity.create_role(
+        f"original-creator-{uuid.uuid4().hex}",
+        "仅原创创建",
+        "只允许创建项目，不允许读取市场参考",
+    )
+    identity.replace_role_permissions(
+        creator_role["id"], [("project.create", "task")]
+    )
+    creator_only = identity.create_user(
+        f"original-creator-only-{uuid.uuid4().hex}", "仅创建用户", "hash"
+    )
+    identity.replace_user_roles(creator_only["id"], [creator_role["id"]])
     sessions = SessionService(identity, secure_cookie=False)
     permissions = PermissionService(identity, sessions)
     workflow = WorkflowRepository(identity)
@@ -116,15 +131,20 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.Fixt
     owner_client.workflow = workflow
     owner_client.principal = owner_principal
     owner_client.denied_client = _client_for_user(app, sessions, denied["id"])
+    owner_client.creator_only_client = _client_for_user(
+        app, sessions, creator_only["id"]
+    )
 
     def cleanup() -> None:
         for project in owner_client.repository.list_projects_for_bootstrap(
             owner_principal.user_id
         ):
             workflow.delete_project_data(str(project["id"]))
-        for user_id in (owner["id"], denied["id"]):
+        for user_id in (owner["id"], denied["id"], creator_only["id"]):
             if identity.get_user(user_id) is not None:
                 identity.soft_delete_user(user_id)
+        if identity.get_role(creator_role["id"]) is not None:
+            identity.soft_delete_role(creator_role["id"])
 
     request.addfinalizer(cleanup)
     return owner_client
@@ -166,6 +186,52 @@ def test_original_create_api_is_idempotent_and_bootstraps_empty_topic_tasks(
         "brief", "characters", "outline", "beats", "script",
     }
     assert all(task["topic_id"] is None for task in tasks)
+
+
+def test_concurrent_original_create_reports_one_create_and_one_reuse(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A race after the service pre-check must not produce two 201 responses."""
+    original_create = CreativeRepository.create_original_project
+    both_prechecks_completed = threading.Barrier(2)
+    original_resolve = MarketReferenceService.resolve
+
+    def resolve_after_both_requests_arrive(
+        service: MarketReferenceService,
+        references: list[dict[str, object]],
+        *,
+        can_read: Callable[[str, int], bool],
+    ) -> object:
+        both_prechecks_completed.wait(timeout=5)
+        return original_resolve(service, references, can_read=can_read)
+
+    monkeypatch.setattr(
+        MarketReferenceService, "resolve", resolve_after_both_requests_arrive
+    )
+
+    def create_after_both_prechecks(
+        repository: CreativeRepository, **values: object
+    ) -> dict[str, object]:
+        both_prechecks_completed.wait(timeout=5)
+        return original_create(repository, **values)
+
+    monkeypatch.setattr(
+        CreativeRepository, "create_original_project", create_after_both_prechecks
+    )
+
+    def post_original() -> object:
+        return client.post(
+            "/api/creative/projects/original",
+            json=original_project_payload("concurrent-request"),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(executor.map(lambda _: post_original(), range(2)))
+
+    assert sorted(response.status_code for response in responses) == [200, 201], [
+        response.text for response in responses
+    ]
+    assert len({response.json()["id"] for response in responses}) == 1
 
 
 def test_original_create_api_returns_503_then_retries_the_same_failed_project(
@@ -272,6 +338,32 @@ def test_original_routes_enforce_create_and_reference_permissions_and_keep_imita
     assert "市场参考不存在" in forbidden_reference.json()["detail"]
     assert imitation.status_code == 200, imitation.text
     assert imitation.json()["creation_mode"] == "imitation"
+
+
+def test_original_create_rejects_reference_without_read_permission(
+    client: TestClient,
+) -> None:
+    topic = client.repository.upsert_topics([{
+        "platform": "hg", "job_id": "forbidden-reference", "source_path": "rank.json",
+        "captured_at": "2026-08-19", "title": "不可读参考", "description": "",
+        "category": "都市", "rank_type": "热播榜", "score": 90,
+        "confidence": "high", "score_details": {}, "recommendation": "adopt",
+        "evidence": [],
+    }])[0]
+    client.repository.update_topic(topic["id"], "adopted")
+
+    response = client.creator_only_client.post(
+        "/api/creative/projects/original",
+        json={
+            **original_project_payload("forbidden-reference"),
+            "reference_refs": [
+                {"resource_type": "topic", "resource_id": topic["id"]}
+            ],
+        },
+    )
+
+    assert response.status_code == 403
+    assert f"topic/{topic['id']}" in response.json()["detail"]
 
 
 def test_original_create_rejects_an_idempotency_key_owned_by_an_imitation_project(

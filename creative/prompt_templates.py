@@ -12,7 +12,7 @@ import json
 from typing import Any
 
 
-PROMPT_TEMPLATE_VERSION = "phase4-v3"
+PROMPT_TEMPLATE_VERSION = "phase4-v4"
 BREAKDOWN_PROMPT_TEMPLATE_VERSION = "transcript-breakdown-v1"
 
 DRAMA_CONSTRAINTS = (
@@ -55,7 +55,19 @@ def character_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
 def series_arc_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
     return _messages(
         "根据锁定 Brief 与人物关系规划全剧阶段弧线。返回 series_arc 字符串和 stages 数组，"
-        "只规划结构，不写完整正文或台词。",
+        "并返回 series_overview 对象；series_overview 必须包含 core_event、character_progress、conflict、"
+        "reversal、highlight、cliffhanger 六个非空字符串，分别概括全剧核心事件、人物推进、主要冲突、"
+        "关键反转、剧情亮点与结尾悬念。只规划结构，不写完整正文或台词。",
+        payload,
+    )
+
+
+def series_overview_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
+    return _messages(
+        "根据当前全剧阶段弧线和全部分集大纲，汇总全集剧情概览。只返回 series_overview 对象；"
+        "series_overview 必须包含 core_event、character_progress、conflict、reversal、highlight、"
+        "cliffhanger 六个非空字符串，分别概括全剧核心事件、人物推进、主要冲突、关键反转、"
+        "剧情亮点与结尾悬念。不得改写分集大纲，不得补写输入中不存在的剧情。",
         payload,
     )
 
@@ -141,6 +153,8 @@ def breakdown_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
         "excerpt 必须是该集转写中的原文短句。只有部分集数时，要在 risk_notes 和 risks 中明确覆盖缺口；"
         "没有评论正文时，comment_resonance 必须明确写出当前未提供评论正文，不能声称观众观点，且该字段的"
         " field_sources 返回空数组。title 的证据由系统根据剧目元数据补充，field_sources.title 也返回空数组。"
+        "target_audience 在缺少评论画像或平台标签时，必须标注为基于现有转写的推断，"
+        "并让 field_sources.target_audience 返回空数组。"
         "risk_notes 如果只记录集数覆盖或资料缺口，同样返回空证据数组，不能伪造原文摘录。"
         "数组字段必须返回 JSON 数组，文本字段必须返回字符串。",
         payload,

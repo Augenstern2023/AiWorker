@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from creative.outline_overview import normalize_series_overview, read_series_overview
 from creative.script_service import normalize_script_content, validate_beats, validate_script
 
 
@@ -64,6 +65,21 @@ class CreativeRepository:
                 conn.execute("ALTER TABLE creative_topics ADD COLUMN rank_type TEXT NOT NULL DEFAULT ''")
             if "rank_source" not in columns:
                 conn.execute("ALTER TABLE creative_topics ADD COLUMN rank_source TEXT NOT NULL DEFAULT ''")
+            conn.execute("""
+                UPDATE creative_topics
+                SET rank_source = CASE
+                    WHEN platform = 'hg'
+                         AND TRIM(rank_type) <> ''
+                         AND rank_type NOT LIKE '全部%'
+                         AND rank_type NOT LIKE '真人剧%'
+                         AND rank_type NOT LIKE '漫剧%'
+                         AND rank_type NOT LIKE 'AI剧%'
+                        THEN '全部' || rank_type
+                    WHEN platform = 'hg' AND TRIM(rank_type) = '' THEN '全部'
+                    ELSE rank_type
+                END
+                WHERE TRIM(rank_source) = ''
+            """)
             if "description" not in columns:
                 conn.execute("ALTER TABLE creative_topics ADD COLUMN description TEXT NOT NULL DEFAULT ''")
             labels = tuple(self._NON_GENRE_LABELS)
@@ -1414,6 +1430,7 @@ class CreativeRepository:
         job_id: str = "",
         generation_meta: dict[str, Any] | None = None,
         workflow_task_id: str | None = None,
+        series_overview: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         project = self.get_project(project_id)
         if not project:
@@ -1436,10 +1453,17 @@ class CreativeRepository:
         if job_id:
             meta["job_id"] = job_id
         now = time.time()
+        normalized_overview = (
+            normalize_series_overview(series_overview)
+            if series_overview is not None
+            else None
+        )
         with self._connect() as conn:
             for episode in episodes:
                 content = dict(episode)
                 content["series_arc"] = series_arc
+                if normalized_overview is not None:
+                    content["series_overview"] = normalized_overview
                 parent = conn.execute(
                     "SELECT id FROM creative_episodes WHERE project_id = ? AND stage = 'outline' AND episode_number = ? ORDER BY version DESC LIMIT 1",
                     (project_id, int(content["episode"])),
@@ -1473,6 +1497,7 @@ class CreativeRepository:
         workflow_task_id: str | None = None,
         *,
         batch_id: str | None = None,
+        series_overview: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Persist a contiguous generated outline prefix so a failed job is recoverable."""
         project = self.get_project(project_id)
@@ -1514,10 +1539,17 @@ class CreativeRepository:
         if job_id:
             meta["job_id"] = job_id
         now = time.time()
+        normalized_overview = (
+            normalize_series_overview(series_overview)
+            if series_overview is not None
+            else None
+        )
         with self._connect() as conn:
             for episode in episodes:
                 content = dict(episode)
                 content["series_arc"] = series_arc
+                if normalized_overview is not None:
+                    content["series_overview"] = normalized_overview
                 episode_number = int(content["episode"])
                 existing = existing_by_episode.get(episode_number)
                 if existing:
@@ -1601,6 +1633,7 @@ class CreativeRepository:
                 "episodes": rows,
                 "series_arc": series_arc,
                 "stages": list(stages),
+                "series_overview": read_series_overview(content.get("series_overview")),
             }))
         return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
@@ -1609,17 +1642,153 @@ class CreativeRepository:
         if not project:
             raise ValueError("创作项目不存在")
         rows = [item for item in project["episodes"] if item["stage"] == "outline" and item["batch_id"] == batch_id]
-        return {"batch_id": batch_id, "episodes": rows}
+        overview = read_series_overview((rows[0].get("content") or {}).get("series_overview")) if rows else None
+        return {"batch_id": batch_id, "series_overview": overview, "episodes": rows}
+
+    def _validated_outline_overview_rows(
+        self,
+        conn: sqlite3.Connection,
+        project_id: int,
+        batch_id: str,
+        *,
+        require_missing: bool,
+        allow_current_locked: bool = False,
+    ) -> list[sqlite3.Row]:
+        project = conn.execute(
+            "SELECT locked_brief_id, character_batch_id, outline_batch_id, target_episode_count "
+            "FROM creative_projects WHERE id = ? AND deleted = 0",
+            (project_id,),
+        ).fetchone()
+        if project is None:
+            raise ValueError("创作项目不存在")
+        all_rows = conn.execute(
+            "SELECT id, batch_id, version, status, episode_number, content_json, "
+            "upstream_refs_json, updated_at FROM creative_episodes "
+            "WHERE project_id = ? AND stage = 'outline'",
+            (project_id,),
+        ).fetchall()
+        rows = [row for row in all_rows if str(row["batch_id"]) == batch_id]
+        if not rows:
+            raise ValueError("分集大纲批次不存在")
+        is_draft = all(row["status"] == "draft" for row in rows)
+        is_locked_backfill = bool(
+            allow_current_locked
+            and all(row["status"] in {"locked", "approved"} for row in rows)
+        )
+        if not is_draft and not is_locked_backfill:
+            raise ValueError("已完成的版本不能原地修改")
+
+        locked_brief_id = int(project["locked_brief_id"] or 0)
+        character_batch_id = str(project["character_batch_id"] or "")
+
+        def same_context(row: sqlite3.Row) -> bool:
+            refs = json.loads(row["upstream_refs_json"] or "{}")
+            return (
+                int(refs.get("brief_id") or 0) == locked_brief_id
+                and str(refs.get("character_batch_id") or "") == character_batch_id
+            )
+
+        if any(not same_context(row) for row in rows):
+            raise ValueError("只能编辑当前创作上下文的大纲批次")
+        if is_locked_backfill:
+            if str(project["outline_batch_id"] or "") != batch_id:
+                raise ValueError("只能补充当前已完成的大纲批次")
+        else:
+            compatible_rows = [
+                row
+                for row in all_rows
+                if row["status"] == "draft" and same_context(row)
+            ]
+            latest = max(
+                compatible_rows,
+                key=lambda row: (
+                    int(row["version"] or 0),
+                    float(row["updated_at"] or 0),
+                    int(row["id"] or 0),
+                ),
+                default=None,
+            )
+            if latest is None or str(latest["batch_id"]) != batch_id:
+                raise ValueError("只能编辑当前大纲批次")
+
+        expected = list(range(1, int(project["target_episode_count"]) + 1))
+        actual = sorted(int(row["episode_number"]) for row in rows)
+        if actual != expected:
+            raise ValueError(
+                f"分集大纲必须完整覆盖 1-{project['target_episode_count']} 集后才能生成全集剧情概览"
+            )
+        if require_missing and any(
+            read_series_overview(
+                json.loads(row["content_json"] or "{}").get("series_overview")
+            )
+            for row in rows
+        ):
+            raise ValueError("当前大纲版本已存在全集剧情概览")
+        return sorted(rows, key=lambda row: int(row["episode_number"]))
+
+    def assert_outline_overview_generation_ready(
+        self, project_id: int, batch_id: str
+    ) -> dict[str, Any]:
+        """Validate a current complete batch before spending a model request."""
+
+        with self._connect() as conn:
+            self._validated_outline_overview_rows(
+                conn,
+                project_id,
+                batch_id,
+                require_missing=True,
+                allow_current_locked=True,
+            )
+        return self.get_outline_batch(project_id, batch_id)
+
+    def update_outline_overview(
+        self,
+        project_id: int,
+        batch_id: str,
+        series_overview: dict[str, Any],
+        *,
+        only_if_missing: bool = False,
+    ) -> dict[str, Any]:
+        """Atomically update overview metadata, allowing locked one-time backfill."""
+
+        normalized = normalize_series_overview(series_overview)
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            persisted = self._validated_outline_overview_rows(
+                conn,
+                project_id,
+                batch_id,
+                require_missing=only_if_missing,
+                allow_current_locked=only_if_missing,
+            )
+            for row in persisted:
+                content = json.loads(row["content_json"])
+                content["series_overview"] = normalized
+                conn.execute(
+                    "UPDATE creative_episodes SET content_json = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(content, ensure_ascii=False), now, int(row["id"])),
+                )
+        return self.get_outline_batch(project_id, batch_id)
 
     def update_episode(self, episode_id: int, content: dict[str, Any]) -> dict[str, Any] | None:
         episode = self.get_episode(episode_id)
+        preserve_content_keys: tuple[str, ...] = ()
         if episode:
-            if episode.get("stage") == "beats":
+            if episode.get("stage") == "outline":
+                preserve_content_keys = ("series_overview",)
+            elif episode.get("stage") == "beats":
                 content = validate_beats(content, allow_legacy=True)
             elif episode.get("stage") == "script":
                 content = validate_script(content)
                 return self._create_script_revision_if_changed(episode, content)
-        return self._update_creative_item("creative_episodes", episode_id, content, episode=True)
+        return self._update_creative_item(
+            "creative_episodes",
+            episode_id,
+            content,
+            episode=True,
+            preserve_content_keys=preserve_content_keys,
+        )
 
     def _create_script_revision_if_changed(
         self, episode: dict[str, Any], content: dict[str, Any]
@@ -1725,9 +1894,9 @@ class CreativeRepository:
             "outline_batch_id": project["outline_batch_id"],
             "outline_id": outline["id"],
             "outline_version": outline["version"],
-            "outline_content_fingerprint": hashlib.sha256(
-                json.dumps(outline.get("content") or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            ).hexdigest(),
+            "outline_content_fingerprint": self._outline_content_fingerprint(
+                outline.get("content") or {}
+            ),
         }
         now = time.time()
         with self._connect() as conn:
@@ -1796,9 +1965,9 @@ class CreativeRepository:
             "outline_batch_id": project.get("outline_batch_id"),
             "outline_id": outline["id"],
             "outline_version": outline["version"],
-            "outline_content_fingerprint": hashlib.sha256(
-                json.dumps(outline.get("content") or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            ).hexdigest(),
+            "outline_content_fingerprint": self._outline_content_fingerprint(
+                outline.get("content") or {}
+            ),
             "beats_id": beats["id"],
             "beats_version": beats["version"],
             "beats_content_fingerprint": hashlib.sha256(
@@ -1852,8 +2021,10 @@ class CreativeRepository:
             and item.get("upstream_refs", {}).get("outline_batch_id") == project.get("outline_batch_id")
             and int(item.get("upstream_refs", {}).get("outline_id") or 0) == int(outline["id"])
             and int(item.get("upstream_refs", {}).get("outline_version") or 0) == int(outline["version"])
-            and item.get("upstream_refs", {}).get("outline_content_fingerprint")
-            == self._content_fingerprint(outline.get("content") or {})
+            and self._outline_content_fingerprint_matches(
+                item.get("upstream_refs", {}).get("outline_content_fingerprint"),
+                outline.get("content") or {},
+            )
         ]
         if not beats:
             raise ValueError("必须先锁定当前集 Beats")
@@ -1882,6 +2053,27 @@ class CreativeRepository:
         return hashlib.sha256(
             json.dumps(content or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
+
+    @classmethod
+    def _outline_content_fingerprint(cls, content: Any) -> str:
+        """Fingerprint only outline fields that can invalidate downstream work."""
+
+        normalized = dict(content) if isinstance(content, dict) else content
+        if isinstance(normalized, dict):
+            normalized.pop("series_overview", None)
+        return cls._content_fingerprint(normalized)
+
+    @classmethod
+    def _outline_content_fingerprint_matches(
+        cls, fingerprint: Any, content: Any
+    ) -> bool:
+        """Accept both canonical and historical full-content outline hashes."""
+
+        saved = str(fingerprint or "")
+        return bool(saved) and saved in {
+            cls._outline_content_fingerprint(content),
+            cls._content_fingerprint(content),
+        }
 
     def _locked_generation_context_refs(self, project: dict[str, Any]) -> dict[str, Any]:
         brief = next(
@@ -1930,7 +2122,9 @@ class CreativeRepository:
             "outline_batch_id": project.get("outline_batch_id"),
             "outline_id": outline["id"],
             "outline_version": outline["version"],
-            "outline_content_fingerprint": self._content_fingerprint(outline.get("content") or {}),
+            "outline_content_fingerprint": self._outline_content_fingerprint(
+                outline.get("content") or {}
+            ),
         }
         if stage == "script":
             beats = self._locked_beats_for_episode(project, episode_number)
@@ -1940,6 +2134,26 @@ class CreativeRepository:
                 "beats_content_fingerprint": self._content_fingerprint(beats.get("content") or {}),
             })
         return refs
+
+    def _episode_generation_refs_match(
+        self,
+        project: dict[str, Any],
+        stage: str,
+        episode_number: int,
+        saved_refs: Any,
+    ) -> bool:
+        """Compare generation refs while accepting legacy outline hashes."""
+
+        if not isinstance(saved_refs, dict):
+            return False
+        expected = self._episode_generation_refs(project, stage, episode_number)
+        saved = dict(saved_refs)
+        saved_outline_fingerprint = saved.pop("outline_content_fingerprint", None)
+        expected.pop("outline_content_fingerprint", None)
+        outline = self._locked_outline_for_episode(project, episode_number)
+        return saved == expected and self._outline_content_fingerprint_matches(
+            saved_outline_fingerprint, outline.get("content") or {}
+        )
 
     def save_episode_generation_checkpoint(
         self,
@@ -2035,8 +2249,11 @@ class CreativeRepository:
                 continue
             try:
                 compatible = all(
-                    item.get("upstream_refs") == self._episode_generation_refs(
-                        project, stage, int(item["episode_number"])
+                    self._episode_generation_refs_match(
+                        project,
+                        stage,
+                        int(item["episode_number"]),
+                        item.get("upstream_refs"),
                     )
                     for item in rows
                 )
@@ -2489,8 +2706,10 @@ class CreativeRepository:
             if (
                 int(refs.get("outline_id") or 0) != int(outline["id"])
                 or int(refs.get("outline_version") or 0) != int(outline["version"])
-                or str(refs.get("outline_content_fingerprint") or "")
-                != self._content_fingerprint(outline.get("content") or {})
+                or not self._outline_content_fingerprint_matches(
+                    refs.get("outline_content_fingerprint"),
+                    outline.get("content") or {},
+                )
             ):
                 stale.append(episode_number)
                 continue
@@ -2569,18 +2788,27 @@ class CreativeRepository:
         content: dict[str, Any],
         *,
         episode: bool = False,
+        preserve_content_keys: tuple[str, ...] = (),
     ) -> dict[str, Any] | None:
         if table not in {"creative_characters", "creative_relationships", "creative_episodes"}:
             raise ValueError("invalid creative table")
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (item_id,)).fetchone()
             if not row:
                 return None
             if row["status"] != "draft":
                 raise ValueError("已完成的版本不能原地修改")
+            resolved_content = dict(content)
+            current_content = json.loads(row["content_json"] or "{}")
+            for key in preserve_content_keys:
+                if key in current_content:
+                    resolved_content[key] = current_content[key]
+                else:
+                    resolved_content.pop(key, None)
             conn.execute(
                 f"UPDATE {table} SET content_json = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(content, ensure_ascii=False), time.time(), item_id),
+                (json.dumps(resolved_content, ensure_ascii=False), time.time(), item_id),
             )
             updated = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (item_id,)).fetchone()
         return self._episode(dict(updated)) if episode else self._creative_item(dict(updated))

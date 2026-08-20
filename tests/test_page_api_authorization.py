@@ -17,7 +17,11 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.testclient import TestClient
 
 from core.job import CrawlJob
-from creative.api import build_creative_router, creative_api_authorization
+from creative.api import (
+    build_creative_router,
+    creative_api_authorization,
+    uses_project_member_stage_authorization,
+)
 from creative.delivery import DeliveryService, build_delivery_router
 from creative.repository import CreativeRepository
 from creative.workflow_adapter import CreativeWorkflowAdapter
@@ -26,7 +30,7 @@ from identity.permission_service import PermissionService
 from identity.schema import Principal
 from identity.session_service import SessionContext
 from runtime.job_state import JobState
-from WebGUI import install_security_middleware
+from WebGUI import install_security_middleware, project_member_stage_api_path
 from web.page_access_service import PageAccessService
 from workflow.repository import WorkflowRepository
 
@@ -51,6 +55,19 @@ class MutablePageAccessRepository:
         return set().union(
             *(self.role_routes.get(code, set()) for code in role_codes)
         ) if role_codes else set()
+
+
+class DeniedProjectStagePageAccess:
+    @staticmethod
+    def can_call_page_api(
+        principal: Principal, method: str, path: str
+    ) -> bool | None:
+        del principal
+        if method == "POST" and path == (
+            "/api/creative/projects/8/blueprints/generate"
+        ):
+            return False
+        return None
 
 
 class FakeSessionService:
@@ -213,6 +230,70 @@ def test_page_denial_overrides_legacy_wildcard_permission() -> None:
 
     assert response.status_code == 403
     assert response.json() == {"detail": "没有执行此操作的权限"}
+
+
+def test_project_member_stage_routes_defer_outer_page_denial_to_resource_scope() -> None:
+    paths = (
+        "/api/creative/projects/8/blueprints/generate",
+        "/api/creative/projects/8/characters/generate",
+        "/api/creative/projects/8/outlines/generate",
+        "/api/creative/projects/8/outlines/batch-1/overview/generate",
+        "/api/creative/projects/8/episodes/1/beats/generate",
+        "/api/creative/projects/8/episodes/1/scripts/generate",
+    )
+
+    for path in paths:
+        assert project_member_stage_api_path(path, "POST") is True
+        assert uses_project_member_stage_authorization(
+            path.removeprefix("/api/creative"), "POST"
+        ) is True
+
+    assert project_member_stage_api_path(
+        "/api/creative/projects/8", "DELETE"
+    ) is False
+    assert project_member_stage_api_path(
+        "/api/creative/projects/8/outlines/batch-1/overview", "PATCH"
+    ) is True
+    assert uses_project_member_stage_authorization(
+        "/projects/8/outlines/batch-1/overview", "PATCH"
+    ) is True
+
+
+def test_outer_middleware_allows_project_stage_request_to_reach_resource_scope() -> None:
+    principal = Principal(
+        user_id="project-member",
+        username="project-member",
+        display_name="Project Member",
+        role_codes=("screenwriter",),
+        permissions=frozenset({"blueprint.generate"}),
+        data_scope="project",
+        session_id="project-member-session",
+    )
+    sessions = FakeSessionService(principal)
+    permission_service = object.__new__(PermissionService)
+    permission_service.repository = sessions.repository  # type: ignore[assignment]
+    permission_service.session_service = sessions  # type: ignore[assignment]
+    permission_service.principal_for_session = (  # type: ignore[method-assign]
+        lambda raw_token: principal if raw_token == "valid-session" else None
+    )
+    app = FastAPI()
+    app.state.identity_permission_service = permission_service
+    app.state.page_access_service = DeniedProjectStagePageAccess()
+
+    @app.post("/api/creative/projects/{project_id}/blueprints/generate")
+    def generate_blueprint(project_id: int) -> dict[str, int]:
+        return {"project_id": project_id}
+
+    install_security_middleware(app, sessions)
+    client = _session_client(app)
+
+    response = client.post(
+        "/api/creative/projects/8/blueprints/generate",
+        headers={"X-CSRF-Token": "valid-csrf"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"project_id": 8}
 
 
 def test_role_page_grant_and_account_override_control_bound_api_immediately() -> None:

@@ -868,6 +868,7 @@ window.aiworkerModules.push(() => ({
                     this.creativeWorkspace.showJobLogs = false;
                     this.creativeWorkspace.activeAction = action;
                     this.creativeWorkspace.activeSeriesGeneration = Boolean(options.series);
+                    this.creativeWorkspace.activeBatchId = String(options.batchId || '');
                     this.creativeWorkspace.activeEpisode = ['beats', 'script'].includes(action)
                         && !this.creativeWorkspace.activeSeriesGeneration
                         ? Number(this.creativeWorkspace.selectedEpisode || 0)
@@ -1059,7 +1060,8 @@ window.aiworkerModules.push(() => ({
 
                 creativeActionLabel(action) {
                     return {
-                        blueprints: '仿制方向', characters: '人物关系', outlines: '分集大纲', beats: 'Beats 脚本', script: '场次剧本'
+                        blueprints: '仿制方向', characters: '人物关系', outlines: '分集大纲',
+                        outline_overview: '全集剧情概览', beats: 'Beats 脚本', script: '场次剧本'
                     }[action] || '创作内容';
                 },
 
@@ -1068,6 +1070,7 @@ window.aiworkerModules.push(() => ({
                         blueprints: '仿制方向生成任务已发起，正在后台处理',
                         characters: '人物关系生成任务已发起，正在后台处理',
                         outlines: '分集大纲生成任务已发起，正在后台处理',
+                        outline_overview: '全集剧情概览生成任务已发起，正在后台处理',
                         beats: 'Beats 脚本生成任务已发起，正在后台处理', script: '场次剧本生成任务已发起，正在后台处理'
                     }[action] || '创作内容生成任务已发起，正在后台处理';
                 },
@@ -1104,6 +1107,11 @@ window.aiworkerModules.push(() => ({
                         );
                         return generatedForJob.length >= Number(project.target_episode_count || 0);
                     }
+                    if (action === 'outline_overview') {
+                        // Manual saves can populate the batch while this AI job is still
+                        // running. Only the job terminal state can prove this job succeeded.
+                        return false;
+                    }
                     if (action === 'beats') {
                         const generated = (project.episodes || []).filter(item => item.stage === 'beats' && item.generation_meta?.job_id === jobId);
                         return this.creativeWorkspace.activeSeriesGeneration
@@ -1127,6 +1135,7 @@ window.aiworkerModules.push(() => ({
                     this.creativeWorkspace.activeAction = '';
                     this.creativeWorkspace.activeEpisode = 0;
                     this.creativeWorkspace.activeSeriesGeneration = false;
+                    this.creativeWorkspace.activeBatchId = '';
                     this.creativeWorkspace.paused = false;
                     this.creativeWorkspace.notifiedStatus = 'succeeded';
                 },
@@ -1176,6 +1185,7 @@ window.aiworkerModules.push(() => ({
                             this.creativeWorkspace.activeAction = '';
                             this.creativeWorkspace.activeEpisode = 0;
                             this.creativeWorkspace.activeSeriesGeneration = false;
+                            this.creativeWorkspace.activeBatchId = '';
                             this.creativeWorkspace.paused = false;
                             alert(`创作任务${job.status === 'cancelled' ? '已取消' : '失败'}：${job.message || ''}`);
                         }

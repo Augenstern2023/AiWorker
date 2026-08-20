@@ -29,6 +29,7 @@ from creative.script_service import (
     generate_episode_script,
     generate_episode_script_chunk,
     generate_outline_bundle,
+    generate_series_overview,
 )
 
 
@@ -112,7 +113,7 @@ async def run(job: CrawlJob) -> None:
     action = str(extra.get("action") or "").strip()
     project_id = int(extra.get("project_id") or 0)
     db_path = Path(str(extra.get("db_path") or ".runtime/creative/creative.db"))
-    if action not in {"blueprints", "characters", "outlines", "beats", "script"} or project_id < 1:
+    if action not in {"blueprints", "characters", "outlines", "outline_overview", "beats", "script"} or project_id < 1:
         raise ValueError("Phase 4 任务缺少有效 action 或 project_id")
 
     repository = CreativeRepository(db_path)
@@ -168,6 +169,7 @@ async def run(job: CrawlJob) -> None:
         resume_episodes = [item["content"] for item in resumable["episodes"]] if resumable else None
         resume_series_arc = resumable["series_arc"] if resumable else None
         resume_stages = resumable["stages"] if resumable else None
+        resume_series_overview = resumable["series_overview"] if resumable else None
         if resumable:
             completed = len(resume_episodes or [])
             total = int(project["target_episode_count"])
@@ -195,6 +197,7 @@ async def run(job: CrawlJob) -> None:
                 },
                 workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
                 batch_id=outline_batch_id,
+                series_overview=arc.get("series_overview"),
             )
             outline_batch_id = saved["batch_id"]
 
@@ -218,11 +221,38 @@ async def run(job: CrawlJob) -> None:
             resume_episodes=resume_episodes,
             resume_series_arc=resume_series_arc,
             resume_stages=resume_stages,
+            resume_series_overview=resume_series_overview,
         )
         if outline_batch_id is None:
             raise RuntimeError("分集大纲未创建任何生成检查点")
         bundle = repository.get_outline_batch(project_id, outline_batch_id)
         result = {"action": action, "batch_id": bundle["batch_id"], "episode_count": len(bundle["episodes"])}
+    elif action == "outline_overview":
+        batch_id = str(extra.get("batch_id") or "").strip()
+        batch = repository.assert_outline_overview_generation_ready(
+            project_id, batch_id
+        )
+        first_content = batch["episodes"][0].get("content") or {}
+        overview, meta = await generate_series_overview(
+            provider,
+            project,
+            [item.get("content") or {} for item in batch["episodes"]],
+            str(first_content.get("series_arc") or ""),
+        )
+        saved = repository.update_outline_overview(
+            project_id, batch_id, overview, only_if_missing=True
+        )
+        emit(
+            job,
+            "progress",
+            "全集剧情概览已生成",
+            payload={"stage": action, "completed": 1, "total": 1},
+        )
+        result = {
+            "action": action,
+            "batch_id": batch_id,
+            "episode_count": len(saved["episodes"]),
+        }
     elif series_generation:
         brief = _locked_brief(project)
         characters, relationships = _locked_characters(project)

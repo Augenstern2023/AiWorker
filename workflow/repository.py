@@ -664,6 +664,9 @@ class WorkflowRepository:
         task = self._require_task(connection, task_id)
         live_actor = self._live_actor(connection, actor_id)
         transition_actor = dict(live_actor)
+        transition_actor["can_edit_project_task"] = (
+            self._can_edit_project_task(connection, task, live_actor)
+        )
         transition_actor.update(authorization_context or {})
         to_status = self.state_machine.transition(task, action, transition_actor)
         if assignee_user_id is None:
@@ -768,6 +771,10 @@ class WorkflowRepository:
                     if (
                         is_global_project_owner and row["project_id"] is not None
                     )
+                    or (
+                        row["project_id"] is not None
+                        and row["project_id"] in assigned_projects
+                    )
                     or row["assignee_id"] == actor_id
                     or (
                         row["status"] == "pool"
@@ -839,8 +846,12 @@ class WorkflowRepository:
                 return False
             if live_actor["is_system_admin"]:
                 return True
+            can_edit_project_task = self._can_edit_project_task(
+                connection, task, live_actor
+            )
             if (
-                task["role_code"] not in live_actor["role_codes"]
+                not can_edit_project_task
+                and task["role_code"] not in live_actor["role_codes"]
                 and task["task_type"] not in live_actor["claimable_task_types"]
             ):
                 return False
@@ -908,7 +919,13 @@ class WorkflowRepository:
                 and not can_claim_established_writing
             ):
                 raise PermissionError("actor must be an active project member")
-            to_status = self.state_machine.transition(task, "claim", live_actor)
+            transition_actor = dict(live_actor)
+            transition_actor["can_edit_project_task"] = (
+                self._can_edit_project_task(connection, task, live_actor)
+            )
+            to_status = self.state_machine.transition(
+                task, "claim", transition_actor
+            )
             cursor = connection.exec_driver_sql(
                 """
                 UPDATE workflow_tasks
@@ -959,7 +976,13 @@ class WorkflowRepository:
         with self.identity_repository.transaction() as connection:
             task = self._require_task(connection, task_id)
             live_actor = self._live_actor(connection, actor_id)
-            to_status = self.state_machine.transition(task, "start", live_actor)
+            transition_actor = dict(live_actor)
+            transition_actor["can_edit_project_task"] = (
+                self._can_edit_project_task(connection, task, live_actor)
+            )
+            to_status = self.state_machine.transition(
+                task, "start", transition_actor
+            )
             connection.exec_driver_sql(
                 """
                 UPDATE workflow_tasks SET status = %s, updated_at = CURRENT_TIMESTAMP
@@ -1468,6 +1491,34 @@ class WorkflowRepository:
             is not None
         )
 
+    def is_active_project_member(
+        self, project_id: str, actor: Principal | dict[str, Any]
+    ) -> bool:
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.connect() as connection:
+            try:
+                self._live_actor(connection, actor_id)
+            except PermissionError:
+                return False
+            return self._is_active_project_member(
+                connection, project_id, actor_id
+            )
+
+    @classmethod
+    def _can_edit_project_task(
+        cls,
+        connection: Connection,
+        task: dict[str, Any],
+        actor: dict[str, Any],
+    ) -> bool:
+        project_id = task.get("project_id")
+        return bool(
+            project_id is not None
+            and cls._is_active_project_member(
+                connection, str(project_id), str(actor["user_id"])
+            )
+        )
+
     @staticmethod
     def _writing_stage_has_active_task(
         connection: Connection, task: dict[str, Any]
@@ -1801,7 +1852,12 @@ class WorkflowRepository:
         event["actor_user_id"] = event.pop("actor_id")
         event["before_status"] = event.pop("from_status")
         event["after_status"] = event.pop("to_status")
-        event["details"] = json.loads(event.pop("details_json"))
+        details_json = event.pop("details_json")
+        event["details"] = (
+            json.loads(details_json)
+            if isinstance(details_json, str)
+            else details_json
+        )
         return event
 
     @staticmethod
@@ -1810,6 +1866,10 @@ class WorkflowRepository:
         event["actor_user_id"] = event.pop("actor_id")
         before_json = event.pop("before_json")
         after_json = event.pop("after_json")
-        event["before"] = json.loads(before_json) if before_json else None
-        event["after"] = json.loads(after_json) if after_json else None
+        event["before"] = (
+            json.loads(before_json) if isinstance(before_json, str) else before_json
+        )
+        event["after"] = (
+            json.loads(after_json) if isinstance(after_json, str) else after_json
+        )
         return event

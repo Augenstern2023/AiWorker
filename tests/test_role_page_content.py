@@ -323,8 +323,10 @@ def test_selection_drama_page_cannot_edit_admin_credentials():
     ):
         assert forbidden not in selection
         assert forbidden not in selection_script
-    assert "配置中心地址" in admin
-    assert "activationCode" in admin
+    assert "红果抓包下载设置" in admin
+    assert "capture_root" in admin_script
+    assert "wait_timeout_seconds" in admin_script
+    assert "activationCode" not in admin_script
     assert "saveDramaSettings" in admin_script
     assert "testDramaInterface" in admin_script
 
@@ -390,7 +392,7 @@ def test_review_project_name_opens_its_creative_brief():
 
     assert "project-name-button" in script
     assert "`/planning/projects/${project.id}/brief`" in script
-    assert "/review/projects/${project.id}/members" not in script
+    assert "`/review/projects/${project.id}/members`" in script
 
 
 def test_admin_delivery_page_lists_generated_resources_without_delivery_registry():

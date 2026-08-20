@@ -76,6 +76,10 @@ class OutlineBatchRequest(BaseModel):
     workflow_task_id: str | None = None
 
 
+class OutlineOverviewRequest(BaseModel):
+    series_overview: dict[str, Any] = Field(default_factory=dict)
+
+
 class EpisodeBeatsRequest(BaseModel):
     content: dict[str, Any]
     workflow_task_id: str | None = None

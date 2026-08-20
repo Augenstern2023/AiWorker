@@ -117,8 +117,11 @@
                     jobId: '',
                     notifiedStatus: '',
                     interfaceTest: null,
-                    settings: {config_url: '', has_activation_code: false},
-                    activationCode: ''
+                    settings: {
+                        capture_root: 'E:\\hg\\raw\\video_urls',
+                        capture_service_url: 'http://127.0.0.1:8776',
+                        wait_timeout_seconds: 600
+                    }
                 },
                 creative: {
                     platform: creativePlatformPreference(),
@@ -142,8 +145,10 @@
                     jobId: '', jobMessage: '', jobProgress: {}, jobStatus: '', paused: false, notifiedStatus: '',
                     jobLogs: [], jobLogCount: 0, showJobLogs: false,
                     jobStartedAt: 0, jobElapsedSeconds: 0,
-                    startingAction: '', activeAction: '', activeEpisode: 0, activeSeriesGeneration: false,
+                    startingAction: '', activeAction: '', activeEpisode: 0, activeSeriesGeneration: false, activeBatchId: '',
                     outlineEpisodeUpdates: {episodeNumber: 0, records: []},
+                    outlineOverviewExpanded: true, outlineOverviewDraft: {},
+                    outlineOverviewErrors: {}, outlineOverviewSaving: false, outlineOverviewSaveSequence: 0,
                     saveState: {}, notice: '', noticeType: 'success', noticeTimer: null
                 },
                 dramaDownload: {title: '', topic: null, source: 'hongguo', fallbackReason: '', candidates: [], selectedCandidate: null, selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], relatedVideos: [], missingEpisodes: [], seriesRangeLabel: '', seriesWarnings: [], selectedEpisodes: [], allEpisodes: false, episodesExpanded: true, searching: false, episodesLoading: false, starting: false, error: '', jobId: '', jobStatus: '', progress: {}, progressMessage: '', paused: false, finished: false, background: false, showFiles: false, logs: [], logCount: 0, videoPreviewPath: '', videoPreviewUrl: '', videoPreviewError: ''},

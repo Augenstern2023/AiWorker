@@ -284,6 +284,22 @@ def test_frozen_seed_patch_returns_conflict_and_new_version_uses_it_as_parent(
     assert version.json()["parent_version_id"] == seed_v1["id"]
 
 
+def test_blank_draft_seed_patch_returns_conflict_without_erasing_the_seed(
+    client: TestClient,
+) -> None:
+    project = create_original_project(client, "blank-seed-request")
+    seed = client.repository.get_current_seed(project["id"])
+    assert seed is not None
+
+    response = client.patch(
+        f"/api/creative/seeds/{seed['id']}", json={"seed_text": "   "}
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "原创种子内容不能为空"
+    assert client.repository.get_seed(seed["id"])["seed_text"] == seed["seed_text"]
+
+
 def test_project_list_api_reconciles_current_users_pending_original_project(
     client: TestClient,
 ) -> None:

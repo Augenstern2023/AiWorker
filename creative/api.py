@@ -2203,15 +2203,20 @@ def build_creative_router(
             raise HTTPException(404, "原创种子不存在")
         assert_project_generation_access(int(seed["project_id"]), principal)
         values = payload.model_dump(exclude_none=True)
-        if "reference_refs" in values:
-            bundle = market_reference_service.resolve(
-                [item.model_dump() for item in payload.reference_refs or []],
-                can_read=lambda kind, identifier: can_read_market_reference(
-                    request, principal, kind, identifier
-                ),
-            )
-            values["reference_refs"] = bundle.source_refs
-        updated = repository.update_seed(seed_id, values)
+        try:
+            if "reference_refs" in values:
+                bundle = market_reference_service.resolve(
+                    [item.model_dump() for item in payload.reference_refs or []],
+                    can_read=lambda kind, identifier: can_read_market_reference(
+                        request, principal, kind, identifier
+                    ),
+                )
+                values["reference_refs"] = bundle.source_refs
+            updated = repository.update_seed(seed_id, values)
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
         if updated is None:
             raise HTTPException(409, "已冻结的原创种子不能修改")
         return updated

@@ -1165,6 +1165,8 @@ class CreativeRepository:
             return None
         if not updates:
             return seed
+        if "seed_text" in updates and not str(updates["seed_text"]).strip():
+            raise ValueError("原创种子内容不能为空")
         assignments: list[str] = []
         params: list[Any] = []
         for key, value in updates.items():

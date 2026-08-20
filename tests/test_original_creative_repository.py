@@ -142,6 +142,18 @@ def test_frozen_seed_is_immutable_and_next_version_points_to_it(tmp_path):
     ]
 
 
+def test_draft_seed_rejects_a_blank_seed_text_update(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = ready_original_project(repository)
+    seed = repository.get_current_seed(project["id"])
+    assert seed is not None
+
+    with pytest.raises(ValueError, match="原创种子内容不能为空"):
+        repository.update_seed(seed["id"], {"seed_text": "   "})
+
+    assert repository.get_seed(seed["id"])["seed_text"] == seed["seed_text"]
+
+
 def test_deleting_original_project_removes_its_seed_versions(tmp_path):
     repository = CreativeRepository(tmp_path / "creative.sqlite3")
     project = ready_original_project(repository)

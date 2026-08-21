@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -164,6 +165,48 @@ def test_link_action_keeps_pending_when_top_level_project_id_is_invalid(
 
     assert exc.value.code == "RESULT_VALIDATION_FAILED"
     assert orchestrator_context.store.require_action(action["id"], "writer-1")["status"] == "pending"
+
+
+def test_legacy_pending_link_without_project_id_json_fails_closed(
+    orchestrator_context, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    action = orchestrator_context.store.create_action(
+        session_id=orchestrator_context.session["id"],
+        actor_user_id=orchestrator_context.actor.user_id,
+        action_type="project.link",
+        project_id=1,
+        idempotency_key="legacy-link-project:1",
+        request_hash="legacy-link-project:1",
+        payload={},
+        expected_context={
+            "session_revision": orchestrator_context.session["context_revision"]
+        },
+        source_snapshot_id=None,
+    )
+    with sqlite3.connect(orchestrator_context.store.db_path) as connection:
+        connection.execute(
+            "UPDATE writer_agent_actions SET project_id_json=NULL WHERE id=?",
+            (action["id"],),
+        )
+        legacy_row = connection.execute(
+            "SELECT project_id, project_id_json FROM writer_agent_actions WHERE id=?",
+            (action["id"],),
+        ).fetchone()
+    assert legacy_row == (1, None)
+    bind_project = MagicMock(wraps=orchestrator_context.store.bind_project)
+    monkeypatch.setattr(orchestrator_context.store, "bind_project", bind_project)
+
+    with pytest.raises(WriterActionError) as exc:
+        orchestrator_context.orchestrator.execute_project_action(
+            action["id"], orchestrator_context.actor
+        )
+
+    assert exc.value.code == "RESULT_VALIDATION_FAILED"
+    persisted = orchestrator_context.store.require_action(action["id"], "writer-1")
+    assert persisted["status"] == "pending"
+    assert orchestrator_context.store.get(action["session_id"], "writer-1")["project_id"] is None
+    orchestrator_context.creative_service.get_project.assert_not_called()
+    bind_project.assert_not_called()
 
 
 def test_create_action_rejects_reference_revoked_after_card_creation(

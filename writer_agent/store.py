@@ -281,6 +281,13 @@ class WriterAgentStore:
         raw_project_id = item.pop("project_id_json", None)
         if raw_project_id is not None:
             item["project_id"] = _decode(raw_project_id, item["project_id"])
+        elif (
+            item["action_type"] == "project.link"
+            and item["status"] == "pending"
+            and item["result"] is None
+        ):
+            # SQLite affinity cannot prove the original type of a legacy value.
+            item["project_id"] = None
         item["revision"] = int(item["revision"])
         item["retryable"] = bool(item["retryable"])
         item["target_stage"] = item["payload"].get("target_stage")

@@ -61,7 +61,19 @@ class WriterProjectOrchestrator:
             return action["result"]
         payload = action["payload"]
         if action["action_type"] == "project.link":
-            project_id = int(payload["project_id"])
+            try:
+                raw_project_id = action["project_id"]
+                if isinstance(raw_project_id, bool):
+                    raise ValueError
+                project_id = int(raw_project_id)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise WriterActionError(
+                    "RESULT_VALIDATION_FAILED", "关联项目 ID 缺失或无效"
+                ) from exc
+            if project_id < 1:
+                raise WriterActionError(
+                    "RESULT_VALIDATION_FAILED", "关联项目 ID 缺失或无效"
+                )
             project = self.creative_service.get_project(project_id)
             if not self.permission_service.can_read_project(actor, str(project_id)):
                 raise WriterActionError("PROJECT_ACCESS_DENIED", "无权关联该项目")

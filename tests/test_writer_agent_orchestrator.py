@@ -19,8 +19,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from identity.schema import Principal
+from writer_agent.action_service import persist_proposed_actions
 from writer_agent.orchestrator import WriterProjectOrchestrator
-from writer_agent.schema import WriterActionError
+from writer_agent.schema import ProposedAction, WriterActionError
 from writer_agent.store import WriterAgentStore
 
 
@@ -78,6 +79,7 @@ def test_create_action_binds_idempotent_original_project(orchestrator_context) -
             "target_audience": "18-35岁", "target_episode_count": 20,
             "episode_duration_seconds": 120, "cost_level": "low",
             "content_boundaries": ["不美化职场霸凌"], "reference_refs": [],
+            "assumptions": [],
         },
     )
 
@@ -104,6 +106,63 @@ def test_link_action_rechecks_project_read_access(orchestrator_context) -> None:
     assert exc.value.code == "PROJECT_ACCESS_DENIED"
 
 
+def test_link_action_persisted_from_proposal_uses_top_level_project_id(
+    orchestrator_context,
+) -> None:
+    action = persist_proposed_actions(
+        orchestrator_context.store,
+        session_id=orchestrator_context.session["id"],
+        actor_user_id=orchestrator_context.actor.user_id,
+        proposed_actions=[ProposedAction.model_validate({
+            "action_type": "project.link",
+            "title": "关联已有项目",
+            "project_id": 18,
+        })],
+        materials=[],
+        selected_messages=[],
+        project_context={
+            "session_revision": orchestrator_context.session["context_revision"]
+        },
+    )[0]
+
+    assert action["project_id"] == 18
+    assert "project_id" not in action["payload"]
+
+    result = orchestrator_context.orchestrator.execute_project_action(
+        action["id"], orchestrator_context.actor
+    )
+
+    assert result["project_id"] == 18
+    assert orchestrator_context.store.get(action["session_id"], "writer-1")["project_id"] == 18
+
+
+@pytest.mark.parametrize("project_id", [None, "invalid-project-id", 0])
+def test_link_action_keeps_pending_when_top_level_project_id_is_invalid(
+    orchestrator_context, project_id: int | str | None,
+) -> None:
+    action = orchestrator_context.store.create_action(
+        session_id=orchestrator_context.session["id"],
+        actor_user_id=orchestrator_context.actor.user_id,
+        action_type="project.link",
+        project_id=project_id,
+        idempotency_key=f"invalid-link-project:{project_id}",
+        request_hash=f"invalid-link-project:{project_id}",
+        payload={},
+        expected_context={
+            "session_revision": orchestrator_context.session["context_revision"]
+        },
+        source_snapshot_id=None,
+    )
+
+    with pytest.raises(WriterActionError) as exc:
+        orchestrator_context.orchestrator.execute_project_action(
+            action["id"], orchestrator_context.actor
+        )
+
+    assert exc.value.code == "RESULT_VALIDATION_FAILED"
+    assert orchestrator_context.store.require_action(action["id"], "writer-1")["status"] == "pending"
+
+
 def test_create_action_rejects_reference_revoked_after_card_creation(
     orchestrator_context,
 ) -> None:
@@ -115,6 +174,7 @@ def test_create_action_rejects_reference_revoked_after_card_creation(
             "target_episode_count": 20, "episode_duration_seconds": 120,
             "cost_level": "low", "content_boundaries": [],
             "reference_refs": [{"resource_type": "topic", "resource_id": 404}],
+            "assumptions": [],
         },
     )
     with pytest.raises(WriterActionError) as exc:
@@ -149,6 +209,30 @@ def test_create_action_keeps_pending_when_required_project_field_is_missing(
     orchestrator_context.creative_service.create_original_project.assert_not_called()
 
 
+def test_create_action_keeps_pending_when_assumptions_are_missing(
+    orchestrator_context,
+) -> None:
+    action = orchestrator_context.create_action(
+        "project.create_original",
+        payload={
+            "seed_text": "未来公司按照员工情绪发工资",
+            "name": "情绪公司", "genre": "都市奇幻", "target_platform": "hg",
+            "target_audience": "18-35岁", "target_episode_count": 20,
+            "episode_duration_seconds": 120, "cost_level": "low",
+            "content_boundaries": ["不美化职场霸凌"], "reference_refs": [],
+        },
+    )
+
+    with pytest.raises(WriterActionError) as exc:
+        orchestrator_context.orchestrator.execute_project_action(
+            action["id"], orchestrator_context.actor
+        )
+
+    assert exc.value.code == "RESULT_VALIDATION_FAILED"
+    assert orchestrator_context.store.require_action(action["id"], "writer-1")["status"] == "pending"
+    orchestrator_context.creative_service.create_original_project.assert_not_called()
+
+
 def test_create_action_requires_project_create_permission(orchestrator_context) -> None:
     action = orchestrator_context.create_action(
         "project.create_original",
@@ -158,6 +242,7 @@ def test_create_action_requires_project_create_permission(orchestrator_context) 
             "target_audience": "18-35岁", "target_episode_count": 20,
             "episode_duration_seconds": 120, "cost_level": "low",
             "content_boundaries": ["不美化职场霸凌"], "reference_refs": [],
+            "assumptions": [],
         },
     )
     unprivileged_actor = replace(orchestrator_context.actor, permissions=frozenset())
@@ -182,6 +267,7 @@ def test_replay_after_binding_records_result_without_rebinding(
             "target_audience": "18-35岁", "target_episode_count": 20,
             "episode_duration_seconds": 120, "cost_level": "low",
             "content_boundaries": ["不美化职场霸凌"], "reference_refs": [],
+            "assumptions": [],
         },
     )
     bind_calls: list[tuple[int, int, int]] = []

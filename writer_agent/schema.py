@@ -71,7 +71,7 @@ class OriginalProjectActionPayload(BaseModel):
     cost_level: str = Field(min_length=1, max_length=30)
     content_boundaries: list[str] = Field(max_length=20)
     reference_refs: list[ReferenceRef] = Field(default_factory=list, max_length=10)
-    assumptions: list[str] = Field(default_factory=list, max_length=20)
+    assumptions: list[str] = Field(max_length=20)
 
 
 class ProposedAction(_WriterActionModel):

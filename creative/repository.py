@@ -1867,8 +1867,6 @@ class CreativeRepository:
         source_refs: dict[str, Any] | None = None,
         operation_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        if not 1 <= len(items) <= 5:
-            raise ValueError("仿制方向数量必须在 1-5 之间")
         request_hash = self._operation_request_hash(
             project_id=project_id,
             stage="brief",
@@ -1884,6 +1882,8 @@ class CreativeRepository:
         )
 
         def create(conn: sqlite3.Connection) -> dict[str, Any]:
+            if not 1 <= len(items) <= 5:
+                raise ValueError("仿制方向数量必须在 1-5 之间")
             project = self._operation_project(conn, project_id)
             now = time.time()
             refs = source_refs or {

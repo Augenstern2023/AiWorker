@@ -250,6 +250,33 @@ def test_reused_operation_key_reports_idempotency_before_scope_validation(
     assert str(exc_info.value) == "IDEMPOTENCY_KEY_REUSED"
 
 
+def test_reused_brief_operation_key_checks_idempotency_before_count_validation(
+    tmp_path: Path,
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = seed_original_project(repository)
+    operation_id = "writer-action-reused-count:brief"
+    repository.create_blueprints(
+        project["id"],
+        [{"content": valid_original_brief("首次方向")}],
+        direction_type="original",
+        operation_id=operation_id,
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        repository.create_blueprints(
+            project["id"],
+            [
+                {"content": valid_original_brief(f"复用方向 {index}")}
+                for index in range(6)
+            ],
+            direction_type="original",
+            operation_id=operation_id,
+        )
+
+    assert str(exc_info.value) == "IDEMPOTENCY_KEY_REUSED"
+
+
 def test_stable_request_hash_ignores_mapping_insertion_order(tmp_path: Path) -> None:
     repository = CreativeRepository(tmp_path / "creative.db")
     project = seed_locked_outline_project(repository)

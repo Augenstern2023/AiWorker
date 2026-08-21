@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 from typing import Any
 from urllib.parse import quote
+import uuid
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -24,6 +25,7 @@ from openpyxl import Workbook
 from pydantic import BaseModel
 
 from creative.hit_breakdown import breakdown_field_guide, personalize_breakdown_field_guide
+from creative.application_service import CreativeApplicationService
 from creative.imitation_service import assess_similarity_risk
 from creative.lifecycle_service import TopicLifecycleService, content_fingerprint
 from creative.market_reference_service import MarketReferenceService
@@ -38,6 +40,7 @@ from creative.workflow_adapter import CreativeWorkflowAdapter
 
 from creative.schema import (
     BlueprintDeriveRequest,
+    BlueprintCreateRequest,
     BlueprintGenerateRequest,
     BlueprintUpdateRequest,
     BriefLockRequest,
@@ -69,6 +72,7 @@ from identity.dependencies import current_principal, require_permission
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.schema import Principal
+from identity.session_service import SessionService
 from system_database import SystemDatabase, SystemDatabaseSettings
 from workflow.repository import (
     ESTABLISHED_WRITING_PERMISSION,
@@ -703,13 +707,17 @@ def build_creative_router(
     runtime_dir: str | Path = ".runtime",
     job_manager: Any | None = None,
     workflow_repository: WorkflowRepository | None = None,
+    repository: CreativeRepository | None = None,
+    application_service: CreativeApplicationService | None = None,
 ) -> APIRouter:
     router = APIRouter(
         prefix="/api/creative",
         tags=["creative"],
         dependencies=[Depends(creative_api_authorization)],
     )
-    repository = CreativeRepository(Path(runtime_dir) / "creative" / "creative.db")
+    repository = repository or CreativeRepository(
+        Path(runtime_dir) / "creative" / "creative.db"
+    )
     if workflow_repository is None:
         workflow_repository = WorkflowRepository(
             IdentityRepository(
@@ -717,18 +725,42 @@ def build_creative_router(
             )
         )
     migrate_project_creator_memberships(repository, workflow_repository)
-    workflow_adapter = CreativeWorkflowAdapter(repository, workflow_repository)
-    workflow_transitions = TransitionService(
-        workflow_repository, creative_adapter=workflow_adapter
+    workflow_adapter = (
+        application_service.workflow_adapter
+        if application_service is not None
+        else CreativeWorkflowAdapter(repository, workflow_repository)
+    )
+    workflow_transitions = (
+        application_service.transitions
+        if application_service is not None
+        else TransitionService(workflow_repository, creative_adapter=workflow_adapter)
     )
     workflow_transitions.migrate_pending_creative_approvals()
     service = TopicService(str(root))
     workspace_root = Path(root).resolve()
     lifecycle_service = TopicLifecycleService(repository, workspace_root, job_manager)
     market_reference_service = MarketReferenceService(repository)
-    original_project_service = OriginalProjectService(
-        repository, workflow_repository, market_reference_service
+    original_project_service = (
+        application_service.original_project_service
+        if application_service is not None
+        else OriginalProjectService(
+            repository, workflow_repository, market_reference_service
+        )
     )
+    if application_service is None:
+        application_service = CreativeApplicationService(
+            repository,
+            workflow_repository,
+            workflow_transitions,
+            job_manager,
+            Path(runtime_dir),
+            original_project_service=original_project_service,
+            workflow_adapter=workflow_adapter,
+            permission_service=PermissionService(
+                workflow_repository.identity_repository,
+                SessionService(workflow_repository.identity_repository),
+            ),
+        )
 
     def topic_library_items(
         principal: Principal,
@@ -1202,7 +1234,7 @@ def build_creative_router(
         request: Request,
         **extra: Any,
     ) -> dict[str, Any]:
-        project_or_404(project_id)
+        project = project_or_404(project_id)
         if job_manager is None:
             raise HTTPException(503, "creative job manager is unavailable")
         required_permission = (
@@ -1222,6 +1254,39 @@ def build_creative_router(
             raise HTTPException(403, "没有创建此机器任务的权限")
         assert_project_generation_access(project_id, principal)
         workflow_task_id = str(extra.get("workflow_task_id") or "") or None
+        normalized_stage = {
+            "blueprints": "brief",
+            "blueprint_variant": "brief",
+            "characters": "characters",
+            "outlines": "outline",
+            "outline_overview": "outline",
+            "beats": "beats",
+            "script": "script",
+        }[action]
+        operation_id = str(extra.pop("operation_id", "") or uuid.uuid4().hex)
+        generation_instruction = str(
+            extra.pop("generation_instruction", "") or ""
+        ).strip()
+        source_snapshot = extra.pop("source_snapshot", None)
+        source_snapshot_id = str(extra.pop("source_snapshot_id", "") or "").strip()
+        if source_snapshot is None:
+            source_snapshot_id = source_snapshot_id or (
+                f"project-{project_id}-r{int(project.get('revision') or 0)}-"
+                f"{normalized_stage}-{operation_id}"
+            )
+            source_snapshot = {
+                "snapshot_id": source_snapshot_id,
+                "stage": normalized_stage,
+                "project": project,
+            }
+        else:
+            embedded_id = source_snapshot.get("snapshot_id") or source_snapshot.get("id")
+            source_snapshot_id = source_snapshot_id or str(embedded_id or "").strip()
+            if not source_snapshot_id:
+                source_snapshot_id = f"creative-source-{operation_id}"
+        snapshot_extra = application_service._snapshot_extra(
+            source_snapshot_id, source_snapshot
+        )
         payload = {
             "platform": "creative",
             "crawler_type": "phase4_generate",
@@ -1236,6 +1301,10 @@ def build_creative_router(
                     principal.user_id if principal is not None else None
                 ),
                 "workflow_task_id": workflow_task_id,
+                "normalized_stage": normalized_stage,
+                "operation_id": operation_id,
+                "generation_instruction": generation_instruction,
+                **snapshot_extra,
                 "db_path": str(repository.db_path.resolve()),
                 "runtime_dir": str(Path(runtime_dir).resolve()),
                 **extra,
@@ -1272,6 +1341,18 @@ def build_creative_router(
                 request=request,
             )
         return {"status": "success", "job": job}
+
+    def generation_request_extra(payload: Any | None) -> dict[str, Any]:
+        if payload is None:
+            return {}
+        return {
+            "operation_id": getattr(payload, "operation_id", None),
+            "generation_instruction": getattr(
+                payload, "generation_instruction", ""
+            ),
+            "source_snapshot_id": getattr(payload, "source_snapshot_id", None),
+            "source_snapshot": getattr(payload, "source_snapshot", None),
+        }
 
     def validate_task(
         task_id: str | None,
@@ -1345,6 +1426,30 @@ def build_creative_router(
             principal,
             project_id=project_id,
         )
+
+    def application_task_id(
+        task_id: str | None,
+        stage: str,
+        project_id: int,
+        principal: Principal,
+    ) -> str:
+        try:
+            if task_id:
+                application_service.validate_task_for_creation(
+                    task_id, project_id, stage, principal
+                )
+                return task_id
+            return str(
+                application_service.ensure_stage_task(
+                    project_id, stage, principal
+                )["id"]
+            )
+        except KeyError as exc:
+            raise HTTPException(404, "workflow task not found") from exc
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     def batch_resource_for(table: str, item_id: int) -> str | None:
         if table not in {"creative_characters", "creative_relationships"}:
@@ -2166,9 +2271,10 @@ def build_creative_router(
         principal: Principal = Depends(require_permission("project.create")),
     ):
         try:
-            project, created = original_project_service.create(
-                payload,
+            project, created = application_service.create_original_project_result(
+                payload.model_dump(exclude={"creation_request_id"}),
                 principal,
+                creation_request_id=payload.creation_request_id,
                 can_read_reference=lambda kind, identifier: can_read_market_reference(
                     request, principal, kind, identifier
                 ),
@@ -2663,6 +2769,7 @@ def build_creative_router(
                     for item in bundle.source_refs
                 ],
                 workflow_task_id=workflow_task_id,
+                **generation_request_extra(payload),
             )
         if payload.preserve_blueprint_ids:
             raise HTTPException(409, "仿写方向不支持保留补生成")
@@ -2673,7 +2780,30 @@ def build_creative_router(
             request,
             count=payload.count,
             workflow_task_id=workflow_task_id,
+            **generation_request_extra(payload),
         )
+
+    @router.post("/projects/{project_id}/blueprints")
+    async def create_project_blueprint(
+        project_id: int,
+        payload: BlueprintCreateRequest,
+        principal: Principal = Depends(current_principal),
+    ):
+        try:
+            return application_service.persist_draft(
+                project_id=project_id,
+                stage="brief",
+                payload=payload.content,
+                workflow_task_id=application_task_id(
+                    payload.workflow_task_id, "brief", project_id, principal
+                ),
+                operation_id=payload.operation_id,
+                actor=principal,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @router.post("/blueprints/{blueprint_id}/derive")
     async def derive_project_blueprint(
@@ -2721,6 +2851,10 @@ def build_creative_router(
                 for item in bundle.source_refs
             ],
             workflow_task_id=workflow_task_id,
+            operation_id=payload.operation_id,
+            generation_instruction=payload.instruction,
+            source_snapshot_id=payload.source_snapshot_id,
+            source_snapshot=payload.source_snapshot,
         )
 
     @router.patch("/blueprints/{blueprint_id}")
@@ -2835,6 +2969,7 @@ def build_creative_router(
             principal,
             request,
             workflow_task_id=workflow_task_id,
+            **generation_request_extra(payload),
         )
 
     @router.post("/projects/{project_id}/characters")
@@ -2844,18 +2979,25 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         try:
-            workflow_task_id = resolve_task_for_creation(
+            workflow_task_id = application_task_id(
                 payload.workflow_task_id,
                 "characters",
-                principal,
-                project_id=project_id,
-            )
-            return repository.create_character_batch(
                 project_id,
-                payload.characters,
-                payload.relationships,
-                workflow_task_id=workflow_task_id,
+                principal,
             )
+            return application_service.persist_draft(
+                project_id=project_id,
+                stage="characters",
+                payload={
+                    "characters": payload.characters,
+                    "relationships": payload.relationships,
+                },
+                workflow_task_id=workflow_task_id,
+                operation_id=payload.operation_id or uuid.uuid4().hex,
+                actor=principal,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -2895,11 +3037,13 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         try:
-            return workflow_transitions.complete_creative_without_review(
-                payload.workflow_task_id,
-                "characters",
-                f"{project_id}:{batch_id}",
-                principal,
+            return application_service.lock_resource(
+                project_id=project_id,
+                stage="characters",
+                resource_id=f"{project_id}:{batch_id}",
+                workflow_task_id=payload.workflow_task_id,
+                operation_id=payload.operation_id or uuid.uuid4().hex,
+                actor=principal,
             )
         except KeyError as exc:
             raise HTTPException(404, "creative resource or workflow task not found") from exc
@@ -2928,6 +3072,7 @@ def build_creative_router(
             principal,
             request,
             workflow_task_id=workflow_task_id,
+            **generation_request_extra(payload),
         )
 
     @router.post("/projects/{project_id}/outlines")
@@ -2937,18 +3082,25 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         try:
-            workflow_task_id = validate_task(
+            workflow_task_id = application_task_id(
                 payload.workflow_task_id,
                 "outline",
-                principal,
-                project_id=project_id,
-            )
-            return repository.create_outline_batch(
                 project_id,
-                payload.episodes,
-                payload.series_arc,
-                workflow_task_id=workflow_task_id,
+                principal,
             )
+            return application_service.persist_draft(
+                project_id=project_id,
+                stage="outline",
+                payload={
+                    "episodes": payload.episodes,
+                    "series_arc": payload.series_arc,
+                },
+                workflow_task_id=workflow_task_id,
+                operation_id=payload.operation_id or uuid.uuid4().hex,
+                actor=principal,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -2989,6 +3141,7 @@ def build_creative_router(
             request,
             workflow_task_id=workflow_task_id,
             batch_id=batch_id,
+            **generation_request_extra(payload),
         )
 
     @router.patch("/projects/{project_id}/outlines/{batch_id}/overview")
@@ -3030,11 +3183,13 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         try:
-            return workflow_transitions.complete_creative_without_review(
-                payload.workflow_task_id,
-                "outline",
-                f"{project_id}:{batch_id}",
-                principal,
+            return application_service.lock_resource(
+                project_id=project_id,
+                stage="outline",
+                resource_id=f"{project_id}:{batch_id}",
+                workflow_task_id=payload.workflow_task_id,
+                operation_id=payload.operation_id or uuid.uuid4().hex,
+                actor=principal,
             )
         except KeyError as exc:
             raise HTTPException(404, "creative resource or workflow task not found") from exc
@@ -3067,6 +3222,7 @@ def build_creative_router(
             request,
             episode_number=episode_number,
             workflow_task_id=workflow_task_id,
+            **generation_request_extra(payload),
         )
 
     @router.post("/projects/{project_id}/beats/generate-series")
@@ -3088,6 +3244,7 @@ def build_creative_router(
             project_id, "beats", principal, request,
             series=True, chunk_size=10, episode_start=1, episode_end=total,
             workflow_task_id=workflow_task_id,
+            **generation_request_extra(payload),
         )
 
     @router.post("/projects/{project_id}/episodes/{episode_number}/beats")
@@ -3098,18 +3255,23 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         try:
-            workflow_task_id = validate_task(
+            workflow_task_id = application_task_id(
                 payload.workflow_task_id,
                 "beats",
-                principal,
-                project_id=project_id,
-            )
-            return repository.create_episode_beats(
                 project_id,
-                episode_number,
-                payload.content,
-                workflow_task_id=workflow_task_id,
+                principal,
             )
+            return application_service.persist_draft(
+                project_id=project_id,
+                stage="beats",
+                payload=payload.content,
+                workflow_task_id=workflow_task_id,
+                operation_id=payload.operation_id or uuid.uuid4().hex,
+                actor=principal,
+                episode_number=episode_number,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -3120,8 +3282,16 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         try:
-            return workflow_transitions.complete_creative_without_review(
-                payload.workflow_task_id, "beats", str(episode_id), principal
+            episode = repository.get_episode(episode_id)
+            if episode is None:
+                raise KeyError(episode_id)
+            return application_service.lock_resource(
+                project_id=int(episode["project_id"]),
+                stage="beats",
+                resource_id=str(episode_id),
+                workflow_task_id=payload.workflow_task_id,
+                operation_id=payload.operation_id or uuid.uuid4().hex,
+                actor=principal,
             )
         except KeyError as exc:
             raise HTTPException(404, "creative resource or workflow task not found") from exc
@@ -3158,7 +3328,15 @@ def build_creative_router(
         if episode_number in repository.missing_current_locked_beats(project_id):
             raise HTTPException(409, "必须先锁定当前集 Beats")
         workflow_task_id = validate_task(payload.workflow_task_id if payload else None, "script", principal, project_id=project_id)
-        return create_generation_job(project_id, "script", principal, request, episode_number=episode_number, workflow_task_id=workflow_task_id)
+        return create_generation_job(
+            project_id,
+            "script",
+            principal,
+            request,
+            episode_number=episode_number,
+            workflow_task_id=workflow_task_id,
+            **generation_request_extra(payload),
+        )
 
     @router.post("/projects/{project_id}/scripts/generate-series")
     async def generate_project_scripts_series(
@@ -3183,22 +3361,43 @@ def build_creative_router(
             project_id, "script", principal, request,
             series=True, chunk_size=10, episode_start=1, episode_end=total,
             workflow_task_id=workflow_task_id,
+            **generation_request_extra(payload),
         )
 
     @router.post("/projects/{project_id}/episodes/{episode_number}/scripts")
     async def create_project_episode_script(project_id: int, episode_number: int, payload: EpisodeBeatsRequest, principal: Principal = Depends(current_principal)):
         try:
-            workflow_task_id = validate_task(payload.workflow_task_id, "script", principal, project_id=project_id)
-            return repository.create_episode_script(
-                project_id, episode_number, validate_script(payload.content), workflow_task_id=workflow_task_id
+            workflow_task_id = application_task_id(
+                payload.workflow_task_id, "script", project_id, principal
             )
+            return application_service.persist_draft(
+                project_id=project_id,
+                stage="script",
+                payload=payload.content,
+                workflow_task_id=workflow_task_id,
+                operation_id=payload.operation_id or uuid.uuid4().hex,
+                actor=principal,
+                episode_number=episode_number,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
     @router.post("/scripts/{episode_id}/lock")
     async def lock_episode_script(episode_id: int, payload: CreativeLockRequest, principal: Principal = Depends(current_principal)):
         try:
-            return workflow_transitions.complete_creative_without_review(payload.workflow_task_id, "script", str(episode_id), principal)
+            episode = repository.get_episode(episode_id)
+            if episode is None:
+                raise KeyError(episode_id)
+            return application_service.lock_resource(
+                project_id=int(episode["project_id"]),
+                stage="script",
+                resource_id=str(episode_id),
+                workflow_task_id=payload.workflow_task_id,
+                operation_id=payload.operation_id or uuid.uuid4().hex,
+                actor=principal,
+            )
         except KeyError as exc:
             raise HTTPException(404, "creative resource or workflow task not found") from exc
         except (PermissionError, ValueError) as exc:
@@ -3244,6 +3443,8 @@ def register_creative_routes(
     runtime_dir: str | Path = ".runtime",
     job_manager: Any | None = None,
     workflow_repository: WorkflowRepository | None = None,
+    repository: CreativeRepository | None = None,
+    application_service: CreativeApplicationService | None = None,
 ) -> None:
     app.include_router(
         build_creative_router(
@@ -3251,5 +3452,7 @@ def register_creative_routes(
             runtime_dir=runtime_dir,
             job_manager=job_manager,
             workflow_repository=workflow_repository,
+            repository=repository,
+            application_service=application_service,
         )
     )

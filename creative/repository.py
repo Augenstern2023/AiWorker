@@ -19,6 +19,17 @@ from pathlib import Path
 from typing import Any, Callable
 
 from creative.outline_overview import normalize_series_overview, read_series_overview
+
+
+def canonical_request_hash(payload: Any) -> str:
+    """Return the stable SHA-256 for a JSON-compatible request payload."""
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 from creative.script_service import normalize_script_content, validate_beats, validate_script
 
 
@@ -1321,18 +1332,14 @@ class CreativeRepository:
         scope: dict[str, Any],
         payload: dict[str, Any],
     ) -> str:
-        canonical = json.dumps(
+        return canonical_request_hash(
             {
                 "project_id": int(project_id),
                 "stage": stage,
                 "scope": scope,
                 "payload": payload,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        return hashlib.sha256(canonical).hexdigest()
+            }
+        )
 
     def _operation_project(
         self, conn: sqlite3.Connection, project_id: int, *, include_episodes: bool = False
@@ -2638,7 +2645,13 @@ class CreativeRepository:
             )
         return self.get_outline_batch(project_id, batch_id)
 
-    def find_resumable_outline_batch(self, project_id: int) -> dict[str, Any] | None:
+    def find_resumable_outline_batch(
+        self,
+        project_id: int,
+        *,
+        operation_id: str | None = None,
+        include_complete: bool = False,
+    ) -> dict[str, Any] | None:
         """Return the newest compatible incomplete draft batch, if it can safely continue."""
         project = self.get_project(project_id)
         if not project:
@@ -2650,6 +2663,11 @@ class CreativeRepository:
             if (
                 item["stage"] == "outline"
                 and item.get("status") == "draft"
+                and (
+                    operation_id is None
+                    or item.get("generation_meta", {}).get("operation_id")
+                    == operation_id
+                )
                 and refs.get("brief_id") == project.get("locked_brief_id")
                 and refs.get("character_batch_id") == project.get("character_batch_id")
             ):
@@ -2659,7 +2677,12 @@ class CreativeRepository:
         for batch_id, rows in groups.items():
             rows.sort(key=lambda item: int(item["episode_number"]))
             numbers = [int(item["episode_number"]) for item in rows]
-            if not rows or len(rows) >= total or numbers != list(range(1, len(rows) + 1)):
+            if (
+                not rows
+                or len(rows) > total
+                or (len(rows) == total and not include_complete)
+                or numbers != list(range(1, len(rows) + 1))
+            ):
                 continue
             content = rows[0].get("content") or {}
             meta = rows[0].get("generation_meta") or {}
@@ -3322,7 +3345,11 @@ class CreativeRepository:
         return [self.get_episode(episode_id) or {} for episode_id in ids]
 
     def find_resumable_episode_series(
-        self, project_id: int, stage: str
+        self,
+        project_id: int,
+        stage: str,
+        *,
+        operation_id: str | None = None,
     ) -> dict[str, Any] | None:
         if stage not in {"beats", "script"}:
             raise ValueError("批量续写仅支持 Beats 或场次剧本")
@@ -3336,6 +3363,11 @@ class CreativeRepository:
                 item.get("stage") == stage
                 and item.get("status") == "draft"
                 and item.get("generation_meta", {}).get("series_generation")
+                and (
+                    operation_id is None
+                    or item.get("generation_meta", {}).get("operation_id")
+                    == operation_id
+                )
             ):
                 groups.setdefault(str(item["batch_id"]), []).append(item)
         candidates: list[tuple[tuple[int, float], dict[str, Any]]] = []

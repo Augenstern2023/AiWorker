@@ -68,8 +68,12 @@ from analysis.asr import (
 from analysis.llm import LLMError, create_llm_provider_from_config
 from analysis.today_rank_api import register_today_rank_routes
 from creative.api import register_creative_routes
+from creative.application_service import CreativeApplicationService
+from creative.market_reference_service import MarketReferenceService
+from creative.original_project_service import OriginalProjectService
 from creative.repository import CreativeRepository
 from creative.transcript_assets import normalize_title
+from creative.workflow_adapter import CreativeWorkflowAdapter
 from screenplay_review.api import register_script_review_routes
 from screenplay_optimization.api import register_script_optimization_routes
 from writer_agent.api import register_writer_agent_routes
@@ -496,7 +500,30 @@ identity_permission_service = PermissionService(
 )
 audit_service = AuditService(identity_repository)
 workflow_repository = WorkflowRepository(identity_repository)
-workflow_transition_service = TransitionService(workflow_repository)
+creative_repository = CreativeRepository(
+    WORKSPACE_ROOT / ".runtime" / "creative" / "creative.db"
+)
+creative_workflow_adapter = CreativeWorkflowAdapter(
+    creative_repository, workflow_repository
+)
+workflow_transition_service = TransitionService(
+    workflow_repository, creative_adapter=creative_workflow_adapter
+)
+original_project_service = OriginalProjectService(
+    creative_repository,
+    workflow_repository,
+    MarketReferenceService(creative_repository),
+)
+creative_application_service = CreativeApplicationService(
+    creative_repository,
+    workflow_repository,
+    workflow_transition_service,
+    job_manager,
+    WORKSPACE_ROOT / ".runtime",
+    original_project_service=original_project_service,
+    workflow_adapter=creative_workflow_adapter,
+    permission_service=identity_permission_service,
+)
 navigation_repository = (
     NavigationRepository(system_database) if system_database is not None else None
 )
@@ -511,9 +538,6 @@ if navigation_repository is not None:
 else:
     navigation_service = NavigationService()
     page_access_service = navigation_service.page_access_service
-creative_repository = CreativeRepository(
-    WORKSPACE_ROOT / ".runtime" / "creative" / "creative.db"
-)
 app.state.identity_repository = identity_repository
 app.state.system_database = system_database
 app.state.identity_password_service = identity_password_service
@@ -524,6 +548,8 @@ app.state.navigation_repository = navigation_repository
 app.state.page_access_service = page_access_service
 app.state.workflow_repository = workflow_repository
 app.state.workflow_transition_service = workflow_transition_service
+app.state.creative_repository = creative_repository
+app.state.creative_application_service = creative_application_service
 templates = Jinja2Templates(directory=str(WORKSPACE_ROOT / "templates"))
 
 
@@ -590,6 +616,8 @@ register_creative_routes(
     runtime_dir=Path(__file__).resolve().parent / ".runtime",
     job_manager=job_manager,
     workflow_repository=workflow_repository,
+    repository=creative_repository,
+    application_service=creative_application_service,
 )
 register_script_review_routes(
     app,
@@ -604,6 +632,8 @@ register_script_optimization_routes(
 register_writer_agent_routes(
     app,
     runtime_dir=Path(__file__).resolve().parent / ".runtime",
+    creative_repository=creative_repository,
+    creative_application_service=creative_application_service,
 )
 
 # Models

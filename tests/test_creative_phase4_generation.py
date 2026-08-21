@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import httpx
 import pytest
@@ -72,6 +73,39 @@ def blueprint_payload(count: int = 3):
         ],
         "provider": "test-llm",
     }
+
+
+def test_worker_loads_and_validates_inline_source_snapshot(tmp_path: Path) -> None:
+    snapshot = {"snapshot_id": "snapshot-7", "materials": ["第一集"]}
+    fingerprint = phase4_worker.canonical_request_hash(snapshot)
+
+    loaded = phase4_worker._load_source_snapshot(
+        {
+            "runtime_dir": str(tmp_path),
+            "source_snapshot_id": "snapshot-7",
+            "source_snapshot_sha256": fingerprint,
+            "source_snapshot": snapshot,
+        }
+    )
+
+    assert loaded == snapshot
+
+
+def test_worker_rejects_snapshot_chunk_path_outside_runtime(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="runtime root"):
+        phase4_worker._load_source_snapshot(
+            {
+                "runtime_dir": str(tmp_path),
+                "source_snapshot_id": "snapshot-7",
+                "source_snapshot_sha256": "0" * 64,
+                "source_snapshot_ref": {
+                    "paths": ["../outside.jsonpart"],
+                    "sha256": "0" * 64,
+                    "size": 2,
+                    "read_only": True,
+                },
+            }
+        )
 
 
 def test_blueprint_prompt_requires_an_imitation_reason_for_each_direction() -> None:

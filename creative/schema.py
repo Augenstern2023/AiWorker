@@ -81,12 +81,23 @@ class BlueprintGenerateRequest(BaseModel):
     preserve_blueprint_ids: list[int] = Field(default_factory=list, max_length=5)
     workflow_task_id: str | None = None
     operation_id: str | None = Field(None, max_length=200)
+    generation_instruction: str = Field("", max_length=2000)
+    source_snapshot_id: str | None = Field(None, max_length=200)
+    source_snapshot: dict[str, Any] | None = None
+
+
+class BlueprintCreateRequest(BaseModel):
+    content: dict[str, Any]
+    workflow_task_id: str = Field(min_length=1)
+    operation_id: str = Field(min_length=1, max_length=200)
 
 
 class BlueprintDeriveRequest(BaseModel):
     instruction: str = Field(min_length=1, max_length=500)
     workflow_task_id: str = Field(min_length=1)
     operation_id: str | None = Field(None, max_length=200)
+    source_snapshot_id: str | None = Field(None, max_length=200)
+    source_snapshot: dict[str, Any] | None = None
 
 
 class BlueprintUpdateRequest(BaseModel):
@@ -134,6 +145,9 @@ class EpisodeBeatsRequest(BaseModel):
 class WorkflowLinkRequest(BaseModel):
     workflow_task_id: str | None = None
     operation_id: str | None = Field(None, max_length=200)
+    generation_instruction: str = Field("", max_length=2000)
+    source_snapshot_id: str | None = Field(None, max_length=200)
+    source_snapshot: dict[str, Any] | None = None
 
 
 class CreativeLockRequest(BaseModel):

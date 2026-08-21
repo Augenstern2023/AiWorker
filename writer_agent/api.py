@@ -30,6 +30,8 @@ from urllib.parse import unquote
 import config
 from analysis.llm import create_llm_provider_from_config
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from creative.application_service import CreativeApplicationService
+from creative.repository import CreativeRepository
 from identity.dependencies import current_principal
 from identity.schema import Principal
 from pydantic import BaseModel
@@ -267,7 +269,12 @@ def _session_materials(session: dict[str, Any]) -> list[dict[str, Any]]:
     return materials or [{"name": first_name, "content": content}]
 
 
-def build_writer_agent_router(runtime_dir: str | Path = ".runtime") -> APIRouter:
+def build_writer_agent_router(
+    runtime_dir: str | Path = ".runtime",
+    *,
+    creative_repository: CreativeRepository | None = None,
+    creative_application_service: CreativeApplicationService | None = None,
+) -> APIRouter:
     store = WriterAgentStore(Path(runtime_dir) / "writer_agent" / "writer_agent.db")
     router = APIRouter(prefix="/api/writer-agent", tags=["writer-agent"])
 
@@ -412,5 +419,17 @@ def build_writer_agent_router(runtime_dir: str | Path = ".runtime") -> APIRouter
     return router
 
 
-def register_writer_agent_routes(app: Any, *, runtime_dir: str | Path = ".runtime") -> None:
-    app.include_router(build_writer_agent_router(runtime_dir))
+def register_writer_agent_routes(
+    app: Any,
+    *,
+    runtime_dir: str | Path = ".runtime",
+    creative_repository: CreativeRepository | None = None,
+    creative_application_service: CreativeApplicationService | None = None,
+) -> None:
+    app.include_router(
+        build_writer_agent_router(
+            runtime_dir,
+            creative_repository=creative_repository,
+            creative_application_service=creative_application_service,
+        )
+    )

@@ -59,6 +59,21 @@ def test_webgui_registers_rag_routes():
     assert "/api/rag/query" in paths
 
 
+def test_webgui_shares_creative_application_dependencies():
+    paths = {route.path for route in WebGUI.app.routes}
+
+    assert "/api/creative/projects/{project_id}/blueprints" in paths
+    assert WebGUI.creative_application_service.repository is WebGUI.creative_repository
+    assert (
+        WebGUI.creative_application_service.workflow_adapter
+        is WebGUI.creative_workflow_adapter
+    )
+    assert (
+        WebGUI.workflow_transition_service.creative_adapter
+        is WebGUI.creative_workflow_adapter
+    )
+
+
 def test_webgui_registers_analytics_routes():
     paths = {route.path for route in WebGUI.app.routes}
 

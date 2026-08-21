@@ -80,57 +80,69 @@ class BlueprintGenerateRequest(BaseModel):
     count: int = Field(3, ge=3, le=5)
     preserve_blueprint_ids: list[int] = Field(default_factory=list, max_length=5)
     workflow_task_id: str | None = None
+    operation_id: str | None = Field(None, max_length=200)
 
 
 class BlueprintDeriveRequest(BaseModel):
     instruction: str = Field(min_length=1, max_length=500)
     workflow_task_id: str = Field(min_length=1)
+    operation_id: str | None = Field(None, max_length=200)
 
 
 class BlueprintUpdateRequest(BaseModel):
     content: dict[str, Any]
     difference_note: str | None = None
+    operation_id: str | None = Field(None, max_length=200)
 
 
 class BriefLockRequest(BaseModel):
     difference_note: str = ""
     workflow_task_id: str = Field(min_length=1)
+    operation_id: str | None = Field(None, max_length=200)
 
 
 class CharacterBatchRequest(BaseModel):
     characters: list[dict[str, Any]] = Field(default_factory=list)
     relationships: list[dict[str, Any]] = Field(default_factory=list)
     workflow_task_id: str | None = None
+    operation_id: str | None = Field(None, max_length=200)
 
 
 class CreativeItemUpdateRequest(BaseModel):
     content: dict[str, Any]
+    operation_id: str | None = Field(None, max_length=200)
 
 
 class OutlineBatchRequest(BaseModel):
     series_arc: str = ""
     episodes: list[dict[str, Any]] = Field(default_factory=list)
     workflow_task_id: str | None = None
+    operation_id: str | None = Field(None, max_length=200)
 
 
 class OutlineOverviewRequest(BaseModel):
     series_overview: dict[str, Any] = Field(default_factory=dict)
+    operation_id: str | None = Field(None, max_length=200)
 
 
 class EpisodeBeatsRequest(BaseModel):
     content: dict[str, Any]
     workflow_task_id: str | None = None
+    operation_id: str | None = Field(None, max_length=200)
 
 
 class WorkflowLinkRequest(BaseModel):
     workflow_task_id: str | None = None
+    operation_id: str | None = Field(None, max_length=200)
 
 
 class CreativeLockRequest(BaseModel):
     workflow_task_id: str = Field(min_length=1)
+    operation_id: str | None = Field(None, max_length=200)
 
 
 class CreativeSubmitRequest(BaseModel):
     workflow_task_id: str = Field(min_length=1)
     resource_type: str = Field(min_length=1)
     resource_id: str = Field(min_length=1)
+    operation_id: str | None = Field(None, max_length=200)

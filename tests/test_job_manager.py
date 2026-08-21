@@ -617,6 +617,90 @@ def test_stale_terminal_disk_state_does_not_override_launched_retry(
     assert (status, scope_active) == ("running", 1)
 
 
+def test_terminal_disk_sync_cannot_overwrite_claim_competing_before_commit(
+    monkeypatch, tmp_path
+):
+    """A claim competing after the terminal read must remain the final attempt."""
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    job = CrawlJob.from_dict(_creative_operation_payload(job_id="sync-claim-race"))
+    operation_id = "sync-claim-race-operation"
+    job.extra["operation_id"] = operation_id
+    failed = JobState(job=job, status="failed")
+    manager.storage.reserve_job_operation(
+        operation_id,
+        failed,
+        scope=creative_job_scope(job),
+        launcher_owner="old-launcher",
+        launcher_lease_expires_at=0,
+    )
+    manager.storage.upsert_job(failed)
+
+    terminal_read = threading.Event()
+    claim_started = threading.Event()
+    original_connect = manager.storage._connect
+
+    class PausingConnection(sqlite3.Connection):
+        def execute(self, sql, parameters=()):
+            cursor = super().execute(sql, parameters)
+            if (
+                threading.current_thread().name == "terminal-sync"
+                and "SELECT status,launch_phase" in sql
+            ):
+                terminal_read.set()
+                assert claim_started.wait(timeout=2)
+            return cursor
+
+    def instrumented_connect():
+        if threading.current_thread().name == "terminal-sync":
+            return sqlite3.connect(manager.storage.db_path, factory=PausingConnection)
+        return original_connect()
+
+    monkeypatch.setattr(manager.storage, "_connect", instrumented_connect)
+    sync_results = []
+    claim_results = []
+
+    sync_thread = threading.Thread(
+        name="terminal-sync",
+        target=lambda: sync_results.append(
+            manager.storage.sync_terminal_job_from_disk(failed)
+        ),
+    )
+    sync_thread.start()
+    assert terminal_read.wait(timeout=2)
+
+    def claim_operation():
+        claim_started.set()
+        claim_results.append(
+            manager.storage.claim_failed_job_operation(
+                operation_id,
+                launcher_owner="new-launcher",
+                launcher_lease_expires_at=10**12,
+            )[0]
+        )
+
+    claim_thread = threading.Thread(target=claim_operation)
+    claim_thread.start()
+    sync_thread.join(timeout=2)
+    claim_thread.join(timeout=2)
+
+    assert not sync_thread.is_alive()
+    assert not claim_thread.is_alive()
+    assert sync_results == [True]
+    assert claim_results == [True]
+    with sqlite3.connect(tmp_path / "agent_state.db") as connection:
+        status, scope_active, owner, phase = connection.execute(
+            "SELECT status,scope_active,launcher_owner,launch_phase "
+            "FROM agent_jobs WHERE operation_id=?",
+            (operation_id,),
+        ).fetchone()
+    assert (status, scope_active, owner, phase) == (
+        "pending",
+        1,
+        "new-launcher",
+        "launching",
+    )
+
+
 def test_job_manager_get_logs_loads_state_from_disk(tmp_path):
     manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
     job = CrawlJob(job_id="job-history", platform="dy", crawler_type="rank")

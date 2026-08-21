@@ -137,7 +137,8 @@ def test_link_action_persisted_from_proposal_uses_top_level_project_id(
 
 
 @pytest.mark.parametrize(
-    "project_id", [None, "invalid-project-id", "1.5", 0, 1.5]
+    "project_id",
+    [None, "invalid-project-id", "1.5", 0, -1, 1.5, True, 1.0, "1", "1.0"],
 )
 def test_link_action_keeps_pending_when_top_level_project_id_is_invalid(
     orchestrator_context, project_id: float | int | str | None,

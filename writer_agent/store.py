@@ -66,6 +66,7 @@ class WriterAgentStore:
             )
             self._migrate_sessions(conn)
             self._create_action_tables(conn)
+            self._migrate_actions(conn)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30)
@@ -92,7 +93,7 @@ class WriterAgentStore:
             "CREATE TABLE IF NOT EXISTS writer_agent_actions ("
             "id TEXT PRIMARY KEY, session_id INTEGER NOT NULL, actor_user_id TEXT NOT NULL, "
             "action_type TEXT NOT NULL, status TEXT NOT NULL, phase TEXT NOT NULL DEFAULT '', "
-            "revision INTEGER NOT NULL, project_id INTEGER, target_key TEXT NOT NULL DEFAULT '', "
+            "revision INTEGER NOT NULL, project_id INTEGER, project_id_json TEXT, target_key TEXT NOT NULL DEFAULT '', "
             "idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, source_snapshot_id TEXT, "
             "expected_context_json TEXT NOT NULL DEFAULT '{}', payload_json TEXT NOT NULL DEFAULT '{}', "
             "result_json TEXT, error_code TEXT, error_message TEXT, retryable INTEGER NOT NULL DEFAULT 0, "
@@ -122,6 +123,12 @@ class WriterAgentStore:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_writer_agent_steps_action ON writer_agent_action_steps(action_id, step_order)"
         )
+
+    def _migrate_actions(self, conn: sqlite3.Connection) -> None:
+        if "project_id_json" not in self._columns(conn, "writer_agent_actions"):
+            conn.execute(
+                "ALTER TABLE writer_agent_actions ADD COLUMN project_id_json TEXT"
+            )
 
     def create(self, user_id: str, content: str, title: str = "", filename: str = "") -> dict[str, Any]:
         now = time.time()
@@ -242,7 +249,7 @@ class WriterAgentStore:
         return item
 
     @staticmethod
-    def _target_key(action_type: str, project_id: int | None, payload: dict[str, Any]) -> str:
+    def _target_key(action_type: str, project_id: Any, payload: dict[str, Any]) -> str:
         if action_type != "creative.run_plan" or project_id is None:
             return ""
         aliases = {"blueprints": "brief", "outlines": "outline"}
@@ -271,6 +278,9 @@ class WriterAgentStore:
             value = item.pop(key, None)
             output = {"expected_context_json": "expected_context", "payload_json": "payload", "result_json": "result"}[key]
             item[output] = _decode(value, default)
+        raw_project_id = item.pop("project_id_json", None)
+        if raw_project_id is not None:
+            item["project_id"] = _decode(raw_project_id, item["project_id"])
         item["revision"] = int(item["revision"])
         item["retryable"] = bool(item["retryable"])
         item["target_stage"] = item["payload"].get("target_stage")
@@ -294,7 +304,7 @@ class WriterAgentStore:
             raise WriterActionError("PROJECT_NOT_AVAILABLE", "动作不存在或无权访问")
         return row
 
-    def create_action(self, *, session_id: int, actor_user_id: str, action_type: str, project_id: int | None, idempotency_key: str, request_hash: str, payload: dict[str, Any], expected_context: dict[str, Any], source_snapshot_id: str | None, expires_at: float | None = None) -> dict[str, Any]:
+    def create_action(self, *, session_id: int, actor_user_id: str, action_type: str, project_id: Any, idempotency_key: str, request_hash: str, payload: dict[str, Any], expected_context: dict[str, Any], source_snapshot_id: str | None, expires_at: float | None = None) -> dict[str, Any]:
         now = time.time()
         target_key = self._target_key(action_type, project_id, payload)
         with self._connect() as conn:
@@ -309,9 +319,9 @@ class WriterAgentStore:
                 raise WriterActionError("IDEMPOTENCY_KEY_REUSED", "幂等键已用于不同动作")
             action_id = f"action-{uuid.uuid4().hex}"
             conn.execute(
-                "INSERT INTO writer_agent_actions (id,session_id,actor_user_id,action_type,status,revision,project_id,target_key,idempotency_key,request_hash,source_snapshot_id,expected_context_json,payload_json,created_at,updated_at,expires_at,root_action_id) "
-                "VALUES (?,?,?,?, 'pending',1,?,?,?,?,?,?,?,?,?,?,?)",
-                (action_id, session_id, actor_user_id, action_type, project_id, target_key, idempotency_key, request_hash, source_snapshot_id, _json(expected_context), _json(payload), now, now, expires_at, action_id),
+                "INSERT INTO writer_agent_actions (id,session_id,actor_user_id,action_type,status,revision,project_id,project_id_json,target_key,idempotency_key,request_hash,source_snapshot_id,expected_context_json,payload_json,created_at,updated_at,expires_at,root_action_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (action_id, session_id, actor_user_id, action_type, "pending", 1, project_id, _json(project_id), target_key, idempotency_key, request_hash, source_snapshot_id, _json(expected_context), _json(payload), now, now, expires_at, action_id),
             )
             row = self._require_action_conn(conn, action_id)
         return self._action_row(row)
@@ -658,16 +668,19 @@ class WriterAgentStore:
             action_id = f"action-{uuid.uuid4().hex}"
             conn.execute(
                 "INSERT INTO writer_agent_actions "
-                "(id,session_id,actor_user_id,action_type,status,revision,project_id,"
+                "(id,session_id,actor_user_id,action_type,status,revision,project_id,project_id_json,"
                 "target_key,idempotency_key,request_hash,source_snapshot_id,"
                 "expected_context_json,payload_json,retry_of_action_id,root_action_id,"
-                "created_at,updated_at) VALUES (?,?,?,?, 'pending',1,?,?,?,?,?,?,?,?,?,?,?)",
+                "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     action_id,
                     current["session_id"],
                     actor_user_id,
                     current["action_type"],
+                    "pending",
+                    1,
                     current["project_id"],
+                    current["project_id_json"],
                     current["target_key"],
                     retry_key,
                     current["request_hash"],

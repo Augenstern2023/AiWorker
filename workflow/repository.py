@@ -37,6 +37,7 @@ from system_database.schema import (
 from .state_machine import WorkflowStateMachine
 
 OWNER_PROJECT_ROLES = frozenset({"owner", "project_owner"})
+PROJECT_CREATOR_ROLE = "project_creator"
 _MANAGED_PROJECT_ROLES = OWNER_PROJECT_ROLES | frozenset(
     {"manager", "project_manager"}
 )
@@ -1116,12 +1117,6 @@ class WorkflowRepository:
                 "SELECT 1 FROM project_members WHERE project_id = %s LIMIT 1",
                 (project_id,),
             ).mappings().fetchone()
-            has_owner = connection.exec_driver_sql(
-                "SELECT 1 FROM project_members WHERE project_id = %s "
-                "AND project_role IN ('owner', 'project_owner') "
-                "AND status = 'active' LIMIT 1",
-                (project_id,),
-            ).mappings().fetchone()
             is_global_owner_bootstrap = (
                 has_members is None
                 and actor_id == user_id
@@ -1130,9 +1125,8 @@ class WorkflowRepository:
             )
             is_creator_bootstrap = (
                 allow_creator_bootstrap
-                and has_owner is None
                 and actor_id == user_id
-                and project_role in OWNER_PROJECT_ROLES
+                and project_role == PROJECT_CREATOR_ROLE
                 and "project.create" in live_actor["permissions"]
             )
             if not (is_global_owner_bootstrap or is_creator_bootstrap):
@@ -1187,6 +1181,55 @@ class WorkflowRepository:
                 dict(member),
             )
         return dict(member)
+
+    def ensure_project_creator(
+        self, project_id: str, creator_user_id: str, actor: Principal | dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Create a missing creator membership without reviving an inactive one."""
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.transaction() as connection:
+            existing = connection.exec_driver_sql(
+                "SELECT * FROM project_members WHERE project_id = %s AND user_id = %s "
+                "AND project_role = %s",
+                (project_id, creator_user_id, PROJECT_CREATOR_ROLE),
+            ).mappings().fetchone()
+            if existing is not None:
+                return dict(existing)
+            live_actor = self._live_actor(connection, actor_id)
+            if actor_id != creator_user_id or not (
+                live_actor["is_system_admin"]
+                or "project.create" in live_actor["permissions"]
+                or "*" in live_actor["permissions"]
+            ):
+                return None
+        return self.add_project_member(
+            project_id, creator_user_id, PROJECT_CREATOR_ROLE, actor,
+            allow_creator_bootstrap=True,
+        )
+
+    def migrate_creator_membership(self, project_id: str, created_by: str) -> bool:
+        """Only rename the creator's local project_owner membership."""
+        with self.identity_repository.transaction() as connection:
+            creator = connection.exec_driver_sql(
+                "SELECT * FROM project_members WHERE project_id = %s AND user_id = %s "
+                "AND project_role = %s",
+                (project_id, created_by, PROJECT_CREATOR_ROLE),
+            ).mappings().fetchone()
+            legacy = connection.exec_driver_sql(
+                "SELECT * FROM project_members WHERE project_id = %s AND user_id = %s "
+                "AND project_role = 'project_owner'",
+                (project_id, created_by),
+            ).mappings().fetchone()
+            if legacy is None:
+                return False
+            if creator is None:
+                connection.exec_driver_sql(
+                    "UPDATE project_members SET project_role = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                    (PROJECT_CREATOR_ROLE, legacy["id"]),
+                )
+            else:
+                connection.exec_driver_sql("DELETE FROM project_members WHERE id = %s", (legacy["id"],))
+        return True
 
     def list_project_members(self, project_id: str) -> list[dict[str, Any]]:
         with self.identity_repository.connect() as connection:
@@ -1291,6 +1334,9 @@ class WorkflowRepository:
             if not members:
                 raise KeyError(membership_id)
             removed_user_id = members[0]["user_id"]
+            if any(member["project_role"] == PROJECT_CREATOR_ROLE for member in members):
+                if removed_user_id == actor_id:
+                    raise PermissionError("project creator cannot deactivate themselves")
             removes_active_owner = any(
                 member["status"] == "active"
                 and member["project_role"] in OWNER_PROJECT_ROLES
@@ -1312,6 +1358,25 @@ class WorkflowRepository:
                         "current project owner cannot be removed until another owner is assigned"
                     )
             for member in members:
+                if member["project_role"] == PROJECT_CREATOR_ROLE:
+                    connection.exec_driver_sql(
+                        "UPDATE project_members SET status = 'inactive', updated_at = CURRENT_TIMESTAMP "
+                        "WHERE id = %s",
+                        (member["id"],),
+                    )
+                    disabled = connection.exec_driver_sql(
+                        "SELECT * FROM project_members WHERE id = %s", (member["id"],)
+                    ).mappings().fetchone()
+                    self._record_project_member_event(
+                        connection,
+                        project_id,
+                        member["id"],
+                        "project_member.disable",
+                        actor_id,
+                        dict(member),
+                        dict(disabled) if disabled is not None else None,
+                    )
+                    continue
                 connection.exec_driver_sql(
                     "DELETE FROM project_members WHERE id = %s", (member["id"],)
                 )

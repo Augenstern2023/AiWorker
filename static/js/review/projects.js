@@ -23,6 +23,7 @@
     const projectRoleLabels = {
         owner: '项目负责人',
         project_owner: '项目负责人',
+        project_creator: '项目创建负责人',
         creative_planner: '创意策划',
         screenwriter: '编剧',
     };
@@ -188,7 +189,7 @@
                     && ['owner', 'project_owner'].includes(member.project_role)
                     && ownerCount <= 1
                 );
-                removeButton.textContent = '移除';
+                removeButton.textContent = member.project_role === 'project_creator' ? '停用' : '移除';
                 removeButton.disabled = saving || isLastActiveOwner;
                 removeButton.title = isLastActiveOwner ? '请先添加另一位项目负责人' : `移除${memberName(member)}的${roleLabel}角色`;
                 removeButton.setAttribute('aria-label', removeButton.title);

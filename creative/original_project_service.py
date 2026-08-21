@@ -100,13 +100,7 @@ class OriginalProjectService:
 
     def _bootstrap(self, project: dict[str, Any], actor: Principal) -> None:
         project_id = str(project["id"])
-        self.workflow_repository.add_project_member(
-            project_id,
-            actor.user_id,
-            "project_owner",
-            actor,
-            allow_creator_bootstrap=True,
-        )
+        self.workflow_repository.ensure_project_creator(project_id, actor.user_id, actor)
         for task_type, role_code in self._STAGE_ROLES:
             task = self.workflow_repository.ensure_project_task(
                 project_id,

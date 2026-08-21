@@ -29,6 +29,7 @@ from creative.lifecycle_service import TopicLifecycleService, content_fingerprin
 from creative.market_reference_service import MarketReferenceService
 from creative.original_direction_service import validate_original_direction_content
 from creative.original_project_service import OriginalProjectService
+from creative.project_creator_migration import migrate_project_creator_memberships
 from creative.outline_overview import SERIES_OVERVIEW_FIELD_LABELS, read_series_overview
 from creative.repository import CreativeRepository, DuplicateTopicError
 from creative.script_service import normalize_script_content, validate_script
@@ -205,7 +206,9 @@ def creative_api_authorization(
             else ("breakdown.edit", "project.manage")
         )
     elif path.startswith("/projects"):
-        if path in {"/projects/member-candidates", "/projects/original"}:
+        if path == "/projects/member-candidates":
+            permissions = ("project.member.manage",)
+        elif path == "/projects/original":
             permissions = ("project.create",)
         elif method == "POST" and established_writing_ensure_resource(path):
             permissions = (ESTABLISHED_WRITING_PERMISSION,)
@@ -711,6 +714,7 @@ def build_creative_router(
                 SystemDatabase(SystemDatabaseSettings.from_environment())
             )
         )
+    migrate_project_creator_memberships(repository, workflow_repository)
     workflow_adapter = CreativeWorkflowAdapter(repository, workflow_repository)
     workflow_transitions = TransitionService(
         workflow_repository, creative_adapter=workflow_adapter
@@ -1583,6 +1587,10 @@ def build_creative_router(
             or int(existing["breakdown_id"]) != int(breakdown["id"])
         ):
             raise HTTPException(409, "该创建请求已用于其他项目")
+        if (payload.planner_member_ids or payload.writer_member_ids) and (
+            "project.member.manage" not in principal.permissions
+        ):
+            raise HTTPException(403, "没有管理项目成员的权限")
         try:
             planner_member_ids = _validate_members(
                 principal, payload.planner_member_ids, "creative_planner"
@@ -1600,13 +1608,7 @@ def build_creative_router(
                 created_by=principal.user_id,
             )
             project_id = str(project["id"])
-            workflow_repository.add_project_member(
-                project_id,
-                principal.user_id,
-                "project_owner",
-                principal,
-                allow_creator_bootstrap=True,
-            )
+            workflow_repository.ensure_project_creator(project_id, principal.user_id, principal)
             for member_id in planner_member_ids:
                 workflow_repository.add_project_member(
                     project_id, member_id, "creative_planner", principal
@@ -1655,6 +1657,13 @@ def build_creative_router(
         role_code: str,
     ) -> list[str]:
         """Validate selected ids against the exact list shown by the candidates API."""
+        selected = list(
+            dict.fromkeys(
+                str(raw).strip() for raw in (member_ids or []) if str(raw).strip()
+            )
+        )
+        if not selected:
+            return []
         task_type_by_role = {
             "creative_planner": "brief",
             "screenwriter": "outline",
@@ -1666,14 +1675,9 @@ def build_creative_router(
             role_code,
             task_type,
             principal,
-            required_permission="project.create",
+            required_permission="project.member.manage",
         )
         candidate_ids = {item["user_id"] for item in candidates}
-        selected = list(
-            dict.fromkeys(
-                str(raw).strip() for raw in (member_ids or []) if str(raw).strip()
-            )
-        )
         if any(user_id not in candidate_ids for user_id in selected):
             raise ValueError(f"所选账号不是可用的{role_code}成员")
         return selected
@@ -1725,7 +1729,7 @@ def build_creative_router(
     @router.get("/projects/member-candidates")
     async def list_project_member_candidates(
         role_code: str,
-        principal: Principal = Depends(require_permission("project.create")),
+        principal: Principal = Depends(require_permission("project.member.manage")),
     ) -> list[dict[str, Any]]:
         task_type_by_role = {
             "creative_planner": "brief",
@@ -1739,7 +1743,7 @@ def build_creative_router(
                 role_code,
                 task_type,
                 principal,
-                required_permission="project.create",
+                required_permission="project.member.manage",
             )
             return [
                 {
@@ -2118,12 +2122,8 @@ def build_creative_router(
                 )
             resolved_project = repository.get_project(int(project["id"])) or project
             if resolved_project.get("created_by") == principal.user_id:
-                workflow_repository.add_project_member(
-                    str(resolved_project["id"]),
-                    principal.user_id,
-                    "project_owner",
-                    principal,
-                    allow_creator_bootstrap=True,
+                workflow_repository.ensure_project_creator(
+                    str(resolved_project["id"]), principal.user_id, principal
                 )
             if workflow_task_id and bound_id is None:
                 try:
@@ -2529,27 +2529,34 @@ def build_creative_router(
     async def update_project(
         project_id: int,
         payload: ProjectUpdateRequest,
+        request: Request,
         principal: Principal = Depends(current_principal),
     ):
         try:
+            permission_service = getattr(
+                request.app.state, "identity_permission_service", None
+            )
+            if not isinstance(permission_service, PermissionService):
+                raise HTTPException(500, "identity permission service is not configured")
             project = project_or_404(project_id)
-            is_creator = project.get("created_by") == principal.user_id
             is_active_member = workflow_repository.is_active_project_member(
                 str(project_id), principal
             )
             if (
                 not principal.is_system_admin
-                and not is_creator
-                and not is_active_member
+                and not permission_service.can_create_project_content(
+                    principal, str(project_id), active_member=is_active_member
+                )
             ):
                 raise HTTPException(403, "只能修改本人创建或参与的项目草稿")
             updates = payload.model_dump(exclude_none=True)
-            if (
-                "status" in updates
-                and not principal.is_system_admin
-                and not is_creator
-            ):
-                raise HTTPException(403, "项目成员不能修改项目管理状态")
+            if updates.get("status") == "archived":
+                if not principal.is_system_admin and "project.archive" not in principal.permissions:
+                    raise HTTPException(403, "没有归档项目的权限")
+                if not principal.is_system_admin and not permission_service.can_access_managed_project(
+                    principal, str(project_id)
+                ):
+                    raise HTTPException(403, "无权管理该项目")
             return repository.update_project(project_id, updates)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -2561,11 +2568,13 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         project = project_or_404(project_id)
-        if (
-            not principal.is_system_admin
-            and project.get("created_by") != principal.user_id
-        ):
-            raise HTTPException(403, "只能删除本人创建的项目")
+        permission_service = getattr(
+            request.app.state, "identity_permission_service", None
+        )
+        if not isinstance(permission_service, PermissionService):
+            raise HTTPException(500, "identity permission service is not configured")
+        if not permission_service.can_delete_project(principal, str(project_id)):
+            raise HTTPException(403, "无权管理该项目")
         try:
             workflow_repository.delete_project_data(str(project_id))
             removed = repository.delete_project(project_id)

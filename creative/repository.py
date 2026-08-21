@@ -1239,6 +1239,14 @@ class CreativeRepository:
             ).fetchone()
         return self.get_project(int(row["id"])) if row is not None else None
 
+    def list_project_creator_audit_rows(self) -> list[tuple[str, str]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, created_by FROM creative_projects "
+                "WHERE deleted = 0 AND created_by IS NOT NULL"
+            ).fetchall()
+        return [(str(row["id"]), str(row["created_by"])) for row in rows]
+
     @staticmethod
     def _breakdown_target_audience(content_json: str) -> str:
         try:

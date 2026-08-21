@@ -55,6 +55,38 @@ def _role_user(identity: IdentityRepository, role_code: str, label: str) -> dict
     return user
 
 
+def test_project_creator_can_edit_but_cannot_manage_members(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    database, identity = _postgres_identity(monkeypatch)
+    workflow = WorkflowRepository(identity)
+    creator_user = _role_user(identity, "screenwriter", "项目创建负责人")
+    permissions = PermissionService(identity, SessionService(identity))
+    creator = permissions.principal_for_user(creator_user["id"], "creator-session")
+    assert creator is not None
+    project_id = f"creator-{uuid.uuid4().hex}"
+
+    def cleanup() -> None:
+        workflow.delete_project_data(project_id)
+        if identity.get_user(creator_user["id"]) is not None:
+            identity.soft_delete_user(creator_user["id"])
+        database.dispose()
+
+    request.addfinalizer(cleanup)
+    workflow.add_project_member(
+        project_id,
+        creator.user_id,
+        "project_creator",
+        creator,
+        allow_creator_bootstrap=True,
+    )
+
+    assert workflow.is_active_project_member(project_id, creator)
+    with pytest.raises(PermissionError):
+        workflow.assert_can_manage_project(project_id, creator)
+
+
 def test_project_member_editor_lists_candidates_and_member_identity(
     monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,

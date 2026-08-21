@@ -287,13 +287,6 @@ window.aiworkerModules.push(() => ({
                         ]);
                         this.planningAssignment.plannerCandidates = planner;
                         this.planningAssignment.writerCandidates = writer;
-                        const currentPlanner = planner.find(candidate => candidate.is_current_user);
-                        const currentWriter = writer.find(candidate => candidate.is_current_user);
-                        if (currentPlanner) {
-                            this.planningAssignment.plannerMemberIds = [currentPlanner.user_id];
-                        } else if (currentWriter) {
-                            this.planningAssignment.writerMemberIds = [currentWriter.user_id];
-                        }
                     } catch (error) {
                         this.planningAssignment.error = error.message || '读取团队成员失败';
                     } finally {

@@ -1188,13 +1188,6 @@ class WorkflowRepository:
         """Create a missing creator membership without reviving an inactive one."""
         actor_id = self._actor_id(actor)
         with self.identity_repository.transaction() as connection:
-            existing = connection.exec_driver_sql(
-                "SELECT * FROM project_members WHERE project_id = %s AND user_id = %s "
-                "AND project_role = %s",
-                (project_id, creator_user_id, PROJECT_CREATOR_ROLE),
-            ).mappings().fetchone()
-            if existing is not None:
-                return dict(existing)
             live_actor = self._live_actor(connection, actor_id)
             if actor_id != creator_user_id or not (
                 live_actor["is_system_admin"]
@@ -1202,10 +1195,40 @@ class WorkflowRepository:
                 or "*" in live_actor["permissions"]
             ):
                 return None
-        return self.add_project_member(
-            project_id, creator_user_id, PROJECT_CREATOR_ROLE, actor,
-            allow_creator_bootstrap=True,
-        )
+            membership_id = str(uuid.uuid4())
+            inserted = connection.exec_driver_sql(
+                """
+                INSERT INTO project_members
+                    (id, project_id, user_id, project_role, status, added_by)
+                VALUES (%s, %s, %s, %s, 'active', %s)
+                ON CONFLICT(project_id, user_id, project_role) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    membership_id,
+                    project_id,
+                    creator_user_id,
+                    PROJECT_CREATOR_ROLE,
+                    actor_id,
+                ),
+            ).mappings().fetchone()
+            member = connection.exec_driver_sql(
+                "SELECT * FROM project_members WHERE project_id = %s AND user_id = %s "
+                "AND project_role = %s",
+                (project_id, creator_user_id, PROJECT_CREATOR_ROLE),
+            ).mappings().fetchone()
+            assert member is not None
+            if inserted is not None:
+                self._record_project_member_event(
+                    connection,
+                    project_id,
+                    membership_id,
+                    "project_member.add",
+                    actor_id,
+                    None,
+                    dict(member),
+                )
+            return dict(member)
 
     def migrate_creator_membership(self, project_id: str, created_by: str) -> bool:
         """Only rename the creator's local project_owner membership."""
@@ -1334,9 +1357,20 @@ class WorkflowRepository:
             if not members:
                 raise KeyError(membership_id)
             removed_user_id = members[0]["user_id"]
-            if any(member["project_role"] == PROJECT_CREATOR_ROLE for member in members):
+            deactivates_creator = any(
+                member["project_role"] == PROJECT_CREATOR_ROLE
+                for member in members
+            )
+            if deactivates_creator:
                 if removed_user_id == actor_id:
                     raise PermissionError("project creator cannot deactivate themselves")
+                members = connection.exec_driver_sql(
+                    """
+                    SELECT * FROM project_members
+                    WHERE project_id = %s AND user_id = %s ORDER BY id
+                    """,
+                    (project_id, removed_user_id),
+                ).mappings().fetchall()
             removes_active_owner = any(
                 member["status"] == "active"
                 and member["project_role"] in OWNER_PROJECT_ROLES
@@ -1358,7 +1392,9 @@ class WorkflowRepository:
                         "current project owner cannot be removed until another owner is assigned"
                     )
             for member in members:
-                if member["project_role"] == PROJECT_CREATOR_ROLE:
+                if deactivates_creator:
+                    if member["status"] == "inactive":
+                        continue
                     connection.exec_driver_sql(
                         "UPDATE project_members SET status = 'inactive', updated_at = CURRENT_TIMESTAMP "
                         "WHERE id = %s",

@@ -32,6 +32,7 @@ from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.session_service import SessionService
 from system_database import SystemDatabase, SystemDatabaseSettings
+from workflow.api import build_workflow_router
 from workflow.repository import WorkflowRepository
 
 
@@ -863,6 +864,7 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
     app.state.identity_permission_service = permissions
     app.dependency_overrides[creative_api_principal] = lambda: creator
     app.dependency_overrides[current_principal] = lambda: creator
+    app.include_router(build_workflow_router(workflow))
     app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
     client = TestClient(app, raise_server_exceptions=False)
     base_payload = {
@@ -960,3 +962,43 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
         if task.get("workflow_id") == f"project:{project_id}"
     ]
     assert len(replay_tasks) == 5
+
+    workflow.add_project_member(
+        project_id, victim_user["id"], "screenwriter", admin
+    )
+    reactivated_creator = workflow.add_project_member(
+        project_id, creator.user_id, "project_creator", admin
+    )
+    created_by = creative.get_project(int(project_id))["created_by"]
+    app.dependency_overrides[creative_api_principal] = lambda: admin
+    app.dependency_overrides[current_principal] = lambda: admin
+    deactivated = client.delete(
+        f"/api/workflow/projects/{project_id}/members/"
+        f"{reactivated_creator['id']}"
+    )
+    assert deactivated.status_code == 204, deactivated.text
+
+    members_after_deactivation = workflow.list_project_members(project_id)
+    assert {
+        (member["project_role"], member["status"])
+        for member in members_after_deactivation
+        if member["user_id"] == creator.user_id
+    } == {
+        ("project_creator", "inactive"),
+        ("screenwriter", "inactive"),
+    }
+    assert any(
+        member["user_id"] == victim_user["id"]
+        and member["project_role"] == "screenwriter"
+        and member["status"] == "active"
+        for member in members_after_deactivation
+    )
+    assert creative.get_project(int(project_id))["created_by"] == created_by
+
+    app.dependency_overrides[creative_api_principal] = lambda: creator
+    app.dependency_overrides[current_principal] = lambda: creator
+    assert client.patch(
+        f"/api/creative/projects/{project_id}",
+        json={"name": "停用后不得修改"},
+    ).status_code == 403
+    assert creative.get_project(int(project_id))["created_by"] == created_by

@@ -9,7 +9,10 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import os
+from threading import Event
 import uuid
 
 from alembic import command
@@ -85,6 +88,77 @@ def test_project_creator_can_edit_but_cannot_manage_members(
     assert workflow.is_active_project_member(project_id, creator)
     with pytest.raises(PermissionError):
         workflow.assert_can_manage_project(project_id, creator)
+
+
+def test_ensure_project_creator_cannot_revive_concurrently_deactivated_membership(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    database, identity = _postgres_identity(monkeypatch)
+    project_id = f"creator-interleave-{uuid.uuid4().hex}"
+    owner_user = _role_user(identity, "project_owner", "并发停用负责人")
+    creator_user = _role_user(identity, "screenwriter", "并发创建负责人")
+    permissions = PermissionService(identity, SessionService(identity))
+    owner = permissions.principal_for_user(owner_user["id"], "owner-session")
+    creator = permissions.principal_for_user(
+        creator_user["id"], "creator-session"
+    )
+    assert owner is not None and creator is not None
+    transaction_committed = Event()
+    allow_ensure_to_return = Event()
+
+    class InterleavingIdentityRepository:
+        """Pause the ensure request after its first real transaction commits."""
+
+        def __init__(self, repository: IdentityRepository) -> None:
+            self.repository = repository
+            self.paused = False
+
+        def __getattr__(self, name: str):
+            return getattr(self.repository, name)
+
+        @contextmanager
+        def transaction(self):
+            with self.repository.transaction() as connection:
+                yield connection
+            if not self.paused:
+                self.paused = True
+                transaction_committed.set()
+                assert allow_ensure_to_return.wait(timeout=5)
+
+    workflow = WorkflowRepository(identity)
+    interleaved_workflow = WorkflowRepository(
+        InterleavingIdentityRepository(identity)
+    )
+
+    def cleanup() -> None:
+        allow_ensure_to_return.set()
+        workflow.delete_project_data(project_id)
+        for user in (owner_user, creator_user):
+            if identity.get_user(user["id"]) is not None:
+                identity.soft_delete_user(user["id"])
+        database.dispose()
+
+    request.addfinalizer(cleanup)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            interleaved_workflow.ensure_project_creator,
+            project_id,
+            creator.user_id,
+            creator,
+        )
+        assert transaction_committed.wait(timeout=5)
+        active = workflow.add_project_member(
+            project_id, creator.user_id, "project_creator", owner
+        )
+        workflow.remove_project_member(project_id, active["id"], owner)
+        allow_ensure_to_return.set()
+        assert future.result(timeout=5) is not None
+
+    assert [
+        (member["project_role"], member["status"])
+        for member in workflow.list_project_members(project_id)
+    ] == [("project_creator", "inactive")]
 
 
 def test_project_member_editor_lists_candidates_and_member_identity(

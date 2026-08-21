@@ -186,6 +186,8 @@ def test_original_create_api_is_idempotent_and_bootstraps_empty_topic_tasks(
         "brief", "characters", "outline", "beats", "script",
     }
     assert all(task["topic_id"] is None for task in tasks)
+    members = client.workflow.list_project_members(str(first_project["id"]))
+    assert [item["project_role"] for item in members] == ["project_creator"]
 
 
 def test_concurrent_original_create_reports_one_create_and_one_reuse(

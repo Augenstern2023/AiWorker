@@ -210,6 +210,8 @@ def creative_api_authorization(
             permissions = ("project.member.manage",)
         elif path == "/projects/original":
             permissions = ("project.create",)
+        elif method == "DELETE" and re.fullmatch(r"/projects/\d+", path):
+            permissions = ("project.delete",)
         elif method == "POST" and established_writing_ensure_resource(path):
             permissions = (ESTABLISHED_WRITING_PERMISSION,)
         elif method == "GET":

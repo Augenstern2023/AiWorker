@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 import time
 from typing import Any
 
@@ -203,12 +204,17 @@ def test_steps_run_in_order_only_after_dependencies_succeed_and_retry_preserves_
     store.fail_action(action["id"], code="GENERATION_FAILED", message="failed", retryable=True)
 
     retry = store.create_retry_action(
-        store.require_retryable_action(action["id"], "writer-1"), "writer-1"
+        store.require_retryable_action(action["id"], "writer-1"),
+        "writer-1",
+        retry_request_id="retry-step-action",
     )
     copied = store.list_steps(retry["id"])
     assert [step["step_key"] for step in copied] == ["script:2"]
     assert copied[0]["operation_id"] == "operation-2"
     assert copied[0]["step_order"] == 3
+    assert [
+        step["step_key"] for step in store.list_runnable_steps(retry["id"])
+    ] == ["script:2"]
 
 
 def test_retry_copies_only_failed_or_unstarted_steps(tmp_path: Path) -> None:
@@ -224,7 +230,9 @@ def test_retry_copies_only_failed_or_unstarted_steps(tmp_path: Path) -> None:
     store.fail_action(action["id"], code="GENERATION_FAILED", message="failed", retryable=True)
 
     retry = store.create_retry_action(
-        store.require_retryable_action(action["id"], "writer-1"), "writer-1"
+        store.require_retryable_action(action["id"], "writer-1"),
+        "writer-1",
+        retry_request_id="retry-selected-states",
     )
 
     assert [step["step_key"] for step in store.list_steps(retry["id"])] == ["failed", "pending"]
@@ -265,3 +273,97 @@ def test_upsert_step_persists_job_assignment_without_changing_operation_id(tmp_p
 
     assert updated["job_id"] == "job-1"
     assert updated["operation_id"] == "operation-1"
+
+
+def test_missing_dependency_is_not_treated_as_succeeded(tmp_path: Path) -> None:
+    store = WriterAgentStore(tmp_path / "writer-agent.db")
+    action = seed_run_plan(store, key="missing-dependency", project_id=17, episodes=(1, 1))
+    store.upsert_step(
+        action_id=action["id"], step_key="script:1", stage="script",
+        episode_start=1, episode_end=1, status="pending", operation_id="operation-1",
+        depends_on=["outline:1"], attempt=1, step_order=1,
+    )
+
+    assert store.list_runnable_steps(action["id"]) == []
+
+
+def test_upsert_step_rejects_a_conflicting_plan_replay(tmp_path: Path) -> None:
+    store = WriterAgentStore(tmp_path / "writer-agent.db")
+    action = seed_run_plan(store, key="step-conflict", project_id=17, episodes=(1, 1))
+    store.upsert_step(
+        action_id=action["id"], step_key="script:1", stage="script",
+        episode_start=1, episode_end=1, status="pending", operation_id="operation-1",
+        depends_on=[], attempt=1, step_order=1,
+    )
+
+    with pytest.raises(WriterActionError, match="IDEMPOTENCY_KEY_REUSED"):
+        store.upsert_step(
+            action_id=action["id"], step_key="script:1", stage="script",
+            episode_start=1, episode_end=2, status="pending", operation_id="operation-1",
+            depends_on=["outline:1"], attempt=1, step_order=9,
+        )
+
+
+def _failed_action_with_two_steps(store: WriterAgentStore, *, key: str) -> dict[str, Any]:
+    action = seed_run_plan(store, key=key, project_id=17, episodes=(1, 2))
+    store.claim_pending_action(action["id"], expected_revision=1)
+    for episode in (1, 2):
+        store.upsert_step(
+            action_id=action["id"], step_key=f"script:{episode}", stage="script",
+            episode_start=episode, episode_end=episode, status="failed",
+            operation_id=f"operation-{episode}", depends_on=[], attempt=1,
+            step_order=episode,
+        )
+    return store.fail_action(
+        action["id"], code="GENERATION_FAILED", message="failed", retryable=True
+    )
+
+
+def test_retry_request_replay_returns_one_complete_retry_action(tmp_path: Path) -> None:
+    store = WriterAgentStore(tmp_path / "writer-agent.db")
+    source = _failed_action_with_two_steps(store, key="retry-replay")
+
+    first = store.create_retry_action(
+        source, "writer-1", retry_request_id="client-retry-1"
+    )
+    second = store.create_retry_action(
+        source, "writer-1", retry_request_id="client-retry-1"
+    )
+
+    assert second["id"] == first["id"]
+    assert second["retry_of_action_id"] == source["id"]
+    assert [step["step_key"] for step in store.list_steps(first["id"])] == [
+        "script:1", "script:2"
+    ]
+    assert len(store.list_session_actions(int(source["session_id"]))) == 2
+
+
+def test_retry_action_and_all_steps_roll_back_together(tmp_path: Path) -> None:
+    store = WriterAgentStore(tmp_path / "writer-agent.db")
+    source = _failed_action_with_two_steps(store, key="retry-atomic")
+    with store._connect() as connection:
+        connection.execute(
+            "CREATE TRIGGER abort_retry_second_step BEFORE INSERT ON "
+            "writer_agent_action_steps WHEN NEW.step_key = 'script:2' "
+            "BEGIN SELECT RAISE(ABORT, 'simulated crash'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="simulated crash"):
+        store.create_retry_action(
+            source, "writer-1", retry_request_id="client-retry-crash"
+        )
+
+    assert [item["id"] for item in store.list_session_actions(int(source["session_id"]))] == [
+        source["id"]
+    ]
+
+
+def test_snapshot_id_replay_rejects_different_content(tmp_path: Path) -> None:
+    store = WriterAgentStore(tmp_path / "writer-agent.db")
+    first = store.save_source_snapshot({"version": 1}, snapshot_id="snapshot-1")
+
+    assert store.save_source_snapshot(
+        {"version": 1}, snapshot_id="snapshot-1"
+    )["id"] == first["id"]
+    with pytest.raises(WriterActionError, match="IDEMPOTENCY_KEY_REUSED"):
+        store.save_source_snapshot({"version": 2}, snapshot_id="snapshot-1")

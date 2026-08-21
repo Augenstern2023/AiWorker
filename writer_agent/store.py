@@ -481,15 +481,45 @@ class WriterAgentStore:
 
     def upsert_step(self, *, action_id: str, step_key: str, stage: str, episode_start: int | None, episode_end: int | None, status: str, operation_id: str, depends_on: list[str], attempt: int, step_order: int, job_id: str | None = None) -> dict[str, Any]:
         now = time.time()
+        normalized_dependencies = sorted({str(key) for key in depends_on})
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._require_action_conn(conn, action_id)
             existing = conn.execute("SELECT * FROM writer_agent_action_steps WHERE action_id=? AND step_key=?", (action_id, step_key)).fetchone()
             if existing:
-                if existing["operation_id"] != operation_id:
-                    raise WriterActionError("IDEMPOTENCY_KEY_REUSED", "步骤键已用于不同 operation_id")
+                existing_dependencies = sorted(
+                    {str(key) for key in _decode(existing["depends_on_json"], [])}
+                )
+                existing_plan = (
+                    str(existing["operation_id"]),
+                    str(existing["stage"]),
+                    existing["episode_start"],
+                    existing["episode_end"],
+                    existing_dependencies,
+                    int(existing["attempt"]),
+                    int(existing["step_order"]),
+                )
+                requested_plan = (
+                    operation_id,
+                    stage,
+                    episode_start,
+                    episode_end,
+                    normalized_dependencies,
+                    int(attempt),
+                    int(step_order),
+                )
+                if existing_plan != requested_plan or (
+                    job_id is not None
+                    and existing["job_id"] is not None
+                    and str(existing["job_id"]) != job_id
+                ):
+                    raise WriterActionError(
+                        "IDEMPOTENCY_KEY_REUSED", "步骤键已用于不同执行计划"
+                    )
+                if job_id is None or existing["job_id"] == job_id:
+                    return self._step_row(existing)
                 changed = conn.execute(
-                    "UPDATE writer_agent_action_steps SET job_id=COALESCE(?, job_id), revision=?, updated_at=? WHERE action_id=? AND step_key=? AND status=? AND revision=?",
+                    "UPDATE writer_agent_action_steps SET job_id=?, revision=?, updated_at=? WHERE action_id=? AND step_key=? AND status=? AND revision=?",
                     (job_id, int(existing["revision"]) + 1, now, action_id, step_key, existing["status"], int(existing["revision"])),
                 ).rowcount
                 if changed != 1:
@@ -498,15 +528,50 @@ class WriterAgentStore:
                 return self._step_row(row)
             conn.execute(
                 "INSERT INTO writer_agent_action_steps (action_id,step_key,stage,episode_start,episode_end,status,operation_id,job_id,depends_on_json,attempt,step_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (action_id, step_key, stage, episode_start, episode_end, status, operation_id, job_id, _json(depends_on), attempt, step_order, now, now),
+                (action_id, step_key, stage, episode_start, episode_end, status, operation_id, job_id, _json(normalized_dependencies), attempt, step_order, now, now),
             )
             row = conn.execute("SELECT * FROM writer_agent_action_steps WHERE action_id=? AND step_key=?", (action_id, step_key)).fetchone()
         return self._step_row(row)
 
     def list_runnable_steps(self, action_id: str) -> list[dict[str, Any]]:
-        steps = self.list_steps(action_id)
+        with self._connect() as conn:
+            action = self._require_action_conn(conn, action_id)
+            rows = conn.execute(
+                "SELECT * FROM writer_agent_action_steps WHERE action_id=? "
+                "ORDER BY step_order, id",
+                (action_id,),
+            ).fetchall()
+            inherited_states: dict[str, str] = {}
+            ancestor_id = action["retry_of_action_id"]
+            visited: set[str] = set()
+            while ancestor_id and str(ancestor_id) not in visited:
+                ancestor_key = str(ancestor_id)
+                visited.add(ancestor_key)
+                ancestor_steps = conn.execute(
+                    "SELECT step_key,status FROM writer_agent_action_steps "
+                    "WHERE action_id=?",
+                    (ancestor_key,),
+                ).fetchall()
+                for ancestor_step in ancestor_steps:
+                    inherited_states.setdefault(
+                        str(ancestor_step["step_key"]), str(ancestor_step["status"])
+                    )
+                ancestor = conn.execute(
+                    "SELECT retry_of_action_id FROM writer_agent_actions WHERE id=?",
+                    (ancestor_key,),
+                ).fetchone()
+                ancestor_id = ancestor["retry_of_action_id"] if ancestor else None
+        steps = [self._step_row(row) for row in rows]
         states = {step["step_key"]: step["status"] for step in steps}
-        return [step for step in steps if step["status"] == "pending" and all(states.get(key, "succeeded") == "succeeded" for key in step["depends_on"])]
+        return [
+            step
+            for step in steps
+            if step["status"] == "pending"
+            and all(
+                states.get(key, inherited_states.get(key)) == "succeeded"
+                for key in step["depends_on"]
+            )
+        ]
 
     def _transition_step(self, action_id: str, step_key: str, *, status: str, allowed: set[str], **updates: Any) -> dict[str, Any]:
         with self._connect() as conn:
@@ -557,42 +622,110 @@ class WriterAgentStore:
             raise WriterActionError("ACTION_STATE_INVALID", "该动作不可重试")
         return action
 
-    def create_retry_action(self, source: dict[str, Any], actor_user_id: str) -> dict[str, Any]:
-        if source["actor_user_id"] != actor_user_id:
-            raise WriterActionError("PROJECT_ACCESS_DENIED", "无权重试该动作")
-        retry_key = f"retry:{source['id']}:{uuid.uuid4().hex}"
-        retry = self.create_action(
-            session_id=int(source["session_id"]), actor_user_id=actor_user_id,
-            action_type=str(source["action_type"]), project_id=source.get("project_id"),
-            idempotency_key=retry_key, request_hash=str(source["request_hash"]),
-            payload=dict(source["payload"]), expected_context=dict(source["expected_context"]),
-            source_snapshot_id=source.get("source_snapshot_id"),
-        )
+    def create_retry_action(
+        self,
+        source: dict[str, Any],
+        actor_user_id: str,
+        *,
+        retry_request_id: str,
+    ) -> dict[str, Any]:
+        retry_request_id = retry_request_id.strip()
+        if not retry_request_id:
+            raise WriterActionError(
+                "RESULT_VALIDATION_FAILED", "重试请求必须提供稳定请求 ID"
+            )
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = self._require_action_conn(conn, retry["id"])
-            changed = conn.execute(
-                "UPDATE writer_agent_actions SET retry_of_action_id=?, root_action_id=?, revision=?, updated_at=? WHERE id=? AND status=? AND revision=?",
-                (source["id"], source.get("root_action_id") or source["id"], int(row["revision"]) + 1, time.time(), retry["id"], "pending", int(row["revision"])),
-            ).rowcount
-            if changed != 1:
-                raise WriterActionError("ACTION_REVISION_MISMATCH", "动作版本已变化")
-        for step in self.list_steps(source["id"]):
-            if step["status"] not in {"failed", "pending", "blocked"}:
-                continue
-            self.upsert_step(
-                action_id=retry["id"], step_key=step["step_key"], stage=step["stage"],
-                episode_start=step["episode_start"], episode_end=step["episode_end"], status="pending",
-                operation_id=step["operation_id"], depends_on=step["depends_on"], attempt=int(step["attempt"]) + 1,
-                step_order=int(step["step_order"]), job_id=None,
+            current = self._require_action_conn(conn, str(source["id"]), actor_user_id)
+            if current["status"] != "failed" or not bool(current["retryable"]):
+                raise WriterActionError("ACTION_STATE_INVALID", "该动作不可重试")
+            retry_key = f"retry:{current['id']}:{retry_request_id}"
+            existing = conn.execute(
+                "SELECT * FROM writer_agent_actions WHERE actor_user_id=? "
+                "AND idempotency_key=?",
+                (actor_user_id, retry_key),
+            ).fetchone()
+            if existing:
+                if (
+                    existing["request_hash"] != current["request_hash"]
+                    or existing["retry_of_action_id"] != current["id"]
+                ):
+                    raise WriterActionError(
+                        "IDEMPOTENCY_KEY_REUSED", "重试幂等键已用于不同动作"
+                    )
+                return self._action_row(existing)
+            now = time.time()
+            action_id = f"action-{uuid.uuid4().hex}"
+            conn.execute(
+                "INSERT INTO writer_agent_actions "
+                "(id,session_id,actor_user_id,action_type,status,revision,project_id,"
+                "target_key,idempotency_key,request_hash,source_snapshot_id,"
+                "expected_context_json,payload_json,retry_of_action_id,root_action_id,"
+                "created_at,updated_at) VALUES (?,?,?,?, 'pending',1,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    action_id,
+                    current["session_id"],
+                    actor_user_id,
+                    current["action_type"],
+                    current["project_id"],
+                    current["target_key"],
+                    retry_key,
+                    current["request_hash"],
+                    current["source_snapshot_id"],
+                    current["expected_context_json"],
+                    current["payload_json"],
+                    current["id"],
+                    current["root_action_id"] or current["id"],
+                    now,
+                    now,
+                ),
             )
-        return self.require_action(retry["id"], actor_user_id)
+            source_steps = conn.execute(
+                "SELECT * FROM writer_agent_action_steps WHERE action_id=? "
+                "ORDER BY step_order, id",
+                (current["id"],),
+            ).fetchall()
+            for step in source_steps:
+                if step["status"] not in {"failed", "pending", "blocked"}:
+                    continue
+                conn.execute(
+                    "INSERT INTO writer_agent_action_steps "
+                    "(action_id,step_key,stage,episode_start,episode_end,status,"
+                    "operation_id,job_id,depends_on_json,attempt,step_order,created_at,"
+                    "updated_at) VALUES (?,?,?,?,?,'pending',?,NULL,?,?,?,?,?)",
+                    (
+                        action_id,
+                        step["step_key"],
+                        step["stage"],
+                        step["episode_start"],
+                        step["episode_end"],
+                        step["operation_id"],
+                        step["depends_on_json"],
+                        int(step["attempt"]) + 1,
+                        int(step["step_order"]),
+                        now,
+                        now,
+                    ),
+                )
+            retry = self._require_action_conn(conn, action_id, actor_user_id)
+        return self._action_row(retry)
 
     def save_source_snapshot(self, snapshot: dict[str, Any], *, snapshot_id: str | None = None) -> dict[str, Any]:
         encoded = _json(snapshot)
         fingerprint = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if snapshot_id is not None:
+                identified = conn.execute(
+                    "SELECT * FROM writer_agent_source_snapshots WHERE id=?",
+                    (snapshot_id,),
+                ).fetchone()
+                if identified:
+                    if identified["fingerprint"] != fingerprint:
+                        raise WriterActionError(
+                            "IDEMPOTENCY_KEY_REUSED", "材料快照 ID 已用于不同内容"
+                        )
+                    return {"id": identified["id"], "fingerprint": identified["fingerprint"], "snapshot": _decode(identified["snapshot_json"], {}), "created_at": identified["created_at"]}
             existing = conn.execute("SELECT * FROM writer_agent_source_snapshots WHERE fingerprint=?", (fingerprint,)).fetchone()
             if existing:
                 return {"id": existing["id"], "fingerprint": existing["fingerprint"], "snapshot": _decode(existing["snapshot_json"], {}), "created_at": existing["created_at"]}

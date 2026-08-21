@@ -46,13 +46,16 @@ def _pdf_with_text(text: str) -> bytes:
     return output.getvalue()
 
 
-def _principal(user_id: str = "writer-1") -> Principal:
+def _principal(
+    user_id: str = "writer-1",
+    permissions: frozenset[str] = frozenset({"script.review.generate"}),
+) -> Principal:
     return Principal(
         user_id=user_id,
         username=user_id,
         display_name="编剧",
         role_codes=("screenwriter",),
-        permissions=frozenset({"script.review.generate"}),
+        permissions=permissions,
         data_scope="project",
         session_id=f"session-{user_id}",
     )
@@ -118,10 +121,70 @@ class UnsafeCreativeProvider:
         }
 
 
-def _client(tmp_path, user_id: str = "writer-1") -> TestClient:
+class LockedBriefOverwriteProvider:
+    def __init__(self) -> None:
+        self.messages = []
+
+    async def complete_json(self, messages):
+        self.messages = messages
+        return {
+            "reply": "已尝试替换已锁定方向。",
+            "cards": [{
+                "card_id": "brief-replacement",
+                "card_type": "brief",
+                "content": {"title": "新方向"},
+                "assumptions": [],
+            }],
+            "proposed_actions": [{
+                "action_type": "creative.run_plan",
+                "title": "重新生成 Brief",
+                "source_card_id": "brief-replacement",
+                "target_stage": "brief",
+                "payload": {},
+                "assumptions": [],
+            }],
+        }
+
+
+class WrongInspirationCardProvider:
+    def __init__(self) -> None:
+        self.messages = []
+
+    async def complete_json(self, messages):
+        self.messages = messages
+        return {
+            "reply": "这是一个单一方向。",
+            "cards": [{
+                "card_id": "brief-too-early",
+                "card_type": "brief",
+                "content": {"title": "谎言听证人"},
+                "assumptions": [],
+            }],
+            "proposed_actions": [{
+                "action_type": "project.create_original",
+                "title": "创建项目",
+                "source_card_id": "brief-too-early",
+                "payload": {},
+                "assumptions": [],
+            }],
+        }
+
+
+def _client(
+    tmp_path,
+    user_id: str = "writer-1",
+    *,
+    creative_repository=None,
+    permissions: frozenset[str] = frozenset({"script.review.generate"}),
+) -> TestClient:
     app = FastAPI()
-    app.dependency_overrides[current_principal] = lambda: _principal(user_id)
-    app.include_router(writer_agent_api.build_writer_agent_router(tmp_path))
+    app.dependency_overrides[current_principal] = lambda: _principal(
+        user_id, permissions
+    )
+    app.include_router(writer_agent_api.build_writer_agent_router(
+        tmp_path,
+        creative_repository=creative_repository,
+    ))
     return TestClient(app)
 
 
@@ -285,6 +348,170 @@ def test_writer_agent_downgrades_unsafe_model_action_to_text(tmp_path, monkeypat
 
     assert response.status_code == 200
     assert response.json()["messages"][-1]["content"] == "我不能执行删除，但可以继续讨论。"
+    assert response.json()["actions"] == []
+
+
+def test_chat_uses_server_project_authority_and_blocks_locked_brief_overwrite(
+    tmp_path, monkeypatch
+) -> None:
+    repository = writer_agent_api.CreativeRepository(tmp_path / "creative.db")
+    project = repository.create_original_project(
+        seed_text="一家用情绪考核员工的公司",
+        name="情绪公司",
+        target_episode_count=12,
+        created_by="writer-1",
+        creation_request_id="locked-context",
+    )
+    locked_brief = repository.create_blueprints(
+        project["id"],
+        [{"content": {"title": "情绪公司", "protagonist": "林岚"}}],
+        direction_type="original",
+    )[0]
+    locked_brief = repository.lock_brief(locked_brief["id"])
+    provider = LockedBriefOverwriteProvider()
+    monkeypatch.setattr(writer_agent_api, "create_provider", lambda: provider)
+    client = _client(tmp_path, creative_repository=repository)
+    created = client.post(
+        "/api/writer-agent/sessions",
+        json={"content": "继续完善当前项目。"},
+    ).json()
+    writer_agent_api.WriterAgentStore(
+        tmp_path / "writer_agent" / "writer_agent.db"
+    ).bind_project(created["id"], project["id"], expected_context_revision=0)
+
+    response = client.post(
+        f"/api/writer-agent/sessions/{created['id']}/messages",
+        json={"message": "重做一个方向"},
+    )
+
+    assert response.status_code == 200
+    request_payload = json.loads(provider.messages[-1]["content"])
+    authority = request_payload["项目权威上下文"]
+    assert authority["revision"] == locked_brief["revision"]
+    assert authority["locked_brief"] == {
+        "id": locked_brief["id"],
+        "version": locked_brief["version"],
+        "content": locked_brief["content"],
+    }
+    assert response.json()["messages"][-1].get("cards", []) == []
+    assert response.json()["actions"] == []
+
+
+def test_chat_records_an_authorized_optional_reference_in_the_action_snapshot(
+    tmp_path, monkeypatch
+) -> None:
+    repository = writer_agent_api.CreativeRepository(tmp_path / "creative.db")
+    topic = repository.upsert_topics([{
+        "platform": "dy",
+        "job_id": "rank-1",
+        "source_path": "rank.json",
+        "captured_at": "2026-08-21T08:00:00+08:00",
+        "title": "职场榜单",
+        "description": "职场题材热度上升",
+        "category": "职场",
+        "score": 88,
+        "confidence": "high",
+        "score_details": {},
+        "recommendation": "观察市场情绪",
+        "evidence": [],
+    }])[0]
+    monkeypatch.setattr(writer_agent_api, "create_provider", lambda: CreativeProvider())
+    client = _client(
+        tmp_path,
+        creative_repository=repository,
+        permissions=frozenset({"script.review.generate", "topic.read"}),
+    )
+    created = client.post(
+        "/api/writer-agent/sessions",
+        json={"content": "婚礼上的职场反击。"},
+    ).json()
+
+    response = client.post(
+        f"/api/writer-agent/sessions/{created['id']}/messages",
+        json={
+            "message": "生成大纲",
+            "reference_refs": [{
+                "resource_type": "topic",
+                "resource_id": topic["id"],
+            }],
+        },
+    )
+
+    assert response.status_code == 200
+    action = response.json()["actions"][0]
+    snapshot = writer_agent_api.WriterAgentStore(
+        tmp_path / "writer_agent" / "writer_agent.db"
+    ).require_source_snapshot(action["source_snapshot_id"])["snapshot"]
+    assert snapshot["references"] == [{
+        "resource_type": "topic",
+        "resource_id": topic["id"],
+        "name": "职场榜单",
+        "version": 1,
+        "readable": True,
+    }]
+
+
+def test_chat_rejects_an_optional_reference_without_read_permission(
+    tmp_path, monkeypatch
+) -> None:
+    repository = writer_agent_api.CreativeRepository(tmp_path / "creative.db")
+    topic = repository.upsert_topics([{
+        "platform": "dy",
+        "job_id": "rank-2",
+        "source_path": "rank.json",
+        "captured_at": "2026-08-21T08:00:00+08:00",
+        "title": "无权榜单",
+        "description": "",
+        "category": "职场",
+        "score": 80,
+        "confidence": "high",
+        "score_details": {},
+        "recommendation": "",
+        "evidence": [],
+    }])[0]
+    monkeypatch.setattr(writer_agent_api, "create_provider", lambda: CreativeProvider())
+    client = _client(tmp_path, creative_repository=repository)
+    created = client.post(
+        "/api/writer-agent/sessions", json={"content": "一句创作材料。"}
+    ).json()
+
+    response = client.post(
+        f"/api/writer-agent/sessions/{created['id']}/messages",
+        json={
+            "message": "生成大纲",
+            "reference_refs": [{
+                "resource_type": "topic",
+                "resource_id": topic["id"],
+            }],
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def test_one_line_inspiration_requires_a_three_to_five_direction_card(
+    tmp_path, monkeypatch
+) -> None:
+    provider = WrongInspirationCardProvider()
+    monkeypatch.setattr(writer_agent_api, "create_provider", lambda: provider)
+    client = _client(tmp_path)
+    created = client.post(
+        "/api/writer-agent/sessions",
+        json={"content": "一个能听见谎言的女孩被迫为权贵作证。"},
+    ).json()
+
+    response = client.post(
+        f"/api/writer-agent/sessions/{created['id']}/messages",
+        json={"message": "请基于这句灵感给我几个创作方向"},
+    )
+
+    assert response.status_code == 200
+    request_payload = json.loads(provider.messages[-1]["content"])
+    assert request_payload["输出要求"] == {
+        "card_type": "directions",
+        "direction_count": {"min": 3, "max": 5},
+    }
+    assert response.json()["messages"][-1].get("cards", []) == []
     assert response.json()["actions"] == []
 
 

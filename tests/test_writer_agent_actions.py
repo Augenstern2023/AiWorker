@@ -63,6 +63,21 @@ def test_model_cannot_propose_an_unknown_or_trusted_write_action() -> None:
         })
 
 
+def test_model_cannot_nest_server_trusted_fields_in_action_payload() -> None:
+    with pytest.raises(ValidationError):
+        ProposedAction.model_validate({
+            "action_type": "creative.run_plan",
+            "title": "生成大纲",
+            "target_stage": "outline",
+            "payload": {
+                "plan": {
+                    "steps": [{"actor": "model-controlled"}],
+                    "permissions": ["*"],
+                },
+            },
+        })
+
+
 def test_confirmation_requires_one_matching_pending_action() -> None:
     actions = [
         pending_action("a", "creative.run_plan", target_stage="outline"),
@@ -76,11 +91,22 @@ def test_confirmation_requires_one_matching_pending_action() -> None:
 
 def test_confirmation_with_new_constraint_requires_revision() -> None:
     decision = match_natural_language_decision(
-        "确认生成大纲，但人物关系改成师徒对立", 
+        "确认生成大纲，但人物关系改成师徒对立",
         [pending_action("a", "creative.run_plan", target_stage="outline")],
     )
 
     assert decision.action_id == "a"
+    assert decision.revision_required is True
+
+
+def test_confirmation_with_a_negative_constraint_is_not_a_cancellation() -> None:
+    decision = match_natural_language_decision(
+        "确认生成大纲，但不要虐主",
+        [pending_action("a", "creative.run_plan", target_stage="outline")],
+    )
+
+    assert decision.action_id == "a"
+    assert decision.decision == "confirm"
     assert decision.revision_required is True
 
 

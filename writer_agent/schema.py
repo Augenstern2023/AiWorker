@@ -18,6 +18,33 @@ ActionType = Literal[
     "project.create_original", "project.link", "creative.run_plan", "creative.lock"
 ]
 Stage = Literal["brief", "characters", "outline", "beats", "script"]
+_SERVER_TRUSTED_PAYLOAD_FIELDS = frozenset({
+    "actor",
+    "actor_user_id",
+    "expected_context",
+    "idempotency_key",
+    "permission",
+    "permission_result",
+    "permissions",
+    "principal",
+    "request_hash",
+    "revision",
+    "source_snapshot_id",
+    "status",
+    "target_key",
+})
+
+
+def _payload_contains_server_trusted_field(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(
+            str(key) in _SERVER_TRUSTED_PAYLOAD_FIELDS
+            or _payload_contains_server_trusted_field(nested)
+            for key, nested in value.items()
+        )
+    if isinstance(value, list):
+        return any(_payload_contains_server_trusted_field(item) for item in value)
+    return False
 
 
 class _WriterActionModel(BaseModel):
@@ -40,6 +67,8 @@ class ProposedAction(_WriterActionModel):
 
     @model_validator(mode="after")
     def validate_action_scope(self) -> "ProposedAction":
+        if _payload_contains_server_trusted_field(self.payload):
+            raise ValueError("动作负载不得包含服务端可信字段")
         if self.action_type == "project.create_original" and not (
             self.source_card_id or self.payload
         ):

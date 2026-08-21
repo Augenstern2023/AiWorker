@@ -25,19 +25,28 @@ import time
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import unquote
 
 import config
 from analysis.llm import create_llm_provider_from_config
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from creative.application_service import CreativeApplicationService
+from creative.market_reference_service import MarketReferenceService
 from creative.repository import CreativeRepository
 from identity.dependencies import current_principal
 from identity.schema import Principal
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
-from .action_service import parse_creative_cards, parse_proposed_actions, persist_proposed_actions
+from .action_service import (
+    build_project_authority_context,
+    parse_creative_cards,
+    parse_proposed_actions,
+    persist_proposed_actions,
+    requires_direction_card,
+    validate_direction_requirement,
+    validate_project_authority,
+)
 from .schema import WriterActionError
 from .service import build_writer_report_markdown, is_review_request, normalize_writer_report, writer_messages
 from .store import WriterAgentStore
@@ -56,9 +65,17 @@ class SessionCreateRequest(BaseModel):
     title: str = ""
 
 
+class ReferenceSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    resource_type: Literal["topic", "breakdown"]
+    resource_id: int = Field(ge=1)
+
+
 class ChatRequest(BaseModel):
     message: str
     display_user_message: bool = True
+    reference_refs: list[ReferenceSelection] = Field(default_factory=list, max_length=10)
 
 
 def create_provider() -> Any:
@@ -157,6 +174,9 @@ def build_writer_agent_router(
     creative_application_service: CreativeApplicationService | None = None,
 ) -> APIRouter:
     store = WriterAgentStore(Path(runtime_dir) / "writer_agent" / "writer_agent.db")
+    authority_repository = creative_repository or getattr(
+        creative_application_service, "repository", None
+    )
     router = APIRouter(prefix="/api/writer-agent", tags=["writer-agent"])
     router.creative_dependencies = SimpleNamespace(
         repository=creative_repository,
@@ -169,6 +189,68 @@ def build_writer_agent_router(
 
     def session_user_id(principal: Principal) -> str | None:
         return None if principal.is_system_admin else principal.user_id
+
+    def can_read_reference(
+        principal: Principal, resource_type: str, resource_id: int
+    ) -> bool:
+        del resource_id
+        if principal.is_system_admin:
+            return True
+        if resource_type == "topic":
+            return bool(
+                {"topic.read", "breakdown.read.approved", "brief.read.approved"}
+                & principal.permissions
+            )
+        return bool(
+            {"breakdown.read", "breakdown.read.approved"}
+            & principal.permissions
+        )
+
+    def resolve_references(
+        selected: list[ReferenceSelection], principal: Principal
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        if not selected:
+            return [], []
+        if authority_repository is None:
+            raise HTTPException(409, "可选参考服务不可用")
+        raw_refs = [item.model_dump(mode="json") for item in selected]
+        try:
+            bundle = MarketReferenceService(authority_repository).resolve(
+                raw_refs,
+                can_read=lambda resource_type, resource_id: can_read_reference(
+                    principal, resource_type, resource_id
+                ),
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+        audited_refs: list[dict[str, Any]] = []
+        for item in bundle.source_refs:
+            resource_type = str(item["resource_type"])
+            resource_id = int(item["resource_id"])
+            resource = (
+                authority_repository.get_topic(resource_id)
+                if resource_type == "topic"
+                else authority_repository.get_breakdown(resource_id)
+            )
+            assert resource is not None
+            if resource_type == "topic":
+                name = str(resource.get("title") or f"选题 #{resource_id}")
+                version = int(resource.get("version") or 1)
+            else:
+                content = resource.get("content") or {}
+                name = str(content.get("title") or f"拆解 #{resource_id}")
+                version = int(resource.get("version") or 1)
+            audited_refs.append({
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                "name": name,
+                "version": version,
+                "readable": True,
+            })
+        return bundle.context, audited_refs
 
     @router.get("/sessions")
     async def list_sessions(principal: Principal = Depends(current_principal)) -> dict[str, Any]:
@@ -234,8 +316,18 @@ def build_writer_agent_router(
         current_material = materials[-1]
         review_requested = is_review_request(message)
         material_catalog = [{"name": item["name"], "length": len(item["content"])} for item in materials]
-        project_context = ({"project_id": session["project_id"]}
-                           if session.get("project_id") is not None else {})
+        reference_context, reference_refs = resolve_references(
+            payload.reference_refs, principal
+        )
+        try:
+            project_context = build_project_authority_context(
+                authority_repository, session.get("project_id")
+            )
+        except WriterActionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        direction_required = requires_direction_card(
+            materials, message, project_context
+        )
         try:
             raw = await create_provider().complete_json(writer_messages(
                 current_material["content"], history, message,
@@ -244,6 +336,8 @@ def build_writer_agent_router(
                 material_catalog=material_catalog,
                 materials=materials,
                 project_context=project_context,
+                reference_context=reference_context,
+                direction_required=direction_required,
             ))
         except Exception as exc:
             raise HTTPException(503, f"编剧大师暂时无法响应：{exc}") from exc
@@ -254,14 +348,22 @@ def build_writer_agent_router(
         actions: list[dict[str, Any]] = []
         if not review_requested:
             try:
-                cards = [card.model_dump(mode="json") for card in parse_creative_cards(payload_data)]
+                card_models = parse_creative_cards(payload_data)
+                proposed_actions = parse_proposed_actions(payload_data)
+                validate_direction_requirement(card_models, direction_required)
+                validate_project_authority(
+                    card_models, proposed_actions, project_context
+                )
+                cards = [card.model_dump(mode="json") for card in card_models]
             except WriterActionError:
                 cards = []
-            card_ids = {card["card_id"] for card in cards}
-            proposed_actions = [
-                action for action in parse_proposed_actions(payload_data)
-                if action.source_card_id is None or action.source_card_id in card_ids
-            ]
+                proposed_actions = []
+            else:
+                card_ids = {card["card_id"] for card in cards}
+                proposed_actions = [
+                    action for action in proposed_actions
+                    if action.source_card_id is None or action.source_card_id in card_ids
+                ]
             actions = persist_proposed_actions(
                 store,
                 session_id=session_id,
@@ -273,6 +375,7 @@ def build_writer_agent_router(
                     {"role": "user", "content": message},
                 ],
                 project_context=project_context,
+                reference_refs=reference_refs,
             )
         history.extend([
             {

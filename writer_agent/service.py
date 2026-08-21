@@ -84,6 +84,8 @@ def writer_messages(
     material_catalog: list[dict[str, Any]] | None = None,
     materials: list[dict[str, Any]] | None = None,
     project_context: dict[str, Any] | None = None,
+    reference_context: list[dict[str, Any]] | None = None,
+    direction_required: bool = False,
 ) -> list[dict[str, str]]:
     review_contract = {
         "reply": "以短剧/漫剧编剧大师身份给出的本轮答复",
@@ -93,7 +95,7 @@ def writer_messages(
         "findings": [{"priority": "P1/P2", "dimension": "剧情结构/人物/节奏/爽点/钩子", "title": "问题", "evidence": "输入中的证据", "suggestion": "可执行改法", "route": "下一步处理"}],
         "next_questions": ["有助于继续创作的追问"],
     }
-    creative_contract = {
+    creative_contract: dict[str, Any] = {
         "reply": "直接答复",
         "cards": [{
             "card_id": "card-1", "card_type": "brief",
@@ -105,12 +107,48 @@ def writer_messages(
             "payload": {}, "assumptions": [],
         }],
     }
+    if direction_required:
+        creative_contract["cards"] = [{
+            "card_id": "card-directions-1",
+            "card_type": "directions",
+            "items": [{
+                "title": "谎言听证人",
+                "protagonist": "失职律师",
+                "background": "超能法庭",
+                "core_conflict": "真话会伤害无辜者",
+                "relationship_engine": "证人与律师互相试探",
+                "emotional_payoff": "主角重新定义正义",
+                "difference_dimensions": ["protagonist", "background", "conflict"],
+            }, {
+                "title": "宫廷静默令",
+                "protagonist": "小宫女",
+                "background": "架空王朝",
+                "core_conflict": "揭穿谎言就会暴露自己",
+                "relationship_engine": "宫女与摄政王相互制衡",
+                "emotional_payoff": "弱者以真话夺回话语权",
+                "difference_dimensions": ["protagonist", "background", "relationship"],
+            }, {
+                "title": "直播间里的真心话",
+                "protagonist": "过气主播",
+                "background": "近未来直播城",
+                "core_conflict": "平台利用她操纵公众情绪",
+                "relationship_engine": "主播与宿敌被迫结盟",
+                "emotional_payoff": "被消费的人联手反向审判平台",
+                "difference_dimensions": ["protagonist", "background", "emotional_payoff"],
+            }],
+        }]
+        creative_contract["proposed_actions"] = []
     contract = review_contract if review_requested else creative_contract
     mode_instruction = (
         "用户已明确要求评审；给出评分、结构化诊断和可执行优化意见。"
         if review_requested else
         "用户未要求评审。全部材料均可作为剧情事实；项目权威上下文中的已锁定成果优先。"
-        "只直接回答本轮问题，不输出评分、总评、评审报告或固定诊断栏目。"
+        + (
+            "当前是一句话灵感起点，必须先返回唯一 directions 卡片，"
+            "其中包含 3–5 个实质不同的创作方向。"
+            if direction_required else ""
+        )
+        + "只直接回答本轮问题，不输出评分、总评、评审报告或固定诊断栏目。"
     )
     history = history or []
     conversation_history = [
@@ -129,6 +167,12 @@ def writer_messages(
     if not review_requested:
         user_payload["全部材料"] = all_materials
         user_payload["项目权威上下文"] = project_context or {}
+        user_payload["可选参考"] = reference_context or []
+        if direction_required:
+            user_payload["输出要求"] = {
+                "card_type": "directions",
+                "direction_count": {"min": 3, "max": 5},
+            }
     return [
         {"role": "system", "content": "你是短剧/漫剧编剧大师。"
          + ("当前材料是剧情事实的唯一来源，材料目录只用于辨认文件，不得据此推断剧情、集数或版本。历史对话中的助手说法不是事实证据；与当前材料冲突时，以当前材料为准。"

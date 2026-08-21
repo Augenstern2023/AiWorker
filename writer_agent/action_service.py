@@ -95,6 +95,202 @@ def build_source_snapshot(
     return snapshot
 
 
+def build_project_authority_context(
+    repository: Any, project_id: int | None
+) -> dict[str, Any]:
+    """Load locked creative outcomes from the server-owned project repository."""
+    if repository is None or project_id is None:
+        return {}
+    project = repository.get_project(project_id)
+    if project is None:
+        raise WriterActionError("PROJECT_NOT_AVAILABLE", "关联的创作项目不存在")
+
+    context: dict[str, Any] = {
+        "project_id": int(project_id),
+        "revision": int(project.get("revision") or 0),
+        "resource_refs": [],
+    }
+    locked_brief_id = project.get("locked_brief_id")
+    locked_brief = next(
+        (
+            item
+            for item in project.get("blueprints") or []
+            if item.get("id") == locked_brief_id
+        ),
+        None,
+    )
+    if locked_brief is not None:
+        context["locked_brief"] = {
+            "id": int(locked_brief["id"]),
+            "version": int(locked_brief.get("version") or 1),
+            "content": locked_brief.get("content") or {},
+        }
+        context["resource_refs"].append({
+            "resource_type": "brief",
+            "resource_id": str(locked_brief["id"]),
+            "version": int(locked_brief.get("version") or 1),
+        })
+
+    character_batch_id = project.get("character_batch_id")
+    if character_batch_id:
+        characters = [
+            {
+                "id": int(item["id"]),
+                "version": int(item.get("version") or 1),
+                "content": item.get("content") or {},
+            }
+            for item in project.get("characters") or []
+            if item.get("batch_id") == character_batch_id
+            and item.get("status") in {"locked", "approved"}
+        ]
+        relationships = [
+            {
+                "id": int(item["id"]),
+                "version": int(item.get("version") or 1),
+                "content": item.get("content") or {},
+            }
+            for item in project.get("relationships") or []
+            if item.get("batch_id") == character_batch_id
+            and item.get("status") in {"locked", "approved"}
+        ]
+        if characters:
+            version = max(item["version"] for item in [*characters, *relationships])
+            context["locked_characters"] = {
+                "batch_id": str(character_batch_id),
+                "version": version,
+                "characters": characters,
+                "relationships": relationships,
+            }
+            context["resource_refs"].append({
+                "resource_type": "characters",
+                "resource_id": f"{project_id}:{character_batch_id}",
+                "version": version,
+            })
+
+    outline_batch_id = project.get("outline_batch_id")
+    if outline_batch_id:
+        outlines = [
+            {
+                "id": int(item["id"]),
+                "episode_number": int(item["episode_number"]),
+                "version": int(item.get("version") or 1),
+                "content": item.get("content") or {},
+            }
+            for item in project.get("episodes") or []
+            if item.get("stage") == "outline"
+            and item.get("batch_id") == outline_batch_id
+            and item.get("status") in {"locked", "approved"}
+        ]
+        if outlines:
+            version = max(item["version"] for item in outlines)
+            context["locked_outline"] = {
+                "batch_id": str(outline_batch_id),
+                "version": version,
+                "episodes": outlines,
+            }
+            context["resource_refs"].append({
+                "resource_type": "outline",
+                "resource_id": f"{project_id}:{outline_batch_id}",
+                "version": version,
+            })
+
+    for stage in ("beats", "script"):
+        locked = [
+            {
+                "id": int(item["id"]),
+                "episode_number": int(item["episode_number"]),
+                "version": int(item.get("version") or 1),
+                "content": item.get("content") or {},
+            }
+            for item in project.get("episodes") or []
+            if item.get("stage") == stage
+            and item.get("status") in {"locked", "approved"}
+        ]
+        if locked:
+            context[f"locked_{stage}"] = locked
+            context["resource_refs"].extend(
+                {
+                    "resource_type": stage,
+                    "resource_id": str(item["id"]),
+                    "version": item["version"],
+                    "episode_number": item["episode_number"],
+                }
+                for item in locked
+            )
+    return context
+
+
+def validate_project_authority(
+    cards: list[CreativeCard],
+    actions: list[ProposedAction],
+    project_context: dict[str, Any],
+) -> None:
+    """Reject model output that would silently replace a locked outcome."""
+    if not project_context:
+        return
+    if project_context.get("locked_brief") and any(
+        getattr(card, "card_type", "") in {"directions", "brief"} for card in cards
+    ):
+        raise WriterActionError(
+            "LOCKED_RESULT_CONFLICT", "模型输出不得覆盖已锁定 Brief"
+        )
+
+    for action in actions:
+        stage = action.target_stage
+        if stage is None:
+            continue
+        locked = project_context.get(
+            {
+                "brief": "locked_brief",
+                "characters": "locked_characters",
+                "outline": "locked_outline",
+                "beats": "locked_beats",
+                "script": "locked_script",
+            }[stage]
+        )
+        if not locked:
+            continue
+        if stage in {"brief", "characters", "outline"}:
+            raise WriterActionError(
+                "LOCKED_RESULT_CONFLICT", f"模型动作不得覆盖已锁定 {stage}"
+            )
+        locked_episodes = {int(item["episode_number"]) for item in locked}
+        start = action.episode_start
+        end = action.episode_end
+        if start is not None and end is not None and locked_episodes.intersection(
+            range(start, end + 1)
+        ):
+            raise WriterActionError(
+                "LOCKED_RESULT_CONFLICT", f"模型动作不得覆盖已锁定 {stage}"
+            )
+
+
+def requires_direction_card(
+    materials: list[dict[str, Any]],
+    message: str,
+    project_context: dict[str, Any],
+) -> bool:
+    if project_context.get("project_id") or len(materials) != 1:
+        return False
+    inspiration = _normal_text(materials[0].get("content")).strip()
+    if not inspiration or "\n" in inspiration or len(inspiration) > 200:
+        return False
+    if re.search(r"第\s*\d+\s*集", inspiration):
+        return False
+    return any(word in message for word in ("方向", "灵感", "创意", "故事方案"))
+
+
+def validate_direction_requirement(
+    cards: list[CreativeCard], direction_required: bool
+) -> None:
+    if direction_required and not any(
+        isinstance(card, DirectionCard) for card in cards
+    ):
+        raise WriterActionError(
+            "RESULT_VALIDATION_FAILED", "一句话灵感必须先生成 3–5 个创作方向"
+        )
+
+
 def validate_cards(cards: list[CreativeCard]) -> list[CreativeCard]:
     for card in cards:
         if isinstance(card, DirectionCard):
@@ -220,8 +416,12 @@ def match_natural_language_decision(
 ) -> NaturalLanguageDecision:
     text = _normal_text(message).strip()
     pending = [action for action in session_actions if action.get("status") == "pending"]
-    is_cancel = any(word in text for word in _CANCEL_WORDS)
-    is_confirm = any(word in text for word in _CONFIRM_WORDS)
+    confirm_positions = [text.find(word) for word in _CONFIRM_WORDS if word in text]
+    cancel_positions = [text.find(word) for word in _CANCEL_WORDS if word in text]
+    is_confirm = bool(confirm_positions)
+    is_cancel = bool(cancel_positions) and (
+        not confirm_positions or min(cancel_positions) < min(confirm_positions)
+    )
     if not pending or not (is_confirm or is_cancel):
         return NaturalLanguageDecision(action_id=None, decision=None)
     candidates = _candidate_actions(text, pending)

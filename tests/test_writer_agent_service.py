@@ -18,6 +18,7 @@
 
 import json
 
+from writer_agent.action_service import parse_creative_cards
 from writer_agent.service import build_writer_report_markdown, normalize_writer_report, writer_messages
 
 
@@ -99,3 +100,19 @@ def test_non_review_prompt_contains_all_materials_and_project_authority():
     payload = json.loads(messages[-1]["content"])
     assert [item["name"] for item in payload["全部材料"]] == ["旧剧本.md", "人物补充.txt"]
     assert payload["项目权威上下文"]["locked_brief"]["id"] == 9
+
+
+def test_one_line_inspiration_prompt_contract_contains_valid_distinct_directions():
+    messages = writer_messages(
+        materials=[{"name": "灵感.txt", "content": "一个能听见谎言的女孩。"}],
+        history=[],
+        user_message="给我几个创作方向",
+        review_requested=False,
+        direction_required=True,
+    )
+
+    contract = json.loads(messages[0]["content"].split("只返回 JSON：", 1)[1])
+    cards = parse_creative_cards(contract)
+
+    assert len(cards) == 1
+    assert len(cards[0].items) == 3

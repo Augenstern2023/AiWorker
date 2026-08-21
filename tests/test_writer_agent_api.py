@@ -179,6 +179,46 @@ class LockedBriefOverwriteProvider:
         }
 
 
+class MixedAuthorityProvider:
+    async def complete_json(self, messages):
+        return {
+            "reply": "保留合法的大纲动作。",
+            "cards": [
+                {
+                    "card_id": "invalid-brief",
+                    "card_type": "brief",
+                    "content": {"title": "非法覆盖"},
+                    "assumptions": [],
+                },
+                {
+                    "card_id": "valid-outline-plan",
+                    "card_type": "plan",
+                    "title": "生成分集大纲",
+                    "summary": "沿用已锁定 Brief 继续生成大纲",
+                    "steps": [{"stage": "outline"}],
+                },
+            ],
+            "proposed_actions": [
+                {
+                    "action_type": "creative.run_plan",
+                    "title": "非法重做 Brief",
+                    "source_card_id": "invalid-brief",
+                    "target_stage": "brief",
+                    "payload": {},
+                    "assumptions": [],
+                },
+                {
+                    "action_type": "creative.run_plan",
+                    "title": "生成分集大纲",
+                    "source_card_id": "valid-outline-plan",
+                    "target_stage": "outline",
+                    "payload": {},
+                    "assumptions": [],
+                },
+            ],
+        }
+
+
 class WrongInspirationCardProvider:
     def __init__(self) -> None:
         self.messages = []
@@ -1242,6 +1282,57 @@ def test_chat_uses_server_project_authority_and_blocks_locked_brief_overwrite(
     }
     assert response.json()["messages"][-1].get("cards", []) == []
     assert response.json()["actions"] == []
+
+
+def test_chat_keeps_unrelated_valid_output_when_one_action_conflicts_with_authority(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = writer_agent_api.CreativeRepository(tmp_path / "creative.db")
+    project = repository.create_original_project(
+        seed_text="保留合法模型输出",
+        name="混合动作项目",
+        target_episode_count=12,
+        created_by="writer-1",
+        creation_request_id="mixed-authority-output",
+    )
+    brief = repository.create_blueprints(
+        project["id"],
+        [{"content": {"title": "已锁定方向"}}],
+        direction_type="original",
+    )[0]
+    repository.lock_brief(brief["id"])
+    monkeypatch.setattr(
+        writer_agent_api, "create_provider", lambda: MixedAuthorityProvider()
+    )
+    readable_permissions = MagicMock()
+    readable_permissions.can_read_project.return_value = True
+    client = _client(
+        tmp_path,
+        creative_repository=repository,
+        permission_service=readable_permissions,
+    )
+    session = client.post(
+        "/api/writer-agent/sessions",
+        json={"content": "继续创作当前项目。"},
+    ).json()
+    writer_agent_api.WriterAgentStore(
+        tmp_path / "writer_agent" / "writer_agent.db"
+    ).bind_project(session["id"], project["id"], expected_context_revision=0)
+
+    response = client.post(
+        f"/api/writer-agent/sessions/{session['id']}/messages",
+        json={
+            "message": "沿用 Brief 生成大纲",
+            "client_message_id": "mixed-authority-message",
+        },
+    )
+
+    assert response.status_code == 200
+    assert [
+        card["card_id"] for card in response.json()["messages"][-1]["cards"]
+    ] == ["valid-outline-plan"]
+    assert len(response.json()["actions"]) == 1
+    assert response.json()["actions"][0]["payload"]["target_stage"] == "outline"
 
 
 def test_chat_rechecks_linked_project_read_access_before_calling_model(

@@ -551,6 +551,58 @@ def validate_project_authority(
         )
 
 
+def filter_project_authority_output(
+    cards: list[CreativeCard],
+    actions: list[ProposedAction],
+    project_context: dict[str, Any],
+) -> tuple[list[CreativeCard], list[ProposedAction]]:
+    """Remove only authority-invalid model items and their dependent cards."""
+
+    if not project_context:
+        return cards, actions
+
+    cards_by_id = {
+        str(card.card_id): card
+        for card in cards
+        if getattr(card, "card_id", None) is not None
+    }
+    referenced_card_ids = {
+        action.source_card_id
+        for action in actions
+        if action.source_card_id is not None
+    }
+    allowed_actions: list[ProposedAction] = []
+    allowed_source_ids: set[str] = set()
+    for action in actions:
+        source_card = cards_by_id.get(str(action.source_card_id or ""))
+        try:
+            validate_project_authority(
+                [source_card] if source_card is not None else [],
+                [action],
+                project_context,
+            )
+        except WriterActionError:
+            continue
+        allowed_actions.append(action)
+        if action.source_card_id is not None and source_card is not None:
+            allowed_source_ids.add(action.source_card_id)
+
+    allowed_cards: list[CreativeCard] = []
+    for card in cards:
+        card_id = str(card.card_id)
+        if card_id in allowed_source_ids:
+            allowed_cards.append(card)
+            continue
+        if card_id in referenced_card_ids:
+            continue
+        try:
+            validate_project_authority([card], [], project_context)
+        except WriterActionError:
+            continue
+        allowed_cards.append(card)
+    return allowed_cards, allowed_actions
+
+
 def requires_direction_card(
     materials: list[dict[str, Any]],
     message: str,

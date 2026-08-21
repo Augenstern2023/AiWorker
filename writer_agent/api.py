@@ -23,6 +23,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import threading
 import time
 from io import BytesIO
 from pathlib import Path
@@ -44,12 +45,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from .action_service import (
     ActionService,
     build_project_authority_context,
+    filter_project_authority_output,
     parse_creative_cards,
     parse_proposed_actions,
     persist_proposed_actions,
     requires_direction_card,
     validate_direction_requirement,
-    validate_project_authority,
     match_natural_language_decision,
 )
 from .schema import ActionCommand, ProposedAction, WriterActionError
@@ -63,6 +64,45 @@ _TEXT_UPLOAD_EXTENSIONS = frozenset({
 _DOCUMENT_UPLOAD_EXTENSIONS = frozenset({".docx", ".pdf"})
 _MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 _SUPPLEMENT_MARKER = re.compile(r"\n\n\[补充材料：(?P<name>[^\]]+)\]\n")
+_MESSAGE_CLAIM_LEASE_SECONDS = 30.0
+_MESSAGE_CLAIM_HEARTBEAT_SECONDS = 10.0
+
+
+def _start_message_claim_heartbeat(
+    store: WriterAgentStore,
+    session_id: int,
+    user_id: str,
+    message_id: str,
+    claim_token: str,
+) -> threading.Event:
+    """Renew a provider turn independently of the request event loop."""
+
+    interval = max(float(_MESSAGE_CLAIM_HEARTBEAT_SECONDS), 0.01)
+    stop = threading.Event()
+
+    def heartbeat() -> None:
+        while not stop.wait(interval):
+            try:
+                renewed = store.renew_client_message_claim(
+                    session_id,
+                    user_id,
+                    message_id,
+                    claim_token=claim_token,
+                )
+            except (OSError, sqlite3.Error):
+                return
+            if not renewed:
+                return
+
+    threading.Thread(
+        target=heartbeat,
+        name=f"writer-message-claim-{session_id}-{message_id}",
+        daemon=True,
+    ).start()
+    request_task = asyncio.current_task()
+    if request_task is not None:
+        request_task.add_done_callback(lambda _task: stop.set())
+    return stop
 
 
 class SessionCreateRequest(BaseModel):
@@ -540,12 +580,15 @@ def build_writer_agent_router(
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
+        claim_token = uuid4().hex
         try:
             claim_state = store.claim_client_message(
                 session_id,
                 principal.user_id,
                 message_id,
                 claim_hash,
+                claim_token=claim_token,
+                lease_seconds=_MESSAGE_CLAIM_LEASE_SECONDS,
             )
         except WriterActionError as exc:
             raise action_error(exc) from exc
@@ -567,6 +610,20 @@ def build_writer_agent_router(
                         409, "消息处理已中断，请使用相同消息 ID 重试"
                     )
             raise HTTPException(409, "相同消息仍在处理中")
+        if not store.renew_client_message_claim(
+            session_id,
+            principal.user_id,
+            message_id,
+            claim_token=claim_token,
+        ):
+            raise HTTPException(409, "消息处理租约已由其他请求接管")
+        heartbeat_stop = _start_message_claim_heartbeat(
+            store,
+            session_id,
+            principal.user_id,
+            message_id,
+            claim_token,
+        )
         try:
             raw = await create_provider().complete_json(writer_messages(
                 current_material["content"], history, message,
@@ -579,10 +636,22 @@ def build_writer_agent_router(
                 direction_required=direction_required,
             ))
         except Exception as exc:
+            heartbeat_stop.set()
             store.abandon_client_message(
-                session_id, principal.user_id, message_id
+                session_id,
+                principal.user_id,
+                message_id,
+                claim_token=claim_token,
             )
             raise HTTPException(503, f"编剧大师暂时无法响应：{exc}") from exc
+        if not store.renew_client_message_claim(
+            session_id,
+            principal.user_id,
+            message_id,
+            claim_token=claim_token,
+        ):
+            heartbeat_stop.set()
+            raise HTTPException(409, "消息处理租约已由其他请求接管")
         payload_data = raw if isinstance(raw, dict) else {}
         report = normalize_writer_report(payload_data) if review_requested else None
         reply = report["reply"] if report is not None else str(payload_data.get("reply") or "我已结合当前材料与上下文整理回答。").strip()
@@ -593,7 +662,7 @@ def build_writer_agent_router(
                 card_models = parse_creative_cards(payload_data)
                 proposed_actions = parse_proposed_actions(payload_data)
                 validate_direction_requirement(card_models, direction_required)
-                validate_project_authority(
+                card_models, proposed_actions = filter_project_authority_output(
                     card_models, proposed_actions, project_context
                 )
                 cards = [card.model_dump(mode="json") for card in card_models]
@@ -625,6 +694,14 @@ def build_writer_agent_router(
                             )
                     enriched_actions.append(action)
                 proposed_actions = enriched_actions
+            if not store.renew_client_message_claim(
+                session_id,
+                principal.user_id,
+                message_id,
+                claim_token=claim_token,
+            ):
+                heartbeat_stop.set()
+                raise HTTPException(409, "消息处理租约已由其他请求接管")
             try:
                 actions = persist_proposed_actions(
                     store,
@@ -641,8 +718,12 @@ def build_writer_agent_router(
                     client_message_id=message_id,
                 )
             except Exception:
+                heartbeat_stop.set()
                 store.abandon_client_message(
-                    session_id, principal.user_id, message_id
+                    session_id,
+                    principal.user_id,
+                    message_id,
+                    claim_token=claim_token,
                 )
                 raise
         history.extend([
@@ -658,6 +739,14 @@ def build_writer_agent_router(
                 **({"action_ids": [action["id"] for action in actions]} if actions else {}),
             },
         ])
+        if not store.renew_client_message_claim(
+            session_id,
+            principal.user_id,
+            message_id,
+            claim_token=claim_token,
+        ):
+            heartbeat_stop.set()
+            raise HTTPException(409, "消息处理租约已由其他请求接管")
         try:
             saved = store.save_turn(
                 session_id,
@@ -665,15 +754,18 @@ def build_writer_agent_router(
                 history,
                 report,
                 client_message_id=message_id,
+                claim_token=claim_token,
             )
         except Exception:
+            heartbeat_stop.set()
             store.abandon_client_message(
-                session_id, principal.user_id, message_id
+                session_id,
+                principal.user_id,
+                message_id,
+                claim_token=claim_token,
             )
             raise
-        store.complete_client_message(
-            session_id, principal.user_id, message_id
-        )
+        heartbeat_stop.set()
         return saved
 
     @router.get("/sessions/{session_id}/actions/{action_id}")

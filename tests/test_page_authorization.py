@@ -214,6 +214,33 @@ def test_managed_project_page_grant_allows_its_creative_brief_preview(page_app):
     assert client.get("/planning/projects/project-1/brief").status_code == 200
 
 
+def test_project_member_editor_renders_only_with_member_management_permission(
+    page_app,
+):
+    viewer = _principal(roles=("project_owner",))
+    page_app[1].access_by_route["/review/projects"] = {viewer.user_id}
+
+    viewer_response = _client(page_app, viewer).get(
+        "/review/projects/project-1/members"
+    )
+    manager = _principal(
+        roles=("project_owner",), permissions=("project.member.manage",)
+    )
+    manager_response = _client(page_app, manager).get(
+        "/review/projects/project-1/members"
+    )
+
+    assert viewer_response.status_code == 200
+    assert 'data-can-manage-members="false"' in viewer_response.text
+    assert 'id="project-member-form"' not in viewer_response.text
+    assert manager_response.status_code == 200
+    assert 'data-can-manage-members="true"' in manager_response.text
+    assert 'id="project-member-form"' in manager_response.text
+    assert '<option value="project_owner">项目负责人</option>' in manager_response.text
+    assert '<option value="creative_planner">创意策划</option>' in manager_response.text
+    assert '<option value="screenwriter">编剧</option>' in manager_response.text
+
+
 def test_writer_can_open_read_only_planning_pages_from_a_project(page_app):
     principal = _principal(roles=("screenwriter",))
     page_app[1].access_by_route["/writing/projects"] = {principal.user_id}

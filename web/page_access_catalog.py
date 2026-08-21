@@ -277,6 +277,7 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
     "/review/roles": _TEAM_ROLES,
     "/review/projects/{project_id}/members": (
         ("GET", "/api/workflow/projects/{project_id}/members"),
+        ("GET", "/api/workflow/projects/{project_id}/member-candidates"),
         ("POST", "/api/workflow/projects/{project_id}/members"),
         ("DELETE", "/api/workflow/projects/{project_id}/members/{user_id}"),
     ),

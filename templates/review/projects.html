@@ -1,37 +1,100 @@
 {% extends "layouts/base.html" %}
 
 {% block content %}
+{% set can_manage_members = principal.is_system_admin or 'project.member.manage' in principal.permissions %}
 <div class="d-flex align-items-center justify-content-between border-bottom pb-3 mb-4">
     <div>
-        <h3 class="mb-1">负责项目</h3>
-        <div class="small text-muted">由我管理的创作项目，可从选题库创建新项目</div>
+        <h3 class="mb-1">{{ '项目成员' if project_id else '负责项目' }}</h3>
+        <div class="small text-muted">
+            {% if project_id %}维护项目负责人、创意策划与编剧{% else %}由我管理的创作项目，可从选题库创建新项目{% endif %}
+        </div>
     </div>
-    <a class="btn btn-outline-light btn-sm" href="/selection/topics" title="前往选题库创建项目及任务">
-        <i class="bi bi-folder-plus me-1" aria-hidden="true"></i>选题库
-    </a>
+    {% if project_id %}
+        <a class="btn btn-outline-secondary btn-sm" href="/review/projects">
+            <i class="bi bi-arrow-left me-1" aria-hidden="true"></i>返回负责项目
+        </a>
+    {% else %}
+        <a class="btn btn-outline-light btn-sm" href="/selection/topics" title="前往选题库创建项目及任务">
+            <i class="bi bi-folder-plus me-1" aria-hidden="true"></i>选题库
+        </a>
+    {% endif %}
 </div>
 <div id="managed-project-error" class="alert alert-danger d-none" role="alert"></div>
-<div id="managed-projects" data-project-id="{{ project_id or '' }}">
-    <div class="table-responsive">
-        <table class="table table-sm align-middle">
-            <thead>
-                <tr>
-                    <th>项目</th>
-                    <th>来源选题</th>
-                    <th>项目状态</th>
-                    <th class="text-end">操作</th>
-                </tr>
-            </thead>
-            <tbody id="managed-project-list">
-                <tr id="managed-project-skeleton" aria-hidden="true">
-                    <td colspan="4">
-                        <div class="ui-skeleton" style="height:20px;width:60%;margin:8px 0;"></div>
-                        <div class="ui-skeleton" style="height:14px;width:40%;"></div>
-                    </td>
-                </tr>
-            </tbody>
-        </table>
-    </div>
+<div
+    id="managed-projects"
+    data-project-id="{{ project_id or '' }}"
+    data-can-manage-members="{{ 'true' if can_manage_members else 'false' }}"
+>
+    {% if project_id %}
+        {% if can_manage_members %}
+        <div class="d-flex flex-column flex-lg-row align-items-lg-end justify-content-between gap-3 mb-4">
+            <div>
+                <div class="small text-muted mb-1">当前项目</div>
+                <h4 class="mb-0" id="member-project-title" aria-live="polite">正在加载...</h4>
+            </div>
+            <form id="project-member-form" class="row g-2 align-items-end">
+                <div class="col-12 col-sm-auto">
+                    <label class="form-label small mb-1" for="project-member-role">项目角色</label>
+                    <select class="form-select form-select-sm" id="project-member-role">
+                        <option value="project_owner">项目负责人</option>
+                        <option value="creative_planner">创意策划</option>
+                        <option value="screenwriter">编剧</option>
+                    </select>
+                </div>
+                <div class="col-12 col-sm-auto">
+                    <label class="form-label small mb-1" for="project-member-user">选择成员</label>
+                    <select class="form-select form-select-sm" id="project-member-user" style="min-width: 220px;">
+                        <option value="">正在加载候选人...</option>
+                    </select>
+                </div>
+                <div class="col-12 col-sm-auto">
+                    <button class="btn btn-primary btn-sm w-100" id="project-member-add" type="submit" disabled>
+                        <i class="bi bi-person-plus me-1" aria-hidden="true"></i>添加成员
+                    </button>
+                </div>
+            </form>
+        </div>
+        <div id="project-member-error" class="alert alert-danger d-none" role="alert"></div>
+        <div id="project-member-loading" class="small text-muted py-3" role="status" aria-live="polite">正在加载项目成员...</div>
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th>成员</th>
+                        <th>登录账号</th>
+                        <th>项目角色</th>
+                        <th>状态</th>
+                        <th class="text-end">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="project-member-list"></tbody>
+            </table>
+        </div>
+        {% else %}
+            <div class="alert alert-warning" role="alert">当前账号没有管理项目成员的权限。</div>
+        {% endif %}
+    {% else %}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th>项目</th>
+                        <th>来源选题</th>
+                        <th>项目状态</th>
+                        <th class="text-end">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="managed-project-list">
+                    <tr id="managed-project-skeleton" aria-hidden="true">
+                        <td colspan="4">
+                            <div class="ui-skeleton" style="height:20px;width:60%;margin:8px 0;"></div>
+                            <div class="ui-skeleton" style="height:14px;width:40%;"></div>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    {% endif %}
 </div>
 {% endblock %}
 {% block scripts %}<script src="/static/js/review/projects.js?v={{ asset_version }}"></script>{% endblock %}

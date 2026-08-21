@@ -165,7 +165,41 @@ def build_workflow_router(
         principal: Principal = Depends(member_manager),
     ) -> list[dict[str, Any]]:
         _call(repository.assert_can_manage_project, project_id, principal)
-        return repository.list_project_members(project_id)
+        members = repository.list_project_members(project_id)
+        enriched = []
+        for member in members:
+            user = repository.identity_repository.get_user(member["user_id"])
+            enriched.append(
+                {
+                    **member,
+                    "username": user["username"] if user else "",
+                    "display_name": user["display_name"] if user else "已停用账号",
+                }
+            )
+        return enriched
+
+    @router.get("/api/workflow/projects/{project_id}/member-candidates")
+    def list_project_member_candidates(
+        project_id: str,
+        project_role: str,
+        principal: Principal = Depends(member_manager),
+    ) -> list[dict[str, Any]]:
+        task_types = {
+            "project_owner": "brief",
+            "creative_planner": "brief",
+            "screenwriter": "outline",
+        }
+        task_type = task_types.get(project_role)
+        if task_type is None:
+            raise HTTPException(400, "unsupported project member role")
+        _call(repository.assert_can_manage_project, project_id, principal)
+        return _call(
+            repository.list_role_assignment_candidates,
+            project_role,
+            task_type,
+            principal,
+            required_permission="project.member.manage",
+        )
 
     @router.post(
         "/api/workflow/projects/{project_id}/members",

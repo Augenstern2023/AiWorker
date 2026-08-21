@@ -22,6 +22,7 @@ from sqlalchemy.engine import make_url
 
 from creative.api import build_creative_router, creative_api_principal
 from creative.repository import CreativeRepository
+from creative.workflow_adapter import CreativeWorkflowAdapter
 from identity.dependencies import current_principal
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
@@ -29,6 +30,7 @@ from identity.session_service import SessionService
 from system_database import SystemDatabase, SystemDatabaseSettings
 from workflow.api import build_workflow_router
 from workflow.repository import SYSTEM_ACTOR, WorkflowRepository
+from workflow.transition_service import TransitionService
 
 
 def _role_user(
@@ -81,9 +83,17 @@ def _exercise_five_stage_creation_edit_and_lock(
         [{"content": {"project_name": "初稿", "target_episode_count": 1}}],
         workflow_task_id=brief_task["id"],
     )[0]
-    created_brief = client.post(
+    missing_authority = client.post(
         f"/api/creative/blueprints/{initial_brief['id']}/versions",
         json={"workflow_task_id": brief_task["id"]},
+    )
+    assert missing_authority.status_code == 409, missing_authority.text
+    created_brief = client.post(
+        f"/api/creative/blueprints/{initial_brief['id']}/versions",
+        json={
+            "workflow_task_id": brief_task["id"],
+            "expected_project_revision": creative.get_project(int(project_id))["revision"],
+        },
     )
     assert created_brief.status_code == 200, created_brief.text
     brief_id = created_brief.json()["id"]
@@ -104,6 +114,15 @@ def _exercise_five_stage_creation_edit_and_lock(
     )
     assert locked_brief.status_code == 200, locked_brief.text
     assert locked_brief.json()["resource"]["status"] == "brief_locked"
+    reconciled_brief = TransitionService(
+        workflow,
+        creative_adapter=CreativeWorkflowAdapter(creative, workflow),
+    ).reconcile_creative_without_review(
+        brief_task["id"], "brief", str(brief_id)
+    )
+    assert reconciled_brief is not None
+    assert reconciled_brief["task"]["status"] == "completed"
+    assert reconciled_brief["resource"]["id"] == brief_id
 
     character_task = _open_stage_task(workflow, client, project_id, "characters")
     created_characters = client.post(

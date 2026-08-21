@@ -703,6 +703,34 @@ class CreativeWorkflowAdapter:
             raise KeyError(resource_id)
         return str(row["status"])
 
+    def locked_resource(self, resource_type: str, resource_id: str) -> dict:
+        """Return the persisted resource body for completion reconciliation."""
+        self._validate_type(resource_type)
+        if resource_type == "brief":
+            return self._required(
+                self.creative_repository.get_blueprint(int(resource_id))
+            )
+        if resource_type == "characters":
+            project_id, batch_id = self._batch_key(resource_id)
+            resource = self.creative_repository.get_character_batch(
+                project_id, batch_id
+            )
+            if not resource["characters"]:
+                raise KeyError(resource_id)
+            return resource
+        if resource_type == "outline":
+            project_id, batch_id = self._batch_key(resource_id)
+            resource = self.creative_repository.get_outline_batch(project_id, batch_id)
+            if not resource["episodes"]:
+                raise KeyError(resource_id)
+            return resource
+        resource = self._required(
+            self.creative_repository.get_episode(int(resource_id))
+        )
+        if resource["stage"] != resource_type:
+            raise ValueError("creative resource type mismatch")
+        return resource
+
     def beats_episode_progress(self, resource_id: str) -> dict[str, Any]:
         """Return current-outline coverage, treating this completion as accepted."""
         episode = self._required(

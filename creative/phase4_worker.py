@@ -13,6 +13,7 @@ import asyncio
 import hmac
 import json
 from pathlib import Path
+import threading
 from typing import Any
 
 import config
@@ -27,7 +28,11 @@ from creative.original_direction_service import (
 )
 from creative.outline_overview import normalize_series_overview
 from creative.prompt_templates import PROMPT_TEMPLATE_VERSION, series_overview_messages
-from creative.repository import CreativeRepository, canonical_request_hash
+from creative.repository import (
+    GENERATION_OPERATION_LEASE_SECONDS,
+    CreativeRepository,
+    canonical_request_hash,
+)
 from creative.script_service import (
     build_continuity_ledger,
     generate_character_bundle,
@@ -245,7 +250,7 @@ async def generate_series_overview(
     return overview, meta
 
 
-async def run(job: CrawlJob) -> None:
+async def _run_once(job: CrawlJob) -> None:
     extra = job.extra or {}
     action = str(extra.get("action") or "").strip()
     project_id = int(extra.get("project_id") or 0)
@@ -254,7 +259,7 @@ async def run(job: CrawlJob) -> None:
         raise ValueError("Phase 4 任务缺少有效 action 或 project_id")
 
     repository = CreativeRepository(db_path)
-    _validate_source_authority(extra, repository, project_id)
+    source_authority = _validate_source_authority(extra, repository, project_id)
     inputs = repository.get_project_inputs(project_id)
     source_snapshot = _load_source_snapshot(extra)
     context = _generation_context(extra, source_snapshot)
@@ -355,6 +360,7 @@ async def run(job: CrawlJob) -> None:
                 workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
                 direction_type="original", source_refs=source_refs,
                 operation_id=str(extra.get("operation_id") or "") or None,
+                expected_authority=source_authority,
             )
         else:
             breakdown = dict(inputs["breakdown"])
@@ -372,6 +378,7 @@ async def run(job: CrawlJob) -> None:
                 job.job_id,
                 _generation_meta(meta, extra),
                 operation_id=str(extra.get("operation_id") or "") or None,
+                expected_authority=source_authority,
             )
         result: dict[str, Any] = {"action": action, "blueprint_ids": [item["id"] for item in resources]}
     elif action == "blueprint_variant":
@@ -396,6 +403,7 @@ async def run(job: CrawlJob) -> None:
             workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
             direction_type="original", source_refs=generated["source_refs"],
             operation_id=str(extra.get("operation_id") or "") or None,
+            expected_authority=source_authority,
         )
         result = {"action": action, "blueprint_ids": [resources[0]["id"]]}
     elif action == "characters":
@@ -411,6 +419,7 @@ async def run(job: CrawlJob) -> None:
             _generation_meta(meta, extra),
             workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
             operation_id=str(extra.get("operation_id") or "") or None,
+            expected_authority=source_authority,
         )
         result = {"action": action, "batch_id": bundle["batch_id"]}
     elif action == "outlines":
@@ -480,6 +489,7 @@ async def run(job: CrawlJob) -> None:
                 reservation_owner_id=(
                     job.job_id if generation_reservation is not None else None
                 ),
+                expected_authority=source_authority,
             )
             outline_batch_id = saved["batch_id"]
 
@@ -522,7 +532,11 @@ async def run(job: CrawlJob) -> None:
             str(first_content.get("series_arc") or ""),
         )
         saved = repository.update_outline_overview(
-            project_id, batch_id, overview, only_if_missing=True
+            project_id,
+            batch_id,
+            overview,
+            only_if_missing=True,
+            expected_authority=source_authority,
         )
         emit(
             job,
@@ -617,6 +631,7 @@ async def run(job: CrawlJob) -> None:
                 reservation_operation_id=str(extra["operation_id"]),
                 reservation_request_hash=str(extra["generation_request_hash"]),
                 reservation_owner_id=job.job_id,
+                expected_authority=source_authority,
             )
             series_batch_id = saved[0]["batch_id"]
             if action == "beats":
@@ -666,6 +681,7 @@ async def run(job: CrawlJob) -> None:
                 _generation_meta(meta, extra),
                 workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
                 operation_id=str(extra.get("operation_id") or "") or None,
+                expected_authority=source_authority,
             )
         else:
             beats = repository._locked_beats_for_episode(project, episode_number)
@@ -688,6 +704,7 @@ async def run(job: CrawlJob) -> None:
                 _generation_meta(meta, extra),
                 workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
                 operation_id=str(extra.get("operation_id") or "") or None,
+                expected_authority=source_authority,
             )
         result = {"action": action, "episode_id": resource["id"], "episode_number": episode_number, "brief_id": brief["id"]}
 
@@ -699,6 +716,7 @@ async def run(job: CrawlJob) -> None:
             batch_id=str(generation_reservation["batch_id"]),
             result=result,
             owner_id=job.job_id,
+            expected_authority=source_authority,
         )
     target_dir = Path("data") / "creative" / "jobs" / job.job_id
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -710,6 +728,64 @@ async def run(job: CrawlJob) -> None:
     emit(job, "artifact", "Phase 4 生成记录", payload={"path": str(report_path), "artifact_type": "json"})
     emit(job, "progress", "生成完成", payload={"stage": action, "completed": total_episodes, "total": total_episodes})
     emit(job, "job_finished", "创作内容生成完成", payload=result)
+
+
+async def run(job: CrawlJob) -> None:
+    extra = job.extra or {}
+    action = str(extra.get("action") or "").strip()
+    reserved_generation = action == "outlines" or (
+        bool(extra.get("series")) and action in {"beats", "script"}
+    )
+    operation_id = str(extra.get("operation_id") or "").strip()
+    request_hash = str(extra.get("generation_request_hash") or "").strip()
+    project_id = int(extra.get("project_id") or 0)
+    heartbeat_stop = threading.Event()
+    heartbeat: threading.Thread | None = None
+    if reserved_generation and operation_id and request_hash and project_id > 0:
+        heartbeat_repository = CreativeRepository(
+            Path(str(extra.get("db_path") or ".runtime/creative/creative.db"))
+        )
+
+        def renew_lease() -> None:
+            heartbeat_interval = GENERATION_OPERATION_LEASE_SECONDS / 3
+            while not heartbeat_stop.wait(heartbeat_interval):
+                try:
+                    heartbeat_repository.renew_generation_operation(
+                        operation_id=operation_id,
+                        request_hash=request_hash,
+                        owner_id=job.job_id,
+                    )
+                except Exception:
+                    continue
+
+        heartbeat = threading.Thread(target=renew_lease, daemon=True)
+        heartbeat.start()
+    try:
+        await _run_once(job)
+    except Exception:
+        if reserved_generation:
+            if operation_id and request_hash and project_id > 0:
+                try:
+                    repository = CreativeRepository(
+                        Path(
+                            str(
+                                extra.get("db_path")
+                                or ".runtime/creative/creative.db"
+                            )
+                        )
+                    )
+                    repository.fail_generation_operation(
+                        operation_id=operation_id,
+                        request_hash=request_hash,
+                        owner_id=job.job_id,
+                    )
+                except Exception:
+                    pass
+        raise
+    finally:
+        heartbeat_stop.set()
+        if heartbeat is not None:
+            heartbeat.join(timeout=1.0)
 
 
 def parse_args() -> argparse.Namespace:

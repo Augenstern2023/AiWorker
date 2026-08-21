@@ -844,6 +844,38 @@ def test_phase4_worker_persists_generation_and_report(tmp_path, monkeypatch):
     assert "blueprints" in report.read_text(encoding="utf-8")
 
 
+def test_phase4_worker_rejects_authority_change_at_persistence_boundary(
+    tmp_path, monkeypatch,
+):
+    db_path = tmp_path / ".runtime" / "creative" / "creative.db"
+    repository = CreativeRepository(db_path)
+    project = seed_worker_project(repository)
+
+    class AuthorityChangingProvider(SequentialProvider):
+        async def complete_json(self, messages):
+            repository.update_project(project["id"], {"name": "权威已变化"})
+            return await super().complete_json(messages)
+
+    provider = AuthorityChangingProvider([blueprint_payload()])
+    monkeypatch.setattr(phase4_worker, "create_provider", lambda: provider)
+    monkeypatch.chdir(tmp_path)
+    job = CrawlJob(
+        job_id="creative-worker-authority-race",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "blueprints", "project_id": project["id"], "count": 3,
+            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            **generation_contract(repository, project["id"]),
+        },
+    )
+
+    with pytest.raises(ValueError, match="authority changed"):
+        asyncio.run(phase4_worker.run(job))
+
+    assert repository.get_project(project["id"])["blueprints"] == []
+
+
 def test_phase4_worker_does_not_persist_partial_blueprints_after_llm_failure(tmp_path, monkeypatch):
     db_path = tmp_path / ".runtime" / "creative" / "creative.db"
     repository = CreativeRepository(db_path)
@@ -950,6 +982,126 @@ def test_phase4_worker_continues_a_saved_outline_batch_after_a_failed_job(tmp_pa
     assert len(resumed_provider.calls) == 1
     assert [item["episode_number"] for item in outlines] == list(range(1, 21))
     assert len({item["batch_id"] for item in outlines}) == 1
+
+
+def test_phase4_worker_retry_takes_over_failure_before_first_checkpoint(
+    tmp_path, monkeypatch,
+):
+    db_path = tmp_path / ".runtime" / "creative" / "creative.db"
+    repository = CreativeRepository(db_path)
+    project = seed_worker_project(repository, episode_count=1)
+    brief = repository.create_blueprints(
+        project["id"], [{"content": {"title": "方向"}}]
+    )[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(
+        project["id"], [{"name": "主角"}], []
+    )
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    operation = generation_contract(
+        repository, project["id"], operation_id="pre-checkpoint-retry"
+    )
+
+    class FailingProvider:
+        provider_name = "failing-test-llm"
+
+        async def complete_json(self, messages):
+            raise RuntimeError("provider failed before checkpoint")
+
+    monkeypatch.setattr(phase4_worker, "create_provider", FailingProvider)
+    failed_job = CrawlJob(
+        job_id="outline-before-checkpoint-failed",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "outlines", "project_id": project["id"],
+            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            **operation,
+        },
+    )
+    with pytest.raises(RuntimeError, match="before checkpoint"):
+        asyncio.run(phase4_worker.run(failed_job))
+
+    retry_provider = SequentialProvider([
+        {"series_arc": "相识、对抗、合作", "stages": ["相识", "对抗", "合作"]},
+        {"episodes": [outline_episode(1)]},
+    ])
+    monkeypatch.setattr(phase4_worker, "create_provider", lambda: retry_provider)
+    retry_job = CrawlJob(
+        job_id="outline-before-checkpoint-retry",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "outlines", "project_id": project["id"],
+            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "retry_of_job_id": failed_job.job_id,
+            **operation,
+        },
+    )
+
+    asyncio.run(phase4_worker.run(retry_job))
+
+    outlines = [
+        item for item in repository.get_project(project["id"])["episodes"]
+        if item["stage"] == "outline"
+    ]
+    assert [item["episode_number"] for item in outlines] == [1]
+
+
+def test_phase4_worker_retry_takes_over_expired_orphan_before_first_checkpoint(
+    tmp_path, monkeypatch,
+):
+    db_path = tmp_path / ".runtime" / "creative" / "creative.db"
+    repository = CreativeRepository(db_path)
+    project = seed_worker_project(repository, episode_count=1)
+    brief = repository.create_blueprints(
+        project["id"], [{"content": {"title": "方向"}}]
+    )[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(
+        project["id"], [{"name": "主角"}], []
+    )
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    operation = generation_contract(
+        repository, project["id"], operation_id="orphan-before-checkpoint"
+    )
+    repository.reserve_generation_operation(
+        operation_id="orphan-before-checkpoint",
+        project_id=project["id"],
+        stage="outline",
+        request_hash=operation["generation_request_hash"],
+        owner_id="dead-outline-worker",
+    )
+    with repository._connect() as connection:
+        connection.execute(
+            "UPDATE creative_generation_operations SET updated_at = 0 "
+            "WHERE operation_id = ?",
+            ("orphan-before-checkpoint",),
+        )
+    provider = SequentialProvider([
+        {"series_arc": "相识、对抗、合作", "stages": ["相识", "对抗", "合作"]},
+        {"episodes": [outline_episode(1)]},
+    ])
+    monkeypatch.setattr(phase4_worker, "create_provider", lambda: provider)
+    retry_job = CrawlJob(
+        job_id="orphan-outline-retry",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "outlines", "project_id": project["id"],
+            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "retry_of_job_id": "dead-outline-worker",
+            **operation,
+        },
+    )
+
+    asyncio.run(phase4_worker.run(retry_job))
+
+    outlines = [
+        item for item in repository.get_project(project["id"])["episodes"]
+        if item["stage"] == "outline"
+    ]
+    assert [item["episode_number"] for item in outlines] == [1]
 
 
 def test_phase4_worker_saves_series_beats_in_ten_episode_checkpoints(tmp_path, monkeypatch):

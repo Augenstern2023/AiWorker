@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -20,7 +21,7 @@ from creative.application_service import (
     MAX_INLINE_SOURCE_SNAPSHOT_BYTES,
     CreativeApplicationService,
 )
-from creative.repository import CreativeRepository
+from creative.repository import CreativeRepository, canonical_request_hash
 from identity.schema import Principal
 
 
@@ -298,6 +299,220 @@ def test_lock_replay_and_changed_key_are_checked_before_transition(
     assert creative_context.transitions.complete_creative_without_review.call_count == 1
 
 
+def test_expired_lock_reservation_reconciles_after_side_effect_process_crash(
+    creative_context,
+) -> None:
+    project = creative_context.create_original_project()
+    result = {
+        "resource": {"id": "brief-1", "status": "brief_locked"},
+        "task": {"id": "brief-task", "status": "completed"},
+    }
+    request_hash = canonical_request_hash(
+        {
+            "workflow_task_id": "brief-task",
+            "resource_id": "brief-1",
+            "difference_note": "",
+        }
+    )
+    creative_context.repository.reserve_side_effect_operation(
+        operation_id="crashed-lock-op",
+        project_id=project["id"],
+        stage="brief.lock",
+        request_hash=request_hash,
+        owner_id="dead-process",
+    )
+    creative_context.transitions.complete_creative_without_review(
+        "brief-task", "brief", "brief-1", creative_context.actor,
+        difference_note="",
+    )
+    with creative_context.repository._connect() as connection:
+        row = connection.execute(
+            "SELECT resource_ref_json FROM creative_operation_results "
+            "WHERE operation_id = ?",
+            ("crashed-lock-op",),
+        ).fetchone()
+        pending = json.loads(row["resource_ref_json"])
+        pending["lease_expires_at"] = 0
+        connection.execute(
+            "UPDATE creative_operation_results SET resource_ref_json = ? "
+            "WHERE operation_id = ?",
+            (json.dumps(pending), "crashed-lock-op"),
+        )
+    creative_context.transitions.reconcile_creative_without_review.return_value = result
+
+    replay = creative_context.application_service.lock_resource(
+        project_id=project["id"],
+        stage="brief",
+        resource_id="brief-1",
+        workflow_task_id="brief-task",
+        operation_id="crashed-lock-op",
+        actor=creative_context.actor,
+    )
+
+    assert replay == result
+    assert creative_context.transitions.complete_creative_without_review.call_count == 1
+    creative_context.transitions.reconcile_creative_without_review.assert_called_once_with(
+        "brief-task", "brief", "brief-1"
+    )
+
+
+def test_live_lock_reservation_rejects_duplicate_and_changed_request(
+    creative_context,
+) -> None:
+    project = creative_context.create_original_project()
+    creative_context.repository.reserve_side_effect_operation(
+        operation_id="live-lock-op",
+        project_id=project["id"],
+        stage="brief.lock",
+        request_hash=canonical_request_hash(
+            {
+                "workflow_task_id": "brief-task",
+                "resource_id": "brief-1",
+                "difference_note": "",
+            }
+        ),
+        owner_id="live-process",
+    )
+
+    with pytest.raises(RuntimeError, match="OPERATION_IN_PROGRESS"):
+        creative_context.application_service.lock_resource(
+            project_id=project["id"],
+            stage="brief",
+            resource_id="brief-1",
+            workflow_task_id="brief-task",
+            operation_id="live-lock-op",
+            actor=creative_context.actor,
+        )
+    with pytest.raises(ValueError, match="IDEMPOTENCY_KEY_REUSED"):
+        creative_context.application_service.lock_resource(
+            project_id=project["id"],
+            stage="brief",
+            resource_id="brief-2",
+            workflow_task_id="brief-task",
+            operation_id="live-lock-op",
+            actor=creative_context.actor,
+        )
+    creative_context.transitions.complete_creative_without_review.assert_not_called()
+
+
+def test_lock_heartbeat_keeps_an_expired_live_owner_exclusive(
+    creative_context,
+) -> None:
+    project = creative_context.create_original_project()
+    request_hash = canonical_request_hash(
+        {
+            "workflow_task_id": "brief-task",
+            "resource_id": "brief-1",
+            "difference_note": "",
+        }
+    )
+    creative_context.repository.reserve_side_effect_operation(
+        operation_id="heartbeat-lock-op",
+        project_id=project["id"],
+        stage="brief.lock",
+        request_hash=request_hash,
+        owner_id="live-process",
+    )
+    with creative_context.repository._connect() as connection:
+        row = connection.execute(
+            "SELECT resource_ref_json FROM creative_operation_results "
+            "WHERE operation_id = ?",
+            ("heartbeat-lock-op",),
+        ).fetchone()
+        pending = json.loads(row["resource_ref_json"])
+        pending["lease_expires_at"] = 0
+        connection.execute(
+            "UPDATE creative_operation_results SET resource_ref_json = ? "
+            "WHERE operation_id = ?",
+            (json.dumps(pending), "heartbeat-lock-op"),
+        )
+
+    assert creative_context.repository.renew_side_effect_operation(
+        operation_id="heartbeat-lock-op", owner_id="live-process"
+    )
+    with pytest.raises(RuntimeError, match="OPERATION_IN_PROGRESS"):
+        creative_context.repository.reserve_side_effect_operation(
+            operation_id="heartbeat-lock-op",
+            project_id=project["id"],
+            stage="brief.lock",
+            request_hash=request_hash,
+            owner_id="duplicate-process",
+        )
+
+
+def test_locked_non_brief_legacy_saves_require_explicit_revision_authority(
+    creative_context,
+) -> None:
+    service = creative_context.application_service
+    repository = creative_context.repository
+    project = creative_context.create_original_project()
+    brief = repository.create_blueprints(
+        project["id"], [{"content": valid_original_brief("锁定 Brief")}],
+        direction_type="original",
+    )[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(
+        project["id"], [{"name": "林岚"}], []
+    )
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(
+        project["id"], [{"episode": 1, "summary": "开端"}], "主线"
+    )
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    beats = repository.create_episode_beats(
+        project["id"], 1, {"beats": [{"beat": "开场"}]}
+    )
+    repository.lock_episode_beats(beats["id"])
+    script = repository.create_episode_script(
+        project["id"], 1, {"scenes": []}
+    )
+    repository.lock_episode_script(script["id"])
+
+    cases = (
+        ("characters", {"characters": [{"name": "林岚"}], "relationships": []}, None),
+        ("outline", {"episodes": [{"episode": 1, "summary": "重做"}], "series_arc": "主线"}, None),
+        ("beats", {"beats": [{"beat": "重做"}]}, 1),
+        ("script", {"scenes": []}, 1),
+    )
+    for stage, payload, episode_number in cases:
+        with pytest.raises(ValueError, match="replaces_resource_id.*expected_project_revision"):
+            service.persist_legacy_draft(
+                project_id=project["id"],
+                stage=stage,
+                payload=payload,
+                workflow_task_id=f"{stage}-task",
+                operation_id=f"locked-{stage}-save",
+                actor=creative_context.actor,
+                episode_number=episode_number,
+            )
+
+
+def test_locked_legacy_save_is_rechecked_inside_the_repository_transaction(
+    creative_context, monkeypatch,
+) -> None:
+    service = creative_context.application_service
+    repository = creative_context.repository
+    project = creative_context.create_original_project()
+    brief = repository.create_blueprints(
+        project["id"], [{"content": valid_original_brief("锁定 Brief")}],
+        direction_type="original",
+    )[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(
+        project["id"], [{"name": "林岚"}], []
+    )
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    monkeypatch.setattr(repository, "has_locked_stage_resource", lambda *args, **kwargs: False)
+
+    with pytest.raises(ValueError, match="revision"):
+        service.persist_legacy_draft(
+            project_id=project["id"],
+            stage="characters",
+            payload={"characters": [{"name": "绕过版本"}], "relationships": []},
+            workflow_task_id="characters-task",
+            operation_id="atomic-legacy-guard",
+            actor=creative_context.actor,
+        )
 def test_generation_always_adds_server_authority_to_material_snapshot(
     creative_context,
 ) -> None:

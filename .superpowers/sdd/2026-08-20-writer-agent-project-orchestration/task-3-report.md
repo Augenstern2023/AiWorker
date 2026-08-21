@@ -130,3 +130,66 @@ DONE_WITH_CONCERNS。C1、I1–I6、M1 已修复，并以行为测试扩展覆�
 ### Commit SHA
 
 `77ca085` (`fix: 完善共享创作服务契约`；由 controller 精确暂存 Task 3 修复文件并提交。)
+
+## Fix round 2
+
+### 状态
+
+DONE_WITH_CONCERNS。I1、I2、I5、M2 与 N1 已按复审意见修复；未执行 Git 暂存、提交、reset、checkout、stash、clean、ACL 或 `icacls` 操作。提交状态：`PENDING_CONTROLLER_COMMIT`。
+
+### RED 证据与对应生产变异
+
+- 首轮聚焦 RED：`$env:UV_CACHE_DIR='.uv-cache-task3'; uv run pytest tests/test_creative_application_service.py::test_expired_lock_reservation_reconciles_after_side_effect_process_crash tests/test_creative_application_service.py::test_live_lock_reservation_rejects_duplicate_and_changed_request tests/test_creative_application_service.py::test_locked_non_brief_legacy_saves_require_explicit_revision_authority tests/test_creative_phase4_generation.py::test_phase4_worker_rejects_authority_change_at_persistence_boundary tests/test_creative_phase4_generation.py::test_phase4_worker_retry_takes_over_failure_before_first_checkpoint -q -p no:cacheprovider --basetemp=.pytest-task3-fix2-red` → `4 failed, 1 passed`。分别捕获 pending lock 无恢复、legacy locked save 仍走普通写、模型后持久化缺少 authority CAS、首 checkpoint 前失败永久 active；live duplicate/changed hash 的既有保护保持通过。
+- Brief caller authority HTTP RED：`uv run pytest tests/test_project_creator_governance.py -q -p no:cacheprovider --basetemp=.pytest-task3-fix2-red-http -k 'project_governance_http_matrix_and_five_stage_collaboration'` → `1 failed, 1 deselected`；缺少 `expected_project_revision` 的 version 请求错误返回 200 并实际创建版本。
+- 审查后补强 RED：四项聚焦命令覆盖真实恢复分流、lock heartbeat、repository 事务内 locked 复验、进程死亡 orphan generation lease → `4 failed in 1.69s`。对应生产变异为：恢复者再次执行已完成 workflow transition、无续租 API、仅应用层 check-then-write、active generation 无过期接管。
+
+### 实现
+
+- legacy 兼容写统一进入公开 `persist_legacy_draft()`；replacement/CAS 必须成对出现。characters、outline、Beats、script 在已锁定资源后缺字段立即拒绝，并把 `reject_if_locked` 传到真实 repository `BEGIN IMMEDIATE` 写事务内再次复验，关闭检查与写入之间的并发窗口。显式 revision 继续水合为原 legacy 完整响应体。
+- Brief version API 不再读取当前 revision 代填；缺失 caller revision 明确 HTTP 409，stale revision 继续由事务内 CAS 映射 409；首个原创 root Brief 路径保持不变。
+- side-effect reservation 写入持久 lease/owner；未过期重复与 changed hash 在副作用前拒绝。执行期间后台 heartbeat 续租；过期 owner 可原子接管。若崩溃发生在 domain/workflow 已完成而 finalize 未写入，恢复者先通过 `TransitionService.reconcile_creative_without_review()` 读取真实 locked resource、completed task、successor/progress 并 finalize，而不重复 `complete_work`；若只完成 domain，仍进入原 partial-domain recovery。
+- generation operation 增加 `failed` 状态、显式失败标记、active lease 与 heartbeat。正常异常可立即由匹配 `retry_of_job_id` 的相同 hash 接管；进程死亡留下的 active row 在 lease 过期后可接管；live owner 因续租保持排他。changed hash、旧 owner checkpoint、completed replay 与部分 chunk 恢复规则保持不变。
+- repository 新增同连接 authority envelope/CAS。worker 将冻结的 server authority 传入 Brief、人物、大纲 checkpoint、overview、series checkpoint、单集 Beats/script 及 generation complete 的每个生成持久化事务；模型结束后 authority 变化会在写锁内拒绝且不落库。
+
+### GREEN / 回归统计
+
+- 首轮五项新契约：`5 passed in 1.49s`；Brief caller authority真实 HTTP：`1 passed, 1 deselected, 1 warning in 2.70s`。
+- 审查补强四项：`4 passed in 1.44s`；真实 PostgreSQL workflow completed/domain locked reconciliation 随五阶段治理测试通过。
+- 最终 Task 3 核心 + worker + operation + original/member/writer/governance 联合回归：`96 passed, 13 warnings in 13.68s`。
+- locked Brief successor API + WebGUI shared dependency/public generation API：`3 passed, 193 deselected, 16 warnings in 3.68s`。
+- 完整 WebGUI 回归：`188 passed, 7 failed, 16 warnings in 4.66s`；七项与前两轮相同，均为未触及的 navigation/template/static JS 基线断言。
+- 11 个触及 Python 文件 `py_compile`：Passed；file-header check：`11 already compliant, 0 errors`。
+
+### 自审
+
+- 每个新增测试均在生产编辑前取得目标 RED；复审发现的四个承重缺口再次以独立 RED 修正后才进入 GREEN。
+- I1 的最终裁决点在 repository 写事务，不依赖 API 预检查；四类非 Brief legacy 路由仍保留首次草稿和显式 revision 响应兼容。
+- I2 的 heartbeat 阻止超过初始 lease 的真实 live owner 被接管；完成态 reconciliation 不再次触发 workflow 状态机，恢复结果仍包含完整资源、task、next task 与 episode progress。
+- I5 authority 比较与资源写/检查点在同一 SQLite 写事务；生成自身写入的 draft/status 不改变冻结 authority，chunk resume 可继续。
+- N1 同时覆盖捕获到的 provider 失败与未执行异常清理的 orphan process；owner/hash/batch 校验仍阻止旧 worker 和 changed request。
+- 未修改 Task 4+ writer action、无关 UI 静态资源或共享 Git 元数据。
+
+### 改动文件
+
+- `creative/application_service.py`
+- `creative/api.py`
+- `creative/phase4_worker.py`
+- `creative/repository.py`
+- `creative/workflow_adapter.py`
+- `workflow/transition_service.py`
+- `tests/test_creative_application_service.py`
+- `tests/test_creative_phase4_generation.py`
+- `tests/test_project_creator_governance.py`
+- `tests/test_project_member_stage_editing.py`
+- `tests/test_creative_phase4.py`
+- `.superpowers/sdd/2026-08-20-writer-agent-project-orchestration/task-3-report.md`
+
+### 疑虑
+
+- 完整 `tests/test_webgui_ui_changes.py` 仍有七个既有静态 UI 断言失败，未越界修复。
+- 更广的 `tests/test_creative_phase4.py` 仍有既有 `IdentityRepository(Path)` constructor drift setup failures；本轮触及的 locked Brief successor 测试已独立通过。
+- crash takeover 需等待 30 秒 lease 到期；live operation 每 10 秒续租。此延迟换取跨进程 owner 判定与并发排他。
+
+### Commit SHA
+
+`PENDING_CONTROLLER_COMMIT`

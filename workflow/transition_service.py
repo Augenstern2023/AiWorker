@@ -146,6 +146,46 @@ class TransitionService:
             result["beats_progress"] = beats_progress
         return result
 
+    def reconcile_creative_without_review(
+        self, task_id: str, resource_type: str, resource_id: str
+    ) -> dict[str, Any] | None:
+        """Recover the result when domain and workflow completion already committed."""
+        if self.creative_adapter is None:
+            raise RuntimeError("creative workflow adapter is not configured")
+        task = self.repository.get_task(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        if task["status"] != "completed":
+            return None
+        if self.creative_adapter.domain_status(resource_type, resource_id) not in {
+            "locked",
+            "brief_locked",
+        }:
+            return None
+        resource = self.creative_adapter.locked_resource(resource_type, resource_id)
+        with self.repository.identity_repository.connect() as connection:
+            successor = connection.exec_driver_sql(
+                "SELECT * FROM workflow_tasks WHERE predecessor_task_id = %s "
+                "ORDER BY created_at, id LIMIT 1",
+                (task_id,),
+            ).mappings().fetchone()
+        result: dict[str, Any] = {
+            "resource": resource,
+            "task": task,
+            "next_task": (
+                self.repository._task_dict(successor)
+                if successor is not None
+                else None
+            ),
+        }
+        if resource_type in {"beats", "script"}:
+            result["beats_progress"] = (
+                self.creative_adapter.beats_episode_progress(resource_id)
+                if resource_type == "beats"
+                else self.creative_adapter.script_episode_progress(resource_id)
+            )
+        return result
+
     def complete_creative_beats_batch_without_review(
         self, task_id: str, project_id: int, actor: Principal
     ) -> dict[str, Any]:

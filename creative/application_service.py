@@ -11,12 +11,17 @@ from __future__ import annotations
 from collections.abc import Callable
 import json
 from pathlib import Path
+import threading
 from typing import Any
 import uuid
 
 from creative.original_direction_service import validate_original_direction_content
 from creative.original_project_service import OriginalProjectService
-from creative.repository import CreativeRepository, canonical_request_hash
+from creative.repository import (
+    SIDE_EFFECT_OPERATION_LEASE_SECONDS,
+    CreativeRepository,
+    canonical_request_hash,
+)
 from creative.schema import OriginalProjectCreateRequest
 from creative.workflow_adapter import CreativeWorkflowAdapter
 from identity.permission_service import PermissionService
@@ -160,6 +165,7 @@ class CreativeApplicationService:
         operation_id: str,
         actor: Principal,
         episode_number: int | None = None,
+        reject_if_locked: bool = False,
     ) -> dict[str, Any]:
         self.assert_stage_write_access(project_id, stage, actor)
         self.validate_task_for_creation(
@@ -186,6 +192,7 @@ class CreativeApplicationService:
                 payload.get("relationships", []),
                 workflow_task_id=workflow_task_id,
                 operation_id=operation_id,
+                reject_if_locked=reject_if_locked,
             )
         elif stage == "outline":
             resource = self.repository.create_outline_batch(
@@ -194,6 +201,7 @@ class CreativeApplicationService:
                 payload.get("series_arc", ""),
                 workflow_task_id=workflow_task_id,
                 operation_id=operation_id,
+                reject_if_locked=reject_if_locked,
             )
         elif stage == "beats" and episode_number is not None:
             resource = self.repository.create_episode_beats(
@@ -202,6 +210,7 @@ class CreativeApplicationService:
                 payload,
                 workflow_task_id=workflow_task_id,
                 operation_id=operation_id,
+                reject_if_locked=reject_if_locked,
             )
         elif stage == "script" and episode_number is not None:
             resource = self.repository.create_episode_script(
@@ -210,10 +219,44 @@ class CreativeApplicationService:
                 payload,
                 workflow_task_id=workflow_task_id,
                 operation_id=operation_id,
+                reject_if_locked=reject_if_locked,
             )
         else:
             raise ValueError("unsupported creative stage payload")
         return self.resource_ref(stage, resource)
+
+    def persist_legacy_draft(
+        self,
+        *,
+        replaces_resource_id: str | None = None,
+        expected_project_revision: int | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Preserve legacy response bodies while enforcing the revision boundary."""
+        stage = str(kwargs["stage"])
+        episode_number = kwargs.get("episode_number")
+        if (replaces_resource_id is None) != (expected_project_revision is None):
+            raise ValueError(
+                "replaces_resource_id and expected_project_revision are required together"
+            )
+        if replaces_resource_id is None:
+            if stage != "brief" and self.repository.has_locked_stage_resource(
+                int(kwargs["project_id"]),
+                stage,
+                episode_number=episode_number,
+            ):
+                raise ValueError(
+                    "replaces_resource_id and expected_project_revision are required "
+                    "after a resource is locked"
+                )
+            ref = self.persist_draft(**kwargs, reject_if_locked=True)
+        else:
+            ref = self.create_revision(
+                **kwargs,
+                replaces_resource_id=str(replaces_resource_id),
+                expected_project_revision=int(expected_project_revision),
+            )
+        return self.hydrate_resource_ref(ref)
 
     def hydrate_resource_ref(self, ref: dict[str, Any]) -> dict[str, Any]:
         project_id = int(ref["project_id"])
@@ -292,7 +335,32 @@ class CreativeApplicationService:
         )
         if reservation["state"] == "complete":
             return reservation["result"]
+        heartbeat_stop = threading.Event()
+        heartbeat_interval = SIDE_EFFECT_OPERATION_LEASE_SECONDS / 3
+
+        def renew_lease() -> None:
+            while not heartbeat_stop.wait(heartbeat_interval):
+                try:
+                    if not self.repository.renew_side_effect_operation(
+                        operation_id=operation_id, owner_id=owner_id
+                    ):
+                        return
+                except Exception:
+                    continue
+
+        heartbeat = threading.Thread(target=renew_lease, daemon=True)
+        heartbeat.start()
         try:
+            if reservation.get("recovered"):
+                reconciled = self.transitions.reconcile_creative_without_review(
+                    workflow_task_id, stage, resource_id
+                )
+                if reconciled is not None:
+                    return self.repository.finalize_side_effect_operation(
+                        operation_id=operation_id,
+                        owner_id=owner_id,
+                        result=reconciled,
+                    )
             kwargs = {"difference_note": difference_note} if stage == "brief" else {}
             result = self.transitions.complete_creative_without_review(
                 workflow_task_id, stage, resource_id, actor, **kwargs
@@ -305,6 +373,9 @@ class CreativeApplicationService:
                 operation_id=operation_id, owner_id=owner_id
             )
             raise
+        finally:
+            heartbeat_stop.set()
+            heartbeat.join(timeout=1.0)
 
     def create_revision(
         self,

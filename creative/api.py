@@ -1437,19 +1437,7 @@ def build_creative_router(
             raise HTTPException(409, str(exc)) from exc
 
     def persist_legacy_draft(**kwargs: Any) -> dict[str, Any]:
-        replaces_resource_id = kwargs.pop("replaces_resource_id", None)
-        expected_project_revision = kwargs.pop("expected_project_revision", None)
-        if replaces_resource_id is not None:
-            if expected_project_revision is None:
-                raise ValueError("expected_project_revision is required for a revision")
-            ref = application_service.create_revision(
-                **kwargs,
-                replaces_resource_id=str(replaces_resource_id),
-                expected_project_revision=int(expected_project_revision),
-            )
-        else:
-            ref = application_service.persist_draft(**kwargs)
-        return application_service.hydrate_resource_ref(ref)
+        return application_service.persist_legacy_draft(**kwargs)
 
     def batch_resource_for(table: str, item_id: int) -> str | None:
         if table not in {"creative_characters", "creative_relationships"}:
@@ -2904,7 +2892,10 @@ def build_creative_router(
                 principal,
                 project_id=int(current["project_id"]),
             )
-            project = project_or_404(int(current["project_id"]))
+            if payload is None or payload.expected_project_revision is None:
+                raise CreativeContextConflict(
+                    "expected_project_revision is required for a revision"
+                )
             ref = application_service.create_revision(
                 project_id=int(current["project_id"]),
                 stage="brief",
@@ -2912,11 +2903,7 @@ def build_creative_router(
                 payload=current["content"],
                 workflow_task_id=workflow_task_id,
                 operation_id=(payload.operation_id if payload else None) or uuid.uuid4().hex,
-                expected_project_revision=(
-                    payload.expected_project_revision
-                    if payload and payload.expected_project_revision is not None
-                    else int(project["revision"])
-                ),
+                expected_project_revision=payload.expected_project_revision,
                 actor=principal,
             )
             return application_service.hydrate_resource_ref(ref)

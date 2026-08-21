@@ -192,4 +192,4 @@ DONE_WITH_CONCERNS。I1、I2、I5、M2 与 N1 已按复审意见修复；未执�
 
 ### Commit SHA
 
-`PENDING_CONTROLLER_COMMIT`
+`38040e2` (`fix: 收紧创作事务与恢复契约`；由 controller 精确暂存并提交。)

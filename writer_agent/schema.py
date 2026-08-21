@@ -192,6 +192,34 @@ class ActionCommand(_WriterActionModel):
     client_request_id: str
 
 
+class PlanStep(_WriterActionModel):
+    """One durable, independently executable creative-plan operation."""
+
+    step_key: str
+    stage: Stage
+    kind: Literal["generate", "persist", "lock"]
+    episode_number: int | None = Field(default=None, ge=1)
+    depends_on: list[str] = Field(default_factory=list)
+    expected_context: dict[str, Any]
+    replaces_resource_id: str | None = None
+    invalidates_downstream: bool = False
+
+
+class CreativePlan(_WriterActionModel):
+    """The read-only dependency plan shown to a writer before execution."""
+
+    project_id: int | None
+    target_stage: Stage
+    episode_start: int | None = Field(default=None, ge=1)
+    episode_end: int | None = Field(default=None, ge=1)
+    source_snapshot_id: str
+    assumptions: list[str]
+    reused_resources: list[dict[str, Any]] = Field(default_factory=list)
+    requires_selection: bool = False
+    selection_stage: Stage | None = None
+    steps: list[PlanStep]
+
+
 class WriterActionError(RuntimeError):
     def __init__(
         self,

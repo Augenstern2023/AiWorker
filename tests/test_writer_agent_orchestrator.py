@@ -346,3 +346,157 @@ def test_replay_after_binding_records_result_without_rebinding(
     assert bind_calls == [(action["session_id"], 17, 0)]
     assert replayed["project_id"] == 17
     assert orchestrator_context.store.require_action(action["id"], "writer-1")["result"] == replayed
+
+
+def empty_original_project() -> dict[str, Any]:
+    return {
+        "id": 17, "revision": 0, "target_episode_count": 2,
+        "locked_brief_id": None, "character_batch_id": None,
+        "outline_batch_id": None, "blueprints": [], "characters": [],
+        "relationships": [], "episodes": [],
+    }
+
+
+def project_with_locked_outline() -> dict[str, Any]:
+    project = empty_original_project()
+    project.update({
+        "revision": 3, "locked_brief_id": 101,
+        "character_batch_id": "characters-v1",
+        "outline_batch_id": "outlines-v1",
+        "blueprints": [{"id": 101, "version": 1, "status": "brief_locked"}],
+        "characters": [{"id": 201, "batch_id": "characters-v1", "version": 1,
+                        "status": "locked"}],
+        "episodes": [
+            {"id": 301, "stage": "outline", "episode_number": 1,
+             "batch_id": "outlines-v1", "version": 1, "status": "locked"},
+            {"id": 302, "stage": "outline", "episode_number": 2,
+             "batch_id": "outlines-v1", "version": 1, "status": "locked"},
+        ],
+    })
+    return project
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        ("brief", ["brief.persist"]),
+        ("characters", ["brief.persist", "brief.lock", "characters.generate"]),
+        ("outline", [
+            "brief.persist", "brief.lock", "characters.generate",
+            "characters.lock", "outline.generate",
+        ]),
+        ("script", [
+            "brief.persist", "brief.lock", "characters.generate",
+            "characters.lock", "outline.generate", "outline.lock",
+            "beats.generate:1", "beats.lock:1", "script.generate:1",
+        ]),
+    ],
+)
+def test_plan_fills_only_missing_dependencies(target, expected, orchestrator_context) -> None:
+    """Would catch a planner that skips an upstream locked baseline step."""
+    plan = orchestrator_context.orchestrator.build_plan(
+        project=empty_original_project(), target_stage=target,
+        episode_start=1, episode_end=1, source_snapshot_id="snapshot-1",
+        confirmed_brief_payload={"title": "情绪公司", "logline": "情绪决定工资"},
+    )
+    assert [step.step_key for step in plan.steps] == expected
+
+
+def test_plan_reuses_locked_authority(orchestrator_context) -> None:
+    """Would catch a planner that regenerates compatible locked authority."""
+    plan = orchestrator_context.orchestrator.build_plan(
+        project=project_with_locked_outline(), target_stage="script",
+        episode_start=1, episode_end=2, source_snapshot_id="snapshot-2",
+    )
+    assert [step.step_key for step in plan.steps] == [
+        "beats.generate:1", "beats.lock:1", "script.generate:1",
+        "beats.generate:2", "beats.lock:2", "script.generate:2",
+    ]
+    assert {item["resource_type"] for item in plan.reused_resources} == {
+        "brief", "characters", "outline",
+    }
+
+
+def test_plan_pauses_for_selection_after_multi_direction_generation(
+    orchestrator_context,
+) -> None:
+    """Would catch a planner that locks an unselected generated direction."""
+    plan = orchestrator_context.orchestrator.build_plan(
+        project=empty_original_project(), target_stage="outline",
+        episode_start=1, episode_end=1, source_snapshot_id="snapshot-3",
+        confirmed_brief_payload=None,
+    )
+    assert [step.step_key for step in plan.steps] == ["brief.generate"]
+    assert plan.requires_selection is True
+    assert plan.selection_stage == "brief"
+
+
+def test_execute_step_rejects_task_assigned_to_another_user(orchestrator_context) -> None:
+    """Would catch an executor that leaks the workflow assignment exception."""
+    plan = orchestrator_context.orchestrator.build_plan(
+        project=empty_original_project(), target_stage="brief",
+        episode_start=1, episode_end=1, source_snapshot_id="snapshot-4",
+        confirmed_brief_payload={"title": "情绪公司"},
+    )
+    orchestrator_context.creative_service.ensure_stage_task.side_effect = PermissionError(
+        "该创作阶段已由其他人员处理"
+    )
+
+    with pytest.raises(WriterActionError) as exc:
+        orchestrator_context.orchestrator.execute_step(
+            plan=plan, step=plan.steps[0], actor=orchestrator_context.actor,
+            source_snapshot={}, payload={"title": "情绪公司"},
+        )
+
+    assert exc.value.code == "TASK_ASSIGNED_TO_OTHER"
+
+
+def test_reworking_locked_outline_calls_create_revision_and_marks_downstream_historical(
+    orchestrator_context,
+) -> None:
+    """Would catch an executor that writes a locked outline as an ordinary draft."""
+    project = project_with_locked_outline()
+    plan = orchestrator_context.orchestrator.build_plan(
+        project=project, target_stage="outline", episode_start=1, episode_end=1,
+        source_snapshot_id="snapshot-5", rework_stage="outline",
+    )
+    step = plan.steps[0]
+    orchestrator_context.creative_service.ensure_stage_task.return_value = {"id": "task-1"}
+    orchestrator_context.creative_service.create_revision.return_value = {
+        "resource_type": "outline", "resource_id": "17:outlines-v2",
+    }
+
+    result = orchestrator_context.orchestrator.execute_step(
+        plan=plan, step=step, actor=orchestrator_context.actor,
+        source_snapshot={}, payload={"episodes": []},
+    )
+
+    assert step.replaces_resource_id == "17:outlines-v1"
+    assert step.invalidates_downstream is True
+    assert result["resource_refs"] == [
+        {"resource_type": "outline", "resource_id": "17:outlines-v2"}
+    ]
+    orchestrator_context.creative_service.create_revision.assert_called_once()
+    orchestrator_context.creative_service.persist_draft.assert_not_called()
+
+
+def test_locked_resource_is_never_patched_in_place(orchestrator_context) -> None:
+    """Would catch an execution path that uses the repository PATCH-style draft API."""
+    project = project_with_locked_outline()
+    plan = orchestrator_context.orchestrator.build_plan(
+        project=project, target_stage="characters", episode_start=1, episode_end=1,
+        source_snapshot_id="snapshot-6", rework_stage="characters",
+    )
+    step = plan.steps[0]
+    orchestrator_context.creative_service.ensure_stage_task.return_value = {"id": "task-2"}
+    orchestrator_context.creative_service.create_revision.return_value = {
+        "resource_type": "characters", "resource_id": "17:characters-v2",
+    }
+
+    orchestrator_context.orchestrator.execute_step(
+        plan=plan, step=step, actor=orchestrator_context.actor,
+        source_snapshot={}, payload={"characters": [{"name": "林夏"}]},
+    )
+
+    assert step.replaces_resource_id == "17:characters-v1"
+    orchestrator_context.creative_service.persist_draft.assert_not_called()

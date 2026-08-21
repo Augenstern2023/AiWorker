@@ -38,6 +38,7 @@ from identity.schema import Principal
 from pydantic import BaseModel
 
 from .service import build_writer_report_markdown, is_review_request, normalize_writer_report, writer_messages
+from .store import WriterAgentStore
 
 
 _TEXT_UPLOAD_EXTENSIONS = frozenset({
@@ -56,129 +57,6 @@ class SessionCreateRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     display_user_message: bool = True
-
-
-class WriterAgentStore:
-    def __init__(self, db_path: Path) -> None:
-        self.db_path = db_path
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.execute("CREATE TABLE IF NOT EXISTS writer_agent_sessions (id INTEGER PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, filename TEXT NOT NULL DEFAULT '', messages_json TEXT NOT NULL DEFAULT '[]', report_json TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL, updated_at REAL NOT NULL)")
-            columns = {
-                row["name"]
-                for row in conn.execute("PRAGMA table_info(writer_agent_sessions)").fetchall()
-            }
-            if "reports_json" not in columns:
-                conn.execute(
-                    "ALTER TABLE writer_agent_sessions ADD COLUMN reports_json TEXT NOT NULL DEFAULT '[]'"
-                )
-
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    def create(self, user_id: str, content: str, title: str = "", filename: str = "") -> dict[str, Any]:
-        now = time.time()
-        material_name = filename or title or "已粘贴创作材料"
-        material_message = _material_message(material_name, content)
-        with self._connect() as conn:
-            cursor = conn.execute(
-                "INSERT INTO writer_agent_sessions (user_id,title,content,filename,messages_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
-                (
-                    user_id,
-                    title or filename or "未命名创作会话",
-                    content,
-                    filename,
-                    json.dumps([material_message], ensure_ascii=False),
-                    now,
-                    now,
-                ),
-            )
-        return self.get(int(cursor.lastrowid), user_id) or {}
-
-    def append_material(
-        self, session_id: int, user_id: str | None, content: str, filename: str
-    ) -> dict[str, Any]:
-        session = self.get(session_id, user_id)
-        if not session:
-            return {}
-        messages = list(session.get("messages") or [])
-        messages.append(_material_message(filename, content))
-        combined_content = (
-            f"{session['content']}\n\n[补充材料：{filename}]\n{content}"
-        )
-        with self._connect() as conn:
-            conn.execute(
-                "UPDATE writer_agent_sessions SET content = ?, messages_json = ?, updated_at = ? WHERE id = ?"
-                if user_id is None
-                else "UPDATE writer_agent_sessions SET content = ?, messages_json = ?, updated_at = ? WHERE id = ? AND user_id = ?",
-                (combined_content, json.dumps(messages, ensure_ascii=False), time.time(), session_id)
-                if user_id is None
-                else (
-                    combined_content,
-                    json.dumps(messages, ensure_ascii=False),
-                    time.time(),
-                    session_id,
-                    user_id,
-                ),
-            )
-        return self.get(session_id, user_id) or {}
-
-    def get(self, session_id: int, user_id: str | None) -> dict[str, Any] | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM writer_agent_sessions WHERE id = ?" if user_id is None else "SELECT * FROM writer_agent_sessions WHERE id = ? AND user_id = ?",
-                (session_id,) if user_id is None else (session_id, user_id),
-            ).fetchone()
-        return self._row(row) if row else None
-
-    def list(self, user_id: str | None) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM writer_agent_sessions ORDER BY updated_at DESC" if user_id is None else "SELECT * FROM writer_agent_sessions WHERE user_id = ? ORDER BY updated_at DESC",
-                () if user_id is None else (user_id,),
-            ).fetchall()
-        return [self._row(row) for row in rows]
-
-    def save_turn(
-        self,
-        session_id: int,
-        user_id: str | None,
-        messages: list[dict[str, Any]],
-        report: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        session = self.get(session_id, user_id)
-        if not session:
-            return {}
-        reports = list(session.get("reports") or [])
-        latest_report = dict(session.get("report") or {})
-        if report is not None:
-            report_entry = {
-                "id": f"report-{len(reports) + 1}",
-                "created_at": time.time(),
-                "report": report,
-            }
-            reports.append(report_entry)
-            latest_report = report
-            if messages and messages[-1].get("role") == "assistant":
-                messages[-1]["report_id"] = report_entry["id"]
-        with self._connect() as conn:
-            conn.execute(
-                "UPDATE writer_agent_sessions SET messages_json = ?, report_json = ?, reports_json = ?, updated_at = ? WHERE id = ?" if user_id is None else "UPDATE writer_agent_sessions SET messages_json = ?, report_json = ?, reports_json = ?, updated_at = ? WHERE id = ? AND user_id = ?",
-                (json.dumps(messages, ensure_ascii=False), json.dumps(latest_report, ensure_ascii=False), json.dumps(reports, ensure_ascii=False), time.time(), session_id) if user_id is None else (json.dumps(messages, ensure_ascii=False), json.dumps(latest_report, ensure_ascii=False), json.dumps(reports, ensure_ascii=False), time.time(), session_id, user_id),
-            )
-        return self.get(session_id, user_id) or {}
-
-    @staticmethod
-    def _row(row: sqlite3.Row) -> dict[str, Any]:
-        item = dict(row)
-        item["messages"] = json.loads(item.pop("messages_json") or "[]")
-        item["report"] = json.loads(item.pop("report_json") or "{}")
-        item["reports"] = json.loads(item.pop("reports_json", "[]") or "[]")
-        if not item["reports"] and item["report"]:
-            item["reports"] = [{"id": "report-1", "created_at": item["updated_at"], "report": item["report"]}]
-        return item
 
 
 def create_provider() -> Any:

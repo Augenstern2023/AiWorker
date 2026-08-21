@@ -417,10 +417,19 @@ def requires_direction_card(
     message: str,
     project_context: dict[str, Any],
 ) -> bool:
-    if project_context.get("project_id") or len(materials) != 1:
+    if (
+        project_context.get("project_id")
+        or len(materials) != 1
+        or "跳过方向" in message
+    ):
         return False
     inspiration = _normal_text(materials[0].get("content")).strip()
-    if not inspiration or "\n" in inspiration or len(inspiration) > 200:
+    if (
+        not inspiration
+        or "完整故事" in inspiration
+        or "\n" in inspiration
+        or len(inspiration) > 200
+    ):
         return False
     if re.search(r"第\s*\d+\s*集", inspiration):
         return False

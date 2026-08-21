@@ -188,6 +188,13 @@ def _validate_source_authority(
     authority = extra.get("source_authority")
     expected_sha = str(extra.get("source_authority_sha256") or "").strip()
     if not isinstance(authority, dict) or not expected_sha:
+        # Direct legacy worker jobs predate the server-side envelope.  They are
+        # still internal jobs, so derive the same current authority instead of
+        # rejecting the old workflow path during migration.
+        if authority is None and not expected_sha:
+            return repository.generation_authority_envelope(
+                project_id, extra.get("episode_number")
+            )
         raise ValueError("server source authority is required")
     supplied_sha = canonical_request_hash(authority)
     if not hmac.compare_digest(supplied_sha, expected_sha):

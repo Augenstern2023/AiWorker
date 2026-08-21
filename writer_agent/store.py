@@ -522,6 +522,50 @@ class WriterAgentStore:
                 raise WriterActionError("ACTION_REVISION_MISMATCH", "动作版本已变化", current_revision=int(row["revision"]))
             return self._action_row(self._require_action_conn(conn, action_id))
 
+    def attach_project_to_action(
+        self,
+        action_id: str,
+        project_id: int,
+        *,
+        project_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist the project created by an action before materializing its plan."""
+
+        if type(project_id) is not int or project_id < 1:
+            raise WriterActionError("RESULT_VALIDATION_FAILED", "项目 ID 无效")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = self._require_action_conn(conn, action_id)
+            current_project_id = row["project_id"]
+            if current_project_id is not None and int(current_project_id) != project_id:
+                raise WriterActionError(
+                    "IDEMPOTENCY_KEY_REUSED", "动作已绑定到不同项目"
+                )
+            expected = _decode(row["expected_context_json"], {})
+            expected.update(project_context)
+            changed = conn.execute(
+                "UPDATE writer_agent_actions SET project_id=?, project_id_json=?, "
+                "expected_context_json=?, revision=?, updated_at=? WHERE id=? "
+                "AND status=? AND revision=?",
+                (
+                    project_id,
+                    _json(project_id),
+                    _json(expected),
+                    int(row["revision"]) + 1,
+                    time.time(),
+                    action_id,
+                    row["status"],
+                    int(row["revision"]),
+                ),
+            ).rowcount
+            if changed != 1:
+                raise WriterActionError(
+                    "ACTION_REVISION_MISMATCH",
+                    "动作版本已变化",
+                    current_revision=int(row["revision"]),
+                )
+            return self._action_row(self._require_action_conn(conn, action_id))
+
     def expire_pending_actions(self, *, older_than: float) -> int:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")

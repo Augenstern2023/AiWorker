@@ -372,6 +372,10 @@ class WriterProjectOrchestrator:
                 resource_id = payload.get("resource_id")
                 if not resource_id:
                     raise ValueError("lock step requires resource_id")
+                if task.get("status") == "assigned":
+                    self.creative_service.workflow_repository.start_task(
+                        workflow_task_id, actor
+                    )
                 result = self.creative_service.lock_resource(
                     project_id=plan.project_id, stage=step.stage,
                     resource_id=str(resource_id), workflow_task_id=workflow_task_id,
@@ -560,7 +564,10 @@ class WriterProjectOrchestrator:
     ) -> dict[str, Any]:
         """Adapt a persisted action/step record to the typed production executor."""
 
-        if action.get("action_type") != "creative.run_plan":
+        if action.get("action_type") not in {
+            "creative.run_plan",
+            "project.create_original",
+        }:
             raise WriterActionError(
                 "ACTION_STATE_INVALID", "动作不是可执行创作计划"
             )
@@ -604,6 +611,28 @@ class WriterProjectOrchestrator:
             step_payloads.get(selected.step_key), dict
         ):
             payload = dict(step_payloads[selected.step_key])
+        if selected.kind == "lock" and not payload.get("resource_id"):
+            dependencies = {
+                str(item["step_key"]): item
+                for item in persisted_steps
+                if str(item["step_key"]) in selected.depends_on
+            }
+            resource_ids = {
+                str(reference["resource_id"])
+                for dependency in dependencies.values()
+                if dependency.get("status") == "succeeded"
+                and dependency.get("stage") == selected.stage
+                and dependency.get("episode_start") == selected.episode_number
+                for reference in dependency.get("resource_refs") or []
+                if isinstance(reference, dict) and reference.get("resource_id")
+            }
+            if len(resource_ids) != 1:
+                raise WriterActionError(
+                    "RESULT_VALIDATION_FAILED",
+                    "锁定步骤未找到唯一的上游成果",
+                    retryable=False,
+                )
+            payload["resource_id"] = resource_ids.pop()
         snapshot_id = str(action.get("source_snapshot_id") or "")
         if not snapshot_id:
             raise WriterActionError("REFERENCE_UNAVAILABLE", "材料快照不存在")
@@ -638,6 +667,65 @@ class WriterProjectOrchestrator:
                 result["authority_revision"] = max(revisions)
                 result["authority_refs"] = advanced
         return result
+
+    def prepare_action_plan(
+        self, action_id: str, actor: Principal
+    ) -> list[dict[str, Any]]:
+        """Materialize a confirmed target-stage plan into durable runner steps."""
+
+        action = self.store.require_action(action_id, actor.user_id)
+        if action.get("action_type") not in {
+            "creative.run_plan",
+            "project.create_original",
+        }:
+            raise WriterActionError(
+                "ACTION_TYPE_INVALID", "该动作不是目标阶段创作计划"
+            )
+        project_id = action.get("project_id")
+        if type(project_id) is not int or project_id < 1:
+            raise WriterActionError("PROJECT_NOT_AVAILABLE", "创作计划缺少项目")
+        payload = dict(action.get("payload") or {})
+        target_stage = payload.get("target_stage")
+        if target_stage not in {"brief", "characters", "outline", "beats", "script"}:
+            raise WriterActionError("RESULT_VALIDATION_FAILED", "目标创作阶段无效")
+        project = self.creative_service.get_project(project_id)
+        confirmed_brief = payload.get("confirmed_brief_payload")
+        if not isinstance(confirmed_brief, dict):
+            confirmed_brief = None
+        rework_stage = payload.get("rework_stage")
+        if rework_stage not in {None, "brief", "characters", "outline", "beats", "script"}:
+            raise WriterActionError("RESULT_VALIDATION_FAILED", "重做阶段无效")
+        plan = self.build_plan(
+            project=project,
+            target_stage=target_stage,
+            episode_start=payload.get("episode_start"),
+            episode_end=payload.get("episode_end"),
+            source_snapshot_id=str(action.get("source_snapshot_id") or ""),
+            confirmed_brief_payload=confirmed_brief,
+            assumptions=list(payload.get("assumptions") or []),
+            rework_stage=rework_stage,
+        )
+        for order, step in enumerate(plan.steps, start=1):
+            self.store.upsert_step(
+                action_id=action_id,
+                step_key=step.step_key,
+                stage=step.stage,
+                episode_start=step.episode_number,
+                episode_end=step.episode_number,
+                status="pending",
+                operation_id=f"{action_id}:{step.step_key}",
+                depends_on=step.depends_on,
+                attempt=1,
+                step_order=order,
+            )
+        return self.store.list_steps(action_id)
+
+    def project_context(self, project_id: int) -> dict[str, Any]:
+        """Read the current authority context without exposing it in action results."""
+
+        return CreativeApplicationService.plan_expected_context(
+            self.creative_service.get_project(project_id)
+        )
 
     def recover_action_step_result(
         self,

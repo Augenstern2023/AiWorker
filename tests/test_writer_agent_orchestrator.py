@@ -93,6 +93,7 @@ def test_create_action_binds_idempotent_original_project(orchestrator_context) -
     )
 
     assert second["project_id"] == first["project_id"]
+    assert set(first) == {"project_id", "name", "creation_mode", "open_url"}
     session = orchestrator_context.store.get(action["session_id"], "writer-1")
     assert session["project_id"] == first["project_id"]
 

@@ -28,6 +28,8 @@ from workflow.transition_service import TransitionService
 from writer_agent.orchestrator import WriterProjectOrchestrator
 from writer_agent.schema import CreativePlan, PlanStep, WriterActionError
 
+from tests.writer_agent_harness import e2e_context
+
 
 def test_creative_plan_keeps_dependency_and_authority_contract() -> None:
     """Would catch a serialized plan that loses its execution ordering contract."""
@@ -1310,3 +1312,65 @@ def test_workflow_adapter_strictly_rejects_incomplete_episode_authority(
 
     with pytest.raises(ValueError, match="authority|upstream|权威|上游"):
         adapter._assert_current_upstream("beats", str(beats_id), snapshot)
+
+
+def test_conversation_creates_project_and_generates_twenty_episode_outline(
+    e2e_context,
+) -> None:
+    session = e2e_context.create_session("未来公司按照员工情绪发工资")
+    directions = e2e_context.chat(session, "给我5个不同方向")
+    direction_card = directions["messages"][-1]["cards"][0]
+    assert len(direction_card["items"]) == 5
+    assert all(
+        len(item["difference_dimensions"]) >= 2
+        for item in direction_card["items"]
+    )
+    action = e2e_context.chat(session, "采用第2个，创建20集项目并生成全剧大纲")
+    completed = e2e_context.confirm_and_wait(action)
+    project = e2e_context.creative_repository.get_project(completed["project_id"])
+
+    assert project["locked_brief_id"]
+    assert project["character_batch_id"]
+    outlines = [item for item in project["episodes"] if item["stage"] == "outline"]
+    assert len(outlines) == 20
+
+
+def test_conversation_retries_only_failed_script_episode(e2e_context) -> None:
+    project = e2e_context.project_with_locked_outline_and_beats(episodes=range(1, 6))
+    session = e2e_context.create_session("继续写剧本")
+    e2e_context.link_project(session, project["id"])
+    e2e_context.fail_script_episode_once(2)
+
+    first = e2e_context.confirm_and_wait(
+        e2e_context.chat(session, "生成第1到5集剧本")
+    )
+    assert first["result"]["partial"] is True
+    retry = e2e_context.retry_and_wait(session["id"], first["id"])
+    assert retry["result"]["executed_episodes"] == [2]
+    assert e2e_context.script_versions(project["id"]) == {
+        1: 1, 2: 1, 3: 1, 4: 1, 5: 1,
+    }
+
+
+def test_complete_story_goes_directly_to_confirmed_brief(e2e_context) -> None:
+    session = e2e_context.create_session(
+        "完整故事：林岚发现公司用情绪积分决定工资并组织同事反抗"
+    )
+    proposed = e2e_context.chat(session, "跳过方向比较，整理 Brief 并创建项目")
+    assert proposed["messages"][-1]["cards"][0]["card_type"] == "brief"
+    completed = e2e_context.confirm_and_wait(proposed)
+    project = e2e_context.creative_repository.get_project(completed["project_id"])
+    assert project["blueprints"][0]["direction_type"] == "original"
+
+
+def test_imported_story_and_optional_reference_are_snapshotted(e2e_context) -> None:
+    session = e2e_context.create_session("继续创作")
+    e2e_context.upload_material(session, "旧剧本.md", "第一集：林岚的工资因愤怒清零")
+    reference = e2e_context.seed_readable_topic_reference("职场热播样本")
+    proposed = e2e_context.chat(
+        session, f"参考选题 {reference['id']}，基于全部材料生成大纲"
+    )
+    snapshot = e2e_context.source_snapshot(proposed["actions"][-1]["source_snapshot_id"])
+    assert [item["name"] for item in snapshot["materials"]] == ["旧剧本.md"]
+    assert snapshot["references"][0]["resource_id"] == reference["id"]
+    assert snapshot["references"][0]["readable"] is True

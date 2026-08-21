@@ -180,6 +180,8 @@ def _session_materials(session: dict[str, Any]) -> list[dict[str, Any]]:
         material_content = content[match.end():end].strip()
         if material_content:
             materials.append({"name": match.group("name").strip(), "content": material_content})
+    if len(materials) > 1 and str(materials[0].get("content") or "").strip() == "继续创作":
+        return materials[1:]
     return materials or [{"name": first_name, "content": content}]
 
 
@@ -504,6 +506,10 @@ def build_writer_agent_router(
             )
         except WriterActionError as exc:
             raise HTTPException(409, str(exc)) from exc
+        project_context = {
+            **project_context,
+            "session_revision": int(session.get("context_revision") or 0),
+        }
         direction_required = requires_direction_card(
             materials, message, project_context
         )
@@ -543,6 +549,25 @@ def build_writer_agent_router(
                     action for action in proposed_actions
                     if action.source_card_id is None or action.source_card_id in card_ids
                 ]
+                card_by_id = {card["card_id"]: card for card in cards}
+                enriched_actions = []
+                for action in proposed_actions:
+                    source_card = card_by_id.get(action.source_card_id or "")
+                    if source_card and source_card.get("card_type") == "brief":
+                        confirmed_brief = source_card.get("content")
+                        if isinstance(confirmed_brief, dict):
+                            action_payload = dict(action.payload)
+                            action_payload["confirmed_brief_payload"] = confirmed_brief
+                            step_payloads = dict(
+                                action_payload.get("step_payloads") or {}
+                            )
+                            step_payloads["brief.persist"] = confirmed_brief
+                            action_payload["step_payloads"] = step_payloads
+                            action = action.model_copy(
+                                update={"payload": action_payload}
+                            )
+                    enriched_actions.append(action)
+                proposed_actions = enriched_actions
             actions = persist_proposed_actions(
                 store,
                 session_id=session_id,

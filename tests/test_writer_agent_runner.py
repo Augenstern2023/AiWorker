@@ -152,6 +152,11 @@ def test_runner_keeps_successful_episodes_and_retries_only_failures(
     )
     assert failed["status"] == "failed"
     assert failed["result"]["partial"] is True
+    assert failed["result"]["succeeded_steps"] == [
+        "script.generate:1", "script.generate:3"
+    ]
+    assert failed["result"]["failed_steps"] == ["script.generate:2"]
+    assert failed["result"]["executed_episodes"] == [1, 3]
     assert {
         step["step_key"]
         for step in runner_context.store.list_steps(action["id"])
@@ -164,6 +169,259 @@ def test_runner_keeps_successful_episodes_and_retries_only_failures(
         step["step_key"]
         for step in runner_context.store.list_steps(retry["id"])
     ] == ["script.generate:2"]
+    retried = runner_context.store.require_action(
+        retry["id"], runner_context.actor.user_id
+    )
+    assert retried["result"] == {
+        "partial": False,
+        "succeeded_steps": ["script.generate:2"],
+        "failed_steps": [],
+        "executed_episodes": [2],
+    }
+
+
+@pytest.mark.parametrize("action_type", ["project.create_original", "project.link"])
+def test_runner_executes_project_action_before_marking_it_succeeded(
+    runner_context, action_type: str
+) -> None:
+    project_id = None if action_type == "project.create_original" else 17
+    action = runner_context.store.create_action(
+        session_id=runner_context.session["id"],
+        actor_user_id=runner_context.actor.user_id,
+        action_type=action_type,
+        project_id=project_id,
+        idempotency_key=f"execute:{action_type}",
+        request_hash=f"execute:{action_type}",
+        payload=(
+            {
+                "seed_text": "情绪决定工资",
+                "name": "情绪公司",
+                "genre": "都市奇幻",
+                "target_platform": "hg",
+                "target_audience": "18-35岁",
+                "target_episode_count": 12,
+                "episode_duration_seconds": 120,
+                "cost_level": "low",
+                "content_boundaries": [],
+                "reference_refs": [],
+                "assumptions": [],
+            }
+            if action_type == "project.create_original"
+            else {}
+        ),
+        expected_context={"session_revision": 0},
+        source_snapshot_id="snapshot-project-action",
+    )
+    runner_context.store.claim_pending_action(action["id"], expected_revision=1)
+    runner_context.orchestrator.execute_project_action.return_value = {
+        "project_id": 17,
+        "name": "情绪公司",
+        "open_url": "/planning/projects/17/brief",
+    }
+
+    runner_context.runner.run(action["id"], runner_context.actor)
+
+    completed = runner_context.store.require_action(
+        action["id"], runner_context.actor.user_id
+    )
+    runner_context.orchestrator.execute_project_action.assert_called_once_with(
+        action["id"], runner_context.actor
+    )
+    assert completed["status"] == "succeeded"
+    assert completed["result"]["project_id"] == 17
+
+
+def test_runner_materializes_a_confirmed_plan_when_no_steps_exist(
+    runner_context,
+) -> None:
+    action = runner_context.store.create_action(
+        session_id=runner_context.session["id"],
+        actor_user_id=runner_context.actor.user_id,
+        action_type="creative.run_plan",
+        project_id=17,
+        idempotency_key="materialize-plan",
+        request_hash="materialize-plan",
+        payload={"target_stage": "outline"},
+        expected_context={"project_revision": 4},
+        source_snapshot_id="snapshot-materialize",
+    )
+    runner_context.store.claim_pending_action(action["id"], expected_revision=1)
+
+    def materialize(action_id: str, _actor: Principal) -> list[dict]:
+        runner_context.store.upsert_step(
+            action_id=action_id,
+            step_key="outline.generate",
+            stage="outline",
+            episode_start=None,
+            episode_end=None,
+            status="pending",
+            operation_id=f"{action_id}:outline.generate",
+            depends_on=[],
+            attempt=1,
+            step_order=1,
+        )
+        return runner_context.store.list_steps(action_id)
+
+    runner_context.orchestrator.prepare_action_plan.side_effect = materialize
+
+    runner_context.runner.run(action["id"], runner_context.actor)
+
+    runner_context.orchestrator.prepare_action_plan.assert_called_once_with(
+        action["id"], runner_context.actor
+    )
+    assert runner_context.executed == ["outline.generate"]
+    assert runner_context.store.require_action(
+        action["id"], runner_context.actor.user_id
+    )["status"] == "succeeded"
+
+
+def test_project_creation_can_continue_to_outline_in_one_confirmed_action(
+    runner_context,
+) -> None:
+    action = runner_context.store.create_action(
+        session_id=runner_context.session["id"],
+        actor_user_id=runner_context.actor.user_id,
+        action_type="project.create_original",
+        project_id=None,
+        idempotency_key="create-and-outline",
+        request_hash="create-and-outline",
+        payload={
+            "seed_text": "情绪决定工资",
+            "name": "情绪公司",
+            "genre": "都市奇幻",
+            "target_platform": "hg",
+            "target_audience": "18-35岁",
+            "target_episode_count": 12,
+            "episode_duration_seconds": 120,
+            "cost_level": "low",
+            "content_boundaries": [],
+            "reference_refs": [],
+            "assumptions": [],
+            "target_stage": "outline",
+        },
+        expected_context={"session_revision": 0},
+        source_snapshot_id="snapshot-create-outline",
+    )
+    runner_context.store.claim_pending_action(action["id"], expected_revision=1)
+    runner_context.orchestrator.execute_project_action.return_value = {
+        "project_id": 17,
+        "name": "情绪公司",
+        "open_url": "/planning/projects/17/brief",
+        "project_context": {"project_revision": 4},
+    }
+
+    def materialize(action_id: str, _actor: Principal) -> list[dict]:
+        current = runner_context.store.require_action(action_id, None)
+        assert current["project_id"] == 17
+        runner_context.store.upsert_step(
+            action_id=action_id,
+            step_key="outline.generate",
+            stage="outline",
+            episode_start=None,
+            episode_end=None,
+            status="pending",
+            operation_id=f"{action_id}:outline.generate",
+            depends_on=[],
+            attempt=1,
+            step_order=1,
+        )
+        return runner_context.store.list_steps(action_id)
+
+    runner_context.orchestrator.prepare_action_plan.side_effect = materialize
+
+    runner_context.runner.run(action["id"], runner_context.actor)
+
+    completed = runner_context.store.require_action(
+        action["id"], runner_context.actor.user_id
+    )
+    assert completed["status"] == "succeeded"
+    assert completed["project_id"] == 17
+    assert runner_context.executed == ["outline.generate"]
+
+
+@pytest.mark.parametrize(
+    ("resource_refs", "expect_success"),
+    [
+        ([{"resource_id": "brief-101", "status": "draft"}], True),
+        ([], False),
+        (
+            [
+                {"resource_id": "brief-101", "status": "draft"},
+                {"resource_id": "brief-102", "status": "draft"},
+            ],
+            False,
+        ),
+    ],
+)
+def test_lock_step_resolves_only_one_succeeded_dependency_resource(
+    runner_context, resource_refs: list[dict], expect_success: bool
+) -> None:
+    """A lock must consume exactly one durable resource produced by its dependency."""
+    snapshot = runner_context.store.save_source_snapshot({"source": "lock-test"})
+    action = runner_context.store.create_action(
+        session_id=runner_context.session["id"],
+        actor_user_id=runner_context.actor.user_id,
+        action_type="creative.run_plan",
+        project_id=17,
+        idempotency_key=f"lock-resource:{len(resource_refs)}",
+        request_hash=f"lock-resource:{len(resource_refs)}",
+        payload={"target_stage": "characters"},
+        expected_context={"project_revision": 4},
+        source_snapshot_id=snapshot["id"],
+    )
+    runner_context.store.upsert_step(
+        action_id=action["id"],
+        step_key="brief.persist",
+        stage="brief",
+        episode_start=None,
+        episode_end=None,
+        status="pending",
+        operation_id=f"{action['id']}:brief.persist",
+        depends_on=[],
+        attempt=1,
+        step_order=1,
+    )
+    runner_context.store.finish_step(
+        action["id"], "brief.persist", {"resource_refs": resource_refs}
+    )
+    lock_step = runner_context.store.upsert_step(
+        action_id=action["id"],
+        step_key="brief.lock",
+        stage="brief",
+        episode_start=None,
+        episode_end=None,
+        status="pending",
+        operation_id=f"{action['id']}:brief.lock",
+        depends_on=["brief.persist"],
+        attempt=1,
+        step_order=2,
+    )
+    creative_service = MagicMock()
+    creative_service.ensure_stage_task.return_value = {"id": "brief-task"}
+    creative_service.lock_resource.return_value = {
+        "resource_id": "brief-101", "status": "locked"
+    }
+    creative_service.advance_plan_context.return_value = {"revision": 5}
+    orchestrator = _real_orchestrator(runner_context.store, creative_service)
+    current_action = runner_context.store.require_action(
+        action["id"], runner_context.actor.user_id
+    )
+
+    if not expect_success:
+        with pytest.raises(WriterActionError) as exc:
+            orchestrator.execute_action_step(
+                current_action, lock_step, runner_context.actor,
+                operation_id=lock_step["operation_id"],
+            )
+        assert exc.value.code == "RESULT_VALIDATION_FAILED"
+        return
+
+    orchestrator.execute_action_step(
+        current_action, lock_step, runner_context.actor,
+        operation_id=lock_step["operation_id"],
+    )
+
+    assert creative_service.lock_resource.call_args.kwargs["resource_id"] == "brief-101"
 
 
 def test_runner_audits_success_failure_and_cancel_without_material_content(

@@ -801,6 +801,13 @@ def test_writer_agent_persists_valid_cards_actions_and_source_snapshot(tmp_path,
     action = response.json()["actions"][0]
     assert action["status"] == "pending"
     assert action["payload"]["source_card_id"] == "brief-1"
+    assert action["expected_context"]["session_revision"] == 0
+    assert action["payload"]["confirmed_brief_payload"] == assistant_message[
+        "cards"
+    ][0]["content"]
+    assert action["payload"]["step_payloads"]["brief.persist"] == assistant_message[
+        "cards"
+    ][0]["content"]
     snapshot = writer_agent_api.WriterAgentStore(
         tmp_path / "writer_agent" / "writer_agent.db"
     ).require_source_snapshot(action["source_snapshot_id"])

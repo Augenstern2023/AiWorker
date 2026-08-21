@@ -149,6 +149,33 @@ class WriterActionRunner:
             return
 
     @staticmethod
+    def _terminal_result(
+        action: dict[str, Any], steps: list[dict[str, Any]], *, partial: bool
+    ) -> dict[str, Any]:
+        """Merge durable project metadata with a concise execution summary."""
+
+        result = dict(action.get("result") or {})
+        succeeded = [step for step in steps if step["status"] == "succeeded"]
+        failed = [
+            step for step in steps if step["status"] in {"failed", "blocked"}
+        ]
+        result.update(
+            {
+                "partial": partial,
+                "succeeded_steps": [str(step["step_key"]) for step in succeeded],
+                "failed_steps": [str(step["step_key"]) for step in failed],
+                "executed_episodes": sorted(
+                    {
+                        int(step["episode_start"])
+                        for step in succeeded
+                        if step.get("episode_start") is not None
+                    }
+                ),
+            }
+        )
+        return result
+
+    @staticmethod
     def _job_status(job: Any) -> str:
         if isinstance(job, dict):
             return str(job.get("status") or "")
@@ -331,6 +358,78 @@ class WriterActionRunner:
         elif action["status"] != "running":
             raise WriterActionError("ACTION_STATE_INVALID", "动作当前状态不可执行")
 
+        if action["action_type"] in {"project.create_original", "project.link"}:
+            try:
+                current_actor = self._load_current_principal(action)
+                result = self.orchestrator.execute_project_action(
+                    action_id, current_actor
+                )
+                continue_to_stage = (
+                    action["action_type"] == "project.create_original"
+                    and (action.get("payload") or {}).get("target_stage")
+                    in {"brief", "characters", "outline", "beats", "script"}
+                )
+                if continue_to_stage:
+                    self.store.record_action_result(action_id, result)
+                    project_id = result.get("project_id")
+                    project_context = result.get("project_context")
+                    if not isinstance(project_context, dict):
+                        read_context = getattr(
+                            self.orchestrator, "project_context", None
+                        )
+                        project_context = (
+                            read_context(project_id)
+                            if callable(read_context)
+                            else None
+                        )
+                    self.store.attach_project_to_action(
+                        action_id,
+                        project_id,
+                        project_context=(
+                            project_context
+                            if isinstance(project_context, dict)
+                            else {"project_revision": 0}
+                        ),
+                    )
+                    self.orchestrator.prepare_action_plan(
+                        action_id, current_actor
+                    )
+            except WriterActionError as exc:
+                terminal = self.store.fail_action(
+                    action_id,
+                    code=exc.code,
+                    message=str(exc),
+                    retryable=exc.retryable,
+                    conflicting_action_id=exc.conflicting_action_id,
+                )
+                self._audit_terminal(terminal, actor, error_code=exc.code)
+                return
+            if continue_to_stage:
+                action = self.store.require_action(action_id, actor.user_id)
+            else:
+                terminal = self.store.finish_action(
+                    action_id, status="succeeded", result=result
+                )
+                self._audit_terminal(terminal, actor)
+                return
+
+        if action["action_type"] == "creative.run_plan" and not self.store.list_steps(
+            action_id
+        ):
+            try:
+                current_actor = self._load_current_principal(action)
+                self.orchestrator.prepare_action_plan(action_id, current_actor)
+            except WriterActionError as exc:
+                terminal = self.store.fail_action(
+                    action_id,
+                    code=exc.code,
+                    message=str(exc),
+                    retryable=exc.retryable,
+                    conflicting_action_id=exc.conflicting_action_id,
+                )
+                self._audit_terminal(terminal, actor, error_code=exc.code)
+                return
+
         while True:
             action = self.store.require_action(action_id, actor.user_id)
             if action["status"] != "running":
@@ -448,6 +547,7 @@ class WriterActionRunner:
                     self._poll_event.wait(0.2)
 
         steps = self.store.list_steps(action_id)
+        action = self.store.require_action(action_id, actor.user_id)
         failed = [step for step in steps if step["status"] == "failed"]
         blocked = [step for step in steps if step["status"] == "blocked"]
         cancelled = [step for step in steps if step["status"] == "cancelled"]
@@ -460,7 +560,9 @@ class WriterActionRunner:
                 message=str(first.get("error_message") or "依赖步骤失败"),
                 retryable=any(bool(item.get("retryable")) for item in failed),
                 conflicting_action_id=first.get("conflicting_action_id"),
-                result={"partial": bool(succeeded)},
+                result=self._terminal_result(
+                    action, steps, partial=bool(succeeded)
+                ),
             )
             self._audit_terminal(
                 terminal, actor, error_code=str(first.get("error_code") or "DEPENDENCY_FAILED")
@@ -469,11 +571,17 @@ class WriterActionRunner:
             terminal = self.store.finish_action(
                 action_id,
                 status="cancelled",
-                result={"partial": bool(succeeded)},
+                result=self._terminal_result(
+                    action, steps, partial=bool(succeeded)
+                ),
             )
             self._audit_terminal(terminal, actor)
         else:
-            terminal = self.store.finish_action(action_id, status="succeeded")
+            terminal = self.store.finish_action(
+                action_id,
+                status="succeeded",
+                result=self._terminal_result(action, steps, partial=False),
+            )
             self._audit_terminal(terminal, actor)
 
     def reconcile(self, action_id: str, actor: Principal) -> dict[str, Any]:

@@ -43,6 +43,7 @@ PAGE_TEMPLATES = {
     "/planning/projects": "planning/projects.html",
     "/planning/projects/{project_id}/brief": "planning/brief.html",
     "/planning/projects/{project_id}/characters": "planning/characters.html",
+    "/writing/dashboard": "writing/dashboard.html",
     "/writing/projects": "writing/projects.html",
     "/writing/projects/{project_id}/outlines": "writing/outlines.html",
     "/writing/projects/{project_id}/episodes/{episode_number}/beats": "writing/beats.html",
@@ -243,6 +244,10 @@ def _page_response(
             principal,
             navigation_service,
             page_title=page_title,
+            workspace_runtime=template_name not in {
+                "selection/dashboard.html",
+                "writing/dashboard.html",
+            },
             workspace_page=(
                 "tasks"
                 if template_name in {"common/tasks.html", "common/my_tasks.html"}
@@ -261,6 +266,7 @@ def _template_context(
     *,
     page_title: str,
     workspace_page: str = "",
+    workspace_runtime: bool = False,
 ) -> dict:
     csrf_token = ""
     service = getattr(request.app.state, "identity_permission_service", None)
@@ -275,6 +281,7 @@ def _template_context(
         "current_route": request.url.path,
         "page_title": page_title,
         "workspace_page": workspace_page,
+        "workspace_runtime": workspace_runtime,
         "can_manage_data": bool(
             principal
             and (

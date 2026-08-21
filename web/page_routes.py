@@ -13,7 +13,7 @@ from __future__ import annotations
 
 
 PAGE_ROUTES = (
-    ("/selection/dashboard", "page.selection", "工作概览"),
+    ("/selection/dashboard", "page.selection", "选品概览"),
     ("/selection/ranks", "page.selection", "今日榜单"),
     ("/selection/hits", "page.selection", "今日爆款"),
     ("/selection/topics", "page.selection", "选题库"),
@@ -21,6 +21,7 @@ PAGE_ROUTES = (
     ("/planning/projects", "page.planning", "策划项目"),
     ("/planning/projects/{project_id}/brief", "page.planning", "创作任务书"),
     ("/planning/projects/{project_id}/characters", "page.planning", "人物关系"),
+    ("/writing/dashboard", "page.writing", "工作概览"),
     ("/writing/projects", "page.writing", "编剧项目"),
     ("/writing/projects/{project_id}/outlines", "page.writing", "全剧大纲"),
     (

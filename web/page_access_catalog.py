@@ -234,6 +234,10 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
     )
     + _CREATIVE_TASK_SUPPORT
     + _CREATIVE_JOB_MONITOR,
+    "/writing/dashboard": (
+        ("GET", "/api/creative/projects"),
+        ("GET", "/api/workflow/tasks"),
+    ),
     "/writing/projects": (
         ("GET", "/api/creative/projects"),
         ("GET", "/api/creative/topics"),

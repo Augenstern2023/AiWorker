@@ -232,7 +232,7 @@ NAVIGATION_CATALOG = (
     {
         "id": "navigation:selection:dashboard",
         "parent_id": "navigation:selection",
-        "label": "工作概览",
+        "label": "选品概览",
         "route": "/selection/dashboard",
         "required_permission": "page.selection",
         "sort_order": 10,
@@ -297,9 +297,17 @@ NAVIGATION_CATALOG = (
         "id": "navigation:writing",
         "label": "编剧工作台",
         "icon": "bi-pencil-square",
-        "route": "/writing/projects",
+        "route": "/writing/dashboard",
         "required_permission": "page.writing",
         "sort_order": 30,
+    },
+    {
+        "id": "navigation:writing:dashboard",
+        "parent_id": "navigation:writing",
+        "label": "工作概览",
+        "route": "/writing/dashboard",
+        "required_permission": "page.writing",
+        "sort_order": 10,
     },
     {
         "id": "navigation:writing:projects",
@@ -307,7 +315,7 @@ NAVIGATION_CATALOG = (
         "label": "编剧项目",
         "route": "/writing/projects",
         "required_permission": "page.writing",
-        "sort_order": 10,
+        "sort_order": 20,
     },
     {
         "id": "navigation:script-review",
@@ -623,7 +631,9 @@ DEFAULT_ROLE_PAGE_ROUTES: dict[str, frozenset[str]] = {
         }
     ),
     "creative_planner": frozenset({"/planning/projects"}),
-    "screenwriter": frozenset({"/writing/projects", "/review/scripts"}),
+    "screenwriter": frozenset(
+        {"/writing/dashboard", "/writing/projects", "/review/scripts"}
+    ),
     "project_owner": frozenset(
         {
             "/admin/roles",

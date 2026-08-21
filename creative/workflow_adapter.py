@@ -410,6 +410,8 @@ class CreativeWorkflowAdapter:
         actor: Principal,
         *,
         difference_note: str = "",
+        expected_project_revision: int | None = None,
+        expected_authority: dict[str, Any] | None = None,
     ) -> dict:
         """Lock an assigned creative version without creating a submission."""
         if resource_type not in APPROVAL_FREE_RESOURCE_TYPES:
@@ -423,18 +425,39 @@ class CreativeWorkflowAdapter:
 
         if resource_type == "brief":
             resource = self.creative_repository.lock_brief(
-                int(resource_id), difference_note
+                int(resource_id),
+                difference_note,
+                expected_revision=expected_project_revision,
+                expected_authority=expected_authority,
             )
         elif resource_type == "characters":
             project_id, batch_id = self._batch_key(resource_id)
-            resource = self.creative_repository.lock_character_batch(project_id, batch_id)
+            resource = self.creative_repository.lock_character_batch(
+                project_id,
+                batch_id,
+                expected_revision=expected_project_revision,
+                expected_authority=expected_authority,
+            )
         elif resource_type == "outline":
             project_id, batch_id = self._batch_key(resource_id)
-            resource = self.creative_repository.lock_outline_batch(project_id, batch_id)
+            resource = self.creative_repository.lock_outline_batch(
+                project_id,
+                batch_id,
+                expected_revision=expected_project_revision,
+                expected_authority=expected_authority,
+            )
         elif resource_type == "beats":
-            resource = self.creative_repository.lock_episode_beats(int(resource_id))
+            resource = self.creative_repository.lock_episode_beats(
+                int(resource_id),
+                expected_revision=expected_project_revision,
+                expected_authority=expected_authority,
+            )
         else:
-            resource = self.creative_repository.lock_episode_script(int(resource_id))
+            resource = self.creative_repository.lock_episode_script(
+                int(resource_id),
+                expected_revision=expected_project_revision,
+                expected_authority=expected_authority,
+            )
         return {"resource": resource, "snapshot": snapshot}
 
     def lock_beats_batch_without_review(
@@ -925,6 +948,15 @@ class CreativeWorkflowAdapter:
                 for ref in refs
             ):
                 raise ValueError("creative resource references a stale outline upstream")
+            if not self.creative_repository.episode_generation_refs_match(
+                project,
+                resource_type,
+                int(snapshot["episode_number"]),
+                refs[0],
+            ):
+                raise ValueError(
+                    "creative resource authority is incomplete or stale"
+                )
         if resource_type == "script":
             current = sorted(
                 [item for item in project.get("episodes", []) if item["stage"] == "beats" and int(item["episode_number"]) == int(snapshot["episode_number"]) and item.get("status") in {"locked", "approved"}],

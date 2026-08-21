@@ -54,6 +54,8 @@ class TransitionService:
         actor: Principal,
         *,
         difference_note: str = "",
+        expected_project_revision: int | None = None,
+        expected_authority: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Finish a creative task by locking its version instead of submitting it."""
         if self.creative_adapter is None:
@@ -68,6 +70,8 @@ class TransitionService:
                 resource_id,
                 actor,
                 difference_note=difference_note,
+                expected_project_revision=expected_project_revision,
+                expected_authority=expected_authority,
             )
         except ValueError as exc:
             # A prior request may have locked the resource before a later

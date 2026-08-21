@@ -194,7 +194,15 @@ def _validate_source_authority(
         raise ValueError("server source authority fingerprint mismatch")
     if int(authority.get("project_id") or 0) != int(project_id):
         raise ValueError("server source authority project mismatch")
-    current = repository.generation_authority_envelope(project_id)
+    scoped_episode = authority.get("episode_number")
+    if scoped_episode is not None and int(extra.get("episode_number") or 0) != int(
+        scoped_episode
+    ):
+        raise ValueError("server source authority episode mismatch")
+    current = repository.generation_authority_envelope(
+        project_id,
+        int(scoped_episode) if scoped_episode is not None else None,
+    )
     if not hmac.compare_digest(
         canonical_request_hash(current), canonical_request_hash(authority)
     ):

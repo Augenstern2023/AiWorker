@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from creative.application_service import CreativeContextConflict, CreativeTaskOccupied
 from identity.schema import Principal
 from writer_agent.action_service import persist_proposed_actions
 from writer_agent.orchestrator import WriterProjectOrchestrator
@@ -376,6 +377,78 @@ def project_with_locked_outline() -> dict[str, Any]:
     return project
 
 
+def project_with_locked_episode_chain() -> dict[str, Any]:
+    """Build one fully compatible locked episode authority chain."""
+    project = project_with_locked_outline()
+    project["target_episode_count"] = 1
+    project["episodes"] = project["episodes"][:1]
+    outline = project["episodes"][0]
+    outline["content"] = {"episode": 1, "summary": "开端"}
+    outline_fingerprint = hashlib.sha256(
+        json.dumps(
+            outline["content"], ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    beats_content = {"beats": [{"beat": "开场"}]}
+    beats_fingerprint = hashlib.sha256(
+        json.dumps(
+            beats_content, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    brief_fingerprint = hashlib.sha256(b"{}").hexdigest()
+    character_fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "characters": [
+                    {"id": 201, "version": 1, "content": {}}
+                ],
+                "relationships": [],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    project["episodes"].extend([
+        {
+            "id": 401, "stage": "beats", "episode_number": 1,
+            "version": 1, "status": "locked", "content": beats_content,
+            "upstream_refs": {
+                "brief_id": 101,
+                "brief_version": 1,
+                "brief_content_fingerprint": brief_fingerprint,
+                "character_batch_id": "characters-v1",
+                "character_content_fingerprint": character_fingerprint,
+                "outline_batch_id": "outlines-v1",
+                "outline_id": 301,
+                "outline_version": 1,
+                "outline_content_fingerprint": outline_fingerprint,
+            },
+        },
+        {
+            "id": 501, "stage": "script", "episode_number": 1,
+            "version": 1, "status": "locked", "content": {"scenes": []},
+            "upstream_refs": {
+                "brief_id": 101,
+                "brief_version": 1,
+                "brief_content_fingerprint": brief_fingerprint,
+                "character_batch_id": "characters-v1",
+                "character_content_fingerprint": character_fingerprint,
+                "outline_batch_id": "outlines-v1",
+                "outline_id": 301,
+                "outline_version": 1,
+                "outline_content_fingerprint": outline_fingerprint,
+                "beats_id": 401,
+                "beats_version": 1,
+                "beats_content_fingerprint": beats_fingerprint,
+            },
+        },
+    ])
+    return project
+
+
 @pytest.mark.parametrize(
     ("target", "expected"),
     [
@@ -417,6 +490,223 @@ def test_plan_reuses_locked_authority(orchestrator_context) -> None:
     }
 
 
+def test_plan_reuses_all_five_compatible_locked_resources_as_empty_chain(
+    orchestrator_context,
+) -> None:
+    """Would catch a planner that regenerates an already compatible locked Script."""
+    plan = orchestrator_context.orchestrator.build_plan(
+        project=project_with_locked_episode_chain(), target_stage="script",
+        episode_start=1, episode_end=1, source_snapshot_id="snapshot-all-locked",
+    )
+
+    assert plan.steps == []
+    assert [item["resource_type"] for item in plan.reused_resources] == [
+        "brief", "characters", "outline", "beats", "script",
+    ]
+
+
+def test_plan_rejects_stale_locked_beats_and_rebuilds_its_script_chain(
+    orchestrator_context,
+) -> None:
+    """Would catch reuse based only on the locked status of a historical Beats."""
+    project = project_with_locked_episode_chain()
+    beats = next(item for item in project["episodes"] if item["stage"] == "beats")
+    beats["upstream_refs"]["outline_batch_id"] = "outlines-old"
+
+    plan = orchestrator_context.orchestrator.build_plan(
+        project=project, target_stage="script", episode_start=1, episode_end=1,
+        source_snapshot_id="snapshot-stale-beats",
+    )
+
+    assert [step.step_key for step in plan.steps] == [
+        "beats.generate:1", "beats.lock:1", "script.generate:1",
+    ]
+    assert {item["resource_type"] for item in plan.reused_resources} == {
+        "brief", "characters", "outline",
+    }
+
+
+def test_script_generation_binds_reused_beats_authority(orchestrator_context) -> None:
+    """Would catch a Script step detached from the locked Beats it consumes."""
+    project = project_with_locked_episode_chain()
+    project["episodes"] = [
+        item for item in project["episodes"] if item["stage"] != "script"
+    ]
+
+    plan = orchestrator_context.orchestrator.build_plan(
+        project=project, target_stage="script", episode_start=1, episode_end=1,
+        source_snapshot_id="snapshot-bind-beats",
+    )
+
+    assert [step.step_key for step in plan.steps] == ["script.generate:1"]
+    assert plan.steps[0].expected_context["beats"] == {
+        "resource_id": "401",
+        "version": 1,
+        "fingerprint": hashlib.sha256(
+            json.dumps(
+                {"beats": [{"beat": "开场"}]}, ensure_ascii=False,
+                sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def test_plan_selects_highest_compatible_locked_beats_and_script(
+    orchestrator_context,
+) -> None:
+    """Would catch first-record or highest-but-stale locked resource selection."""
+    project = project_with_locked_episode_chain()
+    beats_v1 = next(item for item in project["episodes"] if item["stage"] == "beats")
+    script_v1 = next(item for item in project["episodes"] if item["stage"] == "script")
+    beats_v3 = {
+        **beats_v1, "id": 403, "version": 3,
+        "content": {"beats": [{"beat": "兼容新版"}]},
+    }
+    beats_v4_stale = {
+        **beats_v1, "id": 404, "version": 4,
+        "upstream_refs": {**beats_v1["upstream_refs"], "outline_id": 999},
+    }
+    beats_v3_fingerprint = hashlib.sha256(
+        json.dumps(
+            beats_v3["content"], ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    script_v2 = {
+        **script_v1, "id": 502, "version": 2,
+        "upstream_refs": {
+            **script_v1["upstream_refs"],
+            "beats_id": 403,
+            "beats_version": 3,
+            "beats_content_fingerprint": beats_v3_fingerprint,
+        },
+    }
+    script_v3_stale = {
+        **script_v1, "id": 503, "version": 3,
+        "upstream_refs": {**script_v1["upstream_refs"], "beats_id": 999},
+    }
+    project["episodes"].extend([
+        beats_v3, beats_v4_stale, script_v2, script_v3_stale,
+    ])
+
+    plan = orchestrator_context.orchestrator.build_plan(
+        project=project, target_stage="script", episode_start=1, episode_end=1,
+        source_snapshot_id="snapshot-highest-compatible",
+    )
+
+    assert plan.steps == []
+    assert [
+        (item["resource_type"], item["resource_id"])
+        for item in plan.reused_resources[-2:]
+    ] == [("beats", "403"), ("script", "502")]
+
+
+def test_plan_rejects_locked_beats_with_stale_extended_upstream_fingerprints(
+    orchestrator_context,
+) -> None:
+    """Would catch reuse that checks pointers but ignores supplied authority hashes."""
+    project = project_with_locked_episode_chain()
+    beats_v1 = next(item for item in project["episodes"] if item["stage"] == "beats")
+    project["episodes"].append({
+        **beats_v1,
+        "id": 402,
+        "version": 2,
+        "upstream_refs": {
+            **beats_v1["upstream_refs"],
+            "brief_version": 999,
+            "brief_content_fingerprint": "stale-brief",
+            "character_content_fingerprint": "stale-characters",
+        },
+    })
+
+    plan = orchestrator_context.orchestrator.build_plan(
+        project=project,
+        target_stage="script",
+        episode_start=1,
+        episode_end=1,
+        source_snapshot_id="snapshot-stale-extended-refs",
+    )
+
+    assert plan.steps == []
+    assert [
+        (item["resource_type"], item["resource_id"])
+        for item in plan.reused_resources[-2:]
+    ] == [("beats", "401"), ("script", "501")]
+
+
+@pytest.mark.parametrize(
+    "missing_ref",
+    [
+        "brief_version",
+        "brief_content_fingerprint",
+        "character_content_fingerprint",
+    ],
+)
+def test_plan_strictly_rejects_legacy_episode_authority_without_fingerprints(
+    missing_ref, orchestrator_context,
+) -> None:
+    """Historical rows with incomplete authority are never implicitly trusted."""
+    project = project_with_locked_episode_chain()
+    for item in project["episodes"]:
+        if item["stage"] in {"beats", "script"}:
+            item["upstream_refs"].pop(missing_ref, None)
+
+    plan = orchestrator_context.orchestrator.build_plan(
+        project=project,
+        target_stage="script",
+        episode_start=1,
+        episode_end=1,
+        source_snapshot_id=f"snapshot-legacy-missing-{missing_ref}",
+    )
+
+    assert [step.step_key for step in plan.steps] == [
+        "beats.generate:1",
+        "beats.lock:1",
+        "script.generate:1",
+    ]
+
+
+@pytest.mark.parametrize("rework_stage", ["beats", "script"])
+def test_reworking_locked_episode_resource_creates_real_per_episode_revision_step(
+    rework_stage, orchestrator_context,
+) -> None:
+    """Would catch a rework lookup that drops the required episode number."""
+    project = project_with_locked_episode_chain()
+    expected_resource_id = "401" if rework_stage == "beats" else "501"
+
+    plan = orchestrator_context.orchestrator.build_plan(
+        project=project, target_stage=rework_stage, episode_start=1, episode_end=1,
+        source_snapshot_id=f"snapshot-rework-{rework_stage}",
+        rework_stage=rework_stage,
+    )
+
+    assert len(plan.steps) == 1
+    step = plan.steps[0]
+    assert step.step_key == f"{rework_stage}.persist:1"
+    assert step.episode_number == 1
+    assert step.replaces_resource_id == expected_resource_id
+    assert step.invalidates_downstream is True
+
+
+@pytest.mark.parametrize(
+    ("episode_start", "episode_end"),
+    [(0, 1), (2, 1), (1, 3)],
+)
+def test_plan_rejects_episode_range_outside_project_bounds(
+    episode_start, episode_end, orchestrator_context,
+) -> None:
+    """Would catch a planner that emits impossible per-episode work."""
+    with pytest.raises(WriterActionError) as exc:
+        orchestrator_context.orchestrator.build_plan(
+            project=empty_original_project(), target_stage="script",
+            episode_start=episode_start, episode_end=episode_end,
+            source_snapshot_id="snapshot-range",
+            confirmed_brief_payload={"title": "情绪公司"},
+        )
+
+    assert exc.value.code == "RESULT_VALIDATION_FAILED"
+
+
 def test_plan_pauses_for_selection_after_multi_direction_generation(
     orchestrator_context,
 ) -> None:
@@ -438,7 +728,7 @@ def test_execute_step_rejects_task_assigned_to_another_user(orchestrator_context
         episode_start=1, episode_end=1, source_snapshot_id="snapshot-4",
         confirmed_brief_payload={"title": "情绪公司"},
     )
-    orchestrator_context.creative_service.ensure_stage_task.side_effect = PermissionError(
+    orchestrator_context.creative_service.ensure_stage_task.side_effect = CreativeTaskOccupied(
         "该创作阶段已由其他人员处理"
     )
 
@@ -449,6 +739,33 @@ def test_execute_step_rejects_task_assigned_to_another_user(orchestrator_context
         )
 
     assert exc.value.code == "TASK_ASSIGNED_TO_OTHER"
+
+
+def test_execute_step_sanitizes_native_permission_error(orchestrator_context) -> None:
+    """Only the typed task-occupation exception may expose assignment semantics."""
+    plan = orchestrator_context.orchestrator.build_plan(
+        project=empty_original_project(),
+        target_stage="brief",
+        episode_start=1,
+        episode_end=1,
+        source_snapshot_id="snapshot-native-permission",
+        confirmed_brief_payload={"title": "情绪公司"},
+    )
+    orchestrator_context.creative_service.ensure_stage_task.side_effect = PermissionError(
+        r"D:\private\workflow.db: authorization backend failed"
+    )
+
+    with pytest.raises(WriterActionError) as exc:
+        orchestrator_context.orchestrator.execute_step(
+            plan=plan,
+            step=plan.steps[0],
+            actor=orchestrator_context.actor,
+            source_snapshot={},
+            payload={"title": "情绪公司"},
+        )
+
+    assert exc.value.code == "CREATIVE_OPERATION_FAILED"
+    assert "private" not in str(exc.value)
 
 
 def test_reworking_locked_outline_calls_create_revision_and_marks_downstream_historical(
@@ -500,3 +817,45 @@ def test_locked_resource_is_never_patched_in_place(orchestrator_context) -> None
 
     assert step.replaces_resource_id == "17:characters-v1"
     orchestrator_context.creative_service.persist_draft.assert_not_called()
+
+
+def test_failed_authority_advance_does_not_partially_mutate_downstream_steps(
+    orchestrator_context,
+) -> None:
+    """Would catch partial trust propagation when a later context check conflicts."""
+    plan = orchestrator_context.orchestrator.build_plan(
+        project=empty_original_project(),
+        target_stage="script",
+        episode_start=1,
+        episode_end=2,
+        source_snapshot_id="snapshot-atomic-advance",
+        confirmed_brief_payload={"title": "情绪公司"},
+    )
+    lock_step = next(step for step in plan.steps if step.step_key == "outline.lock")
+    first_dependent = next(
+        step for step in plan.steps if step.step_key == "beats.generate:1"
+    )
+    original_context = dict(first_dependent.expected_context)
+    orchestrator_context.creative_service.ensure_stage_task.return_value = {
+        "id": "outline-task"
+    }
+    orchestrator_context.creative_service.lock_resource.return_value = {
+        "resource_type": "outline",
+        "resource_id": "17:outlines-v1",
+    }
+    orchestrator_context.creative_service.advance_plan_context.side_effect = [
+        {**original_context, "revision": 1},
+        CreativeContextConflict("concurrent authority change"),
+    ]
+
+    with pytest.raises(WriterActionError) as exc:
+        orchestrator_context.orchestrator.execute_step(
+            plan=plan,
+            step=lock_step,
+            actor=orchestrator_context.actor,
+            source_snapshot={"snapshot_id": "snapshot-atomic-advance"},
+            payload={"resource_id": "17:outlines-v1"},
+        )
+
+    assert exc.value.code == "STALE_PROJECT_CONTEXT"
+    assert first_dependent.expected_context == original_context

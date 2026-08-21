@@ -39,6 +39,14 @@ class CreativeContextConflict(ValueError):
     """Raised when the expected creative authority revision is stale."""
 
 
+class CreativeTaskOccupied(PermissionError):
+    """Raised when another assignee owns the creative workflow task."""
+
+
+class CreativeProjectAccessDenied(PermissionError):
+    """Raised when the actor cannot write creative content for the project."""
+
+
 class CreativeApplicationService:
     def __init__(
         self,
@@ -65,6 +73,292 @@ class CreativeApplicationService:
         if project is None:
             raise KeyError(project_id)
         return project
+
+    @staticmethod
+    def _resource_fingerprint(content: Any) -> str:
+        return canonical_request_hash(content or {})
+
+    @staticmethod
+    def highest_locked_episode_resource(
+        project: dict[str, Any], stage: str, episode_number: int
+    ) -> dict[str, Any] | None:
+        candidates = [
+            item
+            for item in project.get("episodes", [])
+            if item.get("stage") == stage
+            and int(item.get("episode_number") or 0) == int(episode_number)
+            and item.get("status") in {"locked", "approved"}
+        ]
+        return max(
+            candidates,
+            key=lambda item: (int(item.get("version") or 0), int(item["id"])),
+            default=None,
+        )
+
+    @staticmethod
+    def _current_locked_outline(
+        project: dict[str, Any], episode_number: int
+    ) -> dict[str, Any] | None:
+        candidates = [
+            item
+            for item in project.get("episodes", [])
+            if item.get("stage") == "outline"
+            and int(item.get("episode_number") or 0) == int(episode_number)
+            and item.get("batch_id") == project.get("outline_batch_id")
+            and item.get("status") in {"locked", "approved"}
+        ]
+        return max(
+            candidates,
+            key=lambda item: (int(item.get("version") or 0), int(item["id"])),
+            default=None,
+        )
+
+    @classmethod
+    def compatible_locked_episode_resource(
+        cls, project: dict[str, Any], stage: str, episode_number: int
+    ) -> dict[str, Any] | None:
+        """Select the highest locked episode resource on current upstream authority."""
+        if stage not in {"beats", "script"}:
+            raise ValueError("compatibility lookup only supports episode resources")
+        outline = cls._current_locked_outline(project, episode_number)
+        if outline is None:
+            return None
+        locked_brief_id = project.get("locked_brief_id")
+        character_batch_id = project.get("character_batch_id")
+        outline_batch_id = project.get("outline_batch_id")
+        if not locked_brief_id or not character_batch_id or not outline_batch_id:
+            return None
+        brief = next(
+            (
+                item
+                for item in project.get("blueprints", [])
+                if item.get("id") == locked_brief_id
+                and item.get("status") in {"brief_locked", "locked", "approved"}
+            ),
+            None,
+        )
+        characters = [
+            item
+            for item in project.get("characters", [])
+            if item.get("batch_id") == character_batch_id
+            and item.get("status") in {"locked", "approved"}
+        ]
+        relationships = [
+            item
+            for item in project.get("relationships", [])
+            if item.get("batch_id") == character_batch_id
+            and item.get("status") in {"locked", "approved"}
+        ]
+        if brief is None or not characters:
+            return None
+        character_fingerprint = CreativeRepository._content_fingerprint({
+            "characters": [
+                {
+                    "id": item["id"],
+                    "version": item.get("version"),
+                    "content": item.get("content") or {},
+                }
+                for item in sorted(characters, key=lambda item: int(item["id"]))
+            ],
+            "relationships": [
+                {
+                    "id": item["id"],
+                    "version": item.get("version"),
+                    "content": item.get("content") or {},
+                }
+                for item in sorted(relationships, key=lambda item: int(item["id"]))
+            ],
+        })
+
+        compatible_beats: dict[str, Any] | None = None
+        if stage == "script":
+            compatible_beats = cls.compatible_locked_episode_resource(
+                project, "beats", episode_number
+            )
+            if compatible_beats is None:
+                return None
+
+        def is_compatible(item: dict[str, Any]) -> bool:
+            refs = item.get("upstream_refs") or {}
+            if (
+                str(refs.get("brief_id") or "") != str(locked_brief_id)
+                or int(refs.get("brief_version") or 0)
+                != int(brief.get("version") or 0)
+                or str(refs.get("brief_content_fingerprint") or "")
+                != cls._resource_fingerprint(brief.get("content") or {})
+                or str(refs.get("character_batch_id") or "")
+                != str(character_batch_id)
+                or str(refs.get("character_content_fingerprint") or "")
+                != character_fingerprint
+                or str(refs.get("outline_batch_id") or "")
+                != str(outline_batch_id)
+                or int(refs.get("outline_id") or 0) != int(outline["id"])
+                or int(refs.get("outline_version") or 0)
+                != int(outline.get("version") or 0)
+                or not CreativeRepository._outline_content_fingerprint_matches(
+                    refs.get("outline_content_fingerprint"),
+                    outline.get("content") or {},
+                )
+            ):
+                return False
+            if stage == "beats":
+                return True
+            assert compatible_beats is not None
+            return (
+                int(refs.get("beats_id") or 0) == int(compatible_beats["id"])
+                and int(refs.get("beats_version") or 0)
+                == int(compatible_beats.get("version") or 0)
+                and str(refs.get("beats_content_fingerprint") or "")
+                == cls._resource_fingerprint(compatible_beats.get("content") or {})
+            )
+
+        candidates = [
+            item
+            for item in project.get("episodes", [])
+            if item.get("stage") == stage
+            and int(item.get("episode_number") or 0) == int(episode_number)
+            and item.get("status") in {"locked", "approved"}
+            and is_compatible(item)
+        ]
+        return max(
+            candidates,
+            key=lambda item: (int(item.get("version") or 0), int(item["id"])),
+            default=None,
+        )
+
+    @classmethod
+    def plan_expected_context(
+        cls, project: dict[str, Any], episode_number: int | None = None
+    ) -> dict[str, Any]:
+        """Build the scoped project authority compared at each plan side effect."""
+        beats = (
+            cls.compatible_locked_episode_resource(project, "beats", episode_number)
+            if episode_number is not None
+            else None
+        )
+        return {
+            "revision": int(project.get("revision") or 0),
+            "locked_brief_id": project.get("locked_brief_id"),
+            "character_batch_id": project.get("character_batch_id"),
+            "outline_batch_id": project.get("outline_batch_id"),
+            "beats": {
+                "resource_id": str(beats["id"]),
+                "version": int(beats.get("version") or 0),
+                "fingerprint": cls._resource_fingerprint(beats.get("content") or {}),
+            }
+            if beats is not None
+            else None,
+        }
+
+    def current_plan_context(
+        self, project_id: int, episode_number: int | None = None
+    ) -> dict[str, Any]:
+        return self.plan_expected_context(
+            self.get_project(project_id), episode_number
+        )
+
+    def assert_plan_context(
+        self,
+        project_id: int,
+        expected_context: dict[str, Any],
+        episode_number: int | None = None,
+    ) -> dict[str, Any]:
+        """Compare scoped plan authority and return a CAS envelope for writes."""
+        current = self.current_plan_context(project_id, episode_number)
+        if canonical_request_hash(current) != canonical_request_hash(expected_context):
+            raise CreativeContextConflict("project authority changed")
+        authority = self.repository.generation_authority_envelope(
+            project_id, episode_number
+        )
+        if (
+            int(authority.get("revision") or 0)
+            != int(expected_context.get("revision") or 0)
+            or str((authority.get("brief") or {}).get("id") or "")
+            != str(expected_context.get("locked_brief_id") or "")
+            or str((authority.get("characters") or {}).get("batch_id") or "")
+            != str(expected_context.get("character_batch_id") or "")
+            or str((authority.get("outline") or {}).get("batch_id") or "")
+            != str(expected_context.get("outline_batch_id") or "")
+        ):
+            raise CreativeContextConflict("project authority changed")
+        confirmed = self.current_plan_context(project_id, episode_number)
+        if canonical_request_hash(confirmed) != canonical_request_hash(
+            expected_context
+        ):
+            raise CreativeContextConflict("project authority changed")
+        return authority
+
+    def advance_plan_context(
+        self,
+        project_id: int,
+        expected_context: dict[str, Any],
+        *,
+        stage: str,
+        kind: str,
+        resource_id: str | None,
+        episode_number: int | None,
+    ) -> dict[str, Any]:
+        """Advance only authority changes deterministically caused by one plan step."""
+        advanced = {
+            **expected_context,
+            "beats": dict(expected_context["beats"])
+            if isinstance(expected_context.get("beats"), dict)
+            else None,
+        }
+        if kind == "lock":
+            if not resource_id:
+                raise ValueError("lock step requires resource_id")
+            if stage == "brief":
+                advanced.update({
+                    "revision": int(expected_context["revision"]) + 1,
+                    "locked_brief_id": int(resource_id),
+                    "character_batch_id": None,
+                    "outline_batch_id": None,
+                    "beats": None,
+                })
+            elif stage == "characters":
+                _, separator, batch_id = resource_id.partition(":")
+                if not separator or not batch_id:
+                    raise ValueError("character lock requires a batch resource id")
+                advanced.update({
+                    "revision": int(expected_context["revision"]) + 1,
+                    "character_batch_id": batch_id,
+                    "outline_batch_id": None,
+                    "beats": None,
+                })
+            elif stage == "outline":
+                _, separator, batch_id = resource_id.partition(":")
+                if not separator or not batch_id:
+                    raise ValueError("outline lock requires a batch resource id")
+                advanced.update({
+                    "revision": int(expected_context["revision"]) + 1,
+                    "outline_batch_id": batch_id,
+                    "beats": None,
+                })
+            elif stage == "beats":
+                resource = self.repository.get_episode(int(resource_id))
+                if (
+                    resource is None
+                    or resource.get("stage") != "beats"
+                    or int(resource.get("episode_number") or 0)
+                    != int(episode_number or 0)
+                ):
+                    raise ValueError("locked Beats does not match the plan episode")
+                advanced["beats"] = {
+                    "resource_id": str(resource["id"]),
+                    "version": int(resource.get("version") or 0),
+                    "fingerprint": self._resource_fingerprint(
+                        resource.get("content") or {}
+                    ),
+                }
+            elif stage != "script":
+                raise ValueError("unsupported creative lock stage")
+        current = self.current_plan_context(project_id, episode_number)
+        if canonical_request_hash(current) != canonical_request_hash(advanced):
+            raise CreativeContextConflict(
+                "project authority changed outside the completed plan step"
+            )
+        return current
 
     def create_original_project(
         self,
@@ -98,15 +392,25 @@ class CreativeApplicationService:
         )
 
     def ensure_stage_task(
-        self, project_id: int, stage: str, actor: Principal
+        self,
+        project_id: int,
+        stage: str,
+        actor: Principal,
+        *,
+        expected_context: dict[str, Any] | None = None,
+        episode_number: int | None = None,
     ) -> dict[str, Any]:
+        self.assert_stage_write_access(project_id, stage, actor)
+        if expected_context is not None:
+            self.assert_plan_context(
+                project_id, expected_context, episode_number
+            )
         project = self.repository.get_project(project_id)
         if project is None:
             raise KeyError(project_id)
         role_code = (
             "creative_planner" if stage in {"brief", "characters"} else "screenwriter"
         )
-        self.assert_stage_write_access(project_id, stage, actor)
         task = self.workflow_repository.ensure_project_task(
             str(project_id),
             project.get("topic_id"),
@@ -120,8 +424,13 @@ class CreativeApplicationService:
             )
         if task["status"] == "pool":
             if not self.workflow_repository.can_claim_task(task["id"], actor):
-                raise PermissionError("该创作阶段已由其他人员处理")
-            task = self.workflow_repository.claim_task(task["id"], actor)
+                raise CreativeTaskOccupied("该创作阶段已由其他人员处理")
+            try:
+                task = self.workflow_repository.claim_task(task["id"], actor)
+            except PermissionError as exc:
+                raise CreativeTaskOccupied(
+                    "该创作阶段已由其他人员处理"
+                ) from exc
         if (
             task["status"] in {"assigned", "in_progress", "returned"}
             and task.get("assignee_user_id") not in {None, actor.user_id}
@@ -129,7 +438,7 @@ class CreativeApplicationService:
                 str(project_id), actor
             )
         ):
-            raise PermissionError("该创作阶段已由其他人员处理")
+            raise CreativeTaskOccupied("该创作阶段已由其他人员处理")
         return task
 
     def assert_stage_write_access(
@@ -142,7 +451,7 @@ class CreativeApplicationService:
                 str(project_id), actor
             ),
         ):
-            raise PermissionError("无权创作该项目")
+            raise CreativeProjectAccessDenied("无权创作该项目")
 
     def validate_task_for_creation(
         self,
@@ -151,9 +460,14 @@ class CreativeApplicationService:
         stage: str,
         actor: Principal,
     ) -> dict[str, Any]:
-        return self.workflow_adapter.assert_task_for_creation(
-            workflow_task_id, stage, actor, project_id=project_id
-        )
+        try:
+            return self.workflow_adapter.assert_task_for_creation(
+                workflow_task_id, stage, actor, project_id=project_id
+            )
+        except PermissionError as exc:
+            raise CreativeTaskOccupied(
+                "该创作阶段已由其他人员处理"
+            ) from exc
 
     def persist_draft(
         self,
@@ -166,63 +480,93 @@ class CreativeApplicationService:
         actor: Principal,
         episode_number: int | None = None,
         reject_if_locked: bool = False,
+        expected_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.assert_stage_write_access(project_id, stage, actor)
         self.validate_task_for_creation(
             workflow_task_id, project_id, stage, actor
         )
-        if stage == "brief":
-            content = validate_original_direction_content(
-                payload, market_context=[], blocked_terms=[]
-            )
-            resource = self.repository.create_blueprints(
-                project_id,
-                [{"content": content}],
-                workflow_task_id=workflow_task_id,
-                direction_type="original",
-                operation_id=operation_id,
-                first_root_only=True,
-            )[0]
-        elif stage == "characters":
-            if not payload.get("characters"):
-                raise ValueError("characters must contain at least one item")
-            resource = self.repository.create_character_batch(
-                project_id,
-                payload["characters"],
-                payload.get("relationships", []),
-                workflow_task_id=workflow_task_id,
-                operation_id=operation_id,
-                reject_if_locked=reject_if_locked,
-            )
-        elif stage == "outline":
-            resource = self.repository.create_outline_batch(
-                project_id,
-                payload["episodes"],
-                payload.get("series_arc", ""),
-                workflow_task_id=workflow_task_id,
-                operation_id=operation_id,
-                reject_if_locked=reject_if_locked,
-            )
-        elif stage == "beats" and episode_number is not None:
-            resource = self.repository.create_episode_beats(
-                project_id,
-                episode_number,
-                payload,
-                workflow_task_id=workflow_task_id,
-                operation_id=operation_id,
-                reject_if_locked=reject_if_locked,
-            )
-        elif stage == "script" and episode_number is not None:
-            resource = self.repository.create_episode_script(
-                project_id,
-                episode_number,
-                payload,
-                workflow_task_id=workflow_task_id,
-                operation_id=operation_id,
-                reject_if_locked=reject_if_locked,
-            )
-        else:
-            raise ValueError("unsupported creative stage payload")
+        expected_authority = (
+            self.assert_plan_context(project_id, expected_context, episode_number)
+            if expected_context is not None
+            else None
+        )
+        expected_revision = (
+            int(expected_context["revision"])
+            if expected_context is not None
+            else None
+        )
+        try:
+            if stage == "brief":
+                content = validate_original_direction_content(
+                    payload, market_context=[], blocked_terms=[]
+                )
+                resource = self.repository.create_blueprints(
+                    project_id,
+                    [{"content": content}],
+                    workflow_task_id=workflow_task_id,
+                    direction_type="original",
+                    operation_id=operation_id,
+                    first_root_only=True,
+                    expected_authority=expected_authority,
+                )[0]
+            elif stage == "characters":
+                if not payload.get("characters"):
+                    raise ValueError("characters must contain at least one item")
+                resource = self.repository.create_character_batch(
+                    project_id,
+                    payload["characters"],
+                    payload.get("relationships", []),
+                    workflow_task_id=workflow_task_id,
+                    operation_id=operation_id,
+                    expected_project_revision=expected_revision,
+                    expected_authority=expected_authority,
+                    reject_if_locked=reject_if_locked,
+                )
+            elif stage == "outline":
+                resource = self.repository.create_outline_batch(
+                    project_id,
+                    payload["episodes"],
+                    payload.get("series_arc", ""),
+                    workflow_task_id=workflow_task_id,
+                    operation_id=operation_id,
+                    expected_project_revision=expected_revision,
+                    expected_authority=expected_authority,
+                    reject_if_locked=reject_if_locked,
+                )
+            elif stage == "beats" and episode_number is not None:
+                resource = self.repository.create_episode_beats(
+                    project_id,
+                    episode_number,
+                    payload,
+                    workflow_task_id=workflow_task_id,
+                    operation_id=operation_id,
+                    expected_project_revision=expected_revision,
+                    expected_authority=expected_authority,
+                    reject_if_locked=reject_if_locked,
+                )
+            elif stage == "script" and episode_number is not None:
+                resource = self.repository.create_episode_script(
+                    project_id,
+                    episode_number,
+                    payload,
+                    workflow_task_id=workflow_task_id,
+                    operation_id=operation_id,
+                    expected_project_revision=expected_revision,
+                    expected_authority=expected_authority,
+                    reject_if_locked=reject_if_locked,
+                )
+            else:
+                raise ValueError("unsupported creative stage payload")
+        except ValueError as exc:
+            if str(exc) in {
+                "project revision changed",
+                "server source authority changed",
+            }:
+                raise CreativeContextConflict(
+                    "project authority changed"
+                ) from exc
+            raise
         return self.resource_ref(stage, resource)
 
     def persist_legacy_draft(
@@ -317,12 +661,19 @@ class CreativeApplicationService:
         operation_id: str,
         actor: Principal,
         difference_note: str = "",
+        expected_context: dict[str, Any] | None = None,
+        episode_number: int | None = None,
     ) -> dict[str, Any]:
         request_hash = canonical_request_hash(
             {
                 "workflow_task_id": workflow_task_id,
                 "resource_id": resource_id,
                 "difference_note": difference_note,
+                **(
+                    {"expected_context": expected_context}
+                    if expected_context is not None
+                    else {}
+                ),
             }
         )
         owner_id = uuid.uuid4().hex
@@ -361,13 +712,43 @@ class CreativeApplicationService:
                         owner_id=owner_id,
                         result=reconciled,
                     )
-            kwargs = {"difference_note": difference_note} if stage == "brief" else {}
+            self.assert_stage_write_access(project_id, stage, actor)
+            self.validate_task_for_creation(
+                workflow_task_id, project_id, stage, actor
+            )
+            expected_authority = None
+            if expected_context is not None:
+                expected_authority = self.assert_plan_context(
+                    project_id, expected_context, episode_number
+                )
+            kwargs: dict[str, Any] = {
+                "expected_project_revision": (
+                    int(expected_context["revision"])
+                    if expected_context is not None
+                    else None
+                ),
+                "expected_authority": expected_authority,
+            }
+            if stage == "brief":
+                kwargs["difference_note"] = difference_note
             result = self.transitions.complete_creative_without_review(
                 workflow_task_id, stage, resource_id, actor, **kwargs
             )
             return self.repository.finalize_side_effect_operation(
                 operation_id=operation_id, owner_id=owner_id, result=result
             )
+        except ValueError as exc:
+            self.repository.abandon_side_effect_operation(
+                operation_id=operation_id, owner_id=owner_id
+            )
+            if str(exc) in {
+                "project revision changed",
+                "server source authority changed",
+            }:
+                raise CreativeContextConflict(
+                    "project authority changed"
+                ) from exc
+            raise
         except Exception:
             self.repository.abandon_side_effect_operation(
                 operation_id=operation_id, owner_id=owner_id
@@ -389,9 +770,15 @@ class CreativeApplicationService:
         expected_project_revision: int,
         actor: Principal,
         episode_number: int | None = None,
+        expected_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.assert_stage_write_access(project_id, stage, actor)
         self.validate_task_for_creation(workflow_task_id, project_id, stage, actor)
+        expected_authority = (
+            self.assert_plan_context(project_id, expected_context, episode_number)
+            if expected_context is not None
+            else None
+        )
         try:
             if stage == "brief":
                 source = self.repository.get_blueprint(int(replaces_resource_id))
@@ -418,6 +805,7 @@ class CreativeApplicationService:
                     workflow_task_id=workflow_task_id, operation_id=operation_id,
                     replaces_resource_id=replaces_resource_id,
                     expected_project_revision=expected_project_revision,
+                    expected_authority=expected_authority,
                 )
             elif stage == "outline":
                 resource = self.repository.create_outline_batch(
@@ -425,6 +813,7 @@ class CreativeApplicationService:
                     workflow_task_id=workflow_task_id, operation_id=operation_id,
                     replaces_resource_id=replaces_resource_id,
                     expected_project_revision=expected_project_revision,
+                    expected_authority=expected_authority,
                 )
             elif stage == "beats" and episode_number is not None:
                 resource = self.repository.create_episode_beats(
@@ -432,6 +821,7 @@ class CreativeApplicationService:
                     workflow_task_id=workflow_task_id, operation_id=operation_id,
                     replaces_resource_id=replaces_resource_id,
                     expected_project_revision=expected_project_revision,
+                    expected_authority=expected_authority,
                 )
             elif stage == "script" and episode_number is not None:
                 resource = self.repository.create_episode_script(
@@ -439,11 +829,15 @@ class CreativeApplicationService:
                     workflow_task_id=workflow_task_id, operation_id=operation_id,
                     replaces_resource_id=replaces_resource_id,
                     expected_project_revision=expected_project_revision,
+                    expected_authority=expected_authority,
                 )
             else:
                 raise ValueError("unsupported creative revision payload")
         except ValueError as exc:
-            if "project revision changed" in str(exc):
+            if str(exc) in {
+                "project revision changed",
+                "server source authority changed",
+            }:
                 raise CreativeContextConflict("project authority revision changed") from exc
             raise
         return self.resource_ref(stage, resource)
@@ -508,6 +902,7 @@ class CreativeApplicationService:
         episode_end: int | None = None,
         series: bool = False,
         count: int | None = None,
+        expected_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         state = self.start_generation_compat(
             project_id=project_id,
@@ -524,6 +919,7 @@ class CreativeApplicationService:
             series=series,
             count=count,
             chunk_size=10,
+            expected_context=expected_context,
         )
         return {
             "job_id": state.job_id,
@@ -546,10 +942,17 @@ class CreativeApplicationService:
         source_snapshot_id: str,
         source_snapshot: dict[str, Any],
         action: str | None = None,
+        expected_context: dict[str, Any] | None = None,
         **legacy_extra: Any,
     ) -> Any:
         if self.job_manager is None:
             raise RuntimeError("creative job manager is unavailable")
+        if actor is not None:
+            self.assert_stage_write_access(project_id, stage, actor)
+            if workflow_task_id is not None:
+                self.validate_task_for_creation(
+                    workflow_task_id, project_id, stage, actor
+                )
         worker_action = action or {
             "brief": "blueprints",
             "characters": "characters",
@@ -557,7 +960,15 @@ class CreativeApplicationService:
             "beats": "beats",
             "script": "script",
         }[stage]
-        authority = self.repository.generation_authority_envelope(project_id)
+        authority = (
+            self.assert_plan_context(
+                project_id, expected_context, legacy_extra.get("episode_number")
+            )
+            if expected_context is not None
+            else self.repository.generation_authority_envelope(
+                project_id, legacy_extra.get("episode_number")
+            )
+        )
         authority_sha = canonical_request_hash(authority)
         snapshot_extra = self._snapshot_extra(source_snapshot_id, source_snapshot)
         request_identity = {

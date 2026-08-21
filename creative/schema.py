@@ -90,6 +90,8 @@ class BlueprintCreateRequest(BaseModel):
     content: dict[str, Any]
     workflow_task_id: str = Field(min_length=1)
     operation_id: str = Field(min_length=1, max_length=200)
+    replaces_resource_id: str | None = Field(None, max_length=200)
+    expected_project_revision: int | None = Field(None, ge=0)
 
 
 class BlueprintDeriveRequest(BaseModel):
@@ -115,6 +117,8 @@ class BriefLockRequest(BaseModel):
 class CharacterBatchRequest(BaseModel):
     characters: list[dict[str, Any]] = Field(default_factory=list)
     relationships: list[dict[str, Any]] = Field(default_factory=list)
+    replaces_resource_id: str | None = Field(None, max_length=200)
+    expected_project_revision: int | None = Field(None, ge=0)
     workflow_task_id: str | None = None
     operation_id: str | None = Field(None, max_length=200)
 
@@ -126,6 +130,8 @@ class CreativeItemUpdateRequest(BaseModel):
 
 class OutlineBatchRequest(BaseModel):
     series_arc: str = ""
+    replaces_resource_id: str | None = Field(None, max_length=200)
+    expected_project_revision: int | None = Field(None, ge=0)
     episodes: list[dict[str, Any]] = Field(default_factory=list)
     workflow_task_id: str | None = None
     operation_id: str | None = Field(None, max_length=200)
@@ -138,6 +144,8 @@ class OutlineOverviewRequest(BaseModel):
 
 class EpisodeBeatsRequest(BaseModel):
     content: dict[str, Any]
+    replaces_resource_id: str | None = Field(None, max_length=200)
+    expected_project_revision: int | None = Field(None, ge=0)
     workflow_task_id: str | None = None
     operation_id: str | None = Field(None, max_length=200)
 
@@ -148,6 +156,7 @@ class WorkflowLinkRequest(BaseModel):
     generation_instruction: str = Field("", max_length=2000)
     source_snapshot_id: str | None = Field(None, max_length=200)
     source_snapshot: dict[str, Any] | None = None
+    expected_project_revision: int | None = Field(None, ge=0)
 
 
 class CreativeLockRequest(BaseModel):

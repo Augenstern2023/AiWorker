@@ -323,6 +323,21 @@ class CreativeRepository:
                 )
             """)
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS creative_generation_operations (
+                    operation_id TEXT PRIMARY KEY,
+                    project_id INTEGER NOT NULL,
+                    stage TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    batch_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES creative_projects(id)
+                )
+            """)
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS creative_stage_exports (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     project_id INTEGER NOT NULL, stage TEXT NOT NULL, format TEXT NOT NULL,
@@ -1588,6 +1603,234 @@ class CreativeRepository:
                 json.loads(row["resource_ref_json"] or "{}"),
             )
 
+    def reserve_side_effect_operation(
+        self,
+        *,
+        operation_id: str,
+        project_id: int,
+        stage: str,
+        request_hash: str,
+        owner_id: str,
+    ) -> dict[str, Any]:
+        """Reserve an idempotency key before a non-database side effect."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM creative_operation_results WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if row is not None:
+                if (
+                    int(row["project_id"]) != int(project_id)
+                    or str(row["stage"]) != stage
+                    or str(row["request_hash"]) != request_hash
+                ):
+                    raise ValueError("IDEMPOTENCY_KEY_REUSED")
+                value = json.loads(row["resource_ref_json"] or "{}")
+                if value.get("_operation_state") == "pending":
+                    raise RuntimeError("OPERATION_IN_PROGRESS")
+                return {"state": "complete", "result": value}
+            conn.execute(
+                "INSERT INTO creative_operation_results "
+                "(operation_id, project_id, stage, request_hash, resource_ref_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    operation_id,
+                    project_id,
+                    stage,
+                    request_hash,
+                    json.dumps(
+                        {"_operation_state": "pending", "owner_id": owner_id},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    time.time(),
+                ),
+            )
+        return {"state": "reserved", "owner_id": owner_id}
+
+    def finalize_side_effect_operation(
+        self, *, operation_id: str, owner_id: str, result: dict[str, Any]
+    ) -> dict[str, Any]:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT resource_ref_json FROM creative_operation_results "
+                "WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("operation reservation is missing")
+            current = json.loads(row["resource_ref_json"] or "{}")
+            if current.get("_operation_state") != "pending":
+                return current
+            if current.get("owner_id") != owner_id:
+                raise RuntimeError("OPERATION_IN_PROGRESS")
+            conn.execute(
+                "UPDATE creative_operation_results SET resource_ref_json = ? "
+                "WHERE operation_id = ?",
+                (
+                    json.dumps(
+                        result,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        default=str,
+                    ),
+                    operation_id,
+                ),
+            )
+        return dict(result)
+
+    def abandon_side_effect_operation(
+        self, *, operation_id: str, owner_id: str
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT resource_ref_json FROM creative_operation_results "
+                "WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                return
+            current = json.loads(row["resource_ref_json"] or "{}")
+            if (
+                current.get("_operation_state") == "pending"
+                and current.get("owner_id") == owner_id
+            ):
+                conn.execute(
+                    "DELETE FROM creative_operation_results WHERE operation_id = ?",
+                    (operation_id,),
+                )
+
+    def reserve_generation_operation(
+        self,
+        *,
+        operation_id: str,
+        project_id: int,
+        stage: str,
+        request_hash: str,
+        owner_id: str,
+        predecessor_owner_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM creative_generation_operations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if row is not None:
+                if (
+                    int(row["project_id"]) != int(project_id)
+                    or str(row["stage"]) != stage
+                    or str(row["request_hash"]) != request_hash
+                ):
+                    raise ValueError("IDEMPOTENCY_KEY_REUSED")
+                if row["status"] == "active" and str(row["owner_id"]) != owner_id:
+                    checkpoint = conn.execute(
+                        "SELECT 1 FROM creative_episodes WHERE project_id = ? "
+                        "AND batch_id = ? LIMIT 1",
+                        (project_id, str(row["batch_id"])),
+                    ).fetchone()
+                    if (
+                        checkpoint is None
+                        or predecessor_owner_id != str(row["owner_id"])
+                    ):
+                        raise RuntimeError("OPERATION_IN_PROGRESS")
+                    conn.execute(
+                        "UPDATE creative_generation_operations SET owner_id = ?, "
+                        "updated_at = ? WHERE operation_id = ?",
+                        (owner_id, time.time(), operation_id),
+                    )
+                return {
+                    "batch_id": str(row["batch_id"]),
+                    "status": str(row["status"]),
+                    "result": json.loads(row["result_json"] or "{}"),
+                }
+            batch_id = uuid.uuid4().hex
+            now = time.time()
+            conn.execute(
+                "INSERT INTO creative_generation_operations "
+                "(operation_id, project_id, stage, request_hash, owner_id, batch_id, "
+                "status, result_json, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'active', '{}', ?, ?)",
+                (operation_id, project_id, stage, request_hash, owner_id, batch_id, now, now),
+            )
+        return {"batch_id": batch_id, "status": "active", "result": {}}
+
+    def complete_generation_operation(
+        self,
+        *,
+        operation_id: str,
+        request_hash: str,
+        batch_id: str,
+        result: dict[str, Any],
+        owner_id: str | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            owner_clause = " AND owner_id = ?" if owner_id is not None else ""
+            params: list[Any] = [
+                json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                time.time(), operation_id, request_hash, batch_id,
+            ]
+            if owner_id is not None:
+                params.append(owner_id)
+            cursor = conn.execute(
+                "UPDATE creative_generation_operations SET status = 'complete', "
+                "result_json = ?, updated_at = ? WHERE operation_id = ? "
+                f"AND request_hash = ? AND batch_id = ?{owner_clause}",
+                params,
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("generation operation reservation changed")
+
+    def validate_generation_reservation(
+        self,
+        *,
+        operation_id: str,
+        request_hash: str,
+        batch_id: str,
+        owner_id: str | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT request_hash, batch_id, owner_id FROM creative_generation_operations "
+                "WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+        if (
+            row is None
+            or str(row["request_hash"]) != request_hash
+            or str(row["batch_id"]) != batch_id
+            or (owner_id is not None and str(row["owner_id"]) != owner_id)
+        ):
+            raise ValueError("generation operation reservation changed")
+
+    @staticmethod
+    def _validate_generation_reservation_conn(
+        conn: sqlite3.Connection,
+        *,
+        operation_id: str,
+        request_hash: str,
+        batch_id: str,
+        owner_id: str | None = None,
+    ) -> None:
+        row = conn.execute(
+            "SELECT request_hash, batch_id, status, owner_id FROM creative_generation_operations "
+            "WHERE operation_id = ?",
+            (operation_id,),
+        ).fetchone()
+        if (
+            row is None
+            or str(row["request_hash"]) != request_hash
+            or str(row["batch_id"]) != batch_id
+            or str(row["status"]) != "active"
+            or (owner_id is not None and str(row["owner_id"]) != owner_id)
+        ):
+            raise ValueError("generation operation reservation changed")
+
     def update_project(
         self,
         project_id: int,
@@ -1772,6 +2015,90 @@ class CreativeRepository:
         project["allowed_actions"] = self._allowed_project_actions(project)
         return project
 
+    def generation_authority_envelope(self, project_id: int) -> dict[str, Any]:
+        project = self.get_project(project_id)
+        if project is None:
+            raise ValueError("创作项目不存在")
+
+        def fingerprint(value: Any) -> str:
+            return canonical_request_hash(value)
+
+        brief = next(
+            (
+                item
+                for item in project["blueprints"]
+                if int(item["id"]) == int(project.get("locked_brief_id") or 0)
+            ),
+            None,
+        )
+        character_batch_id = project.get("character_batch_id")
+        outline_batch_id = project.get("outline_batch_id")
+        characters = [
+            item
+            for item in project["characters"]
+            if item.get("batch_id") == character_batch_id
+        ]
+        relationships = [
+            item
+            for item in project["relationships"]
+            if item.get("batch_id") == character_batch_id
+        ]
+        outlines = [
+            item
+            for item in project["episodes"]
+            if item.get("stage") == "outline"
+            and item.get("batch_id") == outline_batch_id
+        ]
+        latest_beats: dict[int, dict[str, Any]] = {}
+        for item in project["episodes"]:
+            if item.get("stage") != "beats" or item.get("status") not in {
+                "locked",
+                "approved",
+            }:
+                continue
+            number = int(item["episode_number"])
+            current = latest_beats.get(number)
+            if current is None or (int(item["version"]), int(item["id"])) > (
+                int(current["version"]),
+                int(current["id"]),
+            ):
+                latest_beats[number] = item
+        return {
+            "project_id": int(project_id),
+            "revision": int(project.get("revision") or 0),
+            "brief": {
+                "id": int(brief["id"]) if brief else None,
+                "fingerprint": fingerprint(brief.get("content") or {}) if brief else None,
+            },
+            "characters": {
+                "batch_id": character_batch_id,
+                "fingerprint": fingerprint(
+                    {
+                        "characters": [item.get("content") or {} for item in characters],
+                        "relationships": [item.get("content") or {} for item in relationships],
+                    }
+                )
+                if character_batch_id
+                else None,
+            },
+            "outline": {
+                "batch_id": outline_batch_id,
+                "fingerprint": fingerprint(
+                    [item.get("content") or {} for item in outlines]
+                )
+                if outline_batch_id
+                else None,
+            },
+            "locked_beats": [
+                {
+                    "episode_number": number,
+                    "id": int(item["id"]),
+                    "fingerprint": fingerprint(item.get("content") or {}),
+                }
+                for number, item in sorted(latest_beats.items())
+            ],
+        }
+
     def get_project_by_workflow_task_id(
         self, workflow_task_id: str
     ) -> dict[str, Any] | None:
@@ -1873,6 +2200,7 @@ class CreativeRepository:
         direction_type: str = "imitation",
         source_refs: dict[str, Any] | None = None,
         operation_id: str | None = None,
+        first_root_only: bool = False,
     ) -> list[dict[str, Any]]:
         request_hash = self._operation_request_hash(
             project_id=project_id,
@@ -1885,6 +2213,7 @@ class CreativeRepository:
                 "workflow_task_id": workflow_task_id,
                 "direction_type": direction_type,
                 "source_refs": source_refs,
+                "first_root_only": first_root_only,
             },
         )
 
@@ -1892,6 +2221,16 @@ class CreativeRepository:
             if not 1 <= len(items) <= 5:
                 raise ValueError("仿制方向数量必须在 1-5 之间")
             project = self._operation_project(conn, project_id)
+            if first_root_only:
+                if project.get("creation_mode") != "original":
+                    raise ValueError("first Brief is only available for original projects")
+                root = conn.execute(
+                    "SELECT id FROM creative_blueprints WHERE project_id = ? "
+                    "AND parent_version_id IS NULL LIMIT 1",
+                    (project_id,),
+                ).fetchone()
+                if root is not None:
+                    raise ValueError("a root Brief already exists; create a revision")
             now = time.time()
             refs = source_refs or {
                 "topic_id": project["topic_id"],
@@ -2013,13 +2352,21 @@ class CreativeRepository:
         content: dict[str, Any],
         workflow_task_id: str | None,
         operation_id: str,
+        *,
+        expected_project_revision: int | None = None,
+        expected_project_id: int | None = None,
     ) -> dict[str, Any]:
         def request_hash(project_id: int) -> str:
             return self._operation_request_hash(
                 project_id=project_id,
                 stage="brief_revision",
                 scope={"blueprint_id": blueprint_id},
-                payload={"content": content, "workflow_task_id": workflow_task_id},
+                payload={
+                    "content": content,
+                    "workflow_task_id": workflow_task_id,
+                    "expected_project_revision": expected_project_revision,
+                    "expected_project_id": expected_project_id,
+                },
             )
 
         source_holder: dict[str, sqlite3.Row] = {}
@@ -2039,6 +2386,10 @@ class CreativeRepository:
             if source is None:
                 raise ValueError("仿制方向不存在")
             project_id = int(source["project_id"])
+            if expected_project_id is not None and project_id != int(expected_project_id):
+                raise ValueError("replacement Brief belongs to another project")
+            project = self._operation_project(conn, project_id)
+            self._assert_expected_revision(project, expected_project_revision)
             version_row = conn.execute(
                 "SELECT COALESCE(MAX(version), 0) + 1 AS version "
                 "FROM creative_blueprints WHERE project_id = ? AND candidate_group_id = ?",
@@ -2239,6 +2590,8 @@ class CreativeRepository:
         generation_meta: dict[str, Any] | None = None,
         workflow_task_id: str | None = None,
         operation_id: str | None = None,
+        replaces_resource_id: str | None = None,
+        expected_project_revision: int | None = None,
     ) -> dict[str, Any]:
         request_hash = self._operation_request_hash(
             project_id=project_id,
@@ -2250,13 +2603,28 @@ class CreativeRepository:
                 "job_id": job_id,
                 "generation_meta": generation_meta,
                 "workflow_task_id": workflow_task_id,
+                "replaces_resource_id": replaces_resource_id,
+                "expected_project_revision": expected_project_revision,
             },
         )
 
         def create(conn: sqlite3.Connection) -> dict[str, Any]:
             project = self._operation_project(conn, project_id)
+            self._assert_expected_revision(project, expected_project_revision)
             if not project.get("locked_brief_id"):
                 raise ValueError("必须先锁定 Brief")
+            replacement_batch_id: str | None = None
+            if replaces_resource_id is not None:
+                raw_project, separator, raw_batch = str(replaces_resource_id).partition(":")
+                replacement_batch_id = raw_batch if separator else raw_project
+                if separator and int(raw_project) != int(project_id):
+                    raise ValueError("replacement character batch belongs to another project")
+                exists = conn.execute(
+                    "SELECT 1 FROM creative_characters WHERE project_id = ? AND batch_id = ? LIMIT 1",
+                    (project_id, replacement_batch_id),
+                ).fetchone()
+                if exists is None:
+                    raise ValueError("replacement character batch does not exist")
             batch_id = uuid.uuid4().hex
             now = time.time()
             refs = {"brief_id": project["locked_brief_id"]}
@@ -2271,10 +2639,17 @@ class CreativeRepository:
             version = int(version_row["version"])
             for index, content in enumerate(characters, start=1):
                 key = str(content.get("name") or f"character-{index}").strip()
-                parent = conn.execute(
-                    "SELECT id FROM creative_characters WHERE project_id = ? AND character_key = ? ORDER BY version DESC LIMIT 1",
-                    (project_id, key),
-                ).fetchone()
+                if replacement_batch_id is not None:
+                    parent = conn.execute(
+                        "SELECT id FROM creative_characters WHERE project_id = ? "
+                        "AND batch_id = ? AND character_key = ?",
+                        (project_id, replacement_batch_id, key),
+                    ).fetchone()
+                else:
+                    parent = conn.execute(
+                        "SELECT id FROM creative_characters WHERE project_id = ? AND character_key = ? ORDER BY version DESC LIMIT 1",
+                        (project_id, key),
+                    ).fetchone()
                 conn.execute(
                     """
                     INSERT INTO creative_characters (
@@ -2287,10 +2662,17 @@ class CreativeRepository:
                 )
             for index, content in enumerate(relationships, start=1):
                 key = f"{content.get('from') or ''}>{content.get('to') or ''}:{index}"
-                parent = conn.execute(
-                    "SELECT id FROM creative_relationships WHERE project_id = ? AND relationship_key = ? ORDER BY version DESC LIMIT 1",
-                    (project_id, key),
-                ).fetchone()
+                if replacement_batch_id is not None:
+                    parent = conn.execute(
+                        "SELECT id FROM creative_relationships WHERE project_id = ? "
+                        "AND batch_id = ? AND relationship_key = ?",
+                        (project_id, replacement_batch_id, key),
+                    ).fetchone()
+                else:
+                    parent = conn.execute(
+                        "SELECT id FROM creative_relationships WHERE project_id = ? AND relationship_key = ? ORDER BY version DESC LIMIT 1",
+                        (project_id, key),
+                    ).fetchone()
                 conn.execute(
                     """
                     INSERT INTO creative_relationships (
@@ -2448,6 +2830,8 @@ class CreativeRepository:
         workflow_task_id: str | None = None,
         series_overview: dict[str, Any] | None = None,
         operation_id: str | None = None,
+        replaces_resource_id: str | None = None,
+        expected_project_revision: int | None = None,
     ) -> dict[str, Any]:
         request_hash = self._operation_request_hash(
             project_id=project_id,
@@ -2460,13 +2844,29 @@ class CreativeRepository:
                 "generation_meta": generation_meta,
                 "workflow_task_id": workflow_task_id,
                 "series_overview": series_overview,
+                "replaces_resource_id": replaces_resource_id,
+                "expected_project_revision": expected_project_revision,
             },
         )
 
         def create(conn: sqlite3.Connection) -> dict[str, Any]:
             project = self._operation_project(conn, project_id)
+            self._assert_expected_revision(project, expected_project_revision)
             if not project.get("character_batch_id"):
                 raise ValueError("必须先锁定人物关系版本")
+            replacement_batch_id: str | None = None
+            if replaces_resource_id is not None:
+                raw_project, separator, raw_batch = str(replaces_resource_id).partition(":")
+                replacement_batch_id = raw_batch if separator else raw_project
+                if separator and int(raw_project) != int(project_id):
+                    raise ValueError("replacement outline batch belongs to another project")
+                exists = conn.execute(
+                    "SELECT 1 FROM creative_episodes WHERE project_id = ? "
+                    "AND stage = 'outline' AND batch_id = ? LIMIT 1",
+                    (project_id, replacement_batch_id),
+                ).fetchone()
+                if exists is None:
+                    raise ValueError("replacement outline batch does not exist")
             expected = list(range(1, int(project["target_episode_count"]) + 1))
             actual = sorted(int(item.get("episode") or 0) for item in episodes)
             if actual != expected:
@@ -2498,10 +2898,19 @@ class CreativeRepository:
                 content["series_arc"] = series_arc
                 if normalized_overview is not None:
                     content["series_overview"] = normalized_overview
-                parent = conn.execute(
-                    "SELECT id FROM creative_episodes WHERE project_id = ? AND stage = 'outline' AND episode_number = ? ORDER BY version DESC LIMIT 1",
-                    (project_id, int(content["episode"])),
-                ).fetchone()
+                if replacement_batch_id is not None:
+                    parent = conn.execute(
+                        "SELECT id FROM creative_episodes WHERE project_id = ? "
+                        "AND stage = 'outline' AND batch_id = ? AND episode_number = ?",
+                        (project_id, replacement_batch_id, int(content["episode"])),
+                    ).fetchone()
+                    if parent is None:
+                        raise ValueError("replacement outline batch is incomplete")
+                else:
+                    parent = conn.execute(
+                        "SELECT id FROM creative_episodes WHERE project_id = ? AND stage = 'outline' AND episode_number = ? ORDER BY version DESC LIMIT 1",
+                        (project_id, int(content["episode"])),
+                    ).fetchone()
                 conn.execute(
                     """
                     INSERT INTO creative_episodes (
@@ -2549,6 +2958,9 @@ class CreativeRepository:
         *,
         batch_id: str | None = None,
         series_overview: dict[str, Any] | None = None,
+        reservation_operation_id: str | None = None,
+        reservation_request_hash: str | None = None,
+        reservation_owner_id: str | None = None,
     ) -> dict[str, Any]:
         """Persist a contiguous generated outline prefix so a failed job is recoverable."""
         project = self.get_project(project_id)
@@ -2596,6 +3008,17 @@ class CreativeRepository:
             else None
         )
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if reservation_operation_id is not None:
+                if reservation_request_hash is None or batch_id is None:
+                    raise ValueError("generation reservation identity is incomplete")
+                self._validate_generation_reservation_conn(
+                    conn,
+                    operation_id=reservation_operation_id,
+                    request_hash=reservation_request_hash,
+                    batch_id=batch_id,
+                    owner_id=reservation_owner_id,
+                )
             for episode in episodes:
                 content = dict(episode)
                 content["series_arc"] = series_arc
@@ -2946,6 +3369,8 @@ class CreativeRepository:
         workflow_task_id: str | None = None,
         update_project_status: bool = True,
         operation_id: str | None = None,
+        replaces_resource_id: str | None = None,
+        expected_project_revision: int | None = None,
     ) -> dict[str, Any]:
         request_hash = self._operation_request_hash(
             project_id=project_id,
@@ -2957,11 +3382,14 @@ class CreativeRepository:
                 "generation_meta": generation_meta,
                 "workflow_task_id": workflow_task_id,
                 "update_project_status": update_project_status,
+                "replaces_resource_id": replaces_resource_id,
+                "expected_project_revision": expected_project_revision,
             },
         )
 
         def create(conn: sqlite3.Connection) -> dict[str, Any]:
             project = self._operation_project(conn, project_id, include_episodes=True)
+            self._assert_expected_revision(project, expected_project_revision)
             if not project.get("outline_batch_id"):
                 raise ValueError("必须先锁定分集大纲")
             if not 1 <= int(episode_number) <= int(project["target_episode_count"]):
@@ -2981,13 +3409,27 @@ class CreativeRepository:
                 ),
             }
             now = time.time()
-            parent = conn.execute(
-                "SELECT id, version FROM creative_episodes "
-                "WHERE project_id = ? AND stage = 'beats' AND episode_number = ? "
-                "ORDER BY version DESC, id DESC LIMIT 1",
+            if replaces_resource_id is not None:
+                parent = conn.execute(
+                    "SELECT id, version FROM creative_episodes WHERE id = ? "
+                    "AND project_id = ? AND stage = 'beats' AND episode_number = ?",
+                    (int(replaces_resource_id), project_id, int(episode_number)),
+                ).fetchone()
+                if parent is None:
+                    raise ValueError("replacement Beats does not belong to this episode")
+            else:
+                parent = conn.execute(
+                    "SELECT id, version FROM creative_episodes "
+                    "WHERE project_id = ? AND stage = 'beats' AND episode_number = ? "
+                    "ORDER BY version DESC, id DESC LIMIT 1",
+                    (project_id, int(episode_number)),
+                ).fetchone()
+            latest = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) AS version FROM creative_episodes "
+                "WHERE project_id = ? AND stage = 'beats' AND episode_number = ?",
                 (project_id, int(episode_number)),
             ).fetchone()
-            version = int(parent["version"]) + 1 if parent is not None else 1
+            version = int(latest["version"]) + 1
             cursor = conn.execute(
                 """
                 INSERT INTO creative_episodes (
@@ -3033,6 +3475,8 @@ class CreativeRepository:
         workflow_task_id: str | None = None,
         update_project_status: bool = True,
         operation_id: str | None = None,
+        replaces_resource_id: str | None = None,
+        expected_project_revision: int | None = None,
     ) -> dict[str, Any]:
         request_hash = self._operation_request_hash(
             project_id=project_id,
@@ -3044,11 +3488,14 @@ class CreativeRepository:
                 "generation_meta": generation_meta,
                 "workflow_task_id": workflow_task_id,
                 "update_project_status": update_project_status,
+                "replaces_resource_id": replaces_resource_id,
+                "expected_project_revision": expected_project_revision,
             },
         )
 
         def create(conn: sqlite3.Connection) -> dict[str, Any]:
             project = self._operation_project(conn, project_id, include_episodes=True)
+            self._assert_expected_revision(project, expected_project_revision)
             if not 1 <= int(episode_number) <= int(project["target_episode_count"]):
                 raise ValueError("集数超出项目范围")
             beats = self._locked_beats_for_episode(project, episode_number)
@@ -3077,13 +3524,27 @@ class CreativeRepository:
                 ).hexdigest(),
             }
             now = time.time()
-            parent = conn.execute(
-                "SELECT id, version FROM creative_episodes "
-                "WHERE project_id = ? AND stage = 'script' AND episode_number = ? "
-                "ORDER BY version DESC, id DESC LIMIT 1",
+            if replaces_resource_id is not None:
+                parent = conn.execute(
+                    "SELECT id, version FROM creative_episodes WHERE id = ? "
+                    "AND project_id = ? AND stage = 'script' AND episode_number = ?",
+                    (int(replaces_resource_id), project_id, int(episode_number)),
+                ).fetchone()
+                if parent is None:
+                    raise ValueError("replacement script does not belong to this episode")
+            else:
+                parent = conn.execute(
+                    "SELECT id, version FROM creative_episodes "
+                    "WHERE project_id = ? AND stage = 'script' AND episode_number = ? "
+                    "ORDER BY version DESC, id DESC LIMIT 1",
+                    (project_id, int(episode_number)),
+                ).fetchone()
+            latest = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) AS version FROM creative_episodes "
+                "WHERE project_id = ? AND stage = 'script' AND episode_number = ?",
                 (project_id, int(episode_number)),
             ).fetchone()
-            version = int(parent["version"]) + 1 if parent is not None else 1
+            version = int(latest["version"]) + 1
             cursor = conn.execute(
                 """
                 INSERT INTO creative_episodes (
@@ -3285,6 +3746,9 @@ class CreativeRepository:
         workflow_task_id: str | None = None,
         *,
         batch_id: str | None = None,
+        reservation_operation_id: str | None = None,
+        reservation_request_hash: str | None = None,
+        reservation_owner_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Atomically persist one full-series generation checkpoint of episode drafts."""
         if stage not in {"beats", "script"}:
@@ -3321,6 +3785,17 @@ class CreativeRepository:
         now = time.time()
         ids: list[int] = []
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if reservation_operation_id is not None:
+                if reservation_request_hash is None:
+                    raise ValueError("generation reservation identity is incomplete")
+                self._validate_generation_reservation_conn(
+                    conn,
+                    operation_id=reservation_operation_id,
+                    request_hash=reservation_request_hash,
+                    batch_id=batch_id,
+                    owner_id=reservation_owner_id,
+                )
             for episode_number, content, refs, version, parent_id in prepared:
                 cursor = conn.execute(
                     """

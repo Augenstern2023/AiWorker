@@ -23,6 +23,7 @@ from pypdf.generic import DictionaryObject, NameObject, DecodedStreamObject
 from identity.dependencies import current_principal
 from identity.schema import Principal
 from writer_agent import api as writer_agent_api
+from unittest.mock import MagicMock
 
 
 def _pdf_with_text(text: str) -> bytes:
@@ -96,6 +97,20 @@ def _client(tmp_path, user_id: str = "writer-1") -> TestClient:
     app.dependency_overrides[current_principal] = lambda: _principal(user_id)
     app.include_router(writer_agent_api.build_writer_agent_router(tmp_path))
     return TestClient(app)
+
+
+def test_writer_router_retains_injected_creative_dependencies(tmp_path) -> None:
+    repository = MagicMock(name="creative_repository")
+    application_service = MagicMock(name="creative_application_service")
+
+    router = writer_agent_api.build_writer_agent_router(
+        tmp_path,
+        creative_repository=repository,
+        creative_application_service=application_service,
+    )
+
+    assert router.creative_dependencies.repository is repository
+    assert router.creative_dependencies.application_service is application_service
 
 
 def _admin_client(tmp_path) -> TestClient:

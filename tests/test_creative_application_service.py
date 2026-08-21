@@ -205,3 +205,141 @@ def test_application_service_spills_large_snapshot_to_relative_chunks(
         (creative_context.application_service.runtime_dir / path).is_file()
         for path in reference["paths"]
     )
+
+
+def test_first_brief_rejects_second_root_and_imitation_project(
+    creative_context,
+) -> None:
+    service = creative_context.application_service
+    project = creative_context.create_original_project()
+    first = valid_original_brief("首个根 Brief")
+    service.persist_draft(
+        project_id=project["id"],
+        stage="brief",
+        payload=first,
+        workflow_task_id="brief-task",
+        operation_id="first-root",
+        actor=creative_context.actor,
+    )
+
+    with pytest.raises(ValueError, match="revision"):
+        service.persist_draft(
+            project_id=project["id"],
+            stage="brief",
+            payload=valid_original_brief("第二个根 Brief"),
+            workflow_task_id="brief-task",
+            operation_id="second-root",
+            actor=creative_context.actor,
+        )
+
+    imitation, _ = creative_context.repository.ensure_original_project(
+        seed_text="仿写种子",
+        name="仿写项目",
+        target_episode_count=1,
+        created_by=creative_context.actor.user_id,
+        creation_request_id="imitation-project",
+    )
+    with creative_context.repository._connect() as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            "UPDATE creative_projects SET creation_mode = 'imitation' WHERE id = ?",
+            (imitation["id"],),
+        )
+    with pytest.raises(ValueError, match="original"):
+        service.persist_draft(
+            project_id=imitation["id"],
+            stage="brief",
+            payload=valid_original_brief("错误原创根"),
+            workflow_task_id="brief-task",
+            operation_id="imitation-root",
+            actor=creative_context.actor,
+        )
+
+
+def test_lock_replay_and_changed_key_are_checked_before_transition(
+    creative_context,
+) -> None:
+    project = creative_context.create_original_project()
+    result = {
+        "resource": {"id": "brief-1", "status": "brief_locked"},
+        "task": {"id": "brief-task", "status": "completed"},
+    }
+    creative_context.transitions.complete_creative_without_review.return_value = result
+    service = creative_context.application_service
+
+    first = service.lock_resource(
+        project_id=project["id"],
+        stage="brief",
+        resource_id="brief-1",
+        workflow_task_id="brief-task",
+        operation_id="lock-op",
+        actor=creative_context.actor,
+    )
+    replay = service.lock_resource(
+        project_id=project["id"],
+        stage="brief",
+        resource_id="brief-1",
+        workflow_task_id="brief-task",
+        operation_id="lock-op",
+        actor=creative_context.actor,
+    )
+
+    assert replay == first == result
+    assert creative_context.transitions.complete_creative_without_review.call_count == 1
+    with pytest.raises(ValueError, match="IDEMPOTENCY_KEY_REUSED"):
+        service.lock_resource(
+            project_id=project["id"],
+            stage="brief",
+            resource_id="brief-2",
+            workflow_task_id="brief-task",
+            operation_id="lock-op",
+            actor=creative_context.actor,
+        )
+    assert creative_context.transitions.complete_creative_without_review.call_count == 1
+
+
+def test_generation_always_adds_server_authority_to_material_snapshot(
+    creative_context,
+) -> None:
+    project = creative_context.create_original_project()
+    creative_context.jobs.create_job.return_value = SimpleNamespace(
+        job_id="authority-job", status="pending"
+    )
+
+    creative_context.application_service.start_generation(
+        project_id=project["id"],
+        stage="brief",
+        actor=creative_context.actor,
+        workflow_task_id="brief-task",
+        operation_id="authority-op",
+        generation_instruction="只使用冻结材料",
+        source_snapshot_id="material-only",
+        source_snapshot={"snapshot_id": "material-only", "materials": ["素材"]},
+    )
+
+    extra = creative_context.jobs.create_job.call_args.args[0]["extra"]
+    assert extra["source_authority"]["project_id"] == project["id"]
+    assert extra["source_authority"]["revision"] == project["revision"]
+    assert extra["source_authority_sha256"]
+    assert extra["generation_request_hash"]
+
+
+def test_application_service_hydrates_legacy_resource_shapes(
+    creative_context,
+) -> None:
+    project = creative_context.create_original_project()
+    brief = creative_context.repository.create_blueprints(
+        project["id"], [{"content": valid_original_brief("可水合 Brief")}],
+        direction_type="original",
+    )[0]
+    creative_context.repository.lock_brief(brief["id"])
+    characters = creative_context.repository.create_character_batch(
+        project["id"], [{"name": "林岚"}], []
+    )
+
+    hydrated = creative_context.application_service.hydrate_resource_ref(
+        creative_context.application_service.resource_ref("characters", characters)
+    )
+
+    assert hydrated["batch_id"] == characters["batch_id"]
+    assert hydrated["characters"][0]["id"] == characters["characters"][0]["id"]

@@ -24,6 +24,7 @@ import sqlite3
 import time
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import unquote
 
@@ -277,6 +278,10 @@ def build_writer_agent_router(
 ) -> APIRouter:
     store = WriterAgentStore(Path(runtime_dir) / "writer_agent" / "writer_agent.db")
     router = APIRouter(prefix="/api/writer-agent", tags=["writer-agent"])
+    router.creative_dependencies = SimpleNamespace(
+        repository=creative_repository,
+        application_service=creative_application_service,
+    )
 
     def assert_access(principal: Principal) -> None:
         if not principal.is_system_admin and "script.review.generate" not in principal.permissions:

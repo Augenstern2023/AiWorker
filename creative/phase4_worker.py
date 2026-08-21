@@ -39,6 +39,9 @@ from creative.script_service import (
 )
 
 
+MAX_INLINE_SOURCE_SNAPSHOT_BYTES = 2 * 1024 * 1024
+
+
 def create_provider():
     return create_llm_provider_from_config(config)
 
@@ -129,9 +132,18 @@ def _load_source_snapshot(extra: dict[str, Any]) -> dict[str, Any] | None:
         if not isinstance(inline, dict):
             raise ValueError("source snapshot must be an object")
         snapshot = dict(inline)
+        canonical = json.dumps(
+            snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        if len(canonical) > MAX_INLINE_SOURCE_SNAPSHOT_BYTES:
+            raise ValueError("inline source snapshot exceeds 2 MiB")
     else:
         if not isinstance(reference, dict):
             raise ValueError("source snapshot content is required")
+        if reference.get("read_only") is not True:
+            raise ValueError("source snapshot reference must be read_only")
+        if set(reference) != {"paths", "sha256", "size", "read_only"}:
+            raise ValueError("source snapshot reference has invalid shape")
         paths = reference.get("paths")
         if not isinstance(paths, list) or not paths:
             raise ValueError("source snapshot chunks are required")
@@ -163,6 +175,26 @@ def _load_source_snapshot(extra: dict[str, Any]) -> dict[str, Any] | None:
     if not hmac.compare_digest(actual_sha, expected_sha):
         raise ValueError("source snapshot fingerprint mismatch")
     return snapshot
+
+
+def _validate_source_authority(
+    extra: dict[str, Any], repository: CreativeRepository, project_id: int
+) -> dict[str, Any]:
+    authority = extra.get("source_authority")
+    expected_sha = str(extra.get("source_authority_sha256") or "").strip()
+    if not isinstance(authority, dict) or not expected_sha:
+        raise ValueError("server source authority is required")
+    supplied_sha = canonical_request_hash(authority)
+    if not hmac.compare_digest(supplied_sha, expected_sha):
+        raise ValueError("server source authority fingerprint mismatch")
+    if int(authority.get("project_id") or 0) != int(project_id):
+        raise ValueError("server source authority project mismatch")
+    current = repository.generation_authority_envelope(project_id)
+    if not hmac.compare_digest(
+        canonical_request_hash(current), canonical_request_hash(authority)
+    ):
+        raise ValueError("server source authority changed")
+    return dict(authority)
 
 
 def _generation_context(
@@ -222,6 +254,7 @@ async def run(job: CrawlJob) -> None:
         raise ValueError("Phase 4 任务缺少有效 action 或 project_id")
 
     repository = CreativeRepository(db_path)
+    _validate_source_authority(extra, repository, project_id)
     inputs = repository.get_project_inputs(project_id)
     source_snapshot = _load_source_snapshot(extra)
     context = _generation_context(extra, source_snapshot)
@@ -237,8 +270,35 @@ async def run(job: CrawlJob) -> None:
             ):
                 raise ValueError("source snapshot project revision changed")
         project["generation_context"] = context
-    provider = create_provider()
     series_generation = bool(extra.get("series")) and action in {"beats", "script"}
+    generation_reservation: dict[str, Any] | None = None
+    reserved_generation = action == "outlines" or series_generation
+    if reserved_generation:
+        operation_id = str(extra.get("operation_id") or "").strip()
+        generation_request_hash = str(
+            extra.get("generation_request_hash") or ""
+        ).strip()
+        if not operation_id or not generation_request_hash:
+            raise ValueError("generation operation identity and request hash are required")
+        generation_reservation = repository.reserve_generation_operation(
+            operation_id=operation_id,
+            project_id=project_id,
+            stage="outline" if action == "outlines" else action,
+            request_hash=generation_request_hash,
+            owner_id=job.job_id,
+            predecessor_owner_id=(
+                str(extra.get("retry_of_job_id") or "").strip() or None
+            ),
+        )
+        if generation_reservation["status"] == "complete":
+            emit(
+                job,
+                "job_finished",
+                "创作内容生成已完成，返回幂等结果",
+                payload=generation_reservation["result"],
+            )
+            return
+    provider = create_provider()
     total_episodes = int(project.get("target_episode_count") or 0) if series_generation else 1
     retry_completed = 0
 
@@ -364,7 +424,11 @@ async def run(job: CrawlJob) -> None:
             operation_id=operation_id,
             include_complete=operation_id is not None,
         )
-        outline_batch_id: str | None = resumable["batch_id"] if resumable else None
+        outline_batch_id: str | None = (
+            str(generation_reservation["batch_id"])
+            if generation_reservation is not None
+            else (resumable["batch_id"] if resumable else None)
+        )
         resume_episodes = [item["content"] for item in resumable["episodes"]] if resumable else None
         resume_series_arc = resumable["series_arc"] if resumable else None
         resume_stages = resumable["stages"] if resumable else None
@@ -383,6 +447,13 @@ async def run(job: CrawlJob) -> None:
             arc: dict[str, Any], episodes: list[dict[str, Any]], meta: dict[str, Any]
         ) -> None:
             nonlocal outline_batch_id
+            if generation_reservation is not None:
+                repository.validate_generation_reservation(
+                    operation_id=str(extra["operation_id"]),
+                    request_hash=str(extra["generation_request_hash"]),
+                    batch_id=str(generation_reservation["batch_id"]),
+                    owner_id=job.job_id,
+                )
             saved = repository.save_outline_batch_checkpoint(
                 project_id,
                 episodes,
@@ -396,6 +467,19 @@ async def run(job: CrawlJob) -> None:
                 workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
                 batch_id=outline_batch_id,
                 series_overview=arc.get("series_overview"),
+                reservation_operation_id=(
+                    str(extra["operation_id"])
+                    if generation_reservation is not None
+                    else None
+                ),
+                reservation_request_hash=(
+                    str(extra["generation_request_hash"])
+                    if generation_reservation is not None
+                    else None
+                ),
+                reservation_owner_id=(
+                    job.job_id if generation_reservation is not None else None
+                ),
             )
             outline_batch_id = saved["batch_id"]
 
@@ -465,7 +549,11 @@ async def run(job: CrawlJob) -> None:
             action,
             operation_id=str(extra.get("operation_id") or "") or None,
         )
-        series_batch_id: str | None = resumable["batch_id"] if resumable else None
+        series_batch_id: str | None = (
+            str(generation_reservation["batch_id"])
+            if generation_reservation is not None
+            else (resumable["batch_id"] if resumable else None)
+        )
         completed = int(resumable["completed_episode_count"]) if resumable else 0
         generated_beats = list(resumable["episodes"]) if resumable and action == "beats" else []
         if completed:
@@ -507,6 +595,13 @@ async def run(job: CrawlJob) -> None:
                     provider, project, brief, outlines, characters, relationships, beats_by_episode,
                     continuity_ledger=_continuity_ledger_through(project, start - 1),
                 )
+            if generation_reservation is not None:
+                repository.validate_generation_reservation(
+                    operation_id=str(extra["operation_id"]),
+                    request_hash=str(extra["generation_request_hash"]),
+                    batch_id=str(generation_reservation["batch_id"]),
+                    owner_id=job.job_id,
+                )
             saved = repository.save_episode_generation_checkpoint(
                 project_id, action, checkpoint_items, job.job_id,
                 {
@@ -519,6 +614,9 @@ async def run(job: CrawlJob) -> None:
                 },
                 workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
                 batch_id=series_batch_id,
+                reservation_operation_id=str(extra["operation_id"]),
+                reservation_request_hash=str(extra["generation_request_hash"]),
+                reservation_owner_id=job.job_id,
             )
             series_batch_id = saved[0]["batch_id"]
             if action == "beats":
@@ -594,6 +692,14 @@ async def run(job: CrawlJob) -> None:
         result = {"action": action, "episode_id": resource["id"], "episode_number": episode_number, "brief_id": brief["id"]}
 
     await wait_if_paused(job)
+    if generation_reservation is not None:
+        repository.complete_generation_operation(
+            operation_id=str(extra["operation_id"]),
+            request_hash=str(extra["generation_request_hash"]),
+            batch_id=str(generation_reservation["batch_id"]),
+            result=result,
+            owner_id=job.job_id,
+        )
     target_dir = Path("data") / "creative" / "jobs" / job.job_id
     target_dir.mkdir(parents=True, exist_ok=True)
     report_path = target_dir / "generation.json"

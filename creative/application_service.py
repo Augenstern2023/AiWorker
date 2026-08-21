@@ -12,12 +12,12 @@ from collections.abc import Callable
 import json
 from pathlib import Path
 from typing import Any
+import uuid
 
 from creative.original_direction_service import validate_original_direction_content
 from creative.original_project_service import OriginalProjectService
 from creative.repository import CreativeRepository, canonical_request_hash
 from creative.schema import OriginalProjectCreateRequest
-from creative.script_service import validate_beats, validate_script
 from creative.workflow_adapter import CreativeWorkflowAdapter
 from identity.permission_service import PermissionService
 from identity.schema import Principal
@@ -30,7 +30,7 @@ MAX_INLINE_SOURCE_SNAPSHOT_BYTES = 2 * 1024 * 1024
 SOURCE_SNAPSHOT_CHUNK_BYTES = 1024 * 1024
 
 
-class CreativeContextConflict(RuntimeError):
+class CreativeContextConflict(ValueError):
     """Raised when the expected creative authority revision is stale."""
 
 
@@ -175,6 +175,7 @@ class CreativeApplicationService:
                 workflow_task_id=workflow_task_id,
                 direction_type="original",
                 operation_id=operation_id,
+                first_root_only=True,
             )[0]
         elif stage == "characters":
             if not payload.get("characters"):
@@ -195,26 +196,45 @@ class CreativeApplicationService:
                 operation_id=operation_id,
             )
         elif stage == "beats" and episode_number is not None:
-            content = validate_beats(payload)
             resource = self.repository.create_episode_beats(
                 project_id,
                 episode_number,
-                content,
+                payload,
                 workflow_task_id=workflow_task_id,
                 operation_id=operation_id,
             )
         elif stage == "script" and episode_number is not None:
-            content = validate_script(payload)
             resource = self.repository.create_episode_script(
                 project_id,
                 episode_number,
-                content,
+                payload,
                 workflow_task_id=workflow_task_id,
                 operation_id=operation_id,
             )
         else:
             raise ValueError("unsupported creative stage payload")
         return self.resource_ref(stage, resource)
+
+    def hydrate_resource_ref(self, ref: dict[str, Any]) -> dict[str, Any]:
+        project_id = int(ref["project_id"])
+        stage = str(ref["resource_type"])
+        if stage == "characters":
+            return self.repository.get_character_batch(
+                project_id, str(ref.get("batch_id") or ref["resource_id"]).split(":")[-1]
+            )
+        if stage == "outline":
+            return self.repository.get_outline_batch(
+                project_id, str(ref.get("batch_id") or ref["resource_id"]).split(":")[-1]
+            )
+        if stage in {"beats", "script"}:
+            resource = self.repository.get_episode(int(ref["resource_id"]))
+        elif stage == "brief":
+            resource = self.repository.get_blueprint(int(ref["resource_id"]))
+        else:
+            raise ValueError("unsupported creative resource reference")
+        if resource is None:
+            raise ValueError("creative resource no longer exists")
+        return resource
 
     def resource_ref(
         self, stage: str, resource: dict[str, Any]
@@ -253,23 +273,38 @@ class CreativeApplicationService:
         workflow_task_id: str,
         operation_id: str,
         actor: Principal,
+        difference_note: str = "",
     ) -> dict[str, Any]:
-        result = self.transitions.complete_creative_without_review(
-            workflow_task_id, stage, resource_id, actor
+        request_hash = canonical_request_hash(
+            {
+                "workflow_task_id": workflow_task_id,
+                "resource_id": resource_id,
+                "difference_note": difference_note,
+            }
         )
-        self.repository.record_operation_result(
+        owner_id = uuid.uuid4().hex
+        reservation = self.repository.reserve_side_effect_operation(
             operation_id=operation_id,
             project_id=project_id,
             stage=f"{stage}.lock",
-            request_hash=canonical_request_hash(
-                {
-                    "workflow_task_id": workflow_task_id,
-                    "resource_id": resource_id,
-                }
-            ),
-            resource_ref=result["resource"],
+            request_hash=request_hash,
+            owner_id=owner_id,
         )
-        return result
+        if reservation["state"] == "complete":
+            return reservation["result"]
+        try:
+            kwargs = {"difference_note": difference_note} if stage == "brief" else {}
+            result = self.transitions.complete_creative_without_review(
+                workflow_task_id, stage, resource_id, actor, **kwargs
+            )
+            return self.repository.finalize_side_effect_operation(
+                operation_id=operation_id, owner_id=owner_id, result=result
+            )
+        except Exception:
+            self.repository.abandon_side_effect_operation(
+                operation_id=operation_id, owner_id=owner_id
+            )
+            raise
 
     def create_revision(
         self,
@@ -284,33 +319,63 @@ class CreativeApplicationService:
         actor: Principal,
         episode_number: int | None = None,
     ) -> dict[str, Any]:
-        project = self.get_project(project_id)
-        if int(project["revision"]) != expected_project_revision:
-            raise CreativeContextConflict("project authority revision changed")
-        if stage == "brief":
-            self.assert_stage_write_access(project_id, stage, actor)
-            self.validate_task_for_creation(
-                workflow_task_id, project_id, stage, actor
-            )
-            content = validate_original_direction_content(
-                payload, market_context=[], blocked_terms=[]
-            )
-            resource = self.repository.create_blueprint_revision(
-                int(replaces_resource_id),
-                content,
-                workflow_task_id,
-                operation_id,
-            )
-            return self.resource_ref(stage, resource)
-        return self.persist_draft(
-            project_id=project_id,
-            stage=stage,
-            payload=payload,
-            workflow_task_id=workflow_task_id,
-            operation_id=operation_id,
-            actor=actor,
-            episode_number=episode_number,
-        )
+        self.assert_stage_write_access(project_id, stage, actor)
+        self.validate_task_for_creation(workflow_task_id, project_id, stage, actor)
+        try:
+            if stage == "brief":
+                source = self.repository.get_blueprint(int(replaces_resource_id))
+                if source is None:
+                    raise ValueError("仿制方向不存在")
+                content = (
+                    validate_original_direction_content(
+                        payload, market_context=[], blocked_terms=[]
+                    )
+                    if source.get("direction_type") == "original"
+                    else dict(payload)
+                )
+                resource = self.repository.create_blueprint_revision(
+                    int(replaces_resource_id),
+                    content,
+                    workflow_task_id,
+                    operation_id,
+                    expected_project_revision=expected_project_revision,
+                    expected_project_id=project_id,
+                )
+            elif stage == "characters":
+                resource = self.repository.create_character_batch(
+                    project_id, payload["characters"], payload.get("relationships", []),
+                    workflow_task_id=workflow_task_id, operation_id=operation_id,
+                    replaces_resource_id=replaces_resource_id,
+                    expected_project_revision=expected_project_revision,
+                )
+            elif stage == "outline":
+                resource = self.repository.create_outline_batch(
+                    project_id, payload["episodes"], payload.get("series_arc", ""),
+                    workflow_task_id=workflow_task_id, operation_id=operation_id,
+                    replaces_resource_id=replaces_resource_id,
+                    expected_project_revision=expected_project_revision,
+                )
+            elif stage == "beats" and episode_number is not None:
+                resource = self.repository.create_episode_beats(
+                    project_id, episode_number, payload,
+                    workflow_task_id=workflow_task_id, operation_id=operation_id,
+                    replaces_resource_id=replaces_resource_id,
+                    expected_project_revision=expected_project_revision,
+                )
+            elif stage == "script" and episode_number is not None:
+                resource = self.repository.create_episode_script(
+                    project_id, episode_number, payload,
+                    workflow_task_id=workflow_task_id, operation_id=operation_id,
+                    replaces_resource_id=replaces_resource_id,
+                    expected_project_revision=expected_project_revision,
+                )
+            else:
+                raise ValueError("unsupported creative revision payload")
+        except ValueError as exc:
+            if "project revision changed" in str(exc):
+                raise CreativeContextConflict("project authority revision changed") from exc
+            raise
+        return self.resource_ref(stage, resource)
 
     def _snapshot_extra(
         self, source_snapshot_id: str, source_snapshot: dict[str, Any]
@@ -373,15 +438,70 @@ class CreativeApplicationService:
         series: bool = False,
         count: int | None = None,
     ) -> dict[str, Any]:
+        state = self.start_generation_compat(
+            project_id=project_id,
+            stage=stage,
+            actor=actor,
+            workflow_task_id=workflow_task_id,
+            operation_id=operation_id,
+            generation_instruction=generation_instruction,
+            source_snapshot_id=source_snapshot_id,
+            source_snapshot=source_snapshot,
+            episode_number=episode_number,
+            episode_start=episode_start,
+            episode_end=episode_end,
+            series=series,
+            count=count,
+            chunk_size=10,
+        )
+        return {
+            "job_id": state.job_id,
+            "status": state.status,
+            "project_id": project_id,
+            "stage": stage,
+            "workflow_task_id": workflow_task_id,
+            "operation_id": operation_id,
+        }
+
+    def start_generation_compat(
+        self,
+        *,
+        project_id: int,
+        stage: str,
+        actor: Principal | None,
+        workflow_task_id: str | None,
+        operation_id: str,
+        generation_instruction: str,
+        source_snapshot_id: str,
+        source_snapshot: dict[str, Any],
+        action: str | None = None,
+        **legacy_extra: Any,
+    ) -> Any:
         if self.job_manager is None:
             raise RuntimeError("creative job manager is unavailable")
-        worker_action = {
+        worker_action = action or {
             "brief": "blueprints",
             "characters": "characters",
             "outline": "outlines",
             "beats": "beats",
             "script": "script",
         }[stage]
+        authority = self.repository.generation_authority_envelope(project_id)
+        authority_sha = canonical_request_hash(authority)
+        snapshot_extra = self._snapshot_extra(source_snapshot_id, source_snapshot)
+        request_identity = {
+            "project_id": project_id,
+            "stage": stage,
+            "action": worker_action,
+            "workflow_task_id": workflow_task_id,
+            "operation_id": operation_id,
+            "generation_instruction": generation_instruction,
+            "source_snapshot_id": source_snapshot_id,
+            "source_snapshot_sha256": snapshot_extra["source_snapshot_sha256"],
+            "source_authority_sha256": authority_sha,
+            "flags": legacy_extra,
+        }
+        generation_request_hash = canonical_request_hash(request_identity)
         payload = {
             "platform": "creative",
             "crawler_type": "phase4_generate",
@@ -393,32 +513,17 @@ class CreativeApplicationService:
                 "action": worker_action,
                 "normalized_stage": stage,
                 "project_id": project_id,
-                "created_by_user_id": actor.user_id,
+                "created_by_user_id": actor.user_id if actor is not None else None,
                 "workflow_task_id": workflow_task_id,
                 "operation_id": operation_id,
                 "generation_instruction": generation_instruction,
-                **self._snapshot_extra(source_snapshot_id, source_snapshot),
-                "episode_number": episode_number,
-                "episode_start": episode_start,
-                "episode_end": episode_end,
-                "series": series,
-                "count": count,
-                "chunk_size": 10,
+                **snapshot_extra,
+                "source_authority": authority,
+                "source_authority_sha256": authority_sha,
+                "generation_request_hash": generation_request_hash,
+                **legacy_extra,
                 "db_path": str(self.repository.db_path.resolve()),
                 "runtime_dir": str(self.runtime_dir.resolve()),
             },
         }
-        state = self.job_manager.create_job(
-            payload,
-            created_by_user_id=actor.user_id,
-            workflow_task_id=workflow_task_id,
-            project_id=project_id,
-        )
-        return {
-            "job_id": state.job_id,
-            "status": state.status,
-            "project_id": project_id,
-            "stage": stage,
-            "workflow_task_id": workflow_task_id,
-            "operation_id": operation_id,
-        }
+        return self.job_manager.create_job(payload)

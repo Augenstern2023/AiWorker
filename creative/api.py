@@ -25,7 +25,7 @@ from openpyxl import Workbook
 from pydantic import BaseModel
 
 from creative.hit_breakdown import breakdown_field_guide, personalize_breakdown_field_guide
-from creative.application_service import CreativeApplicationService
+from creative.application_service import CreativeApplicationService, CreativeContextConflict
 from creative.imitation_service import assess_similarity_risk
 from creative.lifecycle_service import TopicLifecycleService, content_fingerprint
 from creative.market_reference_service import MarketReferenceService
@@ -1253,7 +1253,7 @@ def build_creative_router(
         ):
             raise HTTPException(403, "没有创建此机器任务的权限")
         assert_project_generation_access(project_id, principal)
-        workflow_task_id = str(extra.get("workflow_task_id") or "") or None
+        workflow_task_id = str(extra.pop("workflow_task_id", "") or "") or None
         normalized_stage = {
             "blueprints": "brief",
             "blueprint_variant": "brief",
@@ -1284,34 +1284,19 @@ def build_creative_router(
             source_snapshot_id = source_snapshot_id or str(embedded_id or "").strip()
             if not source_snapshot_id:
                 source_snapshot_id = f"creative-source-{operation_id}"
-        snapshot_extra = application_service._snapshot_extra(
-            source_snapshot_id, source_snapshot
-        )
-        payload = {
-            "platform": "creative",
-            "crawler_type": "phase4_generate",
-            "keywords": [],
-            "save_data_option": "json",
-            "get_comments": False,
-            "get_sub_comments": False,
-            "extra": {
-                "action": action,
-                "project_id": project_id,
-                "created_by_user_id": (
-                    principal.user_id if principal is not None else None
-                ),
-                "workflow_task_id": workflow_task_id,
-                "normalized_stage": normalized_stage,
-                "operation_id": operation_id,
-                "generation_instruction": generation_instruction,
-                **snapshot_extra,
-                "db_path": str(repository.db_path.resolve()),
-                "runtime_dir": str(Path(runtime_dir).resolve()),
-                **extra,
-            },
-        }
         try:
-            state = job_manager.create_job(payload)
+            state = application_service.start_generation_compat(
+                project_id=project_id,
+                stage=normalized_stage,
+                action=action,
+                actor=principal,
+                workflow_task_id=workflow_task_id,
+                operation_id=operation_id,
+                generation_instruction=generation_instruction,
+                source_snapshot_id=source_snapshot_id,
+                source_snapshot=source_snapshot,
+                **extra,
+            )
         except JobConflictError as exc:
             raise HTTPException(409, str(exc)) from exc
         if workflow_task_id:
@@ -1450,6 +1435,21 @@ def build_creative_router(
             raise HTTPException(403, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    def persist_legacy_draft(**kwargs: Any) -> dict[str, Any]:
+        replaces_resource_id = kwargs.pop("replaces_resource_id", None)
+        expected_project_revision = kwargs.pop("expected_project_revision", None)
+        if replaces_resource_id is not None:
+            if expected_project_revision is None:
+                raise ValueError("expected_project_revision is required for a revision")
+            ref = application_service.create_revision(
+                **kwargs,
+                replaces_resource_id=str(replaces_resource_id),
+                expected_project_revision=int(expected_project_revision),
+            )
+        else:
+            ref = application_service.persist_draft(**kwargs)
+        return application_service.hydrate_resource_ref(ref)
 
     def batch_resource_for(table: str, item_id: int) -> str | None:
         if table not in {"creative_characters", "creative_relationships"}:
@@ -2790,7 +2790,7 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         try:
-            return application_service.persist_draft(
+            return persist_legacy_draft(
                 project_id=project_id,
                 stage="brief",
                 payload=payload.content,
@@ -2798,6 +2798,8 @@ def build_creative_router(
                     payload.workflow_task_id, "brief", project_id, principal
                 ),
                 operation_id=payload.operation_id,
+                replaces_resource_id=payload.replaces_resource_id,
+                expected_project_revision=payload.expected_project_revision,
                 actor=principal,
             )
         except PermissionError as exc:
@@ -2902,9 +2904,24 @@ def build_creative_router(
                 principal,
                 project_id=int(current["project_id"]),
             )
-            return repository.create_blueprint_version(
-                blueprint_id, workflow_task_id=workflow_task_id
+            project = project_or_404(int(current["project_id"]))
+            ref = application_service.create_revision(
+                project_id=int(current["project_id"]),
+                stage="brief",
+                replaces_resource_id=str(blueprint_id),
+                payload=current["content"],
+                workflow_task_id=workflow_task_id,
+                operation_id=(payload.operation_id if payload else None) or uuid.uuid4().hex,
+                expected_project_revision=(
+                    payload.expected_project_revision
+                    if payload and payload.expected_project_revision is not None
+                    else int(project["revision"])
+                ),
+                actor=principal,
             )
+            return application_service.hydrate_resource_ref(ref)
+        except CreativeContextConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from exc
 
@@ -2915,11 +2932,16 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         try:
-            return workflow_transitions.complete_creative_without_review(
-                payload.workflow_task_id,
-                "brief",
-                str(blueprint_id),
-                principal,
+            blueprint = repository.get_blueprint(blueprint_id)
+            if blueprint is None:
+                raise KeyError(blueprint_id)
+            return application_service.lock_resource(
+                project_id=int(blueprint["project_id"]),
+                stage="brief",
+                resource_id=str(blueprint_id),
+                workflow_task_id=payload.workflow_task_id,
+                operation_id=payload.operation_id or uuid.uuid4().hex,
+                actor=principal,
                 difference_note=payload.difference_note,
             )
         except KeyError as exc:
@@ -2985,7 +3007,7 @@ def build_creative_router(
                 project_id,
                 principal,
             )
-            return application_service.persist_draft(
+            return persist_legacy_draft(
                 project_id=project_id,
                 stage="characters",
                 payload={
@@ -2994,6 +3016,8 @@ def build_creative_router(
                 },
                 workflow_task_id=workflow_task_id,
                 operation_id=payload.operation_id or uuid.uuid4().hex,
+                replaces_resource_id=payload.replaces_resource_id,
+                expected_project_revision=payload.expected_project_revision,
                 actor=principal,
             )
         except PermissionError as exc:
@@ -3088,7 +3112,7 @@ def build_creative_router(
                 project_id,
                 principal,
             )
-            return application_service.persist_draft(
+            return persist_legacy_draft(
                 project_id=project_id,
                 stage="outline",
                 payload={
@@ -3097,6 +3121,8 @@ def build_creative_router(
                 },
                 workflow_task_id=workflow_task_id,
                 operation_id=payload.operation_id or uuid.uuid4().hex,
+                replaces_resource_id=payload.replaces_resource_id,
+                expected_project_revision=payload.expected_project_revision,
                 actor=principal,
             )
         except PermissionError as exc:
@@ -3261,12 +3287,14 @@ def build_creative_router(
                 project_id,
                 principal,
             )
-            return application_service.persist_draft(
+            return persist_legacy_draft(
                 project_id=project_id,
                 stage="beats",
                 payload=payload.content,
                 workflow_task_id=workflow_task_id,
                 operation_id=payload.operation_id or uuid.uuid4().hex,
+                replaces_resource_id=payload.replaces_resource_id,
+                expected_project_revision=payload.expected_project_revision,
                 actor=principal,
                 episode_number=episode_number,
             )
@@ -3370,12 +3398,14 @@ def build_creative_router(
             workflow_task_id = application_task_id(
                 payload.workflow_task_id, "script", project_id, principal
             )
-            return application_service.persist_draft(
+            return persist_legacy_draft(
                 project_id=project_id,
                 stage="script",
                 payload=payload.content,
                 workflow_task_id=workflow_task_id,
                 operation_id=payload.operation_id or uuid.uuid4().hex,
+                replaces_resource_id=payload.replaces_resource_id,
+                expected_project_revision=payload.expected_project_revision,
                 actor=principal,
                 episode_number=episode_number,
             )

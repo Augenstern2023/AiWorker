@@ -417,3 +417,158 @@ def test_recorded_lock_result_can_be_replayed_and_hydrated(tmp_path: Path) -> No
 
     assert first_ref == second_ref == resource_ref
     assert repository.hydrate_operation_result("writer-action-8:brief-lock") == locked
+
+
+def test_explicit_episode_revision_uses_exact_parent_and_atomic_authority(
+    tmp_path: Path,
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = seed_locked_outline_project(repository)
+    first = repository.create_episode_beats(
+        project["id"], 1, {"title": "初版", "beats": [{"beat": "开场"}]}
+    )
+    repository.create_episode_beats(
+        project["id"], 1, {"title": "中间版", "beats": [{"beat": "冲突"}]}
+    )
+    expected_revision = repository.get_project(project["id"])["revision"]
+
+    revision = repository.create_episode_beats(
+        project["id"],
+        1,
+        {"title": "重做初版", "beats": [{"beat": "新开场"}]},
+        operation_id="exact-parent-beats",
+        replaces_resource_id=str(first["id"]),
+        expected_project_revision=expected_revision,
+    )
+
+    assert revision["parent_version_id"] == first["id"]
+    with pytest.raises(ValueError, match="project revision changed"):
+        repository.create_episode_beats(
+            project["id"],
+            1,
+            {"title": "过期重做", "beats": [{"beat": "过期"}]},
+            operation_id="stale-beats",
+            replaces_resource_id=str(first["id"]),
+            expected_project_revision=expected_revision - 1,
+        )
+
+
+def test_generation_operation_reservation_validates_hash_and_concurrency(
+    tmp_path: Path,
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = seed_original_project(repository)
+
+    first = repository.reserve_generation_operation(
+        operation_id="outline-generation",
+        project_id=project["id"],
+        stage="outline",
+        request_hash="request-a",
+        owner_id="job-1",
+    )
+    replay = repository.reserve_generation_operation(
+        operation_id="outline-generation",
+        project_id=project["id"],
+        stage="outline",
+        request_hash="request-a",
+        owner_id="job-1",
+    )
+
+    assert replay["batch_id"] == first["batch_id"]
+    with pytest.raises(ValueError, match="IDEMPOTENCY_KEY_REUSED"):
+        repository.reserve_generation_operation(
+            operation_id="outline-generation",
+            project_id=project["id"],
+            stage="outline",
+            request_hash="request-b",
+            owner_id="job-2",
+        )
+    with pytest.raises(RuntimeError, match="OPERATION_IN_PROGRESS"):
+        repository.reserve_generation_operation(
+            operation_id="outline-generation",
+            project_id=project["id"],
+            stage="outline",
+            request_hash="request-a",
+            owner_id="job-2",
+        )
+
+
+def test_explicit_revision_lineage_is_exact_for_all_five_resource_shapes(
+    tmp_path: Path,
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = seed_locked_outline_project(repository)
+    project_id = project["id"]
+    authority = repository.get_project(project_id)["revision"]
+
+    brief_source = repository.get_blueprint(
+        repository.get_project(project_id)["locked_brief_id"]
+    )
+    brief_revision = repository.create_blueprint_revision(
+        brief_source["id"],
+        {**brief_source["content"], "title": "精确 Brief 修订"},
+        brief_source.get("workflow_task_id"),
+        "all-lineage-brief",
+        expected_project_revision=authority,
+        expected_project_id=project_id,
+    )
+    assert brief_revision["parent_version_id"] == brief_source["id"]
+
+    characters_first = repository.create_character_batch(
+        project_id, [{"name": "精确人物", "identity": "初版"}], []
+    )
+    repository.create_character_batch(
+        project_id, [{"name": "精确人物", "identity": "中间版"}], []
+    )
+    characters_revision = repository.create_character_batch(
+        project_id,
+        [{"name": "精确人物", "identity": "重做初版"}],
+        [],
+        operation_id="all-lineage-characters",
+        replaces_resource_id=f"{project_id}:{characters_first['batch_id']}",
+        expected_project_revision=authority,
+    )
+    assert (
+        characters_revision["characters"][0]["parent_version_id"]
+        == characters_first["characters"][0]["id"]
+    )
+
+    outline_first = repository.create_outline_batch(
+        project_id, [{"episode": 1, "summary": "初版"}], "初版"
+    )
+    repository.create_outline_batch(
+        project_id, [{"episode": 1, "summary": "中间版"}], "中间版"
+    )
+    outline_revision = repository.create_outline_batch(
+        project_id,
+        [{"episode": 1, "summary": "重做初版"}],
+        "重做初版",
+        operation_id="all-lineage-outline",
+        replaces_resource_id=f"{project_id}:{outline_first['batch_id']}",
+        expected_project_revision=authority,
+    )
+    assert (
+        outline_revision["episodes"][0]["parent_version_id"]
+        == outline_first["episodes"][0]["id"]
+    )
+
+    beats = repository.create_episode_beats(
+        project_id, 1, {"title": "锁定 Beats", "beats": [{"beat": "开场"}]}
+    )
+    repository.lock_episode_beats(beats["id"])
+    script_first = repository.create_episode_script(
+        project_id, 1, {"title": "初版剧本", "scenes": []}
+    )
+    repository.create_episode_script(
+        project_id, 1, {"title": "中间版剧本", "scenes": []}
+    )
+    current_authority = repository.get_project(project_id)["revision"]
+    script_revision = repository.create_episode_script(
+        project_id,
+        1,
+        {"title": "重做初版剧本", "scenes": []},
+        operation_id="all-lineage-script",
+        replaces_resource_id=str(script_first["id"]),
+        expected_project_revision=current_authority,
+    )
+    assert script_revision["parent_version_id"] == script_first["id"]

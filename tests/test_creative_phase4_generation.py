@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -46,6 +48,29 @@ class SequentialProvider:
             raise response
         return response
 
+
+def authority_extra(
+    repository: CreativeRepository, project_id: int
+) -> dict[str, Any]:
+    authority = repository.generation_authority_envelope(project_id)
+    return {
+        "source_authority": authority,
+        "source_authority_sha256": phase4_worker.canonical_request_hash(authority),
+    }
+
+
+def generation_contract(
+    repository: CreativeRepository,
+    project_id: int,
+    operation_id: str = "worker-generation-operation",
+) -> dict[str, Any]:
+    return {
+        **authority_extra(repository, project_id),
+        "operation_id": operation_id,
+        "generation_request_hash": phase4_worker.canonical_request_hash(
+            {"project_id": project_id, "operation_id": operation_id}
+        ),
+    }
 
 def blueprint_payload(count: int = 3):
     return {
@@ -106,6 +131,68 @@ def test_worker_rejects_snapshot_chunk_path_outside_runtime(tmp_path: Path) -> N
                 },
             }
         )
+
+
+def test_worker_rejects_oversized_inline_snapshot(tmp_path: Path) -> None:
+    snapshot = {
+        "snapshot_id": "oversized",
+        "material": "字" * (2 * 1024 * 1024),
+    }
+    with pytest.raises(ValueError, match="2 MiB"):
+        phase4_worker._load_source_snapshot(
+            {
+                "runtime_dir": str(tmp_path),
+                "source_snapshot_id": "oversized",
+                "source_snapshot_sha256": phase4_worker.canonical_request_hash(
+                    snapshot
+                ),
+                "source_snapshot": snapshot,
+            }
+        )
+
+
+def test_worker_requires_read_only_chunk_reference(tmp_path: Path) -> None:
+    snapshot = {"snapshot_id": "chunked", "material": "素材"}
+    content = json.dumps(
+        snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    chunk = tmp_path / "creative" / "source_snapshots" / "chunk.jsonpart"
+    chunk.parent.mkdir(parents=True)
+    chunk.write_bytes(content)
+    fingerprint = phase4_worker.canonical_request_hash(snapshot)
+
+    with pytest.raises(ValueError, match="read_only"):
+        phase4_worker._load_source_snapshot(
+            {
+                "runtime_dir": str(tmp_path),
+                "source_snapshot_id": "chunked",
+                "source_snapshot_sha256": fingerprint,
+                "source_snapshot_ref": {
+                    "paths": [chunk.relative_to(tmp_path).as_posix()],
+                    "sha256": fingerprint,
+                    "size": len(content),
+                },
+            }
+        )
+
+
+def test_worker_requires_and_validates_server_authority(tmp_path: Path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = seed_worker_project(repository, episode_count=1)
+    authority = repository.generation_authority_envelope(project["id"])
+
+    assert phase4_worker._validate_source_authority(
+        {
+            "source_authority": authority,
+            "source_authority_sha256": phase4_worker.canonical_request_hash(
+                authority
+            ),
+        },
+        repository,
+        project["id"],
+    ) == authority
+    with pytest.raises(ValueError, match="authority"):
+        phase4_worker._validate_source_authority({}, repository, project["id"])
 
 
 def test_blueprint_prompt_requires_an_imitation_reason_for_each_direction() -> None:
@@ -743,6 +830,7 @@ def test_phase4_worker_persists_generation_and_report(tmp_path, monkeypatch):
         extra={
             "action": "blueprints", "project_id": project["id"], "count": 3,
             "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            **generation_contract(repository, project["id"]),
         },
     )
 
@@ -770,6 +858,7 @@ def test_phase4_worker_does_not_persist_partial_blueprints_after_llm_failure(tmp
         extra={
             "action": "blueprints", "project_id": project["id"], "count": 3,
             "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            **authority_extra(repository, project["id"]),
         },
     )
 
@@ -801,6 +890,7 @@ def test_phase4_worker_preserves_completed_outline_chunks_after_a_later_failure(
         extra={
             "action": "outlines", "project_id": project["id"],
             "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            **generation_contract(repository, project["id"]),
         },
     )
 
@@ -833,7 +923,8 @@ def test_phase4_worker_continues_a_saved_outline_batch_after_a_failed_job(tmp_pa
     failed_job = CrawlJob(
         job_id="creative-worker-outline-failed",
         platform="creative", crawler_type="phase4_generate",
-        extra={"action": "outlines", "project_id": project["id"], "db_path": str(db_path)},
+        extra={"action": "outlines", "project_id": project["id"], "db_path": str(db_path),
+               **generation_contract(repository, project["id"])},
     )
     with pytest.raises(Exception, match="结构校验"):
         asyncio.run(phase4_worker.run(failed_job))
@@ -845,7 +936,9 @@ def test_phase4_worker_continues_a_saved_outline_batch_after_a_failed_job(tmp_pa
     resumed_job = CrawlJob(
         job_id="creative-worker-outline-resumed",
         platform="creative", crawler_type="phase4_generate",
-        extra={"action": "outlines", "project_id": project["id"], "db_path": str(db_path)},
+        extra={"action": "outlines", "project_id": project["id"], "db_path": str(db_path),
+               "retry_of_job_id": "creative-worker-outline-failed",
+               **generation_contract(repository, project["id"])},
     )
 
     asyncio.run(phase4_worker.run(resumed_job))
@@ -889,6 +982,7 @@ def test_phase4_worker_saves_series_beats_in_ten_episode_checkpoints(tmp_path, m
         extra={
             "action": "beats", "series": True, "project_id": project["id"],
             "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            **generation_contract(repository, project["id"]),
         },
     )
 
@@ -928,6 +1022,7 @@ def test_phase4_worker_saves_series_scripts_after_all_current_beats_are_locked(t
         extra={
             "action": "script", "series": True, "project_id": project["id"],
             "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            **generation_contract(repository, project["id"]),
         },
     )
 
@@ -971,6 +1066,7 @@ def test_phase4_worker_surfaces_provider_retry_progress(tmp_path, monkeypatch):
         extra={
             "action": "blueprints", "project_id": project["id"], "count": 3,
             "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            **authority_extra(repository, project["id"]),
         },
     )
 

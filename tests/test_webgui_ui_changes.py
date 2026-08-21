@@ -74,6 +74,13 @@ def test_webgui_shares_creative_application_dependencies():
     )
 
 
+def test_creative_generation_routes_use_only_public_application_service_api():
+    source = _source("creative/api.py")
+
+    assert "._snapshot_extra(" not in source
+    assert "start_generation_compat(" in source
+
+
 def test_webgui_registers_analytics_routes():
     paths = {route.path for route in WebGUI.app.routes}
 

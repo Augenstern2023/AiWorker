@@ -651,6 +651,38 @@ class CreativeApplicationService:
             "episode_number": resource.get("episode_number"),
         }
 
+    def recover_generation_result(
+        self, *, operation_id: str, project_id: int, stage: str
+    ) -> dict[str, Any]:
+        """Rebuild durable resource references after a worker completed."""
+
+        hydrated = self.repository.hydrate_operation_result(operation_id)
+        resources: list[dict[str, Any]]
+        if isinstance(hydrated, list):
+            resources = [dict(item) for item in hydrated]
+        elif isinstance(hydrated, dict):
+            resources = [hydrated]
+        else:
+            resumable = (
+                self.repository.find_resumable_outline_batch(
+                    int(project_id),
+                    operation_id=operation_id,
+                    include_complete=True,
+                )
+                if stage == "outline"
+                else None
+            )
+            if resumable is None:
+                raise ValueError("completed generation result is unavailable")
+            resources = [resumable]
+        if not resources:
+            raise ValueError("completed generation resources are unavailable")
+        return {
+            "resource_refs": [
+                self.resource_ref(stage, resource) for resource in resources
+            ]
+        }
+
     def lock_resource(
         self,
         *,
@@ -903,6 +935,7 @@ class CreativeApplicationService:
         series: bool = False,
         count: int | None = None,
         expected_context: dict[str, Any] | None = None,
+        retry_failed_operation: bool = False,
     ) -> dict[str, Any]:
         state = self.start_generation_compat(
             project_id=project_id,
@@ -920,6 +953,7 @@ class CreativeApplicationService:
             count=count,
             chunk_size=10,
             expected_context=expected_context,
+            retry_failed_operation=retry_failed_operation,
         )
         return {
             "job_id": state.job_id,
@@ -943,6 +977,7 @@ class CreativeApplicationService:
         source_snapshot: dict[str, Any],
         action: str | None = None,
         expected_context: dict[str, Any] | None = None,
+        retry_failed_operation: bool = False,
         **legacy_extra: Any,
     ) -> Any:
         if self.job_manager is None:
@@ -1003,9 +1038,20 @@ class CreativeApplicationService:
                 "source_authority": authority,
                 "source_authority_sha256": authority_sha,
                 "generation_request_hash": generation_request_hash,
+                "retry_failed_operation": bool(retry_failed_operation),
                 **legacy_extra,
                 "db_path": str(self.repository.db_path.resolve()),
                 "runtime_dir": str(self.runtime_dir.resolve()),
             },
         }
+        if actor is not None and workflow_task_id is not None:
+            get_or_create = getattr(self.job_manager, "get_or_create_job", None)
+            if callable(get_or_create):
+                return get_or_create(
+                    operation_id,
+                    payload,
+                    created_by_user_id=actor.user_id,
+                    workflow_task_id=workflow_task_id,
+                    project_id=project_id,
+                )
         return self.job_manager.create_job(payload)

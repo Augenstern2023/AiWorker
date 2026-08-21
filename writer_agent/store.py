@@ -97,6 +97,7 @@ class WriterAgentStore:
             "idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, source_snapshot_id TEXT, "
             "expected_context_json TEXT NOT NULL DEFAULT '{}', payload_json TEXT NOT NULL DEFAULT '{}', "
             "result_json TEXT, error_code TEXT, error_message TEXT, retryable INTEGER NOT NULL DEFAULT 0, "
+            "conflicting_action_id TEXT, "
             "job_id TEXT, decision_request_id TEXT, retry_of_action_id TEXT, root_action_id TEXT, "
             "created_at REAL NOT NULL, updated_at REAL NOT NULL, started_at REAL, finished_at REAL, expires_at REAL, "
             "UNIQUE(actor_user_id, idempotency_key))"
@@ -107,6 +108,7 @@ class WriterAgentStore:
             "episode_start INTEGER, episode_end INTEGER, status TEXT NOT NULL, operation_id TEXT NOT NULL, "
             "job_id TEXT, depends_on_json TEXT NOT NULL DEFAULT '[]', resource_refs_json TEXT NOT NULL DEFAULT '[]', "
             "error_code TEXT, error_message TEXT, retryable INTEGER NOT NULL DEFAULT 0, attempt INTEGER NOT NULL, "
+            "conflicting_action_id TEXT, execution_owner TEXT, lease_expires_at REAL, "
             "step_order INTEGER NOT NULL, revision INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL, updated_at REAL NOT NULL, "
             "finished_at REAL, UNIQUE(action_id, step_key))"
         )
@@ -128,6 +130,31 @@ class WriterAgentStore:
         if "project_id_json" not in self._columns(conn, "writer_agent_actions"):
             conn.execute(
                 "ALTER TABLE writer_agent_actions ADD COLUMN project_id_json TEXT"
+            )
+        if "conflicting_action_id" not in self._columns(
+            conn, "writer_agent_actions"
+        ):
+            conn.execute(
+                "ALTER TABLE writer_agent_actions "
+                "ADD COLUMN conflicting_action_id TEXT"
+            )
+        if "conflicting_action_id" not in self._columns(
+            conn, "writer_agent_action_steps"
+        ):
+            conn.execute(
+                "ALTER TABLE writer_agent_action_steps "
+                "ADD COLUMN conflicting_action_id TEXT"
+            )
+        step_columns = self._columns(conn, "writer_agent_action_steps")
+        if "execution_owner" not in step_columns:
+            conn.execute(
+                "ALTER TABLE writer_agent_action_steps "
+                "ADD COLUMN execution_owner TEXT"
+            )
+        if "lease_expires_at" not in step_columns:
+            conn.execute(
+                "ALTER TABLE writer_agent_action_steps "
+                "ADD COLUMN lease_expires_at REAL"
             )
 
     def create(self, user_id: str, content: str, title: str = "", filename: str = "") -> dict[str, Any]:
@@ -422,7 +449,10 @@ class WriterAgentStore:
             conn.execute("BEGIN IMMEDIATE")
             row = self._require_action_conn(conn, action_id)
             context = _decode(row["expected_context_json"], {})
-            context.update({"project_revision": project_revision, "authority_refs": authority_refs})
+            current_refs = context.get("authority_refs")
+            merged_refs = dict(current_refs) if isinstance(current_refs, dict) else {}
+            merged_refs.update(authority_refs)
+            context.update({"project_revision": project_revision, "authority_refs": merged_refs})
             changed = conn.execute(
                 "UPDATE writer_agent_actions SET expected_context_json=?, revision=?, updated_at=? WHERE id=? AND status=? AND revision=?",
                 (_json(context), int(row["revision"]) + 1, time.time(), action_id, row["status"], int(row["revision"])),
@@ -437,17 +467,21 @@ class WriterAgentStore:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = self._require_action_conn(conn, action_id)
+            if row["status"] == status:
+                return self._action_row(row)
             if row["status"] not in {"queued", "running"}:
                 raise WriterActionError("ACTION_STATE_INVALID", "动作当前状态不允许完成", current_revision=int(row["revision"]))
             return self._transition_in_connection(conn, row, status, result_json=_json(result) if result is not None else row["result_json"], finished_at=time.time())
 
-    def fail_action(self, action_id: str, *, code: str, message: str, retryable: bool = False, result: dict[str, Any] | None = None) -> dict[str, Any]:
+    def fail_action(self, action_id: str, *, code: str, message: str, retryable: bool = False, conflicting_action_id: str | None = None, result: dict[str, Any] | None = None) -> dict[str, Any]:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = self._require_action_conn(conn, action_id)
+            if row["status"] == "failed":
+                return self._action_row(row)
             if row["status"] not in {"queued", "running"}:
                 raise WriterActionError("ACTION_STATE_INVALID", "动作当前状态不允许失败", current_revision=int(row["revision"]))
-            return self._transition_in_connection(conn, row, "failed", error_code=code, error_message=message, retryable=int(retryable), result_json=_json(result) if result is not None else row["result_json"], finished_at=time.time())
+            return self._transition_in_connection(conn, row, "failed", error_code=code, error_message=message, retryable=int(retryable), conflicting_action_id=conflicting_action_id, result_json=_json(result) if result is not None else row["result_json"], finished_at=time.time())
 
     def _transition_in_connection(self, conn: sqlite3.Connection, row: sqlite3.Row, status: str, **updates: Any) -> dict[str, Any]:
         fields = {"status": status, "revision": int(row["revision"]) + 1, "updated_at": time.time(), **updates}
@@ -558,39 +592,171 @@ class WriterAgentStore:
                 "ORDER BY step_order, id",
                 (action_id,),
             ).fetchall()
-            inherited_states: dict[str, str] = {}
-            ancestor_id = action["retry_of_action_id"]
-            visited: set[str] = set()
-            while ancestor_id and str(ancestor_id) not in visited:
-                ancestor_key = str(ancestor_id)
-                visited.add(ancestor_key)
-                ancestor_steps = conn.execute(
-                    "SELECT step_key,status FROM writer_agent_action_steps "
-                    "WHERE action_id=?",
-                    (ancestor_key,),
-                ).fetchall()
-                for ancestor_step in ancestor_steps:
-                    inherited_states.setdefault(
-                        str(ancestor_step["step_key"]), str(ancestor_step["status"])
-                    )
-                ancestor = conn.execute(
-                    "SELECT retry_of_action_id FROM writer_agent_actions WHERE id=?",
-                    (ancestor_key,),
-                ).fetchone()
-                ancestor_id = ancestor["retry_of_action_id"] if ancestor else None
+            states = self._dependency_states_conn(conn, action_id, action)
         steps = [self._step_row(row) for row in rows]
-        states = {step["step_key"]: step["status"] for step in steps}
+        now = time.time()
         return [
             step
             for step in steps
-            if step["status"] == "pending"
+            if (
+                step["status"] == "pending"
+                or (
+                    step["status"] == "running"
+                    and not step.get("job_id")
+                    and float(step.get("lease_expires_at") or 0) <= now
+                )
+            )
             and all(
-                states.get(key, inherited_states.get(key)) == "succeeded"
-                for key in step["depends_on"]
+                states.get(str(key)) == "succeeded" for key in step["depends_on"]
             )
         ]
 
-    def _transition_step(self, action_id: str, step_key: str, *, status: str, allowed: set[str], **updates: Any) -> dict[str, Any]:
+    @staticmethod
+    def _dependency_states_conn(
+        conn: sqlite3.Connection,
+        action_id: str,
+        action: sqlite3.Row,
+    ) -> dict[str, str]:
+        states = {
+            str(item["step_key"]): str(item["status"])
+            for item in conn.execute(
+                "SELECT step_key,status FROM writer_agent_action_steps "
+                "WHERE action_id=?",
+                (action_id,),
+            ).fetchall()
+        }
+        ancestor_id = action["retry_of_action_id"]
+        visited: set[str] = set()
+        while ancestor_id and str(ancestor_id) not in visited:
+            ancestor_key = str(ancestor_id)
+            visited.add(ancestor_key)
+            ancestor_steps = conn.execute(
+                "SELECT step_key,status FROM writer_agent_action_steps "
+                "WHERE action_id=?",
+                (ancestor_key,),
+            ).fetchall()
+            for ancestor_step in ancestor_steps:
+                states.setdefault(
+                    str(ancestor_step["step_key"]), str(ancestor_step["status"])
+                )
+            ancestor = conn.execute(
+                "SELECT retry_of_action_id FROM writer_agent_actions WHERE id=?",
+                (ancestor_key,),
+            ).fetchone()
+            ancestor_id = ancestor["retry_of_action_id"] if ancestor else None
+        return states
+
+    def claim_runnable_step(
+        self,
+        action_id: str,
+        step_key: str,
+        *,
+        owner_id: str,
+        lease_seconds: float,
+    ) -> dict[str, Any] | None:
+        """Atomically claim one runnable step before executing its side effect."""
+
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            action = self._require_action_conn(conn, action_id)
+            if action["status"] != "running" or action["phase"] == "cancelling":
+                return None
+            row = conn.execute(
+                "SELECT * FROM writer_agent_action_steps "
+                "WHERE action_id=? AND step_key=?",
+                (action_id, step_key),
+            ).fetchone()
+            if row is None:
+                return None
+            reclaimable = row["status"] == "pending" or (
+                row["status"] == "running"
+                and row["job_id"] is None
+                and float(row["lease_expires_at"] or 0) <= now
+            )
+            if not reclaimable:
+                return None
+            dependencies = _decode(row["depends_on_json"], [])
+            if dependencies:
+                states = self._dependency_states_conn(conn, action_id, action)
+                if any(states.get(str(key)) != "succeeded" for key in dependencies):
+                    return None
+            changed = conn.execute(
+                "UPDATE writer_agent_action_steps SET status='running', "
+                "execution_owner=?, lease_expires_at=?, revision=?, updated_at=? "
+                "WHERE action_id=? AND step_key=? AND revision=?",
+                (
+                    owner_id,
+                    now + lease_seconds,
+                    int(row["revision"]) + 1,
+                    now,
+                    action_id,
+                    step_key,
+                    int(row["revision"]),
+                ),
+            ).rowcount
+            if changed != 1:
+                return None
+            claimed = conn.execute(
+                "SELECT * FROM writer_agent_action_steps "
+                "WHERE action_id=? AND step_key=?",
+                (action_id, step_key),
+            ).fetchone()
+            return self._step_row(claimed)
+
+    def renew_step_claim(
+        self,
+        action_id: str,
+        step_key: str,
+        *,
+        owner_id: str,
+        lease_seconds: float,
+    ) -> bool:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            changed = conn.execute(
+                "UPDATE writer_agent_action_steps SET lease_expires_at=?, "
+                "updated_at=? WHERE action_id=? AND step_key=? AND status='running' "
+                "AND execution_owner=? AND job_id IS NULL",
+                (
+                    time.time() + lease_seconds,
+                    time.time(),
+                    action_id,
+                    step_key,
+                    owner_id,
+                ),
+            ).rowcount
+        return changed == 1
+
+    def has_running_steps(self, action_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM writer_agent_action_steps "
+                "WHERE action_id=? AND status='running' LIMIT 1",
+                (action_id,),
+            ).fetchone()
+        return row is not None
+
+    def cancel_expired_unbound_steps(self, action_id: str) -> int:
+        """Cancel abandoned non-job claims after an action enters cancellation."""
+
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            changed = conn.execute(
+                "UPDATE writer_agent_action_steps SET status='cancelled', "
+                "execution_owner=NULL, lease_expires_at=NULL, "
+                "error_code='CANCELLED', error_message='生成任务已取消', "
+                "retryable=0, revision=revision+1, updated_at=?, finished_at=? "
+                "WHERE action_id=? AND status='running' AND job_id IS NULL "
+                "AND lease_expires_at IS NOT NULL AND lease_expires_at<=? "
+                "AND EXISTS (SELECT 1 FROM writer_agent_actions "
+                "WHERE id=? AND phase='cancelling')",
+                (now, now, action_id, now, action_id),
+            ).rowcount
+        return changed
+
+    def _transition_step(self, action_id: str, step_key: str, *, status: str, allowed: set[str], execution_owner: str | None = None, **updates: Any) -> dict[str, Any]:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT * FROM writer_agent_action_steps WHERE action_id=? AND step_key=?", (action_id, step_key)).fetchone()
@@ -598,18 +764,210 @@ class WriterAgentStore:
                 raise WriterActionError("PROJECT_NOT_AVAILABLE", "动作步骤不存在")
             if row["status"] not in allowed:
                 raise WriterActionError("ACTION_STATE_INVALID", "步骤当前状态不允许此操作", current_revision=int(row["revision"]))
-            fields = {"status": status, "revision": int(row["revision"]) + 1, "updated_at": time.time(), **updates}
+            if execution_owner is not None and row["execution_owner"] != execution_owner:
+                raise WriterActionError("ACTION_STATE_INVALID", "步骤执行租约已失效")
+            fields = {"status": status, "execution_owner": None, "lease_expires_at": None, "revision": int(row["revision"]) + 1, "updated_at": time.time(), **updates}
             assignments = ", ".join(f"{key}=?" for key in fields)
             changed = conn.execute(f"UPDATE writer_agent_action_steps SET {assignments} WHERE action_id=? AND step_key=? AND status=? AND revision=?", [*fields.values(), action_id, step_key, row["status"], int(row["revision"])]).rowcount
             if changed != 1:
                 raise WriterActionError("ACTION_REVISION_MISMATCH", "步骤版本已变化", current_revision=int(row["revision"]))
             return self._step_row(conn.execute("SELECT * FROM writer_agent_action_steps WHERE action_id=? AND step_key=?", (action_id, step_key)).fetchone())
 
-    def finish_step(self, action_id: str, step_key: str, result: dict[str, Any]) -> dict[str, Any]:
-        return self._transition_step(action_id, step_key, status="succeeded", allowed={"pending", "running"}, resource_refs_json=_json(result.get("resource_refs", [])), finished_at=time.time())
+    def finish_step(self, action_id: str, step_key: str, result: dict[str, Any], *, execution_owner: str | None = None) -> dict[str, Any]:
+        return self._transition_step(action_id, step_key, status="succeeded", allowed={"pending", "running"}, execution_owner=execution_owner, resource_refs_json=_json(result.get("resource_refs", [])), finished_at=time.time())
 
-    def fail_step(self, action_id: str, step_key: str, *, code: str, message: str, retryable: bool) -> dict[str, Any]:
-        return self._transition_step(action_id, step_key, status="failed", allowed={"pending", "running"}, error_code=code, error_message=message, retryable=int(retryable), finished_at=time.time())
+    def complete_step_with_context(
+        self,
+        action_id: str,
+        step_key: str,
+        result: dict[str, Any],
+        *,
+        execution_owner: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist a successful step and its authority advance atomically."""
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            step = conn.execute(
+                "SELECT * FROM writer_agent_action_steps "
+                "WHERE action_id=? AND step_key=?",
+                (action_id, step_key),
+            ).fetchone()
+            if step is None or step["status"] not in {"pending", "running"}:
+                raise WriterActionError("ACTION_STATE_INVALID", "步骤当前状态不允许完成")
+            if execution_owner is not None and step["execution_owner"] != execution_owner:
+                raise WriterActionError("ACTION_STATE_INVALID", "步骤执行租约已失效")
+            now = time.time()
+            changed = conn.execute(
+                "UPDATE writer_agent_action_steps SET status='succeeded', "
+                "resource_refs_json=?, execution_owner=NULL, lease_expires_at=NULL, "
+                "revision=?, updated_at=?, finished_at=? WHERE action_id=? "
+                "AND step_key=? AND status=? AND revision=?",
+                (
+                    _json(result.get("resource_refs", [])),
+                    int(step["revision"]) + 1,
+                    now,
+                    now,
+                    action_id,
+                    step_key,
+                    step["status"],
+                    int(step["revision"]),
+                ),
+            ).rowcount
+            if changed != 1:
+                raise WriterActionError("ACTION_REVISION_MISMATCH", "步骤版本已变化")
+            authority_revision = result.get("authority_revision")
+            if authority_revision is not None:
+                action = self._require_action_conn(conn, action_id)
+                context = _decode(action["expected_context_json"], {})
+                current_revision = int(
+                    context.get("project_revision", context.get("revision", 0)) or 0
+                )
+                next_revision = int(authority_revision)
+                if next_revision < current_revision:
+                    raise WriterActionError(
+                        "STALE_PROJECT_CONTEXT", "项目权威版本不能回退"
+                    )
+                current_refs = context.get("authority_refs")
+                merged_refs = dict(current_refs) if isinstance(current_refs, dict) else {}
+                incoming_refs = result.get("authority_refs")
+                if isinstance(incoming_refs, dict):
+                    merged_refs.update(incoming_refs)
+                context.update(
+                    {
+                        "project_revision": next_revision,
+                        "authority_refs": merged_refs,
+                    }
+                )
+                action_changed = conn.execute(
+                    "UPDATE writer_agent_actions SET expected_context_json=?, "
+                    "revision=?, updated_at=? WHERE id=? AND status=? AND revision=?",
+                    (
+                        _json(context),
+                        int(action["revision"]) + 1,
+                        now,
+                        action_id,
+                        action["status"],
+                        int(action["revision"]),
+                    ),
+                ).rowcount
+                if action_changed != 1:
+                    raise WriterActionError(
+                        "ACTION_REVISION_MISMATCH", "动作版本已变化"
+                    )
+            return self._action_row(self._require_action_conn(conn, action_id))
+
+    def fail_step(self, action_id: str, step_key: str, *, code: str, message: str, retryable: bool, conflicting_action_id: str | None = None, execution_owner: str | None = None) -> dict[str, Any]:
+        return self._transition_step(action_id, step_key, status="failed", allowed={"pending", "running"}, execution_owner=execution_owner, error_code=code, error_message=message, retryable=int(retryable), conflicting_action_id=conflicting_action_id, finished_at=time.time())
+
+    def cancel_step(self, action_id: str, step_key: str) -> dict[str, Any]:
+        return self._transition_step(
+            action_id,
+            step_key,
+            status="cancelled",
+            allowed={"pending", "running"},
+            error_code="CANCELLED",
+            error_message="生成任务已取消",
+            retryable=0,
+            finished_at=time.time(),
+        )
+
+    def assign_step_job(
+        self,
+        action_id: str,
+        step_key: str,
+        job_id: str,
+        *,
+        execution_owner: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist a generated job identity before waiting for its terminal state."""
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            action = self._require_action_conn(conn, action_id)
+            row = conn.execute(
+                "SELECT * FROM writer_agent_action_steps "
+                "WHERE action_id=? AND step_key=?",
+                (action_id, step_key),
+            ).fetchone()
+            if row is None:
+                raise WriterActionError("PROJECT_NOT_AVAILABLE", "动作步骤不存在")
+            if row["job_id"] is not None:
+                if str(row["job_id"]) == str(job_id):
+                    return self._step_row(row)
+                raise WriterActionError(
+                    "IDEMPOTENCY_KEY_REUSED", "步骤已绑定不同生成任务"
+                )
+            if row["status"] not in {"pending", "running"}:
+                raise WriterActionError("ACTION_STATE_INVALID", "步骤当前状态不可绑定任务")
+            if execution_owner is not None and row["execution_owner"] != execution_owner:
+                raise WriterActionError("ACTION_STATE_INVALID", "步骤执行租约已失效")
+            changed = conn.execute(
+                "UPDATE writer_agent_action_steps SET job_id=?, status='running', "
+                "lease_expires_at=NULL, revision=?, updated_at=? "
+                "WHERE action_id=? AND step_key=? AND status=? AND revision=?",
+                (
+                    str(job_id),
+                    int(row["revision"]) + 1,
+                    time.time(),
+                    action_id,
+                    step_key,
+                    row["status"],
+                    int(row["revision"]),
+                ),
+            ).rowcount
+            if changed != 1:
+                raise WriterActionError(
+                    "ACTION_REVISION_MISMATCH",
+                    "步骤版本已变化",
+                    current_revision=int(row["revision"]),
+                )
+            updated = conn.execute(
+                "SELECT * FROM writer_agent_action_steps "
+                "WHERE action_id=? AND step_key=?",
+                (action_id, step_key),
+            ).fetchone()
+            result = self._step_row(updated)
+            result["action_cancelling"] = action["phase"] == "cancelling"
+            return result
+
+    def block_failed_dependents(self, action_id: str) -> int:
+        """Mark pending steps blocked once any dependency cannot succeed."""
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT * FROM writer_agent_action_steps WHERE action_id=? "
+                "ORDER BY step_order,id",
+                (action_id,),
+            ).fetchall()
+            states = {str(row["step_key"]): str(row["status"]) for row in rows}
+            changed = 0
+            for row in rows:
+                if row["status"] != "pending":
+                    continue
+                dependencies = _decode(row["depends_on_json"], [])
+                if not any(
+                    states.get(str(key)) in {"failed", "blocked", "cancelled"}
+                    for key in dependencies
+                ):
+                    continue
+                changed += conn.execute(
+                    "UPDATE writer_agent_action_steps SET status='blocked', "
+                    "error_code='DEPENDENCY_FAILED', error_message='依赖步骤失败', "
+                    "revision=?, updated_at=?, finished_at=? "
+                    "WHERE action_id=? AND step_key=? AND status='pending' "
+                    "AND revision=?",
+                    (
+                        int(row["revision"]) + 1,
+                        time.time(),
+                        time.time(),
+                        action_id,
+                        row["step_key"],
+                        int(row["revision"]),
+                    ),
+                ).rowcount
+            return changed
 
     def list_steps(self, action_id: str) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -630,7 +988,7 @@ class WriterAgentStore:
             if status in {"succeeded", "completed"}:
                 self.finish_step(action_id, step["step_key"], {"resource_refs": step["resource_refs"]})
             elif status in {"failed", "cancelled"}:
-                self._transition_step(action_id, step["step_key"], status=str(status), allowed={"pending", "running"}, error_code="GENERATION_FAILED" if status == "failed" else "CANCELLED", error_message=f"job {status}", finished_at=time.time())
+                self._transition_step(action_id, step["step_key"], status=str(status), allowed={"pending", "running"}, error_code="GENERATION_FAILED" if status == "failed" else "CANCELLED", error_message=f"job {status}", retryable=int(status == "failed"), finished_at=time.time())
         return self.require_action(action_id, None)
 
     def require_retryable_action(self, action_id: str, actor_user_id: str) -> dict[str, Any]:
@@ -671,6 +1029,22 @@ class WriterAgentStore:
                         "IDEMPOTENCY_KEY_REUSED", "重试幂等键已用于不同动作"
                     )
                 return self._action_row(existing)
+            active = conn.execute(
+                "SELECT id,target_key FROM writer_agent_actions "
+                "WHERE status IN ('queued','running') AND project_id=? "
+                "ORDER BY created_at",
+                (current["project_id"],),
+            ).fetchall()
+            for candidate in active:
+                if self._scopes_overlap(
+                    current["target_key"], candidate["target_key"]
+                ):
+                    raise WriterActionError(
+                        "ACTIVE_ACTION_CONFLICT",
+                        "目标范围已有进行中的动作",
+                        retryable=True,
+                        conflicting_action_id=candidate["id"],
+                    )
             now = time.time()
             action_id = f"action-{uuid.uuid4().hex}"
             conn.execute(
@@ -684,7 +1058,7 @@ class WriterAgentStore:
                     current["session_id"],
                     actor_user_id,
                     current["action_type"],
-                    "pending",
+                    "queued",
                     1,
                     current["project_id"],
                     current["project_id_json"],
@@ -705,8 +1079,32 @@ class WriterAgentStore:
                 "ORDER BY step_order, id",
                 (current["id"],),
             ).fetchall()
+            retry_step_keys = {
+                str(step["step_key"])
+                for step in source_steps
+                if step["status"] == "failed" and bool(step["retryable"])
+            }
+            if not retry_step_keys:
+                retry_step_keys = {
+                    str(step["step_key"])
+                    for step in source_steps
+                    if step["status"] in {"failed", "pending"}
+                }
+            changed = True
+            while changed:
+                changed = False
+                for step in source_steps:
+                    step_key = str(step["step_key"])
+                    if step_key in retry_step_keys or step["status"] != "blocked":
+                        continue
+                    dependencies = {
+                        str(key) for key in _decode(step["depends_on_json"], [])
+                    }
+                    if dependencies & retry_step_keys:
+                        retry_step_keys.add(step_key)
+                        changed = True
             for step in source_steps:
-                if step["status"] not in {"failed", "pending", "blocked"}:
+                if str(step["step_key"]) not in retry_step_keys:
                     continue
                 conn.execute(
                     "INSERT INTO writer_agent_action_steps "

@@ -15,10 +15,11 @@ import os
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
-from agents.storage_agent import StorageAgent
+from agents.storage_agent import OperationScopeConflictError, StorageAgent
 from core.events import WorkerEvent, parse_event_line
 from core.job import CrawlJob
 from runtime.job_state import JobState, TERMINAL_STATUSES
@@ -34,6 +35,8 @@ _CONCURRENT_BREAKDOWN_TYPES = frozenset({"breakdown_generate"})
 _CONCURRENT_CREATIVE_GENERATION_TYPES = frozenset({"phase4_generate"})
 _CONCURRENT_SCREENPLAY_REVIEW_TYPES = frozenset({"screenplay_review"})
 _CONCURRENT_SCREENPLAY_OPTIMIZATION_TYPES = frozenset({"screenplay_optimization"})
+_PENDING_LAUNCH_GRACE_SECONDS = 30.0
+_LAUNCH_LEASE_SECONDS = 30.0
 
 
 class JobConflictError(RuntimeError):
@@ -42,6 +45,62 @@ class JobConflictError(RuntimeError):
 
 class JobNotFoundError(KeyError):
     pass
+
+
+class WorkerTerminationError(RuntimeError):
+    pass
+
+
+def _operation_request(job: CrawlJob) -> str:
+    payload = job.to_dict()
+    payload.pop("job_id", None)
+    extra = dict(payload.get("extra") or {})
+    extra.pop("retry_failed_operation", None)
+    extra.pop("retry_of_job_id", None)
+    payload["extra"] = extra
+    return json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+
+
+def creative_job_scope(
+    job: CrawlJob,
+) -> tuple[str, str, tuple[int, int] | None] | None:
+    """Return normalized project/stage/episode scope for a creative job."""
+
+    if job.crawler_type != "phase4_generate":
+        return None
+    extra = job.extra or {}
+    project_id = str(extra.get("project_id") or "").strip()
+    raw_action = str(extra.get("action") or "").strip()
+    stage = {
+        "blueprints": "brief",
+        "blueprint_variant": "brief",
+        "characters": "characters",
+        "outlines": "outline",
+        "outline_overview": "outline",
+        "beats": "beats",
+        "script": "script",
+    }.get(raw_action)
+    if not project_id or stage is None:
+        return None
+    if stage in {"brief", "characters", "outline"}:
+        return project_id, stage, None
+    if bool(extra.get("series")):
+        start = extra.get("episode_start")
+        end = extra.get("episode_end")
+        if start is None or end is None:
+            raise ValueError("creative series job requires an episode range")
+    else:
+        episode = extra.get("episode_number")
+        start = extra.get("episode_start", episode)
+        end = extra.get("episode_end", episode)
+    if start is None or end is None:
+        return None
+    start_number, end_number = int(start), int(end)
+    if start_number < 1 or end_number < start_number:
+        raise ValueError("creative job episode range is invalid")
+    return project_id, stage, (start_number, end_number)
 
 
 class JobManager:
@@ -87,11 +146,269 @@ class JobManager:
                     job.extra[field] = value
         return self.start_job(job)
 
-    def start_job(self, job: CrawlJob) -> JobState:
+    def get_or_create_job(
+        self,
+        operation_id: str,
+        data: dict[str, Any],
+        *,
+        created_by_user_id: str,
+        workflow_task_id: str,
+        project_id: str | int,
+    ) -> JobState:
+        """Reserve operation_id transactionally so only one worker can launch."""
+
+        payload = dict(data)
+        payload.setdefault(
+            "job_id", self.generate_job_id(str(payload.get("platform", "job")))
+        )
+        job = CrawlJob.from_dict(payload)
+        job.extra = dict(job.extra)
+        job.extra.update(
+            {
+                "created_by_user_id": created_by_user_id,
+                "workflow_task_id": workflow_task_id,
+                "project_id": str(project_id),
+                "operation_id": operation_id,
+            }
+        )
+        scope = creative_job_scope(job)
+        proposed = JobState(job=job)
+        launcher_owner = f"job-launcher-{uuid.uuid4().hex}"
+        try:
+            reserved, stored = self.storage.reserve_job_operation(
+                operation_id,
+                proposed,
+                scope=scope,
+                launcher_owner=launcher_owner,
+                launcher_lease_expires_at=time.time() + _LAUNCH_LEASE_SECONDS,
+            )
+        except OperationScopeConflictError as exc:
+            raise JobConflictError(
+                f"creative scope is already reserved by job {exc}"
+            ) from exc
+        if not reserved:
+            if _operation_request(stored.job) != _operation_request(job):
+                raise JobConflictError(
+                    "operation_id is already reserved for a different payload"
+                )
+            if (
+                stored.status == "failed"
+                and bool(job.extra.get("retry_failed_operation"))
+            ):
+                try:
+                    claimed, retry_state = self.storage.claim_failed_job_operation(
+                        operation_id,
+                        launcher_owner=launcher_owner,
+                        launcher_lease_expires_at=time.time()
+                        + _LAUNCH_LEASE_SECONDS,
+                    )
+                except OperationScopeConflictError as exc:
+                    raise JobConflictError(
+                        f"creative scope is already reserved by job {exc}"
+                    ) from exc
+                if claimed and retry_state is not None:
+                    return self._launch_reserved_operation(
+                        operation_id, launcher_owner, retry_state.job
+                    )
+                refreshed = self.storage.get_job_by_operation(operation_id)
+                if refreshed is not None:
+                    stored = refreshed
+            with self.lock:
+                current = self.jobs.get(stored.job_id)
+                if current is None:
+                    current = self._state_from_disk(stored.job_id) or stored
+                    self.jobs[stored.job_id] = current
+                return current
+        return self._launch_reserved_operation(operation_id, launcher_owner, job)
+
+    def _launch_reserved_operation(
+        self, operation_id: str, launcher_owner: str, job: CrawlJob
+    ) -> JobState:
+        heartbeat_stop = threading.Event()
+        lease_lost = threading.Event()
+
+        def renew() -> None:
+            while not heartbeat_stop.wait(_LAUNCH_LEASE_SECONDS / 3):
+                try:
+                    renewed = self.storage.renew_job_launch_lease(
+                        operation_id,
+                        launcher_owner=launcher_owner,
+                        lease_expires_at=time.time() + _LAUNCH_LEASE_SECONDS,
+                    )
+                except Exception:
+                    renewed = False
+                if not renewed:
+                    lease_lost.set()
+                    return
+
+        heartbeat = threading.Thread(target=renew, daemon=True)
+        heartbeat.start()
+        try:
+            try:
+                state = self.start_job(
+                    job,
+                    operation_id=operation_id,
+                    launcher_owner=launcher_owner,
+                    start_monitor=False,
+                )
+            except WorkerTerminationError:
+                raise
+            except Exception:
+                self._record_owned_launch_failure(
+                    job,
+                    operation_id=operation_id,
+                    launcher_owner=launcher_owner,
+                )
+                raise
+            if lease_lost.is_set():
+                self._discard_unmonitored_process(
+                    job.job_id, persist_terminal=False
+                )
+                self._record_owned_launch_failure(
+                    job,
+                    operation_id=operation_id,
+                    launcher_owner=launcher_owner,
+                )
+                raise JobConflictError("launcher lease was lost during worker start")
+            try:
+                finished = self.storage.finish_job_launch(
+                    operation_id, launcher_owner=launcher_owner, phase="launched"
+                )
+            except Exception:
+                self._start_monitor(state)
+                raise
+            if not finished:
+                self._discard_unmonitored_process(
+                    job.job_id, persist_terminal=False
+                )
+                self._record_owned_launch_failure(
+                    job,
+                    operation_id=operation_id,
+                    launcher_owner=launcher_owner,
+                )
+                raise JobConflictError("launcher lease was lost during worker start")
+            self._start_monitor(state)
+            return state
+        finally:
+            heartbeat_stop.set()
+            heartbeat.join(timeout=1.0)
+
+    def _record_owned_launch_failure(
+        self,
+        job: CrawlJob,
+        *,
+        operation_id: str,
+        launcher_owner: str,
+    ) -> None:
+        failed = JobState(job=job)
+        failed.status = "failed"
+        failed.finished_at = time.time()
+        failed.message = "worker launch failed"
+        persisted = self.storage.upsert_owned_job_launch(
+            failed,
+            operation_id,
+            launcher_owner=launcher_owner,
+        )
+        if persisted:
+            self.storage.finish_job_launch(
+                operation_id, launcher_owner=launcher_owner, phase="failed"
+            )
         with self.lock:
+            if persisted:
+                self.jobs[job.job_id] = failed
+                self._save_state(failed)
+            else:
+                self.jobs.pop(job.job_id, None)
+                self.processes.pop(job.job_id, None)
+
+    def _discard_unmonitored_process(
+        self, job_id: str, *, persist_terminal: bool = True
+    ) -> None:
+        with self.lock:
+            process = self.processes.pop(job_id, None)
+        if process is None or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired as exc:
+                with self.lock:
+                    self.processes[job_id] = process
+                    state = self.jobs.get(job_id)
+                if state is not None:
+                    self._start_monitor(
+                        state, persist_terminal=persist_terminal
+                    )
+                raise WorkerTerminationError(
+                    f"worker {job_id} did not exit after kill"
+                ) from exc
+        if process.poll() is None:
+            with self.lock:
+                self.processes[job_id] = process
+                state = self.jobs.get(job_id)
+            if state is not None:
+                self._start_monitor(state, persist_terminal=persist_terminal)
+            raise WorkerTerminationError(
+                f"worker {job_id} is still running after termination"
+            )
+
+    def _start_monitor(
+        self, state: JobState, *, persist_terminal: bool = True
+    ) -> None:
+        process = self.processes.get(state.job_id)
+        if process is None:
+            return
+        thread = threading.Thread(
+            target=self._monitor_process,
+            args=(state, process, persist_terminal),
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except Exception:
+            self._monitor_process(state, process, persist_terminal)
+
+    def start_job(
+        self,
+        job: CrawlJob,
+        *,
+        operation_id: str | None = None,
+        launcher_owner: str | None = None,
+        start_monitor: bool = True,
+    ) -> JobState:
+        if bool(operation_id) != bool(launcher_owner):
+            raise ValueError("operation launch identity requires both id and owner")
+
+        def persist_launch_state(state: JobState) -> None:
+            if operation_id and launcher_owner:
+                if not self.storage.upsert_owned_job_launch(
+                    state,
+                    operation_id,
+                    launcher_owner=launcher_owner,
+                ):
+                    raise JobConflictError(
+                        "launcher lease was lost during worker start"
+                    )
+            else:
+                self.storage.upsert_job(state)
+
+        with self.lock:
+            creative_job_scope(job)
             self._load_states_from_disk()
             self._reconcile_orphan_jobs()
             for state in self.jobs.values():
+                same_operation = bool(
+                    operation_id
+                    and state.job_id == job.job_id
+                    and str(state.job.extra.get("operation_id") or "").strip()
+                    == operation_id
+                )
+                if same_operation:
+                    continue
                 if (
                     state.platform == job.platform
                     and state.status in {"pending", "running", "stopping"}
@@ -103,23 +420,29 @@ class JobManager:
             self.jobs[job.job_id] = state
             job_file = self.jobs_dir / f"{job.job_id}.json"
             job.save(job_file)
+            persist_launch_state(state)
             self._save_state(state)
-            self.storage.upsert_job(state)
 
             process = launch_worker(job_file, cwd=self.cwd, platform=job.platform, crawler_type=job.crawler_type)
             state.pid = process.pid
             state.status = "running"
             state.started_at = time.time()
             self.processes[job.job_id] = process
-            self._save_state(state)
-            self.storage.upsert_job(state)
+            try:
+                persist_launch_state(state)
+            except Exception:
+                self._discard_unmonitored_process(
+                    job.job_id, persist_terminal=False
+                )
+                raise
+            try:
+                self._save_state(state)
+            except Exception:
+                self._discard_unmonitored_process(job.job_id)
+                raise
 
-            thread = threading.Thread(
-                target=self._monitor_process,
-                args=(state, process),
-                daemon=True,
-            )
-            thread.start()
+            if start_monitor:
+                self._start_monitor(state)
             return state
 
     @staticmethod
@@ -138,29 +461,19 @@ class JobManager:
             existing_identity = str(existing_extra.get("topic_id") or "").strip()
             incoming_identity = str(incoming_extra.get("topic_id") or "").strip()
         elif not job_types - _CONCURRENT_CREATIVE_GENERATION_TYPES:
-            def creative_identity(extra):
-                action = str(extra.get("action") or "").strip()
-                original_key = (
-                    str(extra.get("seed_id") or "").strip()
-                    if action in {"blueprints", "blueprint_variant"}
-                    else str(extra.get("episode_number") or "").strip()
-                )
-                parent_key = (
-                    str(extra.get("parent_blueprint_id") or "").strip()
-                    if action == "blueprint_variant"
-                    else ""
-                )
-                return (
-                    str(extra.get("project_id") or "").strip(),
-                    action,
-                    original_key,
-                    parent_key,
-                )
-
-            existing_identity = creative_identity(existing_extra)
-            incoming_identity = creative_identity(incoming_extra)
-            if not all(existing_identity[:2]) or not all(incoming_identity[:2]):
+            existing_scope = creative_job_scope(existing)
+            incoming_scope = creative_job_scope(incoming)
+            if existing_scope is None or incoming_scope is None:
                 return False
+            if existing_scope[:2] != incoming_scope[:2]:
+                return True
+            existing_range, incoming_range = existing_scope[2], incoming_scope[2]
+            if existing_range is None or incoming_range is None:
+                return False
+            return (
+                existing_range[1] < incoming_range[0]
+                or incoming_range[1] < existing_range[0]
+            )
         elif not job_types - _CONCURRENT_SCREENPLAY_REVIEW_TYPES:
             existing_identity = str(existing_extra.get("review_id") or "").strip()
             incoming_identity = str(incoming_extra.get("review_id") or "").strip()
@@ -171,14 +484,40 @@ class JobManager:
             return False
         return bool(existing_identity and incoming_identity and existing_identity != incoming_identity)
 
-    def _monitor_process(self, state: JobState, process: subprocess.Popen) -> None:
-        try:
-            if process.stdout:
+    def _monitor_process(
+        self,
+        state: JobState,
+        process: subprocess.Popen,
+        persist_terminal: bool = True,
+    ) -> None:
+        monitor_error: Exception | None = None
+        if process.stdout:
+            try:
                 for line in process.stdout:
-                    event = parse_event_line(line, job_id=state.job_id, platform=state.platform)
-                    self._record_event(state.job_id, event)
+                    if not persist_terminal:
+                        continue
+                    try:
+                        event = parse_event_line(
+                            line, job_id=state.job_id, platform=state.platform
+                        )
+                        self._record_event(state.job_id, event)
+                    except Exception as exc:
+                        monitor_error = monitor_error or exc
+            except Exception as exc:
+                monitor_error = monitor_error or exc
+        try:
             return_code = process.wait()
         except Exception as exc:
+            monitor_error = monitor_error or exc
+            return_code = process.poll()
+            if return_code is None:
+                logger.exception(
+                    "Worker monitor lost process state while worker may still run: %s",
+                    state.job_id,
+                )
+                return
+
+        if monitor_error is not None:
             return_code = -1
             event = WorkerEvent(
                 event="job_failed",
@@ -186,12 +525,27 @@ class JobManager:
                 worker_id=f"{state.platform}-worker",
                 platform=state.platform,
                 level="error",
-                message=f"worker monitor failed: {exc}",
+                message=f"worker monitor failed: {monitor_error}",
             )
-            self._record_event(state.job_id, event)
+            try:
+                self._record_event(state.job_id, event)
+            except Exception:
+                logger.exception(
+                    "Failed to persist worker monitor error for job %s",
+                    state.job_id,
+                )
+
+        if not persist_terminal:
+            with self.lock:
+                self.processes.pop(state.job_id, None)
+                if self.jobs.get(state.job_id) is state:
+                    self.jobs.pop(state.job_id, None)
+            return
 
         with self.lock:
-            current = self.jobs[state.job_id]
+            current = self.jobs.get(state.job_id)
+            if current is None:
+                return
             current.return_code = return_code
             if current.status == "stopping":
                 current.status = "cancelled"
@@ -279,6 +633,15 @@ class JobManager:
             state.events = state_data.get("events") if isinstance(state_data.get("events"), list) else []
             state.artifacts = state_data.get("artifacts") if isinstance(state_data.get("artifacts"), list) else []
             self._reconcile_orphan_job(state)
+            if state_path.exists() and state.status in TERMINAL_STATUSES:
+                synchronized = self.storage.sync_terminal_job_from_disk(state)
+                if not synchronized:
+                    operation_id = str(
+                        state.job.extra.get("operation_id") or ""
+                    ).strip()
+                    active = self.storage.get_job_by_operation(operation_id)
+                    if active is not None:
+                        return active
             return state
         except (OSError, ValueError, TypeError):
             return None
@@ -357,6 +720,22 @@ class JobManager:
     def _reconcile_orphan_job(self, state: JobState) -> None:
         if state.status not in {"pending", "running", "stopping"}:
             return
+        operation_id = str(state.job.extra.get("operation_id") or "").strip()
+        launch_lease = (
+            self.storage.job_launch_lease(operation_id) if operation_id else None
+        )
+        if (
+            state.status in {"pending", "running"}
+            and launch_lease
+            and launch_lease["phase"] == "launching"
+            and float(launch_lease.get("expires_at") or 0) > time.time()
+        ):
+            return
+        if state.status == "pending" and state.started_at is None:
+            if launch_lease and launch_lease["phase"] == "launching":
+                pass
+            elif time.time() - state.created_at < _PENDING_LAUNCH_GRACE_SECONDS:
+                return
         if (
             self._tracked_process_is_alive(state.job_id)
             or self._process_id_is_alive(state.pid)
@@ -428,6 +807,10 @@ class JobManager:
             self._reconcile_orphan_job(state)
             if state.status not in TERMINAL_STATUSES:
                 raise JobConflictError("only terminal jobs can be retried")
+            if str(state.job.extra.get("operation_id") or "").strip():
+                raise JobConflictError(
+                    "operation-bound jobs must be retried through the owning action"
+                )
             payload = state.job.to_dict()
             payload["job_id"] = self.generate_job_id(state.platform)
             extra = dict(payload.get("extra") or {})
@@ -457,7 +840,10 @@ class JobManager:
             if not state:
                 if force_missing:
                     self._delete_job_files(job_id)
-                    self._delete_storage_rows(job_id)
+                    self._delete_storage_rows(
+                        job_id,
+                        preserve_job=self._storage_job_has_operation(job_id),
+                    )
                     return
                 raise JobNotFoundError(job_id)
             self.jobs[job_id] = state
@@ -473,7 +859,12 @@ class JobManager:
             self._pause_marker(job_id).unlink(missing_ok=True)
 
             self._delete_job_files(job_id)
-            self._delete_storage_rows(job_id)
+            self._delete_storage_rows(
+                job_id,
+                preserve_job=bool(
+                    str(state.job.extra.get("operation_id") or "").strip()
+                ),
+            )
 
     def _delete_job_files(self, job_id: str) -> None:
         for path in (
@@ -486,16 +877,31 @@ class JobManager:
             except FileNotFoundError:
                 pass
 
-    def _delete_storage_rows(self, job_id: str) -> None:
+    def _delete_storage_rows(self, job_id: str, *, preserve_job: bool = False) -> None:
         db_path = self.runtime_dir / "agent_state.db"
         if not db_path.exists():
             return
         import sqlite3
 
         with sqlite3.connect(db_path) as conn:
-            for table in ("agent_artifacts", "agent_events", "agent_jobs"):
+            tables = ["agent_artifacts", "agent_events"]
+            if not preserve_job:
+                tables.append("agent_jobs")
+            for table in tables:
                 conn.execute(f"DELETE FROM {table} WHERE job_id = ?", (job_id,))
             conn.commit()
+
+    def _storage_job_has_operation(self, job_id: str) -> bool:
+        db_path = self.runtime_dir / "agent_state.db"
+        if not db_path.exists():
+            return False
+        import sqlite3
+
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT operation_id FROM agent_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+        return bool(row and str(row[0] or "").strip())
 
     def latest_job_id(self) -> str:
         with self.lock:

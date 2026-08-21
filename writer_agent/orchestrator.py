@@ -259,49 +259,52 @@ class WriterProjectOrchestrator:
                     dependency = add(f"{stage}.lock", stage, "lock", depends_on=[dependency]).step_key  # type: ignore[arg-type]
                 continue
         if target_index >= 3:
-            for episode_number in range(
-                int(episode_start or 1), int(episode_end or 0) + 1
+            from .runner import partition_episode_range
+
+            for batch_start, batch_end in partition_episode_range(
+                int(episode_start or 1), int(episode_end or 0), batch_size=10
             ):
-                beats = CreativeApplicationService.compatible_locked_episode_resource(
-                    project, "beats", episode_number
-                )
-                if beats is not None:
-                    reused_resources.append(
-                        self._resource_reference(project, "beats", beats)
+                for episode_number in range(batch_start, batch_end + 1):
+                    beats = CreativeApplicationService.compatible_locked_episode_resource(
+                        project, "beats", episode_number
+                    )
+                    if beats is not None:
+                        reused_resources.append(
+                            self._resource_reference(project, "beats", beats)
+                        )
+                        if target_stage == "script":
+                            script = CreativeApplicationService.compatible_locked_episode_resource(
+                                project, "script", episode_number
+                            )
+                            if script is not None:
+                                reused_resources.append(
+                                    self._resource_reference(project, "script", script)
+                                )
+                            else:
+                                add(
+                                    f"script.generate:{episode_number}",
+                                    "script",
+                                    "generate",
+                                    episode_number=episode_number,
+                                )
+                        continue
+
+                    generated = add(
+                        f"beats.generate:{episode_number}", "beats", "generate",
+                        episode_number=episode_number,
+                        depends_on=[dependency] if dependency else [],
                     )
                     if target_stage == "script":
-                        script = CreativeApplicationService.compatible_locked_episode_resource(
-                            project, "script", episode_number
+                        locked = add(
+                            f"beats.lock:{episode_number}", "beats", "lock",
+                            episode_number=episode_number,
+                            depends_on=[generated.step_key],
                         )
-                        if script is not None:
-                            reused_resources.append(
-                                self._resource_reference(project, "script", script)
-                            )
-                        else:
-                            add(
-                                f"script.generate:{episode_number}",
-                                "script",
-                                "generate",
-                                episode_number=episode_number,
-                            )
-                    continue
-
-                generated = add(
-                    f"beats.generate:{episode_number}", "beats", "generate",
-                    episode_number=episode_number,
-                    depends_on=[dependency] if dependency else [],
-                )
-                if target_stage == "script":
-                    locked = add(
-                        f"beats.lock:{episode_number}", "beats", "lock",
-                        episode_number=episode_number,
-                        depends_on=[generated.step_key],
-                    )
-                    add(
-                        f"script.generate:{episode_number}", "script", "generate",
-                        episode_number=episode_number,
-                        depends_on=[locked.step_key],
-                    )
+                        add(
+                            f"script.generate:{episode_number}", "script", "generate",
+                            episode_number=episode_number,
+                            depends_on=[locked.step_key],
+                        )
         return CreativePlan(
             project_id=project.get("id"), target_stage=target_stage,
             episode_start=episode_start, episode_end=episode_end,
@@ -318,6 +321,7 @@ class WriterProjectOrchestrator:
         source_snapshot: dict[str, Any],
         payload: dict[str, Any],
         operation_id: str | None = None,
+        retry_failed_operation: bool = False,
     ) -> dict[str, Any]:
         """Execute one visible plan step through the shared creative application service."""
         if plan.project_id is None:
@@ -361,6 +365,7 @@ class WriterProjectOrchestrator:
                     episode_start=step.episode_number,
                     episode_end=step.episode_number,
                     expected_context=step.expected_context,
+                    retry_failed_operation=retry_failed_operation,
                 )
             else:
                 resource_id = payload.get("resource_id")
@@ -373,6 +378,12 @@ class WriterProjectOrchestrator:
                     expected_context=step.expected_context,
                     episode_number=step.episode_number,
                 )
+            if not isinstance(result, dict):
+                result = {
+                    "job_id": str(result.job_id),
+                    "status": str(result.status),
+                    "message": str(getattr(result, "message", "") or ""),
+                }
         except CreativeContextConflict as exc:
             raise WriterActionError(
                 "STALE_PROJECT_CONTEXT", "项目权威版本已变化", retryable=False
@@ -449,6 +460,239 @@ class WriterProjectOrchestrator:
             **result,
             "advanced_contexts": advanced_contexts,
         }
+
+    @staticmethod
+    def _plan_context_from_action(
+        action: dict[str, Any], step_key: str, episode_number: int | None
+    ) -> dict[str, Any]:
+        context = dict(action.get("expected_context") or {})
+        authority_refs = context.get("authority_refs")
+        if isinstance(authority_refs, dict):
+            advanced = authority_refs.get(step_key)
+            if isinstance(advanced, dict):
+                return dict(advanced)
+            if "revision" in authority_refs:
+                return dict(authority_refs)
+        locked_brief = context.get("locked_brief") or {}
+        locked_characters = context.get("locked_characters") or {}
+        locked_outline = context.get("locked_outline") or {}
+        locked_beats = context.get("locked_beats") or []
+        locked_beat = next(
+            (
+                item
+                for item in locked_beats
+                if int(item.get("episode_number") or 0)
+                == int(episode_number or 0)
+            ),
+            None,
+        )
+        beats = (
+            {
+                "resource_id": str(locked_beat["id"]),
+                "version": int(locked_beat.get("version") or 0),
+                "fingerprint": CreativeApplicationService._resource_fingerprint(
+                    locked_beat.get("content") or {}
+                ),
+            }
+            if locked_beat is not None
+            else None
+        )
+        return {
+            "revision": int(
+                context.get("project_revision", context.get("revision", 0)) or 0
+            ),
+            "locked_brief_id": context.get("locked_brief_id")
+            or locked_brief.get("id"),
+            "character_batch_id": context.get("character_batch_id")
+            or locked_characters.get("batch_id"),
+            "outline_batch_id": context.get("outline_batch_id")
+            or locked_outline.get("batch_id"),
+            "beats": beats,
+        }
+
+    def assert_expected_context(
+        self, action: dict[str, Any], actor: Principal
+    ) -> None:
+        """Reject an externally advanced project before a runner side effect."""
+
+        del actor
+        project_id = action.get("project_id")
+        if type(project_id) is not int or project_id < 1:
+            raise WriterActionError("PROJECT_NOT_AVAILABLE", "创作计划缺少项目")
+        expected = action.get("expected_context") or {}
+        expected_revision = int(
+            expected.get("project_revision", expected.get("revision", 0)) or 0
+        )
+        current = self.creative_service.get_project(project_id)
+        if int(current.get("revision") or 0) != expected_revision:
+            raise WriterActionError(
+                "STALE_PROJECT_CONTEXT", "项目权威版本已变化", retryable=False
+            )
+
+    def execute_action_step(
+        self,
+        action: dict[str, Any],
+        step: dict[str, Any],
+        actor: Principal,
+        *,
+        operation_id: str,
+    ) -> dict[str, Any]:
+        """Adapt a persisted action/step record to the typed production executor."""
+
+        if action.get("action_type") != "creative.run_plan":
+            raise WriterActionError(
+                "ACTION_STATE_INVALID", "动作不是可执行创作计划"
+            )
+        persisted_steps = self.store.list_steps(str(action["id"]))
+        plan_steps: list[PlanStep] = []
+        for persisted in persisted_steps:
+            operation = str(persisted["step_key"]).split(":", 1)[0]
+            kind = operation.rsplit(".", 1)[-1]
+            if kind not in {"generate", "persist", "lock"}:
+                raise WriterActionError(
+                    "RESULT_VALIDATION_FAILED", "创作步骤类型无效"
+                )
+            episode_number = persisted.get("episode_start")
+            plan_steps.append(
+                PlanStep(
+                    step_key=str(persisted["step_key"]),
+                    stage=persisted["stage"],
+                    kind=kind,
+                    episode_number=episode_number,
+                    depends_on=list(persisted.get("depends_on") or []),
+                    expected_context=self._plan_context_from_action(
+                        action, str(persisted["step_key"]), episode_number
+                    ),
+                    replaces_resource_id=(
+                        (action.get("payload") or {})
+                        .get("step_payloads", {})
+                        .get(str(persisted["step_key"]), {})
+                        .get("replaces_resource_id")
+                    ),
+                )
+            )
+        selected = next(
+            (item for item in plan_steps if item.step_key == step["step_key"]),
+            None,
+        )
+        if selected is None:
+            raise WriterActionError("PROJECT_NOT_AVAILABLE", "动作步骤不存在")
+        payload = dict(action.get("payload") or {})
+        step_payloads = payload.get("step_payloads")
+        if isinstance(step_payloads, dict) and isinstance(
+            step_payloads.get(selected.step_key), dict
+        ):
+            payload = dict(step_payloads[selected.step_key])
+        snapshot_id = str(action.get("source_snapshot_id") or "")
+        if not snapshot_id:
+            raise WriterActionError("REFERENCE_UNAVAILABLE", "材料快照不存在")
+        snapshot_record = self.store.require_source_snapshot(snapshot_id)
+        plan = CreativePlan(
+            project_id=action.get("project_id"),
+            target_stage=(action.get("payload") or {}).get("target_stage")
+            or selected.stage,
+            episode_start=(action.get("payload") or {}).get("episode_start"),
+            episode_end=(action.get("payload") or {}).get("episode_end"),
+            source_snapshot_id=snapshot_id,
+            assumptions=list((action.get("payload") or {}).get("assumptions") or []),
+            steps=plan_steps,
+        )
+        result = self.execute_step(
+            plan=plan,
+            step=selected,
+            actor=actor,
+            source_snapshot=snapshot_record["snapshot"],
+            payload=payload,
+            operation_id=operation_id,
+            retry_failed_operation=int(step.get("attempt") or 1) > 1,
+        )
+        advanced = result.get("advanced_contexts")
+        if isinstance(advanced, dict) and advanced:
+            revisions = [
+                int(item.get("revision") or 0)
+                for item in advanced.values()
+                if isinstance(item, dict)
+            ]
+            if revisions:
+                result["authority_revision"] = max(revisions)
+                result["authority_refs"] = advanced
+        return result
+
+    def recover_action_step_result(
+        self,
+        action: dict[str, Any],
+        step: dict[str, Any],
+        actor: Principal,
+    ) -> dict[str, Any]:
+        """Rehydrate a completed worker result and downstream authority."""
+
+        del actor
+        project_id = action.get("project_id")
+        if type(project_id) is not int or project_id < 1:
+            raise WriterActionError("PROJECT_NOT_AVAILABLE", "创作计划缺少项目")
+        try:
+            result = self.creative_service.recover_generation_result(
+                operation_id=str(step["operation_id"]),
+                project_id=project_id,
+                stage=str(step["stage"]),
+            )
+            persisted = self.store.list_steps(str(action["id"]))
+            dependencies = {
+                str(item["step_key"]): set(item.get("depends_on") or [])
+                for item in persisted
+            }
+
+            def depends_on_recovered(
+                step_key: str, seen: set[str] | None = None
+            ) -> bool:
+                seen = seen or set()
+                if step_key in seen:
+                    return False
+                seen.add(step_key)
+                direct = dependencies.get(step_key, set())
+                return str(step["step_key"]) in direct or any(
+                    depends_on_recovered(parent, seen) for parent in direct
+                )
+
+            advanced: dict[str, dict[str, Any]] = {}
+            for candidate in persisted:
+                candidate_key = str(candidate["step_key"])
+                if not depends_on_recovered(candidate_key):
+                    continue
+                episode_number = candidate.get("episode_start")
+                context = self.creative_service.advance_plan_context(
+                    project_id,
+                    self._plan_context_from_action(
+                        action, candidate_key, episode_number
+                    ),
+                    stage=str(step["stage"]),
+                    kind="generate",
+                    resource_id=None,
+                    episode_number=episode_number,
+                )
+                if isinstance(context, dict):
+                    advanced[candidate_key] = context
+            if advanced:
+                result["authority_refs"] = advanced
+                result["authority_revision"] = max(
+                    int(context.get("revision") or 0)
+                    for context in advanced.values()
+                )
+            return result
+        except WriterActionError:
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
+            raise WriterActionError(
+                "RESULT_VALIDATION_FAILED",
+                "已完成生成任务的结果无法恢复",
+                retryable=False,
+            ) from exc
+        except Exception as exc:
+            raise WriterActionError(
+                "CREATIVE_OPERATION_FAILED",
+                "恢复生成结果暂时不可用",
+                retryable=True,
+            ) from exc
 
     def execute_project_action(
         self, action_id: str, actor: Principal

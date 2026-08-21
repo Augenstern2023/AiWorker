@@ -77,6 +77,9 @@ from creative.workflow_adapter import CreativeWorkflowAdapter
 from screenplay_review.api import register_script_review_routes
 from screenplay_optimization.api import register_script_optimization_routes
 from writer_agent.api import register_writer_agent_routes
+from writer_agent.orchestrator import WriterProjectOrchestrator
+from writer_agent.runner import WriterActionRunner
+from writer_agent.store import WriterAgentStore
 from identity.api import build_identity_router
 from identity.password_service import PasswordService
 from identity.dependencies import current_principal, require_permission
@@ -461,6 +464,7 @@ job_manager = JobManager(cwd=Path(__file__).resolve().parent)
 async def lifespan(app: FastAPI):
     backend_logger.info("Web GUI started")
     cleanup_task = asyncio.create_task(_periodic_data_operation_cleanup())
+    writer_action_runner.resume_active_actions()
     try:
         yield
     finally:
@@ -524,6 +528,42 @@ creative_application_service = CreativeApplicationService(
     workflow_adapter=creative_workflow_adapter,
     permission_service=identity_permission_service,
 )
+writer_agent_store = WriterAgentStore(
+    WORKSPACE_ROOT / ".runtime" / "writer_agent" / "writer_agent.db"
+)
+
+
+def _writer_can_read_reference(
+    principal: Principal, resource_type: str, resource_id: int
+) -> bool:
+    del resource_id
+    if principal.is_system_admin:
+        return True
+    if resource_type == "topic":
+        return bool(
+            {"topic.read", "breakdown.read.approved", "brief.read.approved"}
+            & principal.permissions
+        )
+    return bool(
+        {"breakdown.read", "breakdown.read.approved"} & principal.permissions
+    )
+
+
+writer_project_orchestrator = WriterProjectOrchestrator(
+    writer_agent_store,
+    creative_application_service,
+    identity_permission_service,
+    workflow_repository,
+    _writer_can_read_reference,
+)
+writer_action_runner = WriterActionRunner(
+    store=writer_agent_store,
+    orchestrator=writer_project_orchestrator,
+    job_manager=job_manager,
+    principal_loader=lambda user_id: identity_permission_service.principal_for_user(
+        user_id, "writer-agent-resume"
+    ),
+)
 navigation_repository = (
     NavigationRepository(system_database) if system_database is not None else None
 )
@@ -550,6 +590,7 @@ app.state.workflow_repository = workflow_repository
 app.state.workflow_transition_service = workflow_transition_service
 app.state.creative_repository = creative_repository
 app.state.creative_application_service = creative_application_service
+app.state.writer_action_runner = writer_action_runner
 templates = Jinja2Templates(directory=str(WORKSPACE_ROOT / "templates"))
 
 

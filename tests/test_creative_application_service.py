@@ -151,7 +151,7 @@ def test_application_service_generation_job_contains_context(
     creative_context,
 ) -> None:
     project = creative_context.create_original_project()
-    creative_context.jobs.create_job.return_value = SimpleNamespace(
+    creative_context.jobs.get_or_create_job.return_value = SimpleNamespace(
         job_id="job-7", status="pending"
     )
 
@@ -166,18 +166,76 @@ def test_application_service_generation_job_contains_context(
         source_snapshot={"project": {"id": project["id"], "revision": 7}},
     )
 
-    payload = creative_context.jobs.create_job.call_args.args[0]
+    payload = creative_context.jobs.get_or_create_job.call_args.args[1]
     job = SimpleNamespace(job=CrawlJob.from_dict({"job_id": "job-7", **payload}))
     assert job.job.extra["generation_instruction"] == "加强第3集反转"
     assert job.job.extra["source_snapshot_id"] == "snapshot-7"
     assert job.job.extra["operation_id"] == "act-7:outline"
 
 
+def test_application_service_reserves_generation_job_by_operation_id(
+    creative_context,
+) -> None:
+    """Calling create_job directly would reopen the crash-window duplicate launch."""
+    project = creative_context.create_original_project()
+    creative_context.jobs.get_or_create_job.return_value = SimpleNamespace(
+        job_id="reserved-job", status="pending"
+    )
+
+    creative_context.application_service.start_generation(
+        project_id=project["id"],
+        stage="brief",
+        actor=creative_context.actor,
+        workflow_task_id="brief-task",
+        operation_id="reserved-operation",
+        generation_instruction="生成 Brief",
+        source_snapshot_id="snapshot-reserved",
+        source_snapshot={"snapshot_id": "snapshot-reserved"},
+    )
+
+    call = creative_context.jobs.get_or_create_job.call_args
+    assert call.args[0] == "reserved-operation"
+    assert call.args[1]["extra"]["operation_id"] == "reserved-operation"
+    assert call.kwargs == {
+        "created_by_user_id": creative_context.actor.user_id,
+        "workflow_task_id": "brief-task",
+        "project_id": project["id"],
+    }
+    creative_context.jobs.create_job.assert_not_called()
+
+
+def test_application_service_marks_failed_operation_retry_without_changing_identity(
+    creative_context,
+) -> None:
+    """A retry action must tell JobManager to relaunch the failed reservation."""
+    project = creative_context.create_original_project()
+    creative_context.jobs.get_or_create_job.return_value = SimpleNamespace(
+        job_id="retry-job", status="pending"
+    )
+
+    creative_context.application_service.start_generation(
+        project_id=project["id"],
+        stage="script",
+        actor=creative_context.actor,
+        workflow_task_id="script-task",
+        operation_id="retry-operation",
+        generation_instruction="生成第一集",
+        source_snapshot_id="snapshot-retry",
+        source_snapshot={"snapshot_id": "snapshot-retry"},
+        episode_number=1,
+        retry_failed_operation=True,
+    )
+
+    extra = creative_context.jobs.get_or_create_job.call_args.args[1]["extra"]
+    assert extra["operation_id"] == "retry-operation"
+    assert extra["retry_failed_operation"] is True
+
+
 def test_application_service_spills_large_snapshot_to_relative_chunks(
     creative_context,
 ) -> None:
     project = creative_context.create_original_project()
-    creative_context.jobs.create_job.return_value = SimpleNamespace(
+    creative_context.jobs.get_or_create_job.return_value = SimpleNamespace(
         job_id="job-large", status="pending"
     )
     snapshot = {
@@ -196,7 +254,7 @@ def test_application_service_spills_large_snapshot_to_relative_chunks(
         source_snapshot=snapshot,
     )
 
-    extra = creative_context.jobs.create_job.call_args.args[0]["extra"]
+    extra = creative_context.jobs.get_or_create_job.call_args.args[1]["extra"]
     assert "source_snapshot" not in extra
     reference = extra["source_snapshot_ref"]
     assert reference["read_only"] is True
@@ -517,7 +575,7 @@ def test_generation_always_adds_server_authority_to_material_snapshot(
     creative_context,
 ) -> None:
     project = creative_context.create_original_project()
-    creative_context.jobs.create_job.return_value = SimpleNamespace(
+    creative_context.jobs.get_or_create_job.return_value = SimpleNamespace(
         job_id="authority-job", status="pending"
     )
 
@@ -532,7 +590,7 @@ def test_generation_always_adds_server_authority_to_material_snapshot(
         source_snapshot={"snapshot_id": "material-only", "materials": ["素材"]},
     )
 
-    extra = creative_context.jobs.create_job.call_args.args[0]["extra"]
+    extra = creative_context.jobs.get_or_create_job.call_args.args[1]["extra"]
     assert extra["source_authority"]["project_id"] == project["id"]
     assert extra["source_authority"]["revision"] == project["revision"]
     assert extra["source_authority_sha256"]

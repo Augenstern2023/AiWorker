@@ -18,7 +18,13 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
 
-from .schema import CreativeCard, DirectionCard, ProposedAction, WriterActionError
+from .schema import (
+    CreativeCard,
+    DirectionCard,
+    OriginalProjectActionPayload,
+    ProposedAction,
+    WriterActionError,
+)
 from .store import WriterAgentStore
 
 
@@ -339,6 +345,18 @@ def parse_proposed_actions(payload: dict[str, Any]) -> list[ProposedAction]:
             # Model output is untrusted: leave its reply visible, but never persist it as an action.
             continue
     return actions
+
+
+def validate_original_project_action_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return only complete project-creation inputs from a durable action."""
+    try:
+        return OriginalProjectActionPayload.model_validate(payload).model_dump(
+            exclude={"assumptions"}
+        )
+    except ValidationError as exc:
+        raise WriterActionError(
+            "RESULT_VALIDATION_FAILED", "原创项目创建资料不完整或无效"
+        ) from exc
 
 
 def persist_proposed_actions(

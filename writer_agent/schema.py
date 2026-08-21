@@ -51,6 +51,29 @@ class _WriterActionModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ReferenceRef(_WriterActionModel):
+    resource_type: Literal["topic", "breakdown"]
+    resource_id: int = Field(ge=1)
+
+
+class OriginalProjectActionPayload(BaseModel):
+    """The complete, user-visible inputs needed to create an original project."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    seed_text: str = Field(min_length=2, max_length=500)
+    name: str = Field(min_length=1, max_length=200)
+    genre: str = Field(min_length=1, max_length=100)
+    target_platform: str = Field(min_length=1, max_length=30)
+    target_audience: str = Field(min_length=1, max_length=500)
+    target_episode_count: int = Field(ge=1, le=100)
+    episode_duration_seconds: int = Field(ge=30, le=1800)
+    cost_level: str = Field(min_length=1, max_length=30)
+    content_boundaries: list[str] = Field(max_length=20)
+    reference_refs: list[ReferenceRef] = Field(default_factory=list, max_length=10)
+    assumptions: list[str] = Field(default_factory=list, max_length=20)
+
+
 class ProposedAction(_WriterActionModel):
     """A model-suggested action, deliberately excluding server-trusted fields."""
 

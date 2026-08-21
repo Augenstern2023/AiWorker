@@ -12,6 +12,7 @@ import json
 import sqlite3
 import time
 from io import BytesIO
+from types import SimpleNamespace
 from urllib.parse import quote
 
 from docx import Document
@@ -23,6 +24,9 @@ from pypdf.generic import DictionaryObject, NameObject, DecodedStreamObject
 from identity.dependencies import current_principal
 from identity.schema import Principal
 from writer_agent import api as writer_agent_api
+from writer_agent.action_service import ActionService
+from writer_agent.schema import ActionCommand
+from writer_agent.store import WriterAgentStore
 from unittest.mock import MagicMock
 
 
@@ -200,6 +204,164 @@ def test_writer_router_retains_injected_creative_dependencies(tmp_path) -> None:
 
     assert router.creative_dependencies.repository is repository
     assert router.creative_dependencies.application_service is application_service
+
+
+def _writer_action_api_context(tmp_path):
+    store = WriterAgentStore(tmp_path / "writer-agent-actions.db")
+    commands = []
+    runner = MagicMock()
+    runner.enqueue.side_effect = lambda action_id, _actor: store.finish_action(
+        action_id, status="succeeded"
+    )
+    runner.cancel.side_effect = lambda action_id, _actor: store.finish_action(
+        action_id, status="cancelled"
+    )
+    runner.retry_failed.side_effect = (
+        lambda action_id, actor, *, retry_request_id: store.create_retry_action(
+            store.require_retryable_action(action_id, actor.user_id),
+            actor.user_id,
+            retry_request_id=retry_request_id,
+        )
+    )
+    action_service = ActionService(store=store, runner=runner)
+
+    def client_for(user_id: str) -> TestClient:
+        app = FastAPI()
+        app.dependency_overrides[current_principal] = lambda: _principal(user_id)
+        app.include_router(
+            writer_agent_api.build_writer_agent_router(
+                tmp_path,
+                store=store,
+                action_service=action_service,
+            )
+        )
+        return TestClient(app)
+
+    def seed_pending(session_id: int, actor_user_id: str) -> dict:
+        return store.create_action(
+            session_id=session_id,
+            actor_user_id=actor_user_id,
+            action_type="creative.run_plan",
+            project_id=17,
+            idempotency_key=f"pending:{session_id}",
+            request_hash=f"hash:{session_id}",
+            payload={
+                "target_stage": "script",
+                "episode_start": 1,
+                "episode_end": 5,
+            },
+            expected_context={"session_revision": 0, "project_revision": 1},
+            source_snapshot_id="snapshot-1",
+        )
+
+    original_decide = action_service.decide
+
+    def recording_decide(command):
+        commands.append(command)
+        return original_decide(command)
+
+    action_service.decide = recording_decide
+    return SimpleNamespace(
+        store=store,
+        commands=commands,
+        runner=runner,
+        writer=client_for("writer-1"),
+        other=client_for("writer-2"),
+        seed_pending=seed_pending,
+    )
+
+
+def test_button_and_natural_language_use_the_same_action_command(
+    tmp_path, monkeypatch
+) -> None:
+    context = _writer_action_api_context(tmp_path)
+    button_session = context.store.create("writer-1", "按钮确认", "生成第1-5集剧本")
+    button_action = context.seed_pending(button_session["id"], "writer-1")
+
+    button = context.writer.post(
+        f"/api/writer-agent/sessions/{button_session['id']}/actions/{button_action['id']}/decision",
+        json={
+            "decision": "confirm",
+            "expected_revision": 1,
+            "client_request_id": "button-1",
+        },
+    )
+    natural_session = context.store.create(
+        "writer-1", "自然语言确认", "生成第1-5集剧本"
+    )
+    natural_action = context.seed_pending(natural_session["id"], "writer-1")
+    natural = context.writer.post(
+        f"/api/writer-agent/sessions/{natural_session['id']}/messages",
+        json={"message": "开始生成"},
+    )
+
+    assert button.status_code == 202
+    assert natural.status_code == 200
+    assert all(isinstance(item, ActionCommand) for item in context.commands)
+    assert [item.action_id for item in context.commands] == [
+        button_action["id"],
+        natural_action["id"],
+    ]
+    assert [item.decision for item in context.commands] == ["confirm", "confirm"]
+
+
+def test_action_decision_rechecks_session_owner(tmp_path) -> None:
+    context = _writer_action_api_context(tmp_path)
+    session = context.store.create("writer-1", "私有动作", "生成剧本")
+    action = context.seed_pending(session["id"], "writer-1")
+
+    response = context.other.post(
+        f"/api/writer-agent/sessions/{session['id']}/actions/{action['id']}/decision",
+        json={
+            "decision": "confirm",
+            "expected_revision": 1,
+            "client_request_id": "attack",
+        },
+    )
+
+    assert response.status_code == 404
+
+
+def test_repeated_decision_client_request_enqueues_once(tmp_path) -> None:
+    context = _writer_action_api_context(tmp_path)
+    session = context.store.create("writer-1", "重复确认", "生成剧本")
+    action = context.seed_pending(session["id"], "writer-1")
+    url = (
+        f"/api/writer-agent/sessions/{session['id']}/actions/{action['id']}/decision"
+    )
+    body = {
+        "decision": "confirm",
+        "expected_revision": 1,
+        "client_request_id": "same-confirm",
+    }
+
+    first = context.writer.post(url, json=body)
+    second = context.writer.post(url, json=body)
+
+    assert first.status_code == second.status_code == 202
+    assert first.json()["id"] == second.json()["id"] == action["id"]
+    context.runner.enqueue.assert_called_once()
+
+
+def test_retry_client_request_is_idempotent(tmp_path) -> None:
+    context = _writer_action_api_context(tmp_path)
+    session = context.store.create("writer-1", "失败重试", "生成剧本")
+    action = context.seed_pending(session["id"], "writer-1")
+    context.store.claim_pending_action(
+        action["id"], expected_revision=1, client_request_id="initial"
+    )
+    context.store.fail_action(
+        action["id"], code="GENERATION_FAILED", message="失败", retryable=True
+    )
+    url = f"/api/writer-agent/sessions/{session['id']}/actions/{action['id']}/retry"
+    body = {"client_request_id": "same-retry"}
+
+    first = context.writer.post(url, json=body)
+    second = context.writer.post(url, json=body)
+
+    assert first.status_code == second.status_code == 202
+    assert first.json()["id"] == second.json()["id"]
+    context.runner.enqueue.assert_called_once()
 
 
 def _admin_client(tmp_path) -> TestClient:

@@ -195,6 +195,15 @@ def test_webgui_registers_independent_writer_agent_workbench():
     assert "/api/writer-agent/sessions" in paths
     assert "/api/writer-agent/sessions/{session_id}/export" in paths
     assert "/api/writer-agent/sessions/{session_id}/reports/{report_id}/export" in paths
+    assert "/api/writer-agent/sessions/{session_id}/actions/{action_id}" in paths
+    assert (
+        "/api/writer-agent/sessions/{session_id}/actions/{action_id}/decision"
+        in paths
+    )
+    assert (
+        "/api/writer-agent/sessions/{session_id}/actions/{action_id}/retry" in paths
+    )
+    assert WebGUI.app.state.writer_action_service is not None
     assert "编剧大师" in template
     assert "writer-agent-file" in template
     assert ".docx,.pdf" in template

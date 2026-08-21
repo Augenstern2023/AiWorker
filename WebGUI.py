@@ -77,6 +77,7 @@ from creative.workflow_adapter import CreativeWorkflowAdapter
 from screenplay_review.api import register_script_review_routes
 from screenplay_optimization.api import register_script_optimization_routes
 from writer_agent.api import register_writer_agent_routes
+from writer_agent.action_service import ActionService
 from writer_agent.orchestrator import WriterProjectOrchestrator
 from writer_agent.runner import WriterActionRunner
 from writer_agent.store import WriterAgentStore
@@ -564,6 +565,11 @@ writer_action_runner = WriterActionRunner(
         user_id, "writer-agent-resume"
     ),
 )
+writer_action_service = ActionService(
+    store=writer_agent_store,
+    runner=writer_action_runner,
+    audit_service=audit_service,
+)
 navigation_repository = (
     NavigationRepository(system_database) if system_database is not None else None
 )
@@ -591,6 +597,7 @@ app.state.workflow_transition_service = workflow_transition_service
 app.state.creative_repository = creative_repository
 app.state.creative_application_service = creative_application_service
 app.state.writer_action_runner = writer_action_runner
+app.state.writer_action_service = writer_action_service
 templates = Jinja2Templates(directory=str(WORKSPACE_ROOT / "templates"))
 
 
@@ -675,6 +682,10 @@ register_writer_agent_routes(
     runtime_dir=Path(__file__).resolve().parent / ".runtime",
     creative_repository=creative_repository,
     creative_application_service=creative_application_service,
+    store=writer_agent_store,
+    action_service=writer_action_service,
+    runner=writer_action_runner,
+    audit_service=audit_service,
 )
 
 # Models

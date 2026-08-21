@@ -120,6 +120,9 @@ _WRITER_AGENT: tuple[ApiRoute, ...] = (
     ("POST", "/api/writer-agent/sessions/{session_id}/materials/file"),
     ("GET", "/api/writer-agent/sessions/{session_id}"),
     ("POST", "/api/writer-agent/sessions/{session_id}/messages"),
+    ("GET", "/api/writer-agent/sessions/{session_id}/actions/{action_id}"),
+    ("POST", "/api/writer-agent/sessions/{session_id}/actions/{action_id}/decision"),
+    ("POST", "/api/writer-agent/sessions/{session_id}/actions/{action_id}/retry"),
     ("GET", "/api/writer-agent/sessions/{session_id}/export"),
     ("GET", "/api/writer-agent/sessions/{session_id}/reports/{report_id}/export"),
 )

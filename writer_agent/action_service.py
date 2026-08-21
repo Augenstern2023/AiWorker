@@ -19,6 +19,7 @@ from uuid import uuid4
 from pydantic import TypeAdapter, ValidationError
 
 from .schema import (
+    ActionCommand,
     CreativeCard,
     DirectionCard,
     OriginalProjectActionPayload,
@@ -46,6 +47,131 @@ class NaturalLanguageDecision:
     action_id: str | None
     decision: str | None
     revision_required: bool = False
+
+
+class ActionService:
+    """Single decision boundary shared by HTTP buttons and chat commands."""
+
+    def __init__(
+        self,
+        *,
+        store: WriterAgentStore,
+        runner: Any,
+        audit_service: Any | None = None,
+    ) -> None:
+        self.store = store
+        self.runner = runner
+        self.audit_service = audit_service
+
+    def _require_owned_action(self, command: ActionCommand) -> dict[str, Any]:
+        session = self.store.get(command.session_id, command.actor.user_id)
+        if session is None:
+            raise WriterActionError("PROJECT_NOT_AVAILABLE", "动作不存在或无权访问")
+        action = self.store.require_action(command.action_id, command.actor.user_id)
+        if int(action["session_id"]) != int(command.session_id):
+            raise WriterActionError("PROJECT_NOT_AVAILABLE", "动作不存在或无权访问")
+        return action
+
+    def _audit(self, command: ActionCommand, action: dict[str, Any]) -> None:
+        if self.audit_service is None:
+            return
+        record = getattr(self.audit_service, "record", None)
+        if not callable(record):
+            return
+        try:
+            record(
+                actor=command.actor,
+                action=f"writer.action.{command.decision}",
+                target_type="writer_action",
+                target_id=str(action["id"]),
+                project_id=(
+                    str(action["project_id"])
+                    if action.get("project_id") is not None
+                    else None
+                ),
+                before=None,
+                after={
+                    "action_id": action["id"],
+                    "project_id": action.get("project_id"),
+                    "stage": action.get("target_stage"),
+                    "status": action.get("status"),
+                },
+                reason=None,
+                result="success",
+            )
+        except TypeError:
+            # Older audit adapters use positional request-oriented signatures.
+            return
+
+    def decide(self, command: ActionCommand) -> dict[str, Any]:
+        self._require_owned_action(command)
+        action, claimed = self.store.claim_pending_action_once(
+            command.action_id,
+            expected_revision=command.expected_revision,
+            client_request_id=command.client_request_id,
+        )
+        if not claimed:
+            return action
+        self._audit(command, action)
+        if command.decision == "confirm":
+            self.runner.enqueue(action["id"], command.actor)
+            return action
+        return self.runner.cancel(action["id"], command.actor)
+
+    def retry(
+        self,
+        *,
+        session_id: int,
+        action_id: str,
+        actor: Any,
+        client_request_id: str,
+    ) -> dict[str, Any]:
+        session = self.store.get(session_id, actor.user_id)
+        if session is None:
+            raise WriterActionError("PROJECT_NOT_AVAILABLE", "动作不存在或无权访问")
+        source = self.store.require_action(action_id, actor.user_id)
+        if int(source["session_id"]) != int(session_id):
+            raise WriterActionError("PROJECT_NOT_AVAILABLE", "动作不存在或无权访问")
+        retry_key = f"retry:{client_request_id.strip()}"
+        before = next(
+            (
+                item
+                for item in self.store.list_session_actions(session_id)
+                if item.get("idempotency_key") == retry_key
+            ),
+            None,
+        )
+        retry = self.runner.retry_failed(
+            action_id,
+            actor,
+            retry_request_id=client_request_id,
+        )
+        if before is None:
+            if self.audit_service is not None and callable(
+                getattr(self.audit_service, "record", None)
+            ):
+                self.audit_service.record(
+                    actor=actor,
+                    action="writer.action.retry",
+                    target_type="writer_action",
+                    target_id=str(retry["id"]),
+                    project_id=(
+                        str(retry["project_id"])
+                        if retry.get("project_id") is not None
+                        else None
+                    ),
+                    before={"source_action_id": action_id},
+                    after={
+                        "action_id": retry["id"],
+                        "project_id": retry.get("project_id"),
+                        "stage": retry.get("target_stage"),
+                        "status": retry.get("status"),
+                    },
+                    reason=None,
+                    result="success",
+                )
+            self.runner.enqueue(retry["id"], actor)
+        return retry
 
 
 def _canonical(value: Any) -> str:

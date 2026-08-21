@@ -394,11 +394,25 @@ class WriterAgentStore:
         return max(int(one["start"]), int(two["start"])) <= min(int(one["end"]), int(two["end"]))
 
     def claim_pending_action(self, action_id: str, *, expected_revision: int, client_request_id: str | None = None) -> dict[str, Any]:
+        action, _claimed = self.claim_pending_action_once(
+            action_id,
+            expected_revision=expected_revision,
+            client_request_id=client_request_id,
+        )
+        return action
+
+    def claim_pending_action_once(
+        self,
+        action_id: str,
+        *,
+        expected_revision: int,
+        client_request_id: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = self._require_action_conn(conn, action_id)
             if client_request_id and row["decision_request_id"] == client_request_id:
-                return self._action_row(row)
+                return self._action_row(row), False
             if row["status"] != "pending":
                 raise WriterActionError("ACTION_NOT_PENDING", "动作已不在待确认状态", current_revision=int(row["revision"]))
             if int(row["revision"]) != expected_revision:
@@ -413,7 +427,7 @@ class WriterAgentStore:
             ).rowcount
             if changed != 1:
                 raise WriterActionError("ACTION_REVISION_MISMATCH", "动作版本已变化", current_revision=int(row["revision"]))
-            return self._action_row(self._require_action_conn(conn, action_id))
+            return self._action_row(self._require_action_conn(conn, action_id)), True
 
     def _transition_action(self, action_id: str, *, from_status: str, to_status: str, **updates: Any) -> dict[str, Any]:
         with self._connect() as conn:

@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import sqlite3
 import time
@@ -39,6 +40,7 @@ from identity.schema import Principal
 from pydantic import BaseModel, ConfigDict, Field
 
 from .action_service import (
+    ActionService,
     build_project_authority_context,
     parse_creative_cards,
     parse_proposed_actions,
@@ -46,8 +48,9 @@ from .action_service import (
     requires_direction_card,
     validate_direction_requirement,
     validate_project_authority,
+    match_natural_language_decision,
 )
-from .schema import WriterActionError
+from .schema import ActionCommand, WriterActionError
 from .service import build_writer_report_markdown, is_review_request, normalize_writer_report, writer_messages
 from .store import WriterAgentStore
 
@@ -76,6 +79,16 @@ class ChatRequest(BaseModel):
     message: str
     display_user_message: bool = True
     reference_refs: list[ReferenceSelection] = Field(default_factory=list, max_length=10)
+
+
+class ActionDecisionRequest(BaseModel):
+    decision: Literal["confirm", "cancel"]
+    expected_revision: int = Field(ge=1)
+    client_request_id: str = Field(min_length=1, max_length=200)
+
+
+class ActionRetryRequest(BaseModel):
+    client_request_id: str = Field(min_length=1, max_length=200)
 
 
 def create_provider() -> Any:
@@ -172,8 +185,19 @@ def build_writer_agent_router(
     *,
     creative_repository: CreativeRepository | None = None,
     creative_application_service: CreativeApplicationService | None = None,
+    store: WriterAgentStore | None = None,
+    action_service: ActionService | None = None,
+    runner: Any | None = None,
+    audit_service: Any | None = None,
 ) -> APIRouter:
-    store = WriterAgentStore(Path(runtime_dir) / "writer_agent" / "writer_agent.db")
+    store = store or WriterAgentStore(
+        Path(runtime_dir) / "writer_agent" / "writer_agent.db"
+    )
+    resolved_action_service = action_service
+    if resolved_action_service is None and runner is not None:
+        resolved_action_service = ActionService(
+            store=store, runner=runner, audit_service=audit_service
+        )
     authority_repository = creative_repository or getattr(
         creative_application_service, "repository", None
     )
@@ -189,6 +213,37 @@ def build_writer_agent_router(
 
     def session_user_id(principal: Principal) -> str | None:
         return None if principal.is_system_admin else principal.user_id
+
+    def owned_user_id(principal: Principal) -> str:
+        # Action mutation is private even when an administrator may read sessions.
+        return principal.user_id
+
+    def action_error(exc: WriterActionError) -> HTTPException:
+        status = {
+            "PROJECT_ACCESS_DENIED": 403,
+            "PROJECT_NOT_AVAILABLE": 404,
+            "ACTION_NOT_PENDING": 409,
+            "ACTION_REVISION_MISMATCH": 409,
+            "ACTION_STATE_INVALID": 409,
+            "ACTIVE_ACTION_CONFLICT": 409,
+            "IDEMPOTENCY_KEY_REUSED": 409,
+            "RESULT_VALIDATION_FAILED": 422,
+        }.get(exc.code, 409)
+        return HTTPException(
+            status,
+            detail={
+                "code": exc.code,
+                "message": str(exc),
+                "retryable": exc.retryable,
+                "current_revision": exc.current_revision,
+                "conflicting_action_id": exc.conflicting_action_id,
+            },
+        )
+
+    def require_action_service() -> ActionService:
+        if resolved_action_service is None:
+            raise HTTPException(503, "创作动作执行服务不可用")
+        return resolved_action_service
 
     def can_read_reference(
         principal: Principal, resource_type: str, resource_id: int
@@ -312,6 +367,53 @@ def build_writer_agent_router(
         if not message:
             raise HTTPException(400, "请输入要讨论的问题")
         history = list(session.get("messages") or [])
+        try:
+            natural_decision = match_natural_language_decision(
+                message, store.list_session_actions(session_id)
+            )
+        except WriterActionError as exc:
+            raise action_error(exc) from exc
+        if natural_decision.action_id and not natural_decision.revision_required:
+            action = store.require_action(
+                natural_decision.action_id, owned_user_id(principal)
+            )
+            request_id = "message:" + hashlib.sha256(
+                f"{session_id}:{action['id']}:{message}".encode("utf-8")
+            ).hexdigest()
+            try:
+                updated_action = require_action_service().decide(
+                    ActionCommand(
+                        session_id=session_id,
+                        action_id=action["id"],
+                        decision=natural_decision.decision,
+                        actor=principal,
+                        expected_revision=int(action["revision"]),
+                        client_request_id=request_id,
+                    )
+                )
+            except WriterActionError as exc:
+                raise action_error(exc) from exc
+            history.extend(
+                [
+                    {
+                        "role": "user",
+                        "content": message,
+                        "display_user_message": payload.display_user_message,
+                    },
+                    {
+                        "role": "assistant",
+                        "content": (
+                            "已提交执行。"
+                            if natural_decision.decision == "confirm"
+                            else "已取消该动作。"
+                        ),
+                        "action_ids": [updated_action["id"]],
+                    },
+                ]
+            )
+            return store.save_turn(
+                session_id, owned_user_id(principal), history, None
+            )
         materials = _session_materials(session)
         current_material = materials[-1]
         review_requested = is_review_request(message)
@@ -391,6 +493,67 @@ def build_writer_agent_router(
         ])
         return store.save_turn(session_id, session_user_id(principal), history, report)
 
+    @router.get("/sessions/{session_id}/actions/{action_id}")
+    async def get_action(
+        session_id: int,
+        action_id: str,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        assert_access(principal)
+        if store.get(session_id, owned_user_id(principal)) is None:
+            raise HTTPException(404, "创作动作不存在")
+        try:
+            action = store.require_action(action_id, owned_user_id(principal))
+        except WriterActionError as exc:
+            raise action_error(exc) from exc
+        if int(action["session_id"]) != session_id:
+            raise HTTPException(404, "创作动作不存在")
+        return action
+
+    @router.post(
+        "/sessions/{session_id}/actions/{action_id}/decision", status_code=202
+    )
+    async def decide_action(
+        session_id: int,
+        action_id: str,
+        payload: ActionDecisionRequest,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        assert_access(principal)
+        try:
+            return require_action_service().decide(
+                ActionCommand(
+                    session_id=session_id,
+                    action_id=action_id,
+                    decision=payload.decision,
+                    actor=principal,
+                    expected_revision=payload.expected_revision,
+                    client_request_id=payload.client_request_id,
+                )
+            )
+        except WriterActionError as exc:
+            raise action_error(exc) from exc
+
+    @router.post(
+        "/sessions/{session_id}/actions/{action_id}/retry", status_code=202
+    )
+    async def retry_action(
+        session_id: int,
+        action_id: str,
+        payload: ActionRetryRequest,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        assert_access(principal)
+        try:
+            return require_action_service().retry(
+                session_id=session_id,
+                action_id=action_id,
+                actor=principal,
+                client_request_id=payload.client_request_id,
+            )
+        except WriterActionError as exc:
+            raise action_error(exc) from exc
+
     @router.get("/sessions/{session_id}/export")
     async def export_session(session_id: int, principal: Principal = Depends(current_principal)) -> Response:
         assert_access(principal)
@@ -445,11 +608,19 @@ def register_writer_agent_routes(
     runtime_dir: str | Path = ".runtime",
     creative_repository: CreativeRepository | None = None,
     creative_application_service: CreativeApplicationService | None = None,
+    store: WriterAgentStore | None = None,
+    action_service: ActionService | None = None,
+    runner: Any | None = None,
+    audit_service: Any | None = None,
 ) -> None:
     app.include_router(
         build_writer_agent_router(
             runtime_dir,
             creative_repository=creative_repository,
             creative_application_service=creative_application_service,
+            store=store,
+            action_service=action_service,
+            runner=runner,
+            audit_service=audit_service,
         )
     )

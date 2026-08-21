@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -95,6 +96,98 @@ def test_project_revision_rejects_a_stale_pointer_change(tmp_path: Path) -> None
         )
 
 
+def test_normalized_project_no_op_preserves_revision_and_cas_semantics(
+    tmp_path: Path,
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = seed_original_project(repository)
+
+    no_op = repository.update_project(
+        project["id"],
+        {
+            "name": "  情绪公司  ",
+            "genre": " 都市奇幻 ",
+            "target_episode_count": "1",
+        },
+        expected_revision=project["revision"],
+    )
+    assert no_op["revision"] == project["revision"]
+
+    changed = repository.update_project(
+        project["id"],
+        {"genre": "悬疑"},
+        expected_revision=project["revision"],
+    )
+    assert changed["revision"] == project["revision"] + 1
+
+    with pytest.raises(ValueError, match="project revision changed"):
+        repository.update_project(
+            project["id"],
+            {"name": "  情绪公司  "},
+            expected_revision=project["revision"],
+        )
+
+
+def test_pre_revision_project_schema_preserves_data_and_defaults_revision(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "creative.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE creative_projects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic_id INTEGER,
+                breakdown_id INTEGER,
+                name TEXT NOT NULL,
+                genre TEXT NOT NULL DEFAULT '',
+                target_platform TEXT NOT NULL DEFAULT '',
+                target_audience TEXT NOT NULL DEFAULT '',
+                target_episode_count INTEGER NOT NULL DEFAULT 20,
+                episode_duration_seconds INTEGER NOT NULL DEFAULT 120,
+                status TEXT NOT NULL DEFAULT 'created',
+                locked_brief_id INTEGER,
+                character_batch_id TEXT,
+                outline_batch_id TEXT,
+                workflow_task_id TEXT,
+                creation_workflow_task_id TEXT,
+                creation_request_id TEXT,
+                created_by TEXT NOT NULL DEFAULT 'local',
+                deleted INTEGER NOT NULL DEFAULT 0,
+                creation_mode TEXT NOT NULL DEFAULT 'original',
+                bootstrap_status TEXT NOT NULL DEFAULT 'ready',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO creative_projects (
+                id, name, genre, target_platform, target_audience,
+                target_episode_count, episode_duration_seconds, creation_mode,
+                created_by, created_at, updated_at
+            ) VALUES (41, '旧库项目', '悬疑', 'hg', '18-35岁', 12, 90,
+                      'original', 'legacy-writer', 1000, 1001)
+            """
+        )
+
+    repository = CreativeRepository(db_path)
+    project = repository.get_project(41)
+
+    assert project is not None
+    assert project["name"] == "旧库项目"
+    assert project["target_episode_count"] == 12
+    assert project["created_by"] == "legacy-writer"
+    assert project["revision"] == 0
+    with repository._connect() as conn:
+        revision_default = {
+            row[1]: row[4]
+            for row in conn.execute("PRAGMA table_info(creative_projects)")
+        }["revision"]
+    assert revision_default == "0"
+
+
 def test_operation_id_cannot_be_reused_for_different_payload(tmp_path: Path) -> None:
     repository = CreativeRepository(tmp_path / "creative.db")
     project = seed_locked_outline_project(repository)
@@ -108,6 +201,53 @@ def test_operation_id_cannot_be_reused_for_different_payload(tmp_path: Path) -> 
             project["id"], 1, {"title": "第1集", "beats": [{"beat": "冲突"}]},
             operation_id="writer-action-2:beats:1",
         )
+
+
+def test_replay_returns_existing_beats_after_authority_pointers_change(
+    tmp_path: Path,
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = seed_locked_outline_project(repository)
+    content = {"title": "第1集", "beats": [{"beat": "开场"}]}
+    first = repository.create_episode_beats(
+        project["id"], 1, content, operation_id="writer-action-replay:beats:1"
+    )
+    replacement = repository.create_blueprints(
+        project["id"],
+        [{"content": valid_original_brief("替代方向")}],
+        direction_type="original",
+    )[0]
+    repository.lock_brief(replacement["id"])
+    assert repository.get_project(project["id"])["outline_batch_id"] is None
+
+    replay = repository.create_episode_beats(
+        project["id"], 1, content, operation_id="writer-action-replay:beats:1"
+    )
+
+    assert replay == first
+
+
+def test_reused_operation_key_reports_idempotency_before_scope_validation(
+    tmp_path: Path,
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = seed_locked_outline_project(repository)
+    repository.create_episode_beats(
+        project["id"],
+        1,
+        {"title": "第1集", "beats": [{"beat": "开场"}]},
+        operation_id="writer-action-reused-scope:beats",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        repository.create_episode_beats(
+            project["id"],
+            2,
+            {"title": "第2集", "beats": [{"beat": "越界冲突"}]},
+            operation_id="writer-action-reused-scope:beats",
+        )
+
+    assert str(exc_info.value) == "IDEMPOTENCY_KEY_REUSED"
 
 
 def test_stable_request_hash_ignores_mapping_insertion_order(tmp_path: Path) -> None:

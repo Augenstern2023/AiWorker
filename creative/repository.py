@@ -1334,6 +1334,27 @@ class CreativeRepository:
         ).encode("utf-8")
         return hashlib.sha256(canonical).hexdigest()
 
+    def _operation_project(
+        self, conn: sqlite3.Connection, project_id: int, *, include_episodes: bool = False
+    ) -> dict[str, Any]:
+        row = conn.execute(
+            "SELECT * FROM creative_projects WHERE id = ? AND deleted = 0",
+            (project_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("创作项目不存在")
+        project = dict(row)
+        if include_episodes:
+            project["episodes"] = [
+                self._episode(dict(item))
+                for item in conn.execute(
+                    "SELECT * FROM creative_episodes WHERE project_id = ? "
+                    "ORDER BY stage, episode_number, version",
+                    (project_id,),
+                ).fetchall()
+            ]
+        return project
+
     @staticmethod
     def _read_operation_result(
         conn: sqlite3.Connection,
@@ -1457,18 +1478,30 @@ class CreativeRepository:
         conn: sqlite3.Connection,
         *,
         operation_id: str,
-        project_id: int,
+        project_id: int | None,
         stage: str,
-        request_hash: str,
+        request_hash: str | Callable[[int], str],
         create: Callable[[sqlite3.Connection], dict[str, Any]],
+        resolve_project_id: Callable[[sqlite3.Connection], int] | None = None,
     ) -> Any:
         conn.execute("BEGIN IMMEDIATE")
+        operation_row = conn.execute(
+            "SELECT project_id FROM creative_operation_results WHERE operation_id = ?",
+            (operation_id,),
+        ).fetchone()
+        if operation_row is not None and project_id is None:
+            project_id = int(operation_row["project_id"])
+        if project_id is None:
+            if resolve_project_id is None:
+                raise ValueError("operation project is required")
+            project_id = int(resolve_project_id(conn))
+        resolved_hash = request_hash(project_id) if callable(request_hash) else request_hash
         existing = self._read_operation_result(
             conn,
             operation_id=operation_id,
             project_id=project_id,
             stage=stage,
-            request_hash=request_hash,
+            request_hash=resolved_hash,
         )
         if existing is not None:
             return self._hydrate_resource_ref(conn, project_id, existing)
@@ -1481,7 +1514,7 @@ class CreativeRepository:
                 operation_id,
                 project_id,
                 stage,
-                request_hash,
+                resolved_hash,
                 json.dumps(
                     resource_ref,
                     ensure_ascii=False,
@@ -1565,6 +1598,36 @@ class CreativeRepository:
         updates = {key: value for key, value in values.items() if key in allowed and value is not None}
         if not updates:
             return project
+        if (
+            expected_revision is not None
+            and int(project.get("revision") or 0) != int(expected_revision)
+        ):
+            raise ValueError("project revision changed")
+        if "target_episode_count" in updates:
+            count = int(updates["target_episode_count"])
+            if not 1 <= count <= 100:
+                raise ValueError("目标集数必须在 1-100 之间")
+            updates["target_episode_count"] = count
+        if "episode_duration_seconds" in updates:
+            duration = int(updates["episode_duration_seconds"])
+            if not 30 <= duration <= 1800:
+                raise ValueError("单集时长必须在 30-1800 秒之间")
+            updates["episode_duration_seconds"] = duration
+        updates = {
+            key: value.strip() if isinstance(value, str) else value
+            for key, value in updates.items()
+        }
+        if "name" in updates and not updates["name"]:
+            raise ValueError("项目名称不能为空")
+        if "status" in updates and updates["status"] != "archived":
+            raise ValueError("项目仅支持归档状态更新")
+        updates = {
+            key: value
+            for key, value in updates.items()
+            if project.get(key) != value
+        }
+        if not updates:
+            return project
         content_updates = set(updates) - {"status"}
         if project.get("locked_brief_id") and content_updates:
             raise ValueError("锁定 Brief 后不能修改项目 Brief 参数")
@@ -1577,24 +1640,10 @@ class CreativeRepository:
                 ).fetchone()
             if pending_brief:
                 raise ValueError("Brief 完成后不能修改项目 Brief 参数")
-        if "target_episode_count" in updates:
-            count = int(updates["target_episode_count"])
-            if not 1 <= count <= 100:
-                raise ValueError("目标集数必须在 1-100 之间")
-            updates["target_episode_count"] = count
-        if "episode_duration_seconds" in updates:
-            duration = int(updates["episode_duration_seconds"])
-            if not 30 <= duration <= 1800:
-                raise ValueError("单集时长必须在 30-1800 秒之间")
-            updates["episode_duration_seconds"] = duration
-        if "name" in updates and not str(updates["name"]).strip():
-            raise ValueError("项目名称不能为空")
-        if "status" in updates and updates["status"] != "archived":
-            raise ValueError("项目仅支持归档状态更新")
         assignments = ", ".join(f"{key} = ?" for key in updates)
         if content_updates:
             assignments += ", revision = revision + 1"
-        params = [str(value).strip() if isinstance(value, str) else value for value in updates.values()]
+        params = list(updates.values())
         params.extend([time.time(), project_id])
         revision_clause = ""
         if expected_revision is not None:
@@ -1820,17 +1869,30 @@ class CreativeRepository:
     ) -> list[dict[str, Any]]:
         if not 1 <= len(items) <= 5:
             raise ValueError("仿制方向数量必须在 1-5 之间")
-        project = self.get_project(project_id)
-        if not project:
-            raise ValueError("创作项目不存在")
-        now = time.time()
-        refs = source_refs or {
-            "topic_id": project["topic_id"], "breakdown_id": project["breakdown_id"]
-        }
-        meta = dict(generation_meta or {})
-        if job_id:
-            meta["job_id"] = job_id
+        request_hash = self._operation_request_hash(
+            project_id=project_id,
+            stage="brief",
+            scope={},
+            payload={
+                "items": items,
+                "job_id": job_id,
+                "generation_meta": generation_meta,
+                "workflow_task_id": workflow_task_id,
+                "direction_type": direction_type,
+                "source_refs": source_refs,
+            },
+        )
+
         def create(conn: sqlite3.Connection) -> dict[str, Any]:
+            project = self._operation_project(conn, project_id)
+            now = time.time()
+            refs = source_refs or {
+                "topic_id": project["topic_id"],
+                "breakdown_id": project["breakdown_id"],
+            }
+            meta = dict(generation_meta or {})
+            if job_id:
+                meta["job_id"] = job_id
             ids: list[int] = []
             for item in items:
                 cursor = conn.execute(
@@ -1859,19 +1921,6 @@ class CreativeRepository:
 
         with self._connect() as conn:
             if operation_id:
-                request_hash = self._operation_request_hash(
-                    project_id=project_id,
-                    stage="brief",
-                    scope={},
-                    payload={
-                        "items": items,
-                        "job_id": job_id,
-                        "generation_meta": generation_meta,
-                        "workflow_task_id": workflow_task_id,
-                        "direction_type": direction_type,
-                        "source_refs": refs,
-                    },
-                )
                 return self._run_idempotent_operation(
                     conn,
                     operation_id=operation_id,
@@ -1958,24 +2007,31 @@ class CreativeRepository:
         workflow_task_id: str | None,
         operation_id: str,
     ) -> dict[str, Any]:
-        current = self.get_blueprint(blueprint_id)
-        if not current:
-            raise ValueError("仿制方向不存在")
-        project_id = int(current["project_id"])
-        request_hash = self._operation_request_hash(
-            project_id=project_id,
-            stage="brief_revision",
-            scope={"blueprint_id": blueprint_id},
-            payload={"content": content, "workflow_task_id": workflow_task_id},
-        )
+        def request_hash(project_id: int) -> str:
+            return self._operation_request_hash(
+                project_id=project_id,
+                stage="brief_revision",
+                scope={"blueprint_id": blueprint_id},
+                payload={"content": content, "workflow_task_id": workflow_task_id},
+            )
 
-        def create(conn: sqlite3.Connection) -> dict[str, Any]:
+        source_holder: dict[str, sqlite3.Row] = {}
+
+        def resolve_project_id(conn: sqlite3.Connection) -> int:
             source = conn.execute(
                 "SELECT * FROM creative_blueprints WHERE id = ?",
                 (blueprint_id,),
             ).fetchone()
             if source is None:
                 raise ValueError("仿制方向不存在")
+            source_holder["source"] = source
+            return int(source["project_id"])
+
+        def create(conn: sqlite3.Connection) -> dict[str, Any]:
+            source = source_holder.get("source")
+            if source is None:
+                raise ValueError("仿制方向不存在")
+            project_id = int(source["project_id"])
             version_row = conn.execute(
                 "SELECT COALESCE(MAX(version), 0) + 1 AS version "
                 "FROM creative_blueprints WHERE project_id = ? AND candidate_group_id = ?",
@@ -2013,10 +2069,11 @@ class CreativeRepository:
             return self._run_idempotent_operation(
                 conn,
                 operation_id=operation_id,
-                project_id=project_id,
+                project_id=None,
                 stage="brief_revision",
                 request_hash=request_hash,
                 create=create,
+                resolve_project_id=resolve_project_id,
             )
 
     @staticmethod
@@ -2176,18 +2233,29 @@ class CreativeRepository:
         workflow_task_id: str | None = None,
         operation_id: str | None = None,
     ) -> dict[str, Any]:
-        project = self.get_project(project_id)
-        if not project:
-            raise ValueError("创作项目不存在")
-        if not project.get("locked_brief_id"):
-            raise ValueError("必须先锁定 Brief")
-        batch_id = uuid.uuid4().hex
-        now = time.time()
-        refs = {"brief_id": project["locked_brief_id"]}
-        meta = dict(generation_meta or {})
-        if job_id:
-            meta["job_id"] = job_id
+        request_hash = self._operation_request_hash(
+            project_id=project_id,
+            stage="characters",
+            scope={},
+            payload={
+                "characters": characters,
+                "relationships": relationships,
+                "job_id": job_id,
+                "generation_meta": generation_meta,
+                "workflow_task_id": workflow_task_id,
+            },
+        )
+
         def create(conn: sqlite3.Connection) -> dict[str, Any]:
+            project = self._operation_project(conn, project_id)
+            if not project.get("locked_brief_id"):
+                raise ValueError("必须先锁定 Brief")
+            batch_id = uuid.uuid4().hex
+            now = time.time()
+            refs = {"brief_id": project["locked_brief_id"]}
+            meta = dict(generation_meta or {})
+            if job_id:
+                meta["job_id"] = job_id
             version_row = conn.execute(
                 "SELECT COALESCE(MAX(version), 0) + 1 AS version "
                 "FROM creative_characters WHERE project_id = ?",
@@ -2237,18 +2305,6 @@ class CreativeRepository:
 
         with self._connect() as conn:
             if operation_id:
-                request_hash = self._operation_request_hash(
-                    project_id=project_id,
-                    stage="characters",
-                    scope={},
-                    payload={
-                        "characters": characters,
-                        "relationships": relationships,
-                        "job_id": job_id,
-                        "generation_meta": generation_meta,
-                        "workflow_task_id": workflow_task_id,
-                    },
-                )
                 return self._run_idempotent_operation(
                     conn,
                     operation_id=operation_id,
@@ -2386,30 +2442,44 @@ class CreativeRepository:
         series_overview: dict[str, Any] | None = None,
         operation_id: str | None = None,
     ) -> dict[str, Any]:
-        project = self.get_project(project_id)
-        if not project:
-            raise ValueError("创作项目不存在")
-        if not project.get("character_batch_id"):
-            raise ValueError("必须先锁定人物关系版本")
-        expected = list(range(1, int(project["target_episode_count"]) + 1))
-        actual = sorted(int(item.get("episode") or 0) for item in episodes)
-        if actual != expected:
-            raise ValueError(f"分集大纲必须完整覆盖 1-{project['target_episode_count']} 集")
-        batch_id = uuid.uuid4().hex
-        refs = {
-            "brief_id": project["locked_brief_id"],
-            "character_batch_id": project["character_batch_id"],
-        }
-        meta = dict(generation_meta or {})
-        if job_id:
-            meta["job_id"] = job_id
-        now = time.time()
-        normalized_overview = (
-            normalize_series_overview(series_overview)
-            if series_overview is not None
-            else None
+        request_hash = self._operation_request_hash(
+            project_id=project_id,
+            stage="outline",
+            scope={},
+            payload={
+                "episodes": episodes,
+                "series_arc": series_arc,
+                "job_id": job_id,
+                "generation_meta": generation_meta,
+                "workflow_task_id": workflow_task_id,
+                "series_overview": series_overview,
+            },
         )
+
         def create(conn: sqlite3.Connection) -> dict[str, Any]:
+            project = self._operation_project(conn, project_id)
+            if not project.get("character_batch_id"):
+                raise ValueError("必须先锁定人物关系版本")
+            expected = list(range(1, int(project["target_episode_count"]) + 1))
+            actual = sorted(int(item.get("episode") or 0) for item in episodes)
+            if actual != expected:
+                raise ValueError(
+                    f"分集大纲必须完整覆盖 1-{project['target_episode_count']} 集"
+                )
+            batch_id = uuid.uuid4().hex
+            refs = {
+                "brief_id": project["locked_brief_id"],
+                "character_batch_id": project["character_batch_id"],
+            }
+            meta = dict(generation_meta or {})
+            if job_id:
+                meta["job_id"] = job_id
+            now = time.time()
+            normalized_overview = (
+                normalize_series_overview(series_overview)
+                if series_overview is not None
+                else None
+            )
             version_row = conn.execute(
                 "SELECT COALESCE(MAX(version), 0) + 1 AS version "
                 "FROM creative_episodes WHERE project_id = ? AND stage = 'outline'",
@@ -2449,19 +2519,6 @@ class CreativeRepository:
 
         with self._connect() as conn:
             if operation_id:
-                request_hash = self._operation_request_hash(
-                    project_id=project_id,
-                    stage="outline",
-                    scope={},
-                    payload={
-                        "episodes": episodes,
-                        "series_arc": series_arc,
-                        "job_id": job_id,
-                        "generation_meta": generation_meta,
-                        "workflow_task_id": workflow_task_id,
-                        "series_overview": series_overview,
-                    },
-                )
                 return self._run_idempotent_operation(
                     conn,
                     operation_id=operation_id,
@@ -2867,38 +2924,40 @@ class CreativeRepository:
         update_project_status: bool = True,
         operation_id: str | None = None,
     ) -> dict[str, Any]:
-        project = self.get_project(project_id)
-        if not project:
-            raise ValueError("创作项目不存在")
-        if not project.get("outline_batch_id"):
-            raise ValueError("必须先锁定分集大纲")
-        if not 1 <= int(episode_number) <= int(project["target_episode_count"]):
-            raise ValueError("集数超出项目范围")
-        outlines = [
-            item for item in project["episodes"]
-            if item["stage"] == "outline"
-            and int(item["episode_number"]) == int(episode_number)
-            and item.get("batch_id") == project.get("outline_batch_id")
-            and item.get("status") in {"locked", "approved"}
-        ]
-        if not outlines:
-            raise ValueError("必须先锁定当前集分集大纲")
-        outline = max(outlines, key=lambda item: (int(item.get("version") or 0), int(item["id"])))
-        meta = dict(generation_meta or {})
-        if job_id:
-            meta["job_id"] = job_id
-        refs = {
-            "brief_id": project["locked_brief_id"],
-            "character_batch_id": project["character_batch_id"],
-            "outline_batch_id": project["outline_batch_id"],
-            "outline_id": outline["id"],
-            "outline_version": outline["version"],
-            "outline_content_fingerprint": self._outline_content_fingerprint(
-                outline.get("content") or {}
-            ),
-        }
-        now = time.time()
+        request_hash = self._operation_request_hash(
+            project_id=project_id,
+            stage="beats",
+            scope={"episode_number": int(episode_number)},
+            payload={
+                "content": content,
+                "job_id": job_id,
+                "generation_meta": generation_meta,
+                "workflow_task_id": workflow_task_id,
+                "update_project_status": update_project_status,
+            },
+        )
+
         def create(conn: sqlite3.Connection) -> dict[str, Any]:
+            project = self._operation_project(conn, project_id, include_episodes=True)
+            if not project.get("outline_batch_id"):
+                raise ValueError("必须先锁定分集大纲")
+            if not 1 <= int(episode_number) <= int(project["target_episode_count"]):
+                raise ValueError("集数超出项目范围")
+            outline = self._locked_outline_for_episode(project, episode_number)
+            meta = dict(generation_meta or {})
+            if job_id:
+                meta["job_id"] = job_id
+            refs = {
+                "brief_id": project["locked_brief_id"],
+                "character_batch_id": project["character_batch_id"],
+                "outline_batch_id": project["outline_batch_id"],
+                "outline_id": outline["id"],
+                "outline_version": outline["version"],
+                "outline_content_fingerprint": self._outline_content_fingerprint(
+                    outline.get("content") or {}
+                ),
+            }
+            now = time.time()
             parent = conn.execute(
                 "SELECT id, version FROM creative_episodes "
                 "WHERE project_id = ? AND stage = 'beats' AND episode_number = ? "
@@ -2929,18 +2988,6 @@ class CreativeRepository:
 
         with self._connect() as conn:
             if operation_id:
-                request_hash = self._operation_request_hash(
-                    project_id=project_id,
-                    stage="beats",
-                    scope={"episode_number": int(episode_number)},
-                    payload={
-                        "content": content,
-                        "job_id": job_id,
-                        "generation_meta": generation_meta,
-                        "workflow_task_id": workflow_task_id,
-                        "update_project_status": update_project_status,
-                    },
-                )
                 return self._run_idempotent_operation(
                     conn,
                     operation_id=operation_id,
@@ -2964,36 +3011,49 @@ class CreativeRepository:
         update_project_status: bool = True,
         operation_id: str | None = None,
     ) -> dict[str, Any]:
-        project = self.get_project(project_id)
-        if not project:
-            raise ValueError("创作项目不存在")
-        if not 1 <= int(episode_number) <= int(project["target_episode_count"]):
-            raise ValueError("集数超出项目范围")
-        beats = self._locked_beats_for_episode(project, episode_number)
-        outline = self._locked_outline_for_episode(project, episode_number)
-        meta = dict(generation_meta or {})
-        if job_id:
-            meta["job_id"] = job_id
-        refs = {
-            "brief_id": project.get("locked_brief_id"),
-            "character_batch_id": project.get("character_batch_id"),
-            "outline_batch_id": project.get("outline_batch_id"),
-            "outline_id": outline["id"],
-            "outline_version": outline["version"],
-            "outline_content_fingerprint": self._outline_content_fingerprint(
-                outline.get("content") or {}
-            ),
-            "beats_id": beats["id"],
-            "beats_version": beats["version"],
-            "beats_content_fingerprint": hashlib.sha256(
-                json.dumps(
-                    beats.get("content") or {}, ensure_ascii=False,
-                    sort_keys=True, separators=(",", ":"),
-                ).encode("utf-8")
-            ).hexdigest(),
-        }
-        now = time.time()
+        request_hash = self._operation_request_hash(
+            project_id=project_id,
+            stage="script",
+            scope={"episode_number": int(episode_number)},
+            payload={
+                "content": content,
+                "job_id": job_id,
+                "generation_meta": generation_meta,
+                "workflow_task_id": workflow_task_id,
+                "update_project_status": update_project_status,
+            },
+        )
+
         def create(conn: sqlite3.Connection) -> dict[str, Any]:
+            project = self._operation_project(conn, project_id, include_episodes=True)
+            if not 1 <= int(episode_number) <= int(project["target_episode_count"]):
+                raise ValueError("集数超出项目范围")
+            beats = self._locked_beats_for_episode(project, episode_number)
+            outline = self._locked_outline_for_episode(project, episode_number)
+            meta = dict(generation_meta or {})
+            if job_id:
+                meta["job_id"] = job_id
+            refs = {
+                "brief_id": project.get("locked_brief_id"),
+                "character_batch_id": project.get("character_batch_id"),
+                "outline_batch_id": project.get("outline_batch_id"),
+                "outline_id": outline["id"],
+                "outline_version": outline["version"],
+                "outline_content_fingerprint": self._outline_content_fingerprint(
+                    outline.get("content") or {}
+                ),
+                "beats_id": beats["id"],
+                "beats_version": beats["version"],
+                "beats_content_fingerprint": hashlib.sha256(
+                    json.dumps(
+                        beats.get("content") or {},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
+            now = time.time()
             parent = conn.execute(
                 "SELECT id, version FROM creative_episodes "
                 "WHERE project_id = ? AND stage = 'script' AND episode_number = ? "
@@ -3024,18 +3084,6 @@ class CreativeRepository:
 
         with self._connect() as conn:
             if operation_id:
-                request_hash = self._operation_request_hash(
-                    project_id=project_id,
-                    stage="script",
-                    scope={"episode_number": int(episode_number)},
-                    payload={
-                        "content": content,
-                        "job_id": job_id,
-                        "generation_meta": generation_meta,
-                        "workflow_task_id": workflow_task_id,
-                        "update_project_status": update_project_status,
-                    },
-                )
                 return self._run_idempotent_operation(
                     conn,
                     operation_id=operation_id,

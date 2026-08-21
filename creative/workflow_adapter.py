@@ -210,6 +210,7 @@ class CreativeWorkflowAdapter:
         self.assert_approvable(submission)
         now = time.time()
         superseded_resources: list[str] = []
+        project_revision: int | None = None
         with self.creative_repository._connect() as connection:
             self.set_domain_status(resource_type, resource_id, "approved", conn=connection)
             if resource_type == "breakdown":
@@ -234,10 +235,11 @@ class CreativeWorkflowAdapter:
                     (json.dumps(content, ensure_ascii=False), now, int(resource_id)),
                 )
                 project = connection.execute(
-                    "SELECT locked_brief_id FROM creative_projects WHERE id = ?",
+                    "SELECT locked_brief_id, revision FROM creative_projects WHERE id = ?",
                     (item["project_id"],),
                 ).fetchone()
                 old_id = project["locked_brief_id"] if project else None
+                expected_revision = int(project["revision"]) if project else -1
                 switching = not old_id or int(old_id) != int(resource_id)
                 if old_id and switching:
                     connection.execute(
@@ -246,43 +248,64 @@ class CreativeWorkflowAdapter:
                     )
                     superseded_resources.append(str(old_id))
                 if switching:
-                    connection.execute(
+                    cursor = connection.execute(
                         "UPDATE creative_projects SET locked_brief_id = ?, character_batch_id = NULL, "
-                        "outline_batch_id = NULL, status = 'brief_approved', updated_at = ? WHERE id = ?",
-                        (int(resource_id), now, item["project_id"]),
+                        "outline_batch_id = NULL, status = 'brief_approved', revision = revision + 1, "
+                        "updated_at = ? WHERE id = ? AND revision = ?",
+                        (int(resource_id), now, item["project_id"], expected_revision),
                     )
+                    if cursor.rowcount != 1:
+                        raise ValueError("project revision changed")
+                    project_revision = expected_revision + 1
+                else:
+                    project_revision = expected_revision
             elif resource_type == "characters":
                 project_id, batch_id = self._batch_key(resource_id)
                 project = connection.execute(
-                    "SELECT character_batch_id FROM creative_projects WHERE id = ?", (project_id,)
+                    "SELECT character_batch_id, revision FROM creative_projects WHERE id = ?",
+                    (project_id,),
                 ).fetchone()
                 old_batch = project["character_batch_id"] if project else None
+                expected_revision = int(project["revision"]) if project else -1
                 switching = not old_batch or old_batch != batch_id
                 if old_batch and switching:
                     self._set_batch_status(connection, "characters", project_id, old_batch, "superseded")
                     superseded_resources.append(f"{project_id}:{old_batch}")
                 if switching:
-                    connection.execute(
+                    cursor = connection.execute(
                         "UPDATE creative_projects SET character_batch_id = ?, outline_batch_id = NULL, "
-                        "status = 'characters_approved', updated_at = ? WHERE id = ?",
-                        (batch_id, now, project_id),
+                        "status = 'characters_approved', revision = revision + 1, updated_at = ? "
+                        "WHERE id = ? AND revision = ?",
+                        (batch_id, now, project_id, expected_revision),
                     )
+                    if cursor.rowcount != 1:
+                        raise ValueError("project revision changed")
+                    project_revision = expected_revision + 1
+                else:
+                    project_revision = expected_revision
             elif resource_type == "outline":
                 project_id, batch_id = self._batch_key(resource_id)
                 project = connection.execute(
-                    "SELECT outline_batch_id FROM creative_projects WHERE id = ?", (project_id,)
+                    "SELECT outline_batch_id, revision FROM creative_projects WHERE id = ?",
+                    (project_id,),
                 ).fetchone()
                 old_batch = project["outline_batch_id"] if project else None
+                expected_revision = int(project["revision"]) if project else -1
                 switching = not old_batch or old_batch != batch_id
                 if old_batch and switching:
                     self._set_batch_status(connection, "outline", project_id, old_batch, "superseded")
                     superseded_resources.append(f"{project_id}:{old_batch}")
                 if switching:
-                    connection.execute(
+                    cursor = connection.execute(
                         "UPDATE creative_projects SET outline_batch_id = ?, status = 'outline_approved', "
-                        "updated_at = ? WHERE id = ?",
-                        (batch_id, now, project_id),
+                        "revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?",
+                        (batch_id, now, project_id, expected_revision),
                     )
+                    if cursor.rowcount != 1:
+                        raise ValueError("project revision changed")
+                    project_revision = expected_revision + 1
+                else:
+                    project_revision = expected_revision
             elif resource_type == "beats":
                 episode = self._required(self.creative_repository.get_episode(int(resource_id)))
                 old_rows = connection.execute(
@@ -342,7 +365,11 @@ class CreativeWorkflowAdapter:
                 requested_submission["resource_id"],
                 actor,
             )
-        return submission
+        if project_revision is None:
+            return submission
+        result = dict(submission)
+        result["revision"] = project_revision
+        return result
 
     def on_returned(
         self,

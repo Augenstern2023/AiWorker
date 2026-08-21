@@ -957,14 +957,6 @@ class CreativeWorkflowAdapter:
                 raise ValueError(
                     "creative resource authority is incomplete or stale"
                 )
-        if resource_type == "script":
-            current = sorted(
-                [item for item in project.get("episodes", []) if item["stage"] == "beats" and int(item["episode_number"]) == int(snapshot["episode_number"]) and item.get("status") in {"locked", "approved"}],
-                key=lambda item: (int(item.get("version") or 0), int(item["id"])), reverse=True,
-            )
-            if not current or any(str(ref.get("beats_id") or "") != str(current[0]["id"]) for ref in refs):
-                raise ValueError("场次剧本引用了过期 Beats")
-
     def _brief_is_approved(self, brief_id: int) -> bool:
         item = self.creative_repository.get_blueprint(brief_id)
         return bool(item and item["status"] in {"approved", "brief_locked"})

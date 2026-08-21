@@ -399,6 +399,55 @@ def test_execution_uses_highest_compatible_beats_not_higher_stale_version(
     ]
 
 
+def test_workflow_script_lock_uses_highest_compatible_beats_not_stale_version(
+    real_writer_context,
+) -> None:
+    """A Script created from compatible Beats must survive the real adapter lock."""
+    seeded = seed_locked_episode_chain(
+        real_writer_context, "compatible-beats-workflow-lock"
+    )
+    project_id = seeded["project"]["id"]
+    stale = real_writer_context.repository.create_episode_beats(
+        project_id, 1, {"beats": [{"beat": "过期但版本更高"}]}
+    )
+    stale_refs = dict(stale["upstream_refs"])
+    stale_refs["outline_id"] = 999999
+    with real_writer_context.repository._connect() as connection:
+        connection.execute(
+            "UPDATE creative_episodes SET upstream_refs_json = ? WHERE id = ?",
+            (json.dumps(stale_refs, ensure_ascii=False), stale["id"]),
+        )
+        connection.execute(
+            "UPDATE creative_episodes SET status = 'historical' WHERE id = ?",
+            (seeded["script"]["id"],),
+        )
+    real_writer_context.repository.lock_episode_beats(stale["id"])
+    script = real_writer_context.repository.create_episode_script(
+        project_id, 1, {"scenes": [{"scene": 1, "summary": "兼容场次"}]}
+    )
+    assert script["upstream_refs"]["beats_id"] == seeded["beats"]["id"]
+
+    task = {
+        "id": "script-task",
+        "task_type": "script",
+        "project_id": str(project_id),
+        "assignee_user_id": real_writer_context.actor.user_id,
+    }
+    adapter = CreativeWorkflowAdapter(
+        real_writer_context.repository,
+        SimpleNamespace(
+            get_task=lambda _task_id: task,
+            get_latest_resource_submission=lambda *_args: None,
+        ),
+    )
+
+    adapter.lock_without_review(
+        "script-task", "script", str(script["id"]), real_writer_context.actor
+    )
+
+    assert real_writer_context.repository.get_episode(script["id"])["status"] == "locked"
+
+
 def test_real_revisions_keep_parent_lineage_and_never_patch_locked_rows(
     real_writer_context, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

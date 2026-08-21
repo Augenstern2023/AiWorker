@@ -136,9 +136,11 @@ def test_link_action_persisted_from_proposal_uses_top_level_project_id(
     assert orchestrator_context.store.get(action["session_id"], "writer-1")["project_id"] == 18
 
 
-@pytest.mark.parametrize("project_id", [None, "invalid-project-id", 0])
+@pytest.mark.parametrize(
+    "project_id", [None, "invalid-project-id", "1.5", 0, 1.5]
+)
 def test_link_action_keeps_pending_when_top_level_project_id_is_invalid(
-    orchestrator_context, project_id: int | str | None,
+    orchestrator_context, project_id: float | int | str | None,
 ) -> None:
     action = orchestrator_context.store.create_action(
         session_id=orchestrator_context.session["id"],

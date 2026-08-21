@@ -561,10 +561,13 @@ def filter_project_authority_output(
     if not project_context:
         return cards, actions
 
+    card_groups: dict[str, list[CreativeCard]] = {}
+    for card in cards:
+        card_groups.setdefault(str(card.card_id), []).append(card)
     cards_by_id = {
-        str(card.card_id): card
-        for card in cards
-        if getattr(card, "card_id", None) is not None
+        card_id: grouped[0]
+        for card_id, grouped in card_groups.items()
+        if len(grouped) == 1
     }
     referenced_card_ids = {
         action.source_card_id
@@ -575,6 +578,8 @@ def filter_project_authority_output(
     allowed_source_ids: set[str] = set()
     for action in actions:
         source_card = cards_by_id.get(str(action.source_card_id or ""))
+        if action.source_card_id is not None and source_card is None:
+            continue
         try:
             validate_project_authority(
                 [source_card] if source_card is not None else [],
@@ -590,6 +595,8 @@ def filter_project_authority_output(
     allowed_cards: list[CreativeCard] = []
     for card in cards:
         card_id = str(card.card_id)
+        if len(card_groups[card_id]) != 1:
+            continue
         if card_id in allowed_source_ids:
             allowed_cards.append(card)
             continue

@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from writer_agent.action_service import (
     build_source_snapshot,
+    filter_project_authority_output,
     match_natural_language_decision,
     parse_creative_cards,
     validate_project_authority,
@@ -75,6 +76,64 @@ def test_locked_brief_allows_only_explicit_current_brief_rework() -> None:
     )
     with pytest.raises(WriterActionError, match="LOCKED_RESULT_CONFLICT"):
         validate_project_authority([card], [stale_nested], authority)
+
+
+def test_authority_filter_drops_ambiguous_duplicate_card_ids_only() -> None:
+    cards = parse_creative_cards({
+        "cards": [
+            {
+                "card_id": "duplicate",
+                "card_type": "brief",
+                "content": {"title": "不得借重复 ID 绕过"},
+            },
+            {
+                "card_id": "duplicate",
+                "card_type": "plan",
+                "title": "伪装计划",
+                "summary": "重复 ID",
+                "steps": [{"stage": "outline"}],
+            },
+            {
+                "card_id": "valid-plan",
+                "card_type": "plan",
+                "title": "合法计划",
+                "summary": "继续生成大纲",
+                "steps": [{"stage": "outline"}],
+            },
+        ]
+    })
+    actions = [
+        ProposedAction.model_validate({
+            "action_type": "creative.run_plan",
+            "title": "重复来源动作",
+            "source_card_id": "duplicate",
+            "target_stage": "outline",
+            "payload": {},
+        }),
+        ProposedAction.model_validate({
+            "action_type": "creative.run_plan",
+            "title": "合法大纲动作",
+            "source_card_id": "valid-plan",
+            "target_stage": "outline",
+            "payload": {},
+        }),
+    ]
+
+    allowed_cards, allowed_actions = filter_project_authority_output(
+        cards,
+        actions,
+        {
+            "project_id": 17,
+            "locked_brief": {
+                "id": 101,
+                "version": 1,
+                "content": {"title": "已锁定 Brief"},
+            },
+        },
+    )
+
+    assert [card.card_id for card in allowed_cards] == ["valid-plan"]
+    assert [action.source_card_id for action in allowed_actions] == ["valid-plan"]
 
 
 def pending_action(

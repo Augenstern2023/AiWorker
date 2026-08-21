@@ -17,6 +17,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from core.job import CrawlJob
+from creative.application_service import CreativeApplicationService
+from creative.repository import CreativeRepository
 from identity.schema import Principal
 from runtime.job_manager import JobManager
 from writer_agent.orchestrator import WriterProjectOrchestrator
@@ -1377,6 +1379,287 @@ def test_runner_persists_stable_conflict_error_fields(runner_context) -> None:
     assert failed["conflicting_action_id"] == "action-blocking"
 
 
+def test_real_job_payload_conflict_is_persisted_as_non_retryable_idempotency_error(
+    monkeypatch, tmp_path
+):
+    """A JobManager payload clash must not be flattened into a retryable failure."""
+    repository = CreativeRepository(tmp_path / "creative.db")
+    workflow = MagicMock()
+    workflow.is_active_project_member.return_value = True
+    workflow.ensure_project_task.return_value = {
+        "id": "script-task",
+        "status": "in_progress",
+        "assignee_user_id": "writer-1",
+    }
+    permissions = MagicMock()
+    permissions.can_create_project_content.return_value = True
+    workflow_adapter = MagicMock(unsafe=True)
+    jobs = JobManager(runtime_dir=tmp_path / "runtime", cwd=tmp_path)
+    process = ControlledProcess()
+    monkeypatch.setattr(
+        "runtime.job_manager.launch_worker", lambda *_args, **_kwargs: process
+    )
+    service = CreativeApplicationService(
+        repository=repository,
+        workflow_repository=workflow,
+        transitions=MagicMock(),
+        job_manager=jobs,
+        runtime_dir=tmp_path,
+        original_project_service=MagicMock(),
+        workflow_adapter=workflow_adapter,
+        permission_service=permissions,
+    )
+    actor = Principal(
+        user_id="writer-1",
+        username="writer",
+        display_name="编剧",
+        role_codes=("screenwriter",),
+        permissions=frozenset({"project.create"}),
+        data_scope="project",
+        session_id="writer-session",
+    )
+    project, _ = repository.ensure_original_project(
+        seed_text="同一 operation 不能变更请求",
+        name="幂等冲突",
+        target_episode_count=1,
+        created_by=actor.user_id,
+        creation_request_id="job-conflict-project",
+    )
+    expected_context = service.current_plan_context(project["id"], 1)
+    store = WriterAgentStore(tmp_path / "writer-agent.db")
+    session = store.create(actor.user_id, "冲突传播", "测试")
+    store.save_source_snapshot(
+        {"snapshot_id": "job-conflict-snapshot"},
+        snapshot_id="job-conflict-snapshot",
+    )
+    blocking = store.create_action(
+        session_id=session["id"],
+        actor_user_id=actor.user_id,
+        action_type="creative.run_plan",
+        project_id=project["id"],
+        idempotency_key="payload-conflict-blocking",
+        request_hash="payload-conflict-blocking",
+        payload={"target_stage": "script"},
+        expected_context={"project_revision": expected_context["revision"]},
+        source_snapshot_id="job-conflict-snapshot",
+    )
+    operation_id = f"{blocking['id']}:script.generate:1"
+    store.upsert_step(
+        action_id=blocking["id"],
+        step_key="script.generate:1",
+        stage="script",
+        episode_start=1,
+        episode_end=1,
+        status="pending",
+        operation_id=operation_id,
+        depends_on=[],
+        attempt=1,
+        step_order=1,
+    )
+    service.start_generation(
+        project_id=project["id"],
+        stage="script",
+        actor=actor,
+        workflow_task_id="script-task",
+        operation_id=operation_id,
+        generation_instruction="初始请求",
+        source_snapshot_id="job-conflict-snapshot",
+        source_snapshot={"snapshot_id": "job-conflict-snapshot"},
+        episode_number=1,
+        episode_start=1,
+        episode_end=1,
+        expected_context=expected_context,
+    )
+    action = store.create_action(
+        session_id=session["id"],
+        actor_user_id=actor.user_id,
+        action_type="creative.run_plan",
+        project_id=project["id"],
+        idempotency_key="payload-conflict-target",
+        request_hash="payload-conflict-target",
+        payload={
+            "target_stage": "script",
+            "episode_start": 1,
+            "episode_end": 1,
+            "step_payloads": {
+                "script.generate:1": {"generation_instruction": "变更请求"}
+            },
+        },
+        expected_context={
+            "project_revision": expected_context["revision"],
+            "authority_refs": {"script.generate:1": expected_context},
+        },
+        source_snapshot_id="job-conflict-snapshot",
+    )
+    action = store.claim_pending_action(action["id"], expected_revision=1)
+    store.upsert_step(
+        action_id=action["id"],
+        step_key="script.generate:1",
+        stage="script",
+        episode_start=1,
+        episode_end=1,
+        status="pending",
+        operation_id=operation_id,
+        depends_on=[],
+        attempt=1,
+        step_order=1,
+    )
+    orchestrator = WriterProjectOrchestrator(
+        store, service, permissions, workflow, lambda *_args: True
+    )
+    step = store.list_steps(action["id"])[0]
+
+    with pytest.raises(WriterActionError) as exc:
+        orchestrator.execute_action_step(action, step, actor, operation_id=operation_id)
+
+    assert exc.value.code == "IDEMPOTENCY_KEY_REUSED"
+    assert exc.value.retryable is False
+    process.complete()
+
+
+def test_real_job_scope_conflict_keeps_owning_action_id_and_is_retryable(
+    monkeypatch, tmp_path
+):
+    """A durable creative scope collision must identify the action holding it."""
+    repository = CreativeRepository(tmp_path / "creative.db")
+    workflow = MagicMock()
+    workflow.is_active_project_member.return_value = True
+    workflow.ensure_project_task.return_value = {
+        "id": "script-task",
+        "status": "in_progress",
+        "assignee_user_id": "writer-1",
+    }
+    permissions = MagicMock()
+    permissions.can_create_project_content.return_value = True
+    workflow_adapter = MagicMock(unsafe=True)
+    jobs = JobManager(runtime_dir=tmp_path / "runtime", cwd=tmp_path)
+    process = ControlledProcess()
+    monkeypatch.setattr(
+        "runtime.job_manager.launch_worker", lambda *_args, **_kwargs: process
+    )
+    service = CreativeApplicationService(
+        repository=repository,
+        workflow_repository=workflow,
+        transitions=MagicMock(),
+        job_manager=jobs,
+        runtime_dir=tmp_path,
+        original_project_service=MagicMock(),
+        workflow_adapter=workflow_adapter,
+        permission_service=permissions,
+    )
+    actor = Principal(
+        user_id="writer-1",
+        username="writer",
+        display_name="编剧",
+        role_codes=("screenwriter",),
+        permissions=frozenset({"project.create"}),
+        data_scope="project",
+        session_id="writer-session",
+    )
+    project, _ = repository.ensure_original_project(
+        seed_text="相同创作范围只能有一个活动 Worker",
+        name="范围冲突",
+        target_episode_count=1,
+        created_by=actor.user_id,
+        creation_request_id="scope-conflict-project",
+    )
+    expected_context = service.current_plan_context(project["id"], 1)
+    store = WriterAgentStore(tmp_path / "writer-agent.db")
+    session = store.create(actor.user_id, "冲突传播", "测试")
+    store.save_source_snapshot(
+        {"snapshot_id": "scope-conflict-snapshot"},
+        snapshot_id="scope-conflict-snapshot",
+    )
+    blocking = store.create_action(
+        session_id=session["id"],
+        actor_user_id=actor.user_id,
+        action_type="creative.run_plan",
+        project_id=project["id"],
+        idempotency_key="scope-conflict-blocking",
+        request_hash="scope-conflict-blocking",
+        payload={"target_stage": "script"},
+        expected_context={"project_revision": expected_context["revision"]},
+        source_snapshot_id="scope-conflict-snapshot",
+    )
+    blocking_operation = f"{blocking['id']}:script.generate:1"
+    store.upsert_step(
+        action_id=blocking["id"],
+        step_key="script.generate:1",
+        stage="script",
+        episode_start=1,
+        episode_end=1,
+        status="pending",
+        operation_id=blocking_operation,
+        depends_on=[],
+        attempt=1,
+        step_order=1,
+    )
+    service.start_generation(
+        project_id=project["id"],
+        stage="script",
+        actor=actor,
+        workflow_task_id="script-task",
+        operation_id=blocking_operation,
+        generation_instruction="占用范围",
+        source_snapshot_id="scope-conflict-snapshot",
+        source_snapshot={"snapshot_id": "scope-conflict-snapshot"},
+        episode_number=1,
+        episode_start=1,
+        episode_end=1,
+        expected_context=expected_context,
+    )
+    action = store.create_action(
+        session_id=session["id"],
+        actor_user_id=actor.user_id,
+        action_type="creative.run_plan",
+        project_id=project["id"],
+        idempotency_key="scope-conflict-target",
+        request_hash="scope-conflict-target",
+        payload={
+            "target_stage": "script",
+            "episode_start": 1,
+            "episode_end": 1,
+            "step_payloads": {
+                "script.generate:1": {"generation_instruction": "冲突请求"}
+            },
+        },
+        expected_context={
+            "project_revision": expected_context["revision"],
+            "authority_refs": {"script.generate:1": expected_context},
+        },
+        source_snapshot_id="scope-conflict-snapshot",
+    )
+    action = store.claim_pending_action(action["id"], expected_revision=1)
+    store.upsert_step(
+        action_id=action["id"],
+        step_key="script.generate:1",
+        stage="script",
+        episode_start=1,
+        episode_end=1,
+        status="pending",
+        operation_id=f"{action['id']}:script.generate:1",
+        depends_on=[],
+        attempt=1,
+        step_order=1,
+    )
+    runner = WriterActionRunner(
+        store=store,
+        orchestrator=WriterProjectOrchestrator(
+            store, service, permissions, workflow, lambda *_args: True
+        ),
+        job_manager=jobs,
+        principal_loader=lambda _user_id: actor,
+    )
+
+    runner.run(action["id"], actor)
+
+    failed = store.require_action(action["id"], actor.user_id)
+    assert failed["error_code"] == "ACTIVE_ACTION_CONFLICT"
+    assert failed["retryable"] is True
+    assert failed["conflicting_action_id"] == blocking["id"]
+    process.complete()
+
+
 def test_authority_advance_preserves_unrelated_episode_contexts(runner_context):
     """Replacing the authority map after one Beats lock makes sibling episodes stale."""
     action = seed_runner_action(
@@ -1528,3 +1811,194 @@ async def test_webgui_startup_resumes_writer_actions(monkeypatch):
 
     assert isinstance(WebGUI.writer_action_runner, WriterActionRunner)
     assert WebGUI.app.state.writer_action_runner is WebGUI.writer_action_runner
+
+
+def test_cancelling_restart_recovers_unbound_operation_job_before_finishing(
+    monkeypatch, runner_context, tmp_path
+):
+    """A cancel must find the durable operation job before reclaiming an unbound step."""
+    process = ControlledProcess()
+    monkeypatch.setattr(
+        "runtime.job_manager.launch_worker", lambda *_args, **_kwargs: process
+    )
+    jobs = JobManager(runtime_dir=tmp_path / "runtime", cwd=tmp_path)
+    action = seed_runner_action(
+        runner_context.store,
+        runner_context.session,
+        runner_context.actor,
+        stage="script",
+        episodes=range(1, 2),
+        project_revision=4,
+    )
+    runner_context.store.start_action(action["id"])
+    step = runner_context.store.list_steps(action["id"])[0]
+    runner_context.store.claim_runnable_step(
+        action["id"],
+        step["step_key"],
+        owner_id="crashed-runner",
+        lease_seconds=-1,
+    )
+    jobs.get_or_create_job(
+        step["operation_id"],
+        _job_payload("unbound-cancel-job"),
+        created_by_user_id=runner_context.actor.user_id,
+        workflow_task_id="script-task",
+        project_id=17,
+    )
+    runner_context.store.set_action_phase(action["id"], phase="cancelling")
+    restarted = WriterActionRunner(
+        store=runner_context.store,
+        orchestrator=runner_context.orchestrator,
+        job_manager=jobs,
+        principal_loader=lambda _user_id: runner_context.actor,
+    )
+
+    reconciled = restarted.reconcile(action["id"], runner_context.actor)
+
+    assert reconciled["status"] == "cancelled"
+    recovered = runner_context.store.list_steps(action["id"])[0]
+    assert recovered["job_id"] == "unbound-cancel-job"
+    assert recovered["status"] == "cancelled"
+    assert process.poll() == -15
+
+
+def test_runner_completes_pointer_step_before_launching_runnable_job(
+    runner_context,
+):
+    """Mixing a lock into a generation batch can stale the job with our own revision."""
+    action = seed_runner_action(
+        runner_context.store,
+        runner_context.session,
+        runner_context.actor,
+        stage="script",
+        episodes=range(1, 2),
+        project_revision=4,
+    )
+    runner_context.store.upsert_step(
+        action_id=action["id"],
+        step_key="beats.lock:2",
+        stage="beats",
+        episode_start=2,
+        episode_end=2,
+        status="pending",
+        operation_id=f"{action['id']}:beats.lock:2",
+        depends_on=[],
+        attempt=1,
+        step_order=2,
+    )
+    executed = []
+
+    class MixedOrchestrator:
+        def assert_expected_context(self, _action, _actor):
+            return None
+
+        def execute_action_step(self, _action, step, _actor, *, operation_id):
+            del operation_id
+            executed.append(step["step_key"])
+            if ".generate" in step["step_key"]:
+                return {"job_id": "script-job"}
+            return {"authority_revision": 5, "authority_refs": {}}
+
+        def recover_action_step_result(self, _action, _step, _actor):
+            return {"resource_refs": [{"resource_id": "script-1"}]}
+
+    class CompletedJobs:
+        def get_job(self, job_id):
+            return {"job_id": job_id, "status": "succeeded"}
+
+    runner = WriterActionRunner(
+        store=runner_context.store,
+        orchestrator=MixedOrchestrator(),
+        job_manager=CompletedJobs(),
+        principal_loader=lambda _user_id: runner_context.actor,
+    )
+
+    runner.run(action["id"], runner_context.actor)
+
+    assert executed == ["beats.lock:2", "script.generate:1"]
+
+
+def test_unrequested_cancelled_job_cannot_finish_action_as_succeeded(
+    runner_context,
+):
+    """A terminal cancelled step must be reflected in the public action status."""
+    action = seed_runner_action(
+        runner_context.store,
+        runner_context.session,
+        runner_context.actor,
+        stage="script",
+        episodes=range(1, 2),
+        project_revision=4,
+    )
+
+    class CancelledOrchestrator:
+        def assert_expected_context(self, _action, _actor):
+            return None
+
+        def execute_action_step(self, _action, _step, _actor, *, operation_id):
+            del operation_id
+            return {"job_id": "externally-cancelled-job"}
+
+    class CancelledJobs:
+        def get_job(self, job_id):
+            return {"job_id": job_id, "status": "cancelled"}
+
+    runner = WriterActionRunner(
+        store=runner_context.store,
+        orchestrator=CancelledOrchestrator(),
+        job_manager=CancelledJobs(),
+        principal_loader=lambda _user_id: runner_context.actor,
+    )
+
+    runner.run(action["id"], runner_context.actor)
+
+    completed = runner_context.store.require_action(
+        action["id"], runner_context.actor.user_id
+    )
+    assert completed["status"] == "cancelled"
+    assert runner_context.store.list_steps(action["id"])[0]["status"] == "cancelled"
+
+
+def test_runner_reloads_principal_before_each_step_side_effect(runner_context):
+    """Disabling an account mid-action must prevent every later write."""
+    action = seed_runner_action(
+        runner_context.store,
+        runner_context.session,
+        runner_context.actor,
+        stage="script",
+        episodes=range(1, 3),
+        project_revision=4,
+    )
+    loads = 0
+    executed = []
+
+    def load_principal(_user_id):
+        nonlocal loads
+        loads += 1
+        return runner_context.actor if loads == 1 else None
+
+    class ImmediateOrchestrator:
+        def assert_expected_context(self, _action, _actor):
+            return None
+
+        def execute_action_step(self, _action, step, _actor, *, operation_id):
+            del operation_id
+            executed.append(step["step_key"])
+            return {"resource_refs": [{"resource_id": step["step_key"]}]}
+
+    runner = WriterActionRunner(
+        store=runner_context.store,
+        orchestrator=ImmediateOrchestrator(),
+        job_manager=runner_context.jobs,
+        principal_loader=load_principal,
+    )
+
+    runner.run(action["id"], runner_context.actor)
+
+    completed = runner_context.store.require_action(
+        action["id"], runner_context.actor.user_id
+    )
+    assert executed == ["script.generate:1"]
+    assert completed["status"] == "failed"
+    assert completed["error_code"] == "PROJECT_ACCESS_DENIED"
+    assert completed["retryable"] is False

@@ -22,6 +22,7 @@ from creative.application_service import (
 )
 from identity.permission_service import PermissionService
 from identity.schema import Principal
+from runtime.job_manager import JobConflictError
 from workflow.repository import WorkflowRepository
 
 from .action_service import validate_original_project_action_payload
@@ -395,6 +396,26 @@ class WriterProjectOrchestrator:
         except CreativeTaskOccupied as exc:
             raise WriterActionError(
                 "TASK_ASSIGNED_TO_OTHER", "该创作阶段已由其他人员处理", retryable=False
+            ) from exc
+        except JobConflictError as exc:
+            if exc.kind == "operation_payload_mismatch":
+                raise WriterActionError(
+                    "IDEMPOTENCY_KEY_REUSED",
+                    "幂等操作已用于不同创作请求",
+                    retryable=False,
+                ) from exc
+            if exc.kind == "creative_scope_collision":
+                conflicting_action_id = self.store.find_action_id_by_operation(
+                    str(exc.conflicting_operation_id or "")
+                )
+                raise WriterActionError(
+                    "ACTIVE_ACTION_CONFLICT",
+                    "目标范围已有进行中的创作动作",
+                    retryable=True,
+                    conflicting_action_id=conflicting_action_id,
+                ) from exc
+            raise WriterActionError(
+                "CREATIVE_OPERATION_FAILED", "创作操作暂时不可用", retryable=True
             ) from exc
         except (KeyError, TypeError, ValueError) as exc:
             raise WriterActionError(

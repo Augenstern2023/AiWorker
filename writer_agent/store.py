@@ -974,6 +974,20 @@ class WriterAgentStore:
             rows = conn.execute("SELECT * FROM writer_agent_action_steps WHERE action_id=? ORDER BY step_order, id", (action_id,)).fetchall()
         return [self._step_row(row) for row in rows]
 
+    def find_action_id_by_operation(self, operation_id: str) -> str | None:
+        """Return the active Writer action that owns a durable operation id."""
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT steps.action_id FROM writer_agent_action_steps AS steps "
+                "JOIN writer_agent_actions AS actions ON actions.id=steps.action_id "
+                "WHERE steps.operation_id=? "
+                "ORDER BY CASE WHEN actions.status IN ('queued','running') "
+                "THEN 0 ELSE 1 END, actions.created_at DESC LIMIT 1",
+                (operation_id,),
+            ).fetchone()
+        return str(row[0]) if row is not None else None
+
     def active_job_ids(self, action_id: str) -> list[str]:
         with self._connect() as conn:
             rows = conn.execute("SELECT job_id FROM writer_agent_action_steps WHERE action_id=? AND job_id IS NOT NULL AND status NOT IN ('succeeded','failed','cancelled','blocked')", (action_id,)).fetchall()

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Callable
 import uuid
 
@@ -53,6 +54,17 @@ class WriterActionRunner:
         self._poll_event = threading.Event()
         self._owner_id = f"writer-runner-{uuid.uuid4().hex}"
         self._lease_seconds = 30.0
+
+    def _load_current_principal(self, action: dict[str, Any]) -> Principal:
+        actor_user_id = str(action.get("actor_user_id") or "")
+        current = self.principal_loader(actor_user_id)
+        if current is None or current.user_id != actor_user_id:
+            raise WriterActionError(
+                "PROJECT_ACCESS_DENIED",
+                "登录账户已停用或不再拥有项目创作权限",
+                retryable=False,
+            )
+        return current
 
     def _execute_with_lease(
         self,
@@ -185,8 +197,9 @@ class WriterActionRunner:
                     self.orchestrator, "recover_action_step_result", None
                 )
                 try:
+                    current_actor = self._load_current_principal(action)
                     result = (
-                        recover(action, step, actor)
+                        recover(action, step, current_actor)
                         if callable(recover)
                         else {"resource_refs": step["resource_refs"]}
                     )
@@ -214,6 +227,53 @@ class WriterActionRunner:
                 self.store.cancel_step(action_id, step["step_key"])
         return self.store.require_action(action_id, actor.user_id)
 
+    def _recover_unbound_operation_jobs(self, action_id: str) -> list[str]:
+        """Bind jobs created before a crashed runner persisted the step job_id."""
+
+        find_job_method = getattr(
+            type(self.job_manager), "find_job_by_operation", None
+        )
+        if not callable(find_job_method):
+            return []
+        find_job = getattr(self.job_manager, "find_job_by_operation")
+        recovered: list[str] = []
+        action = self.store.require_action(action_id, None)
+        for step in self.store.list_steps(action_id):
+            if (
+                step.get("job_id")
+                or step["status"] not in {"pending", "running"}
+                or ".generate" not in str(step.get("step_key") or "")
+                or (
+                    step["status"] == "running"
+                    and float(step.get("lease_expires_at") or 0) > time.time()
+                )
+            ):
+                continue
+            job = find_job(str(step["operation_id"]))
+            if not job:
+                continue
+            if (
+                int(step.get("attempt") or 1) > 1
+                and self._job_status(job) in {"failed", "cancelled"}
+            ):
+                continue
+            job_id = str(job.get("job_id") or job.get("id") or "")
+            if not job_id:
+                continue
+            self.store.assign_step_job(action_id, step["step_key"], job_id)
+            recovered.append(job_id)
+            if action.get("phase") == "cancelling" and self._job_status(job) not in {
+                "succeeded",
+                "completed",
+                "failed",
+                "cancelled",
+            }:
+                try:
+                    self.job_manager.stop(job_id)
+                except JobNotFoundError:
+                    pass
+        return recovered
+
     def run(self, action_id: str, actor: Principal) -> None:
         action = self.store.require_action(action_id, actor.user_id)
         if action["status"] == "queued":
@@ -236,6 +296,7 @@ class WriterActionRunner:
                     return
                 self._poll_event.wait(0.2)
                 continue
+            self._recover_unbound_operation_jobs(action_id)
             if self.store.active_job_ids(action_id):
                 action = self._refresh_job_steps(action_id, actor)
             runnable = self.store.list_runnable_steps(action_id)
@@ -249,15 +310,30 @@ class WriterActionRunner:
                     self._poll_event.wait(0.2)
                     continue
                 break
-            first_step = runnable[0]
-            batch_size = (
-                10
-                if first_step.get("episode_start") is not None
-                and ".generate" in str(first_step.get("step_key") or "")
-                else 1
-            )
+            pointer_steps = [
+                step
+                for step in runnable
+                if ".generate" not in str(step.get("step_key") or "")
+            ]
+            if pointer_steps:
+                scheduled = pointer_steps[:1]
+            else:
+                first_step = runnable[0]
+                first_operation = str(first_step.get("step_key") or "").split(
+                    ":", 1
+                )[0]
+                scheduled = [
+                    step
+                    for step in runnable
+                    if step.get("stage") == first_step.get("stage")
+                    and str(step.get("step_key") or "").split(":", 1)[0]
+                    == first_operation
+                    and step.get("episode_start") is not None
+                ][:10]
+                if not scheduled:
+                    scheduled = [first_step]
             launched_job_ids: list[str] = []
-            for step in runnable[:batch_size]:
+            for step in scheduled:
                 claimed = self.store.claim_runnable_step(
                     action_id,
                     step["step_key"],
@@ -268,8 +344,13 @@ class WriterActionRunner:
                     continue
                 step = claimed
                 try:
-                    self.orchestrator.assert_expected_context(action, actor)
-                    result = self._execute_with_lease(action, step, actor)
+                    current_actor = self._load_current_principal(action)
+                    self.orchestrator.assert_expected_context(
+                        action, current_actor
+                    )
+                    result = self._execute_with_lease(
+                        action, step, current_actor
+                    )
                     job_id = self._job_id(result)
                     if job_id:
                         assigned = self.store.assign_step_job(
@@ -323,6 +404,7 @@ class WriterActionRunner:
         steps = self.store.list_steps(action_id)
         failed = [step for step in steps if step["status"] == "failed"]
         blocked = [step for step in steps if step["status"] == "blocked"]
+        cancelled = [step for step in steps if step["status"] == "cancelled"]
         succeeded = [step for step in steps if step["status"] == "succeeded"]
         if failed or blocked:
             first = failed[0] if failed else blocked[0]
@@ -334,11 +416,18 @@ class WriterActionRunner:
                 conflicting_action_id=first.get("conflicting_action_id"),
                 result={"partial": bool(succeeded)},
             )
+        elif cancelled:
+            self.store.finish_action(
+                action_id,
+                status="cancelled",
+                result={"partial": bool(succeeded)},
+            )
         else:
             self.store.finish_action(action_id, status="succeeded")
 
     def reconcile(self, action_id: str, actor: Principal) -> dict[str, Any]:
         self.store.require_action(action_id, actor.user_id)
+        self._recover_unbound_operation_jobs(action_id)
         action = self._refresh_job_steps(action_id, actor)
         if action.get("phase") == "cancelling":
             self.store.cancel_expired_unbound_steps(action_id)
@@ -382,3 +471,10 @@ class WriterActionRunner:
             actor = self.principal_loader(action["actor_user_id"])
             if actor is not None:
                 self.enqueue(action["id"], actor)
+            else:
+                self.store.fail_action(
+                    action["id"],
+                    code="PROJECT_ACCESS_DENIED",
+                    message="登录账户已停用或不再拥有项目创作权限",
+                    retryable=False,
+                )

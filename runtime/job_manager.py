@@ -40,7 +40,18 @@ _LAUNCH_LEASE_SECONDS = 30.0
 
 
 class JobConflictError(RuntimeError):
-    pass
+    """A durable Job reservation conflict with machine-readable cause data."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str | None = None,
+        conflicting_operation_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.conflicting_operation_id = conflicting_operation_id
 
 
 class JobNotFoundError(KeyError):
@@ -184,12 +195,27 @@ class JobManager:
             )
         except OperationScopeConflictError as exc:
             raise JobConflictError(
-                f"creative scope is already reserved by job {exc}"
+                f"creative scope is already reserved by job {exc}",
+                kind="creative_scope_collision",
+                conflicting_operation_id=exc.operation_id,
             ) from exc
         if not reserved:
             if _operation_request(stored.job) != _operation_request(job):
                 raise JobConflictError(
-                    "operation_id is already reserved for a different payload"
+                    "operation_id is already reserved for a different payload",
+                    kind="operation_payload_mismatch",
+                )
+            claimed_prelaunch, prelaunch_state = (
+                self.storage.claim_expired_prelaunch_operation(
+                    operation_id,
+                    launcher_owner=launcher_owner,
+                    launcher_lease_expires_at=time.time()
+                    + _LAUNCH_LEASE_SECONDS,
+                )
+            )
+            if claimed_prelaunch and prelaunch_state is not None:
+                return self._launch_reserved_operation(
+                    operation_id, launcher_owner, prelaunch_state.job
                 )
             if (
                 stored.status == "failed"
@@ -204,7 +230,9 @@ class JobManager:
                     )
                 except OperationScopeConflictError as exc:
                     raise JobConflictError(
-                        f"creative scope is already reserved by job {exc}"
+                        f"creative scope is already reserved by job {exc}",
+                        kind="creative_scope_collision",
+                        conflicting_operation_id=exc.operation_id,
                     ) from exc
                 if claimed and retry_state is not None:
                     return self._launch_reserved_operation(
@@ -661,6 +689,22 @@ class JobManager:
             if not state:
                 raise JobNotFoundError(job_id)
             self.jobs[job_id] = state
+            self._reconcile_orphan_job(state)
+            return self._public_state(state, include_events=True)
+
+    def find_job_by_operation(self, operation_id: str) -> dict[str, Any] | None:
+        """Return the durable job reserved for an operation, including DB-only rows."""
+
+        stored = self.storage.get_job_by_operation(str(operation_id))
+        if stored is None:
+            return None
+        with self.lock:
+            state = (
+                self.jobs.get(stored.job_id)
+                or self._state_from_disk(stored.job_id)
+                or stored
+            )
+            self.jobs[stored.job_id] = state
             self._reconcile_orphan_job(state)
             return self._public_state(state, include_events=True)
 

@@ -1689,3 +1689,59 @@ def test_creative_series_without_explicit_range_is_rejected_before_launch(
         )
 
     assert launches == []
+
+
+def test_get_or_create_job_takes_over_expired_prelaunch_reservation(
+    monkeypatch, tmp_path
+):
+    """A crash after DB reservation but before worker launch must be recoverable."""
+    launches = []
+
+    def launch(*_args, **_kwargs):
+        launches.append("launched")
+        return FakeProcess()
+
+    monkeypatch.setattr("runtime.job_manager.launch_worker", launch)
+    runtime_dir = tmp_path / "runtime"
+    first = JobManager(runtime_dir=runtime_dir, cwd=tmp_path)
+    operation_id = "expired-prelaunch-operation"
+    payload = {
+        "job_id": "expired-prelaunch-job",
+        "platform": "creative",
+        "crawler_type": "phase4_generate",
+        "extra": {
+            "action": "script",
+            "project_id": 17,
+            "episode_number": 1,
+        },
+    }
+    reserved_job = CrawlJob.from_dict(payload)
+    reserved_job.extra.update(
+        {
+            "created_by_user_id": "writer-1",
+            "workflow_task_id": "script-task",
+            "project_id": "17",
+            "operation_id": operation_id,
+        }
+    )
+    reserved, _stored = first.storage.reserve_job_operation(
+        operation_id,
+        JobState(job=reserved_job),
+        scope=creative_job_scope(reserved_job),
+        launcher_owner="crashed-launcher",
+        launcher_lease_expires_at=0,
+    )
+    assert reserved is True
+
+    restarted = JobManager(runtime_dir=runtime_dir, cwd=tmp_path)
+    recovered = restarted.get_or_create_job(
+        operation_id,
+        payload,
+        created_by_user_id="writer-1",
+        workflow_task_id="script-task",
+        project_id=17,
+    )
+
+    assert recovered.job_id == "expired-prelaunch-job"
+    assert recovered.status == "running"
+    assert launches == ["launched"]

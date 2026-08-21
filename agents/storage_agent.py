@@ -20,7 +20,12 @@ from runtime.job_state import JobState
 
 
 class OperationScopeConflictError(RuntimeError):
-    pass
+    """Identify the durable reservation that owns a conflicting scope."""
+
+    def __init__(self, job_id: str, operation_id: str | None = None) -> None:
+        super().__init__(job_id)
+        self.job_id = job_id
+        self.operation_id = operation_id
 
 
 class StorageAgent:
@@ -428,7 +433,9 @@ class StorageAgent:
                 or max(episode_range[0], existing_range[0])
                 <= min(episode_range[1], existing_range[1])
             ):
-                raise OperationScopeConflictError(str(row[0]))
+                raise OperationScopeConflictError(
+                    str(row[0]), str(row[1] or "") or None
+                )
 
     def claim_failed_job_operation(
         self,
@@ -481,6 +488,49 @@ class StorageAgent:
             state.finished_at = None
             state.message = ""
             return True, state
+
+    def claim_expired_prelaunch_operation(
+        self,
+        operation_id: str,
+        *,
+        launcher_owner: str,
+        launcher_lease_expires_at: float,
+    ) -> tuple[bool, JobState | None]:
+        """Take over a reservation whose launcher died before recording a worker."""
+
+        now = time.time()
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM agent_jobs WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if row is None:
+                return False, None
+            state = self._job_state_from_row(row)
+            prelaunch = (
+                str(row["status"]) == "pending"
+                and str(row["launch_phase"] or "") == "launching"
+                and float(row["launcher_lease_expires_at"] or 0) <= now
+                and row["pid"] is None
+                and row["started_at"] is None
+            )
+            if not prelaunch:
+                return False, state
+            changed = conn.execute(
+                "UPDATE agent_jobs SET launcher_owner=?, "
+                "launcher_lease_expires_at=? WHERE operation_id=? "
+                "AND status='pending' AND launch_phase='launching' "
+                "AND launcher_lease_expires_at<=? AND pid IS NULL "
+                "AND started_at IS NULL",
+                (
+                    launcher_owner,
+                    launcher_lease_expires_at,
+                    operation_id,
+                    now,
+                ),
+            ).rowcount
+            return changed == 1, state
 
     @staticmethod
     def _job_state_from_row(row: sqlite3.Row) -> JobState:

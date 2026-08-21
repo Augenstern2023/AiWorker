@@ -197,6 +197,18 @@ def _api_permission(method: str, path: str) -> str | None:
     return "*"
 
 
+def project_member_stage_api_path(path: str, method: str) -> bool:
+    """Return whether project membership is the route's business authorization."""
+
+    if not path.startswith("/api/creative"):
+        return False
+    from creative.api import uses_project_member_stage_authorization
+
+    return uses_project_member_stage_authorization(
+        path.removeprefix("/api/creative"), method.upper()
+    )
+
+
 def _api_audit_action(method: str, path: str) -> str:
     suffix = path.rsplit("/", 1)[-1]
     if path.startswith("/api/workflow/tasks/") and suffix in {
@@ -309,7 +321,9 @@ def install_security_middleware(target_app: FastAPI, session_service=None) -> No
                     principal, request.method.upper(), request.url.path
                 )
             request.state.page_api_access_decision = page_api_decision
-            if page_api_decision is False:
+            if page_api_decision is False and not project_member_stage_api_path(
+                request.url.path, request.method
+            ):
                 return JSONResponse(
                     status_code=403,
                     content={"detail": "没有执行此操作的权限"},

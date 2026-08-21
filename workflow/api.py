@@ -87,8 +87,11 @@ def build_workflow_router(
     def claim_task(
         task_id: str,
         request: Request,
-        principal: Principal = Depends(require_permission("workflow.claim")),
+        principal: Principal = Depends(current_principal),
     ) -> dict[str, Any]:
+        _require_task_permission_or_project_member(
+            repository, task_id, principal, "workflow.claim"
+        )
         return _audited_call(
             repository,
             request,
@@ -137,10 +140,11 @@ def build_workflow_router(
     def start_task(
         task_id: str,
         request: Request,
-        principal: Principal = Depends(
-            require_permission("workflow.task.update")
-        ),
+        principal: Principal = Depends(current_principal),
     ) -> dict[str, Any]:
+        _require_task_permission_or_project_member(
+            repository, task_id, principal, "workflow.task.update"
+        )
         return _audited_call(
             repository, request, principal, "workflow.start", "task", task_id,
             repository.start_task, task_id, principal
@@ -270,6 +274,12 @@ def _task_view(
     principal: Principal,
 ) -> dict[str, Any]:
     viewed = dict(task)
+    is_active_project_member = bool(
+        task.get("project_id")
+        and repository.is_active_project_member(
+            str(task["project_id"]), principal
+        )
+    )
     assignee_id = task.get("assignee_user_id")
     assignee = (
         repository.identity_repository.get_user(str(assignee_id))
@@ -283,6 +293,7 @@ def _task_view(
         task["status"] == "pool"
         and (
             principal.is_system_admin
+            or is_active_project_member
             or (
                 "workflow.claim" in principal.permissions
                 and repository.can_claim_task(task["id"], principal)
@@ -291,9 +302,13 @@ def _task_view(
     )
     viewed["can_start"] = (
         task["status"] in {"assigned", "returned"}
-        and task["assignee_user_id"] == principal.user_id
+        and (
+            is_active_project_member
+            or task["assignee_user_id"] == principal.user_id
+        )
         and (
             principal.is_system_admin
+            or is_active_project_member
             or "workflow.task.update" in principal.permissions
         )
     )
@@ -308,6 +323,23 @@ def _task_view(
         )
     )
     return viewed
+
+
+def _require_task_permission_or_project_member(
+    repository: WorkflowRepository,
+    task_id: str,
+    principal: Principal,
+    permission: str,
+) -> None:
+    if principal.is_system_admin or permission in principal.permissions:
+        return
+    task = repository.get_task(task_id)
+    project_id = task.get("project_id") if task else None
+    if project_id and repository.is_active_project_member(
+        str(project_id), principal
+    ):
+        return
+    raise HTTPException(status_code=403, detail="没有执行此操作的权限")
 
 
 

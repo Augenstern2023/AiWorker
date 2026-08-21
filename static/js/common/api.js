@@ -24,6 +24,30 @@
         return document.querySelector('meta[name="csrf-token"]')?.content || '';
     }
 
+    function storeCsrfToken(token) {
+        if (!token) return;
+        let meta = document.querySelector('meta[name="csrf-token"]');
+        if (!meta) {
+            meta = document.createElement('meta');
+            meta.name = 'csrf-token';
+            document.head.appendChild(meta);
+        }
+        meta.content = token;
+    }
+
+    async function refreshCsrfToken(signal) {
+        const response = await fetch('/api/auth/me', {
+            method: 'GET',
+            credentials: 'same-origin',
+            signal,
+        });
+        if (!response.ok) return '';
+        const body = await response.json();
+        const token = String(body.csrf_token || '');
+        storeCsrfToken(token);
+        return token;
+    }
+
     function readRequestId(response) {
         return response.headers.get('X-Request-ID');
     }
@@ -58,7 +82,7 @@
             if (token) headers.set('X-CSRF-Token', token);
         }
 
-        const response = await fetch(input, {
+        let response = await fetch(input, {
             ...options,
             signal: options.signal,
             method,
@@ -66,14 +90,33 @@
             credentials: options.credentials || 'same-origin',
         });
 
-        const requestId = readRequestId(response);
+        let requestId = readRequestId(response);
+
+        if (response.status === 403 && WRITE_METHODS.has(method)) {
+            const detail = await parseErrorDetail(response);
+            if (detail === 'CSRF 校验失败') {
+                const refreshedToken = await refreshCsrfToken(options.signal);
+                if (refreshedToken) {
+                    headers.set('X-CSRF-Token', refreshedToken);
+                    response = await fetch(input, {
+                        ...options,
+                        signal: options.signal,
+                        method,
+                        headers,
+                        credentials: options.credentials || 'same-origin',
+                    });
+                    requestId = readRequestId(response);
+                }
+            }
+        }
 
         if (response.status === 401) {
             window.location.assign('/login');
             throw new ApiError('登录已失效，请重新登录后继续。', {status: 401, requestId, response});
         }
         if (response.status === 403) {
-            const error = new PermissionError('无权执行此操作', {requestId, response});
+            const message = await parseErrorDetail(response);
+            const error = new PermissionError(message, {requestId, response});
             window.dispatchEvent(new CustomEvent('aiworker:permission-denied', {
                 detail: {message: error.message},
             }));

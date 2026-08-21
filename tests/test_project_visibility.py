@@ -227,9 +227,11 @@ def test_project_author_owns_drafts_and_managed_reader_sees_approved_only(
         workflow_task_id=author_task["id"],
     )
 
-    assert clients["other"].patch(
-        f"/api/creative/projects/{project['id']}", json={"name": "stolen"}
-    ).status_code == 403
+    member_update = clients["other"].patch(
+        f"/api/creative/projects/{project['id']}", json={"name": "member edit"}
+    )
+    assert member_update.status_code == 200
+    assert member_update.json()["name"] == "member edit"
     owner_view = clients["owner"].get(f"/api/creative/projects/{project['id']}")
     writer_view = clients["writer"].get(f"/api/creative/projects/{project['id']}")
     author_view = clients["author"].get(f"/api/creative/projects/{project['id']}")

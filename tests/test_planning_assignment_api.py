@@ -302,7 +302,11 @@ def test_screenwriter_creates_project_with_team_and_pool_tasks_idempotently(
         outsider_characters = client.post(
             f"/api/creative/projects/{project_id}/workflow-tasks/characters/ensure"
         )
-        assert outsider_characters.status_code == 403, outsider_characters.text
+        assert outsider_characters.status_code == 200, outsider_characters.text
+        assert outsider_characters.json()["task_type"] == "characters"
+        assert (
+            outsider_characters.json()["assignee_user_id"] == outsider.user_id
+        )
 
         script_task = next(
             task for task in first_tasks if task["task_type"] == "script"
@@ -315,7 +319,8 @@ def test_screenwriter_creates_project_with_team_and_pool_tasks_idempotently(
         outsider_update = client.patch(
             f"/api/creative/projects/{project_id}", json={"name": "越权修改"}
         )
-        assert outsider_update.status_code == 403
+        assert outsider_update.status_code == 200, outsider_update.text
+        assert outsider_update.json()["name"] == "越权修改"
 
         app.dependency_overrides[creative_api_principal] = lambda: selection_reader
         app.dependency_overrides[current_principal] = lambda: selection_reader
@@ -578,8 +583,8 @@ def test_unassigned_writer_claims_only_idle_established_writing_stage(
         (member["user_id"], member["project_role"], member["status"])
         for member in workflow.list_project_members(project_id)
     }
-    with pytest.raises(PermissionError):
-        workflow.claim_task(characters["id"], writer)
+    claimed_characters = workflow.claim_task(characters["id"], writer)
+    assert claimed_characters["assignee_user_id"] == writer.user_id
     with pytest.raises(PermissionError, match="already being handled"):
         workflow.claim_task(spare_script["id"], writer)
 

@@ -65,9 +65,14 @@ class ApprovalService:
         canonical = self._canonical_json(content)
         actor_id = self.repository._actor_id(actor)
         with self.repository.identity_repository.transaction() as connection:
-            self.repository._live_actor(connection, actor_id)
+            live_actor = self.repository._live_actor(connection, actor_id)
             task = self.repository._require_task(connection, task_id)
-            if task["assignee_user_id"] != actor_id:
+            if (
+                task["assignee_user_id"] != actor_id
+                and not self.repository._can_edit_project_task(
+                    connection, task, live_actor
+                )
+            ):
                 raise PermissionError("only the task assignee may create a draft")
             if parent_submission_id is not None:
                 parent = self._require_submission(connection, parent_submission_id)
@@ -103,13 +108,18 @@ class ApprovalService:
     ) -> dict[str, Any]:
         actor_id = self.repository._actor_id(actor)
         with self.repository.identity_repository.connect() as connection:
-            self.repository._live_actor(connection, actor_id)
+            live_actor = self.repository._live_actor(connection, actor_id)
             submission = self._require_submission(connection, submission_id)
             task = self.repository._require_task(connection, submission["task_id"])
-        if submission["status"] != "draft":
-            raise ValueError("only a draft submission is editable")
-        if task["assignee_user_id"] != actor_id:
-            raise PermissionError("only the task assignee may edit this draft")
+            if submission["status"] != "draft":
+                raise ValueError("only a draft submission is editable")
+            if (
+                task["assignee_user_id"] != actor_id
+                and not self.repository._can_edit_project_task(
+                    connection, task, live_actor
+                )
+            ):
+                raise PermissionError("only the task assignee may edit this draft")
         return submission
 
     def submit(
@@ -125,8 +135,13 @@ class ApprovalService:
             if before["status"] != "draft":
                 raise ValueError("only a draft submission can be submitted")
             task = self.repository._require_task(connection, before["task_id"])
-            self.repository._live_actor(connection, actor_id)
-            if task["assignee_user_id"] != actor_id:
+            live_actor = self.repository._live_actor(connection, actor_id)
+            if (
+                task["assignee_user_id"] != actor_id
+                and not self.repository._can_edit_project_task(
+                    connection, task, live_actor
+                )
+            ):
                 raise PermissionError("only the task assignee may submit")
             canonical = self._canonical_json(
                 before["content_snapshot"]

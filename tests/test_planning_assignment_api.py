@@ -218,6 +218,14 @@ def test_screenwriter_creates_project_with_team_and_pool_tasks_idempotently(
         assert writer_user["id"] in {
             item["user_id"] for item in writer_candidates.json()
         }
+        writer_candidates_by_id = {
+            item["user_id"]: item for item in writer_candidates.json()
+        }
+        assert writer_candidates_by_id[creator.user_id]["is_current_user"] is True
+        assert all(
+            item["is_current_user"] is (item["user_id"] == creator.user_id)
+            for item in writer_candidates.json()
+        )
 
         first = client.post(
             f"/api/creative/topics/{topic['id']}/planning-assignment", json=payload

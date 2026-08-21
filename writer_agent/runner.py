@@ -46,11 +46,13 @@ class WriterActionRunner:
         orchestrator: WriterProjectOrchestrator,
         job_manager: JobManager,
         principal_loader: Callable[[str], Principal | None],
+        audit_service: Any | None = None,
     ) -> None:
         self.store = store
         self.orchestrator = orchestrator
         self.job_manager = job_manager
         self.principal_loader = principal_loader
+        self.audit_service = audit_service
         self._poll_event = threading.Event()
         self._owner_id = f"writer-runner-{uuid.uuid4().hex}"
         self._lease_seconds = 30.0
@@ -102,6 +104,49 @@ class WriterActionRunner:
             target=self.run, args=(action_id, actor), daemon=True
         )
         thread.start()
+
+    def _audit_terminal(
+        self,
+        action: dict[str, Any],
+        actor: Principal,
+        *,
+        error_code: str | None = None,
+    ) -> None:
+        if self.audit_service is None:
+            return
+        record = getattr(self.audit_service, "record", None)
+        if not callable(record):
+            return
+        job_refs = [
+            {"job_id": str(step["job_id"])}
+            for step in self.store.list_steps(str(action["id"]))
+            if step.get("job_id")
+        ]
+        try:
+            record(
+                actor=actor,
+                action="writer.action.execution",
+                target_type="writer_action",
+                target_id=str(action["id"]),
+                project_id=(
+                    str(action["project_id"])
+                    if action.get("project_id") is not None
+                    else None
+                ),
+                before=None,
+                after={
+                    "action_id": action["id"],
+                    "project_id": action.get("project_id"),
+                    "stage": action.get("target_stage"),
+                    "status": action.get("status"),
+                    "job_refs": job_refs,
+                    **({"error_code": error_code} if error_code else {}),
+                },
+                reason=None,
+                result=("success" if action.get("status") == "succeeded" else "failure"),
+            )
+        except TypeError:
+            return
 
     @staticmethod
     def _job_status(job: Any) -> str:
@@ -293,6 +338,7 @@ class WriterActionRunner:
             if action.get("phase") == "cancelling":
                 action = self.reconcile(action_id, actor)
                 if action["status"] == "cancelled":
+                    self._audit_terminal(action, actor)
                     return
                 self._poll_event.wait(0.2)
                 continue
@@ -408,7 +454,7 @@ class WriterActionRunner:
         succeeded = [step for step in steps if step["status"] == "succeeded"]
         if failed or blocked:
             first = failed[0] if failed else blocked[0]
-            self.store.fail_action(
+            terminal = self.store.fail_action(
                 action_id,
                 code=str(first.get("error_code") or "DEPENDENCY_FAILED"),
                 message=str(first.get("error_message") or "依赖步骤失败"),
@@ -416,14 +462,19 @@ class WriterActionRunner:
                 conflicting_action_id=first.get("conflicting_action_id"),
                 result={"partial": bool(succeeded)},
             )
+            self._audit_terminal(
+                terminal, actor, error_code=str(first.get("error_code") or "DEPENDENCY_FAILED")
+            )
         elif cancelled:
-            self.store.finish_action(
+            terminal = self.store.finish_action(
                 action_id,
                 status="cancelled",
                 result={"partial": bool(succeeded)},
             )
+            self._audit_terminal(terminal, actor)
         else:
-            self.store.finish_action(action_id, status="succeeded")
+            terminal = self.store.finish_action(action_id, status="succeeded")
+            self._audit_terminal(terminal, actor)
 
     def reconcile(self, action_id: str, actor: Principal) -> dict[str, Any]:
         self.store.require_action(action_id, actor.user_id)
@@ -434,7 +485,9 @@ class WriterActionRunner:
         if action.get("phase") == "cancelling" and not self.store.active_job_ids(
             action_id
         ) and not self.store.has_running_steps(action_id):
-            return self.store.finish_action(action_id, status="cancelled")
+            terminal = self.store.finish_action(action_id, status="cancelled")
+            self._audit_terminal(terminal, actor)
+            return terminal
         return action
 
     def retry_failed(
@@ -446,6 +499,20 @@ class WriterActionRunner:
     ) -> dict[str, Any]:
         source = self.store.require_retryable_action(action_id, actor.user_id)
         return self.store.create_retry_action(
+            source,
+            actor.user_id,
+            retry_request_id=retry_request_id or str(source["id"]),
+        )
+
+    def retry_failed_once(
+        self,
+        action_id: str,
+        actor: Principal,
+        *,
+        retry_request_id: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        source = self.store.require_retryable_action(action_id, actor.user_id)
+        return self.store.create_retry_action_once(
             source,
             actor.user_id,
             retry_request_id=retry_request_id or str(source["id"]),
@@ -464,7 +531,9 @@ class WriterActionRunner:
             self.job_manager.stop(job_id)
         if active_jobs or self.store.has_running_steps(action_id):
             return self.store.require_action(action["id"], actor.user_id)
-        return self.store.finish_action(action["id"], status="cancelled")
+        terminal = self.store.finish_action(action["id"], status="cancelled")
+        self._audit_terminal(terminal, actor)
+        return terminal
 
     def resume_active_actions(self) -> None:
         for action in self.store.list_active_actions():

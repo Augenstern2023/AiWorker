@@ -58,10 +58,14 @@ class ActionService:
         store: WriterAgentStore,
         runner: Any,
         audit_service: Any | None = None,
+        permission_service: Any | None = None,
+        workflow_repository: Any | None = None,
     ) -> None:
         self.store = store
         self.runner = runner
         self.audit_service = audit_service
+        self.permission_service = permission_service
+        self.workflow_repository = workflow_repository
 
     def _require_owned_action(self, command: ActionCommand) -> dict[str, Any]:
         session = self.store.get(command.session_id, command.actor.user_id)
@@ -72,7 +76,37 @@ class ActionService:
             raise WriterActionError("PROJECT_NOT_AVAILABLE", "动作不存在或无权访问")
         return action
 
-    def _audit(self, command: ActionCommand, action: dict[str, Any]) -> None:
+    def _require_current_write_authority(self, action: dict[str, Any], actor: Any) -> None:
+        """Recheck live project mutation authority immediately before mutation."""
+        if action["action_type"] == "project.create_original":
+            if "project.create" not in actor.permissions:
+                raise WriterActionError("PROJECT_CREATE_DENIED", "无权创建原创项目")
+            return
+        project_id = action.get("project_id")
+        if project_id is None:
+            raise WriterActionError("PROJECT_ACCESS_DENIED", "关联项目不可写")
+        if self.permission_service is None or self.workflow_repository is None:
+            return
+        project_key = str(project_id)
+        is_active_member = self.workflow_repository.is_active_project_member(
+            project_key, actor
+        )
+        can_write = (
+            is_active_member
+            or self.permission_service.can_access_assigned_project(actor, project_key)
+            or self.permission_service.can_access_managed_project(actor, project_key)
+        )
+        if not can_write:
+            raise WriterActionError("PROJECT_ACCESS_DENIED", "无权编辑当前项目")
+
+    def _audit(
+        self,
+        *,
+        actor: Any,
+        event: str,
+        action: dict[str, Any],
+        error_code: str | None = None,
+    ) -> None:
         if self.audit_service is None:
             return
         record = getattr(self.audit_service, "record", None)
@@ -80,8 +114,8 @@ class ActionService:
             return
         try:
             record(
-                actor=command.actor,
-                action=f"writer.action.{command.decision}",
+                actor=actor,
+                action=event,
                 target_type="writer_action",
                 target_id=str(action["id"]),
                 project_id=(
@@ -95,6 +129,8 @@ class ActionService:
                     "project_id": action.get("project_id"),
                     "stage": action.get("target_stage"),
                     "status": action.get("status"),
+                    "phase": action.get("phase"),
+                    **({"error_code": error_code} if error_code else {}),
                 },
                 reason=None,
                 result="success",
@@ -104,7 +140,8 @@ class ActionService:
             return
 
     def decide(self, command: ActionCommand) -> dict[str, Any]:
-        self._require_owned_action(command)
+        owned = self._require_owned_action(command)
+        self._require_current_write_authority(owned, command.actor)
         action, claimed = self.store.claim_pending_action_once(
             command.action_id,
             expected_revision=command.expected_revision,
@@ -112,11 +149,17 @@ class ActionService:
         )
         if not claimed:
             return action
-        self._audit(command, action)
         if command.decision == "confirm":
+            self._audit(
+                actor=command.actor, event="writer.action.claim", action=action
+            )
             self.runner.enqueue(action["id"], command.actor)
             return action
-        return self.runner.cancel(action["id"], command.actor)
+        cancelled = self.runner.cancel(action["id"], command.actor)
+        self._audit(
+            actor=command.actor, event="writer.action.cancel", action=cancelled
+        )
+        return cancelled
 
     def retry(
         self,
@@ -132,44 +175,14 @@ class ActionService:
         source = self.store.require_action(action_id, actor.user_id)
         if int(source["session_id"]) != int(session_id):
             raise WriterActionError("PROJECT_NOT_AVAILABLE", "动作不存在或无权访问")
-        retry_key = f"retry:{client_request_id.strip()}"
-        before = next(
-            (
-                item
-                for item in self.store.list_session_actions(session_id)
-                if item.get("idempotency_key") == retry_key
-            ),
-            None,
-        )
-        retry = self.runner.retry_failed(
+        self._require_current_write_authority(source, actor)
+        retry, created = self.runner.retry_failed_once(
             action_id,
             actor,
             retry_request_id=client_request_id,
         )
-        if before is None:
-            if self.audit_service is not None and callable(
-                getattr(self.audit_service, "record", None)
-            ):
-                self.audit_service.record(
-                    actor=actor,
-                    action="writer.action.retry",
-                    target_type="writer_action",
-                    target_id=str(retry["id"]),
-                    project_id=(
-                        str(retry["project_id"])
-                        if retry.get("project_id") is not None
-                        else None
-                    ),
-                    before={"source_action_id": action_id},
-                    after={
-                        "action_id": retry["id"],
-                        "project_id": retry.get("project_id"),
-                        "stage": retry.get("target_stage"),
-                        "status": retry.get("status"),
-                    },
-                    reason=None,
-                    result="success",
-                )
+        if created:
+            self._audit(actor=actor, event="writer.action.retry", action=retry)
             self.runner.enqueue(retry["id"], actor)
         return retry
 

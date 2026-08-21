@@ -1032,6 +1032,19 @@ class WriterAgentStore:
         *,
         retry_request_id: str,
     ) -> dict[str, Any]:
+        retry, _created = self.create_retry_action_once(
+            source, actor_user_id, retry_request_id=retry_request_id
+        )
+        return retry
+
+    def create_retry_action_once(
+        self,
+        source: dict[str, Any],
+        actor_user_id: str,
+        *,
+        retry_request_id: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically create a retry or return the prior retry with its origin."""
         retry_request_id = retry_request_id.strip()
         if not retry_request_id:
             raise WriterActionError(
@@ -1056,7 +1069,7 @@ class WriterAgentStore:
                     raise WriterActionError(
                         "IDEMPOTENCY_KEY_REUSED", "重试幂等键已用于不同动作"
                     )
-                return self._action_row(existing)
+                return self._action_row(existing), False
             active = conn.execute(
                 "SELECT id,target_key FROM writer_agent_actions "
                 "WHERE status IN ('queued','running') AND project_id=? "
@@ -1154,7 +1167,7 @@ class WriterAgentStore:
                     ),
                 )
             retry = self._require_action_conn(conn, action_id, actor_user_id)
-        return self._action_row(retry)
+        return self._action_row(retry), True
 
     def save_source_snapshot(self, snapshot: dict[str, Any], *, snapshot_id: str | None = None) -> dict[str, Any]:
         encoded = _json(snapshot)

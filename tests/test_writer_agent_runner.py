@@ -166,6 +166,39 @@ def test_runner_keeps_successful_episodes_and_retries_only_failures(
     ] == ["script.generate:2"]
 
 
+def test_runner_audits_success_failure_and_cancel_without_material_content(
+    runner_context,
+) -> None:
+    records = []
+    runner_context.runner.audit_service = SimpleNamespace(
+        record=lambda **kwargs: records.append(kwargs)
+    )
+
+    succeeded = seed_runner_action(
+        runner_context.store, runner_context.session, runner_context.actor,
+        stage="outline", episodes=range(1, 2), project_revision=4,
+    )
+    runner_context.runner.run(succeeded["id"], runner_context.actor)
+
+    failed = seed_runner_action(
+        runner_context.store, runner_context.session, runner_context.actor,
+        stage="beats", episodes=range(1, 2), project_revision=4,
+    )
+    runner_context.fail_once.add("beats.generate:1")
+    runner_context.runner.run(failed["id"], runner_context.actor)
+
+    cancelled = seed_runner_action(
+        runner_context.store, runner_context.session, runner_context.actor,
+        stage="script", episodes=range(1, 2), project_revision=4,
+    )
+    runner_context.runner.cancel(cancelled["id"], runner_context.actor)
+
+    by_status = {record["after"]["status"]: record for record in records}
+    assert set(by_status) == {"succeeded", "failed", "cancelled"}
+    assert by_status["failed"]["after"]["error_code"] == "GENERATION_FAILED"
+    assert all("content" not in record["after"] for record in records)
+
+
 def test_runner_marks_stale_upstream_without_writing(runner_context) -> None:
     """Skipping the pre-side-effect context check would write against stale upstream."""
     action = seed_runner_action(

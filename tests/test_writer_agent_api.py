@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from io import BytesIO
 from types import SimpleNamespace
@@ -20,12 +21,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pypdf import PdfWriter
 from pypdf.generic import DictionaryObject, NameObject, DecodedStreamObject
+import pytest
 
 from identity.dependencies import current_principal
 from identity.schema import Principal
 from writer_agent import api as writer_agent_api
 from writer_agent.action_service import ActionService
-from writer_agent.schema import ActionCommand
+from writer_agent.schema import ActionCommand, WriterActionError
 from writer_agent.store import WriterAgentStore
 from unittest.mock import MagicMock
 
@@ -223,6 +225,13 @@ def _writer_action_api_context(tmp_path):
             retry_request_id=retry_request_id,
         )
     )
+    runner.retry_failed_once.side_effect = (
+        lambda action_id, actor, *, retry_request_id: store.create_retry_action_once(
+            store.require_retryable_action(action_id, actor.user_id),
+            actor.user_id,
+            retry_request_id=retry_request_id,
+        )
+    )
     action_service = ActionService(store=store, runner=runner)
 
     def client_for(user_id: str) -> TestClient:
@@ -362,6 +371,254 @@ def test_retry_client_request_is_idempotent(tmp_path) -> None:
     assert first.status_code == second.status_code == 202
     assert first.json()["id"] == second.json()["id"]
     context.runner.enqueue.assert_called_once()
+
+
+def test_natural_language_message_id_is_idempotent_but_equal_text_ids_are_distinct(
+    tmp_path,
+) -> None:
+    context = _writer_action_api_context(tmp_path)
+    session = context.store.create("writer-1", "消息幂等", "生成剧本")
+    first_action = context.seed_pending(session["id"], "writer-1")
+    url = f"/api/writer-agent/sessions/{session['id']}/messages"
+
+    first = context.writer.post(
+        url, json={"message": "开始生成", "message_id": "message-replay"}
+    )
+    replay = context.writer.post(
+        url, json={"message": "开始生成", "message_id": "message-replay"}
+    )
+
+    second_action = context.store.create_action(
+        session_id=session["id"],
+        actor_user_id="writer-1",
+        action_type="creative.run_plan",
+        project_id=17,
+        idempotency_key="second-message-action",
+        request_hash="second-message-action",
+        payload={"target_stage": "script", "episode_start": 6, "episode_end": 10},
+        expected_context={"session_revision": 0, "project_revision": 1},
+        source_snapshot_id="snapshot-2",
+    )
+    second = context.writer.post(
+        url, json={"message": "开始生成", "client_message_id": "message-new"}
+    )
+
+    assert first.status_code == replay.status_code == second.status_code == 200
+    assert first_action["id"] in first.json()["messages"][-1]["action_ids"]
+    assert second_action["id"] in second.json()["messages"][-1]["action_ids"]
+    assert context.runner.enqueue.call_count == 2
+
+
+def test_admin_can_read_action_but_cannot_mutate_another_users_action(tmp_path) -> None:
+    context = _writer_action_api_context(tmp_path)
+    session = context.store.create("writer-1", "管理员读取", "生成剧本")
+    action = context.seed_pending(session["id"], "writer-1")
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = _admin_principal
+    app.include_router(
+        writer_agent_api.build_writer_agent_router(
+            tmp_path,
+            store=context.store,
+            action_service=ActionService(store=context.store, runner=context.runner),
+        )
+    )
+    admin = TestClient(app)
+
+    readable = admin.get(
+        f"/api/writer-agent/sessions/{session['id']}/actions/{action['id']}"
+    )
+    denied = admin.post(
+        f"/api/writer-agent/sessions/{session['id']}/actions/{action['id']}/decision",
+        json={
+            "decision": "confirm",
+            "expected_revision": 1,
+            "client_request_id": "admin-write",
+        },
+    )
+
+    assert readable.status_code == 200
+    assert denied.status_code == 404
+
+
+class _DenyProjectWrite:
+    def can_access_assigned_project(self, _actor, _project_id: str) -> bool:
+        return False
+
+    def can_access_managed_project(self, _actor, _project_id: str) -> bool:
+        return False
+
+
+class _InactiveProjectMembership:
+    def is_active_project_member(self, _project_id: str, _actor) -> bool:
+        return False
+
+
+def test_action_service_rechecks_revoked_project_write_before_claim_or_retry(
+    tmp_path,
+) -> None:
+    store = WriterAgentStore(tmp_path / "revoked-writer-actions.db")
+    actor = _principal(permissions=frozenset({"script.review.generate"}))
+    session = store.create(actor.user_id, "撤权", "生成剧本")
+    pending = store.create_action(
+        session_id=session["id"],
+        actor_user_id=actor.user_id,
+        action_type="creative.run_plan",
+        project_id=17,
+        idempotency_key="revoked-pending",
+        request_hash="revoked-pending",
+        payload={"target_stage": "script"},
+        expected_context={"project_revision": 1},
+        source_snapshot_id="snapshot",
+    )
+    runner = MagicMock()
+    service = ActionService(
+        store=store,
+        runner=runner,
+        permission_service=_DenyProjectWrite(),
+        workflow_repository=_InactiveProjectMembership(),
+    )
+
+    with pytest.raises(WriterActionError, match="PROJECT_ACCESS_DENIED"):
+        service.decide(
+            ActionCommand(
+                session_id=session["id"], action_id=pending["id"], decision="confirm",
+                actor=actor, expected_revision=1, client_request_id="revoked-confirm",
+            )
+        )
+
+    assert store.require_action(pending["id"], actor.user_id)["status"] == "pending"
+    runner.enqueue.assert_not_called()
+
+    store.claim_pending_action(pending["id"], expected_revision=1)
+    store.fail_action(
+        pending["id"], code="GENERATION_FAILED", message="失败", retryable=True
+    )
+    with pytest.raises(WriterActionError, match="PROJECT_ACCESS_DENIED"):
+        service.retry(
+            session_id=session["id"], action_id=pending["id"], actor=actor,
+            client_request_id="revoked-retry",
+        )
+
+    assert len(store.list_session_actions(session["id"])) == 1
+
+
+def test_original_project_confirmation_rechecks_project_create_permission(tmp_path) -> None:
+    store = WriterAgentStore(tmp_path / "original-project-permission.db")
+    actor = _principal(permissions=frozenset({"script.review.generate"}))
+    session = store.create(actor.user_id, "原创项目", "生成项目")
+    action = store.create_action(
+        session_id=session["id"], actor_user_id=actor.user_id,
+        action_type="project.create_original", project_id=None,
+        idempotency_key="original-project", request_hash="original-project",
+        payload={"source_card_id": "card-1"}, expected_context={},
+        source_snapshot_id="snapshot",
+    )
+    runner = MagicMock()
+    service = ActionService(store=store, runner=runner)
+
+    with pytest.raises(WriterActionError, match="PROJECT_CREATE_DENIED"):
+        service.decide(
+            ActionCommand(
+                session_id=session["id"], action_id=action["id"], decision="confirm",
+                actor=actor, expected_revision=1, client_request_id="original-create",
+            )
+        )
+
+    assert store.require_action(action["id"], actor.user_id)["status"] == "pending"
+    runner.enqueue.assert_not_called()
+
+
+class _ConcurrentRetryRunner:
+    def __init__(self, store: WriterAgentStore) -> None:
+        self.store = store
+        self.barrier = threading.Barrier(2)
+        self.enqueued: list[str] = []
+        self.lock = threading.Lock()
+
+    def retry_failed(self, action_id, actor, *, retry_request_id):
+        self.barrier.wait(timeout=5)
+        source = self.store.require_retryable_action(action_id, actor.user_id)
+        return self.store.create_retry_action(
+            source, actor.user_id, retry_request_id=retry_request_id
+        )
+
+    def retry_failed_once(self, action_id, actor, *, retry_request_id):
+        source = self.store.require_retryable_action(action_id, actor.user_id)
+        return self.store.create_retry_action_once(
+            source, actor.user_id, retry_request_id=retry_request_id
+        )
+
+    def enqueue(self, action_id, _actor) -> None:
+        with self.lock:
+            self.enqueued.append(action_id)
+
+
+def test_concurrent_retry_request_creates_and_enqueues_exactly_once(tmp_path) -> None:
+    store = WriterAgentStore(tmp_path / "concurrent-retry.db")
+    actor = _principal()
+    session = store.create(actor.user_id, "并发重试", "生成剧本")
+    source = store.create_action(
+        session_id=session["id"], actor_user_id=actor.user_id,
+        action_type="creative.run_plan", project_id=17,
+        idempotency_key="concurrent-source", request_hash="concurrent-source",
+        payload={"target_stage": "script"}, expected_context={"project_revision": 1},
+        source_snapshot_id="snapshot",
+    )
+    store.claim_pending_action(source["id"], expected_revision=1)
+    store.fail_action(source["id"], code="GENERATION_FAILED", message="失败", retryable=True)
+    runner = _ConcurrentRetryRunner(store)
+    service = ActionService(store=store, runner=runner)
+    errors: list[BaseException] = []
+
+    def retry() -> None:
+        try:
+            service.retry(
+                session_id=session["id"], action_id=source["id"], actor=actor,
+                client_request_id="same-concurrent-retry",
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=retry) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not errors
+    assert len(runner.enqueued) == 1
+    assert len(store.list_session_actions(session["id"])) == 2
+
+
+def test_cancel_audit_records_the_actual_cancelled_result(tmp_path) -> None:
+    store = WriterAgentStore(tmp_path / "cancel-audit.db")
+    actor = _principal()
+    session = store.create(actor.user_id, "取消审计", "生成剧本")
+    action = store.create_action(
+        session_id=session["id"], actor_user_id=actor.user_id,
+        action_type="creative.run_plan", project_id=17,
+        idempotency_key="cancel-audit", request_hash="cancel-audit",
+        payload={"target_stage": "script"}, expected_context={"project_revision": 1},
+        source_snapshot_id="snapshot",
+    )
+    runner = MagicMock()
+    runner.cancel.side_effect = lambda action_id, _actor: store.finish_action(
+        action_id, status="cancelled"
+    )
+    records = []
+    audit = MagicMock()
+    audit.record.side_effect = lambda **kwargs: records.append(kwargs)
+    service = ActionService(store=store, runner=runner, audit_service=audit)
+
+    service.decide(
+        ActionCommand(
+            session_id=session["id"], action_id=action["id"], decision="cancel",
+            actor=actor, expected_revision=1, client_request_id="cancel-audit-request",
+        )
+    )
+
+    assert records[-1]["action"] == "writer.action.cancel"
+    assert records[-1]["after"]["status"] == "cancelled"
 
 
 def _admin_client(tmp_path) -> TestClient:

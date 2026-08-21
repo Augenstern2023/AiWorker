@@ -564,11 +564,14 @@ writer_action_runner = WriterActionRunner(
     principal_loader=lambda user_id: identity_permission_service.principal_for_user(
         user_id, "writer-agent-resume"
     ),
+    audit_service=audit_service,
 )
 writer_action_service = ActionService(
     store=writer_agent_store,
     runner=writer_action_runner,
     audit_service=audit_service,
+    permission_service=identity_permission_service,
+    workflow_repository=workflow_repository,
 )
 navigation_repository = (
     NavigationRepository(system_database) if system_database is not None else None
@@ -686,6 +689,8 @@ register_writer_agent_routes(
     action_service=writer_action_service,
     runner=writer_action_runner,
     audit_service=audit_service,
+    permission_service=identity_permission_service,
+    workflow_repository=workflow_repository,
 )
 
 # Models

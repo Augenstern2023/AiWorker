@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import re
 import sqlite3
 import time
@@ -28,6 +27,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
 from urllib.parse import unquote
+from uuid import uuid4
 
 import config
 from analysis.llm import create_llm_provider_from_config
@@ -79,6 +79,8 @@ class ChatRequest(BaseModel):
     message: str
     display_user_message: bool = True
     reference_refs: list[ReferenceSelection] = Field(default_factory=list, max_length=10)
+    message_id: str | None = Field(default=None, min_length=1, max_length=200)
+    client_message_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class ActionDecisionRequest(BaseModel):
@@ -189,6 +191,8 @@ def build_writer_agent_router(
     action_service: ActionService | None = None,
     runner: Any | None = None,
     audit_service: Any | None = None,
+    permission_service: Any | None = None,
+    workflow_repository: Any | None = None,
 ) -> APIRouter:
     store = store or WriterAgentStore(
         Path(runtime_dir) / "writer_agent" / "writer_agent.db"
@@ -196,7 +200,11 @@ def build_writer_agent_router(
     resolved_action_service = action_service
     if resolved_action_service is None and runner is not None:
         resolved_action_service = ActionService(
-            store=store, runner=runner, audit_service=audit_service
+            store=store,
+            runner=runner,
+            audit_service=audit_service,
+            permission_service=permission_service,
+            workflow_repository=workflow_repository,
         )
     authority_repository = creative_repository or getattr(
         creative_application_service, "repository", None
@@ -221,6 +229,7 @@ def build_writer_agent_router(
     def action_error(exc: WriterActionError) -> HTTPException:
         status = {
             "PROJECT_ACCESS_DENIED": 403,
+            "PROJECT_CREATE_DENIED": 403,
             "PROJECT_NOT_AVAILABLE": 404,
             "ACTION_NOT_PENDING": 409,
             "ACTION_REVISION_MISMATCH": 409,
@@ -367,6 +376,23 @@ def build_writer_agent_router(
         if not message:
             raise HTTPException(400, "请输入要讨论的问题")
         history = list(session.get("messages") or [])
+        message_id = (
+            payload.client_message_id
+            or payload.message_id
+            or f"message-{uuid4().hex}"
+        )
+        prior_message = next(
+            (
+                item
+                for item in history
+                if item.get("role") == "user" and item.get("message_id") == message_id
+            ),
+            None,
+        )
+        if prior_message is not None:
+            if prior_message.get("content") != message:
+                raise HTTPException(409, "消息 ID 已用于不同内容")
+            return session
         try:
             natural_decision = match_natural_language_decision(
                 message, store.list_session_actions(session_id)
@@ -377,9 +403,7 @@ def build_writer_agent_router(
             action = store.require_action(
                 natural_decision.action_id, owned_user_id(principal)
             )
-            request_id = "message:" + hashlib.sha256(
-                f"{session_id}:{action['id']}:{message}".encode("utf-8")
-            ).hexdigest()
+            request_id = f"message:{session_id}:{action['id']}:{message_id}"
             try:
                 updated_action = require_action_service().decide(
                     ActionCommand(
@@ -398,6 +422,7 @@ def build_writer_agent_router(
                     {
                         "role": "user",
                         "content": message,
+                        "message_id": message_id,
                         "display_user_message": payload.display_user_message,
                     },
                     {
@@ -483,6 +508,7 @@ def build_writer_agent_router(
             {
                 "role": "user",
                 "content": message,
+                "message_id": message_id,
                 "display_user_message": payload.display_user_message,
             },
             {
@@ -500,10 +526,10 @@ def build_writer_agent_router(
         principal: Principal = Depends(current_principal),
     ) -> dict[str, Any]:
         assert_access(principal)
-        if store.get(session_id, owned_user_id(principal)) is None:
+        if store.get(session_id, session_user_id(principal)) is None:
             raise HTTPException(404, "创作动作不存在")
         try:
-            action = store.require_action(action_id, owned_user_id(principal))
+            action = store.require_action(action_id, session_user_id(principal))
         except WriterActionError as exc:
             raise action_error(exc) from exc
         if int(action["session_id"]) != session_id:
@@ -612,6 +638,8 @@ def register_writer_agent_routes(
     action_service: ActionService | None = None,
     runner: Any | None = None,
     audit_service: Any | None = None,
+    permission_service: Any | None = None,
+    workflow_repository: Any | None = None,
 ) -> None:
     app.include_router(
         build_writer_agent_router(
@@ -622,5 +650,7 @@ def register_writer_agent_routes(
             action_service=action_service,
             runner=runner,
             audit_service=audit_service,
+            permission_service=permission_service,
+            workflow_repository=workflow_repository,
         )
     )

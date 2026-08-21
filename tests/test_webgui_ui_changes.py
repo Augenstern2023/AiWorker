@@ -18,6 +18,8 @@
 
 import json
 import os
+import shutil
+import subprocess
 import time
 import zipfile
 from pathlib import Path
@@ -656,7 +658,7 @@ def test_webgui_registers_phase4_routes_and_flat_project_workspace():
     assert "/api/jobs/{job_id}/retry" in paths
     assert "创作项目" in html
     assert "currentTab" not in html
-    assert "/planning/projects" in _source("web/navigation_service.py")
+    assert "/planning/projects" in _source("web/page_routes.py")
     assert "fetchCreativeProjects" in html
     assert "generateProjectBlueprints" in html
     assert "completeProjectBrief" in html
@@ -822,14 +824,61 @@ def test_today_hits_switches_generation_and_display_by_rank_source():
     assert "['全部', '真人剧', '漫剧', 'AI剧']" in tasks
     assert "changeCreativeRankSource" in topics
     assert "rank_source=${encodeURIComponent(this.creative.rankSource)}" in topics
-    assert "rank_source: rankSource" in breakdowns
-    assert "creative:topics:hits:${platform}:${rankSource}" in breakdowns
-    assert "window.aiworkerUi?.writeCache(cacheKey, items" in breakdowns
+    assert "rank_source: this.creative.rankSource" in breakdowns
+    assert "creative:topics:hits:${this.creative.platform}:${this.creative.rankSource}" in topics
+    assert "window.aiworkerUi?.writeCache(cacheKey, items" in topics
     assert 'aria-label="榜单来源"' in section
     assert "creativeRankSourceOptions()" in section
     assert "榜单来源" in section
     assert "topic.rank_source || topic.rank_type || '-'" in section
     assert "topic.platform" not in section
+
+
+def test_today_hits_restores_the_saved_rank_source_for_the_selected_platform():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the browser module")
+
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const values = new Map([
+  ['aiworker.selection.hits.rank-source.hg', '漫剧'],
+]);
+global.window = {
+  aiworkerModules: [],
+  addEventListener: () => {},
+  localStorage: {
+    getItem: (key) => values.get(key) || null,
+    setItem: (key, value) => values.set(key, String(value)),
+  },
+};
+vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'), {
+  filename: process.argv[1],
+});
+const component = window.aiworkerModules[0]();
+const state = Object.assign({}, component, {
+  creative: {platform: 'hg', rankSource: '榜单'},
+  generateCreativeTopics: async () => {},
+});
+(async () => {
+  await state.changeCreativePlatform();
+  if (state.creative.rankSource !== '漫剧') {
+    throw new Error(`expected saved hg source, got ${state.creative.rankSource}`);
+  }
+})().catch((error) => {
+  console.error(error.stack || error);
+  process.exit(1);
+});
+'''
+    result = subprocess.run(
+        [node, "-e", script, "static/js/selection/topics.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_today_hits_initial_load_generates_the_latest_top_ten():
@@ -948,7 +997,10 @@ def test_saving_a_scene_script_refreshes_topic_library_state():
     )[0]
 
     assert "item.stage === 'script'" in save_method
-    assert "await this.fetchTopicLibrary();" in save_method
+    assert "await this.refreshCreativeTopicLibrary();" in save_method
+    assert "await this.fetchTopicLibrary();" in creative.split(
+        "async refreshCreativeTopicLibrary()", 1
+    )[1].split("async", 1)[0]
 
 
 def test_completed_scene_script_generation_refreshes_topic_library_state():
@@ -958,7 +1010,7 @@ def test_completed_scene_script_generation_refreshes_topic_library_state():
     )[0]
 
     assert "action === 'script'" in reconcile_method
-    assert "await this.fetchTopicLibrary();" in reconcile_method
+    assert "await this.refreshCreativeTopicLibrary();" in reconcile_method
 
 
 def test_scene_script_preview_and_download_use_delivery_formats():
@@ -1032,8 +1084,8 @@ def test_scene_script_page_uses_the_writing_workspace_layout():
     page = _source("templates/writing/scripts.html")
 
     assert '{% extends "layouts/base.html" %}' in page
-    assert 'src="/static/js/common/creative.js"' in page
-    assert 'src="/static/js/writing/scripts.js"' in page
+    assert 'src="/static/js/common/creative.js?v={{ asset_version }}"' in page
+    assert 'src="/static/js/writing/scripts.js?v={{ asset_version }}"' in page
 
 
 def test_locked_characters_offer_a_direct_link_to_episode_outlines():
@@ -1772,15 +1824,13 @@ def test_hongguo_drama_routes_replace_legacy_proxy_routes():
     admin_page = _source("templates/admin/config.html")
     admin_actions = _source("static/js/admin/workspace.js")
     drama_actions = _source("static/js/selection/dramas.js")
-    assert "红果抓包下载设置" in admin_page
-    assert "capture_root" in admin_actions
-    assert "capture_service_url" in admin_actions
-    assert "wait_timeout_seconds" in admin_actions
-    assert "检查目录与服务" in admin_page
-    assert "配置中心地址" not in admin_page
-    assert "activationCode" not in admin_actions
-    assert "captureStatusLabel" in drama_actions
-    assert "仅检索外部抓包服务" in drama_page
+    assert "剧目接口设置" in admin_page
+    assert "配置中心地址" in admin_page
+    assert "activationCode" in admin_actions
+    assert "config_url" in admin_actions
+    assert "/api/hongguo/drama/settings" in admin_actions
+    assert "dramaReviewStatusLabel" in drama_actions
+    assert "输入完整剧名，检索全部红果剧源" in drama_page
     review_actions = _source("static/js/common/creative.js")
     assert "剧评检索下载" in drama_page
     assert "startDramaReviewCapture" in drama_page
@@ -1804,7 +1854,7 @@ def test_hongguo_drama_routes_replace_legacy_proxy_routes():
     assert "breakdownEditor.record?.status !== 'draft'" in html
     assert "episodesLoading" in html
     assert 'x-show="dramaDownload.searching"' in html
-    assert "检索已抓包红果剧目" in drama_page
+    assert "检索并选择剧集" in drama_page
     assert "onDramaTitleInput" not in drama_page
     assert "chooseDramaSuggestion" not in drama_page
     assert "topic-evidence-drawer" not in html
@@ -1815,7 +1865,7 @@ def test_hongguo_drama_routes_replace_legacy_proxy_routes():
     assert "data-bs-toggle=\"tooltip\"" in html
     assert "置信度" not in html
     assert "可仿制/成本" not in html
-    assert "红果检索已降级至抖音" not in html
+    assert "红果检索已降级至抖音" in drama_page
     assert "批量下载抖音视频并解析" in html
     assert "selectedAwemeIds" in html
     assert "toggleAllDouyinDownloadCandidates" in html

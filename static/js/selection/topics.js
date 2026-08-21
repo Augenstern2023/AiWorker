@@ -10,6 +10,45 @@ window.aiworkerModules.push(() => ({
 
                 async changeCreativePlatform() {
                     this.rememberCreativePlatform();
+                    const sources = this.creativeRankSourceOptions();
+                    this.creative.rankSource = this.creativeRankSourcePreference(sources);
+                    await this.generateCreativeTopics();
+                },
+
+                creativeRankSourceOptions() {
+                    return this.creative.platform === 'hg'
+                        ? ['全部', '真人剧', '漫剧', 'AI剧']
+                        : ['榜单', '热榜'];
+                },
+
+                creativeRankSourcePreference(sources = this.creativeRankSourceOptions()) {
+                    try {
+                        const platform = this.creative.platform === 'hg' ? 'hg' : 'dy';
+                        const stored = window.localStorage.getItem(
+                            `aiworker.selection.hits.rank-source.${platform}`
+                        );
+                        return sources.includes(stored) ? stored : sources[0];
+                    } catch (_) {
+                        return sources[0];
+                    }
+                },
+
+                rememberCreativeRankSource() {
+                    try {
+                        const platform = this.creative.platform === 'hg' ? 'hg' : 'dy';
+                        window.localStorage.setItem(
+                            `aiworker.selection.hits.rank-source.${platform}`,
+                            this.creative.rankSource
+                        );
+                    } catch (_) {
+                        // Private browsing can deny storage; the current page still works.
+                    }
+                },
+
+                async changeCreativeRankSource(rankSource) {
+                    if (!this.creativeRankSourceOptions().includes(rankSource)) return;
+                    this.creative.rankSource = rankSource;
+                    this.rememberCreativeRankSource();
                     await this.generateCreativeTopics();
                 },
 
@@ -17,7 +56,7 @@ window.aiworkerModules.push(() => ({
                     this.creative.loading = true;
                     this.creative.error = '';
                     try {
-                        const cacheKey = `creative:topics:hits:${this.creative.platform}`;
+                        const cacheKey = `creative:topics:hits:${this.creative.platform}:${this.creative.rankSource}`;
                         const cached = window.aiworkerUi?.readCache(cacheKey);
                         if (cached && !cached.stale) {
                             this.creative.items = cached.value;
@@ -25,7 +64,7 @@ window.aiworkerModules.push(() => ({
                             return;
                         }
                         const res = await window.aiworkerUi.requestKey(cacheKey, async (signal) => {
-                            return aiworkerApi.request(`/api/creative/topics?platform=${encodeURIComponent(this.creative.platform)}&status=pending_review`, {signal});
+                            return aiworkerApi.request(`/api/creative/topics?platform=${encodeURIComponent(this.creative.platform)}&rank_source=${encodeURIComponent(this.creative.rankSource)}&status=pending_review`, {signal});
                         });
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.detail || '读取选题失败');

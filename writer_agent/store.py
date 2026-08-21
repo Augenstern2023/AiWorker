@@ -1137,7 +1137,8 @@ class WriterAgentStore:
                 "(id,session_id,actor_user_id,action_type,status,revision,project_id,project_id_json,"
                 "target_key,idempotency_key,request_hash,source_snapshot_id,"
                 "expected_context_json,payload_json,retry_of_action_id,root_action_id,"
-                "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "result_json,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     action_id,
                     current["session_id"],
@@ -1155,6 +1156,7 @@ class WriterAgentStore:
                     current["payload_json"],
                     current["id"],
                     current["root_action_id"] or current["id"],
+                    current["result_json"],
                     now,
                     now,
                 ),

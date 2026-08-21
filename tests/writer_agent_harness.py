@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import re
+import threading
 from types import SimpleNamespace
 from typing import Any, Iterator
 from urllib.parse import quote
@@ -126,6 +127,14 @@ class DeterministicCreativeProvider:
 
     async def complete_json(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
         text = str(messages)
+        system_prompt = next(
+            (
+                str(message.get("content") or "")
+                for message in messages
+                if message.get("role") == "system"
+            ),
+            "",
+        )
         user = next(
             (
                 str(message.get("content") or "")
@@ -142,6 +151,37 @@ class DeterministicCreativeProvider:
             "你是短剧/漫剧编剧大师" in str(message.get("content") or "")
             for message in messages
         )
+        if is_writer_chat and "剧本" in round_message and "创建项目" in round_message:
+            return {
+                "reply": "已整理创建项目并生成剧本的计划",
+                "cards": [{
+                    "card_id": "brief-script-1",
+                    "card_type": "brief",
+                    "content": self.brief(),
+                    "assumptions": ["低成本"],
+                }],
+                "proposed_actions": [{
+                    "action_type": "project.create_original",
+                    "title": "创建原创项目并生成分集剧本",
+                    "source_card_id": "brief-script-1",
+                    "target_stage": "script",
+                    "episode_start": 1,
+                    "episode_end": 5,
+                    "payload": {
+                        "seed_text": "未来公司按照员工情绪发工资",
+                        "name": "情绪公司",
+                        "genre": "都市奇幻",
+                        "target_platform": "hg",
+                        "target_audience": "18-35岁",
+                        "target_episode_count": 5,
+                        "episode_duration_seconds": 120,
+                        "cost_level": "low",
+                        "content_boundaries": [],
+                        "reference_refs": [],
+                    },
+                    "assumptions": ["低成本"],
+                }],
+            }
         if is_writer_chat and "剧本" in round_message:
             return {
                 "reply": "已整理剧本生成计划",
@@ -151,8 +191,30 @@ class DeterministicCreativeProvider:
                     "payload": {}, "assumptions": ["沿用已锁定上游成果"],
                 }],
             }
-        if re.search(r"根据第\s*\d+\s*集已锁定 Beats 生成可拍摄的场次剧本", text):
-            return self.script(1)
+        beats_match = re.search(
+            r"为第\s*(\d+)\s*集生成 Beats。顶层必须返回 JSON 对象",
+            system_prompt,
+        )
+        if beats_match:
+            return self.beats(int(beats_match.group(1)))
+        beats_chunk_match = re.search(
+            r"批量生成第\s*(\d+)\s*[-–]\s*(\d+)\s*集 Beats。顶层必须返回",
+            system_prompt,
+        )
+        if beats_chunk_match:
+            start, end = (int(value) for value in beats_chunk_match.groups())
+            return {
+                "episodes": [
+                    {"episode": episode, **self.beats(episode)}
+                    for episode in range(start, end + 1)
+                ]
+            }
+        script_match = re.search(
+            r"根据第\s*(\d+)\s*集已锁定 Beats 生成可拍摄的场次剧本",
+            system_prompt,
+        )
+        if script_match:
+            return self.script(int(script_match.group(1)))
         if "人物卡和人物关系" in text:
             return self.characters()
         if "汇总全集剧情概览" in text:
@@ -230,7 +292,8 @@ class DeterministicCreativeProvider:
             episode = int(re.findall(r"episode_number[^0-9]*(\d+)", text)[-1]) if re.findall(r"episode_number[^0-9]*(\d+)", text) else 1
             return self.beats(episode)
         if "场次剧本" in text or "episode_title" in text:
-            return self.script(1)
+            episode_match = re.findall(r"episode_number[^0-9]*(\d+)", text)
+            return self.script(int(episode_match[-1]) if episode_match else 1)
         target_script = "剧本" in round_message
         if target_script:
             return {
@@ -260,6 +323,8 @@ class DeterministicJobManager:
         self.jobs: dict[str, dict[str, Any]] = {}
         self._by_operation: dict[str, str] = {}
         self._fail_once: set[str] = set()
+        self.status_history: dict[str, list[str]] = {}
+        self.job_created = threading.Event()
         self.wake = lambda: None
 
     def fail_once(self, step_key: str) -> None:
@@ -280,7 +345,9 @@ class DeterministicJobManager:
     def _create(self, operation_id: str, payload: dict[str, Any]) -> SimpleNamespace:
         job_id = f"deterministic-{len(self.jobs) + 1}"
         self.jobs[job_id] = {"job_id": job_id, "status": "pending", "payload": payload}
+        self.status_history[job_id] = ["pending"]
         self._by_operation[operation_id] = job_id
+        self.job_created.set()
         return SimpleNamespace(job_id=job_id, status="pending")
 
     def find_job_by_operation(self, operation_id: str) -> dict[str, Any] | None:
@@ -288,33 +355,80 @@ class DeterministicJobManager:
         return self.jobs.get(job_id) if job_id else None
 
     def get_job(self, job_id: str) -> dict[str, Any]:
-        if self.jobs[job_id]["status"] == "pending":
-            self.advance()
         return dict(self.jobs[job_id])
 
     def stop(self, job_id: str) -> None:
-        self.jobs[job_id]["status"] = "cancelled"
+        self._set_status(self.jobs[job_id], "cancelled")
 
-    def advance(self) -> None:
-        for job in self.jobs.values():
-            if job["status"] != "pending":
+    def _set_status(self, job: dict[str, Any], status: str) -> None:
+        job["status"] = status
+        history = self.status_history.setdefault(job["job_id"], [])
+        if not history or history[-1] != status:
+            history.append(status)
+
+    def advance(self) -> bool:
+        terminal_changed = False
+        # Advancing a terminal job wakes the runner, which can enqueue the
+        # next job concurrently.  Iterate over a stable snapshot so one tick
+        # models a scheduler cycle instead of observing a mutable dict view.
+        for job in list(self.jobs.values()):
+            if job["status"] == "pending":
+                self._set_status(job, "running")
                 continue
-            job["status"] = "running"
+            if job["status"] != "running":
+                continue
             extra = job["payload"]["extra"]
             key = f"{extra.get('normalized_stage')}.generate:{extra.get('episode_number')}"
             if key in self._fail_once:
                 self._fail_once.remove(key)
-                job["status"] = "failed"
+                self._set_status(job, "failed")
+                terminal_changed = True
                 continue
             try:
                 data = dict(job["payload"])
                 data["job_id"] = job["job_id"]
                 asyncio.run(phase4_worker.run(CrawlJob.from_dict(data)))
-            except Exception:
-                job["status"] = "failed"
+            except Exception as exc:
+                job["error"] = repr(exc)
+                self._set_status(job, "failed")
+                terminal_changed = True
             else:
-                job["status"] = "succeeded"
+                self._set_status(job, "succeeded")
+                terminal_changed = True
         self.wake()
+        return terminal_changed
+
+
+class _SimulatedRunnerStop(Exception):
+    """End one in-process runner without terminalizing its durable action."""
+
+
+class _RestartableWriterActionRunner(WriterActionRunner):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._stop_requested = threading.Event()
+        self.stopped = threading.Event()
+        self.refreshed = threading.Event()
+
+    def request_process_stop(self) -> None:
+        self._stop_requested.set()
+        self._poll_event.set()
+
+    def _refresh_job_steps(self, action_id: str, actor: Principal) -> dict[str, Any]:
+        if self._stop_requested.is_set():
+            raise _SimulatedRunnerStop
+        action = super()._refresh_job_steps(action_id, actor)
+        self.refreshed.set()
+        return action
+
+    def run(self, action_id: str, actor: Principal) -> None:
+        try:
+            super().run(action_id, actor)
+        except _SimulatedRunnerStop:
+            return
+        finally:
+            if self._stop_requested.is_set():
+                self.stopped.set()
 
 
 class WriterAgentE2EHarness:
@@ -327,6 +441,10 @@ class WriterAgentE2EHarness:
     job_manager: DeterministicJobManager
     workflow_repository: WorkflowRepository
     database: SystemDatabase
+    orchestrator: WriterProjectOrchestrator
+    runner: _RestartableWriterActionRunner
+    action_service: ActionService
+    job_bound: threading.Event
 
     @classmethod
     def create(cls, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> "WriterAgentE2EHarness":
@@ -358,12 +476,55 @@ class WriterAgentE2EHarness:
         harness.job_manager = DeterministicJobManager(harness.provider)
         harness.creative_service = CreativeApplicationService(harness.creative_repository, harness.workflow_repository, transitions, harness.job_manager, tmp_path, harness.original_project_service, adapter, permissions)
         harness.store = WriterAgentStore(tmp_path / "writer-agent.db")
-        orchestrator = WriterProjectOrchestrator(harness.store, harness.creative_service, permissions, harness.workflow_repository, lambda _actor, _kind, _id: True)
-        runner = WriterActionRunner(store=harness.store, orchestrator=orchestrator, job_manager=harness.job_manager, principal_loader=lambda user_id: harness.actor if user_id == harness.actor.user_id else None)
-        harness.job_manager.wake = runner._poll_event.set
+        harness.job_bound = threading.Event()
+        harness.action_changed = threading.Event()
+        assign_step_job = harness.store.assign_step_job
+
+        def record_bound_job(
+            action_id: str,
+            step_key: str,
+            job_id: str,
+            *,
+            execution_owner: str | None = None,
+        ) -> dict[str, Any]:
+            step = assign_step_job(
+                action_id,
+                step_key,
+                job_id,
+                execution_owner=execution_owner,
+            )
+            harness.job_bound.set()
+            harness.action_changed.set()
+            return step
+
+        harness.store.assign_step_job = record_bound_job
+        for method_name in (
+            "attach_project_to_action",
+            "complete_step_with_context",
+            "fail_action",
+            "fail_step",
+            "finish_action",
+            "record_action_result",
+        ):
+            original = getattr(harness.store, method_name)
+
+            def mark_action_change(
+                *args: Any,
+                _original: Any = original,
+                **kwargs: Any,
+            ) -> Any:
+                result = _original(*args, **kwargs)
+                harness.action_changed.set()
+                return result
+
+            setattr(harness.store, method_name, mark_action_change)
+        harness.orchestrator = WriterProjectOrchestrator(harness.store, harness.creative_service, permissions, harness.workflow_repository, lambda _actor, _kind, _id: True)
+        harness.runner = _RestartableWriterActionRunner(store=harness.store, orchestrator=harness.orchestrator, job_manager=harness.job_manager, principal_loader=lambda user_id: harness.actor if user_id == harness.actor.user_id else None)
+        harness.action_service = ActionService(store=harness.store, runner=harness.runner)
+        harness.job_manager.wake = harness.runner._poll_event.set
         app = FastAPI()
         app.dependency_overrides[current_principal] = lambda: harness.actor
-        app.include_router(writer_agent_api.build_writer_agent_router(tmp_path, creative_repository=harness.creative_repository, creative_application_service=harness.creative_service, store=harness.store, action_service=ActionService(store=harness.store, runner=runner), runner=runner, permission_service=permissions, workflow_repository=harness.workflow_repository))
+        app.include_router(writer_agent_api.build_writer_agent_router(tmp_path, creative_repository=harness.creative_repository, creative_application_service=harness.creative_service, store=harness.store, action_service=harness.action_service, runner=harness.runner, permission_service=permissions, workflow_repository=harness.workflow_repository))
         harness.client = TestClient(app)
         monkeypatch.setattr(writer_agent_api, "create_provider", lambda: harness.provider)
         monkeypatch.setattr(phase4_worker, "create_provider", lambda: harness.provider)
@@ -396,6 +557,40 @@ class WriterAgentE2EHarness:
         retry = self._accepted(self.client.post(f"/api/writer-agent/sessions/{session_id}/actions/{action_id}/retry", json={"client_request_id": f"retry:{action_id}"}))
         return self._terminal(session_id, retry["id"])
 
+    def confirm_until_running(self, response: dict[str, Any]) -> dict[str, Any]:
+        action = response["actions"][-1]
+        self.job_manager.job_created.clear()
+        self.job_bound.clear()
+        self._accepted(self.client.post(
+            f"/api/writer-agent/sessions/{action['session_id']}/actions/{action['id']}/decision",
+            json={
+                "decision": "confirm",
+                "expected_revision": action["revision"],
+                "client_request_id": f"confirm:{action['id']}",
+            },
+        ))
+        assert self.job_manager.job_created.wait(timeout=5), self.store.list_steps(action["id"])
+        assert self.job_bound.wait(timeout=5), self.store.list_steps(action["id"])
+        self.job_manager.advance()
+        assert any(job["status"] == "running" for job in self.job_manager.jobs.values())
+        self.runner.request_process_stop()
+        assert self.runner.stopped.wait(timeout=5), self.store.list_steps(action["id"])
+        return self.store.require_action(action["id"], self.actor.user_id)
+
+    def restart_runner_and_wait(self, session_id: int, action_id: str) -> dict[str, Any]:
+        self.runner = _RestartableWriterActionRunner(
+            store=self.store,
+            orchestrator=self.orchestrator,
+            job_manager=self.job_manager,
+            principal_loader=lambda user_id: (
+                self.actor if user_id == self.actor.user_id else None
+            ),
+        )
+        self.action_service.runner = self.runner
+        self.job_manager.wake = self.runner._poll_event.set
+        self.runner.enqueue(action_id, self.actor)
+        return self._terminal(session_id, action_id)
+
     def project_with_locked_outline_and_beats(self, episodes: range) -> dict[str, Any]:
         numbers = list(episodes)
         project, _ = self.original_project_service.create(OriginalProjectCreateRequest(seed_text="情绪公司", name="情绪公司", genre="都市奇幻", target_platform="hg", target_audience="18-35岁", target_episode_count=len(numbers), episode_duration_seconds=120, cost_level="low", content_boundaries=[], reference_refs=[], creation_request_id=f"seed:{uuid.uuid4().hex}"), self.actor, can_read_reference=lambda _kind, _id: True)
@@ -425,6 +620,19 @@ class WriterAgentE2EHarness:
         project = self.creative_repository.get_project(project_id)
         return {episode: len(self.creative_repository.list_episode_versions(project_id, "script", episode)) for episode in sorted({int(item["episode_number"]) for item in project["episodes"] if item["stage"] == "script"})}
 
+    def script_episode_titles(self, project_id: int) -> dict[int, str]:
+        project = self.creative_repository.get_project(project_id)
+        return {
+            int(item["episode_number"]): str(item["content"]["episode_title"])
+            for item in project["episodes"]
+            if item["stage"] == "script"
+        }
+
+    def projects(self) -> list[dict[str, Any]]:
+        return self.creative_repository.list_projects_for_bootstrap(
+            self.actor.user_id
+        )
+
     def seed_readable_topic_reference(self, title: str) -> dict[str, Any]:
         return self.creative_repository.upsert_topics([{ "platform": "hg", "job_id": f"ref:{uuid.uuid4().hex}", "source_path": "integration.json", "captured_at": "2026-08-20", "title": title, "description": "", "category": "都市", "rank_type": "热播榜", "score": 90, "confidence": "high", "score_details": {}, "recommendation": "推荐", "evidence": [] }])[0]
 
@@ -443,10 +651,27 @@ class WriterAgentE2EHarness:
 
     def _terminal(self, session_id: int, action_id: str) -> dict[str, Any]:
         for _attempt in range(100):
+            self.runner.refreshed.clear()
+            self.action_changed.clear()
             action = self._ok(self.client.get(f"/api/writer-agent/sessions/{session_id}/actions/{action_id}"))
             if action["status"] in {"succeeded", "failed", "cancelled"}:
                 return action
-            self.job_manager.advance()
+            if self.job_manager.advance():
+                assert self.runner.refreshed.wait(timeout=5), {
+                    "action": action,
+                    "steps": self.store.list_steps(action_id),
+                }
+            elif self.store.active_job_ids(action_id):
+                continue
+            else:
+                # A recovered runner may be between durable, non-job steps.
+                # Wait for its observable next transition, never for a fixed
+                # interval, before polling the action again.
+                self.runner._poll_event.set()
+                assert self.action_changed.wait(timeout=5), {
+                    "action": action,
+                    "steps": self.store.list_steps(action_id),
+                }
         raise AssertionError({"action": action, "steps": self.store.list_steps(action_id)})
 
     def close(self) -> None:

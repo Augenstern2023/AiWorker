@@ -1346,8 +1346,64 @@ def test_conversation_retries_only_failed_script_episode(e2e_context) -> None:
     )
     assert first["result"]["partial"] is True
     retry = e2e_context.retry_and_wait(session["id"], first["id"])
-    assert retry["result"]["executed_episodes"] == [2]
+    assert retry["result"]["executed_episodes"] == [2], (
+        retry["status"],
+        retry["error_code"],
+        retry["error_message"],
+        [
+            (step["step_key"], step["status"], step["error_code"])
+            for step in e2e_context.store.list_steps(retry["id"])
+        ],
+    )
     assert e2e_context.script_versions(project["id"]) == {
+        1: 1, 2: 1, 3: 1, 4: 1, 5: 1,
+    }
+    assert e2e_context.script_episode_titles(project["id"]) == {
+        episode: f"第{episode}集" for episode in range(1, 6)
+    }
+    assert any(
+        "running" in history
+        for history in e2e_context.job_manager.status_history.values()
+    )
+
+
+def test_created_project_partial_retry_reuses_project_and_survives_runner_restart(
+    e2e_context,
+) -> None:
+    session = e2e_context.create_session("未来公司按员工情绪发工资")
+    proposed = e2e_context.chat(
+        session, "创建项目并生成第1到5集剧本"
+    )
+    e2e_context.fail_script_episode_once(2)
+    running = e2e_context.confirm_until_running(proposed)
+    first = e2e_context.restart_runner_and_wait(session["id"], running["id"])
+    assert first["status"] == "failed"
+    assert first["retryable"] is True, (
+        first["error_code"],
+        first["error_message"],
+        e2e_context.store.list_steps(first["id"]),
+    )
+    assert len(e2e_context.projects()) == 1
+
+    retry = e2e_context.retry_and_wait(session["id"], first["id"])
+
+    assert retry["status"] == "succeeded", [
+        (job_id, job.get("error"))
+        for job_id, job in e2e_context.job_manager.jobs.items()
+        if job.get("error")
+    ]
+    assert retry["result"]["executed_episodes"] == [2], (
+        retry["status"],
+        retry["error_code"],
+        retry["error_message"],
+        [
+            (step["step_key"], step["status"], step["error_code"])
+            for step in e2e_context.store.list_steps(retry["id"])
+        ],
+    )
+    assert len(e2e_context.projects()) == 1
+    project_id = first["project_id"]
+    assert e2e_context.script_versions(project_id) == {
         1: 1, 2: 1, 3: 1, 4: 1, 5: 1,
     }
 

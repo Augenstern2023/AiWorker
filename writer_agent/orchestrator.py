@@ -611,7 +611,8 @@ class WriterProjectOrchestrator:
             step_payloads.get(selected.step_key), dict
         ):
             payload = dict(step_payloads[selected.step_key])
-        if selected.kind == "lock" and not payload.get("resource_id"):
+        if selected.kind == "lock":
+            explicit_resource_id = payload.get("resource_id")
             dependencies = {
                 str(item["step_key"]): item
                 for item in persisted_steps
@@ -632,7 +633,17 @@ class WriterProjectOrchestrator:
                     "锁定步骤未找到唯一的上游成果",
                     retryable=False,
                 )
-            payload["resource_id"] = resource_ids.pop()
+            resolved_resource_id = resource_ids.pop()
+            if (
+                explicit_resource_id is not None
+                and str(explicit_resource_id) != resolved_resource_id
+            ):
+                raise WriterActionError(
+                    "RESULT_VALIDATION_FAILED",
+                    "锁定步骤指定的成果与唯一上游成果不一致",
+                    retryable=False,
+                )
+            payload["resource_id"] = resolved_resource_id
         snapshot_id = str(action.get("source_snapshot_id") or "")
         if not snapshot_id:
             raise WriterActionError("REFERENCE_UNAVAILABLE", "材料快照不存在")

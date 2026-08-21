@@ -339,22 +339,96 @@ def test_project_creation_can_continue_to_outline_in_one_confirmed_action(
     assert runner_context.executed == ["outline.generate"]
 
 
+def test_project_creation_retry_reuses_project_and_only_runs_copied_failures(
+    runner_context,
+) -> None:
+    """Retrying a continued create action must not create a second project."""
+    store = runner_context.store
+    action = store.create_action(
+        session_id=runner_context.session["id"],
+        actor_user_id=runner_context.actor.user_id,
+        action_type="project.create_original",
+        project_id=17,
+        idempotency_key="create-script-partial",
+        request_hash="create-script-partial",
+        payload={"target_stage": "script", "episode_start": 1, "episode_end": 2},
+        expected_context={"project_revision": 4},
+        source_snapshot_id="snapshot-create-script-partial",
+    )
+    store.claim_pending_action(action["id"], expected_revision=1)
+    store.start_action(action["id"])
+    for order, episode in enumerate((1, 2), start=1):
+        step_key = f"script.generate:{episode}"
+        store.upsert_step(
+            action_id=action["id"],
+            step_key=step_key,
+            stage="script",
+            episode_start=episode,
+            episode_end=episode,
+            status="pending",
+            operation_id=f"{action['id']}:{step_key}",
+            depends_on=[],
+            attempt=1,
+            step_order=order,
+        )
+    store.finish_step(
+        action["id"],
+        "script.generate:1",
+        {"resource_refs": [{"resource_id": "script-1"}]},
+    )
+    store.fail_step(
+        action["id"],
+        "script.generate:2",
+        code="GENERATION_FAILED",
+        message="episode 2",
+        retryable=True,
+    )
+    store.fail_action(
+        action["id"],
+        code="GENERATION_FAILED",
+        message="episode 2",
+        retryable=True,
+        result={"project_id": 17, "name": "情绪公司", "partial": True},
+    )
+    retry = runner_context.runner.retry_failed(action["id"], runner_context.actor)
+    runner_context.orchestrator.execute_project_action.side_effect = AssertionError(
+        "retry must not create another project"
+    )
+    runner_context.orchestrator.prepare_action_plan.side_effect = AssertionError(
+        "retry must keep the copied failure-only plan"
+    )
+
+    runner_context.runner.run(retry["id"], runner_context.actor)
+
+    completed = store.require_action(retry["id"], runner_context.actor.user_id)
+    assert completed["status"] == "succeeded"
+    assert completed["project_id"] == 17
+    assert completed["result"]["project_id"] == 17
+    assert completed["result"]["executed_episodes"] == [2]
+    assert runner_context.executed == ["script.generate:2"]
+
+
 @pytest.mark.parametrize(
-    ("resource_refs", "expect_success"),
+    ("resource_refs", "explicit_resource_id", "expect_success"),
     [
-        ([{"resource_id": "brief-101", "status": "draft"}], True),
-        ([], False),
+        ([{"resource_id": "brief-101", "status": "draft"}], None, True),
+        ([], None, False),
         (
             [
                 {"resource_id": "brief-101", "status": "draft"},
                 {"resource_id": "brief-102", "status": "draft"},
             ],
+            None,
             False,
         ),
+        ([{"resource_id": "brief-101", "status": "draft"}], "brief-999", False),
     ],
 )
 def test_lock_step_resolves_only_one_succeeded_dependency_resource(
-    runner_context, resource_refs: list[dict], expect_success: bool
+    runner_context,
+    resource_refs: list[dict],
+    explicit_resource_id: str | None,
+    expect_success: bool,
 ) -> None:
     """A lock must consume exactly one durable resource produced by its dependency."""
     snapshot = runner_context.store.save_source_snapshot({"source": "lock-test"})
@@ -363,9 +437,16 @@ def test_lock_step_resolves_only_one_succeeded_dependency_resource(
         actor_user_id=runner_context.actor.user_id,
         action_type="creative.run_plan",
         project_id=17,
-        idempotency_key=f"lock-resource:{len(resource_refs)}",
-        request_hash=f"lock-resource:{len(resource_refs)}",
-        payload={"target_stage": "characters"},
+        idempotency_key=f"lock-resource:{len(resource_refs)}:{explicit_resource_id}",
+        request_hash=f"lock-resource:{len(resource_refs)}:{explicit_resource_id}",
+        payload={
+            "target_stage": "characters",
+            "step_payloads": (
+                {"brief.lock": {"resource_id": explicit_resource_id}}
+                if explicit_resource_id is not None
+                else {}
+            ),
+        },
         expected_context={"project_revision": 4},
         source_snapshot_id=snapshot["id"],
     )
@@ -740,6 +821,8 @@ class ConcreteCreativeService:
             kwargs.get("episode_number"),
         )
         self.calls.append(("generate", kwargs["operation_id"]))
+        if kwargs["stage"] == "brief":
+            return {"resource_id": "101", "status": "succeeded"}
         return {"status": "succeeded"}
 
     def lock_resource(self, **kwargs):
@@ -805,6 +888,9 @@ def test_runner_uses_real_orchestrator_contract_and_advances_its_own_authority(
         payload={
             "target_stage": "characters",
             "step_payloads": {
+                "brief.generate": {
+                    "generation_instruction": "生成 Brief"
+                },
                 "brief.lock": {"resource_id": "101"},
                 "characters.generate": {
                     "generation_instruction": "生成人物"
@@ -817,15 +903,27 @@ def test_runner_uses_real_orchestrator_contract_and_advances_its_own_authority(
     action = store.claim_pending_action(action["id"], expected_revision=1)
     store.upsert_step(
         action_id=action["id"],
+        step_key="brief.generate",
+        stage="brief",
+        episode_start=None,
+        episode_end=None,
+        status="pending",
+        operation_id="real:brief.generate",
+        depends_on=[],
+        attempt=1,
+        step_order=1,
+    )
+    store.upsert_step(
+        action_id=action["id"],
         step_key="brief.lock",
         stage="brief",
         episode_start=None,
         episode_end=None,
         status="pending",
         operation_id="real:brief.lock",
-        depends_on=[],
+        depends_on=["brief.generate"],
         attempt=1,
-        step_order=1,
+        step_order=2,
     )
     store.upsert_step(
         action_id=action["id"],
@@ -837,7 +935,7 @@ def test_runner_uses_real_orchestrator_contract_and_advances_its_own_authority(
         operation_id="real:characters.generate",
         depends_on=["brief.lock"],
         attempt=1,
-        step_order=2,
+        step_order=3,
     )
     creative_service = ConcreteCreativeService()
     runner = WriterActionRunner(
@@ -853,6 +951,7 @@ def test_runner_uses_real_orchestrator_contract_and_advances_its_own_authority(
     assert completed["status"] == "succeeded"
     assert completed["expected_context"]["project_revision"] == 5
     assert creative_service.calls == [
+        ("generate", "real:brief.generate"),
         ("lock", "real:brief.lock"),
         ("generate", "real:characters.generate"),
     ]

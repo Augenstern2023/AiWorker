@@ -358,7 +358,15 @@ class WriterActionRunner:
         elif action["status"] != "running":
             raise WriterActionError("ACTION_STATE_INVALID", "动作当前状态不可执行")
 
-        if action["action_type"] in {"project.create_original", "project.link"}:
+        continued_project_action = bool(
+            action["action_type"] == "project.create_original"
+            and action.get("project_id") is not None
+            and self.store.list_steps(action_id)
+        )
+        if (
+            action["action_type"] in {"project.create_original", "project.link"}
+            and not continued_project_action
+        ):
             try:
                 current_actor = self._load_current_principal(action)
                 result = self.orchestrator.execute_project_action(

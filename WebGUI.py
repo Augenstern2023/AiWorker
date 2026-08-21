@@ -71,6 +71,7 @@ from creative.api import register_creative_routes
 from creative.application_service import CreativeApplicationService
 from creative.market_reference_service import MarketReferenceService
 from creative.original_project_service import OriginalProjectService
+from creative.project_creator_migration import migrate_project_creator_memberships
 from creative.repository import CreativeRepository
 from creative.transcript_assets import normalize_title
 from creative.workflow_adapter import CreativeWorkflowAdapter
@@ -508,6 +509,7 @@ workflow_repository = WorkflowRepository(identity_repository)
 creative_repository = CreativeRepository(
     WORKSPACE_ROOT / ".runtime" / "creative" / "creative.db"
 )
+migrate_project_creator_memberships(creative_repository, workflow_repository)
 creative_workflow_adapter = CreativeWorkflowAdapter(
     creative_repository, workflow_repository
 )

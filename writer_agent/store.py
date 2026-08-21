@@ -98,7 +98,7 @@ class WriterAgentStore:
             "expected_context_json TEXT NOT NULL DEFAULT '{}', payload_json TEXT NOT NULL DEFAULT '{}', "
             "result_json TEXT, error_code TEXT, error_message TEXT, retryable INTEGER NOT NULL DEFAULT 0, "
             "conflicting_action_id TEXT, "
-            "job_id TEXT, decision_request_id TEXT, retry_of_action_id TEXT, root_action_id TEXT, "
+            "job_id TEXT, decision_request_id TEXT, cancel_request_id TEXT, retry_of_action_id TEXT, root_action_id TEXT, "
             "created_at REAL NOT NULL, updated_at REAL NOT NULL, started_at REAL, finished_at REAL, expires_at REAL, "
             "UNIQUE(actor_user_id, idempotency_key))"
         )
@@ -115,6 +115,13 @@ class WriterAgentStore:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS writer_agent_source_snapshots ("
             "id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL UNIQUE, snapshot_json TEXT NOT NULL, created_at REAL NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS writer_agent_message_claims ("
+            "session_id INTEGER NOT NULL, user_id TEXT NOT NULL, message_id TEXT NOT NULL, "
+            "content_hash TEXT NOT NULL, status TEXT NOT NULL, claim_token TEXT, "
+            "created_at REAL NOT NULL, updated_at REAL NOT NULL, "
+            "PRIMARY KEY(session_id, user_id, message_id))"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_writer_agent_actions_session ON writer_agent_actions(session_id, created_at DESC)"
@@ -138,6 +145,12 @@ class WriterAgentStore:
                 "ALTER TABLE writer_agent_actions "
                 "ADD COLUMN conflicting_action_id TEXT"
             )
+        if "cancel_request_id" not in self._columns(
+            conn, "writer_agent_actions"
+        ):
+            conn.execute(
+                "ALTER TABLE writer_agent_actions ADD COLUMN cancel_request_id TEXT"
+            )
         if "conflicting_action_id" not in self._columns(
             conn, "writer_agent_action_steps"
         ):
@@ -155,6 +168,13 @@ class WriterAgentStore:
             conn.execute(
                 "ALTER TABLE writer_agent_action_steps "
                 "ADD COLUMN lease_expires_at REAL"
+            )
+        if "claim_token" not in self._columns(
+            conn, "writer_agent_message_claims"
+        ):
+            conn.execute(
+                "ALTER TABLE writer_agent_message_claims "
+                "ADD COLUMN claim_token TEXT"
             )
 
     def create(self, user_id: str, content: str, title: str = "", filename: str = "") -> dict[str, Any]:
@@ -177,23 +197,26 @@ class WriterAgentStore:
         return self.get(int(cursor.lastrowid), user_id) or {}
 
     def append_material(self, session_id: int, user_id: str | None, content: str, filename: str) -> dict[str, Any]:
-        session = self.get(session_id, user_id)
-        if not session:
-            return {}
-        messages = list(session.get("messages") or [])
-        messages.append(_material_message(filename, content))
-        combined = f"{session['content']}\n\n[补充材料：{filename}]\n{content}"
-        now = time.time()
         with self._connect() as conn:
-            sql = (
-                "UPDATE writer_agent_sessions SET content=?, messages_json=?, context_revision=context_revision+1, updated_at=? WHERE id=?"
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM writer_agent_sessions WHERE id=?"
                 if user_id is None
-                else "UPDATE writer_agent_sessions SET content=?, messages_json=?, context_revision=context_revision+1, updated_at=? WHERE id=? AND user_id=?"
+                else "SELECT * FROM writer_agent_sessions WHERE id=? AND user_id=?",
+                (session_id,) if user_id is None else (session_id, user_id),
+            ).fetchone()
+            if row is None:
+                return {}
+            messages = _decode(row["messages_json"] or "[]", [])
+            messages.append(_material_message(filename, content))
+            combined = (
+                f"{row['content']}\n\n[补充材料：{filename}]\n{content}"
             )
-            values: tuple[Any, ...] = (combined, _json(messages), now, session_id)
-            if user_id is not None:
-                values += (user_id,)
-            conn.execute(sql, values)
+            conn.execute(
+                "UPDATE writer_agent_sessions SET content=?, messages_json=?, "
+                "context_revision=context_revision+1, updated_at=? WHERE id=?",
+                (combined, _json(messages), time.time(), session_id),
+            )
         return self.get(session_id, user_id) or {}
 
     def get(self, session_id: int, actor_user_id: str | None) -> dict[str, Any] | None:
@@ -216,33 +239,259 @@ class WriterAgentStore:
             ).fetchall()
         return [self._row(row) for row in rows]
 
-    def save_turn(self, session_id: int, user_id: str | None, messages: list[dict[str, Any]], report: dict[str, Any] | None) -> dict[str, Any]:
-        session = self.get(session_id, user_id)
-        if not session:
-            return {}
+    def save_turn(
+        self,
+        session_id: int,
+        user_id: str | None,
+        messages: list[dict[str, Any]],
+        report: dict[str, Any] | None,
+        *,
+        client_message_id: str | None = None,
+        claim_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically merge one client turn without replacing concurrent history."""
+
+        if claim_token is not None and not client_message_id:
+            raise ValueError("claim_token requires client_message_id")
         normalized_messages = [dict(message) for message in messages]
         for message in normalized_messages:
             message.setdefault("message_id", _message_id())
-        reports = list(session.get("reports") or [])
-        latest_report = dict(session.get("report") or {})
-        if report is not None:
-            entry = {"id": f"report-{len(reports) + 1}", "created_at": time.time(), "report": report}
-            reports.append(entry)
-            latest_report = report
-            if normalized_messages and normalized_messages[-1].get("role") == "assistant":
-                normalized_messages[-1]["report_id"] = entry["id"]
-        now = time.time()
         with self._connect() as conn:
-            sql = (
-                "UPDATE writer_agent_sessions SET messages_json=?, report_json=?, reports_json=?, updated_at=? WHERE id=?"
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM writer_agent_sessions WHERE id=?"
                 if user_id is None
-                else "UPDATE writer_agent_sessions SET messages_json=?, report_json=?, reports_json=?, updated_at=? WHERE id=? AND user_id=?"
-            )
-            values: tuple[Any, ...] = (_json(normalized_messages), _json(latest_report), _json(reports), now, session_id)
-            if user_id is not None:
-                values += (user_id,)
-            conn.execute(sql, values)
+                else "SELECT * FROM writer_agent_sessions WHERE id=? AND user_id=?",
+                (session_id,) if user_id is None else (session_id, user_id),
+            ).fetchone()
+            if row is None:
+                return {}
+            if claim_token is not None:
+                claim = conn.execute(
+                    "SELECT status, claim_token FROM writer_agent_message_claims "
+                    "WHERE session_id=? AND user_id=? AND message_id=?",
+                    (session_id, user_id, client_message_id),
+                ).fetchone()
+                if (
+                    claim is None
+                    or claim["status"] != "in_progress"
+                    or claim["claim_token"] != claim_token
+                ):
+                    raise WriterActionError(
+                        "MESSAGE_CLAIM_LOST", "消息处理租约已由其他请求接管"
+                    )
+            persisted_messages = _decode(row["messages_json"] or "[]", [])
+            reports = _decode(row["reports_json"] or "[]", [])
+            latest_report = _decode(row["report_json"] or "{}", {})
+            turn_messages = normalized_messages
+            if client_message_id:
+                incoming_index = next(
+                    (
+                        index
+                        for index, message in enumerate(normalized_messages)
+                        if message.get("role") == "user"
+                        and message.get("message_id") == client_message_id
+                    ),
+                    None,
+                )
+                if incoming_index is None:
+                    raise WriterActionError(
+                        "RESULT_VALIDATION_FAILED", "客户端消息未出现在待保存轮次中"
+                    )
+                incoming = normalized_messages[incoming_index]
+                existing = next(
+                    (
+                        message
+                        for message in persisted_messages
+                        if message.get("role") == "user"
+                        and message.get("message_id") == client_message_id
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    if existing.get("content") != incoming.get("content"):
+                        raise WriterActionError(
+                            "IDEMPOTENCY_KEY_REUSED",
+                            "消息 ID 已用于不同内容",
+                        )
+                    turn_messages = []
+                else:
+                    turn_messages = normalized_messages[incoming_index:]
+                    for offset, message in enumerate(turn_messages):
+                        if message.get("role") == "assistant":
+                            message["message_id"] = (
+                                f"{client_message_id}:assistant:{offset}"
+                            )
+                    persisted_messages.extend(turn_messages)
+            else:
+                persisted_messages = normalized_messages
+            if report is not None and turn_messages:
+                entry = {
+                    "id": f"report-{len(reports) + 1}",
+                    "created_at": time.time(),
+                    "report": report,
+                }
+                reports.append(entry)
+                latest_report = report
+                if turn_messages and turn_messages[-1].get("role") == "assistant":
+                    turn_messages[-1]["report_id"] = entry["id"]
+            if turn_messages:
+                conn.execute(
+                    "UPDATE writer_agent_sessions SET messages_json=?, report_json=?, "
+                    "reports_json=?, updated_at=? WHERE id=?",
+                    (
+                        _json(persisted_messages),
+                        _json(latest_report),
+                        _json(reports),
+                        time.time(),
+                        session_id,
+                    ),
+                )
+            if claim_token is not None:
+                completed = conn.execute(
+                    "UPDATE writer_agent_message_claims SET status='completed', "
+                    "updated_at=? WHERE session_id=? AND user_id=? AND message_id=? "
+                    "AND status='in_progress' AND claim_token=?",
+                    (
+                        time.time(),
+                        session_id,
+                        user_id,
+                        client_message_id,
+                        claim_token,
+                    ),
+                ).rowcount
+                if completed != 1:
+                    raise WriterActionError(
+                        "MESSAGE_CLAIM_LOST", "消息处理租约已由其他请求接管"
+                    )
         return self.get(session_id, user_id) or {}
+
+    def claim_client_message(
+        self,
+        session_id: int,
+        user_id: str,
+        message_id: str,
+        content_hash: str,
+        *,
+        claim_token: str | None = None,
+        lease_seconds: float = 30.0,
+    ) -> str:
+        """Claim one model-backed client turn before any external side effect."""
+
+        now = time.time()
+        owner_token = claim_token or uuid.uuid4().hex
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            session = conn.execute(
+                "SELECT 1 FROM writer_agent_sessions WHERE id=? AND user_id=?",
+                (session_id, user_id),
+            ).fetchone()
+            if session is None:
+                raise WriterActionError(
+                    "PROJECT_NOT_AVAILABLE", "创作会话不存在或无权访问"
+                )
+            row = conn.execute(
+                "SELECT * FROM writer_agent_message_claims "
+                "WHERE session_id=? AND user_id=? AND message_id=?",
+                (session_id, user_id, message_id),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO writer_agent_message_claims "
+                    "(session_id,user_id,message_id,content_hash,status,claim_token,created_at,updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        session_id,
+                        user_id,
+                        message_id,
+                        content_hash,
+                        "in_progress",
+                        owner_token,
+                        now,
+                        now,
+                    ),
+                )
+                return "claimed"
+            if str(row["content_hash"]) != content_hash:
+                raise WriterActionError(
+                    "IDEMPOTENCY_KEY_REUSED", "消息 ID 已用于不同内容"
+                )
+            if row["status"] == "completed":
+                return "completed"
+            if now - float(row["updated_at"]) < lease_seconds:
+                return "in_progress"
+            conn.execute(
+                "UPDATE writer_agent_message_claims SET status='in_progress', "
+                "claim_token=?, updated_at=? "
+                "WHERE session_id=? AND user_id=? AND message_id=?",
+                (owner_token, now, session_id, user_id, message_id),
+            )
+            return "claimed"
+
+    def renew_client_message_claim(
+        self,
+        session_id: int,
+        user_id: str,
+        message_id: str,
+        *,
+        claim_token: str,
+    ) -> bool:
+        """Renew only the caller's live message lease."""
+
+        with self._connect() as conn:
+            renewed = conn.execute(
+                "UPDATE writer_agent_message_claims SET updated_at=? "
+                "WHERE session_id=? AND user_id=? AND message_id=? "
+                "AND status='in_progress' AND claim_token=?",
+                (time.time(), session_id, user_id, message_id, claim_token),
+            ).rowcount
+        return renewed == 1
+
+    def client_message_claim_status(
+        self, session_id: int, user_id: str, message_id: str
+    ) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM writer_agent_message_claims "
+                "WHERE session_id=? AND user_id=? AND message_id=?",
+                (session_id, user_id, message_id),
+            ).fetchone()
+        return str(row["status"]) if row is not None else None
+
+    def complete_client_message(
+        self,
+        session_id: int,
+        user_id: str,
+        message_id: str,
+        *,
+        claim_token: str,
+    ) -> bool:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            completed = conn.execute(
+                "UPDATE writer_agent_message_claims SET status='completed', "
+                "updated_at=? WHERE session_id=? AND user_id=? AND message_id=? "
+                "AND status='in_progress' AND claim_token=?",
+                (time.time(), session_id, user_id, message_id, claim_token),
+            ).rowcount
+        return completed == 1
+
+    def abandon_client_message(
+        self,
+        session_id: int,
+        user_id: str,
+        message_id: str,
+        *,
+        claim_token: str,
+    ) -> bool:
+        with self._connect() as conn:
+            deleted = conn.execute(
+                "DELETE FROM writer_agent_message_claims WHERE session_id=? "
+                "AND user_id=? AND message_id=? AND status='in_progress' "
+                "AND claim_token=?",
+                (session_id, user_id, message_id, claim_token),
+            ).rowcount
+        return deleted == 1
 
     def bind_project(self, session_id: int, project_id: int, expected_context_revision: int) -> dict[str, Any]:
         with self._connect() as conn:
@@ -321,6 +570,108 @@ class WriterAgentStore:
         return item
 
     @staticmethod
+    def _trusted_action_title(action: dict[str, Any]) -> str:
+        payload = action.get("payload") or {}
+        stage = str(payload.get("target_stage") or "")
+        stage_name = {
+            "brief": "Brief",
+            "characters": "人物关系",
+            "outline": "大纲",
+            "beats": "Beats",
+            "script": "剧本",
+        }.get(stage, "创作成果")
+        start, end = payload.get("episode_start"), payload.get("episode_end")
+        scope = (
+            f"第{start}-{end}集"
+            if start is not None and end is not None
+            else ""
+        )
+        if action.get("action_type") == "project.link":
+            return f"关联项目 #{action.get('project_id')}"
+        if action.get("action_type") == "project.create_original":
+            return "创建原创项目" + (
+                f"并生成{scope}{stage_name}" if stage else ""
+            )
+        if action.get("action_type") == "creative.lock":
+            return f"锁定{scope}{stage_name}"
+        prefix = "重做" if payload.get("rework_stage") == stage else "生成"
+        return f"{prefix}{scope}{stage_name}"
+
+    @staticmethod
+    def _trusted_project_url(action: dict[str, Any]) -> str | None:
+        result = action.get("result") or {}
+        project_id = action.get("project_id") or result.get("project_id")
+        if type(project_id) is not int or project_id < 1:
+            return None
+        payload = action.get("payload") or {}
+        stage = str(payload.get("target_stage") or "brief")
+        if stage == "brief":
+            return f"/planning/projects/{project_id}/brief"
+        if stage == "characters":
+            return f"/planning/projects/{project_id}/characters"
+        if stage == "outline":
+            return f"/writing/projects/{project_id}/outlines"
+        start, end = payload.get("episode_start"), payload.get("episode_end")
+        if type(start) is int and start == end and stage in {"beats", "script"}:
+            suffix = "beats" if stage == "beats" else "scripts"
+            return f"/writing/projects/{project_id}/episodes/{start}/{suffix}"
+        return "/writing/projects"
+
+    def _action_view(
+        self, action: dict[str, Any], steps: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        sanitized_steps = [
+            {
+                "step_key": str(step["step_key"]),
+                "stage": str(step["stage"]),
+                "episode_start": step.get("episode_start"),
+                "episode_end": step.get("episode_end"),
+                "status": str(step["status"]),
+                "resource_refs": list(step.get("resource_refs") or []),
+                "error_code": step.get("error_code"),
+            }
+            for step in steps
+        ]
+        resource_refs: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        result = action.get("result") or {}
+        candidates = [
+            *(result.get("resource_refs") or []),
+            *(
+                reference
+                for step in sanitized_steps
+                if step["status"] == "succeeded"
+                for reference in step["resource_refs"]
+            ),
+        ]
+        for reference in candidates:
+            if not isinstance(reference, dict):
+                continue
+            key = _json(reference)
+            if key not in seen:
+                seen.add(key)
+                resource_refs.append(reference)
+        title = self._trusted_action_title(action)
+        total = len(sanitized_steps)
+        completed = sum(
+            step["status"] == "succeeded" for step in sanitized_steps
+        )
+        return {
+            **action,
+            "title": title,
+            "summary": (
+                f"共 {total} 个可审计步骤"
+                if total
+                else "动作状态由服务端账本记录"
+            ),
+            "steps": sanitized_steps,
+            "completed_steps": completed,
+            "total_steps": total,
+            "resource_refs": resource_refs,
+            "open_url": self._trusted_project_url(action),
+        }
+
+    @staticmethod
     def _step_row(row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
         item["depends_on"] = _decode(item.pop("depends_on_json") or "[]", [])
@@ -362,7 +713,15 @@ class WriterAgentStore:
 
     def require_action(self, action_id: str, actor_user_id: str | None) -> dict[str, Any]:
         with self._connect() as conn:
-            return self._action_row(self._require_action_conn(conn, action_id, actor_user_id))
+            action = self._action_row(
+                self._require_action_conn(conn, action_id, actor_user_id)
+            )
+            steps = conn.execute(
+                "SELECT * FROM writer_agent_action_steps WHERE action_id=? "
+                "ORDER BY step_order,id",
+                (action_id,),
+            ).fetchall()
+        return self._action_view(action, [self._step_row(row) for row in steps])
 
     def revise_action(self, action_id: str, *, expected_revision: int, payload: dict[str, Any] | None = None, expected_context: dict[str, Any] | None = None, phase: str | None = None) -> dict[str, Any]:
         with self._connect() as conn:
@@ -427,6 +786,69 @@ class WriterAgentStore:
             ).rowcount
             if changed != 1:
                 raise WriterActionError("ACTION_REVISION_MISMATCH", "动作版本已变化", current_revision=int(row["revision"]))
+            return self._action_row(self._require_action_conn(conn, action_id)), True
+
+    def request_action_cancellation_once(
+        self,
+        action_id: str,
+        *,
+        expected_revision: int,
+        client_request_id: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Durably request cancellation for pending or active work exactly once."""
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = self._require_action_conn(conn, action_id)
+            if row["cancel_request_id"] == client_request_id:
+                return self._action_row(row), False
+            if row["status"] not in {"pending", "queued", "running"}:
+                raise WriterActionError(
+                    "ACTION_STATE_INVALID",
+                    "动作当前状态不可取消",
+                    current_revision=int(row["revision"]),
+                )
+            if int(row["revision"]) != expected_revision:
+                raise WriterActionError(
+                    "ACTION_REVISION_MISMATCH",
+                    "动作版本已变化",
+                    current_revision=int(row["revision"]),
+                )
+            next_revision = int(row["revision"]) + 1
+            if row["status"] == "pending":
+                changed = conn.execute(
+                    "UPDATE writer_agent_actions SET status='cancelled', "
+                    "cancel_request_id=?, revision=?, updated_at=?, finished_at=? "
+                    "WHERE id=? AND status='pending' AND revision=?",
+                    (
+                        client_request_id,
+                        next_revision,
+                        time.time(),
+                        time.time(),
+                        action_id,
+                        int(row["revision"]),
+                    ),
+                ).rowcount
+            else:
+                changed = conn.execute(
+                    "UPDATE writer_agent_actions SET cancel_request_id=?, "
+                    "phase='cancelling', "
+                    "revision=?, updated_at=? WHERE id=? AND status=? AND revision=?",
+                    (
+                        client_request_id,
+                        next_revision,
+                        time.time(),
+                        action_id,
+                        row["status"],
+                        int(row["revision"]),
+                    ),
+                ).rowcount
+            if changed != 1:
+                raise WriterActionError(
+                    "ACTION_REVISION_MISMATCH",
+                    "动作版本已变化",
+                    current_revision=int(row["revision"]),
+                )
             return self._action_row(self._require_action_conn(conn, action_id)), True
 
     def _transition_action(self, action_id: str, *, from_status: str, to_status: str, **updates: Any) -> dict[str, Any]:
@@ -581,7 +1003,22 @@ class WriterAgentStore:
     def list_session_actions(self, session_id: int) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM writer_agent_actions WHERE session_id=? ORDER BY created_at", (session_id,)).fetchall()
-        return [self._action_row(row) for row in rows]
+            actions = [self._action_row(row) for row in rows]
+            steps_by_action = {
+                str(action["id"]): [
+                    self._step_row(step)
+                    for step in conn.execute(
+                        "SELECT * FROM writer_agent_action_steps WHERE action_id=? "
+                        "ORDER BY step_order,id",
+                        (action["id"],),
+                    ).fetchall()
+                ]
+                for action in actions
+            }
+        return [
+            self._action_view(action, steps_by_action[str(action["id"])])
+            for action in actions
+        ]
 
     def list_active_actions(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -814,12 +1251,14 @@ class WriterAgentStore:
             ).rowcount
         return changed
 
-    def _transition_step(self, action_id: str, step_key: str, *, status: str, allowed: set[str], execution_owner: str | None = None, **updates: Any) -> dict[str, Any]:
+    def _transition_step(self, action_id: str, step_key: str, *, status: str, allowed: set[str], execution_owner: str | None = None, idempotent: bool = False, **updates: Any) -> dict[str, Any]:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT * FROM writer_agent_action_steps WHERE action_id=? AND step_key=?", (action_id, step_key)).fetchone()
             if row is None:
                 raise WriterActionError("PROJECT_NOT_AVAILABLE", "动作步骤不存在")
+            if idempotent and row["status"] == status:
+                return self._step_row(row)
             if row["status"] not in allowed:
                 raise WriterActionError("ACTION_STATE_INVALID", "步骤当前状态不允许此操作", current_revision=int(row["revision"]))
             if execution_owner is not None and row["execution_owner"] != execution_owner:
@@ -924,6 +1363,7 @@ class WriterAgentStore:
             step_key,
             status="cancelled",
             allowed={"pending", "running"},
+            idempotent=True,
             error_code="CANCELLED",
             error_message="生成任务已取消",
             retryable=0,

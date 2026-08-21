@@ -262,13 +262,15 @@ class CreativeApplicationService:
         project_id: int,
         expected_context: dict[str, Any],
         episode_number: int | None = None,
+        *,
+        stage: str | None = None,
     ) -> dict[str, Any]:
         """Compare scoped plan authority and return a CAS envelope for writes."""
         current = self.current_plan_context(project_id, episode_number)
         if canonical_request_hash(current) != canonical_request_hash(expected_context):
             raise CreativeContextConflict("project authority changed")
         authority = self.repository.generation_authority_envelope(
-            project_id, episode_number
+            project_id, episode_number, stage=stage
         )
         if (
             int(authority.get("revision") or 0)
@@ -403,7 +405,7 @@ class CreativeApplicationService:
         self.assert_stage_write_access(project_id, stage, actor)
         if expected_context is not None:
             self.assert_plan_context(
-                project_id, expected_context, episode_number
+                project_id, expected_context, episode_number, stage=stage
             )
         project = self.repository.get_project(project_id)
         if project is None:
@@ -444,12 +446,20 @@ class CreativeApplicationService:
     def assert_stage_write_access(
         self, project_id: int, stage: str, actor: Principal
     ) -> None:
+        globally_authorized = bool(
+            actor.is_system_admin or "project_owner" in actor.role_codes
+        )
+        active_member = (
+            False
+            if globally_authorized
+            else self.workflow_repository.is_active_project_member(
+                str(project_id), actor
+            )
+        )
         if not self.permission_service.can_create_project_content(
             actor,
             str(project_id),
-            active_member=self.workflow_repository.is_active_project_member(
-                str(project_id), actor
-            ),
+            active_member=active_member,
         ):
             raise CreativeProjectAccessDenied("无权创作该项目")
 
@@ -487,7 +497,9 @@ class CreativeApplicationService:
             workflow_task_id, project_id, stage, actor
         )
         expected_authority = (
-            self.assert_plan_context(project_id, expected_context, episode_number)
+            self.assert_plan_context(
+                project_id, expected_context, episode_number, stage=stage
+            )
             if expected_context is not None
             else None
         )
@@ -751,7 +763,7 @@ class CreativeApplicationService:
             expected_authority = None
             if expected_context is not None:
                 expected_authority = self.assert_plan_context(
-                    project_id, expected_context, episode_number
+                    project_id, expected_context, episode_number, stage=stage
                 )
             kwargs: dict[str, Any] = {
                 "expected_project_revision": (
@@ -807,7 +819,9 @@ class CreativeApplicationService:
         self.assert_stage_write_access(project_id, stage, actor)
         self.validate_task_for_creation(workflow_task_id, project_id, stage, actor)
         expected_authority = (
-            self.assert_plan_context(project_id, expected_context, episode_number)
+            self.assert_plan_context(
+                project_id, expected_context, episode_number, stage=stage
+            )
             if expected_context is not None
             else None
         )
@@ -997,11 +1011,16 @@ class CreativeApplicationService:
         }[stage]
         authority = (
             self.assert_plan_context(
-                project_id, expected_context, legacy_extra.get("episode_number")
+                project_id,
+                expected_context,
+                legacy_extra.get("episode_number"),
+                stage=stage,
             )
             if expected_context is not None
             else self.repository.generation_authority_envelope(
-                project_id, legacy_extra.get("episode_number")
+                project_id,
+                legacy_extra.get("episode_number"),
+                stage=stage,
             )
         )
         authority_sha = canonical_request_hash(authority)
@@ -1037,6 +1056,7 @@ class CreativeApplicationService:
                 **snapshot_extra,
                 "source_authority": authority,
                 "source_authority_sha256": authority_sha,
+                "authority_schema_version": 1,
                 "generation_request_hash": generation_request_hash,
                 "retry_failed_operation": bool(retry_failed_operation),
                 **legacy_extra,

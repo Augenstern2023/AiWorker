@@ -79,7 +79,9 @@ class ActionService:
     def _require_current_write_authority(self, action: dict[str, Any], actor: Any) -> None:
         """Recheck the live authority required by the selected action."""
         if action["action_type"] == "project.create_original":
-            if "project.create" not in actor.permissions:
+            if not (
+                actor.is_system_admin or "project.create" in actor.permissions
+            ):
                 raise WriterActionError("PROJECT_CREATE_DENIED", "无权创建原创项目")
             return
         project_id = action.get("project_id")
@@ -144,6 +146,28 @@ class ActionService:
     def decide(self, command: ActionCommand) -> dict[str, Any]:
         owned = self._require_owned_action(command)
         self._require_current_write_authority(owned, command.actor)
+        if command.decision == "cancel":
+            action, requested = self.store.request_action_cancellation_once(
+                command.action_id,
+                expected_revision=command.expected_revision,
+                client_request_id=command.client_request_id,
+            )
+            if not requested:
+                if (
+                    action["status"] in {"queued", "running"}
+                    and action.get("phase") == "cancelling"
+                ):
+                    return self.runner.cancel(action["id"], command.actor)
+                return action
+            cancelled = (
+                action
+                if action["status"] == "cancelled"
+                else self.runner.cancel(action["id"], command.actor)
+            )
+            self._audit(
+                actor=command.actor, event="writer.action.cancel", action=cancelled
+            )
+            return cancelled
         action, claimed = self.store.claim_pending_action_once(
             command.action_id,
             expected_revision=command.expected_revision,
@@ -157,11 +181,7 @@ class ActionService:
             )
             self.runner.enqueue(action["id"], command.actor)
             return action
-        cancelled = self.runner.cancel(action["id"], command.actor)
-        self._audit(
-            actor=command.actor, event="writer.action.cancel", action=cancelled
-        )
-        return cancelled
+        raise WriterActionError("ACTION_STATE_INVALID", "动作决策无效")
 
     def retry(
         self,
@@ -375,28 +395,135 @@ def validate_project_authority(
     """Reject model output that would silently replace a locked outcome."""
     if not project_context:
         return
-    if project_context.get("locked_brief") and any(
-        getattr(card, "card_type", "") in {"directions", "brief"} for card in cards
-    ):
-        raise WriterActionError(
-            "LOCKED_RESULT_CONFLICT", "模型输出不得覆盖已锁定 Brief"
-        )
+
+    authority_keys = {
+        "brief": "locked_brief",
+        "characters": "locked_characters",
+        "outline": "locked_outline",
+        "beats": "locked_beats",
+        "script": "locked_script",
+    }
+    allowed_brief_cards: set[str] = set()
 
     for action in actions:
         stage = action.target_stage
         if stage is None:
             continue
-        locked = project_context.get(
-            {
-                "brief": "locked_brief",
-                "characters": "locked_characters",
-                "outline": "locked_outline",
-                "beats": "locked_beats",
-                "script": "locked_script",
-            }[stage]
+        locked = project_context.get(authority_keys[stage])
+        rework_stage = action.payload.get("rework_stage")
+        explicit_rework = (
+            action.action_type == "creative.run_plan"
+            and rework_stage == stage
         )
+        if rework_stage is not None and not explicit_rework:
+            raise WriterActionError(
+                "LOCKED_RESULT_CONFLICT", "重做阶段必须与目标阶段一致"
+            )
+        if explicit_rework and not locked:
+            raise WriterActionError(
+                "LOCKED_RESULT_CONFLICT", f"没有可重做的已锁定 {stage}"
+            )
         if not locked:
             continue
+
+        expected_ids: list[str]
+        if stage == "brief":
+            expected_ids = [str(locked["id"])]
+        elif stage in {"characters", "outline"}:
+            expected_ids = [
+                f"{int(project_context['project_id'])}:{locked['batch_id']}"
+            ]
+        else:
+            start = action.episode_start
+            end = action.episode_end
+            locked_by_episode = {
+                int(item["episode_number"]): str(item["id"])
+                for item in locked
+            }
+            expected_ids = (
+                [
+                    locked_by_episode[number]
+                    for number in range(start, end + 1)
+                    if number in locked_by_episode
+                ]
+                if start is not None and end is not None
+                else []
+            )
+
+        if explicit_rework:
+            if stage not in {"beats", "script"} and (
+                action.episode_start is not None or action.episode_end is not None
+            ):
+                raise WriterActionError(
+                    "LOCKED_RESULT_CONFLICT", "非分集成果重做不能指定集数范围"
+                )
+            if stage in {"beats", "script"}:
+                start = action.episode_start
+                end = action.episode_end
+                if (
+                    start is None
+                    or end is None
+                    or len(expected_ids) != end - start + 1
+                ):
+                    raise WriterActionError(
+                        "LOCKED_RESULT_CONFLICT",
+                        f"重做范围必须全部对应当前已锁定 {stage}",
+                    )
+            supplied_scalar = next(
+                (
+                    action.payload.get(key)
+                    for key in (
+                        "replaces_resource_id",
+                        "current_resource_id",
+                        "resource_id",
+                    )
+                    if action.payload.get(key) is not None
+                ),
+                None,
+            )
+            supplied_list = next(
+                (
+                    action.payload.get(key)
+                    for key in ("replaces_resource_ids", "resource_ids")
+                    if action.payload.get(key) is not None
+                ),
+                None,
+            )
+            step_payloads = action.payload.get("step_payloads")
+            nested_replacements = (
+                [
+                    str(step_payload["replaces_resource_id"])
+                    for step_payload in step_payloads.values()
+                    if isinstance(step_payload, dict)
+                    and step_payload.get("replaces_resource_id") is not None
+                ]
+                if isinstance(step_payloads, dict)
+                else []
+            )
+            if supplied_scalar is not None and (
+                len(expected_ids) != 1
+                or str(supplied_scalar) != expected_ids[0]
+            ):
+                raise WriterActionError(
+                    "LOCKED_RESULT_CONFLICT", "重做成果与当前权威版本不一致"
+                )
+            if supplied_list is not None and (
+                not isinstance(supplied_list, list)
+                or [str(item) for item in supplied_list] != expected_ids
+            ):
+                raise WriterActionError(
+                    "LOCKED_RESULT_CONFLICT", "重做成果与当前权威版本不一致"
+                )
+            if nested_replacements and sorted(nested_replacements) != sorted(
+                expected_ids
+            ):
+                raise WriterActionError(
+                    "LOCKED_RESULT_CONFLICT", "重做成果与当前权威版本不一致"
+                )
+            if stage == "brief" and action.source_card_id:
+                allowed_brief_cards.add(action.source_card_id)
+            continue
+
         if stage in {"brief", "characters", "outline"}:
             raise WriterActionError(
                 "LOCKED_RESULT_CONFLICT", f"模型动作不得覆盖已锁定 {stage}"
@@ -410,6 +537,18 @@ def validate_project_authority(
             raise WriterActionError(
                 "LOCKED_RESULT_CONFLICT", f"模型动作不得覆盖已锁定 {stage}"
             )
+
+    if project_context.get("locked_brief") and any(
+        getattr(card, "card_type", "") == "directions"
+        or (
+            getattr(card, "card_type", "") == "brief"
+            and getattr(card, "card_id", "") not in allowed_brief_cards
+        )
+        for card in cards
+    ):
+        raise WriterActionError(
+            "LOCKED_RESULT_CONFLICT", "模型输出不得覆盖已锁定 Brief"
+        )
 
 
 def requires_direction_card(
@@ -477,6 +616,15 @@ def parse_creative_cards(payload: dict[str, Any]) -> list[CreativeCard]:
     raw_cards = payload.get("cards")
     if not isinstance(raw_cards, list):
         return []
+    if any(
+        isinstance(card, dict)
+        and card.get("card_type") in {"progress", "result"}
+        for card in raw_cards
+    ):
+        raise WriterActionError(
+            "RESULT_VALIDATION_FAILED",
+            "进度与成果卡只能由服务端动作账本生成",
+        )
     try:
         return validate_cards(_CARDS.validate_python(raw_cards))
     except ValidationError as exc:
@@ -521,6 +669,7 @@ def persist_proposed_actions(
     reference_refs: list[dict[str, Any]] | None = None,
     model_version: str = "writer-agent",
     prompt_version: str = "creative-v1",
+    client_message_id: str | None = None,
 ) -> list[dict[str, Any]]:
     if not proposed_actions:
         return []
@@ -536,7 +685,7 @@ def persist_proposed_actions(
     )
     saved_snapshot = store.save_source_snapshot(snapshot)
     saved_actions: list[dict[str, Any]] = []
-    for action in proposed_actions:
+    for index, action in enumerate(proposed_actions):
         payload = action.payload.copy()
         payload.update({
             "title": action.title,
@@ -558,7 +707,11 @@ def persist_proposed_actions(
             actor_user_id=actor_user_id,
             action_type=action.action_type,
             project_id=project_id,
-            idempotency_key=f"model-{uuid4().hex}",
+            idempotency_key=(
+                f"session:{session_id}:message:{client_message_id}:action:{index}"
+                if client_message_id
+                else f"model-{uuid4().hex}"
+            ),
             request_hash=request_hash,
             payload=payload,
             expected_context=project_context,
@@ -583,16 +736,21 @@ def match_natural_language_decision(
     message: str, session_actions: list[dict[str, Any]]
 ) -> NaturalLanguageDecision:
     text = _normal_text(message).strip()
-    pending = [action for action in session_actions if action.get("status") == "pending"]
     confirm_positions = [text.find(word) for word in _CONFIRM_WORDS if word in text]
     cancel_positions = [text.find(word) for word in _CANCEL_WORDS if word in text]
     is_confirm = bool(confirm_positions)
     is_cancel = bool(cancel_positions) and (
         not confirm_positions or min(cancel_positions) < min(confirm_positions)
     )
-    if not pending or not (is_confirm or is_cancel):
+    candidates_by_state = [
+        action
+        for action in session_actions
+        if action.get("status")
+        in ({"pending", "queued", "running"} if is_cancel else {"pending"})
+    ]
+    if not candidates_by_state or not (is_confirm or is_cancel):
         return NaturalLanguageDecision(action_id=None, decision=None)
-    candidates = _candidate_actions(text, pending)
+    candidates = _candidate_actions(text, candidates_by_state)
     if len(candidates) != 1:
         raise WriterActionError("ACTION_AMBIGUOUS", "无法唯一匹配待确认动作")
     return NaturalLanguageDecision(

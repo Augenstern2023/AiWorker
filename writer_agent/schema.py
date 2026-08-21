@@ -8,10 +8,11 @@
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Any, Literal
 
 from identity.schema import Principal
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 ActionType = Literal[
@@ -113,6 +114,18 @@ class ProposedAction(_WriterActionModel):
                 resource_id or resource_ids
             ):
                 raise ValueError("锁定创作成果必须提供项目、阶段和资源 ID")
+            if resource_id and resource_ids:
+                raise ValueError("锁定创作成果只能使用一种资源 ID 形式")
+            if resource_ids and (
+                not isinstance(resource_ids, list) or len(resource_ids) != 1
+            ):
+                raise ValueError("独立锁定动作一次只能锁定一个成果")
+            if self.target_stage in {"beats", "script"} and (
+                self.episode_start is None
+                or self.episode_end is None
+                or self.episode_start != self.episode_end
+            ):
+                raise ValueError("分集锁定动作必须且只能指定一集")
         return self
 
 
@@ -167,6 +180,18 @@ class ResultCard(_WriterActionModel):
     project_id: int
     resource_refs: list[dict[str, Any]]
     open_url: str
+
+    @field_validator("open_url")
+    @classmethod
+    def validate_local_project_url(cls, value: str) -> str:
+        if not re.fullmatch(
+            r"/(?:planning/projects/[1-9]\d*/(?:brief|characters)|"
+            r"writing/projects(?:/[1-9]\d*/(?:outlines|"
+            r"episodes/[1-9]\d*/(?:beats|scripts)))?)",
+            value,
+        ):
+            raise ValueError("成果链接必须是服务端项目路由")
+        return value
 
 
 class ConflictCard(_WriterActionModel):

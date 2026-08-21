@@ -566,12 +566,43 @@ class WriterProjectOrchestrator:
 
         if action.get("action_type") not in {
             "creative.run_plan",
+            "creative.lock",
             "project.create_original",
         }:
             raise WriterActionError(
                 "ACTION_STATE_INVALID", "动作不是可执行创作计划"
             )
         persisted_steps = self.store.list_steps(str(action["id"]))
+        action_payload = dict(action.get("payload") or {})
+        action_authority = dict(action.get("expected_context") or {})
+
+        def rework_resource_id(
+            stage: str, episode_number: int | None
+        ) -> str | None:
+            if action_payload.get("rework_stage") != stage:
+                return None
+            supplied = action_payload.get("replaces_resource_id")
+            if supplied is not None:
+                return str(supplied)
+            if stage == "brief":
+                locked = action_authority.get("locked_brief") or {}
+                return str(locked["id"]) if locked.get("id") is not None else None
+            if stage in {"characters", "outline"}:
+                locked = action_authority.get(f"locked_{stage}") or {}
+                batch_id = locked.get("batch_id")
+                project_id = action_authority.get("project_id")
+                return (
+                    f"{project_id}:{batch_id}"
+                    if project_id is not None and batch_id
+                    else None
+                )
+            for item in action_authority.get(f"locked_{stage}") or []:
+                if int(item.get("episode_number") or 0) == int(
+                    episode_number or 0
+                ):
+                    return str(item["id"])
+            return None
+
         plan_steps: list[PlanStep] = []
         for persisted in persisted_steps:
             operation = str(persisted["step_key"]).split(":", 1)[0]
@@ -596,6 +627,9 @@ class WriterProjectOrchestrator:
                         .get("step_payloads", {})
                         .get(str(persisted["step_key"]), {})
                         .get("replaces_resource_id")
+                        or rework_resource_id(
+                            str(persisted["stage"]), episode_number
+                        )
                     ),
                 )
             )
@@ -613,6 +647,10 @@ class WriterProjectOrchestrator:
             payload = dict(step_payloads[selected.step_key])
         if selected.kind == "lock":
             explicit_resource_id = payload.get("resource_id")
+            if explicit_resource_id is None:
+                resource_ids = payload.get("resource_ids")
+                if isinstance(resource_ids, list) and len(resource_ids) == 1:
+                    explicit_resource_id = resource_ids[0]
             dependencies = {
                 str(item["step_key"]): item
                 for item in persisted_steps
@@ -627,22 +665,31 @@ class WriterProjectOrchestrator:
                 for reference in dependency.get("resource_refs") or []
                 if isinstance(reference, dict) and reference.get("resource_id")
             }
-            if len(resource_ids) != 1:
-                raise WriterActionError(
-                    "RESULT_VALIDATION_FAILED",
-                    "锁定步骤未找到唯一的上游成果",
-                    retryable=False,
-                )
-            resolved_resource_id = resource_ids.pop()
-            if (
-                explicit_resource_id is not None
-                and str(explicit_resource_id) != resolved_resource_id
-            ):
-                raise WriterActionError(
-                    "RESULT_VALIDATION_FAILED",
-                    "锁定步骤指定的成果与唯一上游成果不一致",
-                    retryable=False,
-                )
+            if action.get("action_type") == "creative.lock":
+                if explicit_resource_id is None:
+                    raise WriterActionError(
+                        "RESULT_VALIDATION_FAILED",
+                        "独立锁定动作缺少唯一成果",
+                        retryable=False,
+                    )
+                resolved_resource_id = str(explicit_resource_id)
+            else:
+                if len(resource_ids) != 1:
+                    raise WriterActionError(
+                        "RESULT_VALIDATION_FAILED",
+                        "锁定步骤未找到唯一的上游成果",
+                        retryable=False,
+                    )
+                resolved_resource_id = resource_ids.pop()
+                if (
+                    explicit_resource_id is not None
+                    and str(explicit_resource_id) != resolved_resource_id
+                ):
+                    raise WriterActionError(
+                        "RESULT_VALIDATION_FAILED",
+                        "锁定步骤指定的成果与唯一上游成果不一致",
+                        retryable=False,
+                    )
             payload["resource_id"] = resolved_resource_id
         snapshot_id = str(action.get("source_snapshot_id") or "")
         if not snapshot_id:
@@ -687,6 +734,7 @@ class WriterProjectOrchestrator:
         action = self.store.require_action(action_id, actor.user_id)
         if action.get("action_type") not in {
             "creative.run_plan",
+            "creative.lock",
             "project.create_original",
         }:
             raise WriterActionError(
@@ -700,6 +748,51 @@ class WriterProjectOrchestrator:
         if target_stage not in {"brief", "characters", "outline", "beats", "script"}:
             raise WriterActionError("RESULT_VALIDATION_FAILED", "目标创作阶段无效")
         project = self.creative_service.get_project(project_id)
+        if action.get("action_type") == "creative.lock":
+            resource_id = payload.get("resource_id")
+            if resource_id is None:
+                resource_ids = payload.get("resource_ids")
+                if isinstance(resource_ids, list) and len(resource_ids) == 1:
+                    resource_id = resource_ids[0]
+            if resource_id is None:
+                raise WriterActionError(
+                    "RESULT_VALIDATION_FAILED", "独立锁定动作缺少唯一成果"
+                )
+            episode_number: int | None = None
+            if target_stage in {"beats", "script"}:
+                episode_start = payload.get("episode_start")
+                episode_end = payload.get("episode_end")
+                if (
+                    type(episode_start) is not int
+                    or type(episode_end) is not int
+                    or not 1 <= episode_start <= 100
+                    or episode_start != episode_end
+                ):
+                    raise WriterActionError(
+                        "RESULT_VALIDATION_FAILED",
+                        "分集锁定动作必须且只能指定一集",
+                    )
+                episode_number = episode_start
+            self.store.upsert_step(
+                action_id=action_id,
+                step_key=(
+                    f"{target_stage}.lock:{episode_number}"
+                    if episode_number is not None
+                    else f"{target_stage}.lock"
+                ),
+                stage=target_stage,
+                episode_start=episode_number,
+                episode_end=episode_number,
+                status="pending",
+                operation_id=(
+                    f"{action_id}:{target_stage}.lock"
+                    + (f":{episode_number}" if episode_number is not None else "")
+                ),
+                depends_on=[],
+                attempt=1,
+                step_order=1,
+            )
+            return self.store.list_steps(action_id)
         confirmed_brief = payload.get("confirmed_brief_payload")
         if not isinstance(confirmed_brief, dict):
             confirmed_brief = None
@@ -835,7 +928,9 @@ class WriterProjectOrchestrator:
             if not self.permission_service.can_read_project(actor, str(project_id)):
                 raise WriterActionError("PROJECT_ACCESS_DENIED", "无权关联该项目")
         elif action["action_type"] == "project.create_original":
-            if "project.create" not in actor.permissions:
+            if not (
+                actor.is_system_admin or "project.create" in actor.permissions
+            ):
                 raise WriterActionError("PROJECT_CREATE_DENIED", "无权创建原创项目")
             creation_payload = validate_original_project_action_payload(payload)
             for reference in creation_payload["reference_refs"]:

@@ -21,7 +21,7 @@ from creative.application_service import (
     CreativeContextConflict,
 )
 from creative import phase4_worker
-from creative.repository import CreativeRepository
+from creative.repository import CreativeRepository, canonical_request_hash
 from creative.workflow_adapter import CreativeWorkflowAdapter
 from identity.schema import Principal
 from workflow.transition_service import TransitionService
@@ -1129,6 +1129,245 @@ def test_episode_worker_authority_ignores_another_episode_advance(
     ) == extra["source_authority"]
 
 
+def test_outline_overview_does_not_change_generation_authority(
+    real_writer_context,
+) -> None:
+    seeded = seed_locked_two_episode_authority(
+        real_writer_context, "outline-overview-authority"
+    )
+    project_id = seeded["project"]["id"]
+    repository = real_writer_context.repository
+    before = repository.generation_authority_envelope(project_id)
+
+    repository.update_outline_overview(
+        project_id,
+        seeded["outline"]["batch_id"],
+        {
+            "core_event": "林岚公开评分漏洞",
+            "character_progress": "从独行到组织同事",
+            "conflict": "员工与情绪考核系统对抗",
+            "reversal": "主管承认系统伤害",
+            "highlight": "规则被反向利用",
+            "cliffhanger": "幕后人现身",
+        },
+        only_if_missing=True,
+    )
+    after_overview = repository.generation_authority_envelope(project_id)
+
+    assert after_overview == before
+
+    outline_id = seeded["outline"]["episodes"][0]["id"]
+    with repository._connect() as connection:
+        row = connection.execute(
+            "SELECT content_json FROM creative_episodes WHERE id = ?",
+            (outline_id,),
+        ).fetchone()
+        changed = json.loads(row["content_json"])
+        changed["summary"] = "第一集正文发生变化"
+        connection.execute(
+            "UPDATE creative_episodes SET content_json = ? WHERE id = ?",
+            (json.dumps(changed, ensure_ascii=False), outline_id),
+        )
+
+    assert repository.generation_authority_envelope(project_id) != before
+
+
+def test_pre_upgrade_outline_authority_survives_overview_only_update(
+    real_writer_context,
+) -> None:
+    seeded = seed_locked_two_episode_authority(
+        real_writer_context, "legacy-outline-authority"
+    )
+    project_id = seeded["project"]["id"]
+    repository = real_writer_context.repository
+    project = repository.get_project(project_id)
+    legacy_authority = repository.generation_authority_envelope(project_id)
+    legacy_outlines = sorted(
+        (
+            item
+            for item in project["episodes"]
+            if item["stage"] == "outline"
+            and item.get("batch_id") == project.get("outline_batch_id")
+        ),
+        key=lambda item: (int(item["episode_number"]), int(item["version"])),
+    )
+    legacy_authority["outline"]["fingerprint"] = canonical_request_hash(
+        [item.get("content") or {} for item in legacy_outlines]
+    )
+    legacy_authority.pop("authority_schema_version", None)
+
+    repository.update_outline_overview(
+        project_id,
+        seeded["outline"]["batch_id"],
+        {
+            "core_event": "林岚公开评分漏洞",
+            "character_progress": "从独行到组织同事",
+            "conflict": "员工与情绪考核系统对抗",
+            "reversal": "主管承认系统伤害",
+            "highlight": "规则被反向利用",
+            "cliffhanger": "幕后人现身",
+        },
+        only_if_missing=True,
+    )
+
+    extra = {
+        "action": "outlines",
+        "source_authority": legacy_authority,
+        "source_authority_sha256": canonical_request_hash(legacy_authority),
+    }
+    assert phase4_worker._validate_source_authority(
+        extra, repository, project_id
+    ) == legacy_authority
+
+
+def test_episode_generation_authority_tracks_all_continuity_beats(
+    real_writer_context,
+) -> None:
+    seeded = seed_locked_two_episode_authority(
+        real_writer_context, "episode-continuity-authority"
+    )
+    project_id = seeded["project"]["id"]
+    repository = real_writer_context.repository
+
+    beats_authority = repository.generation_authority_envelope(
+        project_id, 2, stage="beats"
+    )
+    script_authority = repository.generation_authority_envelope(
+        project_id, 2, stage="script"
+    )
+
+    assert beats_authority["stage"] == "beats"
+    assert [item["episode_number"] for item in beats_authority["locked_beats"]] == [1]
+    assert script_authority["stage"] == "script"
+    assert [item["episode_number"] for item in script_authority["locked_beats"]] == [1, 2]
+
+
+def test_worker_continuity_uses_same_compatible_beats_as_authority(
+    real_writer_context,
+) -> None:
+    seeded = seed_locked_two_episode_authority(
+        real_writer_context, "compatible-worker-continuity"
+    )
+    project_id = seeded["project"]["id"]
+    repository = real_writer_context.repository
+    incompatible = repository.create_episode_beats(
+        project_id,
+        1,
+        {
+            "beats": [
+                {
+                    "order": 1,
+                    "scene": "办公室",
+                    "characters": ["林岚"],
+                    "goal": "公开评分漏洞",
+                    "obstacle": "主管阻拦",
+                    "emotion_change": "犹豫到坚定",
+                    "turn": "证据曝光",
+                    "hook": "幕后人现身",
+                    "state_change": "同事开始支持林岚",
+                    "cost": "林岚失去晋升机会",
+                    "opposition_tactic": "主管公开施压",
+                    "continuity_updates": [
+                        {
+                            "kind": "character",
+                            "name": "林岚",
+                            "event": "错误状态",
+                            "holder": "林岚",
+                            "location": "办公室",
+                            "known_by": ["林岚"],
+                            "status": "active",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    repository.lock_episode_beats(incompatible["id"])
+    with repository._connect() as connection:
+        connection.execute(
+            "UPDATE creative_episodes SET upstream_refs_json = ? WHERE id = ?",
+            (json.dumps({"outline_batch_id": "stale"}), incompatible["id"]),
+        )
+    project = repository.get_project(project_id)
+
+    compatible = repository.compatible_locked_beats(project, [1])
+    ledger = phase4_worker._continuity_ledger_before(
+        project, 2, repository=repository
+    )
+
+    assert [item["id"] for item in compatible] == [seeded["beats"][0]["id"]]
+    assert ledger == []
+
+
+def test_episode_authority_without_stage_fails_closed(
+    real_writer_context,
+) -> None:
+    seeded = seed_locked_two_episode_authority(
+        real_writer_context, "legacy-episode-authority"
+    )
+    project_id = seeded["project"]["id"]
+    repository = real_writer_context.repository
+    unsafe_legacy = repository.generation_authority_envelope(project_id, 2)
+    assert "stage" not in unsafe_legacy
+    extra = {
+        "action": "beats",
+        "episode_number": 2,
+        "source_authority": unsafe_legacy,
+        "source_authority_sha256": canonical_request_hash(unsafe_legacy),
+    }
+
+    with pytest.raises(ValueError, match="stage"):
+        phase4_worker._validate_source_authority(extra, repository, project_id)
+    with pytest.raises(ValueError, match="stage"):
+        repository.create_episode_beats(
+            project_id,
+            2,
+            {"beats": [{"beat": "不应基于窄 authority 落库"}]},
+            expected_authority=unsafe_legacy,
+        )
+
+
+def test_earlier_continuity_change_blocks_stale_episode_persistence(
+    real_writer_context,
+) -> None:
+    seeded = seed_locked_two_episode_authority(
+        real_writer_context, "stale-continuity-authority"
+    )
+    project_id = seeded["project"]["id"]
+    expected_context = real_writer_context.service.current_plan_context(project_id, 2)
+    real_writer_context.service.start_generation(
+        project_id=project_id,
+        stage="beats",
+        actor=real_writer_context.actor,
+        workflow_task_id="beats-task",
+        operation_id="stale-continuity-authority-2",
+        generation_instruction="生成第二集 Beats",
+        source_snapshot_id="snapshot-stale-continuity",
+        source_snapshot={"snapshot_id": "snapshot-stale-continuity"},
+        episode_number=2,
+        episode_start=2,
+        episode_end=2,
+        expected_context=expected_context,
+    )
+    launched_authority = real_writer_context.jobs.payloads[-1]["extra"][
+        "source_authority"
+    ]
+    assert launched_authority["stage"] == "beats"
+
+    replacement = real_writer_context.repository.create_episode_beats(
+        project_id, 1, {"beats": [{"beat": "第一集连续性新版"}]}
+    )
+    real_writer_context.repository.lock_episode_beats(replacement["id"])
+
+    with pytest.raises(ValueError, match="server source authority changed"):
+        real_writer_context.repository.create_episode_beats(
+            project_id,
+            2,
+            {"beats": [{"beat": "基于旧连续性的第二集"}]},
+            expected_authority=launched_authority,
+        )
+
+
 def test_episode_persist_cas_ignores_another_episode_advance(
     real_writer_context, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1417,6 +1656,69 @@ def test_complete_story_goes_directly_to_confirmed_brief(e2e_context) -> None:
     completed = e2e_context.confirm_and_wait(proposed)
     project = e2e_context.creative_repository.get_project(completed["project_id"])
     assert project["blueprints"][0]["direction_type"] == "original"
+
+
+def test_chat_explicitly_reworks_locked_brief_with_parent_lineage(
+    e2e_context,
+) -> None:
+    project = e2e_context.project_with_locked_outline_and_beats(range(1, 2))
+    locked_brief_id = int(project["locked_brief_id"])
+    session = e2e_context.create_session("重做锁定 Brief")
+    e2e_context.link_project(session, project["id"])
+    replacement = e2e_context.provider.brief()
+    replacement["title"] = "情绪公司：重做版"
+
+    class BriefReworkProvider:
+        async def complete_json(self, messages):
+            del messages
+            return {
+                "reply": "已整理 Brief 重做动作",
+                "cards": [{
+                    "card_id": "brief-rework-card",
+                    "card_type": "brief",
+                    "content": replacement,
+                    "assumptions": [],
+                }],
+                "proposed_actions": [{
+                    "action_type": "creative.run_plan",
+                    "title": "重做 Brief",
+                    "source_card_id": "brief-rework-card",
+                    "target_stage": "brief",
+                    "payload": {
+                        "rework_stage": "brief",
+                        "replaces_resource_id": str(locked_brief_id),
+                    },
+                    "assumptions": [],
+                }],
+            }
+
+    e2e_context.provider = BriefReworkProvider()
+
+    proposed = e2e_context.chat(session, "确认按新方向重做 Brief")
+    assert proposed["messages"][-1]["cards"][0]["card_id"] == "brief-rework-card"
+    action = proposed["actions"][-1]
+    assert action["payload"]["rework_stage"] == "brief"
+
+    completed = e2e_context.confirm_and_wait(proposed)
+
+    assert completed["status"] == "succeeded", (
+        completed.get("error_code"),
+        completed.get("error_message"),
+        [
+            {
+                key: step.get(key)
+                for key in ("step_key", "status", "error_code", "error_message")
+            }
+            for step in e2e_context.store.list_steps(completed["id"])
+        ],
+    )
+    versions = e2e_context.creative_repository.get_project(project["id"])[
+        "blueprints"
+    ]
+    revision = max(versions, key=lambda item: (item["version"], item["id"]))
+    assert revision["id"] != locked_brief_id
+    assert revision["parent_version_id"] == locked_brief_id
+    assert revision["content"]["title"] == "情绪公司：重做版"
 
 
 def test_imported_story_and_optional_reference_are_snapshotted(e2e_context) -> None:

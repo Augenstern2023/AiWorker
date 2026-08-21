@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 import hashlib
 import json
 import sqlite3
@@ -35,6 +36,7 @@ from creative.script_service import normalize_script_content, validate_beats, va
 
 SIDE_EFFECT_OPERATION_LEASE_SECONDS = 30.0
 GENERATION_OPERATION_LEASE_SECONDS = 30.0
+GENERATION_AUTHORITY_SCHEMA_VERSION = 2
 
 
 class DuplicateTopicError(ValueError):
@@ -339,6 +341,17 @@ class CreativeRepository:
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     FOREIGN KEY(project_id) REFERENCES creative_projects(id)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS creative_project_deletions (
+                    project_id INTEGER PRIMARY KEY,
+                    project_json TEXT NOT NULL,
+                    delivery_paths_json TEXT NOT NULL DEFAULT '[]',
+                    requested_by TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'creative_deleted',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
                 )
             """)
             conn.execute("""
@@ -2096,10 +2109,41 @@ class CreativeRepository:
                 raise ValueError("project revision changed")
         return self.get_project(project_id) or {}
 
-    def delete_project(self, project_id: int) -> dict[str, Any]:
-        """Permanently remove a project and every project-scoped creative record."""
+    def get_pending_project_deletion(
+        self, project_id: int
+    ) -> dict[str, Any] | None:
+        """Return a durable cross-database deletion tombstone, if any."""
 
         with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM creative_project_deletions WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["project"] = json.loads(item.pop("project_json") or "{}")
+        item["delivery_paths"] = json.loads(
+            item.pop("delivery_paths_json") or "[]"
+        )
+        return item
+
+    def complete_project_deletion(self, project_id: int) -> None:
+        """Acknowledge that the workflow database side of a deletion is clean."""
+
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM creative_project_deletions WHERE project_id = ?",
+                (project_id,),
+            )
+
+    def delete_project(
+        self, project_id: int, *, requested_by: str = ""
+    ) -> dict[str, Any]:
+        """Delete creative rows and leave a durable workflow-cleanup tombstone."""
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             project = conn.execute(
                 "SELECT id, name, topic_id FROM creative_projects WHERE id = ? AND deleted = 0",
                 (project_id,),
@@ -2121,6 +2165,22 @@ class CreativeRepository:
                 ]
                 conn.execute("DELETE FROM creative_deliveries WHERE project_id = ?", (project_id,))
 
+            now = time.time()
+            conn.execute(
+                "INSERT OR REPLACE INTO creative_project_deletions "
+                "(project_id, project_json, delivery_paths_json, requested_by, "
+                "status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    project_id,
+                    json.dumps(dict(project), ensure_ascii=False),
+                    json.dumps(delivery_paths, ensure_ascii=False),
+                    requested_by,
+                    "creative_deleted",
+                    now,
+                    now,
+                ),
+            )
+
             optimization_ids = [
                 int(row["id"])
                 for row in conn.execute(
@@ -2141,6 +2201,7 @@ class CreativeRepository:
             conn.execute("DELETE FROM script_reviews WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_stage_exports WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_operation_results WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM creative_generation_operations WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_episodes WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_relationships WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_characters WHERE project_id = ?", (project_id,))
@@ -2203,11 +2264,15 @@ class CreativeRepository:
         return project
 
     def generation_authority_envelope(
-        self, project_id: int, episode_number: int | None = None
+        self,
+        project_id: int,
+        episode_number: int | None = None,
+        *,
+        stage: str | None = None,
     ) -> dict[str, Any]:
         with self._connect() as conn:
             return self._generation_authority_envelope_conn(
-                conn, project_id, episode_number
+                conn, project_id, episode_number, stage=stage
             )
 
     def _generation_authority_envelope_conn(
@@ -2215,7 +2280,11 @@ class CreativeRepository:
         conn: sqlite3.Connection,
         project_id: int,
         episode_number: int | None = None,
+        *,
+        stage: str | None = None,
     ) -> dict[str, Any]:
+        if stage not in {None, "brief", "characters", "outline", "beats", "script"}:
+            raise ValueError("invalid generation authority stage")
         project = conn.execute(
             "SELECT revision, locked_brief_id, character_batch_id, outline_batch_id "
             "FROM creative_projects WHERE id = ? AND deleted = 0",
@@ -2249,31 +2318,25 @@ class CreativeRepository:
         authority_project = self._operation_project(
             conn, project_id, include_episodes=True
         )
-        latest_beats: dict[int, dict[str, Any]] = {}
-        for item in authority_project["episodes"]:
-            number = int(item.get("episode_number") or 0)
-            if (
-                item.get("stage") != "beats"
-                or item.get("status") not in {"locked", "approved"}
-                or (episode_number is not None and number != int(episode_number))
-            ):
-                continue
-            try:
-                compatible = self.episode_generation_refs_match(
-                    authority_project,
-                    "beats",
-                    number,
-                    item.get("upstream_refs"),
-                )
-            except ValueError:
-                compatible = False
-            current = latest_beats.get(number)
-            if compatible and (
-                current is None
-                or (int(item.get("version") or 0), int(item["id"]))
-                > (int(current.get("version") or 0), int(current["id"]))
-            ):
-                latest_beats[number] = item
+        if episode_number is None:
+            beat_numbers = sorted({
+                int(item.get("episode_number") or 0)
+                for item in authority_project["episodes"]
+                if item.get("stage") == "beats"
+            })
+        elif stage == "beats":
+            beat_numbers = list(range(1, int(episode_number)))
+        elif stage == "script":
+            beat_numbers = list(range(1, int(episode_number) + 1))
+        else:
+            # Historical callers scoped only the target episode.
+            beat_numbers = [int(episode_number)]
+        latest_beats = {
+            int(item["episode_number"]): item
+            for item in self.compatible_locked_beats(
+                authority_project, beat_numbers
+            )
+        }
 
         def content(row: sqlite3.Row) -> Any:
             return json.loads(row["content_json"] or "{}")
@@ -2299,7 +2362,12 @@ class CreativeRepository:
             },
             "outline": {
                 "batch_id": outline_batch_id,
-                "fingerprint": canonical_request_hash([content(item) for item in outlines])
+                "fingerprint": canonical_request_hash(
+                    [
+                        self._outline_authority_content(content(item))
+                        for item in outlines
+                    ]
+                )
                 if outline_batch_id
                 else None,
             },
@@ -2313,10 +2381,102 @@ class CreativeRepository:
                 }
                 for number, item in sorted(latest_beats.items())
             ],
+            "authority_schema_version": GENERATION_AUTHORITY_SCHEMA_VERSION,
         }
         if episode_number is not None:
             authority["episode_number"] = int(episode_number)
+        if stage is not None:
+            authority["stage"] = stage
         return authority
+
+    def _outline_authority_fingerprints_conn(
+        self,
+        conn: sqlite3.Connection,
+        project_id: int,
+    ) -> set[str | None]:
+        project = conn.execute(
+            "SELECT outline_batch_id FROM creative_projects "
+            "WHERE id = ? AND deleted = 0",
+            (project_id,),
+        ).fetchone()
+        batch_id = project["outline_batch_id"] if project is not None else None
+        if not batch_id:
+            return {None}
+        rows = conn.execute(
+            "SELECT content_json FROM creative_episodes WHERE project_id = ? "
+            "AND stage = 'outline' AND batch_id = ? "
+            "ORDER BY episode_number, version",
+            (project_id, batch_id),
+        ).fetchall()
+        contents = [json.loads(row["content_json"] or "{}") for row in rows]
+        normalized = [
+            self._outline_authority_content(content) for content in contents
+        ]
+        return {
+            canonical_request_hash(contents),
+            canonical_request_hash(normalized),
+            canonical_request_hash(
+                [self._outline_content_fingerprint(content) for content in contents]
+            ),
+        }
+
+    def _generation_authority_matches_conn(
+        self,
+        conn: sqlite3.Connection,
+        project_id: int,
+        expected_authority: dict[str, Any],
+    ) -> bool:
+        scoped_episode = expected_authority.get("episode_number")
+        scoped_stage = expected_authority.get("stage")
+        if scoped_episode is not None and scoped_stage is None:
+            raise ValueError("server source authority stage is required")
+        current = self._generation_authority_envelope_conn(
+            conn,
+            project_id,
+            int(scoped_episode) if scoped_episode is not None else None,
+            stage=str(scoped_stage) if scoped_stage is not None else None,
+        )
+        if canonical_request_hash(current) == canonical_request_hash(
+            expected_authority
+        ):
+            return True
+        if expected_authority.get("authority_schema_version") is not None:
+            return False
+
+        # Pre-upgrade envelopes used the same authority fields but hashed the
+        # full outline content (including overview metadata). Accept only a
+        # known historical outline representation while every other authority
+        # field remains byte-for-byte canonical. Stage-less episode envelopes
+        # are rejected above because their old Beats scope was unsafe.
+        expected_legacy = json.loads(json.dumps(expected_authority))
+        current_legacy = json.loads(json.dumps(current))
+        current_legacy.pop("authority_schema_version", None)
+        expected_outline = expected_legacy.get("outline")
+        current_outline = current_legacy.get("outline")
+        if not isinstance(expected_outline, dict) or not isinstance(
+            current_outline, dict
+        ):
+            return False
+        expected_fingerprint = expected_outline.get("fingerprint")
+        expected_outline["fingerprint"] = None
+        current_outline["fingerprint"] = None
+        return (
+            canonical_request_hash(expected_legacy)
+            == canonical_request_hash(current_legacy)
+            and expected_fingerprint
+            in self._outline_authority_fingerprints_conn(conn, project_id)
+        )
+
+    def assert_generation_authority(
+        self,
+        project_id: int,
+        expected_authority: dict[str, Any],
+    ) -> None:
+        with self._connect() as conn:
+            if not self._generation_authority_matches_conn(
+                conn, project_id, expected_authority
+            ):
+                raise ValueError("server source authority changed")
 
     def _assert_generation_authority_conn(
         self,
@@ -2326,13 +2486,9 @@ class CreativeRepository:
     ) -> None:
         if expected_authority is None:
             return
-        scoped_episode = expected_authority.get("episode_number")
-        current = self._generation_authority_envelope_conn(
-            conn,
-            project_id,
-            int(scoped_episode) if scoped_episode is not None else None,
-        )
-        if canonical_request_hash(current) != canonical_request_hash(expected_authority):
+        if not self._generation_authority_matches_conn(
+            conn, project_id, expected_authority
+        ):
             raise ValueError("server source authority changed")
 
     def get_project_by_workflow_task_id(
@@ -3892,6 +4048,25 @@ class CreativeRepository:
             raise ValueError("必须先锁定当前集 Beats")
         return max(beats, key=lambda item: (int(item.get("version") or 0), int(item["id"])))
 
+    def compatible_locked_beats(
+        self,
+        project: dict[str, Any],
+        episode_numbers: Iterable[int],
+    ) -> list[dict[str, Any]]:
+        """Select the exact current-compatible Beats used by authority and prompts."""
+
+        selected: list[dict[str, Any]] = []
+        for episode_number in sorted({int(number) for number in episode_numbers}):
+            if episode_number < 1:
+                continue
+            try:
+                selected.append(
+                    self._locked_beats_for_episode(project, episode_number)
+                )
+            except ValueError:
+                continue
+        return selected
+
     def missing_current_locked_beats(self, project_id: int) -> list[int]:
         """Return episodes without Beats locked against the current outline batch."""
         project = self.get_project(project_id)
@@ -3917,13 +4092,19 @@ class CreativeRepository:
         ).hexdigest()
 
     @classmethod
-    def _outline_content_fingerprint(cls, content: Any) -> str:
-        """Fingerprint only outline fields that can invalidate downstream work."""
+    def _outline_authority_content(cls, content: Any) -> Any:
+        """Return outline content without overview-only metadata."""
 
         normalized = dict(content) if isinstance(content, dict) else content
         if isinstance(normalized, dict):
             normalized.pop("series_overview", None)
-        return cls._content_fingerprint(normalized)
+        return normalized
+
+    @classmethod
+    def _outline_content_fingerprint(cls, content: Any) -> str:
+        """Fingerprint only outline fields that can invalidate downstream work."""
+
+        return cls._content_fingerprint(cls._outline_authority_content(content))
 
     @classmethod
     def _outline_content_fingerprint_matches(

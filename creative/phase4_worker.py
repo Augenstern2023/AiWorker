@@ -86,13 +86,20 @@ def _locked_characters(project: dict[str, Any]) -> tuple[list[dict[str, Any]], l
     return characters, relationships
 
 
-def _continuity_ledger_before(project: dict[str, Any], episode_number: int) -> list[dict[str, Any]]:
+def _continuity_beats(
+    project: dict[str, Any],
+    episode_numbers: range,
+    *,
+    repository: CreativeRepository | None = None,
+) -> list[dict[str, Any]]:
+    if repository is not None:
+        return repository.compatible_locked_beats(project, episode_numbers)
     latest_by_episode: dict[int, dict[str, Any]] = {}
     for item in project["episodes"]:
         if (
             item["stage"] != "beats"
             or item.get("status") not in {"locked", "approved"}
-            or int(item["episode_number"]) >= episode_number
+            or int(item["episode_number"]) not in episode_numbers
         ):
             continue
         number = int(item["episode_number"])
@@ -101,25 +108,37 @@ def _continuity_ledger_before(project: dict[str, Any], episode_number: int) -> l
             int(current.get("version") or 0), int(current["id"])
         ):
             latest_by_episode[number] = item
-    return build_continuity_ledger(list(latest_by_episode.values()))
+    return list(latest_by_episode.values())
 
 
-def _continuity_ledger_through(project: dict[str, Any], episode_number: int) -> list[dict[str, Any]]:
-    latest_by_episode: dict[int, dict[str, Any]] = {}
-    for item in project["episodes"]:
-        if (
-            item["stage"] != "beats"
-            or item.get("status") not in {"locked", "approved"}
-            or int(item["episode_number"]) > episode_number
-        ):
-            continue
-        number = int(item["episode_number"])
-        current = latest_by_episode.get(number)
-        if current is None or (int(item.get("version") or 0), int(item["id"])) > (
-            int(current.get("version") or 0), int(current["id"])
-        ):
-            latest_by_episode[number] = item
-    return build_continuity_ledger(list(latest_by_episode.values()))
+def _continuity_ledger_before(
+    project: dict[str, Any],
+    episode_number: int,
+    *,
+    repository: CreativeRepository | None = None,
+) -> list[dict[str, Any]]:
+    return build_continuity_ledger(
+        _continuity_beats(
+            project,
+            range(1, int(episode_number)),
+            repository=repository,
+        )
+    )
+
+
+def _continuity_ledger_through(
+    project: dict[str, Any],
+    episode_number: int,
+    *,
+    repository: CreativeRepository | None = None,
+) -> list[dict[str, Any]]:
+    return build_continuity_ledger(
+        _continuity_beats(
+            project,
+            range(1, int(episode_number) + 1),
+            repository=repository,
+        )
+    )
 
 
 def _load_source_snapshot(extra: dict[str, Any]) -> dict[str, Any] | None:
@@ -188,6 +207,15 @@ def _validate_source_authority(
     authority = extra.get("source_authority")
     expected_sha = str(extra.get("source_authority_sha256") or "").strip()
     if not isinstance(authority, dict) or not expected_sha:
+        is_pre_envelope_job = (
+            extra.get("legacy_authority_compat") is True
+            and not extra.get("authority_schema_version")
+            and not str(extra.get("operation_id") or "").strip()
+            and not str(extra.get("source_snapshot_id") or "").strip()
+            and not str(extra.get("generation_request_hash") or "").strip()
+        )
+        if is_pre_envelope_job:
+            return repository.generation_authority_envelope(project_id)
         raise ValueError("server source authority is required")
     supplied_sha = canonical_request_hash(authority)
     if not hmac.compare_digest(supplied_sha, expected_sha):
@@ -199,14 +227,24 @@ def _validate_source_authority(
         scoped_episode
     ):
         raise ValueError("server source authority episode mismatch")
-    current = repository.generation_authority_envelope(
-        project_id,
-        int(scoped_episode) if scoped_episode is not None else None,
-    )
-    if not hmac.compare_digest(
-        canonical_request_hash(current), canonical_request_hash(authority)
+    authority_stage = authority.get("stage")
+    worker_stage = str(extra.get("normalized_stage") or "").strip() or {
+        "blueprints": "brief",
+        "blueprint_variant": "brief",
+        "characters": "characters",
+        "outlines": "outline",
+        "outline_overview": "outline",
+        "beats": "beats",
+        "script": "script",
+    }.get(str(extra.get("action") or "").strip())
+    if authority_stage is not None and (
+        authority_stage not in {"brief", "characters", "outline", "beats", "script"}
+        or worker_stage != authority_stage
     ):
-        raise ValueError("server source authority changed")
+        raise ValueError("server source authority stage mismatch")
+    if scoped_episode is not None and authority_stage is None:
+        raise ValueError("server source authority stage is required")
+    repository.assert_generation_authority(project_id, authority)
     return dict(authority)
 
 
@@ -598,24 +636,33 @@ async def _run_once(job: CrawlJob) -> None:
             if sorted(int(item["episode_number"]) for item in outlines) != list(range(start, end + 1)):
                 raise ValueError(f"未找到第 {start}-{end} 集的锁定大纲")
             if action == "beats":
-                prior = [
-                    item for item in project["episodes"]
-                    if item["stage"] == "beats"
-                    and item.get("status") in {"locked", "approved"}
-                    and int(item["episode_number"]) < start
-                ] + generated_beats
+                prior = repository.compatible_locked_beats(
+                    project, range(1, start)
+                ) + generated_beats
                 checkpoint_items, meta = await generate_episode_beats_chunk(
                     provider, project, brief, outlines, characters, relationships,
                     continuity_ledger=build_continuity_ledger(prior),
                 )
             else:
+                selected_beats = {
+                    int(item["episode_number"]): item
+                    for item in repository.compatible_locked_beats(
+                        project, range(start, end + 1)
+                    )
+                }
+                if sorted(selected_beats) != list(range(start, end + 1)):
+                    raise ValueError(
+                        f"未找到第 {start}-{end} 集的当前兼容 locked Beats"
+                    )
                 beats_by_episode = {
-                    episode_number: repository._locked_beats_for_episode(project, episode_number)["content"]
+                    episode_number: selected_beats[episode_number]["content"]
                     for episode_number in range(start, end + 1)
                 }
                 checkpoint_items, meta = await generate_episode_script_chunk(
                     provider, project, brief, outlines, characters, relationships, beats_by_episode,
-                    continuity_ledger=_continuity_ledger_through(project, start - 1),
+                    continuity_ledger=_continuity_ledger_through(
+                        project, start - 1, repository=repository
+                    ),
                 )
             if generation_reservation is not None:
                 repository.validate_generation_reservation(
@@ -677,7 +724,9 @@ async def _run_once(job: CrawlJob) -> None:
                 outline,
                 characters,
                 episode_number,
-                continuity_ledger=_continuity_ledger_before(project, episode_number),
+                continuity_ledger=_continuity_ledger_before(
+                    project, episode_number, repository=repository
+                ),
                 brief=brief,
                 relationships=relationships,
             )
@@ -692,7 +741,12 @@ async def _run_once(job: CrawlJob) -> None:
                 expected_authority=source_authority,
             )
         else:
-            beats = repository._locked_beats_for_episode(project, episode_number)
+            compatible_beats = repository.compatible_locked_beats(
+                project, [episode_number]
+            )
+            if not compatible_beats:
+                raise ValueError("必须先锁定当前集 Beats")
+            beats = compatible_beats[0]
             generated, meta = await generate_episode_script(
                 provider,
                 project,
@@ -700,7 +754,9 @@ async def _run_once(job: CrawlJob) -> None:
                 characters,
                 beats["content"],
                 episode_number,
-                continuity_ledger=_continuity_ledger_through(project, episode_number),
+                continuity_ledger=_continuity_ledger_through(
+                    project, episode_number, repository=repository
+                ),
                 brief=brief,
                 relationships=relationships,
             )

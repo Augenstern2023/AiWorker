@@ -634,8 +634,10 @@ class JobManager:
 
     def _save_state(self, state: JobState) -> None:
         target = self.state_dir / f"{state.job_id}.json"
+        payload = state.to_dict()
+        payload["state_schema_version"] = 1
         with target.open("w", encoding="utf-8") as f:
-            json.dump(state.to_dict(), f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
 
     def _state_from_disk(self, job_id: str) -> JobState | None:
         state_path = self.state_dir / f"{job_id}.json"
@@ -649,6 +651,15 @@ class JobManager:
                 job_data = json.loads(job_path.read_text(encoding="utf-8"))
             if not isinstance(job_data, dict):
                 return None
+            if not state_data.get("state_schema_version"):
+                extra = dict(job_data.get("extra") or {})
+                if (
+                    job_data.get("crawler_type") == "phase4_generate"
+                    and "source_authority" not in extra
+                    and "source_authority_sha256" not in extra
+                ):
+                    extra["legacy_authority_compat"] = True
+                    job_data = {**job_data, "extra": extra}
             state = JobState(job=CrawlJob.from_dict(job_data))
             state.status = str(state_data.get("status") or "failed")
             state.pid = state_data.get("pid")

@@ -20,7 +20,7 @@ from core.job import CrawlJob
 from creative.application_service import CreativeApplicationService
 from creative.repository import CreativeRepository
 from identity.schema import Principal
-from runtime.job_manager import JobManager
+from runtime.job_manager import JobManager, JobNotFoundError
 from writer_agent.orchestrator import WriterProjectOrchestrator
 from writer_agent.runner import WriterActionRunner, partition_episode_range
 from writer_agent.schema import WriterActionError
@@ -1521,6 +1521,28 @@ def test_cancelling_action_reconciles_real_job_to_cancelled(
     assert runner_context.store.list_steps(action["id"])[0]["status"] == "cancelled"
 
 
+def test_cancel_reconciles_job_disappearing_during_stop(runner_context) -> None:
+    action = seed_runner_action(
+        runner_context.store,
+        runner_context.session,
+        runner_context.actor,
+        stage="script",
+        episodes=range(1, 2),
+        project_revision=4,
+    )
+    runner_context.store.start_action(action["id"])
+    runner_context.store.assign_step_job(
+        action["id"], "script.generate:1", "vanished-job"
+    )
+    runner_context.jobs.stop.side_effect = JobNotFoundError("vanished-job")
+    runner_context.jobs.get_job.side_effect = JobNotFoundError("vanished-job")
+
+    cancelled = runner_context.runner.cancel(action["id"], runner_context.actor)
+
+    assert cancelled["status"] == "cancelled"
+    assert runner_context.store.list_steps(action["id"])[0]["status"] == "failed"
+
+
 def test_cancelling_action_reclaims_expired_unbound_step(runner_context):
     """A crashed non-job executor must not strand cancellation forever."""
     action = seed_runner_action(
@@ -1543,12 +1565,7 @@ def test_cancelling_action_reclaims_expired_unbound_step(runner_context):
 
     cancelling = runner_context.runner.cancel(action["id"], runner_context.actor)
     assert cancelling["phase"] == "cancelling"
-    assert cancelling["status"] == "running"
-
-    reconciled = runner_context.runner.reconcile(
-        action["id"], runner_context.actor
-    )
-    assert reconciled["status"] == "cancelled"
+    assert cancelling["status"] == "cancelled"
     assert runner_context.store.list_steps(action["id"])[0]["status"] == "cancelled"
 
 

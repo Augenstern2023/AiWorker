@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import re
 import sqlite3
@@ -355,7 +357,7 @@ def build_writer_agent_router(
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         session = store.append_material(
-            session_id, session_user_id(principal), content, name
+            session_id, owned_user_id(principal), content, name
         )
         if not session:
             raise HTTPException(404, "创作会话不存在")
@@ -372,7 +374,7 @@ def build_writer_agent_router(
     @router.post("/sessions/{session_id}/messages")
     async def chat(session_id: int, payload: ChatRequest, principal: Principal = Depends(current_principal)) -> dict[str, Any]:
         assert_access(principal)
-        session = store.get(session_id, session_user_id(principal))
+        session = store.get(session_id, owned_user_id(principal))
         if not session:
             raise HTTPException(404, "创作会话不存在")
         message = payload.message.strip()
@@ -428,6 +430,7 @@ def build_writer_agent_router(
                     {"role": "user", "content": message},
                 ],
                 project_context=expected_context,
+                client_message_id=message_id,
             )
             history.extend(
                 [
@@ -445,7 +448,11 @@ def build_writer_agent_router(
                 ]
             )
             return store.save_turn(
-                session_id, owned_user_id(principal), history, None
+                session_id,
+                owned_user_id(principal),
+                history,
+                None,
+                client_message_id=message_id,
             )
         try:
             natural_decision = match_natural_language_decision(
@@ -491,7 +498,11 @@ def build_writer_agent_router(
                 ]
             )
             return store.save_turn(
-                session_id, owned_user_id(principal), history, None
+                session_id,
+                owned_user_id(principal),
+                history,
+                None,
+                client_message_id=message_id,
             )
         materials = _session_materials(session)
         current_material = materials[-1]
@@ -500,9 +511,17 @@ def build_writer_agent_router(
         reference_context, reference_refs = resolve_references(
             payload.reference_refs, principal
         )
+        linked_project_id = session.get("project_id")
+        if linked_project_id is not None:
+            if permission_service is None:
+                raise HTTPException(503, "项目权限服务不可用")
+            if not permission_service.can_read_project(
+                principal, str(linked_project_id)
+            ):
+                raise HTTPException(403, "当前账号已无权读取关联项目")
         try:
             project_context = build_project_authority_context(
-                authority_repository, session.get("project_id")
+                authority_repository, linked_project_id
             )
         except WriterActionError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -513,6 +532,41 @@ def build_writer_agent_router(
         direction_required = requires_direction_card(
             materials, message, project_context
         )
+        claim_hash = hashlib.sha256(
+            json.dumps(
+                payload.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        try:
+            claim_state = store.claim_client_message(
+                session_id,
+                principal.user_id,
+                message_id,
+                claim_hash,
+            )
+        except WriterActionError as exc:
+            raise action_error(exc) from exc
+        if claim_state == "completed":
+            return store.get(session_id, owned_user_id(principal)) or session
+        if claim_state == "in_progress":
+            for _attempt in range(500):
+                await asyncio.sleep(0.01)
+                state = store.client_message_claim_status(
+                    session_id, principal.user_id, message_id
+                )
+                if state == "completed":
+                    return (
+                        store.get(session_id, owned_user_id(principal))
+                        or session
+                    )
+                if state is None:
+                    raise HTTPException(
+                        409, "消息处理已中断，请使用相同消息 ID 重试"
+                    )
+            raise HTTPException(409, "相同消息仍在处理中")
         try:
             raw = await create_provider().complete_json(writer_messages(
                 current_material["content"], history, message,
@@ -525,6 +579,9 @@ def build_writer_agent_router(
                 direction_required=direction_required,
             ))
         except Exception as exc:
+            store.abandon_client_message(
+                session_id, principal.user_id, message_id
+            )
             raise HTTPException(503, f"编剧大师暂时无法响应：{exc}") from exc
         payload_data = raw if isinstance(raw, dict) else {}
         report = normalize_writer_report(payload_data) if review_requested else None
@@ -568,19 +625,26 @@ def build_writer_agent_router(
                             )
                     enriched_actions.append(action)
                 proposed_actions = enriched_actions
-            actions = persist_proposed_actions(
-                store,
-                session_id=session_id,
-                actor_user_id=principal.user_id,
-                proposed_actions=proposed_actions,
-                materials=materials,
-                selected_messages=[
-                    *(item for item in history if item.get("kind") != "material"),
-                    {"role": "user", "content": message},
-                ],
-                project_context=project_context,
-                reference_refs=reference_refs,
-            )
+            try:
+                actions = persist_proposed_actions(
+                    store,
+                    session_id=session_id,
+                    actor_user_id=principal.user_id,
+                    proposed_actions=proposed_actions,
+                    materials=materials,
+                    selected_messages=[
+                        *(item for item in history if item.get("kind") != "material"),
+                        {"role": "user", "content": message},
+                    ],
+                    project_context=project_context,
+                    reference_refs=reference_refs,
+                    client_message_id=message_id,
+                )
+            except Exception:
+                store.abandon_client_message(
+                    session_id, principal.user_id, message_id
+                )
+                raise
         history.extend([
             {
                 "role": "user",
@@ -594,7 +658,23 @@ def build_writer_agent_router(
                 **({"action_ids": [action["id"] for action in actions]} if actions else {}),
             },
         ])
-        return store.save_turn(session_id, session_user_id(principal), history, report)
+        try:
+            saved = store.save_turn(
+                session_id,
+                owned_user_id(principal),
+                history,
+                report,
+                client_message_id=message_id,
+            )
+        except Exception:
+            store.abandon_client_message(
+                session_id, principal.user_id, message_id
+            )
+            raise
+        store.complete_client_message(
+            session_id, principal.user_id, message_id
+        )
+        return saved
 
     @router.get("/sessions/{session_id}/actions/{action_id}")
     async def get_action(

@@ -421,7 +421,7 @@ class WriterActionRunner:
                 self._audit_terminal(terminal, actor)
                 return
 
-        if action["action_type"] == "creative.run_plan" and not self.store.list_steps(
+        if action["action_type"] in {"creative.run_plan", "creative.lock"} and not self.store.list_steps(
             action_id
         ):
             try:
@@ -644,9 +644,12 @@ class WriterActionRunner:
             )
         active_jobs = self.store.active_job_ids(action_id)
         for job_id in active_jobs:
-            self.job_manager.stop(job_id)
+            try:
+                self.job_manager.stop(job_id)
+            except JobNotFoundError:
+                continue
         if active_jobs or self.store.has_running_steps(action_id):
-            return self.store.require_action(action["id"], actor.user_id)
+            return self.reconcile(action_id, actor)
         terminal = self.store.finish_action(action["id"], status="cancelled")
         self._audit_terminal(terminal, actor)
         return terminal

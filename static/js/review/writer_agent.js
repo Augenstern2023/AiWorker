@@ -61,6 +61,25 @@
         writerActionPollers.set(key, window.setInterval(() => refreshWriterAction(key), 1000));
     }
 
+    function safeWriterLocalUrl(value) {
+        const raw = String(value || '');
+        try {
+            const origin = window.location.origin === 'null'
+                ? 'http://writer-agent.local'
+                : window.location.origin;
+            const parsed = new URL(raw, origin);
+            if (
+                raw.startsWith('/')
+                && !raw.startsWith('//')
+                && !raw.includes('\\')
+                && parsed.origin === origin
+            ) return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+        } catch (_error) {
+            return '';
+        }
+        return '';
+    }
+
     async function decideWriterAction(action, decision, card) {
         const buttons = card.querySelectorAll('button');
         buttons.forEach((button) => { button.disabled = true; });
@@ -119,6 +138,22 @@
         status.className = 'small writer-action-status';
         status.textContent = ({pending: '待确认', queued: '已排队', running: '生成中', succeeded: '已完成', failed: '执行失败', cancelled: '已取消'})[action.status] || action.status || '';
         card.append(title, summary, status);
+        if (Number(action.total_steps || 0) > 0) {
+            writerCardText(
+                card,
+                'small writer-action-progress mt-2',
+                `${Number(action.completed_steps || 0)} / ${Number(action.total_steps)}`
+            );
+        }
+        (action.resource_refs || []).forEach((resource) => renderWriterValue(card, resource));
+        const actionOpenUrl = safeWriterLocalUrl(action.open_url);
+        if (action.status === 'succeeded' && actionOpenUrl) {
+            const link = document.createElement('a');
+            link.className = 'btn btn-outline-light btn-sm mt-3';
+            link.href = actionOpenUrl;
+            link.textContent = '打开成果';
+            card.append(link);
+        }
         if (action.status === 'pending') {
             const confirm = document.createElement('button');
             confirm.type = 'button';
@@ -131,6 +166,14 @@
             cancel.textContent = '取消';
             cancel.addEventListener('click', () => decideWriterAction(action, 'cancel', card));
             card.append(confirm, cancel);
+        } else if (['queued', 'running'].includes(action.status)) {
+            const cancel = document.createElement('button');
+            cancel.type = 'button';
+            cancel.className = 'btn btn-outline-light btn-sm mt-3';
+            cancel.textContent = action.phase === 'cancelling' ? '取消中' : '取消生成';
+            cancel.disabled = action.phase === 'cancelling';
+            cancel.addEventListener('click', () => decideWriterAction(action, 'cancel', card));
+            card.append(cancel);
         }
         if (action.status === 'failed' && action.retryable) {
             const retry = document.createElement('button');
@@ -211,19 +254,6 @@
             (cardData.steps || []).forEach((step, index) => {
                 writerCardText(card, 'small mt-1', `${index + 1}. ${step.title || step.stage || '步骤'} · ${step.kind || ''}`);
             });
-        } else if (type === 'progress') {
-            writerCardText(card, 'fw-semibold', `${Number(cardData.completed_steps || 0)} / ${Number(cardData.total_steps || 0)}`);
-            writerCardText(card, 'small text-muted mt-1', cardData.status || '');
-        } else if (type === 'result') {
-            writerCardText(card, 'fw-semibold', `项目 #${cardData.project_id || '-'}`);
-            (cardData.resource_refs || []).forEach((resource) => renderWriterValue(card, resource));
-            if (cardData.open_url) {
-                const link = document.createElement('a');
-                link.className = 'btn btn-outline-light btn-sm mt-3';
-                link.href = String(cardData.open_url);
-                link.textContent = '打开项目';
-                card.append(link);
-            }
         } else if (type === 'conflict') {
             writerCardText(card, 'fw-semibold', cardData.message || cardData.code || '项目状态已变化');
             if (cardData.current_revision != null) {
@@ -241,9 +271,12 @@
 
     function renderMountedCreativeCards(host, session) {
         host.querySelectorAll('.writer-creative-card').forEach((card) => card.remove());
+        const modelCardTypes = new Set(['directions', 'brief', 'plan', 'conflict']);
         (session?.messages || []).forEach((message) => {
             if (message.role !== 'assistant') return;
-            (message.cards || []).forEach((card) => host.append(renderWriterCreativeCard(card)));
+            (message.cards || [])
+                .filter((card) => modelCardTypes.has(card?.card_type))
+                .forEach((card) => host.append(renderWriterCreativeCard(card)));
         });
     }
 

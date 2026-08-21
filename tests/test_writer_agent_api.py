@@ -12,6 +12,7 @@ import json
 import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from types import SimpleNamespace
 from urllib.parse import quote
@@ -117,6 +118,32 @@ class CreativeProvider:
         }
 
 
+class ConcurrentCreativeProvider(CreativeProvider):
+    def __init__(self, parties: int = 2) -> None:
+        self.barrier = threading.Barrier(parties)
+        self.calls = 0
+
+    async def complete_json(self, messages):
+        self.calls += 1
+        self.barrier.wait(timeout=5)
+        return await super().complete_json(messages)
+
+
+class SingleCallCreativeProvider(CreativeProvider):
+    def __init__(self) -> None:
+        self.calls = 0
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    async def complete_json(self, messages):
+        self.calls += 1
+        self.started.set()
+        assert self.release.wait(timeout=5)
+        result = await super().complete_json(messages)
+        result["reply"] = f"唯一模型响应 {self.calls}"
+        return result
+
+
 class UnsafeCreativeProvider:
     async def complete_json(self, messages):
         return {
@@ -182,6 +209,7 @@ def _client(
     *,
     creative_repository=None,
     permissions: frozenset[str] = frozenset({"script.review.generate"}),
+    permission_service=None,
 ) -> TestClient:
     app = FastAPI()
     app.dependency_overrides[current_principal] = lambda: _principal(
@@ -190,6 +218,7 @@ def _client(
     app.include_router(writer_agent_api.build_writer_agent_router(
         tmp_path,
         creative_repository=creative_repository,
+        permission_service=permission_service,
     ))
     return TestClient(app)
 
@@ -352,6 +381,64 @@ def test_repeated_decision_client_request_enqueues_once(tmp_path) -> None:
     context.runner.enqueue.assert_called_once()
 
 
+def test_active_action_cancel_is_reachable_and_idempotent(tmp_path) -> None:
+    context = _writer_action_api_context(tmp_path)
+    session = context.store.create("writer-1", "运行中取消", "生成剧本")
+    action = context.seed_pending(session["id"], "writer-1")
+    queued = context.store.claim_pending_action(
+        action["id"], expected_revision=1, client_request_id="initial-confirm"
+    )
+    url = (
+        f"/api/writer-agent/sessions/{session['id']}/actions/{action['id']}/decision"
+    )
+    body = {
+        "decision": "cancel",
+        "expected_revision": queued["revision"],
+        "client_request_id": "same-active-cancel",
+    }
+
+    first = context.writer.post(url, json=body)
+    second = context.writer.post(url, json=body)
+
+    assert first.status_code == second.status_code == 202
+    assert first.json()["status"] == second.json()["status"] == "cancelled"
+    context.runner.cancel.assert_called_once()
+
+
+def test_replayed_active_cancel_reconciles_after_crash_before_runner(tmp_path) -> None:
+    context = _writer_action_api_context(tmp_path)
+    session = context.store.create("writer-1", "取消恢复", "生成剧本")
+    action = context.seed_pending(session["id"], "writer-1")
+    queued = context.store.claim_pending_action(action["id"], expected_revision=1)
+    accepted, requested = context.store.request_action_cancellation_once(
+        action["id"],
+        expected_revision=queued["revision"],
+        client_request_id="crash-safe-cancel",
+    )
+    assert requested is True
+    assert accepted["phase"] == "cancelling"
+    context.runner.cancel.side_effect = lambda action_id, _actor: (
+        context.store.finish_action(action_id, status="cancelled")
+    )
+
+    recovered = ActionService(
+        store=context.store,
+        runner=context.runner,
+    ).decide(
+        ActionCommand(
+            session_id=session["id"],
+            action_id=action["id"],
+            decision="cancel",
+            actor=_principal(),
+            expected_revision=queued["revision"],
+            client_request_id="crash-safe-cancel",
+        )
+    )
+
+    assert recovered["status"] == "cancelled"
+    context.runner.cancel.assert_called_once()
+
+
 def test_retry_client_request_is_idempotent(tmp_path) -> None:
     context = _writer_action_api_context(tmp_path)
     session = context.store.create("writer-1", "失败重试", "生成剧本")
@@ -409,6 +496,182 @@ def test_natural_language_message_id_is_idempotent_but_equal_text_ids_are_distin
     assert context.runner.enqueue.call_count == 2
 
 
+def test_concurrent_same_client_message_persists_one_turn_and_one_action(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = SingleCallCreativeProvider()
+    monkeypatch.setattr(writer_agent_api, "create_provider", lambda: provider)
+    store = WriterAgentStore(tmp_path / "writer-agent.db")
+    claim_calls = 0
+    both_claimed = threading.Event()
+    original_claim = store.claim_client_message
+
+    def record_claim(*args, **kwargs):
+        nonlocal claim_calls
+        result = original_claim(*args, **kwargs)
+        claim_calls += 1
+        if claim_calls == 2:
+            both_claimed.set()
+        return result
+
+    monkeypatch.setattr(store, "claim_client_message", record_claim)
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = lambda: _principal()
+    app.include_router(writer_agent_api.build_writer_agent_router(tmp_path, store=store))
+    client = TestClient(app)
+    session = client.post(
+        "/api/writer-agent/sessions",
+        json={"content": "完整故事：主角反抗情绪工资制度"},
+    ).json()
+    url = f"/api/writer-agent/sessions/{session['id']}/messages"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(
+            client.post,
+            url,
+            json={
+                "message": "生成大纲",
+                "client_message_id": "same-concurrent-message",
+            },
+        )
+        assert provider.started.wait(timeout=5)
+        second = pool.submit(
+            client.post,
+            url,
+            json={
+                "message": "生成大纲",
+                "client_message_id": "same-concurrent-message",
+            },
+        )
+        assert both_claimed.wait(timeout=5)
+        provider.release.set()
+        responses = [first.result(timeout=5), second.result(timeout=5)]
+
+    assert [response.status_code for response in responses] == [200, 200]
+    persisted = client.get(
+        f"/api/writer-agent/sessions/{session['id']}"
+    ).json()
+    assert sum(
+        message.get("message_id") == "same-concurrent-message"
+        for message in persisted["messages"]
+    ) == 1
+    assert len(persisted["actions"]) == 1
+    assert provider.calls == 1
+    assert responses[0].json() == responses[1].json()
+
+
+def test_message_claim_heartbeat_prevents_takeover_during_slow_provider(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = SingleCallCreativeProvider()
+    monkeypatch.setattr(writer_agent_api, "create_provider", lambda: provider)
+    monkeypatch.setattr(
+        writer_agent_api, "_MESSAGE_CLAIM_HEARTBEAT_SECONDS", 0.01, raising=False
+    )
+    store = WriterAgentStore(tmp_path / "writer-agent-heartbeat.db")
+    original_claim = store.claim_client_message
+
+    def short_claim(*args, **kwargs):
+        kwargs["lease_seconds"] = 0.05
+        return original_claim(*args, **kwargs)
+
+    monkeypatch.setattr(store, "claim_client_message", short_claim)
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = lambda: _principal()
+    app.include_router(writer_agent_api.build_writer_agent_router(tmp_path, store=store))
+    client = TestClient(app)
+    session = client.post(
+        "/api/writer-agent/sessions",
+        json={"content": "完整故事：主角反抗情绪工资制度"},
+    ).json()
+    url = f"/api/writer-agent/sessions/{session['id']}/messages"
+    request = {
+        "message": "生成大纲",
+        "client_message_id": "slow-provider-message",
+    }
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(client.post, url, json=request)
+        assert provider.started.wait(timeout=5)
+        time.sleep(0.12)
+        second = pool.submit(client.post, url, json=request)
+        time.sleep(0.12)
+        provider.release.set()
+        responses = [first.result(timeout=5), second.result(timeout=5)]
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert provider.calls == 1
+    assert responses[0].json() == responses[1].json()
+
+
+def test_linked_chat_fails_closed_without_permission_service(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = writer_agent_api.CreativeRepository(tmp_path / "creative.db")
+    project = repository.create_original_project(
+        seed_text="权限服务缺失",
+        name="私有项目",
+        target_episode_count=1,
+        created_by="writer-1",
+        creation_request_id="missing-permission-service",
+    )
+    store = WriterAgentStore(tmp_path / "writer-agent.db")
+    session = store.create("writer-1", "继续创作", "权限缺失会话")
+    store.bind_project(session["id"], project["id"], expected_context_revision=0)
+    provider = MagicMock()
+    monkeypatch.setattr(writer_agent_api, "create_provider", lambda: provider)
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = lambda: _principal("writer-1")
+    app.include_router(
+        writer_agent_api.build_writer_agent_router(
+            tmp_path,
+            store=store,
+            creative_repository=repository,
+        )
+    )
+
+    response = TestClient(app).post(
+        f"/api/writer-agent/sessions/{session['id']}/messages",
+        json={"message": "读取最新 Brief", "client_message_id": "no-permission"},
+    )
+
+    assert response.status_code == 503
+    provider.complete_json.assert_not_called()
+
+
+def test_concurrent_distinct_messages_merge_without_losing_either_turn(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ConcurrentCreativeProvider()
+    monkeypatch.setattr(writer_agent_api, "create_provider", lambda: provider)
+    client = _client(tmp_path)
+    session = client.post(
+        "/api/writer-agent/sessions",
+        json={"content": "完整故事：主角反抗情绪工资制度"},
+    ).json()
+    url = f"/api/writer-agent/sessions/{session['id']}/messages"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(
+            lambda index: client.post(
+                url,
+                json={
+                    "message": f"生成大纲方案 {index}",
+                    "client_message_id": f"concurrent-message-{index}",
+                },
+            ),
+            range(2),
+        ))
+
+    assert [response.status_code for response in responses] == [200, 200]
+    persisted = client.get(
+        f"/api/writer-agent/sessions/{session['id']}"
+    ).json()
+    ids = {message.get("message_id") for message in persisted["messages"]}
+    assert {"concurrent-message-0", "concurrent-message-1"} <= ids
+    assert len(persisted["actions"]) == 2
+
+
 def test_admin_can_read_action_but_cannot_mutate_another_users_action(tmp_path) -> None:
     context = _writer_action_api_context(tmp_path)
     session = context.store.create("writer-1", "管理员读取", "生成剧本")
@@ -438,6 +701,33 @@ def test_admin_can_read_action_but_cannot_mutate_another_users_action(tmp_path) 
 
     assert readable.status_code == 200
     assert denied.status_code == 404
+
+
+def test_admin_read_scope_does_not_allow_cross_user_session_writes(tmp_path) -> None:
+    store = WriterAgentStore(tmp_path / "writer-agent.db")
+    session = store.create("writer-1", "原始材料", "私有会话")
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = _admin_principal
+    app.include_router(
+        writer_agent_api.build_writer_agent_router(tmp_path, store=store)
+    )
+    admin = TestClient(app)
+
+    chat = admin.post(
+        f"/api/writer-agent/sessions/{session['id']}/messages",
+        json={"message": "替别人追加消息", "client_message_id": "admin-cross-write"},
+    )
+    material = admin.post(
+        f"/api/writer-agent/sessions/{session['id']}/materials/file",
+        content=b"cross-user material",
+        headers={"X-Writer-Filename": "attack.md"},
+    )
+
+    assert chat.status_code == material.status_code == 404
+    unchanged = store.get(session["id"], "writer-1")
+    assert unchanged is not None
+    assert unchanged["content"] == "原始材料"
+    assert [item["kind"] for item in unchanged["messages"]] == ["material"]
 
 
 class _DenyProjectWrite:
@@ -578,6 +868,33 @@ def test_original_project_confirmation_rechecks_project_create_permission(tmp_pa
 
     assert store.require_action(action["id"], actor.user_id)["status"] == "pending"
     runner.enqueue.assert_not_called()
+
+
+def test_system_admin_can_confirm_own_original_project_action(tmp_path) -> None:
+    store = WriterAgentStore(tmp_path / "admin-original-project.db")
+    actor = _admin_principal()
+    session = store.create(actor.user_id, "原创项目", "管理员创建项目")
+    action = store.create_action(
+        session_id=session["id"], actor_user_id=actor.user_id,
+        action_type="project.create_original", project_id=None,
+        idempotency_key="admin-original-project",
+        request_hash="admin-original-project",
+        payload={"source_card_id": "card-1"}, expected_context={},
+        source_snapshot_id="snapshot",
+    )
+    runner = MagicMock()
+    service = ActionService(store=store, runner=runner)
+
+    confirmed = service.decide(
+        ActionCommand(
+            session_id=session["id"], action_id=action["id"],
+            decision="confirm", actor=actor, expected_revision=1,
+            client_request_id="admin-original-create",
+        )
+    )
+
+    assert confirmed["status"] == "queued"
+    runner.enqueue.assert_called_once_with(action["id"], actor)
 
 
 class _ConcurrentRetryRunner:
@@ -830,7 +1147,13 @@ def test_structured_project_link_intent_creates_pending_link_without_llm(
         "create_provider",
         lambda: (_ for _ in ()).throw(AssertionError("结构化关联不应调用 LLM")),
     )
-    client = _client(tmp_path, creative_repository=repository)
+    readable_permissions = MagicMock()
+    readable_permissions.can_read_project.return_value = True
+    client = _client(
+        tmp_path,
+        creative_repository=repository,
+        permission_service=readable_permissions,
+    )
     session = client.post(
         "/api/writer-agent/sessions",
         json={"content": "继续创作", "title": "关联项目"},
@@ -888,7 +1211,13 @@ def test_chat_uses_server_project_authority_and_blocks_locked_brief_overwrite(
     locked_brief = repository.lock_brief(locked_brief["id"])
     provider = LockedBriefOverwriteProvider()
     monkeypatch.setattr(writer_agent_api, "create_provider", lambda: provider)
-    client = _client(tmp_path, creative_repository=repository)
+    readable_permissions = MagicMock()
+    readable_permissions.can_read_project.return_value = True
+    client = _client(
+        tmp_path,
+        creative_repository=repository,
+        permission_service=readable_permissions,
+    )
     created = client.post(
         "/api/writer-agent/sessions",
         json={"content": "继续完善当前项目。"},
@@ -913,6 +1242,44 @@ def test_chat_uses_server_project_authority_and_blocks_locked_brief_overwrite(
     }
     assert response.json()["messages"][-1].get("cards", []) == []
     assert response.json()["actions"] == []
+
+
+def test_chat_rechecks_linked_project_read_access_before_calling_model(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = writer_agent_api.CreativeRepository(tmp_path / "creative.db")
+    project = repository.create_original_project(
+        seed_text="撤权后的项目内容",
+        name="私有项目",
+        target_episode_count=1,
+        created_by="writer-1",
+        creation_request_id="revoked-chat-read",
+    )
+    store = WriterAgentStore(tmp_path / "writer-agent.db")
+    session = store.create("writer-1", "继续创作", "撤权会话")
+    store.bind_project(session["id"], project["id"], expected_context_revision=0)
+    permission_service = MagicMock()
+    permission_service.can_read_project.return_value = False
+    provider = MagicMock()
+    monkeypatch.setattr(writer_agent_api, "create_provider", lambda: provider)
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = lambda: _principal("writer-1")
+    app.include_router(
+        writer_agent_api.build_writer_agent_router(
+            tmp_path,
+            store=store,
+            creative_repository=repository,
+            permission_service=permission_service,
+        )
+    )
+
+    response = TestClient(app).post(
+        f"/api/writer-agent/sessions/{session['id']}/messages",
+        json={"message": "把最新大纲发给我", "client_message_id": "revoked-read"},
+    )
+
+    assert response.status_code == 403
+    provider.complete_json.assert_not_called()
 
 
 def test_chat_records_an_authorized_optional_reference_in_the_action_snapshot(

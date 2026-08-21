@@ -31,7 +31,6 @@ from creative.lifecycle_service import TopicLifecycleService, content_fingerprin
 from creative.market_reference_service import MarketReferenceService
 from creative.original_direction_service import validate_original_direction_content
 from creative.original_project_service import OriginalProjectService
-from creative.project_creator_migration import migrate_project_creator_memberships
 from creative.outline_overview import SERIES_OVERVIEW_FIELD_LABELS, read_series_overview
 from creative.repository import CreativeRepository, DuplicateTopicError
 from creative.script_service import normalize_script_content, validate_script
@@ -724,7 +723,6 @@ def build_creative_router(
                 SystemDatabase(SystemDatabaseSettings.from_environment())
             )
         )
-    migrate_project_creator_memberships(repository, workflow_repository)
     workflow_adapter = (
         application_service.workflow_adapter
         if application_service is not None
@@ -748,6 +746,33 @@ def build_creative_router(
         )
     )
     if application_service is None:
+        workflow_identity = getattr(
+            workflow_repository, "identity_repository", None
+        )
+        if workflow_identity is not None:
+            application_permission_service: Any = PermissionService(
+                workflow_identity,
+                SessionService(workflow_identity),
+            )
+        else:
+            class InjectedWorkflowPermissionBoundary:
+                """Narrow fallback for routers built with a repository test double."""
+
+                @staticmethod
+                def can_create_project_content(
+                    principal: Principal,
+                    project_id: str,
+                    *,
+                    active_member: bool,
+                ) -> bool:
+                    del project_id
+                    return bool(
+                        active_member
+                        or principal.is_system_admin
+                        or "project_owner" in principal.role_codes
+                    )
+
+            application_permission_service = InjectedWorkflowPermissionBoundary()
         application_service = CreativeApplicationService(
             repository,
             workflow_repository,
@@ -756,10 +781,7 @@ def build_creative_router(
             Path(runtime_dir),
             original_project_service=original_project_service,
             workflow_adapter=workflow_adapter,
-            permission_service=PermissionService(
-                workflow_repository.identity_repository,
-                SessionService(workflow_repository.identity_repository),
-            ),
+            permission_service=application_permission_service,
         )
 
     def topic_library_items(
@@ -2663,17 +2685,41 @@ def build_creative_router(
         request: Request,
         principal: Principal = Depends(current_principal),
     ):
-        project = project_or_404(project_id)
+        project = repository.get_project(project_id)
+        pending_deletion = repository.get_pending_project_deletion(project_id)
+        if project is None and pending_deletion is None:
+            raise HTTPException(404, "创作项目不存在")
         permission_service = getattr(
             request.app.state, "identity_permission_service", None
         )
         if not isinstance(permission_service, PermissionService):
             raise HTTPException(500, "identity permission service is not configured")
-        if not permission_service.can_delete_project(principal, str(project_id)):
-            raise HTTPException(403, "无权管理该项目")
+        if project is not None:
+            if not permission_service.can_delete_project(principal, str(project_id)):
+                raise HTTPException(403, "无权管理该项目")
+        elif not (
+            principal.is_system_admin
+            or (
+                pending_deletion is not None
+                and pending_deletion.get("requested_by") == principal.user_id
+                and "project.delete" in principal.permissions
+            )
+        ):
+            raise HTTPException(403, "无权继续该项目的删除清理")
         try:
+            if project is not None:
+                removed = repository.delete_project(
+                    project_id, requested_by=principal.user_id
+                )
+            else:
+                assert pending_deletion is not None
+                removed = {
+                    **pending_deletion["project"],
+                    "delivery_paths": list(
+                        pending_deletion.get("delivery_paths") or []
+                    ),
+                }
             workflow_repository.delete_project_data(str(project_id))
-            removed = repository.delete_project(project_id)
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from exc
         except Exception as exc:
@@ -2683,6 +2729,7 @@ def build_creative_router(
                 Path(raw_path).unlink(missing_ok=True)
             except OSError:
                 continue
+        repository.complete_project_deletion(project_id)
         audit_service = getattr(request.app.state, "audit_service", None)
         if isinstance(audit_service, AuditService):
             audit_service.record(
@@ -2691,7 +2738,7 @@ def build_creative_router(
                 target_type="creative_project",
                 target_id=str(project_id),
                 project_id=str(project_id),
-                before=project,
+                before=project or removed,
                 after=None,
                 reason=None,
                 result="success",

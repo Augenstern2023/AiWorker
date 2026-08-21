@@ -21,7 +21,7 @@ import pytest
 
 from creative.application_service import CreativeContextConflict, CreativeTaskOccupied
 from identity.schema import Principal
-from writer_agent.action_service import persist_proposed_actions
+from writer_agent.action_service import parse_proposed_actions, persist_proposed_actions
 from writer_agent.orchestrator import WriterProjectOrchestrator
 from writer_agent.schema import ProposedAction, WriterActionError
 from writer_agent.store import WriterAgentStore
@@ -107,6 +107,150 @@ def test_link_action_rechecks_project_read_access(orchestrator_context) -> None:
             action["id"], orchestrator_context.actor
         )
     assert exc.value.code == "PROJECT_ACCESS_DENIED"
+
+
+def test_standalone_lock_materializes_and_executes_a_real_lock_step(
+    orchestrator_context,
+) -> None:
+    snapshot = orchestrator_context.store.save_source_snapshot({
+        "snapshot_id": "standalone-lock-snapshot",
+        "materials": [],
+    })
+    action = orchestrator_context.store.create_action(
+        session_id=orchestrator_context.session["id"],
+        actor_user_id=orchestrator_context.actor.user_id,
+        action_type="creative.lock",
+        project_id=17,
+        idempotency_key="standalone-lock",
+        request_hash="standalone-lock",
+        payload={
+            "target_stage": "brief",
+            "resource_id": "101",
+            "assumptions": [],
+        },
+        expected_context={"project_revision": 0},
+        source_snapshot_id=snapshot["id"],
+    )
+    orchestrator_context.creative_service.ensure_stage_task.return_value = {
+        "id": "brief-task",
+        "status": "in_progress",
+    }
+    orchestrator_context.creative_service.lock_resource.return_value = {
+        "resource_type": "brief",
+        "resource_id": "101",
+        "status": "locked",
+    }
+
+    steps = orchestrator_context.orchestrator.prepare_action_plan(
+        action["id"], orchestrator_context.actor
+    )
+    result = orchestrator_context.orchestrator.execute_action_step(
+        action,
+        steps[0],
+        orchestrator_context.actor,
+        operation_id=steps[0]["operation_id"],
+    )
+
+    assert [(step["step_key"], step["status"]) for step in steps] == [
+        ("brief.lock", "pending")
+    ]
+    assert result["resource_refs"][0]["resource_id"] == "101"
+    orchestrator_context.creative_service.lock_resource.assert_called_once()
+
+
+@pytest.mark.parametrize("target_stage", ["beats", "script"])
+@pytest.mark.parametrize(
+    ("episode_start", "episode_end"),
+    [(None, None), (2, None), (2, 3)],
+)
+def test_model_episode_lock_requires_exactly_one_episode(
+    target_stage: str,
+    episode_start: int | None,
+    episode_end: int | None,
+) -> None:
+    """Accepting a missing or multi-episode lock scope would create an ambiguous step."""
+
+    actions = parse_proposed_actions({
+        "proposed_actions": [
+            {
+                "action_type": "creative.lock",
+                "title": f"锁定第 2 集 {target_stage}",
+                "project_id": 17,
+                "target_stage": target_stage,
+                "episode_start": episode_start,
+                "episode_end": episode_end,
+                "payload": {"resource_id": f"{target_stage}-2"},
+            }
+        ]
+    })
+
+    assert actions == []
+
+
+@pytest.mark.parametrize("target_stage", ["beats", "script"])
+def test_model_episode_lock_persists_and_executes_from_top_level_scope(
+    orchestrator_context,
+    target_stage: str,
+) -> None:
+    """Dropping the persisted top-level range would strand a valid standalone lock."""
+
+    proposed = parse_proposed_actions({
+        "proposed_actions": [
+            {
+                "action_type": "creative.lock",
+                "title": f"锁定第 2 集 {target_stage}",
+                "project_id": 17,
+                "target_stage": target_stage,
+                "episode_start": 2,
+                "episode_end": 2,
+                "payload": {"resource_id": f"{target_stage}-2"},
+            }
+        ]
+    })
+    assert len(proposed) == 1
+    action = persist_proposed_actions(
+        orchestrator_context.store,
+        session_id=orchestrator_context.session["id"],
+        actor_user_id=orchestrator_context.actor.user_id,
+        proposed_actions=proposed,
+        materials=[],
+        selected_messages=[],
+        project_context={"project_id": 17, "project_revision": 0},
+    )[0]
+    assert action["payload"]["episode_start"] == 2
+    assert action["payload"]["episode_end"] == 2
+    assert "episode_number" not in action["payload"]
+    orchestrator_context.creative_service.ensure_stage_task.return_value = {
+        "id": f"{target_stage}-task-2",
+        "status": "in_progress",
+    }
+    orchestrator_context.creative_service.lock_resource.return_value = {
+        "resource_type": target_stage,
+        "resource_id": f"{target_stage}-2",
+        "status": "locked",
+    }
+
+    steps = orchestrator_context.orchestrator.prepare_action_plan(
+        action["id"], orchestrator_context.actor
+    )
+    result = orchestrator_context.orchestrator.execute_action_step(
+        action,
+        steps[0],
+        orchestrator_context.actor,
+        operation_id=steps[0]["operation_id"],
+    )
+
+    assert [
+        (step["step_key"], step["episode_start"], step["episode_end"])
+        for step in steps
+    ] == [(f"{target_stage}.lock:2", 2, 2)]
+    assert result["resource_refs"][0]["resource_id"] == f"{target_stage}-2"
+    assert (
+        orchestrator_context.creative_service.lock_resource.call_args.kwargs[
+            "episode_number"
+        ]
+        == 2
+    )
 
 
 def test_link_action_persisted_from_proposal_uses_top_level_project_id(
@@ -302,6 +446,32 @@ def test_create_action_requires_project_create_permission(orchestrator_context) 
 
     assert exc.value.code == "PROJECT_CREATE_DENIED"
     orchestrator_context.creative_service.create_original_project.assert_not_called()
+
+
+def test_system_admin_can_create_own_original_project(orchestrator_context) -> None:
+    action = orchestrator_context.create_action(
+        "project.create_original",
+        payload={
+            "seed_text": "未来公司按照员工情绪发工资",
+            "name": "情绪公司", "genre": "都市奇幻", "target_platform": "hg",
+            "target_audience": "18-35岁", "target_episode_count": 20,
+            "episode_duration_seconds": 120, "cost_level": "low",
+            "content_boundaries": [], "reference_refs": [], "assumptions": [],
+        },
+    )
+    admin = replace(
+        orchestrator_context.actor,
+        role_codes=("system_admin",),
+        permissions=frozenset({"*"}),
+        data_scope="all",
+    )
+
+    result = orchestrator_context.orchestrator.execute_project_action(
+        action["id"], admin
+    )
+
+    assert result["project_id"] == 17
+    orchestrator_context.creative_service.create_original_project.assert_called_once()
 
 
 def test_replay_after_binding_records_result_without_rebinding(

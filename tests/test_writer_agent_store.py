@@ -59,6 +59,55 @@ def seed_run_plan(
     )
 
 
+def test_client_message_claim_takeover_fences_previous_owner(
+    tmp_path: Path,
+) -> None:
+    store = WriterAgentStore(tmp_path / "message-claim-fencing.db")
+    session = store.create("writer-1", "并发消息", "测试 claim fencing")
+
+    assert store.claim_client_message(
+        session["id"],
+        "writer-1",
+        "message-1",
+        "content-hash",
+        claim_token="owner-a",
+        lease_seconds=30,
+    ) == "claimed"
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE writer_agent_message_claims SET updated_at=? "
+            "WHERE session_id=? AND user_id=? AND message_id=?",
+            (time.time() - 31, session["id"], "writer-1", "message-1"),
+        )
+
+    assert store.claim_client_message(
+        session["id"],
+        "writer-1",
+        "message-1",
+        "content-hash",
+        claim_token="owner-b",
+        lease_seconds=30,
+    ) == "claimed"
+    assert not store.renew_client_message_claim(
+        session["id"], "writer-1", "message-1", claim_token="owner-a"
+    )
+    assert not store.abandon_client_message(
+        session["id"], "writer-1", "message-1", claim_token="owner-a"
+    )
+    assert (
+        store.client_message_claim_status(
+            session["id"], "writer-1", "message-1"
+        )
+        == "in_progress"
+    )
+    assert not store.complete_client_message(
+        session["id"], "writer-1", "message-1", claim_token="owner-a"
+    )
+    assert store.complete_client_message(
+        session["id"], "writer-1", "message-1", claim_token="owner-b"
+    )
+
+
 def test_store_migrates_session_and_claims_action_once(tmp_path: Path) -> None:
     store = WriterAgentStore(tmp_path / "writer-agent.db")
     session = store.create("writer-1", "旧剧本", "测试")
@@ -178,6 +227,47 @@ def test_session_context_changes_and_new_messages_have_stable_ids(tmp_path: Path
     assert bound["context_revision"] == 1
     assert appended["context_revision"] == 2
     assert appended["messages"][-1]["message_id"]
+
+
+def test_action_view_uses_durable_steps_for_truthful_progress_and_result_link(
+    tmp_path: Path,
+) -> None:
+    store = WriterAgentStore(tmp_path / "writer-agent.db")
+    action = seed_run_plan(
+        store, key="truthful-action-view", project_id=17, episodes=(1, 2)
+    )
+    for episode in (1, 2):
+        store.upsert_step(
+            action_id=action["id"],
+            step_key=f"script.generate:{episode}",
+            stage="script",
+            episode_start=episode,
+            episode_end=episode,
+            status="pending",
+            operation_id=f"truthful-script-{episode}",
+            depends_on=[],
+            attempt=1,
+            step_order=episode,
+        )
+    store.finish_step(
+        action["id"],
+        "script.generate:1",
+        {"resource_refs": [{"resource_type": "script", "resource_id": "501"}]},
+    )
+
+    view = store.require_action(action["id"], "writer-1")
+
+    assert view["title"] == "生成第1-2集剧本"
+    assert view["completed_steps"] == 1
+    assert view["total_steps"] == 2
+    assert [step["status"] for step in view["steps"]] == [
+        "succeeded",
+        "pending",
+    ]
+    assert view["resource_refs"] == [
+        {"resource_type": "script", "resource_id": "501"}
+    ]
+    assert view["open_url"] == "/writing/projects"
 
 
 def test_steps_run_in_order_only_after_dependencies_succeed_and_retry_preserves_operation_id(

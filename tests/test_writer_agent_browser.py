@@ -136,6 +136,37 @@ def test_writer_agent_renders_model_text_without_executing_html(page: Page) -> N
     assert page.evaluate("window.__xss || 0") == 0
 
 
+def test_action_card_renders_server_ledger_progress_and_result_link(page: Page) -> None:
+    mount_writer_agent(
+        page,
+        session={
+            "id": 1,
+            "messages": [],
+            "actions": [{
+                "id": "ledger-action",
+                "action_type": "creative.run_plan",
+                "status": "succeeded",
+                "revision": 4,
+                "title": "生成第1-2集剧本",
+                "summary": "共 2 个可审计步骤",
+                "completed_steps": 2,
+                "total_steps": 2,
+                "resource_refs": [
+                    {"resource_type": "script", "resource_id": "501"}
+                ],
+                "open_url": "/writing/projects",
+            }],
+        },
+    )
+
+    card = page.locator(".writer-action-card")
+    assert card.get_by_text("2 / 2").is_visible()
+    assert card.get_by_text("script").is_visible()
+    assert card.get_by_role("link", name="打开成果").get_attribute("href") == (
+        "/writing/projects"
+    )
+
+
 def test_writer_agent_has_no_horizontal_overflow_at_390px(page: Page) -> None:
     page.set_viewport_size({"width": 390, "height": 844})
     mount_writer_agent(
@@ -154,7 +185,7 @@ def test_writer_agent_has_no_horizontal_overflow_at_390px(page: Page) -> None:
     )
 
 
-def test_writer_agent_renders_all_creative_message_card_types(page: Page) -> None:
+def test_writer_agent_ignores_server_owned_cards_in_message_history(page: Page) -> None:
     mount_writer_agent(
         page,
         session={
@@ -222,14 +253,14 @@ def test_writer_agent_renders_all_creative_message_card_types(page: Page) -> Non
     )
 
     cards = page.locator(".writer-creative-card")
-    assert cards.count() == 6
+    assert cards.count() == 4
     assert cards.nth(0).get_by_text("情绪审判庭").is_visible()
     assert cards.nth(1).get_by_text("愤怒会让工资归零").is_visible()
     assert cards.nth(2).get_by_text("补齐创作基线").is_visible()
-    assert cards.nth(3).get_by_text("2 / 5").is_visible()
-    assert cards.nth(4).get_by_role("link", name="打开项目").get_attribute("href") == "/writing/projects/9/outlines"
-    assert cards.nth(5).get_by_text("项目版本已经变化").is_visible()
-    assert cards.nth(5).get_by_role("button", name="重新生成计划").is_visible()
+    assert cards.nth(3).get_by_text("项目版本已经变化").is_visible()
+    assert page.get_by_text("2 / 5").count() == 0
+    assert page.get_by_role("link", name="打开项目").count() == 0
+    assert cards.nth(3).get_by_role("button", name="重新生成计划").is_visible()
 
 
 def test_writer_agent_project_context_shows_mode_stage_and_valid_entry(page: Page) -> None:

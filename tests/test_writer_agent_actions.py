@@ -16,9 +16,65 @@ from pydantic import ValidationError
 from writer_agent.action_service import (
     build_source_snapshot,
     match_natural_language_decision,
+    parse_creative_cards,
+    validate_project_authority,
     validate_cards,
 )
-from writer_agent.schema import DirectionCard, ProposedAction, WriterActionError
+from writer_agent.schema import (
+    BriefCard,
+    DirectionCard,
+    ProposedAction,
+    ResultCard,
+    WriterActionError,
+)
+
+
+def test_locked_brief_allows_only_explicit_current_brief_rework() -> None:
+    card = BriefCard.model_validate({
+        "card_id": "brief-rework",
+        "content": {"title": "新版 Brief"},
+    })
+    action = ProposedAction.model_validate({
+        "action_type": "creative.run_plan",
+        "title": "重做 Brief",
+        "source_card_id": card.card_id,
+        "target_stage": "brief",
+        "payload": {
+            "rework_stage": "brief",
+            "replaces_resource_id": "9",
+        },
+    })
+    authority = {
+        "project_id": 17,
+        "locked_brief": {"id": 9, "version": 2, "content": {}},
+    }
+
+    validate_project_authority([card], [action], authority)
+
+    stale = action.model_copy(
+        update={
+            "payload": {
+                "rework_stage": "brief",
+                "replaces_resource_id": "8",
+            }
+        }
+    )
+    with pytest.raises(WriterActionError, match="LOCKED_RESULT_CONFLICT"):
+        validate_project_authority([card], [stale], authority)
+
+    stale_nested = action.model_copy(
+        update={
+            "payload": {
+                "rework_stage": "brief",
+                "replaces_resource_id": "9",
+                "step_payloads": {
+                    "brief": {"replaces_resource_id": "8"},
+                },
+            }
+        }
+    )
+    with pytest.raises(WriterActionError, match="LOCKED_RESULT_CONFLICT"):
+        validate_project_authority([card], [stale_nested], authority)
 
 
 def pending_action(
@@ -76,6 +132,53 @@ def test_model_cannot_nest_server_trusted_fields_in_action_payload() -> None:
                 },
             },
         })
+
+
+@pytest.mark.parametrize(
+    "open_url",
+    [
+        "javascript:alert(document.domain)",
+        "JaVaScRiPt:alert(1)",
+        "data:text/html,<script>alert(1)</script>",
+        "//attacker.example/project/7",
+        "https://attacker.example/project/7",
+    ],
+)
+def test_result_card_rejects_non_local_project_urls(open_url: str) -> None:
+    """A model-controlled result link must never escape the application origin."""
+
+    with pytest.raises(ValidationError):
+        ResultCard.model_validate({
+            "card_id": "result-xss",
+            "project_id": 7,
+            "resource_refs": [],
+            "open_url": open_url,
+        })
+
+
+@pytest.mark.parametrize("card_type", ["progress", "result"])
+def test_model_cannot_supply_server_owned_action_cards(card_type: str) -> None:
+    card = (
+        {
+            "card_id": "model-progress",
+            "card_type": "progress",
+            "action_id": "forged-action",
+            "status": "succeeded",
+            "completed_steps": 99,
+            "total_steps": 99,
+        }
+        if card_type == "progress"
+        else {
+            "card_id": "model-result",
+            "card_type": "result",
+            "project_id": 999,
+            "resource_refs": [{"resource_type": "script", "resource_id": "forged"}],
+            "open_url": "/writing/projects/999/outlines",
+        }
+    )
+
+    with pytest.raises(WriterActionError, match="RESULT_VALIDATION_FAILED"):
+        parse_creative_cards({"cards": [card]})
 
 
 def test_confirmation_requires_one_matching_pending_action() -> None:

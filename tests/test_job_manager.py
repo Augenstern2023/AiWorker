@@ -80,6 +80,44 @@ def test_job_manager_create_job(monkeypatch, tmp_path):
     assert (tmp_path / "jobs" / "job-1.json").exists()
 
 
+def test_disk_loader_marks_only_verifiable_pre_schema_phase4_jobs_legacy(
+    tmp_path,
+) -> None:
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    legacy = CrawlJob(
+        job_id="legacy-phase4",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={"action": "blueprints", "project_id": 1},
+    )
+    current = CrawlJob(
+        job_id="current-corrupt-phase4",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={"action": "blueprints", "project_id": 1},
+    )
+    (manager.state_dir / "legacy-phase4.json").write_text(
+        json.dumps({"job": legacy.to_dict(), "status": "pending"}),
+        encoding="utf-8",
+    )
+    (manager.state_dir / "current-corrupt-phase4.json").write_text(
+        json.dumps({
+            "state_schema_version": 1,
+            "job": current.to_dict(),
+            "status": "pending",
+        }),
+        encoding="utf-8",
+    )
+
+    loaded_legacy = manager._state_from_disk("legacy-phase4")
+    loaded_current = manager._state_from_disk("current-corrupt-phase4")
+
+    assert loaded_legacy is not None
+    assert loaded_legacy.job.extra["legacy_authority_compat"] is True
+    assert loaded_current is not None
+    assert "legacy_authority_compat" not in loaded_current.job.extra
+
+
 def test_job_manager_allows_different_drama_downloads_to_run_together(
     monkeypatch, tmp_path
 ):

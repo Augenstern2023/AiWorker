@@ -195,6 +195,33 @@ def test_worker_requires_and_validates_server_authority(tmp_path: Path) -> None:
         phase4_worker._validate_source_authority({}, repository, project["id"])
 
 
+def test_worker_rehydrates_authority_only_for_pre_envelope_jobs(tmp_path: Path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = seed_worker_project(repository, episode_count=1)
+
+    legacy = phase4_worker._validate_source_authority(
+        {"action": "blueprints", "legacy_authority_compat": True},
+        repository,
+        project["id"],
+    )
+
+    assert legacy == repository.generation_authority_envelope(project["id"])
+    with pytest.raises(ValueError, match="authority"):
+        phase4_worker._validate_source_authority(
+            {
+                "action": "blueprints",
+                "authority_schema_version": 1,
+                "operation_id": "new-writer-operation",
+            },
+            repository,
+            project["id"],
+        )
+    with pytest.raises(ValueError, match="authority"):
+        phase4_worker._validate_source_authority(
+            {"action": "blueprints"}, repository, project["id"]
+        )
+
+
 def test_blueprint_prompt_requires_an_imitation_reason_for_each_direction() -> None:
     messages = blueprint_messages({}, 3)
 

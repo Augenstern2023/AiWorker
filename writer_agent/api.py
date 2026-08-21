@@ -37,6 +37,8 @@ from identity.dependencies import current_principal
 from identity.schema import Principal
 from pydantic import BaseModel
 
+from .action_service import parse_creative_cards, parse_proposed_actions, persist_proposed_actions
+from .schema import WriterActionError
 from .service import build_writer_report_markdown, is_review_request, normalize_writer_report, writer_messages
 from .store import WriterAgentStore
 
@@ -232,25 +234,57 @@ def build_writer_agent_router(
         current_material = materials[-1]
         review_requested = is_review_request(message)
         material_catalog = [{"name": item["name"], "length": len(item["content"])} for item in materials]
+        project_context = ({"project_id": session["project_id"]}
+                           if session.get("project_id") is not None else {})
         try:
             raw = await create_provider().complete_json(writer_messages(
                 current_material["content"], history, message,
                 review_requested=review_requested,
                 material_name=current_material["name"],
                 material_catalog=material_catalog,
+                materials=materials,
+                project_context=project_context,
             ))
         except Exception as exc:
             raise HTTPException(503, f"编剧大师暂时无法响应：{exc}") from exc
         payload_data = raw if isinstance(raw, dict) else {}
         report = normalize_writer_report(payload_data) if review_requested else None
         reply = report["reply"] if report is not None else str(payload_data.get("reply") or "我已结合当前材料与上下文整理回答。").strip()
+        cards: list[dict[str, Any]] = []
+        actions: list[dict[str, Any]] = []
+        if not review_requested:
+            try:
+                cards = [card.model_dump(mode="json") for card in parse_creative_cards(payload_data)]
+            except WriterActionError:
+                cards = []
+            card_ids = {card["card_id"] for card in cards}
+            proposed_actions = [
+                action for action in parse_proposed_actions(payload_data)
+                if action.source_card_id is None or action.source_card_id in card_ids
+            ]
+            actions = persist_proposed_actions(
+                store,
+                session_id=session_id,
+                actor_user_id=principal.user_id,
+                proposed_actions=proposed_actions,
+                materials=materials,
+                selected_messages=[
+                    *(item for item in history if item.get("kind") != "material"),
+                    {"role": "user", "content": message},
+                ],
+                project_context=project_context,
+            )
         history.extend([
             {
                 "role": "user",
                 "content": message,
                 "display_user_message": payload.display_user_message,
             },
-            {"role": "assistant", "content": reply},
+            {
+                "role": "assistant", "content": reply,
+                **({"cards": cards} if cards else {}),
+                **({"action_ids": [action["id"] for action in actions]} if actions else {}),
+            },
         ])
         return store.save_turn(session_id, session_user_id(principal), history, report)
 

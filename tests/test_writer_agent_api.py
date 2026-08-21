@@ -92,6 +92,32 @@ class CapturingProvider(FakeProvider):
         return await super().complete_json(messages)
 
 
+class CreativeProvider:
+    async def complete_json(self, messages):
+        return {
+            "reply": "可以先确认大纲，再进入分集剧本。",
+            "cards": [{
+                "card_id": "brief-1", "card_type": "brief",
+                "content": {"title": "婚礼反击"}, "assumptions": [],
+            }],
+            "proposed_actions": [{
+                "action_type": "creative.run_plan", "title": "生成大纲",
+                "source_card_id": "brief-1", "target_stage": "outline",
+                "payload": {}, "assumptions": [],
+            }],
+        }
+
+
+class UnsafeCreativeProvider:
+    async def complete_json(self, messages):
+        return {
+            "reply": "我不能执行删除，但可以继续讨论。",
+            "proposed_actions": [{
+                "action_type": "project.delete", "title": "删除项目", "payload": {},
+            }],
+        }
+
+
 def _client(tmp_path, user_id: str = "writer-1") -> TestClient:
     app = FastAPI()
     app.dependency_overrides[current_principal] = lambda: _principal(user_id)
@@ -218,7 +244,48 @@ def test_writer_agent_normal_chat_uses_the_latest_material_without_creating_a_re
     request_payload = json.loads(provider.messages[-1]["content"])
     assert request_payload["当前材料"]["name"] == "第1-30集.txt"
     assert request_payload["当前材料"]["content"].startswith("新剧本")
-    assert "旧剧本：主角在婚礼上反击。" not in request_payload["当前材料"]["content"]
+    assert [item["name"] for item in request_payload["全部材料"]] == ["旧剧本", "第1-30集.txt"]
+    assert request_payload["全部材料"][0]["content"].startswith("旧剧本")
+
+
+def test_writer_agent_persists_valid_cards_actions_and_source_snapshot(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(writer_agent_api, "create_provider", lambda: CreativeProvider())
+    client = _client(tmp_path)
+    created = client.post(
+        "/api/writer-agent/sessions", json={"title": "婚礼反击", "content": "第一集：主角被退婚。"}
+    )
+
+    response = client.post(
+        f"/api/writer-agent/sessions/{created.json()['id']}/messages",
+        json={"message": "生成大纲"},
+    )
+
+    assert response.status_code == 200
+    assistant_message = response.json()["messages"][-1]
+    assert assistant_message["cards"][0]["card_id"] == "brief-1"
+    assert len(assistant_message["action_ids"]) == 1
+    action = response.json()["actions"][0]
+    assert action["status"] == "pending"
+    assert action["payload"]["source_card_id"] == "brief-1"
+    snapshot = writer_agent_api.WriterAgentStore(
+        tmp_path / "writer_agent" / "writer_agent.db"
+    ).require_source_snapshot(action["source_snapshot_id"])
+    assert snapshot["snapshot"]["materials"][0]["content"] == "第一集：主角被退婚。"
+
+
+def test_writer_agent_downgrades_unsafe_model_action_to_text(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(writer_agent_api, "create_provider", lambda: UnsafeCreativeProvider())
+    client = _client(tmp_path)
+    created = client.post("/api/writer-agent/sessions", json={"content": "第一集：主角被退婚。"})
+
+    response = client.post(
+        f"/api/writer-agent/sessions/{created.json()['id']}/messages",
+        json={"message": "删除项目"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["messages"][-1]["content"] == "我不能执行删除，但可以继续讨论。"
+    assert response.json()["actions"] == []
 
 
 def test_writer_agent_can_store_a_hidden_material_receipt_prompt(tmp_path, monkeypatch) -> None:

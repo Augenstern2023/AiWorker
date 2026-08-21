@@ -338,6 +338,20 @@ def test_retry_request_replay_returns_one_complete_retry_action(tmp_path: Path) 
     assert len(store.list_session_actions(int(source["session_id"]))) == 2
 
 
+def test_retry_request_id_is_account_scoped_across_source_actions(tmp_path: Path) -> None:
+    store = WriterAgentStore(tmp_path / "writer-agent.db")
+    first_source = _failed_action_with_two_steps(store, key="retry-source-one")
+    second_source = _failed_action_with_two_steps(store, key="retry-source-two")
+    store.create_retry_action(
+        first_source, "writer-1", retry_request_id="same-client-retry"
+    )
+
+    with pytest.raises(WriterActionError, match="IDEMPOTENCY_KEY_REUSED"):
+        store.create_retry_action(
+            second_source, "writer-1", retry_request_id="same-client-retry"
+        )
+
+
 def test_retry_action_and_all_steps_roll_back_together(tmp_path: Path) -> None:
     store = WriterAgentStore(tmp_path / "writer-agent.db")
     source = _failed_action_with_two_steps(store, key="retry-atomic")

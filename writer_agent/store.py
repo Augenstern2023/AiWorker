@@ -639,7 +639,7 @@ class WriterAgentStore:
             current = self._require_action_conn(conn, str(source["id"]), actor_user_id)
             if current["status"] != "failed" or not bool(current["retryable"]):
                 raise WriterActionError("ACTION_STATE_INVALID", "该动作不可重试")
-            retry_key = f"retry:{current['id']}:{retry_request_id}"
+            retry_key = f"retry:{retry_request_id}"
             existing = conn.execute(
                 "SELECT * FROM writer_agent_actions WHERE actor_user_id=? "
                 "AND idempotency_key=?",

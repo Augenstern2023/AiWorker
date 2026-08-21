@@ -23,13 +23,18 @@ def _install_api(page: Page) -> None:
         """
         () => {
         window.projectMemberApiCalls = [];
-        window.confirm = () => true;
+        window.projectMemberConfirmations = [];
+        window.confirm = (message) => {
+            window.projectMemberConfirmations.push(message);
+            return true;
+        };
         window.aiworkerApi = {
             request: async (url, options = {}) => {
                 const method = options.method || 'GET';
                 window.projectMemberApiCalls.push({url, method, body: options.body || ''});
                 window.__members = window.__members || [
-                    {id: 'owner-membership', user_id: 'owner-1', username: 'owner', display_name: '项目负责人', project_role: 'project_owner', status: 'active'}
+                    {id: 'owner-membership', user_id: 'owner-1', username: 'owner', display_name: '项目负责人', project_role: 'project_owner', status: 'active'},
+                    {id: 'creator-membership', user_id: 'creator-1', username: 'creator', display_name: '项目创建负责人', project_role: 'project_creator', status: 'active'}
                 ];
                 if (url === '/api/creative/projects') {
                     return new Response(JSON.stringify({items: [{id: 7, name: '成员编辑项目', topic_title: '来源选题', status: 'created'}]}), {status: 200});
@@ -135,4 +140,24 @@ def test_member_editor_adds_and_removes_a_project_role() -> None:
 
         page.get_by_role("button", name="移除候选编剧的编剧角色").click()
         expect(page.locator("#project-member-list")).not_to_contain_text("候选编剧")
+        browser.close()
+
+
+def test_member_editor_uses_deactivation_copy_for_project_creator() -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        _install_api(page)
+        page.set_content(_editor_markup())
+        page.add_script_tag(path=str(PROJECTS_SCRIPT))
+
+        deactivate = page.get_by_role(
+            "button", name="停用项目创建负责人的项目创建负责人角色"
+        )
+        expect(deactivate).to_have_text("停用")
+        deactivate.click()
+
+        assert page.evaluate("window.projectMemberConfirmations") == [
+            "确定停用项目创建负责人的项目创建负责人角色吗？"
+        ]
         browser.close()

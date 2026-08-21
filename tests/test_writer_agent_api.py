@@ -447,10 +447,62 @@ class _DenyProjectWrite:
     def can_access_managed_project(self, _actor, _project_id: str) -> bool:
         return False
 
+    def can_create_project_content(
+        self, _actor, _project_id: str, *, active_member: bool
+    ) -> bool:
+        return False
+
 
 class _InactiveProjectMembership:
     def is_active_project_member(self, _project_id: str, _actor) -> bool:
         return False
+
+
+class _ReadOnlyProjectAccess(_DenyProjectWrite):
+    def can_read_project(self, _actor, _project_id: str) -> bool:
+        return True
+
+    def can_create_project_content(
+        self, _actor, _project_id: str, *, active_member: bool
+    ) -> bool:
+        return active_member
+
+
+def test_project_link_confirmation_requires_read_not_content_write(tmp_path) -> None:
+    store = WriterAgentStore(tmp_path / "readable-project-link.db")
+    actor = _principal(permissions=frozenset({"script.review.generate"}))
+    session = store.create(actor.user_id, "关联只读项目", "关联项目")
+    action = store.create_action(
+        session_id=session["id"],
+        actor_user_id=actor.user_id,
+        action_type="project.link",
+        project_id=17,
+        idempotency_key="readable-project-link",
+        request_hash="readable-project-link",
+        payload={},
+        expected_context={"session_revision": 0},
+        source_snapshot_id="snapshot",
+    )
+    runner = MagicMock()
+    service = ActionService(
+        store=store,
+        runner=runner,
+        permission_service=_ReadOnlyProjectAccess(),
+        workflow_repository=_InactiveProjectMembership(),
+    )
+
+    service.decide(
+        ActionCommand(
+            session_id=session["id"],
+            action_id=action["id"],
+            decision="confirm",
+            actor=actor,
+            expected_revision=1,
+            client_request_id="confirm-readable-link",
+        )
+    )
+
+    runner.enqueue.assert_called_once_with(action["id"], actor)
 
 
 def test_action_service_rechecks_revoked_project_write_before_claim_or_retry(
@@ -753,6 +805,46 @@ def test_writer_agent_persists_valid_cards_actions_and_source_snapshot(tmp_path,
         tmp_path / "writer_agent" / "writer_agent.db"
     ).require_source_snapshot(action["source_snapshot_id"])
     assert snapshot["snapshot"]["materials"][0]["content"] == "第一集：主角被退婚。"
+
+
+def test_structured_project_link_intent_creates_pending_link_without_llm(
+    tmp_path, monkeypatch
+) -> None:
+    repository = writer_agent_api.CreativeRepository(tmp_path / "creative.db")
+    project = repository.create_original_project(
+        seed_text="情绪决定工资",
+        name="情绪公司",
+        target_episode_count=12,
+        created_by="writer-1",
+        creation_request_id="structured-link",
+    )
+    monkeypatch.setattr(
+        writer_agent_api,
+        "create_provider",
+        lambda: (_ for _ in ()).throw(AssertionError("结构化关联不应调用 LLM")),
+    )
+    client = _client(tmp_path, creative_repository=repository)
+    session = client.post(
+        "/api/writer-agent/sessions",
+        json={"content": "继续创作", "title": "关联项目"},
+    ).json()
+
+    response = client.post(
+        f"/api/writer-agent/sessions/{session['id']}/messages",
+        json={
+            "message": "关联已有项目",
+            "message_id": "link-project-23",
+            "link_project_id": project["id"],
+        },
+    )
+
+    assert response.status_code == 200
+    action = response.json()["actions"][-1]
+    assert action["action_type"] == "project.link"
+    assert action["project_id"] == project["id"]
+    assert action["status"] == "pending"
+    assert action["expected_context"]["session_revision"] == 0
+    assert response.json()["messages"][-1]["action_ids"] == [action["id"]]
 
 
 def test_writer_agent_downgrades_unsafe_model_action_to_text(tmp_path, monkeypatch) -> None:

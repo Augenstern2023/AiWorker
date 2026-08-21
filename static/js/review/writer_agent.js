@@ -144,6 +144,109 @@
         return card;
     }
 
+    function writerCardText(parent, className, value) {
+        const element = document.createElement('div');
+        element.className = className;
+        element.textContent = String(value ?? '');
+        parent.append(element);
+        return element;
+    }
+
+    function renderWriterValue(parent, value) {
+        if (Array.isArray(value)) {
+            value.forEach((item) => renderWriterValue(parent, item));
+            return;
+        }
+        if (value && typeof value === 'object') {
+            Object.entries(value).forEach(([key, item]) => {
+                const row = document.createElement('div');
+                row.className = 'small mt-1';
+                const label = document.createElement('strong');
+                label.textContent = `${key}：`;
+                row.append(label);
+                if (item && typeof item === 'object') renderWriterValue(row, item);
+                else row.append(document.createTextNode(String(item ?? '')));
+                parent.append(row);
+            });
+            return;
+        }
+        writerCardText(parent, 'small mt-1', value);
+    }
+
+    function renderWriterCreativeCard(cardData) {
+        const card = document.createElement('article');
+        card.className = `writer-creative-card writer-card-${cardData.card_type || 'unknown'}`;
+        card.dataset.cardId = String(cardData.card_id || '');
+        const type = cardData.card_type;
+        const labels = {
+            directions: '原创方向', brief: '原创 Brief', plan: '创作计划',
+            progress: '创作进度', result: '创作成果', conflict: '创作冲突',
+        };
+        writerCardText(card, 'small text-muted mb-2', labels[type] || '创作卡片');
+        if (type === 'directions') {
+            (cardData.items || []).forEach((item, index) => {
+                const direction = document.createElement('section');
+                direction.className = 'border-top pt-2 mt-2';
+                writerCardText(direction, 'fw-semibold', `${index + 1}. ${item.title || '未命名方向'}`);
+                [
+                    ['主角', item.protagonist], ['背景', item.background],
+                    ['核心冲突', item.core_conflict], ['人物关系', item.relationship_engine],
+                    ['情绪回报', item.emotional_payoff],
+                ].forEach(([label, value]) => {
+                    if (value) writerCardText(direction, 'small mt-1', `${label}：${value}`);
+                });
+                if (item.difference_dimensions?.length) {
+                    writerCardText(direction, 'small text-muted mt-1', `差异维度：${item.difference_dimensions.join('、')}`);
+                }
+                card.append(direction);
+            });
+        } else if (type === 'brief') {
+            renderWriterValue(card, cardData.content || {});
+            if (cardData.assumptions?.length) {
+                writerCardText(card, 'small text-muted mt-2', `AI 假设：${cardData.assumptions.join('；')}`);
+            }
+        } else if (type === 'plan') {
+            writerCardText(card, 'fw-semibold', cardData.title || '创作计划');
+            if (cardData.summary) writerCardText(card, 'small mt-1', cardData.summary);
+            (cardData.steps || []).forEach((step, index) => {
+                writerCardText(card, 'small mt-1', `${index + 1}. ${step.title || step.stage || '步骤'} · ${step.kind || ''}`);
+            });
+        } else if (type === 'progress') {
+            writerCardText(card, 'fw-semibold', `${Number(cardData.completed_steps || 0)} / ${Number(cardData.total_steps || 0)}`);
+            writerCardText(card, 'small text-muted mt-1', cardData.status || '');
+        } else if (type === 'result') {
+            writerCardText(card, 'fw-semibold', `项目 #${cardData.project_id || '-'}`);
+            (cardData.resource_refs || []).forEach((resource) => renderWriterValue(card, resource));
+            if (cardData.open_url) {
+                const link = document.createElement('a');
+                link.className = 'btn btn-outline-light btn-sm mt-3';
+                link.href = String(cardData.open_url);
+                link.textContent = '打开项目';
+                card.append(link);
+            }
+        } else if (type === 'conflict') {
+            writerCardText(card, 'fw-semibold', cardData.message || cardData.code || '项目状态已变化');
+            if (cardData.current_revision != null) {
+                writerCardText(card, 'small text-muted mt-1', `当前版本：${cardData.current_revision}`);
+            }
+            const replan = document.createElement('button');
+            replan.type = 'button';
+            replan.className = 'btn btn-outline-light btn-sm mt-3';
+            replan.textContent = '重新生成计划';
+            replan.addEventListener('click', () => writerWorkbenchCallbacks.sendMessage?.('基于当前项目状态重新生成计划'));
+            card.append(replan);
+        }
+        return card;
+    }
+
+    function renderMountedCreativeCards(host, session) {
+        host.querySelectorAll('.writer-creative-card').forEach((card) => card.remove());
+        (session?.messages || []).forEach((message) => {
+            if (message.role !== 'assistant') return;
+            (message.cards || []).forEach((card) => host.append(renderWriterCreativeCard(card)));
+        });
+    }
+
     async function showWriterProjectPicker(picker) {
         picker.hidden = false;
         picker.replaceChildren();
@@ -164,7 +267,7 @@
                 button.type = 'button';
                 button.className = 'btn btn-outline-light btn-sm';
                 button.textContent = project.name || `项目 #${project.id}`;
-                button.addEventListener('click', () => writerWorkbenchCallbacks.sendMessage?.(`关联已有项目 ${project.id}`));
+                button.addEventListener('click', () => writerWorkbenchCallbacks.sendProjectLink?.(Number(project.id)));
                 picker.append(button);
             });
         } catch (error) {
@@ -182,12 +285,22 @@
             content.className = 'writer-project-summary';
             const name = document.createElement('strong');
             name.textContent = project.name || `项目 #${project.id}`;
+            const mode = project.creation_mode === 'imitation' ? '仿写' : '原创';
+            let stage = project.current_stage || '';
+            if (!stage && (project.outline_batch_id || (project.episodes || []).some((item) => item.stage === 'outline'))) stage = 'outline';
+            if (!stage && project.character_batch_id) stage = 'characters';
+            if (!stage && project.locked_brief_id) stage = 'brief';
+            const stageLabels = {brief: 'Brief', characters: '人物关系', outline: '全剧大纲', beats: '分集 Beats', script: '分集剧本'};
             const meta = document.createElement('span');
             meta.className = 'small text-muted ms-2';
-            meta.textContent = project.current_stage ? `当前阶段：${project.current_stage}` : '原创创作';
+            meta.textContent = `${mode}${stage ? ` · 当前阶段：${stageLabels[stage] || stage}` : '创作'}`;
             const link = document.createElement('a');
             link.className = 'btn btn-outline-light btn-sm ms-auto';
-            link.href = `/creative/projects/${project.id}`;
+            link.href = stage === 'outline'
+                ? `/writing/projects/${project.id}/outlines`
+                : stage === 'characters'
+                    ? `/planning/projects/${project.id}/characters`
+                    : `/planning/projects/${project.id}/brief`;
             link.textContent = '打开项目';
             content.append(name, meta, link);
             context.append(content);
@@ -235,6 +348,7 @@
             hydrateWriterProject(mountedWriterSession);
             const host = writerActionHost();
             if (!host) return;
+            renderMountedCreativeCards(host, mountedWriterSession);
             host.querySelectorAll('.writer-action-card').forEach((card) => card.remove());
             (mountedWriterSession.actions || []).forEach((action) => host.append(renderWriterActionCard(action)));
         },
@@ -461,7 +575,7 @@
         detailElement.classList.toggle('d-none', !hasSession);
         if (hasSession) { titleElement.textContent = activeSession.title || '未命名创作会话'; materialNameElement.textContent = activeSession.filename ? `来源文件：${activeSession.filename}` : '来源：直接输入'; }
         renderSessions(); renderConversation(); renderReportFiles(); setBusy(isBusy);
-        window.writerAgentWorkbench.configure({sendMessage: ask, onSession: updateSession, showError});
+        window.writerAgentWorkbench.configure({sendMessage: ask, sendProjectLink: linkProject, onSession: updateSession, showError});
         window.writerAgentWorkbench.mount(activeSession);
     }
 
@@ -487,6 +601,30 @@
         beginThinking(message, showPendingMessage);
         try {
             const updated = await readJson(await aiworkerApi.request(`/api/writer-agent/sessions/${activeSession.id}/messages`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message, display_user_message: displayUserMessage})}));
+            endThinking(false);
+            updateSession(updated);
+        } catch (error) {
+            endThinking();
+            throw error;
+        }
+    }
+
+    async function linkProject(projectId) {
+        beginThinking('关联已有项目', true);
+        try {
+            const updated = await readJson(await aiworkerApi.request(
+                `/api/writer-agent/sessions/${activeSession.id}/messages`,
+                {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        message: '关联已有项目',
+                        display_user_message: true,
+                        link_project_id: Number(projectId),
+                        message_id: writerRequestId(),
+                    }),
+                }
+            ));
             endThinking(false);
             updateSession(updated);
         } catch (error) {

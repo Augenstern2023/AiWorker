@@ -152,3 +152,137 @@ def test_writer_agent_has_no_horizontal_overflow_at_390px(page: Page) -> None:
     assert page.evaluate(
         "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
     )
+
+
+def test_writer_agent_renders_all_creative_message_card_types(page: Page) -> None:
+    mount_writer_agent(
+        page,
+        session={
+            "id": 1,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "已整理创作方案",
+                    "cards": [
+                        {
+                            "card_id": "directions-1",
+                            "card_type": "directions",
+                            "items": [
+                                {
+                                    "title": "情绪审判庭",
+                                    "protagonist": "劳动仲裁律师",
+                                    "background": "情绪量化城市",
+                                    "core_conflict": "替同事夺回被清零的工资",
+                                    "relationship_engine": "律师与前主管互相试探",
+                                    "emotional_payoff": "普通人夺回情绪解释权",
+                                    "difference_dimensions": ["protagonist", "conflict"],
+                                }
+                            ],
+                        },
+                        {
+                            "card_id": "brief-1",
+                            "card_type": "brief",
+                            "content": {"title": "情绪公司", "logline": "愤怒会让工资归零"},
+                            "assumptions": ["每集 2 分钟"],
+                        },
+                        {
+                            "card_id": "plan-1",
+                            "card_type": "plan",
+                            "title": "生成全剧大纲",
+                            "summary": "补齐创作基线",
+                            "steps": [{"stage": "brief", "kind": "lock"}],
+                        },
+                        {
+                            "card_id": "progress-1",
+                            "card_type": "progress",
+                            "action_id": "a1",
+                            "status": "running",
+                            "completed_steps": 2,
+                            "total_steps": 5,
+                        },
+                        {
+                            "card_id": "result-1",
+                            "card_type": "result",
+                            "project_id": 9,
+                            "resource_refs": [{"resource_type": "outline", "version": 2}],
+                            "open_url": "/writing/projects/9/outlines",
+                        },
+                        {
+                            "card_id": "conflict-1",
+                            "card_type": "conflict",
+                            "code": "STALE_PROJECT_CONTEXT",
+                            "message": "项目版本已经变化",
+                            "current_revision": 12,
+                        },
+                    ],
+                }
+            ],
+            "actions": [],
+        },
+    )
+
+    cards = page.locator(".writer-creative-card")
+    assert cards.count() == 6
+    assert cards.nth(0).get_by_text("情绪审判庭").is_visible()
+    assert cards.nth(1).get_by_text("愤怒会让工资归零").is_visible()
+    assert cards.nth(2).get_by_text("补齐创作基线").is_visible()
+    assert cards.nth(3).get_by_text("2 / 5").is_visible()
+    assert cards.nth(4).get_by_role("link", name="打开项目").get_attribute("href") == "/writing/projects/9/outlines"
+    assert cards.nth(5).get_by_text("项目版本已经变化").is_visible()
+    assert cards.nth(5).get_by_role("button", name="重新生成计划").is_visible()
+
+
+def test_writer_agent_project_context_shows_mode_stage_and_valid_entry(page: Page) -> None:
+    mount_writer_agent(
+        page,
+        session={
+            "id": 1,
+            "project_id": 9,
+            "project": {
+                "id": 9,
+                "name": "情绪公司",
+                "creation_mode": "original",
+                "outline_batch_id": "outlines-v2",
+            },
+            "messages": [],
+            "actions": [],
+        },
+    )
+
+    context = page.locator("#writer-agent-project-context")
+    assert "原创" in context.inner_text()
+    assert "全剧大纲" in context.inner_text()
+    assert context.get_by_role("link", name="打开项目").get_attribute("href") == "/writing/projects/9/outlines"
+
+
+def test_writer_agent_project_picker_submits_structured_project_id(page: Page) -> None:
+    mount_writer_agent(
+        page,
+        session={"id": 1, "messages": [], "actions": []},
+    )
+    page.evaluate(
+        """
+        window.__linkedProjectIds = [];
+        window.writerAgentWorkbench.configure({
+          sendProjectLink(projectId) { window.__linkedProjectIds.push(projectId); }
+        });
+        """
+    )
+    page.evaluate(
+        """
+        () => {
+          window.aiworkerApi.request = async (url, options = {}) => {
+            window.__writerActionRequests.push({url, method: options.method || 'GET'});
+            if (url.startsWith('/api/creative/projects')) {
+              return {items: [{id: 23, name: '可关联项目'}]};
+            }
+            return {};
+          };
+        }
+        """
+    )
+
+    page.get_by_role("button", name="关联已有项目").click()
+    page.get_by_role("button", name="可关联项目").click()
+
+    assert page.evaluate("window.__linkedProjectIds") == [23]

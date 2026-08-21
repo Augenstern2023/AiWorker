@@ -15,10 +15,12 @@
     #writer-agent-project-context { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px clamp(18px, 4vw, 68px); border-bottom: 1px solid var(--border); background: rgba(255,255,255,.02); }
     .writer-project-summary { width: 100%; display: flex; align-items: center; min-width: 0; }
     .writer-project-picker { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 8px; padding-top: 4px; }
-    .writer-action-card { max-width: min(760px, 100%); padding: 16px; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; background: rgba(255,255,255,.025); overflow-wrap: anywhere; }
+    .writer-action-card, .writer-creative-card { max-width: min(760px, 100%); padding: 16px; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; background: rgba(255,255,255,.025); overflow-wrap: anywhere; }
     .writer-action-card h3 { margin: 0 0 6px; font-size: 1rem; }
     .writer-action-card.status-succeeded { border-left-color: var(--success, #39b980); }
     .writer-action-card.status-failed { border-left-color: var(--danger, #e15d68); }
+    .writer-card-result { border-left-color: var(--success, #39b980); }
+    .writer-card-conflict { border-left-color: var(--danger, #e15d68); }
     .writer-agent-messages { padding: 28px clamp(18px, 4vw, 68px); }
     .writer-agent-empty { max-width: 620px; min-height: 520px; margin: auto; display: flex; flex-direction: column; justify-content: center; }
     .writer-agent-message { max-width: min(760px, 100%); padding: 14px 16px; border-left: 3px solid var(--border); white-space: pre-wrap; }

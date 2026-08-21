@@ -77,7 +77,7 @@ class ActionService:
         return action
 
     def _require_current_write_authority(self, action: dict[str, Any], actor: Any) -> None:
-        """Recheck live project mutation authority immediately before mutation."""
+        """Recheck the live authority required by the selected action."""
         if action["action_type"] == "project.create_original":
             if "project.create" not in actor.permissions:
                 raise WriterActionError("PROJECT_CREATE_DENIED", "无权创建原创项目")
@@ -88,13 +88,15 @@ class ActionService:
         if self.permission_service is None or self.workflow_repository is None:
             return
         project_key = str(project_id)
+        if action["action_type"] == "project.link":
+            if not self.permission_service.can_read_project(actor, project_key):
+                raise WriterActionError("PROJECT_ACCESS_DENIED", "无权关联该项目")
+            return
         is_active_member = self.workflow_repository.is_active_project_member(
             project_key, actor
         )
-        can_write = (
-            is_active_member
-            or self.permission_service.can_access_assigned_project(actor, project_key)
-            or self.permission_service.can_access_managed_project(actor, project_key)
+        can_write = self.permission_service.can_create_project_content(
+            actor, project_key, active_member=is_active_member
         )
         if not can_write:
             raise WriterActionError("PROJECT_ACCESS_DENIED", "无权编辑当前项目")

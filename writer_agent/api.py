@@ -50,7 +50,7 @@ from .action_service import (
     validate_project_authority,
     match_natural_language_decision,
 )
-from .schema import ActionCommand, WriterActionError
+from .schema import ActionCommand, ProposedAction, WriterActionError
 from .service import build_writer_report_markdown, is_review_request, normalize_writer_report, writer_messages
 from .store import WriterAgentStore
 
@@ -81,6 +81,7 @@ class ChatRequest(BaseModel):
     reference_refs: list[ReferenceSelection] = Field(default_factory=list, max_length=10)
     message_id: str | None = Field(default=None, min_length=1, max_length=200)
     client_message_id: str | None = Field(default=None, min_length=1, max_length=200)
+    link_project_id: int | None = Field(default=None, ge=1)
 
 
 class ActionDecisionRequest(BaseModel):
@@ -393,6 +394,57 @@ def build_writer_agent_router(
             if prior_message.get("content") != message:
                 raise HTTPException(409, "消息 ID 已用于不同内容")
             return session
+        if payload.link_project_id is not None:
+            project_id = int(payload.link_project_id)
+            try:
+                project = authority_repository.get_project(project_id)
+            except Exception as exc:
+                raise HTTPException(404, "可关联项目不存在") from exc
+            if permission_service is not None and not permission_service.can_read_project(
+                principal, str(project_id)
+            ):
+                raise HTTPException(403, "无权关联该项目")
+            materials = _session_materials(session)
+            expected_context = {
+                "session_revision": int(session.get("context_revision") or 0)
+            }
+            actions = persist_proposed_actions(
+                store,
+                session_id=session_id,
+                actor_user_id=principal.user_id,
+                proposed_actions=[
+                    ProposedAction(
+                        action_type="project.link",
+                        title=f"关联项目：{project.get('name') or project_id}",
+                        summary="确认后将该项目设为当前创作项目",
+                        project_id=project_id,
+                    )
+                ],
+                materials=materials,
+                selected_messages=[
+                    *(item for item in history if item.get("kind") != "material"),
+                    {"role": "user", "content": message},
+                ],
+                project_context=expected_context,
+            )
+            history.extend(
+                [
+                    {
+                        "role": "user",
+                        "content": message,
+                        "message_id": message_id,
+                        "display_user_message": payload.display_user_message,
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "已生成关联项目确认卡，确认后再切换当前项目。",
+                        "action_ids": [action["id"] for action in actions],
+                    },
+                ]
+            )
+            return store.save_turn(
+                session_id, owned_user_id(principal), history, None
+            )
         try:
             natural_decision = match_natural_language_decision(
                 message, store.list_session_actions(session_id)

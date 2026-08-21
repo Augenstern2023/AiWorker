@@ -11,7 +11,14 @@
     .writer-agent-session-detail { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
     .writer-agent-session { width: 100%; padding: 10px 8px; color: var(--text); text-align: left; background: transparent; border: 1px solid transparent; border-radius: 4px; }
     .writer-agent-session:hover, .writer-agent-session.is-active { background: rgba(59, 149, 246, .12); border-color: rgba(59, 149, 246, .45); }
-    .writer-agent-chat { min-width: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; }
+    .writer-agent-chat { min-width: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+    #writer-agent-project-context { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px clamp(18px, 4vw, 68px); border-bottom: 1px solid var(--border); background: rgba(255,255,255,.02); }
+    .writer-project-summary { width: 100%; display: flex; align-items: center; min-width: 0; }
+    .writer-project-picker { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 8px; padding-top: 4px; }
+    .writer-action-card { max-width: min(760px, 100%); padding: 16px; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; background: rgba(255,255,255,.025); overflow-wrap: anywhere; }
+    .writer-action-card h3 { margin: 0 0 6px; font-size: 1rem; }
+    .writer-action-card.status-succeeded { border-left-color: var(--success, #39b980); }
+    .writer-action-card.status-failed { border-left-color: var(--danger, #e15d68); }
     .writer-agent-messages { padding: 28px clamp(18px, 4vw, 68px); }
     .writer-agent-empty { max-width: 620px; min-height: 520px; margin: auto; display: flex; flex-direction: column; justify-content: center; }
     .writer-agent-message { max-width: min(760px, 100%); padding: 14px 16px; border-left: 3px solid var(--border); white-space: pre-wrap; }
@@ -27,14 +34,14 @@
     .writer-agent-report-preview { display: -webkit-box; overflow: hidden; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
     @keyframes writer-agent-thinking { 0% { content: ""; } 25% { content: "."; } 50% { content: ".."; } 75%, 100% { content: "..."; } }
     @media (max-width: 1100px) { .writer-agent-layout { grid-template-columns: 210px minmax(0, 1fr); } .writer-agent-reports { grid-column: 1 / -1; max-height: 260px; border-top: 1px solid var(--border); border-left: 0; } .writer-agent-layout.reports-hidden .writer-agent-reports { display: none; } }
-    @media (max-width: 760px) { .writer-agent-layout { display: block; min-height: 0; } .writer-agent-sidebar, .writer-agent-reports { max-height: 240px; border: 0; border-bottom: 1px solid var(--border); } .writer-agent-layout.reports-hidden .writer-agent-reports { display: none; } .writer-agent-chat { min-height: 640px; } }
+    @media (max-width: 760px) { .writer-agent-layout { display: block; min-height: 0; } .writer-agent-sidebar, .writer-agent-reports { max-height: 240px; border: 0; border-bottom: 1px solid var(--border); } .writer-agent-layout.reports-hidden .writer-agent-reports { display: none; } .writer-agent-chat { min-height: 640px; } .writer-project-summary { flex-wrap: wrap; gap: 6px; } .writer-project-summary .btn { margin-left: 0 !important; } #writer-agent-project-context, .writer-agent-messages, .writer-agent-composer { padding-left: 14px; padding-right: 14px; } }
 </style>
 {% endblock %}
 
 {% block content %}
 <div class="writer-agent-workbench">
     <header class="d-flex justify-content-between align-items-start gap-3 mb-3">
-        <div><h3 class="mb-1">编剧大师</h3><div class="small text-muted">独立诊断工作台，不关联创作项目或工作流</div></div>
+        <div><h3 class="mb-1">编剧大师</h3><div class="small text-muted">对话评审、原创立项与项目创作</div></div>
         <div class="d-flex gap-2">
             <button id="writer-agent-toggle-reports" class="btn btn-outline-light btn-sm" type="button" title="隐藏评审报告" aria-label="隐藏评审报告" aria-pressed="true"><i class="bi bi-layout-sidebar-inset-reverse" aria-hidden="true"></i></button>
             <button id="writer-agent-refresh" class="btn btn-outline-light btn-sm" type="button" title="刷新会话" aria-label="刷新会话"><i class="bi bi-arrow-clockwise" aria-hidden="true"></i></button>
@@ -52,6 +59,11 @@
     </aside>
 
     <main class="writer-agent-chat" aria-label="编剧对话">
+        <section id="writer-agent-project-context" aria-label="当前创作项目">
+            <button id="writer-agent-create-project" class="btn btn-primary btn-sm" type="button">创建原创项目</button>
+            <button id="writer-agent-link-project" class="btn btn-outline-light btn-sm" type="button">关联已有项目</button>
+            <div id="writer-agent-project-picker" hidden></div>
+        </section>
         <div id="writer-agent-messages" class="writer-agent-messages" aria-live="polite">
             <section id="writer-agent-empty" class="writer-agent-empty"><h4>和编剧大师聊聊</h4><p class="text-muted mb-0">粘贴剧本、大纲或角色设定，也可以上传文本文件开始诊断。</p></section>
             <div id="writer-agent-conversation" class="d-grid gap-4 d-none"></div>

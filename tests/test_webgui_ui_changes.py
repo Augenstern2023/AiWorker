@@ -205,10 +205,16 @@ def test_webgui_registers_independent_writer_agent_workbench():
     )
     assert WebGUI.app.state.writer_action_service is not None
     assert "编剧大师" in template
+    assert "对话评审、原创立项与项目创作" in template
+    assert "writer-agent-project-context" in template
+    assert "创建原创项目" in template
+    assert "关联已有项目" in template
     assert "writer-agent-file" in template
     assert ".docx,.pdf" in template
     assert "/api/writer-agent/sessions/file" in script
     assert "renderReport" in script
+    assert "writerAgentWorkbench" in script
+    assert "/actions/${action.id}/decision" in script
 
 
 def test_writer_agent_uses_three_panel_chat_and_report_history_layout():

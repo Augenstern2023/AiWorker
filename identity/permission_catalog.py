@@ -48,6 +48,7 @@ _PERMISSION_CODES = (
     "project.manage",
     "project.member.manage",
     "project.archive",
+    "project.delete",
     "blueprint.read",
     "blueprint.generate",
     "blueprint.edit",
@@ -152,6 +153,7 @@ PERMISSIONS = {
     "project.manage": "管理项目",
     "project.member.manage": "管理项目成员",
     "project.archive": "归档项目",
+    "project.delete": "删除项目",
     "blueprint.read": "查看创作方案",
     "blueprint.generate": "生成创作方案",
     "blueprint.edit": "编辑创作方案",
@@ -509,6 +511,7 @@ _NON_DELEGABLE_PERMISSIONS = {
     "project.manage",
     "project.member.manage",
     "project.archive",
+    "project.delete",
     "workflow.read.managed",
     "workflow.assign",
     "workflow.reassign",
@@ -600,7 +603,7 @@ DEFAULT_ROLES = (
             """page.review page.team_management page.script_review script.review.generate script.review.read
             script.optimize.generate script.optimize.read script.optimize.accept
             project.read.managed project.create project.manage project.member.manage
-            project.archive workflow.read.managed workflow.assign workflow.reassign
+            project.archive project.delete workflow.read.managed workflow.assign workflow.reassign
             workflow.reclaim workflow.cancel version.read.managed version.compare
             job.read.project page.data_management data.media.preview data.media.delete
             identity.user.read identity.user.create identity.user.manage_created

@@ -180,6 +180,7 @@ def _run_original_blueprint_worker(
     seed = client.repository.get_current_seed(project["id"])
     assert seed is not None
     frozen = client.repository.freeze_seed(seed["id"])
+    authority = client.repository.generation_authority_envelope(project["id"])
     monkeypatch.setattr(phase4_worker, "create_provider", FixedProvider)
     job = CrawlJob(
         job_id=f"original-flow-{uuid.uuid4().hex}",
@@ -194,6 +195,10 @@ def _run_original_blueprint_worker(
             "market_context": [],
             "blocked_terms": [],
             "reference_snapshot": [],
+            "source_authority": authority,
+            "source_authority_sha256": phase4_worker.canonical_request_hash(
+                authority
+            ),
         },
     )
     asyncio.run(phase4_worker.run(job))

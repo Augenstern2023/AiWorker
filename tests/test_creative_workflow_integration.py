@@ -122,6 +122,67 @@ def _seed_resources(creative: CreativeRepository) -> dict[str, tuple[str, dict]]
     }
 
 
+@pytest.mark.parametrize("resource_type", ["brief", "characters", "outline"])
+def test_reviewed_authority_switch_increments_and_exposes_project_revision(
+    tmp_path: Path, resource_type: str
+) -> None:
+    creative = CreativeRepository(tmp_path / "creative.db")
+    resources = _seed_resources(creative)
+    project_id = int(resources["brief"][1]["project_id"])
+    if resource_type == "brief":
+        alternative = creative.create_blueprints(
+            project_id,
+            [{"content": {"title": "评审通过的新方向"}, "risk_level": "low"}],
+        )[0]
+        resource_id = str(alternative["id"])
+        expected_pointer = int(alternative["id"])
+        pointer_name = "locked_brief_id"
+    elif resource_type == "characters":
+        alternative = creative.create_character_batch(
+            project_id, [{"name": "新主角", "desire": "赢得自由"}], []
+        )
+        resource_id = f"{project_id}:{alternative['batch_id']}"
+        expected_pointer = alternative["batch_id"]
+        pointer_name = "character_batch_id"
+    else:
+        alternative = creative.create_outline_batch(
+            project_id,
+            [{"episode": 1, "summary": "评审通过的新开局"}],
+            "新成长线",
+        )
+        resource_id = f"{project_id}:{alternative['batch_id']}"
+        expected_pointer = alternative["batch_id"]
+        pointer_name = "outline_batch_id"
+
+    submission = {
+        "id": f"approved-{resource_type}",
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+        "content_snapshot": {},
+        "reviewed_at": 1000,
+    }
+    workflow = SimpleNamespace(
+        list_approved_submissions=lambda requested_type: [submission],
+        supersede_resource_approvals=lambda *_args, **_kwargs: None,
+    )
+    adapter = CreativeWorkflowAdapter(creative, workflow)
+    submission["content_snapshot"] = adapter.snapshot(
+        resource_type, resource_id, reconcile=False
+    )
+    revision_before = creative.get_project(project_id)["revision"]
+
+    approved = adapter.on_approved(submission, SYSTEM_ACTOR)
+
+    switched = creative.get_project(project_id)
+    assert switched[pointer_name] == expected_pointer
+    assert switched["revision"] == revision_before + 1
+    assert approved["revision"] == switched["revision"]
+
+    replayed = adapter.on_approved(submission, SYSTEM_ACTOR)
+    assert creative.get_project(project_id)["revision"] == switched["revision"]
+    assert replayed["revision"] == switched["revision"]
+
+
 def test_system_admin_can_create_a_resource_assigned_to_another_user(tmp_path: Path) -> None:
     task = {
         "id": "task-1", "task_type": "brief", "assignee_user_id": "writer-1",

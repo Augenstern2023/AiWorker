@@ -165,6 +165,42 @@ def test_deleting_original_project_removes_its_seed_versions(tmp_path):
     assert repository.list_seeds(project["id"]) == []
 
 
+@pytest.mark.parametrize("status", ["active", "failed", "complete"])
+def test_project_delete_cleans_generation_reservations(tmp_path, status):
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = ready_original_project(repository)
+    reservation = repository.reserve_generation_operation(
+        operation_id=f"delete-{status}",
+        project_id=project["id"],
+        stage="outline",
+        request_hash=f"hash-{status}",
+        owner_id="worker-1",
+    )
+    if status == "failed":
+        assert repository.fail_generation_operation(
+            operation_id=f"delete-{status}",
+            request_hash=f"hash-{status}",
+            owner_id="worker-1",
+        )
+    elif status == "complete":
+        repository.complete_generation_operation(
+            operation_id=f"delete-{status}",
+            request_hash=f"hash-{status}",
+            batch_id=reservation["batch_id"],
+            owner_id="worker-1",
+            result={"resource_refs": []},
+        )
+
+    repository.delete_project(project["id"])
+
+    assert repository.get_project(project["id"]) is None
+    with repository._connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM creative_generation_operations WHERE project_id = ?",
+            (project["id"],),
+        ).fetchone()[0] == 0
+
+
 def test_original_blueprints_persist_direction_type_and_seed_source(tmp_path):
     repository = CreativeRepository(tmp_path / "creative.sqlite3")
     project = ready_original_project(repository)

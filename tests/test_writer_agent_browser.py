@@ -1,0 +1,530 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) 2025 relakkes@gmail.com
+#
+# This file is part of MediaCrawler project.
+# Repository: https://github.com/NanmiCoder/MediaCrawler
+# GitHub: https://github.com/NanmiCoder
+# Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+from playwright.sync_api import Page, sync_playwright
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def page() -> Iterator[Page]:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        current = browser.new_page(viewport={"width": 1280, "height": 900})
+        current.set_default_timeout(2_000)
+        yield current
+        browser.close()
+
+
+def mount_writer_agent(page: Page, *, session: dict) -> None:
+    page.set_content(
+        '<main id="writer-agent-workbench">'
+        '<section id="writer-agent-project-context">'
+        '<button id="writer-agent-create-project" type="button">创建原创项目</button>'
+        '<button id="writer-agent-link-project" type="button">关联已有项目</button>'
+        '<div id="writer-agent-project-picker" hidden></div></section>'
+        '<section id="writer-agent-messages"></section>'
+        '<form id="writer-agent-message-form">'
+        '<textarea id="writer-agent-message"></textarea>'
+        '<button type="submit">发送</button></form></main>'
+    )
+    page.add_script_tag(
+        content="""
+        window.__writerActionRequests = [];
+        window.aiworkerApi = {
+          async request(url, options = {}) {
+            window.__writerActionRequests.push({
+              url, method: options.method || 'GET',
+              body: JSON.parse(options.body || '{}')
+            });
+            return {id: url.split('/').at(-2), status: 'queued'};
+          }
+        };
+        """
+    )
+    page.add_script_tag(path=ROOT / "static/js/review/writer_agent.js")
+    page.evaluate(
+        "session => window.writerAgentWorkbench.mount(session)", session
+    )
+
+
+def mount_writer_agent_controller_without_sessions(page: Page) -> None:
+    page.set_content(
+        '<main id="writer-agent-workbench">'
+        '<div id="writer-agent-error" class="d-none"></div>'
+        '<div class="writer-agent-layout">'
+        '<aside><button id="writer-agent-new" type="button">新建会话</button>'
+        '<button id="writer-agent-refresh" type="button">刷新会话</button>'
+        '<div id="writer-agent-sessions"></div>'
+        '<section id="writer-agent-session-detail" class="d-none">'
+        '<div id="writer-agent-session-title"></div>'
+        '<div id="writer-agent-material-name"></div></section></aside>'
+        '<section><div id="writer-agent-project-context"></div>'
+        '<div id="writer-agent-empty"></div>'
+        '<div id="writer-agent-conversation" class="d-none"></div>'
+        '<textarea id="writer-agent-message"></textarea>'
+        '<input id="writer-agent-file" type="file">'
+        '<button id="writer-agent-attach" type="button">上传</button>'
+        '<span id="writer-agent-file-name"></span>'
+        '<button id="writer-agent-send" type="button">发送</button></section>'
+        '<aside><button id="writer-agent-toggle-reports" type="button">'
+        '<i></i></button><span id="writer-agent-report-status"></span>'
+        '<div id="writer-agent-reports"></div></aside></div></main>'
+    )
+    page.add_script_tag(
+        content="""
+        window.__writerControllerRequests = [];
+        window.aiworkerApi = {
+          async request(url, options = {}) {
+            const body = JSON.parse(options.body || '{}');
+            window.__writerControllerRequests.push({
+              url, method: options.method || 'GET', body
+            });
+            let payload;
+            if (url.startsWith('/api/creative/projects')) {
+              payload = {items: [{id: 23, name: '可关联项目'}]};
+            } else if (url === '/api/writer-agent/sessions' && !options.method) {
+              payload = {items: []};
+            } else if (url === '/api/writer-agent/sessions') {
+              payload = {
+                id: 41, title: body.title, content: body.content,
+                filename: '', project_id: null,
+                messages: [{
+                  kind: 'material', role: 'user',
+                  material_name: body.title, material_length: body.content.length,
+                  material_preview: body.content, display_user_message: true
+                }], actions: [], reports: []
+              };
+            } else if (url === '/api/writer-agent/sessions/41/messages') {
+              payload = {
+                id: 41, title: '创建原创项目', content: '创建原创项目',
+                filename: '', project_id: null,
+                messages: [{
+                  kind: 'material', role: 'user', material_name: '创建原创项目',
+                  material_length: 6, material_preview: '创建原创项目',
+                  display_user_message: true
+                }, {role: 'assistant', content: '请选择原创方向'}],
+                actions: [], reports: []
+              };
+            } else {
+              throw new Error(`unexpected request: ${url}`);
+            }
+            const response = {ok: true, async json() { return payload; }};
+            if (url.endsWith('/messages') && window.__rejectNextWriterMessageResponse) {
+              window.__rejectNextWriterMessageResponse = false;
+              throw new Error('消息提交失败');
+            }
+            if (url.endsWith('/messages') && window.__deferWriterMessageResponse) {
+              return await new Promise((resolve) => {
+                window.__resolveWriterMessageResponse = () => resolve(response);
+              });
+            }
+            return response;
+          }
+        };
+        """
+    )
+    page.add_script_tag(path=ROOT / "static/js/review/writer_agent.js")
+
+
+def test_create_original_project_starts_a_session_before_sending_message(
+    page: Page,
+) -> None:
+    """Would catch the empty-state shortcut dereferencing activeSession.id."""
+
+    page_errors: list[str] = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    mount_writer_agent_controller_without_sessions(page)
+    page.wait_for_function("window.__writerControllerRequests.length === 1")
+    page.evaluate("window.__deferWriterMessageResponse = true")
+
+    page.get_by_role("button", name="创建原创项目", exact=True).click()
+    page.wait_for_function("window.__writerControllerRequests.length === 3")
+
+    assert page_errors == []
+    assert page.locator(".writer-agent-message.is-user").count() == 1
+    requests = page.evaluate("window.__writerControllerRequests")
+    assert [request["url"] for request in requests] == [
+        "/api/writer-agent/sessions",
+        "/api/writer-agent/sessions",
+        "/api/writer-agent/sessions/41/messages",
+    ]
+    assert requests[1]["method"] == "POST"
+    assert requests[1]["body"] == {
+        "title": "创建原创项目",
+        "content": "创建原创项目",
+    }
+    assert requests[2]["body"]["message"] == "创建原创项目"
+    assert requests[2]["body"]["display_user_message"] is False
+    page.evaluate("window.__resolveWriterMessageResponse()")
+    page.get_by_text("请选择原创方向").wait_for()
+    assert page.locator(".writer-agent-message.is-user").count() == 1
+
+
+def test_create_project_retry_reuses_bootstrap_message_without_duplication(
+    page: Page,
+) -> None:
+    """Would catch a failed bootstrap retry becoming a second visible command."""
+
+    page_errors: list[str] = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    mount_writer_agent_controller_without_sessions(page)
+    page.wait_for_function("window.__writerControllerRequests.length === 1")
+    page.evaluate("window.__rejectNextWriterMessageResponse = true")
+
+    page.get_by_role("button", name="创建原创项目", exact=True).click()
+    page.get_by_text("消息提交失败").wait_for()
+    assert page.locator(".writer-agent-message.is-user").count() == 1
+
+    page.get_by_role("button", name="创建原创项目", exact=True).click()
+    page.wait_for_function("window.__writerControllerRequests.length === 4")
+    page.get_by_text("请选择原创方向").wait_for()
+
+    assert page_errors == []
+    assert page.locator(".writer-agent-message.is-user").count() == 1
+    requests = page.evaluate("window.__writerControllerRequests")
+    first_message = requests[2]["body"]
+    retried_message = requests[3]["body"]
+    assert first_message["message_id"]
+    assert retried_message["message_id"] == first_message["message_id"]
+    assert first_message["display_user_message"] is False
+    assert retried_message["display_user_message"] is False
+
+
+def test_link_project_starts_a_session_before_sending_project_id(
+    page: Page,
+) -> None:
+    """Would catch the empty-state project picker dereferencing activeSession.id."""
+
+    page_errors: list[str] = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    mount_writer_agent_controller_without_sessions(page)
+    page.wait_for_function("window.__writerControllerRequests.length === 1")
+    page.evaluate("window.__deferWriterMessageResponse = true")
+
+    page.get_by_role("button", name="关联已有项目").click()
+    page.get_by_role("button", name="可关联项目").click()
+    page.wait_for_function("window.__writerControllerRequests.length === 4")
+
+    assert page_errors == []
+    assert page.locator(".writer-agent-message.is-user").count() == 1
+    requests = page.evaluate("window.__writerControllerRequests")
+    assert [request["url"] for request in requests] == [
+        "/api/writer-agent/sessions",
+        "/api/creative/projects?participating_only=true",
+        "/api/writer-agent/sessions",
+        "/api/writer-agent/sessions/41/messages",
+    ]
+    assert requests[2]["body"] == {
+        "title": "关联已有项目",
+        "content": "关联已有项目",
+    }
+    assert requests[3]["body"]["message"] == "关联已有项目"
+    assert requests[3]["body"]["link_project_id"] == 23
+    assert requests[3]["body"]["display_user_message"] is False
+    page.evaluate("window.__resolveWriterMessageResponse()")
+    page.get_by_text("请选择原创方向").wait_for()
+    assert page.locator(".writer-agent-message.is-user").count() == 1
+
+
+def test_link_project_retry_reuses_bootstrap_message_without_duplication(
+    page: Page,
+) -> None:
+    """Would catch a failed project-link retry creating a second command."""
+
+    page_errors: list[str] = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    mount_writer_agent_controller_without_sessions(page)
+    page.wait_for_function("window.__writerControllerRequests.length === 1")
+    page.evaluate("window.__rejectNextWriterMessageResponse = true")
+
+    page.get_by_role("button", name="关联已有项目", exact=True).click()
+    page.get_by_role("button", name="可关联项目").click()
+    page.get_by_text("消息提交失败").wait_for()
+    assert page.locator(".writer-agent-message.is-user").count() == 1
+
+    page.get_by_role("button", name="关联已有项目", exact=True).click()
+    page.get_by_role("button", name="可关联项目").click()
+    page.wait_for_function("window.__writerControllerRequests.length === 6")
+    page.get_by_text("请选择原创方向").wait_for()
+
+    assert page_errors == []
+    assert page.locator(".writer-agent-message.is-user").count() == 1
+    requests = page.evaluate("window.__writerControllerRequests")
+    first_message = requests[3]["body"]
+    retried_message = requests[5]["body"]
+    assert first_message["message_id"]
+    assert retried_message["message_id"] == first_message["message_id"]
+    assert first_message["display_user_message"] is False
+    assert retried_message["display_user_message"] is False
+
+
+def test_writer_agent_renders_project_context_and_confirms_action(page: Page) -> None:
+    mount_writer_agent(
+        page,
+        session={
+            "id": 1,
+            "project_id": 9,
+            "project": {"id": 9, "name": "情绪公司", "current_stage": "outline"},
+            "messages": [],
+            "actions": [
+                {
+                    "id": "a1",
+                    "action_type": "creative.run_plan",
+                    "status": "pending",
+                    "revision": 2,
+                    "title": "生成第1-5集剧本",
+                    "summary": "复用已锁定大纲",
+                    "payload": {
+                        "target_stage": "script",
+                        "episode_start": 1,
+                        "episode_end": 5,
+                    },
+                }
+            ],
+        },
+    )
+
+    assert page.locator("#writer-agent-project-context").inner_text().startswith(
+        "情绪公司"
+    )
+    page.get_by_role("button", name="确认生成").click()
+    request = page.evaluate("window.__writerActionRequests[0]")
+    assert request["url"].endswith("/actions/a1/decision")
+    assert request["body"]["expected_revision"] == 2
+
+
+def test_multiple_action_cards_disable_only_the_clicked_card(page: Page) -> None:
+    mount_writer_agent(
+        page,
+        session={
+            "id": 1,
+            "messages": [],
+            "actions": [
+                {"id": "a1", "action_type": "creative.run_plan", "status": "pending", "revision": 1, "title": "大纲"},
+                {"id": "a2", "action_type": "creative.run_plan", "status": "pending", "revision": 1, "title": "剧本"},
+            ],
+        },
+    )
+
+    cards = page.locator(".writer-action-card")
+    cards.nth(0).get_by_role("button", name="确认生成").click()
+    assert cards.nth(1).get_by_role("button", name="确认生成").is_enabled()
+
+
+def test_writer_agent_renders_model_text_without_executing_html(page: Page) -> None:
+    mount_writer_agent(
+        page,
+        session={
+            "id": 1,
+            "messages": [],
+            "actions": [
+                {
+                    "id": "a1",
+                    "action_type": "creative.run_plan",
+                    "status": "pending",
+                    "revision": 1,
+                    "title": '<img src=x onerror="window.__xss=1">',
+                    "summary": "安全文本",
+                }
+            ],
+        },
+    )
+
+    assert page.locator(".writer-action-card img").count() == 0
+    assert page.evaluate("window.__xss || 0") == 0
+
+
+def test_action_card_renders_server_ledger_progress_and_result_link(page: Page) -> None:
+    mount_writer_agent(
+        page,
+        session={
+            "id": 1,
+            "messages": [],
+            "actions": [{
+                "id": "ledger-action",
+                "action_type": "creative.run_plan",
+                "status": "succeeded",
+                "revision": 4,
+                "title": "生成第1-2集剧本",
+                "summary": "共 2 个可审计步骤",
+                "completed_steps": 2,
+                "total_steps": 2,
+                "resource_refs": [
+                    {"resource_type": "script", "resource_id": "501"}
+                ],
+                "open_url": "/writing/projects",
+            }],
+        },
+    )
+
+    card = page.locator(".writer-action-card")
+    assert card.get_by_text("2 / 2").is_visible()
+    assert card.get_by_text("script").is_visible()
+    assert card.get_by_role("link", name="打开成果").get_attribute("href") == (
+        "/writing/projects"
+    )
+
+
+def test_writer_agent_has_no_horizontal_overflow_at_390px(page: Page) -> None:
+    page.set_viewport_size({"width": 390, "height": 844})
+    mount_writer_agent(
+        page,
+        session={
+            "id": 1,
+            "messages": [],
+            "actions": [
+                {"id": "a1", "action_type": "creative.run_plan", "status": "pending", "revision": 1, "title": "生成全剧大纲"}
+            ],
+        },
+    )
+
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+
+def test_writer_agent_ignores_server_owned_cards_in_message_history(page: Page) -> None:
+    mount_writer_agent(
+        page,
+        session={
+            "id": 1,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "已整理创作方案",
+                    "cards": [
+                        {
+                            "card_id": "directions-1",
+                            "card_type": "directions",
+                            "items": [
+                                {
+                                    "title": "情绪审判庭",
+                                    "protagonist": "劳动仲裁律师",
+                                    "background": "情绪量化城市",
+                                    "core_conflict": "替同事夺回被清零的工资",
+                                    "relationship_engine": "律师与前主管互相试探",
+                                    "emotional_payoff": "普通人夺回情绪解释权",
+                                    "difference_dimensions": ["protagonist", "conflict"],
+                                }
+                            ],
+                        },
+                        {
+                            "card_id": "brief-1",
+                            "card_type": "brief",
+                            "content": {"title": "情绪公司", "logline": "愤怒会让工资归零"},
+                            "assumptions": ["每集 2 分钟"],
+                        },
+                        {
+                            "card_id": "plan-1",
+                            "card_type": "plan",
+                            "title": "生成全剧大纲",
+                            "summary": "补齐创作基线",
+                            "steps": [{"stage": "brief", "kind": "lock"}],
+                        },
+                        {
+                            "card_id": "progress-1",
+                            "card_type": "progress",
+                            "action_id": "a1",
+                            "status": "running",
+                            "completed_steps": 2,
+                            "total_steps": 5,
+                        },
+                        {
+                            "card_id": "result-1",
+                            "card_type": "result",
+                            "project_id": 9,
+                            "resource_refs": [{"resource_type": "outline", "version": 2}],
+                            "open_url": "/writing/projects/9/outlines",
+                        },
+                        {
+                            "card_id": "conflict-1",
+                            "card_type": "conflict",
+                            "code": "STALE_PROJECT_CONTEXT",
+                            "message": "项目版本已经变化",
+                            "current_revision": 12,
+                        },
+                    ],
+                }
+            ],
+            "actions": [],
+        },
+    )
+
+    cards = page.locator(".writer-creative-card")
+    assert cards.count() == 4
+    assert cards.nth(0).get_by_text("情绪审判庭").is_visible()
+    assert cards.nth(1).get_by_text("愤怒会让工资归零").is_visible()
+    assert cards.nth(2).get_by_text("补齐创作基线").is_visible()
+    assert cards.nth(3).get_by_text("项目版本已经变化").is_visible()
+    assert page.get_by_text("2 / 5").count() == 0
+    assert page.get_by_role("link", name="打开项目").count() == 0
+    assert cards.nth(3).get_by_role("button", name="重新生成计划").is_visible()
+
+
+def test_writer_agent_project_context_shows_mode_stage_and_valid_entry(page: Page) -> None:
+    mount_writer_agent(
+        page,
+        session={
+            "id": 1,
+            "project_id": 9,
+            "project": {
+                "id": 9,
+                "name": "情绪公司",
+                "creation_mode": "original",
+                "outline_batch_id": "outlines-v2",
+            },
+            "messages": [],
+            "actions": [],
+        },
+    )
+
+    context = page.locator("#writer-agent-project-context")
+    assert "原创" in context.inner_text()
+    assert "全剧大纲" in context.inner_text()
+    assert context.get_by_role("link", name="打开项目").get_attribute("href") == "/writing/projects/9/outlines"
+
+
+def test_writer_agent_project_picker_submits_structured_project_id(page: Page) -> None:
+    mount_writer_agent(
+        page,
+        session={"id": 1, "messages": [], "actions": []},
+    )
+    page.evaluate(
+        """
+        window.__linkedProjectIds = [];
+        window.writerAgentWorkbench.configure({
+          sendProjectLink(projectId) { window.__linkedProjectIds.push(projectId); }
+        });
+        """
+    )
+    page.evaluate(
+        """
+        () => {
+          window.aiworkerApi.request = async (url, options = {}) => {
+            window.__writerActionRequests.push({url, method: options.method || 'GET'});
+            if (url.startsWith('/api/creative/projects')) {
+              return {items: [{id: 23, name: '可关联项目'}]};
+            }
+            return {};
+          };
+        }
+        """
+    )
+
+    page.get_by_role("button", name="关联已有项目").click()
+    page.get_by_role("button", name="可关联项目").click()
+
+    assert page.evaluate("window.__linkedProjectIds") == [23]

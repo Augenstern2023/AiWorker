@@ -158,6 +158,29 @@ def create_original_project(client: TestClient, request_id: str) -> dict[str, ob
     return response.json()
 
 
+def test_project_delete_retries_cross_database_cleanup_from_durable_tombstone(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = create_original_project(client, "delete-saga")
+    delete_workflow = client.workflow.delete_project_data
+    monkeypatch.setattr(
+        client.workflow, "delete_project_data", FailOnce(delete_workflow)
+    )
+
+    first = client.delete(f"/api/creative/projects/{project['id']}")
+
+    assert first.status_code == 503
+    assert client.repository.get_project(project["id"]) is None
+    assert client.repository.get_pending_project_deletion(project["id"])[
+        "requested_by"
+    ] == client.principal.user_id
+
+    second = client.delete(f"/api/creative/projects/{project['id']}")
+
+    assert second.status_code == 200, second.text
+    assert client.repository.get_pending_project_deletion(project["id"]) is None
+
+
 def test_original_create_api_is_idempotent_and_bootstraps_empty_topic_tasks(
     client: TestClient,
 ) -> None:
@@ -186,6 +209,8 @@ def test_original_create_api_is_idempotent_and_bootstraps_empty_topic_tasks(
         "brief", "characters", "outline", "beats", "script",
     }
     assert all(task["topic_id"] is None for task in tasks)
+    members = client.workflow.list_project_members(str(first_project["id"]))
+    assert [item["project_role"] for item in members] == ["project_creator"]
 
 
 def test_concurrent_original_create_reports_one_create_and_one_reuse(

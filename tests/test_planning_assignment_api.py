@@ -32,6 +32,7 @@ from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.session_service import SessionService
 from system_database import SystemDatabase, SystemDatabaseSettings
+from workflow.api import build_workflow_router
 from workflow.repository import WorkflowRepository
 
 
@@ -128,7 +129,9 @@ def test_screenwriter_creates_project_with_team_and_pool_tasks_idempotently(
 
     request.addfinalizer(cleanup_postgres)
     creator_user = _create_role_user(
-        identity, ("screenwriter", "selection_operator"), "创建编剧"
+        identity,
+        ("project_owner", "screenwriter", "selection_operator"),
+        "创建负责人",
     )
     cleanup["user_ids"].append(creator_user["id"])
     planner_role = identity.create_role(
@@ -265,7 +268,7 @@ def test_screenwriter_creates_project_with_team_and_pool_tasks_idempotently(
             (item["user_id"], item["project_role"], item["status"])
             for item in members
         } == {
-            (creator.user_id, "project_owner", "active"),
+            (creator.user_id, "project_creator", "active"),
             (planner_user["id"], "creative_planner", "active"),
             (writer_user["id"], "screenwriter", "active"),
         }
@@ -432,10 +435,10 @@ def test_project_creation_endpoints_reject_user_without_project_create(
         database.dispose()
 
 
-def test_member_candidates_accepts_project_create_without_page_or_read_grant(
+def test_member_candidates_require_project_member_manage_permission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> None:
-    """A project creator must not need broad project-read or page API grants."""
+    """Project creation alone must not expose member candidates."""
     database, identity = _postgres_identity(monkeypatch)
     role = identity.create_role(
         f"project_creator_{uuid.uuid4().hex}", "最小项目创建者", ""
@@ -469,7 +472,7 @@ def test_member_candidates_accepts_project_create_without_page_or_read_grant(
         params={"role_code": "screenwriter"},
     )
 
-    assert response.status_code == 200, response.text
+    assert response.status_code == 403, response.text
 
 
 def test_project_stage_task_creation_is_concurrency_safe(
@@ -702,8 +705,48 @@ def test_invalid_team_selection_leaves_no_partial_project(
         },
     )
 
-    assert response.status_code == 409, response.text
+    assert response.status_code == 403, response.text
     assert creative.list_projects() == []
+
+
+def test_project_creator_can_create_with_empty_member_lists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    database, identity = _postgres_identity(monkeypatch)
+    creator_user = _create_role_user(identity, ("screenwriter",), "空成员创建编剧")
+
+    def cleanup_postgres() -> None:
+        if identity.get_user(creator_user["id"]) is not None:
+            identity.soft_delete_user(creator_user["id"])
+        database.dispose()
+
+    request.addfinalizer(cleanup_postgres)
+    permissions = PermissionService(identity, SessionService(identity))
+    creator = permissions.principal_for_user(creator_user["id"], "creator-session")
+    assert creator is not None
+    runtime = tmp_path / ".runtime"
+    creative = CreativeRepository(runtime / "creative/creative.db")
+    topic = _topic(creative)
+    creative.update_topic(topic["id"], "adopted")
+    breakdown = creative.create_breakdown(topic["id"], {"title": topic["title"]}, {}, [])
+    creative.lock_breakdown(breakdown["id"])
+    app = FastAPI()
+    app.state.identity_permission_service = permissions
+    app.dependency_overrides[creative_api_principal] = lambda: creator
+    app.dependency_overrides[current_principal] = lambda: creator
+    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+
+    response = TestClient(app).post(
+        f"/api/creative/topics/{topic['id']}/planning-assignment",
+        json={
+            "name": "空成员项目",
+            "planner_member_ids": [],
+            "writer_member_ids": [],
+            "creation_request_id": uuid.uuid4().hex,
+        },
+    )
+
+    assert response.status_code == 200, response.text
 
 
 def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
@@ -821,6 +864,7 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
     app.state.identity_permission_service = permissions
     app.dependency_overrides[creative_api_principal] = lambda: creator
     app.dependency_overrides[current_principal] = lambda: creator
+    app.include_router(build_workflow_router(workflow))
     app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
     client = TestClient(app, raise_server_exceptions=False)
     base_payload = {
@@ -871,7 +915,7 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
         (member["user_id"], member["project_role"])
         for member in workflow.list_project_members(project_id)
     } >= {
-        (creator.user_id, "project_owner"),
+        (creator.user_id, "project_creator"),
         (creator.user_id, "screenwriter"),
     }
     tasks = [
@@ -889,8 +933,8 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
 
     with identity.transaction() as connection:
         connection.exec_driver_sql(
-            "DELETE FROM project_members WHERE project_id = %s "
-            "AND project_role = 'project_owner'",
+            "UPDATE project_members SET status = 'inactive' WHERE project_id = %s "
+            "AND project_role = 'project_creator'",
             (project_id,),
         )
         connection.exec_driver_sql(
@@ -908,8 +952,9 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
 
     assert replay.status_code == 200, replay.text
     replay_members = workflow.list_project_members(project_id)
-    assert (creator.user_id, "project_owner") in {
-        (member["user_id"], member["project_role"]) for member in replay_members
+    assert (creator.user_id, "project_creator", "inactive") in {
+        (member["user_id"], member["project_role"], member["status"])
+        for member in replay_members
     }
     replay_tasks = [
         task
@@ -917,3 +962,43 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
         if task.get("workflow_id") == f"project:{project_id}"
     ]
     assert len(replay_tasks) == 5
+
+    workflow.add_project_member(
+        project_id, victim_user["id"], "screenwriter", admin
+    )
+    reactivated_creator = workflow.add_project_member(
+        project_id, creator.user_id, "project_creator", admin
+    )
+    created_by = creative.get_project(int(project_id))["created_by"]
+    app.dependency_overrides[creative_api_principal] = lambda: admin
+    app.dependency_overrides[current_principal] = lambda: admin
+    deactivated = client.delete(
+        f"/api/workflow/projects/{project_id}/members/"
+        f"{reactivated_creator['id']}"
+    )
+    assert deactivated.status_code == 204, deactivated.text
+
+    members_after_deactivation = workflow.list_project_members(project_id)
+    assert {
+        (member["project_role"], member["status"])
+        for member in members_after_deactivation
+        if member["user_id"] == creator.user_id
+    } == {
+        ("project_creator", "inactive"),
+        ("screenwriter", "inactive"),
+    }
+    assert any(
+        member["user_id"] == victim_user["id"]
+        and member["project_role"] == "screenwriter"
+        and member["status"] == "active"
+        for member in members_after_deactivation
+    )
+    assert creative.get_project(int(project_id))["created_by"] == created_by
+
+    app.dependency_overrides[creative_api_principal] = lambda: creator
+    app.dependency_overrides[current_principal] = lambda: creator
+    assert client.patch(
+        f"/api/creative/projects/{project_id}",
+        json={"name": "停用后不得修改"},
+    ).status_code == 403
+    assert creative.get_project(int(project_id))["created_by"] == created_by

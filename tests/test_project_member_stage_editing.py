@@ -338,7 +338,10 @@ def test_project_member_without_stage_permissions_can_generate_edit_and_complete
 
     versioned = collaborator_client.post(
         f"/api/creative/blueprints/{blueprint['id']}/versions",
-        json={"workflow_task_id": task["id"]},
+        json={
+            "workflow_task_id": task["id"],
+            "expected_project_revision": creative.get_project(project["id"])["revision"],
+        },
     )
     assert versioned.status_code == 200, versioned.text
     assert versioned.json()["workflow_task_id"] == task["id"]

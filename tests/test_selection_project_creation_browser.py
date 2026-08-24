@@ -52,7 +52,7 @@ def _open_project_modal(Page: Page, planner_candidates: list[dict], writer_candi
     )
 
 
-def test_create_project_defaults_to_current_user_id() -> None:
+def test_create_project_does_not_default_current_user_id() -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
@@ -66,14 +66,11 @@ def test_create_project_defaults_to_current_user_id() -> None:
             ],
         )
 
-        assert selected == {
-            "plannerMemberIds": [],
-            "writerMemberIds": ["current-user"],
-        }
+        assert selected == {"plannerMemberIds": [], "writerMemberIds": []}
         browser.close()
 
 
-def test_create_project_does_not_default_same_user_twice() -> None:
+def test_create_project_never_defaults_current_user_id() -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
@@ -81,8 +78,5 @@ def test_create_project_does_not_default_same_user_twice() -> None:
 
         selected = _open_project_modal(page, [current], [current])
 
-        assert selected == {
-            "plannerMemberIds": ["current-user"],
-            "writerMemberIds": [],
-        }
+        assert selected == {"plannerMemberIds": [], "writerMemberIds": []}
         browser.close()

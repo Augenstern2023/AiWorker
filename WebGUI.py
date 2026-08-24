@@ -68,11 +68,20 @@ from analysis.asr import (
 from analysis.llm import LLMError, create_llm_provider_from_config
 from analysis.today_rank_api import register_today_rank_routes
 from creative.api import register_creative_routes
+from creative.application_service import CreativeApplicationService
+from creative.market_reference_service import MarketReferenceService
+from creative.original_project_service import OriginalProjectService
+from creative.project_creator_migration import migrate_project_creator_memberships
 from creative.repository import CreativeRepository
 from creative.transcript_assets import normalize_title
+from creative.workflow_adapter import CreativeWorkflowAdapter
 from screenplay_review.api import register_script_review_routes
 from screenplay_optimization.api import register_script_optimization_routes
 from writer_agent.api import register_writer_agent_routes
+from writer_agent.action_service import ActionService
+from writer_agent.orchestrator import WriterProjectOrchestrator
+from writer_agent.runner import WriterActionRunner
+from writer_agent.store import WriterAgentStore
 from identity.api import build_identity_router
 from identity.password_service import PasswordService
 from identity.dependencies import current_principal, require_permission
@@ -457,6 +466,7 @@ job_manager = JobManager(cwd=Path(__file__).resolve().parent)
 async def lifespan(app: FastAPI):
     backend_logger.info("Web GUI started")
     cleanup_task = asyncio.create_task(_periodic_data_operation_cleanup())
+    writer_action_runner.resume_active_actions()
     try:
         yield
     finally:
@@ -496,7 +506,75 @@ identity_permission_service = PermissionService(
 )
 audit_service = AuditService(identity_repository)
 workflow_repository = WorkflowRepository(identity_repository)
-workflow_transition_service = TransitionService(workflow_repository)
+creative_repository = CreativeRepository(
+    WORKSPACE_ROOT / ".runtime" / "creative" / "creative.db"
+)
+migrate_project_creator_memberships(creative_repository, workflow_repository)
+creative_workflow_adapter = CreativeWorkflowAdapter(
+    creative_repository, workflow_repository
+)
+workflow_transition_service = TransitionService(
+    workflow_repository, creative_adapter=creative_workflow_adapter
+)
+original_project_service = OriginalProjectService(
+    creative_repository,
+    workflow_repository,
+    MarketReferenceService(creative_repository),
+)
+creative_application_service = CreativeApplicationService(
+    creative_repository,
+    workflow_repository,
+    workflow_transition_service,
+    job_manager,
+    WORKSPACE_ROOT / ".runtime",
+    original_project_service=original_project_service,
+    workflow_adapter=creative_workflow_adapter,
+    permission_service=identity_permission_service,
+)
+writer_agent_store = WriterAgentStore(
+    WORKSPACE_ROOT / ".runtime" / "writer_agent" / "writer_agent.db"
+)
+
+
+def _writer_can_read_reference(
+    principal: Principal, resource_type: str, resource_id: int
+) -> bool:
+    del resource_id
+    if principal.is_system_admin:
+        return True
+    if resource_type == "topic":
+        return bool(
+            {"topic.read", "breakdown.read.approved", "brief.read.approved"}
+            & principal.permissions
+        )
+    return bool(
+        {"breakdown.read", "breakdown.read.approved"} & principal.permissions
+    )
+
+
+writer_project_orchestrator = WriterProjectOrchestrator(
+    writer_agent_store,
+    creative_application_service,
+    identity_permission_service,
+    workflow_repository,
+    _writer_can_read_reference,
+)
+writer_action_runner = WriterActionRunner(
+    store=writer_agent_store,
+    orchestrator=writer_project_orchestrator,
+    job_manager=job_manager,
+    principal_loader=lambda user_id: identity_permission_service.principal_for_user(
+        user_id, "writer-agent-resume"
+    ),
+    audit_service=audit_service,
+)
+writer_action_service = ActionService(
+    store=writer_agent_store,
+    runner=writer_action_runner,
+    audit_service=audit_service,
+    permission_service=identity_permission_service,
+    workflow_repository=workflow_repository,
+)
 navigation_repository = (
     NavigationRepository(system_database) if system_database is not None else None
 )
@@ -511,9 +589,6 @@ if navigation_repository is not None:
 else:
     navigation_service = NavigationService()
     page_access_service = navigation_service.page_access_service
-creative_repository = CreativeRepository(
-    WORKSPACE_ROOT / ".runtime" / "creative" / "creative.db"
-)
 app.state.identity_repository = identity_repository
 app.state.system_database = system_database
 app.state.identity_password_service = identity_password_service
@@ -524,6 +599,10 @@ app.state.navigation_repository = navigation_repository
 app.state.page_access_service = page_access_service
 app.state.workflow_repository = workflow_repository
 app.state.workflow_transition_service = workflow_transition_service
+app.state.creative_repository = creative_repository
+app.state.creative_application_service = creative_application_service
+app.state.writer_action_runner = writer_action_runner
+app.state.writer_action_service = writer_action_service
 templates = Jinja2Templates(directory=str(WORKSPACE_ROOT / "templates"))
 
 
@@ -590,6 +669,8 @@ register_creative_routes(
     runtime_dir=Path(__file__).resolve().parent / ".runtime",
     job_manager=job_manager,
     workflow_repository=workflow_repository,
+    repository=creative_repository,
+    application_service=creative_application_service,
 )
 register_script_review_routes(
     app,
@@ -604,6 +685,14 @@ register_script_optimization_routes(
 register_writer_agent_routes(
     app,
     runtime_dir=Path(__file__).resolve().parent / ".runtime",
+    creative_repository=creative_repository,
+    creative_application_service=creative_application_service,
+    store=writer_agent_store,
+    action_service=writer_action_service,
+    runner=writer_action_runner,
+    audit_service=audit_service,
+    permission_service=identity_permission_service,
+    workflow_repository=workflow_repository,
 )
 
 # Models

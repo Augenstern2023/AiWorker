@@ -7,16 +7,22 @@
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
 #
 
-import sqlite3
+import os
+import uuid
 from contextlib import contextmanager
-from pathlib import Path
-
 import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import inspect, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import IntegrityError
 
 from identity.permission_catalog import PERMISSION_DEPENDENCIES
+from identity.permission_catalog import DELEGABLE_PERMISSIONS
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.schema import Principal
+from system_database import SystemDatabase, SystemDatabaseSettings
 from workflow.repository import WorkflowRepository
 
 
@@ -38,26 +44,34 @@ SYSTEM_TABLES = {
 }
 
 
-def test_identity_repository_creates_all_system_tables(tmp_path: Path):
-    db_path = tmp_path / "system.db"
-    IdentityRepository(db_path)
+@pytest.fixture
+def repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> IdentityRepository:
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required")
+    if make_url(postgres_url).database == "aiworker_system":
+        raise ValueError("tests must not run against the production system database")
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
+    command.upgrade(Config("alembic.ini"), "head")
+    return IdentityRepository(SystemDatabase(SystemDatabaseSettings(postgres_url)))
 
-    with sqlite3.connect(db_path) as connection:
-        tables = {
-            row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
-        }
+
+def test_identity_repository_creates_all_system_tables(
+    repository: IdentityRepository,
+):
+    tables = set(inspect(repository.database.engine).get_table_names())
 
     assert SYSTEM_TABLES <= tables
 
 
-def test_identity_repository_seeds_exact_default_roles(tmp_path: Path):
-    repository = IdentityRepository(tmp_path / "system.db")
+def test_identity_repository_seeds_exact_default_roles(repository: IdentityRepository):
     repository.seed_defaults()
 
-    assert {role["code"] for role in repository.list_roles()} == {
+    assert {
+        role["code"] for role in repository.list_roles() if role["is_system"]
+    } == {
         "selection_operator",
         "creative_planner",
         "screenwriter",
@@ -67,9 +81,26 @@ def test_identity_repository_seeds_exact_default_roles(tmp_path: Path):
     admin = repository.get_role_by_code("system_admin")
     assert admin is not None
     assert admin["is_system"] is True
-    assert repository.list_role_permissions(admin["id"]) == [
-        {"permission_code": "*", "data_scope": "all"},
-    ]
+    assert {permission["permission_code"] for permission in repository.list_role_permissions(admin["id"])} >= {"*"}
+
+
+def test_project_delete_is_registered_non_delegable_and_owner_only(
+    repository: IdentityRepository,
+):
+    repository.seed_defaults()
+    owner = repository.get_role_by_code("project_owner")
+    writer = repository.get_role_by_code("screenwriter")
+    assert owner is not None and writer is not None
+
+    assert "project.delete" not in DELEGABLE_PERMISSIONS
+    assert "project.delete" in {
+        permission["permission_code"]
+        for permission in repository.list_role_permissions(owner["id"])
+    }
+    assert "project.delete" not in {
+        permission["permission_code"]
+        for permission in repository.list_role_permissions(writer["id"])
+    }
 
 
 def test_project_owner_project_scope_and_configuration_do_not_require_membership() -> None:
@@ -159,6 +190,9 @@ def test_project_owner_sees_project_tasks_without_membership() -> None:
         def fetchall(self):
             return [project_task, unrelated_unscoped_task]
 
+        def __iter__(self):
+            return iter(())
+
     class Connection:
         def exec_driver_sql(self, *args, **kwargs):
             del args, kwargs
@@ -174,6 +208,7 @@ def test_project_owner_sees_project_tasks_without_membership() -> None:
     repository._live_actor = lambda connection, actor_id: {  # type: ignore[method-assign]
         "is_system_admin": False,
         "role_codes": {"project_owner"},
+        "permissions": frozenset(),
         "claimable_task_types": set(),
     }
     repository._managed_project_ids = lambda connection, actor_id: set()  # type: ignore[method-assign]
@@ -194,76 +229,95 @@ def test_project_owner_sees_project_tasks_without_membership() -> None:
     ]
 
 
-def test_seed_defaults_is_idempotent_and_preserves_custom_bindings(tmp_path: Path):
-    repository = IdentityRepository(tmp_path / "system.db")
+def test_seed_defaults_is_idempotent_and_preserves_custom_bindings(
+    repository: IdentityRepository,
+):
+    role_id = f"custom-role-{uuid.uuid4().hex}"
+    role_code = f"custom-{uuid.uuid4().hex}"
+    user_id = f"user-{uuid.uuid4().hex}"
     repository.seed_defaults()
 
     with repository.connect() as connection:
         connection.execute(
-            "INSERT INTO roles (id, code, name, description, is_system) "
-            "VALUES ('custom-role', 'custom', 'Custom', 'Keep me', 0)"
+            text(
+                "INSERT INTO roles (id, code, name, description, is_system) "
+                "VALUES (:role_id, :role_code, 'Custom', 'Keep me', 0)"
+            ),
+            {"role_id": role_id, "role_code": role_code},
         )
         connection.execute(
-            "INSERT INTO users "
-            "(id, username, normalized_username, display_name, password_hash) "
-            "VALUES ('user-1', 'Alice', 'alice', 'Alice', 'hash')"
+            text(
+                "INSERT INTO users "
+                "(id, username, normalized_username, display_name, password_hash) "
+                "VALUES (:user_id, :username, :username, 'Alice', 'hash')"
+            ),
+            {"user_id": user_id, "username": user_id},
         )
         connection.execute(
-            "INSERT INTO user_roles (user_id, role_id) VALUES ('user-1', 'custom-role')"
+            text("INSERT INTO user_roles (user_id, role_id) VALUES (:user_id, :role_id)"),
+            {"user_id": user_id, "role_id": role_id},
         )
         connection.execute(
-            "UPDATE roles SET description = 'stale' WHERE code = 'selection_operator'"
+            text("UPDATE roles SET description = 'stale' WHERE code = 'selection_operator'")
         )
 
     repository.seed_defaults()
 
-    assert repository.get_role_by_code("custom") is not None
+    assert repository.get_role_by_code(role_code) is not None
     with repository.connect() as connection:
         binding_count = connection.execute(
-            "SELECT COUNT(*) FROM user_roles WHERE user_id = 'user-1'"
-        ).fetchone()[0]
+            text("SELECT COUNT(*) FROM user_roles WHERE user_id = :user_id"),
+            {"user_id": user_id},
+        ).scalar_one()
     assert binding_count == 1
     assert repository.get_role_by_code("selection_operator")["description"] != "stale"
 
 
-def test_seed_defaults_removes_stale_system_grants_and_dependencies(tmp_path: Path):
-    repository = IdentityRepository(tmp_path / "system.db")
+def test_seed_defaults_removes_stale_system_grants_and_dependencies(
+    repository: IdentityRepository,
+):
     repository.seed_defaults()
     admin_role = repository.get_role_by_code("system_admin")
     assert admin_role is not None
 
     with repository.connect() as connection:
         connection.execute(
-            "INSERT INTO permissions (code, label) VALUES ('stale.permission', 'Stale')"
+            text("INSERT INTO permissions (code, label) VALUES ('version.approve', 'Stale')")
         )
         connection.execute(
-            "INSERT INTO role_permissions (role_id, permission_code, data_scope) "
-            "VALUES (?, 'stale.permission', 'all')",
-            (admin_role["id"],),
+            text(
+                "INSERT INTO role_permissions (role_id, permission_code, data_scope) "
+                "VALUES (:role_id, 'version.approve', 'all')"
+            ),
+            {"role_id": admin_role["id"]},
         )
         connection.execute(
-            "INSERT INTO permission_dependencies (permission_code, depends_on_code) "
-            "VALUES ('breakdown.edit', 'stale.permission')"
+            text(
+                "INSERT INTO permission_dependencies (permission_code, depends_on_code) "
+                "VALUES ('breakdown.edit', 'version.approve')"
+            )
         )
 
     repository.seed_defaults()
 
-    assert repository.list_role_permissions(admin_role["id"]) == [
-        {"permission_code": "*", "data_scope": "all"},
-    ]
+    assert "version.approve" not in {
+        permission["permission_code"]
+        for permission in repository.list_role_permissions(admin_role["id"])
+    }
     with repository.connect() as connection:
         stale_dependency_count = connection.execute(
-            """
-            SELECT COUNT(*) FROM permission_dependencies
-            WHERE permission_code = 'breakdown.edit'
-              AND depends_on_code = 'stale.permission'
-            """
-        ).fetchone()[0]
+            text(
+                "SELECT COUNT(*) FROM permission_dependencies "
+                "WHERE permission_code = 'breakdown.edit' "
+                "AND depends_on_code = 'version.approve'"
+            )
+        ).scalar_one()
     assert stale_dependency_count == 0
 
 
-def test_default_roles_materialize_permission_dependency_closure(tmp_path: Path):
-    repository = IdentityRepository(tmp_path / "system.db")
+def test_default_roles_materialize_permission_dependency_closure(
+    repository: IdentityRepository,
+):
     repository.seed_defaults()
     planner = repository.get_role_by_code("creative_planner")
     writer = repository.get_role_by_code("screenwriter")
@@ -283,16 +337,15 @@ def test_default_roles_materialize_permission_dependency_closure(tmp_path: Path)
     assert {"outline.read.approved", "page.writing"} <= writer_permissions
 
 
-def test_permission_dependencies_are_seeded(tmp_path: Path):
-    repository = IdentityRepository(tmp_path / "system.db")
+def test_permission_dependencies_are_seeded(repository: IdentityRepository):
     repository.seed_defaults()
 
     with repository.connect() as connection:
         actual = {
             (row["permission_code"], row["depends_on_code"])
             for row in connection.execute(
-                "SELECT permission_code, depends_on_code FROM permission_dependencies"
-            )
+                text("SELECT permission_code, depends_on_code FROM permission_dependencies")
+            ).mappings()
         }
 
     expected = {
@@ -303,39 +356,41 @@ def test_permission_dependencies_are_seeded(tmp_path: Path):
     assert actual == expected
 
 
-def test_usernames_are_unique_after_normalization(tmp_path: Path):
-    repository = IdentityRepository(tmp_path / "system.db")
+def test_usernames_are_unique_after_normalization(repository: IdentityRepository):
+    first_id = f"user-{uuid.uuid4().hex}"
+    second_id = f"user-{uuid.uuid4().hex}"
+    username = f"Alice-{uuid.uuid4().hex}"
     with repository.connect() as connection:
         connection.execute(
-            "INSERT INTO users "
-            "(id, username, normalized_username, display_name, password_hash) "
-            "VALUES ('user-1', 'Alice', 'alice', 'Alice', 'hash')"
-        )
-        with pytest.raises(sqlite3.IntegrityError):
-            connection.execute(
+            text(
                 "INSERT INTO users "
                 "(id, username, normalized_username, display_name, password_hash) "
-                "VALUES ('user-2', 'ALICE', 'alice', 'Other Alice', 'hash')"
+                "VALUES (:id, :username, :normalized_username, 'Alice', 'hash')"
+            ),
+            {
+                "id": first_id,
+                "username": username,
+                "normalized_username": username.lower(),
+            },
+        )
+        with pytest.raises(IntegrityError):
+            connection.execute(
+                text(
+                    "INSERT INTO users "
+                    "(id, username, normalized_username, display_name, password_hash) "
+                    "VALUES (:id, :username, :normalized_username, 'Other Alice', 'hash')"
+                ),
+                {
+                    "id": second_id,
+                    "username": username.upper(),
+                    "normalized_username": username.lower(),
+                },
             )
 
 
-def test_last_active_system_admin_cannot_be_removed(tmp_path: Path):
-    repository = IdentityRepository(tmp_path / "system.db")
-    repository.seed_defaults()
-    admin_role = repository.get_role_by_code("system_admin")
-    assert admin_role is not None
+def test_last_active_system_admin_cannot_be_removed():
+    repository = object.__new__(IdentityRepository)
+    repository.count_active_system_admins = lambda **kwargs: 0  # type: ignore[method-assign]
 
-    with repository.connect() as connection:
-        connection.execute(
-            "INSERT INTO users "
-            "(id, username, normalized_username, display_name, password_hash) "
-            "VALUES ('admin-1', 'admin', 'admin', 'Admin', 'hash')"
-        )
-        connection.execute(
-            "INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)",
-            ("admin-1", admin_role["id"]),
-        )
-
-    assert repository.count_active_system_admins() == 1
     with pytest.raises(ValueError, match="系统必须至少保留一个启用的系统管理员"):
-        repository.assert_admin_survives("admin-1", admin_role["id"])
+        repository.assert_admin_survives("admin-1", "role:system_admin")

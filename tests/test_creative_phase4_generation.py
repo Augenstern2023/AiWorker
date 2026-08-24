@@ -9,6 +9,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -46,6 +49,29 @@ class SequentialProvider:
         return response
 
 
+def authority_extra(
+    repository: CreativeRepository, project_id: int
+) -> dict[str, Any]:
+    authority = repository.generation_authority_envelope(project_id)
+    return {
+        "source_authority": authority,
+        "source_authority_sha256": phase4_worker.canonical_request_hash(authority),
+    }
+
+
+def generation_contract(
+    repository: CreativeRepository,
+    project_id: int,
+    operation_id: str = "worker-generation-operation",
+) -> dict[str, Any]:
+    return {
+        **authority_extra(repository, project_id),
+        "operation_id": operation_id,
+        "generation_request_hash": phase4_worker.canonical_request_hash(
+            {"project_id": project_id, "operation_id": operation_id}
+        ),
+    }
+
 def blueprint_payload(count: int = 3):
     return {
         "blueprints": [
@@ -72,6 +98,128 @@ def blueprint_payload(count: int = 3):
         ],
         "provider": "test-llm",
     }
+
+
+def test_worker_loads_and_validates_inline_source_snapshot(tmp_path: Path) -> None:
+    snapshot = {"snapshot_id": "snapshot-7", "materials": ["第一集"]}
+    fingerprint = phase4_worker.canonical_request_hash(snapshot)
+
+    loaded = phase4_worker._load_source_snapshot(
+        {
+            "runtime_dir": str(tmp_path),
+            "source_snapshot_id": "snapshot-7",
+            "source_snapshot_sha256": fingerprint,
+            "source_snapshot": snapshot,
+        }
+    )
+
+    assert loaded == snapshot
+
+
+def test_worker_rejects_snapshot_chunk_path_outside_runtime(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="runtime root"):
+        phase4_worker._load_source_snapshot(
+            {
+                "runtime_dir": str(tmp_path),
+                "source_snapshot_id": "snapshot-7",
+                "source_snapshot_sha256": "0" * 64,
+                "source_snapshot_ref": {
+                    "paths": ["../outside.jsonpart"],
+                    "sha256": "0" * 64,
+                    "size": 2,
+                    "read_only": True,
+                },
+            }
+        )
+
+
+def test_worker_rejects_oversized_inline_snapshot(tmp_path: Path) -> None:
+    snapshot = {
+        "snapshot_id": "oversized",
+        "material": "字" * (2 * 1024 * 1024),
+    }
+    with pytest.raises(ValueError, match="2 MiB"):
+        phase4_worker._load_source_snapshot(
+            {
+                "runtime_dir": str(tmp_path),
+                "source_snapshot_id": "oversized",
+                "source_snapshot_sha256": phase4_worker.canonical_request_hash(
+                    snapshot
+                ),
+                "source_snapshot": snapshot,
+            }
+        )
+
+
+def test_worker_requires_read_only_chunk_reference(tmp_path: Path) -> None:
+    snapshot = {"snapshot_id": "chunked", "material": "素材"}
+    content = json.dumps(
+        snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    chunk = tmp_path / "creative" / "source_snapshots" / "chunk.jsonpart"
+    chunk.parent.mkdir(parents=True)
+    chunk.write_bytes(content)
+    fingerprint = phase4_worker.canonical_request_hash(snapshot)
+
+    with pytest.raises(ValueError, match="read_only"):
+        phase4_worker._load_source_snapshot(
+            {
+                "runtime_dir": str(tmp_path),
+                "source_snapshot_id": "chunked",
+                "source_snapshot_sha256": fingerprint,
+                "source_snapshot_ref": {
+                    "paths": [chunk.relative_to(tmp_path).as_posix()],
+                    "sha256": fingerprint,
+                    "size": len(content),
+                },
+            }
+        )
+
+
+def test_worker_requires_and_validates_server_authority(tmp_path: Path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = seed_worker_project(repository, episode_count=1)
+    authority = repository.generation_authority_envelope(project["id"])
+
+    assert phase4_worker._validate_source_authority(
+        {
+            "source_authority": authority,
+            "source_authority_sha256": phase4_worker.canonical_request_hash(
+                authority
+            ),
+        },
+        repository,
+        project["id"],
+    ) == authority
+    with pytest.raises(ValueError, match="authority"):
+        phase4_worker._validate_source_authority({}, repository, project["id"])
+
+
+def test_worker_rehydrates_authority_only_for_pre_envelope_jobs(tmp_path: Path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = seed_worker_project(repository, episode_count=1)
+
+    legacy = phase4_worker._validate_source_authority(
+        {"action": "blueprints", "legacy_authority_compat": True},
+        repository,
+        project["id"],
+    )
+
+    assert legacy == repository.generation_authority_envelope(project["id"])
+    with pytest.raises(ValueError, match="authority"):
+        phase4_worker._validate_source_authority(
+            {
+                "action": "blueprints",
+                "authority_schema_version": 1,
+                "operation_id": "new-writer-operation",
+            },
+            repository,
+            project["id"],
+        )
+    with pytest.raises(ValueError, match="authority"):
+        phase4_worker._validate_source_authority(
+            {"action": "blueprints"}, repository, project["id"]
+        )
 
 
 def test_blueprint_prompt_requires_an_imitation_reason_for_each_direction() -> None:
@@ -709,6 +857,7 @@ def test_phase4_worker_persists_generation_and_report(tmp_path, monkeypatch):
         extra={
             "action": "blueprints", "project_id": project["id"], "count": 3,
             "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            **generation_contract(repository, project["id"]),
         },
     )
 
@@ -720,6 +869,38 @@ def test_phase4_worker_persists_generation_and_report(tmp_path, monkeypatch):
     assert detail["status"] == "direction_review"
     assert report.exists()
     assert "blueprints" in report.read_text(encoding="utf-8")
+
+
+def test_phase4_worker_rejects_authority_change_at_persistence_boundary(
+    tmp_path, monkeypatch,
+):
+    db_path = tmp_path / ".runtime" / "creative" / "creative.db"
+    repository = CreativeRepository(db_path)
+    project = seed_worker_project(repository)
+
+    class AuthorityChangingProvider(SequentialProvider):
+        async def complete_json(self, messages):
+            repository.update_project(project["id"], {"name": "权威已变化"})
+            return await super().complete_json(messages)
+
+    provider = AuthorityChangingProvider([blueprint_payload()])
+    monkeypatch.setattr(phase4_worker, "create_provider", lambda: provider)
+    monkeypatch.chdir(tmp_path)
+    job = CrawlJob(
+        job_id="creative-worker-authority-race",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "blueprints", "project_id": project["id"], "count": 3,
+            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            **generation_contract(repository, project["id"]),
+        },
+    )
+
+    with pytest.raises(ValueError, match="authority changed"):
+        asyncio.run(phase4_worker.run(job))
+
+    assert repository.get_project(project["id"])["blueprints"] == []
 
 
 def test_phase4_worker_does_not_persist_partial_blueprints_after_llm_failure(tmp_path, monkeypatch):
@@ -736,6 +917,7 @@ def test_phase4_worker_does_not_persist_partial_blueprints_after_llm_failure(tmp
         extra={
             "action": "blueprints", "project_id": project["id"], "count": 3,
             "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            **authority_extra(repository, project["id"]),
         },
     )
 
@@ -767,6 +949,7 @@ def test_phase4_worker_preserves_completed_outline_chunks_after_a_later_failure(
         extra={
             "action": "outlines", "project_id": project["id"],
             "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            **generation_contract(repository, project["id"]),
         },
     )
 
@@ -799,7 +982,8 @@ def test_phase4_worker_continues_a_saved_outline_batch_after_a_failed_job(tmp_pa
     failed_job = CrawlJob(
         job_id="creative-worker-outline-failed",
         platform="creative", crawler_type="phase4_generate",
-        extra={"action": "outlines", "project_id": project["id"], "db_path": str(db_path)},
+        extra={"action": "outlines", "project_id": project["id"], "db_path": str(db_path),
+               **generation_contract(repository, project["id"])},
     )
     with pytest.raises(Exception, match="结构校验"):
         asyncio.run(phase4_worker.run(failed_job))
@@ -811,7 +995,9 @@ def test_phase4_worker_continues_a_saved_outline_batch_after_a_failed_job(tmp_pa
     resumed_job = CrawlJob(
         job_id="creative-worker-outline-resumed",
         platform="creative", crawler_type="phase4_generate",
-        extra={"action": "outlines", "project_id": project["id"], "db_path": str(db_path)},
+        extra={"action": "outlines", "project_id": project["id"], "db_path": str(db_path),
+               "retry_of_job_id": "creative-worker-outline-failed",
+               **generation_contract(repository, project["id"])},
     )
 
     asyncio.run(phase4_worker.run(resumed_job))
@@ -823,6 +1009,126 @@ def test_phase4_worker_continues_a_saved_outline_batch_after_a_failed_job(tmp_pa
     assert len(resumed_provider.calls) == 1
     assert [item["episode_number"] for item in outlines] == list(range(1, 21))
     assert len({item["batch_id"] for item in outlines}) == 1
+
+
+def test_phase4_worker_retry_takes_over_failure_before_first_checkpoint(
+    tmp_path, monkeypatch,
+):
+    db_path = tmp_path / ".runtime" / "creative" / "creative.db"
+    repository = CreativeRepository(db_path)
+    project = seed_worker_project(repository, episode_count=1)
+    brief = repository.create_blueprints(
+        project["id"], [{"content": {"title": "方向"}}]
+    )[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(
+        project["id"], [{"name": "主角"}], []
+    )
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    operation = generation_contract(
+        repository, project["id"], operation_id="pre-checkpoint-retry"
+    )
+
+    class FailingProvider:
+        provider_name = "failing-test-llm"
+
+        async def complete_json(self, messages):
+            raise RuntimeError("provider failed before checkpoint")
+
+    monkeypatch.setattr(phase4_worker, "create_provider", FailingProvider)
+    failed_job = CrawlJob(
+        job_id="outline-before-checkpoint-failed",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "outlines", "project_id": project["id"],
+            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            **operation,
+        },
+    )
+    with pytest.raises(RuntimeError, match="before checkpoint"):
+        asyncio.run(phase4_worker.run(failed_job))
+
+    retry_provider = SequentialProvider([
+        {"series_arc": "相识、对抗、合作", "stages": ["相识", "对抗", "合作"]},
+        {"episodes": [outline_episode(1)]},
+    ])
+    monkeypatch.setattr(phase4_worker, "create_provider", lambda: retry_provider)
+    retry_job = CrawlJob(
+        job_id="outline-before-checkpoint-retry",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "outlines", "project_id": project["id"],
+            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "retry_of_job_id": failed_job.job_id,
+            **operation,
+        },
+    )
+
+    asyncio.run(phase4_worker.run(retry_job))
+
+    outlines = [
+        item for item in repository.get_project(project["id"])["episodes"]
+        if item["stage"] == "outline"
+    ]
+    assert [item["episode_number"] for item in outlines] == [1]
+
+
+def test_phase4_worker_retry_takes_over_expired_orphan_before_first_checkpoint(
+    tmp_path, monkeypatch,
+):
+    db_path = tmp_path / ".runtime" / "creative" / "creative.db"
+    repository = CreativeRepository(db_path)
+    project = seed_worker_project(repository, episode_count=1)
+    brief = repository.create_blueprints(
+        project["id"], [{"content": {"title": "方向"}}]
+    )[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(
+        project["id"], [{"name": "主角"}], []
+    )
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    operation = generation_contract(
+        repository, project["id"], operation_id="orphan-before-checkpoint"
+    )
+    repository.reserve_generation_operation(
+        operation_id="orphan-before-checkpoint",
+        project_id=project["id"],
+        stage="outline",
+        request_hash=operation["generation_request_hash"],
+        owner_id="dead-outline-worker",
+    )
+    with repository._connect() as connection:
+        connection.execute(
+            "UPDATE creative_generation_operations SET updated_at = 0 "
+            "WHERE operation_id = ?",
+            ("orphan-before-checkpoint",),
+        )
+    provider = SequentialProvider([
+        {"series_arc": "相识、对抗、合作", "stages": ["相识", "对抗", "合作"]},
+        {"episodes": [outline_episode(1)]},
+    ])
+    monkeypatch.setattr(phase4_worker, "create_provider", lambda: provider)
+    retry_job = CrawlJob(
+        job_id="orphan-outline-retry",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "outlines", "project_id": project["id"],
+            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "retry_of_job_id": "dead-outline-worker",
+            **operation,
+        },
+    )
+
+    asyncio.run(phase4_worker.run(retry_job))
+
+    outlines = [
+        item for item in repository.get_project(project["id"])["episodes"]
+        if item["stage"] == "outline"
+    ]
+    assert [item["episode_number"] for item in outlines] == [1]
 
 
 def test_phase4_worker_saves_series_beats_in_ten_episode_checkpoints(tmp_path, monkeypatch):
@@ -855,6 +1161,7 @@ def test_phase4_worker_saves_series_beats_in_ten_episode_checkpoints(tmp_path, m
         extra={
             "action": "beats", "series": True, "project_id": project["id"],
             "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            **generation_contract(repository, project["id"]),
         },
     )
 
@@ -894,6 +1201,7 @@ def test_phase4_worker_saves_series_scripts_after_all_current_beats_are_locked(t
         extra={
             "action": "script", "series": True, "project_id": project["id"],
             "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            **generation_contract(repository, project["id"]),
         },
     )
 
@@ -937,6 +1245,7 @@ def test_phase4_worker_surfaces_provider_retry_progress(tmp_path, monkeypatch):
         extra={
             "action": "blueprints", "project_id": project["id"], "count": 3,
             "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            **authority_extra(repository, project["id"]),
         },
     )
 

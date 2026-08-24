@@ -211,8 +211,9 @@ def test_worker_uses_frozen_seed_snapshot_instead_of_current_seed(
         job_id="original-worker", platform="creative", crawler_type="phase4_generate",
         extra={
             "action": "blueprints", "project_id": project["id"], "count": 3,
-            "db_path": str(repository.db_path), "seed_id": frozen_seed["id"],
-            "market_context": [], "blocked_terms": [], "reference_snapshot": [],
+                "db_path": str(repository.db_path), "seed_id": frozen_seed["id"],
+                "market_context": [], "blocked_terms": [], "reference_snapshot": [],
+                "legacy_authority_compat": True,
         },
     )
 
@@ -243,8 +244,9 @@ def test_worker_creates_one_original_variant_with_parent_source(
         extra={
             "action": "blueprint_variant", "project_id": project["id"],
             "db_path": str(repository.db_path), "seed_id": frozen_seed["id"],
-            "parent_blueprint_id": parent["id"], "instruction": "改成悬疑类型",
-            "market_context": [], "blocked_terms": [],
+                "parent_blueprint_id": parent["id"], "instruction": "改成悬疑类型",
+                "market_context": [], "blocked_terms": [],
+                "legacy_authority_compat": True,
         },
     )
 

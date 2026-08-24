@@ -18,23 +18,44 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import re
 import sqlite3
+import threading
 import time
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, Literal
 from urllib.parse import unquote
+from uuid import uuid4
 
 import config
 from analysis.llm import create_llm_provider_from_config
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from creative.application_service import CreativeApplicationService
+from creative.market_reference_service import MarketReferenceService
+from creative.repository import CreativeRepository
 from identity.dependencies import current_principal
 from identity.schema import Principal
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
+from .action_service import (
+    ActionService,
+    build_project_authority_context,
+    filter_project_authority_output,
+    parse_creative_cards,
+    parse_proposed_actions,
+    persist_proposed_actions,
+    requires_direction_card,
+    validate_direction_requirement,
+    match_natural_language_decision,
+)
+from .schema import ActionCommand, ProposedAction, WriterActionError
 from .service import build_writer_report_markdown, is_review_request, normalize_writer_report, writer_messages
+from .store import WriterAgentStore
 
 
 _TEXT_UPLOAD_EXTENSIONS = frozenset({
@@ -43,6 +64,45 @@ _TEXT_UPLOAD_EXTENSIONS = frozenset({
 _DOCUMENT_UPLOAD_EXTENSIONS = frozenset({".docx", ".pdf"})
 _MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 _SUPPLEMENT_MARKER = re.compile(r"\n\n\[补充材料：(?P<name>[^\]]+)\]\n")
+_MESSAGE_CLAIM_LEASE_SECONDS = 30.0
+_MESSAGE_CLAIM_HEARTBEAT_SECONDS = 10.0
+
+
+def _start_message_claim_heartbeat(
+    store: WriterAgentStore,
+    session_id: int,
+    user_id: str,
+    message_id: str,
+    claim_token: str,
+) -> threading.Event:
+    """Renew a provider turn independently of the request event loop."""
+
+    interval = max(float(_MESSAGE_CLAIM_HEARTBEAT_SECONDS), 0.01)
+    stop = threading.Event()
+
+    def heartbeat() -> None:
+        while not stop.wait(interval):
+            try:
+                renewed = store.renew_client_message_claim(
+                    session_id,
+                    user_id,
+                    message_id,
+                    claim_token=claim_token,
+                )
+            except (OSError, sqlite3.Error):
+                return
+            if not renewed:
+                return
+
+    threading.Thread(
+        target=heartbeat,
+        name=f"writer-message-claim-{session_id}-{message_id}",
+        daemon=True,
+    ).start()
+    request_task = asyncio.current_task()
+    if request_task is not None:
+        request_task.add_done_callback(lambda _task: stop.set())
+    return stop
 
 
 class SessionCreateRequest(BaseModel):
@@ -50,132 +110,30 @@ class SessionCreateRequest(BaseModel):
     title: str = ""
 
 
+class ReferenceSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    resource_type: Literal["topic", "breakdown"]
+    resource_id: int = Field(ge=1)
+
+
 class ChatRequest(BaseModel):
     message: str
     display_user_message: bool = True
+    reference_refs: list[ReferenceSelection] = Field(default_factory=list, max_length=10)
+    message_id: str | None = Field(default=None, min_length=1, max_length=200)
+    client_message_id: str | None = Field(default=None, min_length=1, max_length=200)
+    link_project_id: int | None = Field(default=None, ge=1)
 
 
-class WriterAgentStore:
-    def __init__(self, db_path: Path) -> None:
-        self.db_path = db_path
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.execute("CREATE TABLE IF NOT EXISTS writer_agent_sessions (id INTEGER PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, filename TEXT NOT NULL DEFAULT '', messages_json TEXT NOT NULL DEFAULT '[]', report_json TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL, updated_at REAL NOT NULL)")
-            columns = {
-                row["name"]
-                for row in conn.execute("PRAGMA table_info(writer_agent_sessions)").fetchall()
-            }
-            if "reports_json" not in columns:
-                conn.execute(
-                    "ALTER TABLE writer_agent_sessions ADD COLUMN reports_json TEXT NOT NULL DEFAULT '[]'"
-                )
+class ActionDecisionRequest(BaseModel):
+    decision: Literal["confirm", "cancel"]
+    expected_revision: int = Field(ge=1)
+    client_request_id: str = Field(min_length=1, max_length=200)
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
 
-    def create(self, user_id: str, content: str, title: str = "", filename: str = "") -> dict[str, Any]:
-        now = time.time()
-        material_name = filename or title or "已粘贴创作材料"
-        material_message = _material_message(material_name, content)
-        with self._connect() as conn:
-            cursor = conn.execute(
-                "INSERT INTO writer_agent_sessions (user_id,title,content,filename,messages_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
-                (
-                    user_id,
-                    title or filename or "未命名创作会话",
-                    content,
-                    filename,
-                    json.dumps([material_message], ensure_ascii=False),
-                    now,
-                    now,
-                ),
-            )
-        return self.get(int(cursor.lastrowid), user_id) or {}
-
-    def append_material(
-        self, session_id: int, user_id: str | None, content: str, filename: str
-    ) -> dict[str, Any]:
-        session = self.get(session_id, user_id)
-        if not session:
-            return {}
-        messages = list(session.get("messages") or [])
-        messages.append(_material_message(filename, content))
-        combined_content = (
-            f"{session['content']}\n\n[补充材料：{filename}]\n{content}"
-        )
-        with self._connect() as conn:
-            conn.execute(
-                "UPDATE writer_agent_sessions SET content = ?, messages_json = ?, updated_at = ? WHERE id = ?"
-                if user_id is None
-                else "UPDATE writer_agent_sessions SET content = ?, messages_json = ?, updated_at = ? WHERE id = ? AND user_id = ?",
-                (combined_content, json.dumps(messages, ensure_ascii=False), time.time(), session_id)
-                if user_id is None
-                else (
-                    combined_content,
-                    json.dumps(messages, ensure_ascii=False),
-                    time.time(),
-                    session_id,
-                    user_id,
-                ),
-            )
-        return self.get(session_id, user_id) or {}
-
-    def get(self, session_id: int, user_id: str | None) -> dict[str, Any] | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM writer_agent_sessions WHERE id = ?" if user_id is None else "SELECT * FROM writer_agent_sessions WHERE id = ? AND user_id = ?",
-                (session_id,) if user_id is None else (session_id, user_id),
-            ).fetchone()
-        return self._row(row) if row else None
-
-    def list(self, user_id: str | None) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM writer_agent_sessions ORDER BY updated_at DESC" if user_id is None else "SELECT * FROM writer_agent_sessions WHERE user_id = ? ORDER BY updated_at DESC",
-                () if user_id is None else (user_id,),
-            ).fetchall()
-        return [self._row(row) for row in rows]
-
-    def save_turn(
-        self,
-        session_id: int,
-        user_id: str | None,
-        messages: list[dict[str, Any]],
-        report: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        session = self.get(session_id, user_id)
-        if not session:
-            return {}
-        reports = list(session.get("reports") or [])
-        latest_report = dict(session.get("report") or {})
-        if report is not None:
-            report_entry = {
-                "id": f"report-{len(reports) + 1}",
-                "created_at": time.time(),
-                "report": report,
-            }
-            reports.append(report_entry)
-            latest_report = report
-            if messages and messages[-1].get("role") == "assistant":
-                messages[-1]["report_id"] = report_entry["id"]
-        with self._connect() as conn:
-            conn.execute(
-                "UPDATE writer_agent_sessions SET messages_json = ?, report_json = ?, reports_json = ?, updated_at = ? WHERE id = ?" if user_id is None else "UPDATE writer_agent_sessions SET messages_json = ?, report_json = ?, reports_json = ?, updated_at = ? WHERE id = ? AND user_id = ?",
-                (json.dumps(messages, ensure_ascii=False), json.dumps(latest_report, ensure_ascii=False), json.dumps(reports, ensure_ascii=False), time.time(), session_id) if user_id is None else (json.dumps(messages, ensure_ascii=False), json.dumps(latest_report, ensure_ascii=False), json.dumps(reports, ensure_ascii=False), time.time(), session_id, user_id),
-            )
-        return self.get(session_id, user_id) or {}
-
-    @staticmethod
-    def _row(row: sqlite3.Row) -> dict[str, Any]:
-        item = dict(row)
-        item["messages"] = json.loads(item.pop("messages_json") or "[]")
-        item["report"] = json.loads(item.pop("report_json") or "{}")
-        item["reports"] = json.loads(item.pop("reports_json", "[]") or "[]")
-        if not item["reports"] and item["report"]:
-            item["reports"] = [{"id": "report-1", "created_at": item["updated_at"], "report": item["report"]}]
-        return item
+class ActionRetryRequest(BaseModel):
+    client_request_id: str = Field(min_length=1, max_length=200)
 
 
 def create_provider() -> Any:
@@ -264,12 +222,43 @@ def _session_materials(session: dict[str, Any]) -> list[dict[str, Any]]:
         material_content = content[match.end():end].strip()
         if material_content:
             materials.append({"name": match.group("name").strip(), "content": material_content})
+    if len(materials) > 1 and str(materials[0].get("content") or "").strip() == "继续创作":
+        return materials[1:]
     return materials or [{"name": first_name, "content": content}]
 
 
-def build_writer_agent_router(runtime_dir: str | Path = ".runtime") -> APIRouter:
-    store = WriterAgentStore(Path(runtime_dir) / "writer_agent" / "writer_agent.db")
+def build_writer_agent_router(
+    runtime_dir: str | Path = ".runtime",
+    *,
+    creative_repository: CreativeRepository | None = None,
+    creative_application_service: CreativeApplicationService | None = None,
+    store: WriterAgentStore | None = None,
+    action_service: ActionService | None = None,
+    runner: Any | None = None,
+    audit_service: Any | None = None,
+    permission_service: Any | None = None,
+    workflow_repository: Any | None = None,
+) -> APIRouter:
+    store = store or WriterAgentStore(
+        Path(runtime_dir) / "writer_agent" / "writer_agent.db"
+    )
+    resolved_action_service = action_service
+    if resolved_action_service is None and runner is not None:
+        resolved_action_service = ActionService(
+            store=store,
+            runner=runner,
+            audit_service=audit_service,
+            permission_service=permission_service,
+            workflow_repository=workflow_repository,
+        )
+    authority_repository = creative_repository or getattr(
+        creative_application_service, "repository", None
+    )
     router = APIRouter(prefix="/api/writer-agent", tags=["writer-agent"])
+    router.creative_dependencies = SimpleNamespace(
+        repository=creative_repository,
+        application_service=creative_application_service,
+    )
 
     def assert_access(principal: Principal) -> None:
         if not principal.is_system_admin and "script.review.generate" not in principal.permissions:
@@ -277,6 +266,100 @@ def build_writer_agent_router(runtime_dir: str | Path = ".runtime") -> APIRouter
 
     def session_user_id(principal: Principal) -> str | None:
         return None if principal.is_system_admin else principal.user_id
+
+    def owned_user_id(principal: Principal) -> str:
+        # Action mutation is private even when an administrator may read sessions.
+        return principal.user_id
+
+    def action_error(exc: WriterActionError) -> HTTPException:
+        status = {
+            "PROJECT_ACCESS_DENIED": 403,
+            "PROJECT_CREATE_DENIED": 403,
+            "PROJECT_NOT_AVAILABLE": 404,
+            "ACTION_NOT_PENDING": 409,
+            "ACTION_REVISION_MISMATCH": 409,
+            "ACTION_STATE_INVALID": 409,
+            "ACTIVE_ACTION_CONFLICT": 409,
+            "IDEMPOTENCY_KEY_REUSED": 409,
+            "RESULT_VALIDATION_FAILED": 422,
+        }.get(exc.code, 409)
+        return HTTPException(
+            status,
+            detail={
+                "code": exc.code,
+                "message": str(exc),
+                "retryable": exc.retryable,
+                "current_revision": exc.current_revision,
+                "conflicting_action_id": exc.conflicting_action_id,
+            },
+        )
+
+    def require_action_service() -> ActionService:
+        if resolved_action_service is None:
+            raise HTTPException(503, "创作动作执行服务不可用")
+        return resolved_action_service
+
+    def can_read_reference(
+        principal: Principal, resource_type: str, resource_id: int
+    ) -> bool:
+        del resource_id
+        if principal.is_system_admin:
+            return True
+        if resource_type == "topic":
+            return bool(
+                {"topic.read", "breakdown.read.approved", "brief.read.approved"}
+                & principal.permissions
+            )
+        return bool(
+            {"breakdown.read", "breakdown.read.approved"}
+            & principal.permissions
+        )
+
+    def resolve_references(
+        selected: list[ReferenceSelection], principal: Principal
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        if not selected:
+            return [], []
+        if authority_repository is None:
+            raise HTTPException(409, "可选参考服务不可用")
+        raw_refs = [item.model_dump(mode="json") for item in selected]
+        try:
+            bundle = MarketReferenceService(authority_repository).resolve(
+                raw_refs,
+                can_read=lambda resource_type, resource_id: can_read_reference(
+                    principal, resource_type, resource_id
+                ),
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+        audited_refs: list[dict[str, Any]] = []
+        for item in bundle.source_refs:
+            resource_type = str(item["resource_type"])
+            resource_id = int(item["resource_id"])
+            resource = (
+                authority_repository.get_topic(resource_id)
+                if resource_type == "topic"
+                else authority_repository.get_breakdown(resource_id)
+            )
+            assert resource is not None
+            if resource_type == "topic":
+                name = str(resource.get("title") or f"选题 #{resource_id}")
+                version = int(resource.get("version") or 1)
+            else:
+                content = resource.get("content") or {}
+                name = str(content.get("title") or f"拆解 #{resource_id}")
+                version = int(resource.get("version") or 1)
+            audited_refs.append({
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                "name": name,
+                "version": version,
+                "readable": True,
+            })
+        return bundle.context, audited_refs
 
     @router.get("/sessions")
     async def list_sessions(principal: Principal = Depends(current_principal)) -> dict[str, Any]:
@@ -314,7 +397,7 @@ def build_writer_agent_router(runtime_dir: str | Path = ".runtime") -> APIRouter
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         session = store.append_material(
-            session_id, session_user_id(principal), content, name
+            session_id, owned_user_id(principal), content, name
         )
         if not session:
             raise HTTPException(404, "创作会话不存在")
@@ -331,38 +414,420 @@ def build_writer_agent_router(runtime_dir: str | Path = ".runtime") -> APIRouter
     @router.post("/sessions/{session_id}/messages")
     async def chat(session_id: int, payload: ChatRequest, principal: Principal = Depends(current_principal)) -> dict[str, Any]:
         assert_access(principal)
-        session = store.get(session_id, session_user_id(principal))
+        session = store.get(session_id, owned_user_id(principal))
         if not session:
             raise HTTPException(404, "创作会话不存在")
         message = payload.message.strip()
         if not message:
             raise HTTPException(400, "请输入要讨论的问题")
         history = list(session.get("messages") or [])
+        message_id = (
+            payload.client_message_id
+            or payload.message_id
+            or f"message-{uuid4().hex}"
+        )
+        prior_message = next(
+            (
+                item
+                for item in history
+                if item.get("role") == "user" and item.get("message_id") == message_id
+            ),
+            None,
+        )
+        if prior_message is not None:
+            if prior_message.get("content") != message:
+                raise HTTPException(409, "消息 ID 已用于不同内容")
+            return session
+        if payload.link_project_id is not None:
+            project_id = int(payload.link_project_id)
+            try:
+                project = authority_repository.get_project(project_id)
+            except Exception as exc:
+                raise HTTPException(404, "可关联项目不存在") from exc
+            if permission_service is not None and not permission_service.can_read_project(
+                principal, str(project_id)
+            ):
+                raise HTTPException(403, "无权关联该项目")
+            materials = _session_materials(session)
+            expected_context = {
+                "session_revision": int(session.get("context_revision") or 0)
+            }
+            actions = persist_proposed_actions(
+                store,
+                session_id=session_id,
+                actor_user_id=principal.user_id,
+                proposed_actions=[
+                    ProposedAction(
+                        action_type="project.link",
+                        title=f"关联项目：{project.get('name') or project_id}",
+                        summary="确认后将该项目设为当前创作项目",
+                        project_id=project_id,
+                    )
+                ],
+                materials=materials,
+                selected_messages=[
+                    *(item for item in history if item.get("kind") != "material"),
+                    {"role": "user", "content": message},
+                ],
+                project_context=expected_context,
+                client_message_id=message_id,
+            )
+            history.extend(
+                [
+                    {
+                        "role": "user",
+                        "content": message,
+                        "message_id": message_id,
+                        "display_user_message": payload.display_user_message,
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "已生成关联项目确认卡，确认后再切换当前项目。",
+                        "action_ids": [action["id"] for action in actions],
+                    },
+                ]
+            )
+            return store.save_turn(
+                session_id,
+                owned_user_id(principal),
+                history,
+                None,
+                client_message_id=message_id,
+            )
+        try:
+            natural_decision = match_natural_language_decision(
+                message, store.list_session_actions(session_id)
+            )
+        except WriterActionError as exc:
+            raise action_error(exc) from exc
+        if natural_decision.action_id and not natural_decision.revision_required:
+            action = store.require_action(
+                natural_decision.action_id, owned_user_id(principal)
+            )
+            request_id = f"message:{session_id}:{action['id']}:{message_id}"
+            try:
+                updated_action = require_action_service().decide(
+                    ActionCommand(
+                        session_id=session_id,
+                        action_id=action["id"],
+                        decision=natural_decision.decision,
+                        actor=principal,
+                        expected_revision=int(action["revision"]),
+                        client_request_id=request_id,
+                    )
+                )
+            except WriterActionError as exc:
+                raise action_error(exc) from exc
+            history.extend(
+                [
+                    {
+                        "role": "user",
+                        "content": message,
+                        "message_id": message_id,
+                        "display_user_message": payload.display_user_message,
+                    },
+                    {
+                        "role": "assistant",
+                        "content": (
+                            "已提交执行。"
+                            if natural_decision.decision == "confirm"
+                            else "已取消该动作。"
+                        ),
+                        "action_ids": [updated_action["id"]],
+                    },
+                ]
+            )
+            return store.save_turn(
+                session_id,
+                owned_user_id(principal),
+                history,
+                None,
+                client_message_id=message_id,
+            )
         materials = _session_materials(session)
         current_material = materials[-1]
         review_requested = is_review_request(message)
         material_catalog = [{"name": item["name"], "length": len(item["content"])} for item in materials]
+        reference_context, reference_refs = resolve_references(
+            payload.reference_refs, principal
+        )
+        linked_project_id = session.get("project_id")
+        if linked_project_id is not None:
+            if permission_service is None:
+                raise HTTPException(503, "项目权限服务不可用")
+            if not permission_service.can_read_project(
+                principal, str(linked_project_id)
+            ):
+                raise HTTPException(403, "当前账号已无权读取关联项目")
+        try:
+            project_context = build_project_authority_context(
+                authority_repository, linked_project_id
+            )
+        except WriterActionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        project_context = {
+            **project_context,
+            "session_revision": int(session.get("context_revision") or 0),
+        }
+        direction_required = requires_direction_card(
+            materials, message, project_context
+        )
+        claim_hash = hashlib.sha256(
+            json.dumps(
+                payload.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        claim_token = uuid4().hex
+        try:
+            claim_state = store.claim_client_message(
+                session_id,
+                principal.user_id,
+                message_id,
+                claim_hash,
+                claim_token=claim_token,
+                lease_seconds=_MESSAGE_CLAIM_LEASE_SECONDS,
+            )
+        except WriterActionError as exc:
+            raise action_error(exc) from exc
+        if claim_state == "completed":
+            return store.get(session_id, owned_user_id(principal)) or session
+        if claim_state == "in_progress":
+            for _attempt in range(500):
+                await asyncio.sleep(0.01)
+                state = store.client_message_claim_status(
+                    session_id, principal.user_id, message_id
+                )
+                if state == "completed":
+                    return (
+                        store.get(session_id, owned_user_id(principal))
+                        or session
+                    )
+                if state is None:
+                    raise HTTPException(
+                        409, "消息处理已中断，请使用相同消息 ID 重试"
+                    )
+            raise HTTPException(409, "相同消息仍在处理中")
+        if not store.renew_client_message_claim(
+            session_id,
+            principal.user_id,
+            message_id,
+            claim_token=claim_token,
+        ):
+            raise HTTPException(409, "消息处理租约已由其他请求接管")
+        heartbeat_stop = _start_message_claim_heartbeat(
+            store,
+            session_id,
+            principal.user_id,
+            message_id,
+            claim_token,
+        )
         try:
             raw = await create_provider().complete_json(writer_messages(
                 current_material["content"], history, message,
                 review_requested=review_requested,
                 material_name=current_material["name"],
                 material_catalog=material_catalog,
+                materials=materials,
+                project_context=project_context,
+                reference_context=reference_context,
+                direction_required=direction_required,
             ))
         except Exception as exc:
+            heartbeat_stop.set()
+            store.abandon_client_message(
+                session_id,
+                principal.user_id,
+                message_id,
+                claim_token=claim_token,
+            )
             raise HTTPException(503, f"编剧大师暂时无法响应：{exc}") from exc
+        if not store.renew_client_message_claim(
+            session_id,
+            principal.user_id,
+            message_id,
+            claim_token=claim_token,
+        ):
+            heartbeat_stop.set()
+            raise HTTPException(409, "消息处理租约已由其他请求接管")
         payload_data = raw if isinstance(raw, dict) else {}
         report = normalize_writer_report(payload_data) if review_requested else None
         reply = report["reply"] if report is not None else str(payload_data.get("reply") or "我已结合当前材料与上下文整理回答。").strip()
+        cards: list[dict[str, Any]] = []
+        actions: list[dict[str, Any]] = []
+        if not review_requested:
+            try:
+                card_models = parse_creative_cards(payload_data)
+                proposed_actions = parse_proposed_actions(payload_data)
+                validate_direction_requirement(card_models, direction_required)
+                card_models, proposed_actions = filter_project_authority_output(
+                    card_models, proposed_actions, project_context
+                )
+                cards = [card.model_dump(mode="json") for card in card_models]
+            except WriterActionError:
+                cards = []
+                proposed_actions = []
+            else:
+                card_ids = {card["card_id"] for card in cards}
+                proposed_actions = [
+                    action for action in proposed_actions
+                    if action.source_card_id is None or action.source_card_id in card_ids
+                ]
+                card_by_id = {card["card_id"]: card for card in cards}
+                enriched_actions = []
+                for action in proposed_actions:
+                    source_card = card_by_id.get(action.source_card_id or "")
+                    if source_card and source_card.get("card_type") == "brief":
+                        confirmed_brief = source_card.get("content")
+                        if isinstance(confirmed_brief, dict):
+                            action_payload = dict(action.payload)
+                            action_payload["confirmed_brief_payload"] = confirmed_brief
+                            step_payloads = dict(
+                                action_payload.get("step_payloads") or {}
+                            )
+                            step_payloads["brief.persist"] = confirmed_brief
+                            action_payload["step_payloads"] = step_payloads
+                            action = action.model_copy(
+                                update={"payload": action_payload}
+                            )
+                    enriched_actions.append(action)
+                proposed_actions = enriched_actions
+            if not store.renew_client_message_claim(
+                session_id,
+                principal.user_id,
+                message_id,
+                claim_token=claim_token,
+            ):
+                heartbeat_stop.set()
+                raise HTTPException(409, "消息处理租约已由其他请求接管")
+            try:
+                actions = persist_proposed_actions(
+                    store,
+                    session_id=session_id,
+                    actor_user_id=principal.user_id,
+                    proposed_actions=proposed_actions,
+                    materials=materials,
+                    selected_messages=[
+                        *(item for item in history if item.get("kind") != "material"),
+                        {"role": "user", "content": message},
+                    ],
+                    project_context=project_context,
+                    reference_refs=reference_refs,
+                    client_message_id=message_id,
+                )
+            except Exception:
+                heartbeat_stop.set()
+                store.abandon_client_message(
+                    session_id,
+                    principal.user_id,
+                    message_id,
+                    claim_token=claim_token,
+                )
+                raise
         history.extend([
             {
                 "role": "user",
                 "content": message,
+                "message_id": message_id,
                 "display_user_message": payload.display_user_message,
             },
-            {"role": "assistant", "content": reply},
+            {
+                "role": "assistant", "content": reply,
+                **({"cards": cards} if cards else {}),
+                **({"action_ids": [action["id"] for action in actions]} if actions else {}),
+            },
         ])
-        return store.save_turn(session_id, session_user_id(principal), history, report)
+        if not store.renew_client_message_claim(
+            session_id,
+            principal.user_id,
+            message_id,
+            claim_token=claim_token,
+        ):
+            heartbeat_stop.set()
+            raise HTTPException(409, "消息处理租约已由其他请求接管")
+        try:
+            saved = store.save_turn(
+                session_id,
+                owned_user_id(principal),
+                history,
+                report,
+                client_message_id=message_id,
+                claim_token=claim_token,
+            )
+        except Exception:
+            heartbeat_stop.set()
+            store.abandon_client_message(
+                session_id,
+                principal.user_id,
+                message_id,
+                claim_token=claim_token,
+            )
+            raise
+        heartbeat_stop.set()
+        return saved
+
+    @router.get("/sessions/{session_id}/actions/{action_id}")
+    async def get_action(
+        session_id: int,
+        action_id: str,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        assert_access(principal)
+        if store.get(session_id, session_user_id(principal)) is None:
+            raise HTTPException(404, "创作动作不存在")
+        try:
+            action = store.require_action(action_id, session_user_id(principal))
+        except WriterActionError as exc:
+            raise action_error(exc) from exc
+        if int(action["session_id"]) != session_id:
+            raise HTTPException(404, "创作动作不存在")
+        return action
+
+    @router.post(
+        "/sessions/{session_id}/actions/{action_id}/decision", status_code=202
+    )
+    async def decide_action(
+        session_id: int,
+        action_id: str,
+        payload: ActionDecisionRequest,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        assert_access(principal)
+        try:
+            return require_action_service().decide(
+                ActionCommand(
+                    session_id=session_id,
+                    action_id=action_id,
+                    decision=payload.decision,
+                    actor=principal,
+                    expected_revision=payload.expected_revision,
+                    client_request_id=payload.client_request_id,
+                )
+            )
+        except WriterActionError as exc:
+            raise action_error(exc) from exc
+
+    @router.post(
+        "/sessions/{session_id}/actions/{action_id}/retry", status_code=202
+    )
+    async def retry_action(
+        session_id: int,
+        action_id: str,
+        payload: ActionRetryRequest,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        assert_access(principal)
+        try:
+            return require_action_service().retry(
+                session_id=session_id,
+                action_id=action_id,
+                actor=principal,
+                client_request_id=payload.client_request_id,
+            )
+        except WriterActionError as exc:
+            raise action_error(exc) from exc
 
     @router.get("/sessions/{session_id}/export")
     async def export_session(session_id: int, principal: Principal = Depends(current_principal)) -> Response:
@@ -412,5 +877,29 @@ def build_writer_agent_router(runtime_dir: str | Path = ".runtime") -> APIRouter
     return router
 
 
-def register_writer_agent_routes(app: Any, *, runtime_dir: str | Path = ".runtime") -> None:
-    app.include_router(build_writer_agent_router(runtime_dir))
+def register_writer_agent_routes(
+    app: Any,
+    *,
+    runtime_dir: str | Path = ".runtime",
+    creative_repository: CreativeRepository | None = None,
+    creative_application_service: CreativeApplicationService | None = None,
+    store: WriterAgentStore | None = None,
+    action_service: ActionService | None = None,
+    runner: Any | None = None,
+    audit_service: Any | None = None,
+    permission_service: Any | None = None,
+    workflow_repository: Any | None = None,
+) -> None:
+    app.include_router(
+        build_writer_agent_router(
+            runtime_dir,
+            creative_repository=creative_repository,
+            creative_application_service=creative_application_service,
+            store=store,
+            action_service=action_service,
+            runner=runner,
+            audit_service=audit_service,
+            permission_service=permission_service,
+            workflow_repository=workflow_repository,
+        )
+    )

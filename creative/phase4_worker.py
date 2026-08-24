@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hmac
 import json
 from pathlib import Path
+import threading
 from typing import Any
 
 import config
@@ -19,12 +21,18 @@ import config
 from analysis.llm import create_llm_provider_from_config
 from core.events import emit_event
 from core.job import CrawlJob
-from creative.imitation_service import generate_blueprints
+from creative.imitation_service import complete_with_one_repair, generate_blueprints
 from creative.original_direction_service import (
     derive_original_direction,
     generate_original_directions,
 )
-from creative.repository import CreativeRepository
+from creative.outline_overview import normalize_series_overview
+from creative.prompt_templates import PROMPT_TEMPLATE_VERSION, series_overview_messages
+from creative.repository import (
+    GENERATION_OPERATION_LEASE_SECONDS,
+    CreativeRepository,
+    canonical_request_hash,
+)
 from creative.script_service import (
     build_continuity_ledger,
     generate_character_bundle,
@@ -33,8 +41,10 @@ from creative.script_service import (
     generate_episode_script,
     generate_episode_script_chunk,
     generate_outline_bundle,
-    generate_series_overview,
 )
+
+
+MAX_INLINE_SOURCE_SNAPSHOT_BYTES = 2 * 1024 * 1024
 
 
 def create_provider():
@@ -76,13 +86,20 @@ def _locked_characters(project: dict[str, Any]) -> tuple[list[dict[str, Any]], l
     return characters, relationships
 
 
-def _continuity_ledger_before(project: dict[str, Any], episode_number: int) -> list[dict[str, Any]]:
+def _continuity_beats(
+    project: dict[str, Any],
+    episode_numbers: range,
+    *,
+    repository: CreativeRepository | None = None,
+) -> list[dict[str, Any]]:
+    if repository is not None:
+        return repository.compatible_locked_beats(project, episode_numbers)
     latest_by_episode: dict[int, dict[str, Any]] = {}
     for item in project["episodes"]:
         if (
             item["stage"] != "beats"
             or item.get("status") not in {"locked", "approved"}
-            or int(item["episode_number"]) >= episode_number
+            or int(item["episode_number"]) not in episode_numbers
         ):
             continue
         number = int(item["episode_number"])
@@ -91,28 +108,195 @@ def _continuity_ledger_before(project: dict[str, Any], episode_number: int) -> l
             int(current.get("version") or 0), int(current["id"])
         ):
             latest_by_episode[number] = item
-    return build_continuity_ledger(list(latest_by_episode.values()))
+    return list(latest_by_episode.values())
 
 
-def _continuity_ledger_through(project: dict[str, Any], episode_number: int) -> list[dict[str, Any]]:
-    latest_by_episode: dict[int, dict[str, Any]] = {}
-    for item in project["episodes"]:
-        if (
-            item["stage"] != "beats"
-            or item.get("status") not in {"locked", "approved"}
-            or int(item["episode_number"]) > episode_number
-        ):
-            continue
-        number = int(item["episode_number"])
-        current = latest_by_episode.get(number)
-        if current is None or (int(item.get("version") or 0), int(item["id"])) > (
-            int(current.get("version") or 0), int(current["id"])
-        ):
-            latest_by_episode[number] = item
-    return build_continuity_ledger(list(latest_by_episode.values()))
+def _continuity_ledger_before(
+    project: dict[str, Any],
+    episode_number: int,
+    *,
+    repository: CreativeRepository | None = None,
+) -> list[dict[str, Any]]:
+    return build_continuity_ledger(
+        _continuity_beats(
+            project,
+            range(1, int(episode_number)),
+            repository=repository,
+        )
+    )
 
 
-async def run(job: CrawlJob) -> None:
+def _continuity_ledger_through(
+    project: dict[str, Any],
+    episode_number: int,
+    *,
+    repository: CreativeRepository | None = None,
+) -> list[dict[str, Any]]:
+    return build_continuity_ledger(
+        _continuity_beats(
+            project,
+            range(1, int(episode_number) + 1),
+            repository=repository,
+        )
+    )
+
+
+def _load_source_snapshot(extra: dict[str, Any]) -> dict[str, Any] | None:
+    snapshot_id = str(extra.get("source_snapshot_id") or "").strip()
+    expected_sha = str(extra.get("source_snapshot_sha256") or "").strip()
+    inline = extra.get("source_snapshot")
+    reference = extra.get("source_snapshot_ref")
+    if not snapshot_id and inline is None and reference is None:
+        return None
+    if not snapshot_id or not expected_sha:
+        raise ValueError("source snapshot id and fingerprint are required")
+    if inline is not None and reference is not None:
+        raise ValueError("source snapshot must use one storage mode")
+    if inline is not None:
+        if not isinstance(inline, dict):
+            raise ValueError("source snapshot must be an object")
+        snapshot = dict(inline)
+        canonical = json.dumps(
+            snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        if len(canonical) > MAX_INLINE_SOURCE_SNAPSHOT_BYTES:
+            raise ValueError("inline source snapshot exceeds 2 MiB")
+    else:
+        if not isinstance(reference, dict):
+            raise ValueError("source snapshot content is required")
+        if reference.get("read_only") is not True:
+            raise ValueError("source snapshot reference must be read_only")
+        if set(reference) != {"paths", "sha256", "size", "read_only"}:
+            raise ValueError("source snapshot reference has invalid shape")
+        paths = reference.get("paths")
+        if not isinstance(paths, list) or not paths:
+            raise ValueError("source snapshot chunks are required")
+        runtime_root = Path(str(extra.get("runtime_dir") or ".runtime")).resolve()
+        chunks: list[bytes] = []
+        for raw_path in paths:
+            relative_path = Path(str(raw_path))
+            if relative_path.is_absolute():
+                raise ValueError("source snapshot path escapes runtime root")
+            chunk_path = (runtime_root / relative_path).resolve()
+            if not chunk_path.is_relative_to(runtime_root):
+                raise ValueError("source snapshot path escapes runtime root")
+            chunks.append(chunk_path.read_bytes())
+        content = b"".join(chunks)
+        if int(reference.get("size") or -1) != len(content):
+            raise ValueError("source snapshot size mismatch")
+        if str(reference.get("sha256") or "") != expected_sha:
+            raise ValueError("source snapshot reference fingerprint mismatch")
+        try:
+            snapshot = json.loads(content.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("source snapshot content is invalid") from exc
+        if not isinstance(snapshot, dict):
+            raise ValueError("source snapshot must be an object")
+    embedded_id = snapshot.get("snapshot_id") or snapshot.get("id")
+    if embedded_id is not None and str(embedded_id) != snapshot_id:
+        raise ValueError("source snapshot id mismatch")
+    actual_sha = canonical_request_hash(snapshot)
+    if not hmac.compare_digest(actual_sha, expected_sha):
+        raise ValueError("source snapshot fingerprint mismatch")
+    return snapshot
+
+
+def _validate_source_authority(
+    extra: dict[str, Any], repository: CreativeRepository, project_id: int
+) -> dict[str, Any]:
+    authority = extra.get("source_authority")
+    expected_sha = str(extra.get("source_authority_sha256") or "").strip()
+    if not isinstance(authority, dict) or not expected_sha:
+        is_pre_envelope_job = (
+            extra.get("legacy_authority_compat") is True
+            and not extra.get("authority_schema_version")
+            and not str(extra.get("operation_id") or "").strip()
+            and not str(extra.get("source_snapshot_id") or "").strip()
+            and not str(extra.get("generation_request_hash") or "").strip()
+        )
+        if is_pre_envelope_job:
+            return repository.generation_authority_envelope(project_id)
+        raise ValueError("server source authority is required")
+    supplied_sha = canonical_request_hash(authority)
+    if not hmac.compare_digest(supplied_sha, expected_sha):
+        raise ValueError("server source authority fingerprint mismatch")
+    if int(authority.get("project_id") or 0) != int(project_id):
+        raise ValueError("server source authority project mismatch")
+    scoped_episode = authority.get("episode_number")
+    if scoped_episode is not None and int(extra.get("episode_number") or 0) != int(
+        scoped_episode
+    ):
+        raise ValueError("server source authority episode mismatch")
+    authority_stage = authority.get("stage")
+    worker_stage = str(extra.get("normalized_stage") or "").strip() or {
+        "blueprints": "brief",
+        "blueprint_variant": "brief",
+        "characters": "characters",
+        "outlines": "outline",
+        "outline_overview": "outline",
+        "beats": "beats",
+        "script": "script",
+    }.get(str(extra.get("action") or "").strip())
+    if authority_stage is not None and (
+        authority_stage not in {"brief", "characters", "outline", "beats", "script"}
+        or worker_stage != authority_stage
+    ):
+        raise ValueError("server source authority stage mismatch")
+    if scoped_episode is not None and authority_stage is None:
+        raise ValueError("server source authority stage is required")
+    repository.assert_generation_authority(project_id, authority)
+    return dict(authority)
+
+
+def _generation_context(
+    extra: dict[str, Any], source_snapshot: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    instruction = str(extra.get("generation_instruction") or "").strip()
+    if source_snapshot is None and not instruction:
+        return None
+    return {
+        "generation_instruction": instruction,
+        "source_snapshot_id": str(extra.get("source_snapshot_id") or ""),
+        "source_snapshot": source_snapshot or {},
+    }
+
+
+def _generation_meta(
+    meta: dict[str, Any], extra: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        **meta,
+        "generation_instruction": str(extra.get("generation_instruction") or ""),
+        "source_snapshot_id": str(extra.get("source_snapshot_id") or ""),
+        "source_snapshot_sha256": str(extra.get("source_snapshot_sha256") or ""),
+        "operation_id": str(extra.get("operation_id") or ""),
+    }
+
+
+async def generate_series_overview(
+    provider: Any,
+    project: dict[str, Any],
+    episodes: list[dict[str, Any]],
+    series_arc: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    overview, meta = await complete_with_one_repair(
+        provider,
+        series_overview_messages(
+            {
+                "project": project,
+                "episodes": episodes,
+                "series_arc": series_arc,
+            }
+        ),
+        lambda payload: normalize_series_overview(
+            payload.get("series_overview") if "series_overview" in payload else payload
+        ),
+    )
+    meta["prompt_template_version"] = PROMPT_TEMPLATE_VERSION
+    return overview, meta
+
+
+async def _run_once(job: CrawlJob) -> None:
     extra = job.extra or {}
     action = str(extra.get("action") or "").strip()
     project_id = int(extra.get("project_id") or 0)
@@ -121,10 +305,51 @@ async def run(job: CrawlJob) -> None:
         raise ValueError("Phase 4 任务缺少有效 action 或 project_id")
 
     repository = CreativeRepository(db_path)
+    source_authority = _validate_source_authority(extra, repository, project_id)
     inputs = repository.get_project_inputs(project_id)
-    project = inputs["project"]
-    provider = create_provider()
+    source_snapshot = _load_source_snapshot(extra)
+    context = _generation_context(extra, source_snapshot)
+    project = dict(inputs["project"])
+    if context is not None:
+        authority = source_snapshot.get("project") if source_snapshot else None
+        if isinstance(authority, dict):
+            if int(authority.get("id") or project_id) != project_id:
+                raise ValueError("source snapshot project mismatch")
+            if (
+                authority.get("revision") is not None
+                and int(authority["revision"]) != int(project.get("revision") or 0)
+            ):
+                raise ValueError("source snapshot project revision changed")
+        project["generation_context"] = context
     series_generation = bool(extra.get("series")) and action in {"beats", "script"}
+    generation_reservation: dict[str, Any] | None = None
+    reserved_generation = action == "outlines" or series_generation
+    if reserved_generation:
+        operation_id = str(extra.get("operation_id") or "").strip()
+        generation_request_hash = str(
+            extra.get("generation_request_hash") or ""
+        ).strip()
+        if not operation_id or not generation_request_hash:
+            raise ValueError("generation operation identity and request hash are required")
+        generation_reservation = repository.reserve_generation_operation(
+            operation_id=operation_id,
+            project_id=project_id,
+            stage="outline" if action == "outlines" else action,
+            request_hash=generation_request_hash,
+            owner_id=job.job_id,
+            predecessor_owner_id=(
+                str(extra.get("retry_of_job_id") or "").strip() or None
+            ),
+        )
+        if generation_reservation["status"] == "complete":
+            emit(
+                job,
+                "job_finished",
+                "创作内容生成已完成，返回幂等结果",
+                payload=generation_reservation["result"],
+            )
+            return
+    provider = create_provider()
     total_episodes = int(project.get("target_episode_count") or 0) if series_generation else 1
     retry_completed = 0
 
@@ -155,6 +380,12 @@ async def run(job: CrawlJob) -> None:
             seed = repository.get_seed(int(extra.get("seed_id") or 0))
             if seed is None or seed.get("status") != "frozen":
                 raise ValueError("原创方向任务缺少已冻结的种子版本")
+            seed = dict(seed)
+            if context is not None:
+                seed["constraints"] = {
+                    **dict(seed.get("constraints") or {}),
+                    "generation_context": context,
+                }
             generated, meta = await generate_original_directions(
                 provider, project, seed,
                 list(extra.get("market_context") or []),
@@ -169,16 +400,32 @@ async def run(job: CrawlJob) -> None:
                     for item in list(extra.get("reference_snapshot") or [])
                 ],
             }
+            meta = _generation_meta(meta, extra)
             resources = repository.create_blueprints(
                 project_id, generated, job.job_id, meta,
                 workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
                 direction_type="original", source_refs=source_refs,
+                operation_id=str(extra.get("operation_id") or "") or None,
+                expected_authority=source_authority,
             )
         else:
+            breakdown = dict(inputs["breakdown"])
+            if context is not None:
+                breakdown["content"] = {
+                    **dict(breakdown.get("content") or {}),
+                    "generation_context": context,
+                }
             generated, meta = await generate_blueprints(
-                provider, project, inputs["topic"], inputs["breakdown"], count
+                provider, project, inputs["topic"], breakdown, count
             )
-            resources = repository.create_blueprints(project_id, generated, job.job_id, meta)
+            resources = repository.create_blueprints(
+                project_id,
+                generated,
+                job.job_id,
+                _generation_meta(meta, extra),
+                operation_id=str(extra.get("operation_id") or "") or None,
+                expected_authority=source_authority,
+            )
         result: dict[str, Any] = {"action": action, "blueprint_ids": [item["id"] for item in resources]}
     elif action == "blueprint_variant":
         seed = repository.get_seed(int(extra.get("seed_id") or 0))
@@ -198,31 +445,48 @@ async def run(job: CrawlJob) -> None:
             blocked_terms=list(extra.get("blocked_terms") or []),
         )
         resources = repository.create_blueprints(
-            project_id, [generated], job.job_id, meta,
+            project_id, [generated], job.job_id, _generation_meta(meta, extra),
             workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
             direction_type="original", source_refs=generated["source_refs"],
+            operation_id=str(extra.get("operation_id") or "") or None,
+            expected_authority=source_authority,
         )
         result = {"action": action, "blueprint_ids": [resources[0]["id"]]}
     elif action == "characters":
-        brief = _locked_brief(project)
+        brief = dict(_locked_brief(project))
+        if context is not None:
+            brief["generation_context"] = context
         generated, meta = await generate_character_bundle(provider, project, brief)
         bundle = repository.create_character_batch(
             project_id,
             generated["characters"],
             generated["relationships"],
             job.job_id,
-            meta,
+            _generation_meta(meta, extra),
+            workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
+            operation_id=str(extra.get("operation_id") or "") or None,
+            expected_authority=source_authority,
         )
         result = {"action": action, "batch_id": bundle["batch_id"]}
     elif action == "outlines":
-        brief = _locked_brief(project)
+        brief = dict(_locked_brief(project))
+        if context is not None:
+            brief["generation_context"] = context
         characters, relationships = _locked_characters(project)
-        resumable = repository.find_resumable_outline_batch(project_id)
-        outline_batch_id: str | None = resumable["batch_id"] if resumable else None
+        operation_id = str(extra.get("operation_id") or "") or None
+        resumable = repository.find_resumable_outline_batch(
+            project_id,
+            operation_id=operation_id,
+            include_complete=operation_id is not None,
+        )
+        outline_batch_id: str | None = (
+            str(generation_reservation["batch_id"])
+            if generation_reservation is not None
+            else (resumable["batch_id"] if resumable else None)
+        )
         resume_episodes = [item["content"] for item in resumable["episodes"]] if resumable else None
         resume_series_arc = resumable["series_arc"] if resumable else None
         resume_stages = resumable["stages"] if resumable else None
-        resume_series_overview = resumable["series_overview"] if resumable else None
         if resumable:
             completed = len(resume_episodes or [])
             total = int(project["target_episode_count"])
@@ -238,19 +502,40 @@ async def run(job: CrawlJob) -> None:
             arc: dict[str, Any], episodes: list[dict[str, Any]], meta: dict[str, Any]
         ) -> None:
             nonlocal outline_batch_id
+            if generation_reservation is not None:
+                repository.validate_generation_reservation(
+                    operation_id=str(extra["operation_id"]),
+                    request_hash=str(extra["generation_request_hash"]),
+                    batch_id=str(generation_reservation["batch_id"]),
+                    owner_id=job.job_id,
+                )
             saved = repository.save_outline_batch_checkpoint(
                 project_id,
                 episodes,
                 str(arc["series_arc"]),
                 job.job_id,
                 {
-                    **meta,
+                    **_generation_meta(meta, extra),
                     "stages": arc["stages"],
                     "checkpoint_episode_count": len(episodes),
                 },
                 workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
                 batch_id=outline_batch_id,
                 series_overview=arc.get("series_overview"),
+                reservation_operation_id=(
+                    str(extra["operation_id"])
+                    if generation_reservation is not None
+                    else None
+                ),
+                reservation_request_hash=(
+                    str(extra["generation_request_hash"])
+                    if generation_reservation is not None
+                    else None
+                ),
+                reservation_owner_id=(
+                    job.job_id if generation_reservation is not None else None
+                ),
+                expected_authority=source_authority,
             )
             outline_batch_id = saved["batch_id"]
 
@@ -262,20 +547,20 @@ async def run(job: CrawlJob) -> None:
                 payload={"stage": action, "completed": done, "total": total},
             )
 
-        generated, meta = await generate_outline_bundle(
-            provider,
-            project,
-            brief,
-            characters,
-            relationships,
-            on_progress=progress,
-            on_checkpoint=save_outline_checkpoint,
-            checkpoint=lambda: wait_if_paused(job),
-            resume_episodes=resume_episodes,
-            resume_series_arc=resume_series_arc,
-            resume_stages=resume_stages,
-            resume_series_overview=resume_series_overview,
-        )
+        if len(resume_episodes or []) < int(project["target_episode_count"]):
+            await generate_outline_bundle(
+                provider,
+                project,
+                brief,
+                characters,
+                relationships,
+                on_progress=progress,
+                on_checkpoint=save_outline_checkpoint,
+                checkpoint=lambda: wait_if_paused(job),
+                resume_episodes=resume_episodes,
+                resume_series_arc=resume_series_arc,
+                resume_stages=resume_stages,
+            )
         if outline_batch_id is None:
             raise RuntimeError("分集大纲未创建任何生成检查点")
         bundle = repository.get_outline_batch(project_id, outline_batch_id)
@@ -293,7 +578,11 @@ async def run(job: CrawlJob) -> None:
             str(first_content.get("series_arc") or ""),
         )
         saved = repository.update_outline_overview(
-            project_id, batch_id, overview, only_if_missing=True
+            project_id,
+            batch_id,
+            overview,
+            only_if_missing=True,
+            expected_authority=source_authority,
         )
         emit(
             job,
@@ -307,14 +596,24 @@ async def run(job: CrawlJob) -> None:
             "episode_count": len(saved["episodes"]),
         }
     elif series_generation:
-        brief = _locked_brief(project)
+        brief = dict(_locked_brief(project))
+        if context is not None:
+            brief["generation_context"] = context
         characters, relationships = _locked_characters(project)
         if action == "script":
             missing_beats = repository.missing_current_locked_beats(project_id)
             if missing_beats:
                 raise ValueError(f"全剧场次剧本生成前必须锁定全部 Beats；未锁定集数：{','.join(map(str, missing_beats))}")
-        resumable = repository.find_resumable_episode_series(project_id, action)
-        series_batch_id: str | None = resumable["batch_id"] if resumable else None
+        resumable = repository.find_resumable_episode_series(
+            project_id,
+            action,
+            operation_id=str(extra.get("operation_id") or "") or None,
+        )
+        series_batch_id: str | None = (
+            str(generation_reservation["batch_id"])
+            if generation_reservation is not None
+            else (resumable["batch_id"] if resumable else None)
+        )
         completed = int(resumable["completed_episode_count"]) if resumable else 0
         generated_beats = list(resumable["episodes"]) if resumable and action == "beats" else []
         if completed:
@@ -337,29 +636,45 @@ async def run(job: CrawlJob) -> None:
             if sorted(int(item["episode_number"]) for item in outlines) != list(range(start, end + 1)):
                 raise ValueError(f"未找到第 {start}-{end} 集的锁定大纲")
             if action == "beats":
-                prior = [
-                    item for item in project["episodes"]
-                    if item["stage"] == "beats"
-                    and item.get("status") in {"locked", "approved"}
-                    and int(item["episode_number"]) < start
-                ] + generated_beats
+                prior = repository.compatible_locked_beats(
+                    project, range(1, start)
+                ) + generated_beats
                 checkpoint_items, meta = await generate_episode_beats_chunk(
                     provider, project, brief, outlines, characters, relationships,
                     continuity_ledger=build_continuity_ledger(prior),
                 )
             else:
+                selected_beats = {
+                    int(item["episode_number"]): item
+                    for item in repository.compatible_locked_beats(
+                        project, range(start, end + 1)
+                    )
+                }
+                if sorted(selected_beats) != list(range(start, end + 1)):
+                    raise ValueError(
+                        f"未找到第 {start}-{end} 集的当前兼容 locked Beats"
+                    )
                 beats_by_episode = {
-                    episode_number: repository._locked_beats_for_episode(project, episode_number)["content"]
+                    episode_number: selected_beats[episode_number]["content"]
                     for episode_number in range(start, end + 1)
                 }
                 checkpoint_items, meta = await generate_episode_script_chunk(
                     provider, project, brief, outlines, characters, relationships, beats_by_episode,
-                    continuity_ledger=_continuity_ledger_through(project, start - 1),
+                    continuity_ledger=_continuity_ledger_through(
+                        project, start - 1, repository=repository
+                    ),
+                )
+            if generation_reservation is not None:
+                repository.validate_generation_reservation(
+                    operation_id=str(extra["operation_id"]),
+                    request_hash=str(extra["generation_request_hash"]),
+                    batch_id=str(generation_reservation["batch_id"]),
+                    owner_id=job.job_id,
                 )
             saved = repository.save_episode_generation_checkpoint(
                 project_id, action, checkpoint_items, job.job_id,
                 {
-                    **meta,
+                    **_generation_meta(meta, extra),
                     "series_generation": True,
                     "chunk_size": 10,
                     "checkpoint_start": start,
@@ -368,6 +683,10 @@ async def run(job: CrawlJob) -> None:
                 },
                 workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
                 batch_id=series_batch_id,
+                reservation_operation_id=str(extra["operation_id"]),
+                reservation_request_hash=str(extra["generation_request_hash"]),
+                reservation_owner_id=job.job_id,
+                expected_authority=source_authority,
             )
             series_batch_id = saved[0]["batch_id"]
             if action == "beats":
@@ -382,7 +701,9 @@ async def run(job: CrawlJob) -> None:
             "brief_id": brief["id"],
         }
     else:
-        brief = _locked_brief(project)
+        brief = dict(_locked_brief(project))
+        if context is not None:
+            brief["generation_context"] = context
         characters, relationships = _locked_characters(project)
         episode_number = int(extra.get("episode_number") or 0)
         outline = next(
@@ -403,13 +724,29 @@ async def run(job: CrawlJob) -> None:
                 outline,
                 characters,
                 episode_number,
-                continuity_ledger=_continuity_ledger_before(project, episode_number),
+                continuity_ledger=_continuity_ledger_before(
+                    project, episode_number, repository=repository
+                ),
                 brief=brief,
                 relationships=relationships,
             )
-            resource = repository.create_episode_beats(project_id, episode_number, generated, job.job_id, meta)
+            resource = repository.create_episode_beats(
+                project_id,
+                episode_number,
+                generated,
+                job.job_id,
+                _generation_meta(meta, extra),
+                workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
+                operation_id=str(extra.get("operation_id") or "") or None,
+                expected_authority=source_authority,
+            )
         else:
-            beats = repository._locked_beats_for_episode(project, episode_number)
+            compatible_beats = repository.compatible_locked_beats(
+                project, [episode_number]
+            )
+            if not compatible_beats:
+                raise ValueError("必须先锁定当前集 Beats")
+            beats = compatible_beats[0]
             generated, meta = await generate_episode_script(
                 provider,
                 project,
@@ -417,14 +754,34 @@ async def run(job: CrawlJob) -> None:
                 characters,
                 beats["content"],
                 episode_number,
-                continuity_ledger=_continuity_ledger_through(project, episode_number),
+                continuity_ledger=_continuity_ledger_through(
+                    project, episode_number, repository=repository
+                ),
                 brief=brief,
                 relationships=relationships,
             )
-            resource = repository.create_episode_script(project_id, episode_number, generated, job.job_id, meta)
+            resource = repository.create_episode_script(
+                project_id,
+                episode_number,
+                generated,
+                job.job_id,
+                _generation_meta(meta, extra),
+                workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
+                operation_id=str(extra.get("operation_id") or "") or None,
+                expected_authority=source_authority,
+            )
         result = {"action": action, "episode_id": resource["id"], "episode_number": episode_number, "brief_id": brief["id"]}
 
     await wait_if_paused(job)
+    if generation_reservation is not None:
+        repository.complete_generation_operation(
+            operation_id=str(extra["operation_id"]),
+            request_hash=str(extra["generation_request_hash"]),
+            batch_id=str(generation_reservation["batch_id"]),
+            result=result,
+            owner_id=job.job_id,
+            expected_authority=source_authority,
+        )
     target_dir = Path("data") / "creative" / "jobs" / job.job_id
     target_dir.mkdir(parents=True, exist_ok=True)
     report_path = target_dir / "generation.json"
@@ -435,6 +792,64 @@ async def run(job: CrawlJob) -> None:
     emit(job, "artifact", "Phase 4 生成记录", payload={"path": str(report_path), "artifact_type": "json"})
     emit(job, "progress", "生成完成", payload={"stage": action, "completed": total_episodes, "total": total_episodes})
     emit(job, "job_finished", "创作内容生成完成", payload=result)
+
+
+async def run(job: CrawlJob) -> None:
+    extra = job.extra or {}
+    action = str(extra.get("action") or "").strip()
+    reserved_generation = action == "outlines" or (
+        bool(extra.get("series")) and action in {"beats", "script"}
+    )
+    operation_id = str(extra.get("operation_id") or "").strip()
+    request_hash = str(extra.get("generation_request_hash") or "").strip()
+    project_id = int(extra.get("project_id") or 0)
+    heartbeat_stop = threading.Event()
+    heartbeat: threading.Thread | None = None
+    if reserved_generation and operation_id and request_hash and project_id > 0:
+        heartbeat_repository = CreativeRepository(
+            Path(str(extra.get("db_path") or ".runtime/creative/creative.db"))
+        )
+
+        def renew_lease() -> None:
+            heartbeat_interval = GENERATION_OPERATION_LEASE_SECONDS / 3
+            while not heartbeat_stop.wait(heartbeat_interval):
+                try:
+                    heartbeat_repository.renew_generation_operation(
+                        operation_id=operation_id,
+                        request_hash=request_hash,
+                        owner_id=job.job_id,
+                    )
+                except Exception:
+                    continue
+
+        heartbeat = threading.Thread(target=renew_lease, daemon=True)
+        heartbeat.start()
+    try:
+        await _run_once(job)
+    except Exception:
+        if reserved_generation:
+            if operation_id and request_hash and project_id > 0:
+                try:
+                    repository = CreativeRepository(
+                        Path(
+                            str(
+                                extra.get("db_path")
+                                or ".runtime/creative/creative.db"
+                            )
+                        )
+                    )
+                    repository.fail_generation_operation(
+                        operation_id=operation_id,
+                        request_hash=request_hash,
+                        owner_id=job.job_id,
+                    )
+                except Exception:
+                    pass
+        raise
+    finally:
+        heartbeat_stop.set()
+        if heartbeat is not None:
+            heartbeat.join(timeout=1.0)
 
 
 def parse_args() -> argparse.Namespace:

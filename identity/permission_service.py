@@ -191,6 +191,23 @@ class PermissionService:
             ).mappings().all()
         return any(row["project_role"] in _MANAGED_PROJECT_ROLES for row in rows)
 
+    def can_create_project_content(
+        self, principal: Principal, project_id: str, *, active_member: bool
+    ) -> bool:
+        return active_member or self.can_access_managed_project(principal, project_id)
+
+    def can_govern_project(self, principal: Principal, project_id: str) -> bool:
+        return principal.is_system_admin or (
+            "project.member.manage" in principal.permissions
+            and self.can_access_managed_project(principal, project_id)
+        )
+
+    def can_delete_project(self, principal: Principal, project_id: str) -> bool:
+        return principal.is_system_admin or (
+            "project.delete" in principal.permissions
+            and self.can_access_managed_project(principal, project_id)
+        )
+
     @staticmethod
     def can_access_all(principal: Principal) -> bool:
         return principal.data_scope == "all"

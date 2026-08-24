@@ -590,7 +590,10 @@ def test_locked_brief_version_api_creates_a_successor_brief_task(tmp_path: Path)
     successor_task = workflow.start_task(ensured.json()["id"], principal)
     response = client.post(
         f"/api/creative/blueprints/{brief['id']}/versions",
-        json={"workflow_task_id": successor_task["id"]},
+        json={
+            "workflow_task_id": successor_task["id"],
+            "expected_project_revision": repository.get_project(project["id"])["revision"],
+        },
     )
 
     assert response.status_code == 200

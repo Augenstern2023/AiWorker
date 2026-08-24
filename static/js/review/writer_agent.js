@@ -1,6 +1,393 @@
 (function () {
     'use strict';
 
+    const writerActionPollers = new Map();
+    let mountedWriterSession = null;
+    let writerWorkbenchCallbacks = {};
+
+    async function writerApiJson(result) {
+        if (result && typeof result.json === 'function') {
+            const payload = await result.json().catch(() => ({}));
+            if (result.ok === false) throw new Error(payload.detail?.message || payload.detail || '请求失败');
+            return payload;
+        }
+        return result || {};
+    }
+
+    function writerRequestId() {
+        return window.crypto?.randomUUID?.() || `writer-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+
+    function writerActionHost() {
+        return document.getElementById('writer-agent-conversation') || document.getElementById('writer-agent-messages');
+    }
+
+    function stopWriterActionPolling(actionId) {
+        const timer = writerActionPollers.get(String(actionId));
+        if (timer !== undefined) window.clearInterval(timer);
+        writerActionPollers.delete(String(actionId));
+    }
+
+    function replaceMountedAction(updated) {
+        if (!mountedWriterSession || !updated?.id) return;
+        const actions = mountedWriterSession.actions || (mountedWriterSession.actions = []);
+        const index = actions.findIndex((item) => String(item.id) === String(updated.id));
+        if (index >= 0) actions[index] = Object.assign({}, actions[index], updated);
+        else actions.push(updated);
+        if (typeof writerWorkbenchCallbacks.onSession === 'function') {
+            writerWorkbenchCallbacks.onSession(mountedWriterSession);
+        } else {
+            window.writerAgentWorkbench.mount(mountedWriterSession);
+        }
+    }
+
+    async function refreshWriterAction(actionId) {
+        if (!mountedWriterSession) return;
+        try {
+            const updated = await writerApiJson(await window.aiworkerApi.request(
+                `/api/writer-agent/sessions/${mountedWriterSession.id}/actions/${actionId}`
+            ));
+            replaceMountedAction(updated);
+            if (!['queued', 'running'].includes(updated.status)) stopWriterActionPolling(actionId);
+        } catch (error) {
+            stopWriterActionPolling(actionId);
+            writerWorkbenchCallbacks.showError?.(error.message);
+        }
+    }
+
+    function startWriterActionPolling(actionId) {
+        const key = String(actionId);
+        if (writerActionPollers.has(key)) return;
+        writerActionPollers.set(key, window.setInterval(() => refreshWriterAction(key), 1000));
+    }
+
+    function safeWriterLocalUrl(value) {
+        const raw = String(value || '');
+        try {
+            const origin = window.location.origin === 'null'
+                ? 'http://writer-agent.local'
+                : window.location.origin;
+            const parsed = new URL(raw, origin);
+            if (
+                raw.startsWith('/')
+                && !raw.startsWith('//')
+                && !raw.includes('\\')
+                && parsed.origin === origin
+            ) return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+        } catch (_error) {
+            return '';
+        }
+        return '';
+    }
+
+    async function decideWriterAction(action, decision, card) {
+        const buttons = card.querySelectorAll('button');
+        buttons.forEach((button) => { button.disabled = true; });
+        let updated = null;
+        try {
+            updated = await writerApiJson(await window.aiworkerApi.request(
+                `/api/writer-agent/sessions/${mountedWriterSession.id}/actions/${action.id}/decision`,
+                {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        decision,
+                        expected_revision: Number(action.revision),
+                        client_request_id: writerRequestId(),
+                    }),
+                }
+            ));
+            replaceMountedAction(Object.assign({}, action, updated));
+            if (['queued', 'running'].includes(updated.status)) startWriterActionPolling(action.id);
+        } catch (error) {
+            writerWorkbenchCallbacks.showError?.(error.message);
+        } finally {
+            if (!updated || updated.status === 'pending') buttons.forEach((button) => { button.disabled = false; });
+        }
+    }
+
+    async function retryWriterAction(action, button) {
+        button.disabled = true;
+        try {
+            const retry = await writerApiJson(await window.aiworkerApi.request(
+                `/api/writer-agent/sessions/${mountedWriterSession.id}/actions/${action.id}/retry`,
+                {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({client_request_id: writerRequestId()}),
+                }
+            ));
+            replaceMountedAction(retry);
+            startWriterActionPolling(retry.id);
+        } catch (error) {
+            button.disabled = false;
+            writerWorkbenchCallbacks.showError?.(error.message);
+        }
+    }
+
+    function renderWriterActionCard(action) {
+        const card = document.createElement('article');
+        card.className = `writer-action-card status-${action.status || 'pending'}`;
+        card.dataset.actionId = String(action.id);
+        const title = document.createElement('h3');
+        title.textContent = action.title || action.action_type || '创作动作';
+        const summary = document.createElement('p');
+        summary.className = 'mb-2 text-muted';
+        summary.textContent = action.summary || '';
+        const status = document.createElement('div');
+        status.className = 'small writer-action-status';
+        status.textContent = ({pending: '待确认', queued: '已排队', running: '生成中', succeeded: '已完成', failed: '执行失败', cancelled: '已取消'})[action.status] || action.status || '';
+        card.append(title, summary, status);
+        if (Number(action.total_steps || 0) > 0) {
+            writerCardText(
+                card,
+                'small writer-action-progress mt-2',
+                `${Number(action.completed_steps || 0)} / ${Number(action.total_steps)}`
+            );
+        }
+        (action.resource_refs || []).forEach((resource) => renderWriterValue(card, resource));
+        const actionOpenUrl = safeWriterLocalUrl(action.open_url);
+        if (action.status === 'succeeded' && actionOpenUrl) {
+            const link = document.createElement('a');
+            link.className = 'btn btn-outline-light btn-sm mt-3';
+            link.href = actionOpenUrl;
+            link.textContent = '打开成果';
+            card.append(link);
+        }
+        if (action.status === 'pending') {
+            const confirm = document.createElement('button');
+            confirm.type = 'button';
+            confirm.className = 'btn btn-primary btn-sm mt-3';
+            confirm.textContent = action.action_type === 'project.link' ? '确认关联' : '确认生成';
+            confirm.addEventListener('click', () => decideWriterAction(action, 'confirm', card));
+            const cancel = document.createElement('button');
+            cancel.type = 'button';
+            cancel.className = 'btn btn-outline-light btn-sm mt-3 ms-2';
+            cancel.textContent = '取消';
+            cancel.addEventListener('click', () => decideWriterAction(action, 'cancel', card));
+            card.append(confirm, cancel);
+        } else if (['queued', 'running'].includes(action.status)) {
+            const cancel = document.createElement('button');
+            cancel.type = 'button';
+            cancel.className = 'btn btn-outline-light btn-sm mt-3';
+            cancel.textContent = action.phase === 'cancelling' ? '取消中' : '取消生成';
+            cancel.disabled = action.phase === 'cancelling';
+            cancel.addEventListener('click', () => decideWriterAction(action, 'cancel', card));
+            card.append(cancel);
+        }
+        if (action.status === 'failed' && action.retryable) {
+            const retry = document.createElement('button');
+            retry.type = 'button';
+            retry.className = 'btn btn-primary btn-sm mt-3';
+            retry.textContent = action.result?.partial ? '仅重试失败项' : '重试';
+            retry.addEventListener('click', () => retryWriterAction(action, retry));
+            card.append(retry);
+        }
+        if (['queued', 'running'].includes(action.status)) startWriterActionPolling(action.id);
+        return card;
+    }
+
+    function writerCardText(parent, className, value) {
+        const element = document.createElement('div');
+        element.className = className;
+        element.textContent = String(value ?? '');
+        parent.append(element);
+        return element;
+    }
+
+    function renderWriterValue(parent, value) {
+        if (Array.isArray(value)) {
+            value.forEach((item) => renderWriterValue(parent, item));
+            return;
+        }
+        if (value && typeof value === 'object') {
+            Object.entries(value).forEach(([key, item]) => {
+                const row = document.createElement('div');
+                row.className = 'small mt-1';
+                const label = document.createElement('strong');
+                label.textContent = `${key}：`;
+                row.append(label);
+                if (item && typeof item === 'object') renderWriterValue(row, item);
+                else row.append(document.createTextNode(String(item ?? '')));
+                parent.append(row);
+            });
+            return;
+        }
+        writerCardText(parent, 'small mt-1', value);
+    }
+
+    function renderWriterCreativeCard(cardData) {
+        const card = document.createElement('article');
+        card.className = `writer-creative-card writer-card-${cardData.card_type || 'unknown'}`;
+        card.dataset.cardId = String(cardData.card_id || '');
+        const type = cardData.card_type;
+        const labels = {
+            directions: '原创方向', brief: '原创 Brief', plan: '创作计划',
+            progress: '创作进度', result: '创作成果', conflict: '创作冲突',
+        };
+        writerCardText(card, 'small text-muted mb-2', labels[type] || '创作卡片');
+        if (type === 'directions') {
+            (cardData.items || []).forEach((item, index) => {
+                const direction = document.createElement('section');
+                direction.className = 'border-top pt-2 mt-2';
+                writerCardText(direction, 'fw-semibold', `${index + 1}. ${item.title || '未命名方向'}`);
+                [
+                    ['主角', item.protagonist], ['背景', item.background],
+                    ['核心冲突', item.core_conflict], ['人物关系', item.relationship_engine],
+                    ['情绪回报', item.emotional_payoff],
+                ].forEach(([label, value]) => {
+                    if (value) writerCardText(direction, 'small mt-1', `${label}：${value}`);
+                });
+                if (item.difference_dimensions?.length) {
+                    writerCardText(direction, 'small text-muted mt-1', `差异维度：${item.difference_dimensions.join('、')}`);
+                }
+                card.append(direction);
+            });
+        } else if (type === 'brief') {
+            renderWriterValue(card, cardData.content || {});
+            if (cardData.assumptions?.length) {
+                writerCardText(card, 'small text-muted mt-2', `AI 假设：${cardData.assumptions.join('；')}`);
+            }
+        } else if (type === 'plan') {
+            writerCardText(card, 'fw-semibold', cardData.title || '创作计划');
+            if (cardData.summary) writerCardText(card, 'small mt-1', cardData.summary);
+            (cardData.steps || []).forEach((step, index) => {
+                writerCardText(card, 'small mt-1', `${index + 1}. ${step.title || step.stage || '步骤'} · ${step.kind || ''}`);
+            });
+        } else if (type === 'conflict') {
+            writerCardText(card, 'fw-semibold', cardData.message || cardData.code || '项目状态已变化');
+            if (cardData.current_revision != null) {
+                writerCardText(card, 'small text-muted mt-1', `当前版本：${cardData.current_revision}`);
+            }
+            const replan = document.createElement('button');
+            replan.type = 'button';
+            replan.className = 'btn btn-outline-light btn-sm mt-3';
+            replan.textContent = '重新生成计划';
+            replan.addEventListener('click', () => writerWorkbenchCallbacks.sendMessage?.('基于当前项目状态重新生成计划'));
+            card.append(replan);
+        }
+        return card;
+    }
+
+    function renderMountedCreativeCards(host, session) {
+        host.querySelectorAll('.writer-creative-card').forEach((card) => card.remove());
+        const modelCardTypes = new Set(['directions', 'brief', 'plan', 'conflict']);
+        (session?.messages || []).forEach((message) => {
+            if (message.role !== 'assistant') return;
+            (message.cards || [])
+                .filter((card) => modelCardTypes.has(card?.card_type))
+                .forEach((card) => host.append(renderWriterCreativeCard(card)));
+        });
+    }
+
+    async function showWriterProjectPicker(picker) {
+        picker.hidden = false;
+        picker.replaceChildren();
+        const loading = document.createElement('span');
+        loading.className = 'small text-muted';
+        loading.textContent = '正在读取可关联项目…';
+        picker.append(loading);
+        try {
+            const payload = await writerApiJson(await window.aiworkerApi.request('/api/creative/projects?participating_only=true'));
+            const projects = payload.items || payload.projects || [];
+            picker.replaceChildren();
+            if (!projects.length) {
+                picker.textContent = '暂无可关联项目';
+                return;
+            }
+            projects.forEach((project) => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'btn btn-outline-light btn-sm';
+                button.textContent = project.name || `项目 #${project.id}`;
+                button.addEventListener('click', () => writerWorkbenchCallbacks.sendProjectLink?.(Number(project.id)));
+                picker.append(button);
+            });
+        } catch (error) {
+            picker.textContent = error.message;
+        }
+    }
+
+    function renderWriterProjectContext(session) {
+        const context = document.getElementById('writer-agent-project-context');
+        if (!context) return;
+        context.replaceChildren();
+        const project = session?.project || (session?.project_id ? {id: session.project_id, name: `项目 #${session.project_id}`} : null);
+        if (project) {
+            const content = document.createElement('div');
+            content.className = 'writer-project-summary';
+            const name = document.createElement('strong');
+            name.textContent = project.name || `项目 #${project.id}`;
+            const mode = project.creation_mode === 'imitation' ? '仿写' : '原创';
+            let stage = project.current_stage || '';
+            if (!stage && (project.outline_batch_id || (project.episodes || []).some((item) => item.stage === 'outline'))) stage = 'outline';
+            if (!stage && project.character_batch_id) stage = 'characters';
+            if (!stage && project.locked_brief_id) stage = 'brief';
+            const stageLabels = {brief: 'Brief', characters: '人物关系', outline: '全剧大纲', beats: '分集 Beats', script: '分集剧本'};
+            const meta = document.createElement('span');
+            meta.className = 'small text-muted ms-2';
+            meta.textContent = `${mode}${stage ? ` · 当前阶段：${stageLabels[stage] || stage}` : '创作'}`;
+            const link = document.createElement('a');
+            link.className = 'btn btn-outline-light btn-sm ms-auto';
+            link.href = stage === 'outline'
+                ? `/writing/projects/${project.id}/outlines`
+                : stage === 'characters'
+                    ? `/planning/projects/${project.id}/characters`
+                    : `/planning/projects/${project.id}/brief`;
+            link.textContent = '打开项目';
+            content.append(name, meta, link);
+            context.append(content);
+        } else {
+            const create = document.createElement('button');
+            create.id = 'writer-agent-create-project';
+            create.type = 'button';
+            create.className = 'btn btn-primary btn-sm';
+            create.textContent = '创建原创项目';
+            create.addEventListener('click', () => writerWorkbenchCallbacks.sendMessage?.('创建原创项目'));
+            const link = document.createElement('button');
+            link.id = 'writer-agent-link-project';
+            link.type = 'button';
+            link.className = 'btn btn-outline-light btn-sm';
+            link.textContent = '关联已有项目';
+            const picker = document.createElement('div');
+            picker.id = 'writer-agent-project-picker';
+            picker.className = 'writer-project-picker';
+            picker.hidden = true;
+            link.addEventListener('click', () => showWriterProjectPicker(picker));
+            context.append(create, link, picker);
+        }
+    }
+
+    async function hydrateWriterProject(session) {
+        if (!session?.project_id || session.project || session.__projectLoading) return;
+        session.__projectLoading = true;
+        try {
+            const project = await writerApiJson(await window.aiworkerApi.request(`/api/creative/projects/${session.project_id}`));
+            session.project = project;
+            if (typeof writerWorkbenchCallbacks.onSession === 'function') writerWorkbenchCallbacks.onSession(session);
+            else window.writerAgentWorkbench.mount(session);
+        } catch (_error) {
+            // The linked ID remains visible even when project details are temporarily unavailable.
+        } finally {
+            delete session.__projectLoading;
+        }
+    }
+
+    window.writerAgentWorkbench = {
+        configure(callbacks = {}) { writerWorkbenchCallbacks = Object.assign({}, writerWorkbenchCallbacks, callbacks); },
+        mount(session) {
+            mountedWriterSession = session || {id: null, actions: []};
+            renderWriterProjectContext(mountedWriterSession);
+            hydrateWriterProject(mountedWriterSession);
+            const host = writerActionHost();
+            if (!host) return;
+            renderMountedCreativeCards(host, mountedWriterSession);
+            host.querySelectorAll('.writer-action-card').forEach((card) => card.remove());
+            (mountedWriterSession.actions || []).forEach((action) => host.append(renderWriterActionCard(action)));
+        },
+        stop(actionId) { stopWriterActionPolling(actionId); },
+    };
+
     const sessionsElement = document.getElementById('writer-agent-sessions');
     const errorElement = document.getElementById('writer-agent-error');
     const refreshButton = document.getElementById('writer-agent-refresh');
@@ -221,6 +608,8 @@
         detailElement.classList.toggle('d-none', !hasSession);
         if (hasSession) { titleElement.textContent = activeSession.title || '未命名创作会话'; materialNameElement.textContent = activeSession.filename ? `来源文件：${activeSession.filename}` : '来源：直接输入'; }
         renderSessions(); renderConversation(); renderReportFiles(); setBusy(isBusy);
+        window.writerAgentWorkbench.configure({sendMessage: sendSuggestedMessage, sendProjectLink: sendSuggestedProjectLink, onSession: updateSession, showError});
+        window.writerAgentWorkbench.mount(activeSession);
     }
 
     function updateSession(updated) {
@@ -241,10 +630,50 @@
         } catch (error) { showError(error.message); }
     }
 
-    async function ask(message, showPendingMessage = true, displayUserMessage = true) {
+    function isBootstrapShortcutSession(session, message) {
+        const messages = session?.messages;
+        return Boolean(
+            session?.id
+            && String(session.content || '').trim() === String(message || '').trim()
+            && Array.isArray(messages)
+            && messages.length > 0
+            && messages.every((item) => item?.kind === 'material')
+        );
+    }
+
+    function bootstrapMessageId(sessionId, projectId = null) {
+        const suffix = projectId == null ? '' : `-project-${Number(projectId)}`;
+        return `writer-bootstrap-${sessionId}${suffix}`;
+    }
+
+    async function ask(message, showPendingMessage = true, displayUserMessage = true, messageId = null) {
         beginThinking(message, showPendingMessage);
         try {
-            const updated = await readJson(await aiworkerApi.request(`/api/writer-agent/sessions/${activeSession.id}/messages`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message, display_user_message: displayUserMessage})}));
+            const updated = await readJson(await aiworkerApi.request(`/api/writer-agent/sessions/${activeSession.id}/messages`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message, display_user_message: displayUserMessage, message_id: messageId || writerRequestId()})}));
+            endThinking(false);
+            updateSession(updated);
+        } catch (error) {
+            endThinking();
+            throw error;
+        }
+    }
+
+    async function linkProject(projectId, displayUserMessage = true, showPendingMessage = true, messageId = null) {
+        beginThinking('关联已有项目', showPendingMessage);
+        try {
+            const updated = await readJson(await aiworkerApi.request(
+                `/api/writer-agent/sessions/${activeSession.id}/messages`,
+                {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        message: '关联已有项目',
+                        display_user_message: displayUserMessage,
+                        link_project_id: Number(projectId),
+                        message_id: messageId || writerRequestId(),
+                    }),
+                }
+            ));
             endThinking(false);
             updateSession(updated);
         } catch (error) {
@@ -263,6 +692,36 @@
             ? await aiworkerApi.request('/api/writer-agent/sessions/file', {method: 'POST', headers: {'X-Writer-Filename': encodeURIComponent(file.name)}, body: file})
             : await aiworkerApi.request('/api/writer-agent/sessions', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title: deriveTitle(content), content})});
         updateSession(await readJson(response));
+    }
+
+    async function sendSuggestedMessage(message) {
+        const content = String(message || '').trim();
+        if (!content || isBusy) return;
+        try {
+            showError(); setBusy(true);
+            if (!activeSession) await createInitialSession(null, content);
+            const bootstrap = isBootstrapShortcutSession(activeSession, content);
+            await ask(content, !bootstrap, !bootstrap, bootstrap ? bootstrapMessageId(activeSession.id) : null);
+        } catch (error) {
+            showError(error.message);
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    async function sendSuggestedProjectLink(projectId) {
+        if (isBusy) return;
+        try {
+            showError(); setBusy(true);
+            const content = '关联已有项目';
+            if (!activeSession) await createInitialSession(null, content);
+            const bootstrap = isBootstrapShortcutSession(activeSession, content);
+            await linkProject(projectId, !bootstrap, !bootstrap, bootstrap ? bootstrapMessageId(activeSession.id, projectId) : null);
+        } catch (error) {
+            showError(error.message);
+        } finally {
+            setBusy(false);
+        }
     }
 
     async function appendUploadedMaterial(file) {

@@ -23,6 +23,7 @@
     const projectRoleLabels = {
         owner: '项目负责人',
         project_owner: '项目负责人',
+        project_creator: '项目创建负责人',
         creative_planner: '创意策划',
         screenwriter: '编剧',
     };
@@ -183,14 +184,15 @@
                 removeButton.type = 'button';
                 removeButton.className = 'btn btn-sm btn-outline-danger';
                 const roleLabel = projectRoleLabels[member.project_role] || member.project_role;
+                const actionVerb = member.project_role === 'project_creator' ? '停用' : '移除';
                 const isLastActiveOwner = (
                     member.status === 'active'
                     && ['owner', 'project_owner'].includes(member.project_role)
                     && ownerCount <= 1
                 );
-                removeButton.textContent = '移除';
+                removeButton.textContent = actionVerb;
                 removeButton.disabled = saving || isLastActiveOwner;
-                removeButton.title = isLastActiveOwner ? '请先添加另一位项目负责人' : `移除${memberName(member)}的${roleLabel}角色`;
+                removeButton.title = isLastActiveOwner ? '请先添加另一位项目负责人' : `${actionVerb}${memberName(member)}的${roleLabel}角色`;
                 removeButton.setAttribute('aria-label', removeButton.title);
                 removeButton.addEventListener('click', () => removeMember(member));
                 actions.appendChild(removeButton);
@@ -274,7 +276,8 @@
 
         async function removeMember(member) {
             const roleLabel = projectRoleLabels[member.project_role] || member.project_role;
-            if (saving || !window.confirm(`确定移除${memberName(member)}的${roleLabel}角色吗？`)) return;
+            const actionVerb = member.project_role === 'project_creator' ? '停用' : '移除';
+            if (saving || !window.confirm(`确定${actionVerb}${memberName(member)}的${roleLabel}角色吗？`)) return;
             showMemberError();
             setSaving(true);
             try {
@@ -282,10 +285,10 @@
                     `/api/workflow/projects/${projectId}/members/${encodeURIComponent(member.id)}`,
                     {method: 'DELETE'},
                 );
-                if (!response.ok) throw new Error(await responseError(response, '移除项目成员失败'));
+                if (!response.ok) throw new Error(await responseError(response, `${actionVerb}项目成员失败`));
                 await refreshEditor();
             } catch (reason) {
-                showMemberError(reason.message || '移除项目成员失败');
+                showMemberError(reason.message || `${actionVerb}项目成员失败`);
             } finally {
                 setSaving(false);
             }

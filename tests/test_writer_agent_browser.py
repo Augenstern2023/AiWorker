@@ -60,6 +60,217 @@ def mount_writer_agent(page: Page, *, session: dict) -> None:
     )
 
 
+def mount_writer_agent_controller_without_sessions(page: Page) -> None:
+    page.set_content(
+        '<main id="writer-agent-workbench">'
+        '<div id="writer-agent-error" class="d-none"></div>'
+        '<div class="writer-agent-layout">'
+        '<aside><button id="writer-agent-new" type="button">新建会话</button>'
+        '<button id="writer-agent-refresh" type="button">刷新会话</button>'
+        '<div id="writer-agent-sessions"></div>'
+        '<section id="writer-agent-session-detail" class="d-none">'
+        '<div id="writer-agent-session-title"></div>'
+        '<div id="writer-agent-material-name"></div></section></aside>'
+        '<section><div id="writer-agent-project-context"></div>'
+        '<div id="writer-agent-empty"></div>'
+        '<div id="writer-agent-conversation" class="d-none"></div>'
+        '<textarea id="writer-agent-message"></textarea>'
+        '<input id="writer-agent-file" type="file">'
+        '<button id="writer-agent-attach" type="button">上传</button>'
+        '<span id="writer-agent-file-name"></span>'
+        '<button id="writer-agent-send" type="button">发送</button></section>'
+        '<aside><button id="writer-agent-toggle-reports" type="button">'
+        '<i></i></button><span id="writer-agent-report-status"></span>'
+        '<div id="writer-agent-reports"></div></aside></div></main>'
+    )
+    page.add_script_tag(
+        content="""
+        window.__writerControllerRequests = [];
+        window.aiworkerApi = {
+          async request(url, options = {}) {
+            const body = JSON.parse(options.body || '{}');
+            window.__writerControllerRequests.push({
+              url, method: options.method || 'GET', body
+            });
+            let payload;
+            if (url.startsWith('/api/creative/projects')) {
+              payload = {items: [{id: 23, name: '可关联项目'}]};
+            } else if (url === '/api/writer-agent/sessions' && !options.method) {
+              payload = {items: []};
+            } else if (url === '/api/writer-agent/sessions') {
+              payload = {
+                id: 41, title: body.title, content: body.content,
+                filename: '', project_id: null,
+                messages: [{
+                  kind: 'material', role: 'user',
+                  material_name: body.title, material_length: body.content.length,
+                  material_preview: body.content, display_user_message: true
+                }], actions: [], reports: []
+              };
+            } else if (url === '/api/writer-agent/sessions/41/messages') {
+              payload = {
+                id: 41, title: '创建原创项目', content: '创建原创项目',
+                filename: '', project_id: null,
+                messages: [{
+                  kind: 'material', role: 'user', material_name: '创建原创项目',
+                  material_length: 6, material_preview: '创建原创项目',
+                  display_user_message: true
+                }, {role: 'assistant', content: '请选择原创方向'}],
+                actions: [], reports: []
+              };
+            } else {
+              throw new Error(`unexpected request: ${url}`);
+            }
+            const response = {ok: true, async json() { return payload; }};
+            if (url.endsWith('/messages') && window.__rejectNextWriterMessageResponse) {
+              window.__rejectNextWriterMessageResponse = false;
+              throw new Error('消息提交失败');
+            }
+            if (url.endsWith('/messages') && window.__deferWriterMessageResponse) {
+              return await new Promise((resolve) => {
+                window.__resolveWriterMessageResponse = () => resolve(response);
+              });
+            }
+            return response;
+          }
+        };
+        """
+    )
+    page.add_script_tag(path=ROOT / "static/js/review/writer_agent.js")
+
+
+def test_create_original_project_starts_a_session_before_sending_message(
+    page: Page,
+) -> None:
+    """Would catch the empty-state shortcut dereferencing activeSession.id."""
+
+    page_errors: list[str] = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    mount_writer_agent_controller_without_sessions(page)
+    page.wait_for_function("window.__writerControllerRequests.length === 1")
+    page.evaluate("window.__deferWriterMessageResponse = true")
+
+    page.get_by_role("button", name="创建原创项目", exact=True).click()
+    page.wait_for_function("window.__writerControllerRequests.length === 3")
+
+    assert page_errors == []
+    assert page.locator(".writer-agent-message.is-user").count() == 1
+    requests = page.evaluate("window.__writerControllerRequests")
+    assert [request["url"] for request in requests] == [
+        "/api/writer-agent/sessions",
+        "/api/writer-agent/sessions",
+        "/api/writer-agent/sessions/41/messages",
+    ]
+    assert requests[1]["method"] == "POST"
+    assert requests[1]["body"] == {
+        "title": "创建原创项目",
+        "content": "创建原创项目",
+    }
+    assert requests[2]["body"]["message"] == "创建原创项目"
+    assert requests[2]["body"]["display_user_message"] is False
+    page.evaluate("window.__resolveWriterMessageResponse()")
+    page.get_by_text("请选择原创方向").wait_for()
+    assert page.locator(".writer-agent-message.is-user").count() == 1
+
+
+def test_create_project_retry_reuses_bootstrap_message_without_duplication(
+    page: Page,
+) -> None:
+    """Would catch a failed bootstrap retry becoming a second visible command."""
+
+    page_errors: list[str] = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    mount_writer_agent_controller_without_sessions(page)
+    page.wait_for_function("window.__writerControllerRequests.length === 1")
+    page.evaluate("window.__rejectNextWriterMessageResponse = true")
+
+    page.get_by_role("button", name="创建原创项目", exact=True).click()
+    page.get_by_text("消息提交失败").wait_for()
+    assert page.locator(".writer-agent-message.is-user").count() == 1
+
+    page.get_by_role("button", name="创建原创项目", exact=True).click()
+    page.wait_for_function("window.__writerControllerRequests.length === 4")
+    page.get_by_text("请选择原创方向").wait_for()
+
+    assert page_errors == []
+    assert page.locator(".writer-agent-message.is-user").count() == 1
+    requests = page.evaluate("window.__writerControllerRequests")
+    first_message = requests[2]["body"]
+    retried_message = requests[3]["body"]
+    assert first_message["message_id"]
+    assert retried_message["message_id"] == first_message["message_id"]
+    assert first_message["display_user_message"] is False
+    assert retried_message["display_user_message"] is False
+
+
+def test_link_project_starts_a_session_before_sending_project_id(
+    page: Page,
+) -> None:
+    """Would catch the empty-state project picker dereferencing activeSession.id."""
+
+    page_errors: list[str] = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    mount_writer_agent_controller_without_sessions(page)
+    page.wait_for_function("window.__writerControllerRequests.length === 1")
+    page.evaluate("window.__deferWriterMessageResponse = true")
+
+    page.get_by_role("button", name="关联已有项目").click()
+    page.get_by_role("button", name="可关联项目").click()
+    page.wait_for_function("window.__writerControllerRequests.length === 4")
+
+    assert page_errors == []
+    assert page.locator(".writer-agent-message.is-user").count() == 1
+    requests = page.evaluate("window.__writerControllerRequests")
+    assert [request["url"] for request in requests] == [
+        "/api/writer-agent/sessions",
+        "/api/creative/projects?participating_only=true",
+        "/api/writer-agent/sessions",
+        "/api/writer-agent/sessions/41/messages",
+    ]
+    assert requests[2]["body"] == {
+        "title": "关联已有项目",
+        "content": "关联已有项目",
+    }
+    assert requests[3]["body"]["message"] == "关联已有项目"
+    assert requests[3]["body"]["link_project_id"] == 23
+    assert requests[3]["body"]["display_user_message"] is False
+    page.evaluate("window.__resolveWriterMessageResponse()")
+    page.get_by_text("请选择原创方向").wait_for()
+    assert page.locator(".writer-agent-message.is-user").count() == 1
+
+
+def test_link_project_retry_reuses_bootstrap_message_without_duplication(
+    page: Page,
+) -> None:
+    """Would catch a failed project-link retry creating a second command."""
+
+    page_errors: list[str] = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    mount_writer_agent_controller_without_sessions(page)
+    page.wait_for_function("window.__writerControllerRequests.length === 1")
+    page.evaluate("window.__rejectNextWriterMessageResponse = true")
+
+    page.get_by_role("button", name="关联已有项目", exact=True).click()
+    page.get_by_role("button", name="可关联项目").click()
+    page.get_by_text("消息提交失败").wait_for()
+    assert page.locator(".writer-agent-message.is-user").count() == 1
+
+    page.get_by_role("button", name="关联已有项目", exact=True).click()
+    page.get_by_role("button", name="可关联项目").click()
+    page.wait_for_function("window.__writerControllerRequests.length === 6")
+    page.get_by_text("请选择原创方向").wait_for()
+
+    assert page_errors == []
+    assert page.locator(".writer-agent-message.is-user").count() == 1
+    requests = page.evaluate("window.__writerControllerRequests")
+    first_message = requests[3]["body"]
+    retried_message = requests[5]["body"]
+    assert first_message["message_id"]
+    assert retried_message["message_id"] == first_message["message_id"]
+    assert first_message["display_user_message"] is False
+    assert retried_message["display_user_message"] is False
+
+
 def test_writer_agent_renders_project_context_and_confirms_action(page: Page) -> None:
     mount_writer_agent(
         page,

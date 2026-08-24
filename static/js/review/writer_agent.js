@@ -608,7 +608,7 @@
         detailElement.classList.toggle('d-none', !hasSession);
         if (hasSession) { titleElement.textContent = activeSession.title || '未命名创作会话'; materialNameElement.textContent = activeSession.filename ? `来源文件：${activeSession.filename}` : '来源：直接输入'; }
         renderSessions(); renderConversation(); renderReportFiles(); setBusy(isBusy);
-        window.writerAgentWorkbench.configure({sendMessage: ask, sendProjectLink: linkProject, onSession: updateSession, showError});
+        window.writerAgentWorkbench.configure({sendMessage: sendSuggestedMessage, sendProjectLink: sendSuggestedProjectLink, onSession: updateSession, showError});
         window.writerAgentWorkbench.mount(activeSession);
     }
 
@@ -630,10 +630,26 @@
         } catch (error) { showError(error.message); }
     }
 
-    async function ask(message, showPendingMessage = true, displayUserMessage = true) {
+    function isBootstrapShortcutSession(session, message) {
+        const messages = session?.messages;
+        return Boolean(
+            session?.id
+            && String(session.content || '').trim() === String(message || '').trim()
+            && Array.isArray(messages)
+            && messages.length > 0
+            && messages.every((item) => item?.kind === 'material')
+        );
+    }
+
+    function bootstrapMessageId(sessionId, projectId = null) {
+        const suffix = projectId == null ? '' : `-project-${Number(projectId)}`;
+        return `writer-bootstrap-${sessionId}${suffix}`;
+    }
+
+    async function ask(message, showPendingMessage = true, displayUserMessage = true, messageId = null) {
         beginThinking(message, showPendingMessage);
         try {
-            const updated = await readJson(await aiworkerApi.request(`/api/writer-agent/sessions/${activeSession.id}/messages`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message, display_user_message: displayUserMessage})}));
+            const updated = await readJson(await aiworkerApi.request(`/api/writer-agent/sessions/${activeSession.id}/messages`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message, display_user_message: displayUserMessage, message_id: messageId || writerRequestId()})}));
             endThinking(false);
             updateSession(updated);
         } catch (error) {
@@ -642,8 +658,8 @@
         }
     }
 
-    async function linkProject(projectId) {
-        beginThinking('关联已有项目', true);
+    async function linkProject(projectId, displayUserMessage = true, showPendingMessage = true, messageId = null) {
+        beginThinking('关联已有项目', showPendingMessage);
         try {
             const updated = await readJson(await aiworkerApi.request(
                 `/api/writer-agent/sessions/${activeSession.id}/messages`,
@@ -652,9 +668,9 @@
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
                         message: '关联已有项目',
-                        display_user_message: true,
+                        display_user_message: displayUserMessage,
                         link_project_id: Number(projectId),
-                        message_id: writerRequestId(),
+                        message_id: messageId || writerRequestId(),
                     }),
                 }
             ));
@@ -676,6 +692,36 @@
             ? await aiworkerApi.request('/api/writer-agent/sessions/file', {method: 'POST', headers: {'X-Writer-Filename': encodeURIComponent(file.name)}, body: file})
             : await aiworkerApi.request('/api/writer-agent/sessions', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title: deriveTitle(content), content})});
         updateSession(await readJson(response));
+    }
+
+    async function sendSuggestedMessage(message) {
+        const content = String(message || '').trim();
+        if (!content || isBusy) return;
+        try {
+            showError(); setBusy(true);
+            if (!activeSession) await createInitialSession(null, content);
+            const bootstrap = isBootstrapShortcutSession(activeSession, content);
+            await ask(content, !bootstrap, !bootstrap, bootstrap ? bootstrapMessageId(activeSession.id) : null);
+        } catch (error) {
+            showError(error.message);
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    async function sendSuggestedProjectLink(projectId) {
+        if (isBusy) return;
+        try {
+            showError(); setBusy(true);
+            const content = '关联已有项目';
+            if (!activeSession) await createInitialSession(null, content);
+            const bootstrap = isBootstrapShortcutSession(activeSession, content);
+            await linkProject(projectId, !bootstrap, !bootstrap, bootstrap ? bootstrapMessageId(activeSession.id, projectId) : null);
+        } catch (error) {
+            showError(error.message);
+        } finally {
+            setBusy(false);
+        }
     }
 
     async function appendUploadedMaterial(file) {

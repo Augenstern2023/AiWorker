@@ -33,7 +33,6 @@
 - `static/css/workspaces.css`：字段入口和预览区域样式。
 - `tests/test_creative_phase4_generation.py`：纯生成与 Prompt 契约测试。
 - `tests/test_creative_phase4.py`：repository 和 API 的权限、版本、冲突及字段隔离测试。
-- `tests/test_webgui_ui_changes.py`：模板和前端函数静态契约测试。
 - `tests/test_outline_episode_cards_browser.py`：真实 Alpine/浏览器交互测试。
 
 ## 共享脏工作区保护规则
@@ -481,27 +480,9 @@ git commit --only -m "feat: add synchronous outline field rewrite API" -- creati
 - 修改：`templates/writing/outlines.html`
 - 创建：`templates/common/workspace/outline_field_rewrite_modal.html`
 - 修改：`static/css/workspaces.css`
-- 测试：`tests/test_webgui_ui_changes.py`
 - 测试：`tests/test_outline_episode_cards_browser.py`
 
-- [ ] **步骤 1：编写失败的模板和浏览器测试**
-
-在 `tests/test_webgui_ui_changes.py` 增加：
-
-```python
-def test_outline_workspace_exposes_single_field_ai_rewrite_controls_and_modal():
-    workspace = _source("templates/common/workspace/project_outlines.html")
-    page = _source("templates/writing/outlines.html")
-    script = _source("static/js/writing/outlines.js")
-    for field in (
-        "core_event", "conflict", "character_progress",
-        "highlight", "reversal", "cliffhanger",
-    ):
-        assert f"'{field}'" in workspace
-    assert 'id="outlineFieldRewriteModal"' in page
-    assert "requestOutlineFieldRewrite" in script
-    assert "applyOutlineFieldRewrite" in script
-```
+- [ ] **步骤 1：编写失败的真实浏览器行为测试**
 
 在 `tests/test_outline_episode_cards_browser.py` 中让 fixture 同时读取 `project_outlines.html` 和新增的 `outline_field_rewrite_modal.html`，再扩展 `aiworkerApi.request`，为 rewrite 和 apply 返回确定结果：
 
@@ -538,7 +519,6 @@ def test_outline_field_ai_rewrite_previews_and_applies_only_selected_field(outli
 运行：
 
 ```powershell
-uv run pytest tests/test_webgui_ui_changes.py -k "outline and field and rewrite" -q
 uv run pytest tests/test_outline_episode_cards_browser.py -k "field_ai_rewrite" -q
 ```
 
@@ -631,7 +611,7 @@ uv run pytest tests/test_outline_episode_cards_browser.py -q
 - [ ] **步骤 7：提交任务 4 增量**
 
 ```powershell
-git commit --only -m "feat: add outline field rewrite preview UI" -- static/js/common/tasks.js static/js/common/creative.js static/js/writing/outlines.js templates/common/workspace/project_outlines.html templates/common/workspace/outline_field_rewrite_modal.html templates/writing/outlines.html static/css/workspaces.css tests/test_webgui_ui_changes.py tests/test_outline_episode_cards_browser.py
+git commit --only -m "feat: add outline field rewrite preview UI" -- static/js/common/tasks.js static/js/common/creative.js static/js/writing/outlines.js templates/common/workspace/project_outlines.html templates/common/workspace/outline_field_rewrite_modal.html templates/writing/outlines.html static/css/workspaces.css tests/test_outline_episode_cards_browser.py
 ```
 
 ### 任务 5：端到端回归、脏工作区审计与运行服务更新
@@ -699,7 +679,7 @@ Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8899/writing/projects/11/out
 - [ ] **步骤 7：提交最终集成增量（若前四个任务未分别提交）**
 
 ```powershell
-git commit --only -m "feat: support AI rewrite for individual outline fields" -- creative/outline_fields.py creative/prompt_templates.py creative/script_service.py creative/repository.py creative/schema.py creative/api.py WebGUI.py static/js/common/tasks.js static/js/common/creative.js static/js/writing/outlines.js templates/common/workspace/project_outlines.html templates/common/workspace/outline_field_rewrite_modal.html templates/writing/outlines.html static/css/workspaces.css tests/test_creative_phase4_generation.py tests/test_creative_phase4.py tests/test_webgui_ui_changes.py tests/test_outline_episode_cards_browser.py
+git commit --only -m "feat: support AI rewrite for individual outline fields" -- creative/outline_fields.py creative/prompt_templates.py creative/script_service.py creative/repository.py creative/schema.py creative/api.py WebGUI.py static/js/common/tasks.js static/js/common/creative.js static/js/writing/outlines.js templates/common/workspace/project_outlines.html templates/common/workspace/outline_field_rewrite_modal.html templates/writing/outlines.html static/css/workspaces.css tests/test_creative_phase4_generation.py tests/test_creative_phase4.py tests/test_outline_episode_cards_browser.py
 ```
 
 提交前必须由控制器确认暂存区只含本功能增量；否则不提交并在交付报告中明确说明。

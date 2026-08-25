@@ -196,6 +196,7 @@ backups/
 /.tmp/
 /logs/
 /.worktrees/
+/.superpowers/
 /test/hg_decrypted_mp4_asr_*/
 /creative-*-beats.md
 /今日榜单.png

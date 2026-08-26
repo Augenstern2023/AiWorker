@@ -245,7 +245,8 @@ def build_script_review_router(
         items = [
             refresh_review(review)
             for review in candidates
-            if can_read_review(request, principal, review)
+            if not bool((review.get("source_payload") or {}).get("audit_scope"))
+            and can_read_review(request, principal, review)
         ]
         return {"items": items}
 
@@ -314,6 +315,8 @@ def build_script_review_router(
             raise HTTPException(404, "审核记录不存在")
         if not can_read_review(request, principal, review):
             raise HTTPException(403, "没有访问此审核记录的权限")
+        if bool((review.get("source_payload") or {}).get("audit_scope")):
+            raise HTTPException(409, "完整项目审核不进入人工确认流程")
         if review["source_type"] != "project" or not bool(
             (review.get("source_payload") or {}).get("formal")
         ):

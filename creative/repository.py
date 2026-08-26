@@ -19,6 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
+from creative.outline_fields import OUTLINE_TEXT_FIELDS, outline_field_source_fingerprint
 from creative.outline_overview import normalize_series_overview, read_series_overview
 
 
@@ -41,6 +42,24 @@ GENERATION_AUTHORITY_SCHEMA_VERSION = 2
 
 class DuplicateTopicError(ValueError):
     """Raised when a title has already been collected into the topic store."""
+
+
+def _review_request_key(row: sqlite3.Row) -> str:
+    try:
+        payload = json.loads(row["source_payload_json"] or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ""
+    return str(payload.get("request_key") or "")
+
+
+def _is_project_long_review(row: sqlite3.Row) -> bool:
+    if str(row["source_type"] or "") != "project":
+        return False
+    try:
+        payload = json.loads(row["source_payload_json"] or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return bool(payload.get("audit_scope"))
 
 
 class CreativeRepository:
@@ -2036,6 +2055,7 @@ class CreativeRepository:
         project_id: int,
         values: dict[str, Any],
         *,
+        draft_brief_id: int | None = None,
         expected_revision: int | None = None,
     ) -> dict[str, Any]:
         project = self.get_project(project_id)
@@ -2080,7 +2100,22 @@ class CreativeRepository:
             return project
         content_updates = set(updates) - {"status"}
         if project.get("locked_brief_id") and content_updates:
-            raise ValueError("锁定 Brief 后不能修改项目 Brief 参数")
+            if draft_brief_id is None or expected_revision is None:
+                raise ValueError("锁定 Brief 后不能修改项目 Brief 参数")
+            with self._connect() as conn:
+                draft_brief = conn.execute(
+                    "SELECT project_id, parent_version_id, status "
+                    "FROM creative_blueprints WHERE id = ?",
+                    (int(draft_brief_id),),
+                ).fetchone()
+            if (
+                draft_brief is None
+                or int(draft_brief["project_id"]) != project_id
+                or str(draft_brief["status"]) != "draft"
+                or int(draft_brief["parent_version_id"] or 0)
+                != int(project["locked_brief_id"])
+            ):
+                raise ValueError("只能通过当前锁定 Brief 的新草稿版本修改项目参数")
         if content_updates:
             with self._connect() as conn:
                 pending_brief = conn.execute(
@@ -2863,6 +2898,12 @@ class CreativeRepository:
         project = self.get_project(int(current["project_id"]))
         if not project:
             raise ValueError("创作项目不存在")
+        locked_brief_id = int(project.get("locked_brief_id") or 0)
+        if locked_brief_id:
+            if expected_revision is None:
+                raise ValueError("锁定 Brief 新版本时必须提供项目修订号")
+            if int(current.get("parent_version_id") or 0) != locked_brief_id:
+                raise ValueError("只能锁定当前 Brief 的直接后继草稿")
         self._assert_expected_revision(project, expected_revision)
         if current["status"] == "brief_locked":
             return self._resource_with_project_revision(current, int(current["project_id"]))
@@ -2878,13 +2919,34 @@ class CreativeRepository:
             "project_name": project["name"],
             "genre": project["genre"],
             "target_platform": project["target_platform"],
-            "target_audience": content.get("audience") or project["target_audience"],
+            "target_audience": project["target_audience"],
             "target_episode_count": project["target_episode_count"],
             "episode_duration_seconds": project["episode_duration_seconds"],
         })
         now = time.time()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            authority = conn.execute(
+                "SELECT revision, locked_brief_id FROM creative_projects "
+                "WHERE id = ? AND deleted = 0",
+                (int(current["project_id"]),),
+            ).fetchone()
+            if authority is None:
+                raise ValueError("创作项目不存在")
+            if (
+                expected_revision is not None
+                and int(authority["revision"] or 0) != int(expected_revision)
+            ):
+                raise ValueError("project revision changed")
+            authority_locked_brief_id = int(authority["locked_brief_id"] or 0)
+            if authority_locked_brief_id:
+                if expected_revision is None:
+                    raise ValueError("锁定 Brief 新版本时必须提供项目修订号")
+                if (
+                    int(current.get("parent_version_id") or 0)
+                    != authority_locked_brief_id
+                ):
+                    raise ValueError("只能锁定当前 Brief 的直接后继草稿")
             self._assert_generation_authority_conn(
                 conn, int(current["project_id"]), expected_authority
             )
@@ -2927,6 +2989,16 @@ class CreativeRepository:
         if brief.get("status") != "brief_locked":
             raise ValueError("只能选择已锁定的 Brief 版本")
         content = brief.get("content") or {}
+        project_name = str(content.get("project_name", project["name"]) or "").strip()
+        genre = str(content.get("genre", project["genre"]) or "").strip()
+        target_platform = str(
+            content.get("target_platform", project["target_platform"]) or ""
+        ).strip()
+        target_audience = str(
+            content.get("target_audience", project["target_audience"]) or ""
+        ).strip()
+        if not project_name:
+            project_name = project["name"]
         episode_count = project["target_episode_count"]
         episode_duration = project["episode_duration_seconds"]
         try:
@@ -2944,12 +3016,17 @@ class CreativeRepository:
 
         if int(project.get("locked_brief_id") or 0) == blueprint_id:
             if (
-                int(project["target_episode_count"]) == episode_count
+                project["name"] == project_name
+                and project["genre"] == genre
+                and project["target_platform"] == target_platform
+                and project["target_audience"] == target_audience
+                and int(project["target_episode_count"]) == episode_count
                 and int(project["episode_duration_seconds"]) == episode_duration
             ):
                 return project
             with self._connect() as conn:
                 params: list[Any] = [
+                    project_name, genre, target_platform, target_audience,
                     episode_count, episode_duration, time.time(), project_id,
                 ]
                 revision_clause = ""
@@ -2957,7 +3034,8 @@ class CreativeRepository:
                     revision_clause = " AND revision = ?"
                     params.append(int(expected_revision))
                 cursor = conn.execute(
-                    "UPDATE creative_projects SET target_episode_count = ?, episode_duration_seconds = ?, "
+                    "UPDATE creative_projects SET name = ?, genre = ?, target_platform = ?, "
+                    "target_audience = ?, target_episode_count = ?, episode_duration_seconds = ?, "
                     f"revision = revision + 1, updated_at = ? WHERE id = ?{revision_clause}",
                     params,
                 )
@@ -2966,7 +3044,8 @@ class CreativeRepository:
             return self.get_project(project_id) or {}
         with self._connect() as conn:
             params = [
-                blueprint_id, episode_count, episode_duration, time.time(), project_id,
+                blueprint_id, project_name, genre, target_platform, target_audience,
+                episode_count, episode_duration, time.time(), project_id,
             ]
             revision_clause = ""
             if expected_revision is not None:
@@ -2974,7 +3053,8 @@ class CreativeRepository:
                 params.append(int(expected_revision))
             cursor = conn.execute(
                 "UPDATE creative_projects SET locked_brief_id = ?, character_batch_id = NULL, "
-                "outline_batch_id = NULL, target_episode_count = ?, episode_duration_seconds = ?, "
+                "outline_batch_id = NULL, name = ?, genre = ?, target_platform = ?, "
+                "target_audience = ?, target_episode_count = ?, episode_duration_seconds = ?, "
                 "status = 'brief_locked', revision = revision + 1, "
                 f"updated_at = ? WHERE id = ?{revision_clause}",
                 params,
@@ -3563,6 +3643,159 @@ class CreativeRepository:
         rows = [item for item in project["episodes"] if item["stage"] == "outline" and item["batch_id"] == batch_id]
         overview = read_series_overview((rows[0].get("content") or {}).get("series_overview")) if rows else None
         return {"batch_id": batch_id, "series_overview": overview, "episodes": rows}
+
+    def _outline_field_rewrite_context_conn(
+        self, conn: sqlite3.Connection, episode_id: int
+    ) -> dict[str, Any]:
+        target_row = conn.execute(
+            "SELECT * FROM creative_episodes WHERE id = ?", (int(episode_id),)
+        ).fetchone()
+        if target_row is None or target_row["stage"] != "outline":
+            raise ValueError("分集大纲不存在")
+
+        project_row = conn.execute(
+            "SELECT * FROM creative_projects WHERE id = ? AND deleted = 0",
+            (int(target_row["project_id"]),),
+        ).fetchone()
+        if project_row is None:
+            raise ValueError("创作项目不存在")
+        project = dict(project_row)
+        locked_brief_id = int(project.get("locked_brief_id") or 0)
+        character_batch_id = str(project.get("character_batch_id") or "")
+        if not locked_brief_id:
+            raise ValueError("必须先锁定 Brief")
+        if not character_batch_id:
+            raise ValueError("必须先锁定人物关系版本")
+
+        brief_row = conn.execute(
+            "SELECT * FROM creative_blueprints WHERE id = ? AND project_id = ? "
+            "AND status = 'brief_locked'",
+            (locked_brief_id, int(project["id"])),
+        ).fetchone()
+        if brief_row is None:
+            raise ValueError("必须先锁定 Brief")
+
+        characters = [
+            self._creative_item(dict(row))
+            for row in conn.execute(
+                "SELECT * FROM creative_characters WHERE project_id = ? AND batch_id = ? "
+                "ORDER BY version, id",
+                (int(project["id"]), character_batch_id),
+            ).fetchall()
+        ]
+        relationships = [
+            self._creative_item(dict(row))
+            for row in conn.execute(
+                "SELECT * FROM creative_relationships WHERE project_id = ? AND batch_id = ? "
+                "ORDER BY version, id",
+                (int(project["id"]), character_batch_id),
+            ).fetchall()
+        ]
+
+        outline_rows = conn.execute(
+            "SELECT * FROM creative_episodes WHERE project_id = ? AND stage = 'outline'",
+            (int(project["id"]),),
+        ).fetchall()
+
+        def matches_current_context(row: sqlite3.Row) -> bool:
+            refs = json.loads(row["upstream_refs_json"] or "{}")
+            return (
+                int(refs.get("brief_id") or 0) == locked_brief_id
+                and str(refs.get("character_batch_id") or "") == character_batch_id
+            )
+
+        if not matches_current_context(target_row):
+            raise ValueError("只能编辑当前创作上下文的大纲批次")
+
+        compatible_drafts = [
+            row for row in outline_rows
+            if row["status"] == "draft" and matches_current_context(row)
+        ]
+        target_status = str(target_row["status"])
+        if target_status == "draft":
+            latest_draft = max(
+                compatible_drafts,
+                key=lambda row: (
+                    int(row["version"] or 0),
+                    float(row["updated_at"] or 0),
+                    int(row["id"] or 0),
+                ),
+                default=None,
+            )
+            if latest_draft is None or str(latest_draft["batch_id"]) != str(target_row["batch_id"]):
+                raise ValueError("只能编辑当前大纲批次")
+        elif target_status in {"locked", "approved"}:
+            if str(project.get("outline_batch_id") or "") != str(target_row["batch_id"]):
+                raise ValueError("只能编辑当前已完成的大纲批次")
+            if any(
+                int(row["version"] or 0) > int(target_row["version"] or 0)
+                for row in compatible_drafts
+            ):
+                raise ValueError("当前已完成大纲存在更高版本草稿")
+        else:
+            raise ValueError("已完成的版本不能原地修改")
+
+        same_batch = [
+            row for row in outline_rows
+            if str(row["batch_id"]) == str(target_row["batch_id"])
+        ]
+        by_episode_number = {
+            int(row["episode_number"]): row for row in same_batch
+        }
+        episode_number = int(target_row["episode_number"])
+        previous = by_episode_number.get(episode_number - 1)
+        following = by_episode_number.get(episode_number + 1)
+        return {
+            "project": project,
+            "brief": self._blueprint(dict(brief_row)),
+            "characters": characters,
+            "relationships": relationships,
+            "episode": self._episode(dict(target_row)),
+            "previous_episode": self._episode(dict(previous)) if previous else None,
+            "next_episode": self._episode(dict(following)) if following else None,
+        }
+
+    def get_outline_field_rewrite_context(self, episode_id: int) -> dict[str, Any]:
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            return self._outline_field_rewrite_context_conn(conn, episode_id)
+
+    def apply_outline_field_rewrite(
+        self,
+        episode_id: int,
+        field: str,
+        candidate_value: str,
+        expected_fingerprint: str,
+    ) -> dict[str, Any]:
+        if field not in OUTLINE_TEXT_FIELDS:
+            raise ValueError("不支持的大纲字段")
+        if not isinstance(candidate_value, str) or not candidate_value.strip():
+            raise ValueError("重写内容不能为空")
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._outline_field_rewrite_context_conn(conn, episode_id)
+            row = conn.execute(
+                "SELECT * FROM creative_episodes WHERE id = ?", (int(episode_id),)
+            ).fetchone()
+            if row is None:
+                raise ValueError("分集大纲不存在")
+            episode = self._episode(dict(row))
+            if episode["status"] != "draft":
+                raise ValueError("已完成的版本不能原地修改")
+            if outline_field_source_fingerprint(episode, field) != expected_fingerprint:
+                raise ValueError("该字段已被更新，请重新生成")
+            content = json.loads(row["content_json"] or "{}")
+            content[field] = candidate_value.strip()
+            now = time.time()
+            conn.execute(
+                "UPDATE creative_episodes SET content_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(content, ensure_ascii=False), now, int(episode_id)),
+            )
+            updated = conn.execute(
+                "SELECT * FROM creative_episodes WHERE id = ?", (int(episode_id),)
+            ).fetchone()
+        return self._episode(dict(updated)) if updated else {}
 
     def _validated_outline_overview_rows(
         self,
@@ -4391,6 +4624,57 @@ class CreativeRepository:
             )
         return self.get_script_review(int(cursor.lastrowid)) or {}
 
+    def create_project_review_once(
+        self,
+        *,
+        project_id: int,
+        episode_numbers: list[int],
+        source_fingerprint: str,
+        source_payload: dict[str, Any],
+        created_by: str,
+        request_key: str,
+    ) -> tuple[dict[str, Any], bool]:
+        if not str(request_key).strip():
+            raise ValueError("确认请求缺少幂等键")
+        if not source_payload.get("audit_scope"):
+            raise ValueError("完整项目审核缺少审核范围")
+        payload = dict(source_payload)
+        payload["request_key"] = str(request_key)
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            candidates = conn.execute(
+                "SELECT * FROM script_reviews WHERE created_by = ? AND project_id = ?",
+                (created_by, int(project_id)),
+            ).fetchall()
+            for candidate in candidates:
+                if _review_request_key(candidate) != str(request_key):
+                    continue
+                if str(candidate["source_fingerprint"]) != str(source_fingerprint):
+                    raise ValueError("确认请求已用于不同项目快照")
+                return self._script_review(dict(candidate)), False
+            cursor = conn.execute(
+                """
+                INSERT INTO script_reviews (
+                    project_id, source_type, mode, episode_numbers_json,
+                    source_fingerprint, source_payload_json, created_by, created_at, updated_at
+                ) VALUES (?, 'project', 'collection', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(project_id),
+                    json.dumps(episode_numbers, ensure_ascii=False),
+                    source_fingerprint,
+                    json.dumps(payload, ensure_ascii=False),
+                    created_by,
+                    now,
+                    now,
+                ),
+            )
+            created = conn.execute(
+                "SELECT * FROM script_reviews WHERE id = ?", (int(cursor.lastrowid),)
+            ).fetchone()
+        return self._script_review(dict(created)), True
+
     def get_script_review(self, review_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute(
@@ -4467,6 +4751,68 @@ class CreativeRepository:
                 "error": "",
             },
         )
+
+    def complete_project_review(
+        self, review_id: int, report: dict[str, Any]
+    ) -> dict[str, Any]:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM script_reviews WHERE id = ?", (int(review_id),)
+            ).fetchone()
+            if row is None:
+                raise ValueError("审核记录不存在")
+            if not _is_project_long_review(row):
+                raise ValueError("不是完整项目审核记录")
+            conn.execute(
+                """
+                UPDATE script_reviews
+                SET status = 'completed', ai_verdict = ?, report_json = ?, error = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    str(report.get("ai_verdict") or ""),
+                    json.dumps(report, ensure_ascii=False),
+                    time.time(),
+                    int(review_id),
+                ),
+            )
+            completed = conn.execute(
+                "SELECT * FROM script_reviews WHERE id = ?", (int(review_id),)
+            ).fetchone()
+        return self._script_review(dict(completed)) if completed else {}
+
+    def prepare_project_review_resume(self, review_id: int) -> dict[str, Any]:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM script_reviews WHERE id = ?", (int(review_id),)
+            ).fetchone()
+            if row is None:
+                raise ValueError("审核记录不存在")
+            if not _is_project_long_review(row):
+                raise ValueError("不是完整项目审核记录")
+            status = str(row["status"])
+            if status in {"queued", "running"}:
+                return self._script_review(dict(row))
+            if status == "completed":
+                raise ValueError("完整项目审核已完成，不能恢复")
+            if status != "failed":
+                raise ValueError("完整项目审核当前不能恢复")
+            cursor = conn.execute(
+                """
+                UPDATE script_reviews
+                SET status = 'queued', error = '', updated_at = ?
+                WHERE id = ? AND status = 'failed'
+                """,
+                (time.time(), int(review_id)),
+            )
+            resumed = conn.execute(
+                "SELECT * FROM script_reviews WHERE id = ?", (int(review_id),)
+            ).fetchone()
+            if cursor.rowcount != 1 and resumed is None:
+                raise ValueError("审核记录不存在")
+        return self._script_review(dict(resumed)) if resumed else {}
 
     def checkpoint_script_review(
         self, review_id: int, report: dict[str, Any]

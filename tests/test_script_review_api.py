@@ -131,6 +131,43 @@ def test_project_review_is_marked_stale_and_confirmation_is_rejected(tmp_path) -
     assert confirmation.status_code == 409
 
 
+def test_formal_review_list_and_confirmation_exclude_project_long_audit(tmp_path) -> None:
+    """Removing audit-scope guards would expose project-long audits in the formal workflow."""
+    repository = CreativeRepository(tmp_path / "creative.db")
+    formal = repository.create_script_review(
+        source_type="text",
+        mode="single",
+        project_id=None,
+        episode_numbers=[1],
+        source_fingerprint="formal-fingerprint",
+        source_payload={"formal": False},
+        created_by="writer-1",
+    )
+    project_audit, _ = repository.create_project_review_once(
+        project_id=11,
+        episode_numbers=[1, 2],
+        source_fingerprint="audit-fingerprint",
+        source_payload={"audit_scope": "outline", "request_key": "confirm-1"},
+        created_by="writer-1",
+        request_key="confirm-1",
+    )
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = _admin_principal
+    app.include_router(build_script_review_router(repository, FakeJobManager()))
+    client = TestClient(app)
+
+    listed = client.get("/api/script-reviews")
+    confirmation = client.post(
+        f"/api/script-reviews/{project_audit['id']}/confirm",
+        json={"final_verdict": "通过"},
+    )
+
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()["items"]] == [formal["id"]]
+    assert confirmation.status_code == 409
+    assert confirmation.json()["detail"] == "完整项目审核不进入人工确认流程"
+
+
 def test_completed_review_history_can_be_deleted_by_its_owner(tmp_path) -> None:
     repository = CreativeRepository(tmp_path / "creative.db")
     review = repository.create_script_review(

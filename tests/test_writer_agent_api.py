@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import threading
@@ -27,8 +28,9 @@ import pytest
 from identity.dependencies import current_principal
 from identity.schema import Principal
 from writer_agent import api as writer_agent_api
-from writer_agent.action_service import ActionService
-from writer_agent.schema import ActionCommand, WriterActionError
+from writer_agent.action_service import ActionService, persist_proposed_actions
+from writer_agent.project_review import long_project_review_scope
+from writer_agent.schema import ActionCommand, ProposedAction, WriterActionError
 from writer_agent.store import WriterAgentStore
 from unittest.mock import MagicMock
 
@@ -93,6 +95,12 @@ class FakeProvider:
         }
 
 
+class SlowProvider(FakeProvider):
+    async def complete_json(self, messages):
+        await asyncio.sleep(0.2)
+        return await super().complete_json(messages)
+
+
 class CapturingProvider(FakeProvider):
     def __init__(self) -> None:
         self.messages = []
@@ -111,9 +119,21 @@ class CreativeProvider:
                 "content": {"title": "婚礼反击"}, "assumptions": [],
             }],
             "proposed_actions": [{
-                "action_type": "creative.run_plan", "title": "生成大纲",
+                "action_type": "project.create_original", "title": "创建项目并生成大纲",
                 "source_card_id": "brief-1", "target_stage": "outline",
-                "payload": {}, "assumptions": [],
+                "payload": {
+                    "seed_text": "婚礼现场被退婚后反击",
+                    "name": "婚礼反击",
+                    "genre": "都市情感",
+                    "target_platform": "短视频",
+                    "target_audience": "都市情感内容受众",
+                    "target_episode_count": 20,
+                    "episode_duration_seconds": 120,
+                    "cost_level": "中",
+                    "content_boundaries": [],
+                    "reference_refs": [],
+                },
+                "assumptions": [],
             }],
         }
 
@@ -250,6 +270,7 @@ def _client(
     creative_repository=None,
     permissions: frozenset[str] = frozenset({"script.review.generate"}),
     permission_service=None,
+    job_manager=None,
 ) -> TestClient:
     app = FastAPI()
     app.dependency_overrides[current_principal] = lambda: _principal(
@@ -259,8 +280,55 @@ def _client(
         tmp_path,
         creative_repository=creative_repository,
         permission_service=permission_service,
+        job_manager=job_manager,
     ))
     return TestClient(app)
+
+
+@pytest.mark.parametrize(("message", "expected"), [
+    ("审核更新后的项目大纲", "outline"),
+    ("审核全部大纲", "outline"),
+    ("审核完整剧本", "script"),
+    ("审核完整项目", "project"),
+    ("审核一下这一集", None),
+    ("点评这段台词", None),
+])
+def test_long_project_review_scope(message, expected) -> None:
+    assert long_project_review_scope(message) == expected
+
+
+def test_chat_offers_linked_long_project_review_without_provider(
+    tmp_path, monkeypatch
+) -> None:
+    repository = writer_agent_api.CreativeRepository(tmp_path / "creative.db")
+    project = repository.create_original_project(
+        seed_text="完整审核", name="审核项目", target_episode_count=2,
+        created_by="writer-1", creation_request_id="long-review-offer",
+    )
+    permissions = MagicMock()
+    permissions.can_read_project.return_value = True
+    monkeypatch.setattr(
+        writer_agent_api, "create_provider",
+        lambda: (_ for _ in ()).throw(AssertionError("长审核分流不应调用 Provider")),
+    )
+    client = _client(
+        tmp_path, creative_repository=repository, permission_service=permissions,
+    )
+    session = client.post(
+        "/api/writer-agent/sessions", json={"content": "继续创作"},
+    ).json()
+    WriterAgentStore(tmp_path / "writer_agent" / "writer_agent.db").bind_project(
+        session["id"], project["id"], expected_context_revision=0,
+    )
+
+    response = client.post(
+        f"/api/writer-agent/sessions/{session['id']}/messages",
+        json={"message": "审核全部大纲", "message_id": "long-review-offer-1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["messages"][-1]["kind"] == "project_review_offer"
+    assert response.json()["messages"][-1]["audit_scope"] == "outline"
 
 
 def test_writer_router_retains_injected_creative_dependencies(tmp_path) -> None:
@@ -347,6 +415,34 @@ def _writer_action_api_context(tmp_path):
         other=client_for("writer-2"),
         seed_pending=seed_pending,
     )
+
+
+def test_unlinked_generation_plan_is_not_persisted(tmp_path) -> None:
+    """Catch model output that would render a confirmable but unwritable action."""
+
+    store = WriterAgentStore(tmp_path / "writer-agent-actions.db")
+    session = store.create("writer-1", "未关联项目", "完整故事大纲")
+
+    saved = persist_proposed_actions(
+        store,
+        session_id=session["id"],
+        actor_user_id="writer-1",
+        proposed_actions=[
+            ProposedAction(
+                action_type="creative.run_plan",
+                title="生成第1-5集剧本",
+                target_stage="script",
+                episode_start=1,
+                episode_end=5,
+            )
+        ],
+        materials=[{"name": "大纲.md", "content": "完整故事大纲"}],
+        selected_messages=[{"role": "user", "content": "生成第1-5集剧本"}],
+        project_context={"session_revision": 0},
+    )
+
+    assert saved == []
+    assert store.list_session_actions(session["id"]) == []
 
 
 def test_button_and_natural_language_use_the_same_action_command(
@@ -1097,6 +1193,60 @@ def test_writer_agent_persists_chat_report_and_exports_markdown(tmp_path, monkey
 
     missing_report = client.get(f"/api/writer-agent/sessions/{created.json()['id']}/reports/missing/export")
     assert missing_report.status_code == 404
+
+
+def test_writer_agent_provider_uses_bounded_stage_specific_profile(monkeypatch) -> None:
+    sentinel = object()
+    captured: dict[str, object] = {}
+
+    def fake_factory(config_module, prefix="LLM"):
+        captured.update(config_module=config_module, prefix=prefix)
+        return sentinel
+
+    monkeypatch.setattr(
+        writer_agent_api, "create_llm_provider_from_config", fake_factory
+    )
+
+    assert writer_agent_api.create_provider() is sentinel
+    assert captured == {
+        "config_module": writer_agent_api.config,
+        "prefix": "WRITER_AGENT_LLM",
+    }
+
+
+def test_writer_agent_message_timeout_ends_request_and_allows_same_id_retry(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(writer_agent_api, "create_provider", lambda: SlowProvider())
+    monkeypatch.setattr(
+        writer_agent_api.config,
+        "WRITER_AGENT_MESSAGE_TIMEOUT_SECONDS",
+        0.02,
+        raising=False,
+    )
+    client = _client(tmp_path)
+    created = client.post(
+        "/api/writer-agent/sessions",
+        json={"title": "婚礼反击", "content": "第一集：主角被当众退婚。"},
+    )
+    url = f"/api/writer-agent/sessions/{created.json()['id']}/messages"
+    body = {"message": "请审核更新后的大纲", "message_id": "bounded-turn-1"}
+
+    timed_out = client.post(url, json=body)
+
+    assert timed_out.status_code == 504
+    assert timed_out.json()["detail"] == "编剧大师响应超时，请直接重试本条消息"
+
+    monkeypatch.setattr(writer_agent_api, "create_provider", lambda: FakeProvider())
+    retried = client.post(url, json=body)
+
+    assert retried.status_code == 200
+    matching_messages = [
+        item
+        for item in retried.json()["messages"]
+        if item.get("message_id") == "bounded-turn-1"
+    ]
+    assert len(matching_messages) == 1
 
 
 def test_writer_agent_adds_uploaded_material_to_an_existing_session(tmp_path) -> None:

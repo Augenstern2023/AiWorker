@@ -366,6 +366,43 @@ class WriterAgentStore:
                     )
         return self.get(session_id, user_id) or {}
 
+    def append_project_review_message_once(
+        self,
+        session_id: int,
+        user_id: str,
+        *,
+        review_id: int,
+        audit_scope: str,
+    ) -> dict[str, Any]:
+        """Append the durable review-reference message exactly once."""
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM writer_agent_sessions WHERE id=? AND user_id=?",
+                (session_id, user_id),
+            ).fetchone()
+            if row is None:
+                return {}
+            messages = _decode(row["messages_json"] or "[]", [])
+            if not any(
+                item.get("kind") == "project_review"
+                and int(item.get("review_id") or 0) == int(review_id)
+                for item in messages
+                if isinstance(item, dict)
+            ):
+                messages.append({
+                    "role": "assistant", "kind": "project_review",
+                    "review_id": int(review_id), "audit_scope": audit_scope,
+                    "content": "已创建完整项目审核任务，可在审核记录中查看进度。",
+                    "message_id": f"project-review:{review_id}",
+                })
+                conn.execute(
+                    "UPDATE writer_agent_sessions SET messages_json=?, updated_at=? WHERE id=?",
+                    (_json(messages), time.time(), session_id),
+                )
+        return self.get(session_id, user_id) or {}
+
     def claim_client_message(
         self,
         session_id: int,

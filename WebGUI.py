@@ -84,7 +84,13 @@ from writer_agent.runner import WriterActionRunner
 from writer_agent.store import WriterAgentStore
 from identity.api import build_identity_router
 from identity.password_service import PasswordService
-from identity.dependencies import current_principal, require_permission
+from identity.dependencies import (
+    current_principal,
+    enforce_permission,
+    page_api_access_granted,
+    permission_granted,
+    require_permission,
+)
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.schema import Principal
@@ -96,6 +102,8 @@ from agents.douyin_analysis_agent import AnalyzeOptions as DouyinAnalyzeOptions
 from agents.douyin_analysis_agent import analyze_rank_file as analyze_douyin_rank_file
 from agents.hongguo_analysis_agent import AnalyzeOptions, analyze_rank_file
 from agents.hongguo_drama import HongguoDramaClient, HongguoDramaError, load_settings as load_hongguo_drama_settings, public_settings as public_hongguo_drama_settings, save_settings as save_hongguo_drama_settings
+from agents.drama_providers.third_party import DOWNLOAD_SEARCH_SOURCES
+from agents.hongguo_video_capture_client import HongguoVideoCaptureClient
 from agents.douyin_drama_fallback import DouyinDramaFallbackClient, DouyinFallbackError
 from core.job import CrawlJob
 from rag.api import register_rag_routes
@@ -118,9 +126,9 @@ HONGGUO_REVIEW_CAPTURE_SERVICE_URL = os.getenv(
 HONGGUO_REVIEW_CAPTURE_EXPORT_ROOT = Path(
     os.getenv("HONGGUO_REVIEW_CAPTURE_EXPORT_ROOT", r"E:\hg\exports")
 ).resolve()
-DRAMA_DOWNLOAD_SEARCH_CACHE_TTL_SECONDS = 5 * 60
+# Compatibility handle for extensions that used to clear the remote-search
+# response cache. Local capture searches intentionally bypass response caching.
 _drama_download_search_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
-_drama_download_search_cache_lock = threading.RLock()
 WEB_LOG_LEVEL = os.getenv("AIWORKER_WEB_LOG_LEVEL", "INFO").strip().upper()
 WEB_LOG_MAX_BYTES = 5 * 1024 * 1024
 WEB_LOG_BACKUP_COUNT = 5
@@ -574,6 +582,7 @@ writer_action_service = ActionService(
     audit_service=audit_service,
     permission_service=identity_permission_service,
     workflow_repository=workflow_repository,
+    job_manager=job_manager,
 )
 navigation_repository = (
     NavigationRepository(system_database) if system_database is not None else None
@@ -671,6 +680,7 @@ register_creative_routes(
     workflow_repository=workflow_repository,
     repository=creative_repository,
     application_service=creative_application_service,
+    llm_provider_factory=lambda: create_llm_provider_from_config(config),
 )
 register_script_review_routes(
     app,
@@ -693,6 +703,7 @@ register_writer_agent_routes(
     audit_service=audit_service,
     permission_service=identity_permission_service,
     workflow_repository=workflow_repository,
+    job_manager=job_manager,
 )
 
 # Models
@@ -752,6 +763,9 @@ class FileOperationRequest(BaseModel):
 class HongguoDramaSettingsRequest(BaseModel):
     config_url: Optional[str] = None
     activation_code: Optional[str] = None
+    capture_root: Optional[str] = None
+    capture_service_url: Optional[str] = None
+    wait_timeout_seconds: Optional[int] = Field(default=None, ge=60, le=3600)
 
 
 class HongguoDramaSearchRequest(BaseModel):
@@ -772,8 +786,10 @@ class DouyinReviewCaptureRequest(BaseModel):
 
 
 class HongguoDramaEpisodesRequest(BaseModel):
-    book_id: str
-    source_platform: str = "hg"
+    book_id: str = ""
+    source_platform: str = ""
+    series_ref: str = ""
+    provider_id: str = ""
     title: str = ""
 
 
@@ -784,19 +800,23 @@ class HongguoDramaDownloadStatusRequest(BaseModel):
 class HongguoDramaJobRequest(BaseModel):
     topic_id: int
     title: str
-    book_id: str
+    book_id: str = ""
+    series_ref: str = ""
     episode: int
-    source_platform: str = "hg"
+    source_platform: str = ""
+    provider_id: str = ""
     workflow_task_id: str | None = None
 
 
 class HongguoDramaDownloadJobRequest(BaseModel):
     topic_id: int
     title: str
-    book_id: str
+    book_id: str = ""
+    series_ref: str = ""
     episodes: List[int] = []
     all_episodes: bool = False
-    source_platform: str = "hg"
+    source_platform: str = ""
+    provider_id: str = ""
     workflow_task_id: str | None = None
 
 
@@ -880,9 +900,22 @@ class JobCreateRequest(BaseModel):
     extra: Dict[str, Any] = {}
 
 
-def _require_permission(principal: Principal, code: str) -> None:
+def _require_permission(
+    principal: Principal, code: str, request: Request | None = None
+) -> None:
+    if request is not None:
+        enforce_permission(request, principal, code)
+        return
     if not principal.is_system_admin and code not in principal.permissions:
         raise HTTPException(403, "没有执行此操作的权限")
+
+
+def _operation_permission_granted(
+    principal: Principal, code: str, request: Request | None = None
+) -> bool:
+    if request is not None:
+        return permission_granted(request, principal, code)
+    return principal.is_system_admin or code in principal.permissions
 
 
 _GENERIC_SELECTION_JOB_TYPES = {
@@ -904,6 +937,13 @@ def _validate_generic_selection_job(platform: str, crawler_type: str) -> None:
     allowed_types = _GENERIC_SELECTION_JOB_TYPES.get(platform)
     if allowed_types is None or crawler_type not in allowed_types:
         raise HTTPException(400, "该机器任务类型必须使用专用创建接口")
+
+
+def _require_system_admin_rank_update(
+    principal: Principal, crawler_type: str
+) -> None:
+    if crawler_type.strip().lower() == "rank" and not principal.is_system_admin:
+        raise HTTPException(403, "只有系统管理员可以更新并抓取榜单")
 
 
 def _job_task_context(
@@ -1015,14 +1055,22 @@ def _job_creation_permission(job: dict[str, Any]) -> str:
     return "job.create.selection"
 
 
-def _can_read_job(job: dict[str, Any], principal: Principal) -> bool:
+def _can_read_job(
+    job: dict[str, Any],
+    principal: Principal,
+    request: Request | None = None,
+) -> bool:
     if principal.is_system_admin:
         return True
     creator_id = job.get("created_by_user_id")
     project_id = job.get("project_id")
-    if creator_id == principal.user_id and "job.read.own" in principal.permissions:
+    if creator_id == principal.user_id and _operation_permission_granted(
+        principal, "job.read.own", request
+    ):
         return True
-    if project_id is None or "job.read.project" not in principal.permissions:
+    if project_id is None or not _operation_permission_granted(
+        principal, "job.read.project", request
+    ):
         return False
     return any(
         member["user_id"] == principal.user_id and member["status"] == "active"
@@ -1030,21 +1078,26 @@ def _can_read_job(job: dict[str, Any], principal: Principal) -> bool:
     )
 
 
-def _assert_can_read_job(job: dict[str, Any], principal: Principal) -> None:
-    if not _can_read_job(job, principal):
+def _assert_can_read_job(
+    job: dict[str, Any],
+    principal: Principal,
+    request: Request | None = None,
+) -> None:
+    if not _can_read_job(job, principal, request):
         raise HTTPException(403, "没有访问此机器任务的权限")
 
 
 def _assert_creator_has_live_job_scope(
-    job: dict[str, Any], principal: Principal
+    job: dict[str, Any],
+    principal: Principal,
+    request: Request | None = None,
 ) -> None:
     if job.get("created_by_user_id") != principal.user_id:
         raise HTTPException(403, "只有机器任务创建人可以执行此操作")
     required_permission = _job_creation_permission(job)
-    if (
-        "job.cancel.own" not in principal.permissions
-        or required_permission not in principal.permissions
-    ):
+    if not _operation_permission_granted(
+        principal, "job.cancel.own", request
+    ) or not _operation_permission_granted(principal, required_permission, request):
         raise HTTPException(403, "创建人当前不再具有此机器任务的操作权限")
 
     task_id = job.get("workflow_task_id")
@@ -1070,7 +1123,11 @@ def _assert_creator_has_live_job_scope(
             raise HTTPException(403, "机器任务创建人已不再是项目成员")
 
 
-def _assert_can_stop_job(job: dict[str, Any], principal: Principal) -> None:
+def _assert_can_stop_job(
+    job: dict[str, Any],
+    principal: Principal,
+    request: Request | None = None,
+) -> None:
     if principal.is_system_admin:
         return
     creator_id = job.get("created_by_user_id")
@@ -1078,7 +1135,7 @@ def _assert_can_stop_job(job: dict[str, Any], principal: Principal) -> None:
     if creator_id is None and project_id is None:
         raise HTTPException(403, "历史机器任务只能由系统管理员控制")
     if creator_id == principal.user_id:
-        _assert_creator_has_live_job_scope(job, principal)
+        _assert_creator_has_live_job_scope(job, principal, request)
         return
     if project_id is not None:
         try:
@@ -1090,13 +1147,15 @@ def _assert_can_stop_job(job: dict[str, Any], principal: Principal) -> None:
 
 
 def _assert_can_mutate_owned_job(
-    job: dict[str, Any], principal: Principal
+    job: dict[str, Any],
+    principal: Principal,
+    request: Request | None = None,
 ) -> None:
     if principal.is_system_admin:
         return
     if job.get("created_by_user_id") is None:
         raise HTTPException(403, "历史机器任务只能由系统管理员控制")
-    _assert_creator_has_live_job_scope(job, principal)
+    _assert_creator_has_live_job_scope(job, principal, request)
 
 DATA_ROOT = (WORKSPACE_ROOT / "data").resolve()
 CONFIG_ITEM_FIELDS = [
@@ -2102,11 +2161,17 @@ async def get_hongguo_drama_settings():
 
 @app.put("/api/hongguo/drama/settings")
 async def update_hongguo_drama_settings(payload: HongguoDramaSettingsRequest):
-    settings = save_hongguo_drama_settings(
-        WORKSPACE_ROOT / ".runtime",
-        config_url=payload.config_url,
-        activation_code=payload.activation_code,
-    )
+    try:
+        settings = save_hongguo_drama_settings(
+            WORKSPACE_ROOT / ".runtime",
+            config_url=payload.config_url,
+            activation_code=payload.activation_code,
+            capture_root=payload.capture_root,
+            capture_service_url=payload.capture_service_url,
+            wait_timeout_seconds=payload.wait_timeout_seconds,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {"status": "success", **public_hongguo_drama_settings(settings)}
 
 
@@ -2114,18 +2179,155 @@ async def update_hongguo_drama_settings(payload: HongguoDramaSettingsRequest):
 async def test_hongguo_drama_interface(payload: HongguoDramaSettingsRequest):
     settings = load_hongguo_drama_settings(WORKSPACE_ROOT / ".runtime")
     if payload.config_url is not None:
-        settings["config_url"] = payload.config_url.strip() or settings["config_url"]
+        settings["config_url"] = payload.config_url.strip()
     if payload.activation_code is not None:
         settings["activation_code"] = payload.activation_code.strip()
+    if payload.capture_root is not None:
+        settings["capture_root"] = payload.capture_root.strip()
+    if payload.capture_service_url is not None:
+        settings["capture_service_url"] = payload.capture_service_url.strip()
+    if payload.wait_timeout_seconds is not None:
+        settings["wait_timeout_seconds"] = payload.wait_timeout_seconds
     try:
-        interfaces = await asyncio.to_thread(HongguoDramaClient(settings).refresh_interfaces)
-        return {
-            "status": "success",
-            "message": "配置中心和红果接口配置可用",
-            "interfaces": interfaces,
+        client = HongguoDramaClient(settings)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
+
+    checks: list[dict[str, str]] = []
+    stats: dict[str, Any] = {}
+    try:
+        stats = await asyncio.to_thread(client.refresh_interfaces)
+        checks.append(
+            {
+                "id": "capture_directory",
+                "label": "抓包目录",
+                "status": "success",
+                "message": (
+                    f"目录可用，发现 {int(stats.get('raw_file_count') or 0)} 个抓包文件、"
+                    f"{int(stats.get('series_count') or 0)} 部剧目"
+                ),
+            }
+        )
+    except Exception:
+        checks.append(
+            {
+                "id": "capture_directory",
+                "label": "抓包目录",
+                "status": "error",
+                "message": "目录不可用，请确认目录存在、可读且包含 raw 子目录",
+            }
+        )
+
+    capture_service_status = "error"
+    try:
+        service = HongguoVideoCaptureClient(client.settings["capture_service_url"])
+        service_health = await asyncio.to_thread(service.health)
+        capture_service_status = str(service_health.get("status") or "unknown")
+        service_ready = capture_service_status == "ok"
+        checks.append(
+            {
+                "id": "capture_service",
+                "label": "8776 视频抓包服务",
+                "status": "success" if service_ready else "error",
+                "message": (
+                    "服务已就绪"
+                    if service_ready
+                    else "服务未就绪，请确认 8776 端口服务的 /health 返回 ok"
+                ),
+            }
+        )
+    except Exception:
+        checks.append(
+            {
+                "id": "capture_service",
+                "label": "8776 视频抓包服务",
+                "status": "error",
+                "message": "服务不可用，请确认 8776 端口正在监听且 /health 可访问",
+            }
+        )
+
+    third_party: dict[str, Any]
+    try:
+        result = await asyncio.to_thread(client.refresh_third_party_providers)
+        providers = [
+            {
+                "provider_id": str(item.get("provider_id") or ""),
+                "display_name": str(item.get("display_name") or "未知来源"),
+                "status": (
+                    "available" if item.get("status") == "available" else "error"
+                ),
+                "elapsed_ms": max(0, int(item.get("elapsed_ms") or 0)),
+                "error_code": str(item.get("error_code") or ""),
+                "error": str(item.get("error") or ""),
+            }
+            for item in result.get("providers", [])
+            if isinstance(item, dict)
+        ]
+        provider_count = max(0, int(result.get("provider_count") or len(providers)))
+        available_count = max(0, int(result.get("available_count") or 0))
+        if provider_count and available_count == provider_count:
+            third_party_status = "success"
+        elif available_count:
+            third_party_status = "partial"
+        else:
+            third_party_status = "error"
+        third_party = {
+            "status": third_party_status,
+            "provider_count": provider_count,
+            "available_count": available_count,
+            "providers": providers,
         }
-    except HongguoDramaError as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=502)
+        failed_names = [
+            item["display_name"] for item in providers if item["status"] != "available"
+        ]
+        third_party_message = f"{available_count}/{provider_count} 个来源可用"
+        if failed_names:
+            third_party_message += f"；异常来源：{'、'.join(failed_names)}"
+        checks.append(
+            {
+                "id": "third_party",
+                "label": "第三方剧目来源",
+                "status": third_party_status,
+                "message": third_party_message,
+            }
+        )
+    except Exception:
+        third_party = {
+            "status": "error",
+            "provider_count": len(DOWNLOAD_SEARCH_SOURCES),
+            "available_count": 0,
+            "providers": [],
+        }
+        checks.append(
+            {
+                "id": "third_party",
+                "label": "第三方剧目来源",
+                "status": "error",
+                "message": "0/7 个来源可用；请检查配置中心及第三方接口连通性",
+            }
+        )
+
+    component_statuses = [item["status"] for item in checks]
+    if all(status == "success" for status in component_statuses):
+        status = "success"
+        message = "抓包目录、8776 服务和第三方来源均正常"
+    elif all(status == "error" for status in component_statuses):
+        status = "error"
+        message = "三项检查均异常，请按下方结果逐项处理"
+    else:
+        status = "partial"
+        message = "部分来源或服务异常，请按下方结果处理"
+    return {
+        "status": status,
+        "message": message,
+        "capture_root": client.settings["capture_root"],
+        "capture_service_url": client.settings["capture_service_url"],
+        "wait_timeout_seconds": client.settings["wait_timeout_seconds"],
+        **stats,
+        "capture_service_status": capture_service_status,
+        "third_party": third_party,
+        "checks": checks,
+    }
 
 
 @app.post("/api/hongguo/drama/search")
@@ -2151,20 +2353,17 @@ async def search_douyin_drama(payload: HongguoDramaSearchRequest):
 
 @app.post("/api/hongguo/drama/suggest")
 async def suggest_hongguo_drama(payload: HongguoDramaSearchRequest):
-    """Return exact title matches from every configured Hongguo source."""
+    """Return deduplicated provider and capture suggestions without Douyin."""
     title = payload.title.strip()
     if not title:
-        return {"status": "success", "source": "hongguo", "candidates": []}
+        return {"status": "success", "source": "hongguo_providers", "candidates": []}
     try:
         client = HongguoDramaClient(load_hongguo_drama_settings(WORKSPACE_ROOT / ".runtime"))
-        candidates = await asyncio.to_thread(client.search_exact_all_sources, title)
+        candidates = await asyncio.to_thread(client.suggest_all, title, 8)
         return {
             "status": "success",
-            "source": "hongguo",
-            "candidates": [
-                {key: value for key, value in item.items() if key != "raw"}
-                for item in candidates[:8]
-            ],
+            "source": "hongguo_providers",
+            "candidates": candidates,
         }
     except HongguoDramaError as exc:
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=502)
@@ -2331,9 +2530,10 @@ def _douyin_review_job_payload(job: dict[str, Any]) -> dict[str, Any]:
 async def create_douyin_review_job(
     payload: DouyinReviewCaptureRequest,
     principal: Principal = Depends(current_principal),
+    request: Request = None,
 ):
-    _require_permission(principal, "job.create.selection")
-    _require_permission(principal, "drama.download")
+    _require_permission(principal, "job.create.selection", request)
+    _require_permission(principal, "drama.download", request)
     title = payload.title.strip()
     if not title:
         raise HTTPException(400, "请输入剧名")
@@ -2361,12 +2561,16 @@ async def create_douyin_review_job(
 
 
 @app.get("/api/douyin/reviews/jobs/{job_id}")
-async def get_douyin_review_job(job_id: str, principal: Principal = Depends(current_principal)):
+async def get_douyin_review_job(
+    job_id: str,
+    principal: Principal = Depends(current_principal),
+    request: Request = None,
+):
     try:
         job = job_manager.get_job(job_id)
     except JobNotFoundError as exc:
         raise HTTPException(404, "剧评任务不存在") from exc
-    _assert_can_read_job(job, principal)
+    _assert_can_read_job(job, principal, request)
     return _douyin_review_job_payload(job)
 
 
@@ -2375,12 +2579,13 @@ async def download_douyin_reviews(
     job_id: str,
     format: Literal["csv", "xlsx"] = "csv",
     principal: Principal = Depends(current_principal),
+    request: Request = None,
 ):
     try:
         job = job_manager.get_job(job_id)
     except JobNotFoundError as exc:
         raise HTTPException(404, "剧评任务不存在") from exc
-    _assert_can_read_job(job, principal)
+    _assert_can_read_job(job, principal, request)
     state = _douyin_review_job_payload(job)["job"]
     if state["status"] != "completed":
         raise HTTPException(409, "剧评采集尚未完成")
@@ -2514,12 +2719,25 @@ async def get_hongguo_drama_download_status(payload: HongguoDramaDownloadStatusR
     }
 
 
+def _resolved_drama_provider_identity(payload: BaseModel) -> tuple[str, str]:
+    legacy_provider = str(getattr(payload, "source_platform", "") or "").strip().lower()
+    provider_id = str(getattr(payload, "provider_id", "") or "").strip().lower()
+    if legacy_provider and provider_id and legacy_provider != provider_id:
+        raise HTTPException(400, "provider_id 与 source_platform 不一致")
+    legacy_series = str(getattr(payload, "book_id", "") or "").strip()
+    series_ref = str(getattr(payload, "series_ref", "") or "").strip()
+    if legacy_series and series_ref and legacy_series != series_ref:
+        raise HTTPException(400, "series_ref 与 book_id 不一致")
+    return provider_id or legacy_provider or "hongguo_capture", series_ref or legacy_series
+
+
 @app.post("/api/hongguo/drama/episodes")
 async def get_hongguo_drama_episodes(payload: HongguoDramaEpisodesRequest):
     try:
+        provider_id, series_ref = _resolved_drama_provider_identity(payload)
         client = HongguoDramaClient(load_hongguo_drama_settings(WORKSPACE_ROOT / ".runtime"))
         episodes = await asyncio.to_thread(
-            client.episodes, payload.book_id, payload.source_platform
+            client.episodes, series_ref, provider_id
         )
         downloaded = await asyncio.to_thread(
             downloaded_hongguo_episode_statuses,
@@ -2545,73 +2763,29 @@ async def get_hongguo_drama_episodes(payload: HongguoDramaEpisodesRequest):
 
 @app.post("/api/hongguo/drama/download/search")
 async def search_hongguo_drama_for_download(payload: HongguoDramaSearchRequest):
-    """Search Hongguo first, then return manually selectable Douyin candidates."""
+    """Search configured third-party providers and report capture matches."""
     title = payload.title.strip()
     if not title:
         raise HTTPException(400, "请输入剧名")
-    cache_key = (str(WORKSPACE_ROOT.resolve()), normalize_title(title))
-    now = time.monotonic()
-    with _drama_download_search_cache_lock:
-        cached = _drama_download_search_cache.get(cache_key)
-        if cached and cached[0] > now:
-            return copy.deepcopy(cached[1])
-        _drama_download_search_cache.pop(cache_key, None)
-
-    def cache_result(result: dict[str, Any]) -> dict[str, Any]:
-        with _drama_download_search_cache_lock:
-            if len(_drama_download_search_cache) >= 200:
-                expired = [key for key, value in _drama_download_search_cache.items() if value[0] <= now]
-                for key in expired:
-                    _drama_download_search_cache.pop(key, None)
-                if len(_drama_download_search_cache) >= 200:
-                    _drama_download_search_cache.pop(next(iter(_drama_download_search_cache)))
-            _drama_download_search_cache[cache_key] = (
-                now + DRAMA_DOWNLOAD_SEARCH_CACHE_TTL_SECONDS,
-                copy.deepcopy(result),
-            )
-        return result
-
-    fallback_reason = ""
     try:
         client = HongguoDramaClient(load_hongguo_drama_settings(WORKSPACE_ROOT / ".runtime"))
-        # The source aggregator queries every configured provider. Do not turn a
-        # still-running provider query into a premature Douyin fallback.
-        candidates = await asyncio.to_thread(
-            client.search_exact_all_sources, title
-        )
-        if candidates:
-            return cache_result({"status": "success", "source": "hongguo", "candidates": [{key: value for key, value in item.items() if key != "raw"} for item in candidates]})
-        fallback_reason = "七个剧目源均未返回剧名完全匹配结果"
+        groups = await asyncio.to_thread(client.search_provider_groups, title)
+        result = {
+            "status": "success",
+            "source": "hongguo_providers",
+            **groups,
+        }
+        if not groups.get("candidates") and not groups.get("capture_candidates"):
+            result["message"] = "第三方来源和抓包目录均未找到精确匹配剧目"
+        return result
     except HongguoDramaError as exc:
-        fallback_reason = f"红果接口检索失败：{exc}"
-    backend_logger.info("Hongguo download search falling back to Douyin: title=%s reason=%s", title, fallback_reason)
-    try:
-        candidates = await DouyinDramaFallbackClient().search(title)
-        backend_logger.info("Douyin fallback search returned %s candidates: title=%s", len(candidates), title)
-        return cache_result({"status": "success", "source": "douyin_fallback", "fallback_reason": fallback_reason, "candidates": candidates})
-    except DouyinFallbackError as exc:
-        backend_logger.warning("Douyin fallback search failed: title=%s error=%s", payload.title.strip(), exc)
         return JSONResponse(
             {
                 "status": "error",
-                "source": "douyin_fallback",
-                "fallback_reason": fallback_reason,
-                "message": f"{fallback_reason}；抖音检索失败：{exc}",
+                "source": "hongguo_providers",
+                "message": str(exc),
             },
-            status_code=502,
-        )
-    except Exception as exc:
-        backend_logger.exception(
-            "Douyin fallback search crashed: title=%s", title
-        )
-        return JSONResponse(
-            {
-                "status": "error",
-                "source": "douyin_fallback",
-                "fallback_reason": fallback_reason,
-                "message": f"{fallback_reason}；抖音浏览器启动失败：{exc}",
-            },
-            status_code=502,
+            status_code=503,
         )
 
 
@@ -2619,12 +2793,13 @@ async def search_hongguo_drama_for_download(payload: HongguoDramaSearchRequest):
 async def create_hongguo_drama_job(
     payload: HongguoDramaJobRequest,
     principal: Principal = Depends(current_principal),
+    request: Request = None,
 ):
     if not isinstance(principal, Principal):
         raise HTTPException(401, "登录已失效，请重新登录")
     actor = principal
-    _require_permission(actor, "job.create.selection")
-    _require_permission(actor, "drama.download")
+    _require_permission(actor, "job.create.selection", request)
+    _require_permission(actor, "drama.download", request)
     task_id, project_id = _job_task_context(
         payload.workflow_task_id,
         actor,
@@ -2632,7 +2807,8 @@ async def create_hongguo_drama_job(
         topic_id=payload.topic_id,
         topic_title=payload.title,
     )
-    if not payload.title.strip() or not payload.book_id.strip() or payload.episode < 1:
+    provider_id, series_ref = _resolved_drama_provider_identity(payload)
+    if not payload.title.strip() or not series_ref or payload.episode < 1:
         raise HTTPException(400, "剧名、book_id 和集数必须有效")
     job = CrawlJob(
         job_id=job_manager.generate_job_id("hg"),
@@ -2641,9 +2817,11 @@ async def create_hongguo_drama_job(
         extra={
             "topic_id": payload.topic_id,
             "title": payload.title.strip(),
-            "book_id": payload.book_id.strip(),
+            "book_id": series_ref,
+            "series_ref": series_ref,
             "episode": payload.episode,
-            "source_platform": payload.source_platform.strip().lower() or "hg",
+            "source_platform": provider_id,
+            "provider_id": provider_id,
             "creative_db_path": str(creative_repository.db_path.resolve()),
             "workspace_root": str(WORKSPACE_ROOT.resolve()),
             "created_by_user_id": actor.user_id,
@@ -2709,12 +2887,13 @@ async def resolve_douyin_fallback_series(payload: DouyinFallbackSeriesRequest):
 async def create_hongguo_drama_download_job(
     payload: HongguoDramaDownloadJobRequest,
     principal: Principal = Depends(current_principal),
+    request: Request = None,
 ):
     if not isinstance(principal, Principal):
         raise HTTPException(401, "登录已失效，请重新登录")
     actor = principal
-    _require_permission(actor, "job.create.selection")
-    _require_permission(actor, "drama.download")
+    _require_permission(actor, "job.create.selection", request)
+    _require_permission(actor, "drama.download", request)
     task_id, project_id = _job_task_context(
         payload.workflow_task_id,
         actor,
@@ -2723,7 +2902,8 @@ async def create_hongguo_drama_download_job(
         topic_title=payload.title,
     )
     episodes = sorted({int(item) for item in payload.episodes if int(item) > 0})
-    if not payload.title.strip() or not payload.book_id.strip() or (not payload.all_episodes and not episodes):
+    provider_id, series_ref = _resolved_drama_provider_identity(payload)
+    if not payload.title.strip() or not series_ref or (not payload.all_episodes and not episodes):
         raise HTTPException(400, "剧名、book_id 和至少一个集数必须有效")
     job_id = job_manager.generate_job_id("hg")
     job = CrawlJob(
@@ -2733,10 +2913,12 @@ async def create_hongguo_drama_download_job(
         extra={
             "topic_id": payload.topic_id,
             "title": payload.title.strip(),
-            "book_id": payload.book_id.strip(),
+            "book_id": series_ref,
+            "series_ref": series_ref,
             "episodes": episodes,
             "all_episodes": payload.all_episodes,
-            "source_platform": payload.source_platform.strip().lower() or "hg",
+            "source_platform": provider_id,
+            "provider_id": provider_id,
             "pause_path": str(job_manager.jobs_dir / f"{job_id}.pause"),
             "creative_db_path": str(creative_repository.db_path.resolve()),
             "workspace_root": str(WORKSPACE_ROOT.resolve()),
@@ -2767,12 +2949,13 @@ async def create_hongguo_drama_download_job(
 async def create_douyin_fallback_drama_job(
     payload: DouyinFallbackDramaJobRequest,
     principal: Principal = Depends(current_principal),
+    request: Request = None,
 ):
     if not isinstance(principal, Principal):
         raise HTTPException(401, "登录已失效，请重新登录")
     actor = principal
-    _require_permission(actor, "job.create.selection")
-    _require_permission(actor, "drama.download")
+    _require_permission(actor, "job.create.selection", request)
+    _require_permission(actor, "drama.download", request)
     task_id, project_id = _job_task_context(
         payload.workflow_task_id,
         actor,
@@ -2989,11 +3172,11 @@ async def run_crawler(
     request: Request,
     principal: Principal = Depends(current_principal),
 ):
-    _require_permission(principal, "job.create.selection")
-    _validate_generic_selection_job(
-        config.platform.split()[0].strip().lower(),
-        config.crawler_type.split()[0].strip().lower(),
-    )
+    _require_permission(principal, "job.create.selection", request)
+    platform = config.platform.split()[0].strip().lower()
+    crawler_type = config.crawler_type.split()[0].strip().lower()
+    _validate_generic_selection_job(platform, crawler_type)
+    _require_system_admin_rank_update(principal, crawler_type)
     return await run_crawler_as_job(config, principal, request)
 
     if state.is_running:
@@ -3048,11 +3231,13 @@ async def run_crawler(
 async def create_job(
     request: JobCreateRequest,
     principal: Principal = Depends(current_principal),
+    http_request: Request = None,
 ):
-    _require_permission(principal, "job.create.selection")
+    _require_permission(principal, "job.create.selection", http_request)
     platform = request.platform.strip().lower()
     crawler_type = request.crawler_type.strip().lower()
     _validate_generic_selection_job(platform, crawler_type)
+    _require_system_admin_rank_update(principal, crawler_type)
     workflow_task_id = str(request.extra.get("workflow_task_id") or "") or None
     task_id, project_id = _job_task_context(workflow_task_id, principal)
     safe_extra = {
@@ -3096,19 +3281,28 @@ async def create_job(
 
 
 @app.get("/api/jobs")
-async def list_jobs(principal: Principal = Depends(current_principal)):
+async def list_jobs(
+    principal: Principal = Depends(current_principal),
+    request: Request = None,
+):
     return {
         "jobs": [
-            job for job in job_manager.list_jobs() if _can_read_job(job, principal)
+            job
+            for job in job_manager.list_jobs()
+            if _can_read_job(job, principal, request)
         ]
     }
 
 
 @app.get("/api/jobs/{job_id}")
-async def get_job(job_id: str, principal: Principal = Depends(current_principal)):
+async def get_job(
+    job_id: str,
+    principal: Principal = Depends(current_principal),
+    request: Request = None,
+):
     try:
         job = job_manager.get_job(job_id)
-        _assert_can_read_job(job, principal)
+        _assert_can_read_job(job, principal, request)
         return job
     except JobNotFoundError:
         raise HTTPException(404, "Job not found")
@@ -3116,11 +3310,13 @@ async def get_job(job_id: str, principal: Principal = Depends(current_principal)
 
 @app.get("/api/jobs/{job_id}/logs")
 async def get_job_logs(
-    job_id: str, principal: Principal = Depends(current_principal)
+    job_id: str,
+    principal: Principal = Depends(current_principal),
+    request: Request = None,
 ):
     try:
         job = job_manager.get_job(job_id)
-        _assert_can_read_job(job, principal)
+        _assert_can_read_job(job, principal, request)
         return {"logs": job_manager.get_logs(job_id)}
     except JobNotFoundError:
         raise HTTPException(404, "Job not found")
@@ -3134,7 +3330,7 @@ async def stop_job(
 ):
     try:
         before = job_manager.get_job(job_id)
-        _assert_can_stop_job(before, principal)
+        _assert_can_stop_job(before, principal, request)
         stopped = job_manager.stop(job_id)
         if stopped:
             _record_job_audit(
@@ -3160,7 +3356,7 @@ async def pause_job(
 ):
     try:
         before = job_manager.get_job(job_id)
-        _assert_can_mutate_owned_job(before, principal)
+        _assert_can_mutate_owned_job(before, principal, request)
         paused = job_manager.pause(job_id)
         if paused:
             _record_job_audit(
@@ -3183,7 +3379,10 @@ async def resume_job(
 ):
     try:
         before = job_manager.get_job(job_id)
-        _assert_can_mutate_owned_job(before, principal)
+        _assert_can_mutate_owned_job(before, principal, request)
+        _require_system_admin_rank_update(
+            principal, str(before.get("crawler_type") or "")
+        )
         resumed = job_manager.resume(job_id)
         if resumed:
             _record_job_audit(
@@ -3206,7 +3405,10 @@ async def retry_job(
 ):
     try:
         before = job_manager.get_job(job_id)
-        _assert_can_mutate_owned_job(before, principal)
+        _assert_can_mutate_owned_job(before, principal, request)
+        _require_system_admin_rank_update(
+            principal, str(before.get("crawler_type") or "")
+        )
         retried = job_manager.retry(job_id)
         retried_job = job_manager.get_job(retried.job_id)
         task_id = retried_job.get("workflow_task_id")
@@ -3228,7 +3430,9 @@ async def delete_job(
     request: Request,
     principal: Principal = Depends(current_principal),
 ):
-    if not principal.is_system_admin:
+    if not principal.is_system_admin and not page_api_access_granted(
+        request, principal
+    ):
         raise HTTPException(403, "只有系统管理员可以删除机器任务历史")
     try:
         before = job_manager.get_job(job_id)
@@ -3274,7 +3478,7 @@ async def stop_crawler(
         if job["status"] not in {"pending", "running", "stopping"}:
             continue
         try:
-            _assert_can_stop_job(job, principal)
+            _assert_can_stop_job(job, principal, request)
         except HTTPException:
             continue
         if job_manager.stop(job["job_id"]):
@@ -3287,7 +3491,9 @@ async def stop_crawler(
             )
             return {"status": "success", "message": "stop signal sent"}
     if state.process:
-        if not principal.is_system_admin:
+        if not principal.is_system_admin and not page_api_access_granted(
+            request, principal
+        ):
             raise HTTPException(403, "历史运行进程只能由系统管理员控制")
         process = state.process
         target_id = f"legacy-process:{process.pid}"
@@ -3319,9 +3525,14 @@ async def stop_crawler(
     return {"status": "error", "message": "没有运行中的爬虫"}
 
 @app.get("/api/logs")
-async def get_logs(principal: Principal = Depends(current_principal)):
+async def get_logs(
+    principal: Principal = Depends(current_principal),
+    request: Request = None,
+):
     visible_jobs = [
-        job for job in job_manager.list_jobs() if _can_read_job(job, principal)
+        job
+        for job in job_manager.list_jobs()
+        if _can_read_job(job, principal, request)
     ]
     if visible_jobs:
         latest_job_id = visible_jobs[0]["job_id"]
@@ -3511,9 +3722,10 @@ async def list_files_page_route(
 async def create_file_operation(
     request: FileOperationRequest,
     principal: Principal = Depends(current_principal),
+    http_request: Request = None,
 ):
     permission = "data.media.preview" if request.operation == "archive" else "data.media.delete"
-    _require_permission(principal, permission)
+    _require_permission(principal, permission, http_request)
     cleanup_data_operation_artifacts()
     job_id = job_manager.generate_job_id("data")
     snapshot_path, total = create_data_operation_snapshot(request.selection, job_id)
@@ -3545,14 +3757,15 @@ async def create_file_operation(
 async def download_file_operation(
     job_id: str,
     principal: Principal = Depends(current_principal),
+    request: Request = None,
 ):
-    _require_permission(principal, "data.media.preview")
+    _require_permission(principal, "data.media.preview", request)
     cleanup_data_operation_artifacts()
     try:
         job = job_manager.get_job(job_id)
     except JobNotFoundError as exc:
         raise HTTPException(404, "Job not found") from exc
-    _assert_can_read_job(job, principal)
+    _assert_can_read_job(job, principal, request)
     payload = job.get("job") if isinstance(job.get("job"), dict) else job
     extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
     if payload.get("platform") != "data" or payload.get("crawler_type") != "file_operation" or extra.get("operation") != "archive":

@@ -54,6 +54,11 @@ from .action_service import (
     match_natural_language_decision,
 )
 from .schema import ActionCommand, ProposedAction, WriterActionError
+from .project_review import (
+    ProjectReviewCoordinator,
+    ProjectReviewError,
+    long_project_review_scope,
+)
 from .service import build_writer_report_markdown, is_review_request, normalize_writer_report, writer_messages
 from .store import WriterAgentStore
 
@@ -66,6 +71,20 @@ _MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 _SUPPLEMENT_MARKER = re.compile(r"\n\n\[补充材料：(?P<name>[^\]]+)\]\n")
 _MESSAGE_CLAIM_LEASE_SECONDS = 30.0
 _MESSAGE_CLAIM_HEARTBEAT_SECONDS = 10.0
+
+
+def _writer_message_timeout_seconds() -> float:
+    try:
+        return max(
+            0.01,
+            float(
+                getattr(
+                    config, "WRITER_AGENT_MESSAGE_TIMEOUT_SECONDS", 210
+                )
+            ),
+        )
+    except (TypeError, ValueError):
+        return 210.0
 
 
 def _start_message_claim_heartbeat(
@@ -136,8 +155,17 @@ class ActionRetryRequest(BaseModel):
     client_request_id: str = Field(min_length=1, max_length=200)
 
 
+class ProjectReviewPreviewRequest(BaseModel):
+    audit_scope: Literal["outline", "script", "project"]
+
+
+class ProjectReviewCreateRequest(ProjectReviewPreviewRequest):
+    expected_fingerprint: str = Field(min_length=1)
+    client_request_id: str = Field(min_length=1, max_length=200)
+
+
 def create_provider() -> Any:
-    return create_llm_provider_from_config(config)
+    return create_llm_provider_from_config(config, prefix="WRITER_AGENT_LLM")
 
 
 def _decode_upload(filename: str, content: bytes) -> tuple[str, str]:
@@ -238,6 +266,7 @@ def build_writer_agent_router(
     audit_service: Any | None = None,
     permission_service: Any | None = None,
     workflow_repository: Any | None = None,
+    job_manager: Any | None = None,
 ) -> APIRouter:
     store = store or WriterAgentStore(
         Path(runtime_dir) / "writer_agent" / "writer_agent.db"
@@ -258,6 +287,17 @@ def build_writer_agent_router(
     router.creative_dependencies = SimpleNamespace(
         repository=creative_repository,
         application_service=creative_application_service,
+    )
+    project_review_coordinator = (
+        ProjectReviewCoordinator(
+            repository=authority_repository,
+            store=store,
+            permission_service=permission_service,
+            job_manager=job_manager,
+            runtime_dir=runtime_dir,
+        )
+        if authority_repository is not None
+        else None
     )
 
     def assert_access(principal: Principal) -> None:
@@ -298,6 +338,17 @@ def build_writer_agent_router(
         if resolved_action_service is None:
             raise HTTPException(503, "创作动作执行服务不可用")
         return resolved_action_service
+
+    def require_project_review_coordinator() -> ProjectReviewCoordinator:
+        if project_review_coordinator is None:
+            raise HTTPException(503, "完整项目审核服务不可用")
+        return project_review_coordinator
+
+    def project_review_error(exc: ProjectReviewError) -> HTTPException:
+        detail: Any = str(exc)
+        if exc.extra is not None:
+            detail = {"message": str(exc), **exc.extra}
+        return HTTPException(exc.status_code, detail)
 
     def can_read_reference(
         principal: Principal, resource_type: str, resource_id: int
@@ -494,6 +545,33 @@ def build_writer_agent_router(
                 None,
                 client_message_id=message_id,
             )
+        long_review_scope = long_project_review_scope(message)
+        if long_review_scope is not None:
+            linked_project_id = session.get("project_id")
+            if linked_project_id is None:
+                raise HTTPException(409, "请先关联创作项目后再发起完整项目审核")
+            if permission_service is None:
+                raise HTTPException(503, "项目权限服务不可用")
+            if not permission_service.can_read_project(
+                principal, str(linked_project_id)
+            ):
+                raise HTTPException(403, "当前账号已无权读取关联项目")
+            history.extend([
+                {
+                    "role": "user", "content": message,
+                    "message_id": message_id,
+                    "display_user_message": payload.display_user_message,
+                },
+                {
+                    "role": "assistant", "kind": "project_review_offer",
+                    "audit_scope": long_review_scope,
+                    "content": "已识别为完整项目审核，请先预检并确认当前项目快照。",
+                },
+            ])
+            return store.save_turn(
+                session_id, owned_user_id(principal), history, None,
+                client_message_id=message_id,
+            )
         try:
             natural_decision = match_natural_language_decision(
                 message, store.list_session_actions(session_id)
@@ -625,16 +703,30 @@ def build_writer_agent_router(
             claim_token,
         )
         try:
-            raw = await create_provider().complete_json(writer_messages(
-                current_material["content"], history, message,
-                review_requested=review_requested,
-                material_name=current_material["name"],
-                material_catalog=material_catalog,
-                materials=materials,
-                project_context=project_context,
-                reference_context=reference_context,
-                direction_required=direction_required,
-            ))
+            raw = await asyncio.wait_for(
+                create_provider().complete_json(writer_messages(
+                    current_material["content"], history, message,
+                    review_requested=review_requested,
+                    material_name=current_material["name"],
+                    material_catalog=material_catalog,
+                    materials=materials,
+                    project_context=project_context,
+                    reference_context=reference_context,
+                    direction_required=direction_required,
+                )),
+                timeout=_writer_message_timeout_seconds(),
+            )
+        except asyncio.TimeoutError as exc:
+            heartbeat_stop.set()
+            store.abandon_client_message(
+                session_id,
+                principal.user_id,
+                message_id,
+                claim_token=claim_token,
+            )
+            raise HTTPException(
+                504, "编剧大师响应超时，请直接重试本条消息"
+            ) from exc
         except Exception as exc:
             heartbeat_stop.set()
             store.abandon_client_message(
@@ -768,6 +860,91 @@ def build_writer_agent_router(
         heartbeat_stop.set()
         return saved
 
+    @router.post("/sessions/{session_id}/project-reviews/preview")
+    async def preview_project_review(
+        session_id: int,
+        payload: ProjectReviewPreviewRequest,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        assert_access(principal)
+        try:
+            return require_project_review_coordinator().preview(
+                session_id, principal, payload.audit_scope
+            )
+        except ProjectReviewError as exc:
+            raise project_review_error(exc) from exc
+
+    @router.post("/sessions/{session_id}/project-reviews", status_code=201)
+    async def create_project_review(
+        session_id: int,
+        payload: ProjectReviewCreateRequest,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        assert_access(principal)
+        try:
+            return require_project_review_coordinator().create(
+                session_id, principal, payload.audit_scope,
+                payload.expected_fingerprint, payload.client_request_id,
+            )
+        except ProjectReviewError as exc:
+            raise project_review_error(exc) from exc
+
+    @router.get("/sessions/{session_id}/project-reviews/{review_id}")
+    async def get_project_review(
+        session_id: int,
+        review_id: int,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        if not principal.is_system_admin and "script.review.read" not in principal.permissions:
+            raise HTTPException(403, "没有执行此操作的权限")
+        try:
+            return require_project_review_coordinator().get(
+                session_id, principal, review_id
+            )
+        except ProjectReviewError as exc:
+            raise project_review_error(exc) from exc
+
+    @router.post("/sessions/{session_id}/project-reviews/{review_id}/resume")
+    async def resume_project_review(
+        session_id: int,
+        review_id: int,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        assert_access(principal)
+        try:
+            return require_project_review_coordinator().resume(
+                session_id, principal, review_id
+            )
+        except ProjectReviewError as exc:
+            raise project_review_error(exc) from exc
+
+    @router.get("/sessions/{session_id}/project-reviews/{review_id}/export")
+    async def export_project_review(
+        session_id: int,
+        review_id: int,
+        principal: Principal = Depends(current_principal),
+    ) -> Response:
+        if not principal.is_system_admin and "script.review.read" not in principal.permissions:
+            raise HTTPException(403, "没有执行此操作的权限")
+        try:
+            review = require_project_review_coordinator().get(
+                session_id, principal, review_id
+            )
+        except ProjectReviewError as exc:
+            raise project_review_error(exc) from exc
+        if review.get("status") != "completed":
+            raise HTTPException(409, "完整项目审核尚未完成")
+        from project_review.service import build_project_review_markdown
+        return Response(
+            content=build_project_review_markdown(dict(review.get("report") or {})),
+            media_type="text/markdown; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="project-review-{review_id}.md"'
+                )
+            },
+        )
+
     @router.get("/sessions/{session_id}/actions/{action_id}")
     async def get_action(
         session_id: int,
@@ -889,6 +1066,7 @@ def register_writer_agent_routes(
     audit_service: Any | None = None,
     permission_service: Any | None = None,
     workflow_repository: Any | None = None,
+    job_manager: Any | None = None,
 ) -> None:
     app.include_router(
         build_writer_agent_router(
@@ -901,5 +1079,6 @@ def register_writer_agent_routes(
             audit_service=audit_service,
             permission_service=permission_service,
             workflow_repository=workflow_repository,
+            job_manager=job_manager,
         )
     )

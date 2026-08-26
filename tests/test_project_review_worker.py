@@ -144,6 +144,107 @@ def _capture_events(monkeypatch, worker) -> list[dict]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_kind",
+    ["unit_review", "batch_summary", "final_summary"],
+)
+async def test_worker_request_start_events_expose_safe_input_resource_refs(
+    monkeypatch, tmp_path, request_kind
+) -> None:
+    from project_review import worker
+
+    source = _source()
+    job, _review_id = _review_job(tmp_path, source, suffix=f"refs-{request_kind}")
+    provider = _Provider()
+    emitted = _capture_events(monkeypatch, worker)
+    monkeypatch.setattr(
+        worker,
+        "create_provider",
+        lambda *, retry_callback=None: (
+            setattr(provider, "retry_callback", retry_callback) or provider
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    await worker.run(job)
+
+    request_payloads = [
+        item["payload"]
+        for item in emitted
+        if item["payload"].get("request_attempt") == 1
+        and item["payload"].get("request_kind") == request_kind
+    ]
+    assert request_payloads
+    allowed_ref_keys = {
+        "kind",
+        "id",
+        "revision",
+        "version",
+        "stage_kind",
+        "episode_number",
+        "episode_numbers",
+        "batch_id",
+        "content_fingerprint",
+        "source_fingerprint",
+        "audit_scope",
+        "unit_count",
+    }
+    for payload in request_payloads:
+        refs = payload["loaded_resource_refs"]
+        assert refs
+        assert all(set(ref) <= allowed_ref_keys for ref in refs)
+        forbidden_ref_keys = {
+            "content",
+            "summary",
+            "evidence",
+            "finding",
+            "findings",
+            "reason",
+            "retry_reason",
+        }
+        assert all(forbidden_ref_keys.isdisjoint(ref) for ref in refs)
+        serialized_refs = json.dumps(refs, ensure_ascii=False)
+        for forbidden in (
+            "retry reason",
+            "项目简报正文",
+            "大纲正文",
+        ):
+            assert forbidden not in serialized_refs
+
+        if request_kind == "unit_review":
+            assert any(
+                ref.get("stage_kind") == payload["stage_kind"]
+                and ref.get("episode_number") == payload["current_episode"]
+                for ref in refs
+            )
+        elif request_kind == "batch_summary":
+            assert refs == [
+                {
+                    "stage_kind": payload["stage_kind"],
+                    "episode_numbers": list(
+                        range(payload["batch_start"], payload["batch_end"] + 1)
+                    ),
+                    "source_fingerprint": source["fingerprint"],
+                }
+            ]
+        else:
+            assert {ref["kind"] for ref in refs} == {"project", "stage"}
+            assert next(ref for ref in refs if ref["kind"] == "project") == {
+                "kind": "project",
+                "id": 17,
+                "revision": 3,
+                "audit_scope": "outline",
+            }
+            assert next(ref for ref in refs if ref["kind"] == "stage") == {
+                "kind": "stage",
+                "stage_kind": "outline",
+                "episode_numbers": list(range(1, 13)),
+                "batch_id": "outline-v1",
+                "unit_count": 12,
+            }
+
+
+@pytest.mark.asyncio
 async def test_worker_checkpoints_failure_emits_safe_request_details_and_resumes(
     monkeypatch, tmp_path
 ) -> None:

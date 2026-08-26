@@ -113,10 +113,12 @@ class _ObservedProvider:
         batch_index = _as_int(self.request.get("batch_index"))
         batch = _source_batch(self.source, stage_kind, batch_index)
         max_retries = _as_int(getattr(self.provider, "max_retries", 0))
-        refs = _safe_resource_refs(prompt_payload.get("loaded_resource_refs"))
+        refs = _request_resource_refs(prompt_payload)
         return {
             "audit_scope": str(self.source.get("audit_scope") or ""),
-            "request_kind": str(self.request.get("kind") or ""),
+            "request_kind": str(
+                prompt_payload.get("request_kind") or self.request.get("kind") or ""
+            ),
             "stage_kind": stage_kind,
             "current_episode": _as_int(self.request.get("episode_number")),
             "batch_index": batch_index,
@@ -240,21 +242,68 @@ def _prompt_payload(messages: list[dict[str, str]]) -> dict[str, Any]:
 def _safe_resource_refs(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
-    allowed = {
+    allowed = (
         "kind",
         "id",
         "revision",
         "version",
         "stage_kind",
         "episode_number",
+        "episode_numbers",
         "batch_id",
         "content_fingerprint",
-    }
-    return [
-        {key: item.get(key) for key in allowed if key in item}
-        for item in value
-        if isinstance(item, dict)
+        "source_fingerprint",
+        "audit_scope",
+        "unit_count",
+    )
+    refs = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        ref = {key: item.get(key) for key in allowed if key in item}
+        if ref:
+            refs.append(ref)
+    return refs
+
+
+def _request_resource_refs(prompt_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    refs = _safe_resource_refs(prompt_payload.get("loaded_resource_refs"))
+    if refs:
+        return refs
+    manifest = prompt_payload.get("source_manifest")
+    if not isinstance(manifest, dict):
+        return []
+    project = manifest.get("project")
+    project = project if isinstance(project, dict) else {}
+    refs = [
+        {
+            "kind": "project",
+            "id": _as_int(manifest.get("project_id") or project.get("id")),
+            "revision": _as_int(project.get("revision")),
+            "audit_scope": str(manifest.get("audit_scope") or ""),
+        }
     ]
+    stages = manifest.get("stages")
+    if not isinstance(stages, dict):
+        return refs
+    for stage_name, stage in stages.items():
+        if not isinstance(stage, dict):
+            continue
+        episode_numbers = [
+            number
+            for value in stage.get("episode_numbers") or []
+            if (number := _as_int(value)) > 0
+        ]
+        refs.append(
+            {
+                "kind": "stage",
+                "stage_kind": str(stage.get("stage_kind") or stage_name),
+                "episode_numbers": episode_numbers,
+                "batch_id": str(stage.get("batch_id") or ""),
+                "unit_count": _as_int(stage.get("unit_count")),
+            }
+        )
+    return refs
 
 
 def _source_batch(

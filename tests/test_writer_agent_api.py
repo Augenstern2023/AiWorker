@@ -337,6 +337,9 @@ def _project_review_api_context(
 
 
 @pytest.mark.parametrize(("message", "expected"), [
+    ("帮我审核一下当前的大纲", "outline"),
+    ("审核当前大纲", "outline"),
+    ("审核一下当前剧本", "script"),
     ("审核更新后的项目大纲", "outline"),
     ("审核全部大纲", "outline"),
     ("审核完整剧本", "script"),
@@ -375,6 +378,40 @@ def test_chat_offers_linked_long_project_review_without_provider(
     response = client.post(
         f"/api/writer-agent/sessions/{session['id']}/messages",
         json={"message": "审核全部大纲", "message_id": "long-review-offer-1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["messages"][-1]["kind"] == "project_review_offer"
+    assert response.json()["messages"][-1]["audit_scope"] == "outline"
+
+
+def test_chat_offers_current_outline_long_project_review_without_provider(
+    tmp_path, monkeypatch
+) -> None:
+    repository = writer_agent_api.CreativeRepository(tmp_path / "creative.db")
+    project = repository.create_original_project(
+        seed_text="当前大纲审核", name="审核项目", target_episode_count=2,
+        created_by="writer-1", creation_request_id="current-outline-review-offer",
+    )
+    permissions = MagicMock()
+    permissions.can_read_project.return_value = True
+    monkeypatch.setattr(
+        writer_agent_api, "create_provider",
+        lambda: (_ for _ in ()).throw(AssertionError("长审核分流不应调用 Provider")),
+    )
+    client = _client(
+        tmp_path, creative_repository=repository, permission_service=permissions,
+    )
+    session = client.post(
+        "/api/writer-agent/sessions", json={"content": "继续创作"},
+    ).json()
+    WriterAgentStore(tmp_path / "writer_agent" / "writer_agent.db").bind_project(
+        session["id"], project["id"], expected_context_revision=0,
+    )
+
+    response = client.post(
+        f"/api/writer-agent/sessions/{session['id']}/messages",
+        json={"message": "帮我审核一下当前的大纲", "message_id": "current-outline-review-offer-1"},
     )
 
     assert response.status_code == 200

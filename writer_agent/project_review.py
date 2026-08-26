@@ -25,6 +25,11 @@ def long_project_review_scope(message: str) -> str | None:
         return "script"
     if any(term in normalized for term in ("全部大纲", "所有大纲", "完整大纲", "更新后的项目大纲")):
         return "outline"
+    if "审核" in normalized:
+        if any(term in normalized for term in ("当前大纲", "当前的大纲")):
+            return "outline"
+        if any(term in normalized for term in ("当前剧本", "当前的剧本")):
+            return "script"
     return None
 
 

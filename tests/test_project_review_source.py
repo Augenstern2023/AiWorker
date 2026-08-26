@@ -245,6 +245,26 @@ def test_outline_generation_refs_only_require_the_fields_the_repository_persists
     assert source["upstream_mismatches"] == []
 
 
+def test_script_keeps_work_unit_and_marks_missing_current_outline_and_beats() -> None:
+    project = _project()
+    project["episodes"] = [
+        item for item in project["episodes"]
+        if not (
+            item["episode_number"] == 1
+            and item["stage"] in {"outline", "beats"}
+        )
+    ]
+
+    source = build_project_review_source(project, audit_scope="project")
+
+    script_unit = source["stages"]["script"]["units"][0]
+    mismatch = next(item for item in source["upstream_mismatches"] if item["stage_kind"] == "script")
+    fields = {item["field"] for item in mismatch["mismatches"]}
+    assert script_unit["outline"] is None
+    assert script_unit["beats"] is None
+    assert {"missing_current_outline", "missing_current_beats"} <= fields
+
+
 def test_source_fingerprint_is_deterministic_and_covers_resource_content() -> None:
     first = build_project_review_source(_project(), audit_scope="project")
     second = build_project_review_source(_project(), audit_scope="project")

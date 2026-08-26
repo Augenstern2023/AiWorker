@@ -394,7 +394,20 @@ def _upstream_mismatches(
                     "beats_version": beats_resource["version"],
                     "beats_content_fingerprint": beats_resource["content_fingerprint"],
                 })
-            mismatches = [
+            mismatches = []
+            if stage_kind in {"beats", "script"} and outline is None:
+                mismatches.append({
+                    "field": "missing_current_outline",
+                    "expected": "current_active_outline",
+                    "actual": None,
+                })
+            if stage_kind == "script" and beats_resource is None:
+                mismatches.append({
+                    "field": "missing_current_beats",
+                    "expected": "current_active_beats",
+                    "actual": None,
+                })
+            mismatches.extend(
                 {
                     "field": key,
                     "expected": expected_value,
@@ -402,7 +415,7 @@ def _upstream_mismatches(
                 }
                 for key, expected_value in expected.items()
                 if not _reference_matches(key, refs.get(key), expected_value, outline)
-            ]
+            )
             if mismatches:
                 entries.append({
                     "stage_kind": stage_kind,

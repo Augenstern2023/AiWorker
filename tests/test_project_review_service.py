@@ -188,6 +188,28 @@ async def test_completed_report_does_not_reissue_the_final_summary() -> None:
 
 
 @pytest.mark.asyncio
+async def test_normalized_partial_report_still_requests_missing_final_summary() -> None:
+    """Normalizing a checkpoint must not fabricate a completed final summary."""
+    source = build_project_review_source(_project(1), audit_scope="outline")
+    partial = {
+        "partial": True,
+        "audit_scope": "outline",
+        "stage_results": {"outline": [], "script": []},
+        "batch_summaries": [],
+        "continuity_state": {},
+        "cursor": {"stage_kind": "outline", "episode_number": 1, "batch_index": 1},
+    }
+    normalized_partial = normalize_project_review_report(partial, source)
+    provider = _Provider()
+
+    report = await review_project_source(provider, source, initial_report=normalized_partial)
+
+    assert normalized_partial.get("final_summary") is None
+    assert [request["request_kind"] for request in provider.requests][-1] == "final_summary"
+    assert report["partial"] is False
+
+
+@pytest.mark.asyncio
 async def test_report_contract_normalizes_verdict_and_renders_evidence() -> None:
     """Invalid verdicts/severities and omitted report sections must be observable failures."""
     source = build_project_review_source(_project(1), audit_scope="project")

@@ -239,8 +239,8 @@ async def review_project_source(
 def normalize_project_review_report(report: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
     """Return the stable export contract without modifying source snapshot content."""
     normalized = _resume_report(source, report)
-    final = _normalize_final_summary(report if isinstance(report, dict) else {})
-    normalized.update(final)
+    if isinstance(report, dict) and _has_final_summary(report):
+        normalized.update(_normalize_final_summary(report))
     normalized["partial"] = bool(report.get("partial")) if isinstance(report, dict) else True
     normalized["source_manifest"] = deepcopy(_mapping(source.get("manifest")))
     normalized["upstream_mismatches"] = deepcopy(_mappings(source.get("upstream_mismatches")))

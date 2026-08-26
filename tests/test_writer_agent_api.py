@@ -477,6 +477,32 @@ def test_project_review_requires_associated_readable_project_and_allows_readable
     assert jobs.calls == []
 
 
+def test_project_review_get_and_export_recheck_revoked_project_read_permission(
+    tmp_path,
+) -> None:
+    client, repository, _store, session, permissions, _jobs, _current = (
+        _project_review_api_context(tmp_path)
+    )
+    base = f"/api/writer-agent/sessions/{session['id']}/project-reviews"
+    preview = client.post(f"{base}/preview", json={"audit_scope": "outline"})
+    created = client.post(base, json={
+        "audit_scope": "outline",
+        "expected_fingerprint": preview.json()["fingerprint"],
+        "client_request_id": "recheck-revoked-read",
+    })
+    assert created.status_code == 201
+    review_id = created.json()["review"]["id"]
+    repository.complete_project_review(review_id, {
+        "ai_verdict": "通过",
+        "summary": "审核完成",
+    })
+
+    permissions.can_read_project.return_value = False
+
+    assert client.get(f"{base}/{review_id}").status_code == 403
+    assert client.get(f"{base}/{review_id}/export").status_code == 403
+
+
 @pytest.mark.parametrize(("user_id", "role_codes", "project_creator_id"), [
     ("writer-1", ("screenwriter",), "writer-1"),
     ("project-member-1", ("screenwriter",), "writer-1"),

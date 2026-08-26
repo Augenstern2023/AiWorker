@@ -582,7 +582,6 @@ writer_action_service = ActionService(
     audit_service=audit_service,
     permission_service=identity_permission_service,
     workflow_repository=workflow_repository,
-    job_manager=job_manager,
 )
 navigation_repository = (
     NavigationRepository(system_database) if system_database is not None else None

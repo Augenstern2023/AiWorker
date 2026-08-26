@@ -35,10 +35,14 @@ def mount_writer_agent(page: Page, *, session: dict) -> None:
         '<button id="writer-agent-create-project" type="button">创建原创项目</button>'
         '<button id="writer-agent-link-project" type="button">关联已有项目</button>'
         '<div id="writer-agent-project-picker" hidden></div></section>'
+        '<aside id="writer-agent-project-progress"></aside>'
         '<section id="writer-agent-messages"></section>'
         '<form id="writer-agent-message-form">'
         '<textarea id="writer-agent-message"></textarea>'
-        '<button type="submit">发送</button></form></main>'
+        '<button type="submit">发送</button></form>'
+        '<aside id="writer-project-review-drawer" hidden aria-hidden="true">'
+        '<button id="writer-project-review-close" type="button">关闭</button>'
+        '<div id="writer-project-review-content"></div></aside></main>'
     )
     page.add_script_tag(
         content="""
@@ -54,6 +58,7 @@ def mount_writer_agent(page: Page, *, session: dict) -> None:
         };
         """
     )
+    page.add_script_tag(path=ROOT / "static/js/review/writer_project_review.js")
     page.add_script_tag(path=ROOT / "static/js/review/writer_agent.js")
     page.evaluate(
         "session => window.writerAgentWorkbench.mount(session)", session
@@ -81,7 +86,10 @@ def mount_writer_agent_controller_without_sessions(page: Page) -> None:
         '<button id="writer-agent-send" type="button">发送</button></section>'
         '<aside><button id="writer-agent-toggle-reports" type="button">'
         '<i></i></button><span id="writer-agent-report-status"></span>'
-        '<div id="writer-agent-reports"></div></aside></div></main>'
+        '<div id="writer-agent-reports"></div></aside></div>'
+        '<aside id="writer-project-review-drawer" hidden aria-hidden="true">'
+        '<button id="writer-project-review-close" type="button">关闭</button>'
+        '<div id="writer-project-review-content"></div></aside></main>'
     )
     page.add_script_tag(
         content="""
@@ -115,7 +123,9 @@ def mount_writer_agent_controller_without_sessions(page: Page) -> None:
                   kind: 'material', role: 'user', material_name: '创建原创项目',
                   material_length: 6, material_preview: '创建原创项目',
                   display_user_message: true
-                }, {role: 'assistant', content: '请选择原创方向'}],
+                }, window.__completeProjectReviewOffer
+                  ? {role: 'assistant', kind: 'project_review_offer', audit_scope: 'outline', content: '请确认冻结内容'}
+                  : {role: 'assistant', content: '请选择原创方向'}],
                 actions: [], reports: []
               };
             } else {
@@ -136,6 +146,7 @@ def mount_writer_agent_controller_without_sessions(page: Page) -> None:
         };
         """
     )
+    page.add_script_tag(path=ROOT / "static/js/review/writer_project_review.js")
     page.add_script_tag(path=ROOT / "static/js/review/writer_agent.js")
 
 
@@ -201,6 +212,36 @@ def test_create_project_retry_reuses_bootstrap_message_without_duplication(
     assert retried_message["message_id"] == first_message["message_id"]
     assert first_message["display_user_message"] is False
     assert retried_message["display_user_message"] is False
+
+
+def test_writer_agent_slow_reply_explains_that_request_is_still_bounded(
+    page: Page,
+) -> None:
+    mount_writer_agent_controller_without_sessions(page)
+    page.wait_for_function("window.__writerControllerRequests.length === 1")
+    page.evaluate(
+        """
+        () => {
+          window.__writerNow = Date.now();
+          Date.now = () => window.__writerNow;
+          window.setInterval = (callback) => {
+            window.__writerThinkingTick = callback;
+            return 71;
+          };
+          window.clearInterval = () => {};
+          window.__deferWriterMessageResponse = true;
+        }
+        """
+    )
+    page.locator("#writer-agent-message").fill("请审核更新后的大纲")
+    page.locator("#writer-agent-send").click()
+    page.wait_for_function("window.__writerControllerRequests.length === 3")
+
+    page.evaluate(
+        "window.__writerNow += 61_000; window.__writerThinkingTick();"
+    )
+
+    page.get_by_text("模型响应较慢，仍在处理；超时后可直接重试").wait_for()
 
 
 def test_link_project_starts_a_session_before_sending_project_id(
@@ -345,6 +386,16 @@ def test_writer_agent_renders_model_text_without_executing_html(page: Page) -> N
 
     assert page.locator(".writer-action-card img").count() == 0
     assert page.evaluate("window.__xss || 0") == 0
+
+
+def test_writer_agent_delegates_complete_project_review_messages_to_drawer_ui(page: Page) -> None:
+    """Would catch project-review messages falling through the ordinary material/action path."""
+    mount_writer_agent_controller_without_sessions(page)
+    page.wait_for_function("window.__writerControllerRequests.length === 1")
+    page.evaluate("window.__completeProjectReviewOffer = true")
+    page.get_by_role("button", name="创建原创项目", exact=True).click()
+    assert page.get_by_text("请确认冻结内容").is_visible()
+    assert page.get_by_role("button", name="查看本次加载内容").is_visible()
 
 
 def test_action_card_renders_server_ledger_progress_and_result_link(page: Page) -> None:
@@ -495,6 +546,88 @@ def test_writer_agent_project_context_shows_mode_stage_and_valid_entry(page: Pag
     assert "原创" in context.inner_text()
     assert "全剧大纲" in context.inner_text()
     assert context.get_by_role("link", name="打开项目").get_attribute("href") == "/writing/projects/9/outlines"
+
+
+def test_writer_agent_right_panel_shows_project_stage_and_episode_progress(
+    page: Page,
+) -> None:
+    """Would catch leaving the desktop inspector blank after a project is linked."""
+    mount_writer_agent(
+        page,
+        session={
+            "id": 1,
+            "project_id": 11,
+            "project": {
+                "id": 11,
+                "name": "跑不完的落日，疗不好的伤",
+                "creation_mode": "original",
+                "target_platform": "长篇小说",
+                "target_episode_count": 100,
+                "episode_duration_seconds": 900,
+                "locked_brief_id": None,
+                "character_batch_id": None,
+                "outline_batch_id": None,
+                "blueprints": [{"id": 37, "status": "draft"}],
+                "characters": [],
+                "episodes": [],
+            },
+            "messages": [],
+            "actions": [],
+        },
+    )
+
+    progress = page.locator("#writer-agent-project-progress")
+    assert progress.get_by_role("heading", name="项目进度").is_visible()
+    assert progress.get_by_text("目标 100 章").is_visible()
+    assert progress.get_by_text("单章 15 分钟").is_visible()
+    assert progress.get_by_text("方向 / Brief").is_visible()
+    assert progress.get_by_text("1 个方向 · 待锁定").is_visible()
+    assert progress.get_by_text("全剧大纲").is_visible()
+    assert progress.get_by_text("0 / 100 章", exact=True).count() == 3
+    assert progress.get_by_role("link", name="打开当前阶段").get_attribute(
+        "href"
+    ) == "/planning/projects/11/brief"
+
+
+def test_writer_agent_progress_ignores_stale_versions_and_opens_active_episode(
+    page: Page,
+) -> None:
+    mount_writer_agent(
+        page,
+        session={
+            "id": 2,
+            "project_id": 12,
+            "project": {
+                "id": 12,
+                "name": "当前权威链",
+                "creation_mode": "original",
+                "target_episode_count": 2,
+                "locked_brief_id": 5,
+                "character_batch_id": "characters-v2",
+                "outline_batch_id": "outlines-v2",
+                "blueprints": [],
+                "characters": [],
+                "episodes": [
+                    {"id": 21, "stage": "outline", "episode_number": 1, "batch_id": "outlines-v2", "version": 2, "status": "locked"},
+                    {"id": 22, "stage": "outline", "episode_number": 2, "batch_id": "outlines-v2", "version": 2, "status": "locked"},
+                    {"id": 31, "stage": "beats", "episode_number": 1, "version": 2, "status": "locked", "upstream_refs": {"outline_batch_id": "outlines-v2"}},
+                    {"id": 32, "stage": "beats", "episode_number": 2, "version": 2, "status": "draft", "upstream_refs": {"outline_batch_id": "outlines-v2"}},
+                    {"id": 33, "stage": "beats", "episode_number": 2, "version": 8, "status": "locked", "upstream_refs": {"outline_batch_id": "outlines-v1"}},
+                    {"id": 41, "stage": "script", "episode_number": 1, "version": 1, "status": "draft", "upstream_refs": {"beats_id": 31, "beats_version": 2}},
+                    {"id": 42, "stage": "script", "episode_number": 2, "version": 4, "status": "locked", "upstream_refs": {"beats_id": 33, "beats_version": 8}},
+                ],
+            },
+            "messages": [],
+            "actions": [],
+        },
+    )
+
+    progress = page.locator("#writer-agent-project-progress")
+    assert progress.get_by_text("2 / 2 集", exact=True).count() == 2
+    assert progress.get_by_text("1 / 2 集", exact=True).count() == 1
+    assert progress.get_by_role("link", name="打开当前阶段").get_attribute(
+        "href"
+    ) == "/writing/projects/12/episodes/1/scripts"
 
 
 def test_writer_agent_project_picker_submits_structured_project_id(page: Page) -> None:

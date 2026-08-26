@@ -2,12 +2,30 @@
 
 {% block styles %}
 <style>
-    .writer-agent-layout { display: grid; grid-template-columns: minmax(210px, 250px) minmax(0, 1fr) minmax(230px, 290px); min-height: calc(100vh - 118px); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+    .writer-agent-layout { display: grid; grid-template-columns: minmax(210px, 250px) minmax(0, 1fr) minmax(270px, 320px); min-height: calc(100vh - 118px); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
     .writer-agent-layout.reports-hidden { grid-template-columns: minmax(210px, 250px) minmax(0, 1fr); }
     .writer-agent-layout.reports-hidden .writer-agent-reports { display: none; }
     .writer-agent-sidebar, .writer-agent-reports { padding: 18px; }
     .writer-agent-sidebar { border-right: 1px solid var(--border); }
-    .writer-agent-reports { border-left: 1px solid var(--border); }
+    .writer-agent-reports { min-width: 0; border-left: 1px solid var(--border); }
+    .writer-agent-inspector { position: sticky; top: 18px; max-height: calc(100vh - 36px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+    .writer-project-progress-card { padding-bottom: 18px; border-bottom: 1px solid var(--border); }
+    .writer-project-progress-name { overflow-wrap: anywhere; }
+    .writer-project-progress-meta { display: flex; flex-wrap: wrap; gap: 6px; }
+    .writer-project-progress-chip { padding: 3px 7px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-muted); font-size: .75rem; line-height: 1.25; }
+    .writer-project-progress-overall { height: 4px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.08); }
+    .writer-project-progress-overall > span { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width .2s ease; }
+    .writer-project-stage-list { display: grid; gap: 2px; margin-top: 14px; }
+    .writer-project-stage { position: relative; display: grid; grid-template-columns: 14px minmax(0, 1fr); column-gap: 9px; padding: 7px 0; }
+    .writer-project-stage::before { content: ""; width: 9px; height: 9px; margin-top: 5px; border: 2px solid rgba(255,255,255,.28); border-radius: 50%; background: var(--bg-page); }
+    .writer-project-stage:not(:last-child)::after { content: ""; position: absolute; top: 21px; bottom: -7px; left: 4px; width: 1px; background: var(--border); }
+    .writer-project-stage.is-complete::before { border-color: var(--success, #39b980); background: var(--success, #39b980); }
+    .writer-project-stage.is-current::before { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(59,149,246,.16); }
+    .writer-project-stage-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-width: 0; }
+    .writer-project-stage-value { max-width: 62%; color: var(--text-muted); font-size: .75rem; text-align: right; overflow-wrap: anywhere; }
+    .writer-project-progress-state { min-height: 150px; display: flex; flex-direction: column; justify-content: center; color: var(--text-muted); }
+    .writer-agent-report-history { padding-top: 18px; }
+    @media (prefers-reduced-motion: reduce) { .writer-project-progress-overall > span { transition: none; } }
     .writer-agent-session-detail { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
     .writer-agent-session { width: 100%; padding: 10px 8px; color: var(--text); text-align: left; background: transparent; border: 1px solid transparent; border-radius: 4px; }
     .writer-agent-session:hover, .writer-agent-session.is-active { background: rgba(59, 149, 246, .12); border-color: rgba(59, 149, 246, .45); }
@@ -35,8 +53,8 @@
     .writer-agent-report-file:first-child { border-top: 1px solid var(--border); }
     .writer-agent-report-preview { display: -webkit-box; overflow: hidden; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
     @keyframes writer-agent-thinking { 0% { content: ""; } 25% { content: "."; } 50% { content: ".."; } 75%, 100% { content: "..."; } }
-    @media (max-width: 1100px) { .writer-agent-layout { grid-template-columns: 210px minmax(0, 1fr); } .writer-agent-reports { grid-column: 1 / -1; max-height: 260px; border-top: 1px solid var(--border); border-left: 0; } .writer-agent-layout.reports-hidden .writer-agent-reports { display: none; } }
-    @media (max-width: 760px) { .writer-agent-layout { display: block; min-height: 0; } .writer-agent-sidebar, .writer-agent-reports { max-height: 240px; border: 0; border-bottom: 1px solid var(--border); } .writer-agent-layout.reports-hidden .writer-agent-reports { display: none; } .writer-agent-chat { min-height: 640px; } .writer-project-summary { flex-wrap: wrap; gap: 6px; } .writer-project-summary .btn { margin-left: 0 !important; } #writer-agent-project-context, .writer-agent-messages, .writer-agent-composer { padding-left: 14px; padding-right: 14px; } }
+    @media (max-width: 1100px) { .writer-agent-layout { grid-template-columns: 210px minmax(0, 1fr); } .writer-agent-reports { grid-column: 1 / -1; max-height: none; border-top: 1px solid var(--border); border-left: 0; } .writer-agent-inspector { position: static; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; max-height: none; overflow: visible; } .writer-agent-report-history { padding-top: 0; } .writer-agent-layout.reports-hidden .writer-agent-reports { display: none; } }
+    @media (max-width: 760px) { .writer-agent-layout { display: block; min-height: 0; } .writer-agent-sidebar, .writer-agent-reports { max-height: none; border: 0; border-bottom: 1px solid var(--border); } .writer-agent-inspector { display: block; } .writer-agent-report-history { padding-top: 18px; } .writer-agent-layout.reports-hidden .writer-agent-reports { display: none; } .writer-agent-chat { min-height: 640px; } .writer-project-summary { flex-wrap: wrap; gap: 6px; } .writer-project-summary .btn { margin-left: 0 !important; } #writer-agent-project-context, .writer-agent-messages, .writer-agent-composer { padding-left: 14px; padding-right: 14px; } }
 </style>
 {% endblock %}
 
@@ -45,7 +63,7 @@
     <header class="d-flex justify-content-between align-items-start gap-3 mb-3">
         <div><h3 class="mb-1">编剧大师</h3><div class="small text-muted">对话评审、原创立项与项目创作</div></div>
         <div class="d-flex gap-2">
-            <button id="writer-agent-toggle-reports" class="btn btn-outline-light btn-sm" type="button" title="隐藏评审报告" aria-label="隐藏评审报告" aria-pressed="true"><i class="bi bi-layout-sidebar-inset-reverse" aria-hidden="true"></i></button>
+            <button id="writer-agent-toggle-reports" class="btn btn-outline-light btn-sm" type="button" title="隐藏项目面板" aria-label="隐藏项目面板" aria-pressed="true"><i class="bi bi-layout-sidebar-inset-reverse" aria-hidden="true"></i></button>
             <button id="writer-agent-refresh" class="btn btn-outline-light btn-sm" type="button" title="刷新会话" aria-label="刷新会话"><i class="bi bi-arrow-clockwise" aria-hidden="true"></i></button>
         </div>
     </header>
@@ -78,11 +96,19 @@
         </section>
     </main>
 
-    <aside class="writer-agent-reports" aria-label="评审报告文件">
-        <div class="d-flex justify-content-between align-items-center pb-3"><h5 class="mb-0">评审报告</h5><span id="writer-agent-report-status" class="small text-muted">等待材料</span></div>
-        <div id="writer-agent-reports" class="small text-muted">每轮有效评审会在这里生成可下载的 Markdown 报告。</div>
+    <aside class="writer-agent-reports" aria-label="项目进度与评审报告">
+        <div class="writer-agent-inspector">
+            <section id="writer-agent-project-progress" class="writer-project-progress-card">
+                <div class="writer-project-progress-state"><h5 class="mb-2 text-body">项目进度</h5><span class="small">关联或创建项目后，这里会显示创作阶段与分章进度。</span></div>
+            </section>
+            <section class="writer-agent-report-history" aria-label="评审报告文件">
+                <div class="d-flex justify-content-between align-items-center pb-3"><h5 class="mb-0">评审报告</h5><span id="writer-agent-report-status" class="small text-muted">等待材料</span></div>
+                <div id="writer-agent-reports" class="small text-muted">每轮有效评审会在这里生成可下载的 Markdown 报告。</div>
+            </section>
+        </div>
     </aside>
     </div>
 </div>
+{% include "review/_writer_project_review.html" %}
 {% endblock %}
-{% block scripts %}<script src="/static/js/review/writer_agent.js?v={{ asset_version }}-writer-agent-material-reply"></script>{% endblock %}
+{% block scripts %}<script src="/static/js/review/writer_project_review.js?v={{ asset_version }}-writer-project-review"></script><script src="/static/js/review/writer_agent.js?v={{ asset_version }}-writer-agent-project-review"></script>{% endblock %}

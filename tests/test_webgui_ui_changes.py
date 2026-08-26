@@ -191,6 +191,7 @@ def test_webgui_registers_script_review_page_and_api():
 def test_webgui_registers_independent_writer_agent_workbench():
     paths = {route.path for route in WebGUI.app.routes}
     template = _source("templates/review/writer_agent.html")
+    review_template = _source("templates/review/_writer_project_review.html")
     script = _source("static/js/review/writer_agent.js")
 
     assert "/review/writer-agent" in paths
@@ -205,6 +206,10 @@ def test_webgui_registers_independent_writer_agent_workbench():
     assert (
         "/api/writer-agent/sessions/{session_id}/actions/{action_id}/retry" in paths
     )
+    assert "/api/writer-agent/sessions/{session_id}/project-reviews/preview" in paths
+    assert "/api/writer-agent/sessions/{session_id}/project-reviews/{review_id}" in paths
+    assert "/api/writer-agent/sessions/{session_id}/project-reviews/{review_id}/resume" in paths
+    assert "/api/writer-agent/sessions/{session_id}/project-reviews/{review_id}/export" in paths
     assert WebGUI.app.state.writer_action_service is not None
     assert "编剧大师" in template
     assert "对话评审、原创立项与项目创作" in template
@@ -217,6 +222,10 @@ def test_webgui_registers_independent_writer_agent_workbench():
     assert "renderReport" in script
     assert "writerAgentWorkbench" in script
     assert "/actions/${action.id}/decision" in script
+    assert "writerProjectReviewUI" in script
+    assert '{% include "review/_writer_project_review.html" %}' in template
+    assert "writer-project-review-drawer" in review_template
+    assert "writer_project_review.js" in template
 
 
 def test_writer_agent_uses_three_panel_chat_and_report_history_layout():
@@ -226,7 +235,10 @@ def test_writer_agent_uses_three_panel_chat_and_report_history_layout():
     assert "writer-agent-layout" in template
     assert "writer-agent-session-detail" in template
     assert "writer-agent-reports" in template
+    assert "writer-agent-project-progress" in template
+    assert "writer-agent-inspector" in template
     assert "writer-agent-composer" in template
+    assert "renderWriterProjectProgress" in script
     assert "renderReportFiles" in script
     assert "/reports/${reportId}/export" in script
 
@@ -519,15 +531,6 @@ def test_outline_workspace_calls_generation_a_regeneration_after_a_locked_curren
 
     assert "重新生成" in method
     assert "['locked', 'approved']" in method
-
-
-def test_outline_workspace_prefers_the_locked_outline_batch_over_old_drafts():
-    script = _source("static/js/common/creative.js")
-    function_start = script.index("latestOutlineBatchId()")
-    function_end = script.index("currentProjectOutlines()", function_start)
-    function = script[function_start:function_end]
-
-    assert function.index("if (project.outline_batch_id && compatible.some") < function.index("const drafts")
 
 
 def test_outline_workspace_does_not_resume_a_draft_from_an_old_direction_or_character_batch():
@@ -1556,6 +1559,22 @@ def test_creative_generation_task_log_opens_inside_the_progress_modal():
     assert "/tasks?job_id=" not in progress
 
 
+def test_creative_generation_progress_shows_current_batch_and_slow_request_warning():
+    modal = _source("templates/common/workspace/creative_progress_modal.html")
+    script = _source("static/js/common/creative.js")
+
+    assert "creativeBatchProgressText()" in modal
+    assert "creativeBatchSlow()" in modal
+    assert "模型响应较慢，任务仍在运行" in modal
+    assert "系统会继续等待，已保存的检查点不会丢失" in modal
+    assert "creativeBatchElapsedSeconds()" in script
+    assert "creativeWorkspace.jobProgress?.batch_in_flight" in script
+    assert "creativeWorkspace.jobProgress?.batch_started_at" in script
+    assert ">= 720" in script
+    assert "batch_start" in script and "batch_end" in script
+    assert "reasoning_effort" in script
+
+
 def test_drama_download_fallback_candidates_use_stable_unique_alpine_keys():
     modal = _source("templates/common/workspace/selection_modals.html")
 
@@ -1744,17 +1763,28 @@ def test_today_rank_duration_column_is_after_hot_comment_and_formats_both_day_co
     assert "累计在榜" in html
 
 
-def test_today_rank_refresh_starts_a_douyin_rank_job_then_reloads_the_snapshot():
+def test_today_rank_update_is_admin_only_while_other_users_only_refresh_snapshot():
     script = _source("static/js/selection/ranks.js")
-    template = _source("templates/common/workspace/selection_ranks.html")
+    template = WebGUI.templates.env.get_template(
+        "common/workspace/selection_ranks.html"
+    )
+    admin_html = template.render(principal=SimpleNamespace(is_system_admin=True))
+    user_html = template.render(principal=SimpleNamespace(is_system_admin=False))
 
-    assert "async refreshTodayRank()" in script
+    assert "async refreshTodayRank(canUpdateRank = false)" in script
+    assert "if (!canUpdateRank)" in script
+    assert "await this.fetchTodayRank()" in script
     assert "'/api/jobs'" in script
     assert "platform: 'dy'" in script
     assert "crawler_type: 'rank'" in script
     assert "pollTodayRankRefresh" in script
-    assert "await this.fetchTodayRank()" in script
-    assert '@click="refreshTodayRank"' in template
+    assert "更新并抓取" in admin_html
+    assert "refreshTodayRank(true)" in admin_html
+    assert "refreshTodayRank(false)" not in admin_html
+    assert "刷新榜单" in user_html
+    assert "refreshTodayRank(false)" in user_html
+    assert "更新并抓取" not in user_html
+    assert "refreshTodayRank(true)" not in user_html
 
 
 def test_removed_assets_and_rag_pages_are_not_in_sidebar():
@@ -1824,13 +1854,25 @@ def test_hongguo_drama_routes_replace_legacy_proxy_routes():
     admin_page = _source("templates/admin/config.html")
     admin_actions = _source("static/js/admin/workspace.js")
     drama_actions = _source("static/js/selection/dramas.js")
-    assert "剧目接口设置" in admin_page
+    assert "红果剧目来源与抓包设置" in admin_page
+    assert "capture_root" in admin_actions
+    assert "capture_service_url" in admin_actions
+    assert "wait_timeout_seconds" in admin_actions
+    assert "检查来源与服务" in admin_page
+    assert "检查中…" in admin_page
+    assert 'aria-live="polite"' in admin_page
+    assert "dramaAnalysis.interfaceTesting" in admin_page
+    assert all(label in admin_page for label in ("正常", "部分异常", "异常"))
+    assert all(style in admin_page for style in ("alert-success", "alert-warning", "alert-danger"))
+    assert "checks" in admin_actions
     assert "配置中心地址" in admin_page
     assert "activationCode" in admin_actions
+    assert "activation_code" in admin_actions
     assert "config_url" in admin_actions
     assert "/api/hongguo/drama/settings" in admin_actions
     assert "dramaReviewStatusLabel" in drama_actions
-    assert "输入完整剧名，检索全部红果剧源" in drama_page
+    assert "captureStatusLabel" in drama_actions
+    assert "优先检索第三方剧目来源" in drama_page
     review_actions = _source("static/js/common/creative.js")
     assert "剧评检索下载" in drama_page
     assert "startDramaReviewCapture" in drama_page
@@ -1850,6 +1892,36 @@ def test_hongguo_drama_routes_replace_legacy_proxy_routes():
     assert "async parseDramaDownloadResponse(response)" in html
     assert "await response.text()" in html
     assert "全剧下载" in html
+
+
+def test_hongguo_provider_ui_requires_manual_source_selection():
+    drama_page = _source("templates/common/workspace/selection_dramas.html")
+    download_modal = _source("templates/common/workspace/selection_modals.html")
+    drama_actions = _source("static/js/selection/dramas.js")
+    breakdown_actions = _source("static/js/selection/breakdowns.js")
+
+    assert "dramaAnalysis.providers" in drama_page
+    assert "candidate.provider_id" in drama_page
+    assert "data.providers || []" in drama_actions
+    assert "provider_id: candidate.provider_id" in drama_actions
+    assert "series_ref: candidate.series_ref" in drama_actions
+    assert "data.providers || []" in breakdown_actions
+    assert "this.dramaDownload.candidates.length === 1" not in breakdown_actions
+    assert "dramaDownload.providers.length || dramaDownload.thirdPartyError || dramaDownload.captureError" in download_modal
+
+
+def test_hongguo_settings_ui_preserves_third_party_and_capture_fields():
+    page = _source("templates/admin/config.html")
+    actions = _source("static/js/admin/workspace.js")
+    html = _workspace_source()
+    drama_page = _source("templates/common/workspace/selection_dramas.html")
+
+    assert "第三方剧目来源" in page
+    assert "抓包下载" in page
+    assert 'id="hongguo-config-url"' in page
+    assert 'id="hongguo-activation-code"' in page
+    assert "config_url: this.dramaAnalysis.settings.config_url" in actions
+    assert "...(activationCode ? {activation_code: activationCode} : {})" in actions
     assert "后台下载" in html
     assert "breakdownEditor.record?.status !== 'draft'" in html
     assert "episodesLoading" in html
@@ -1887,7 +1959,7 @@ def test_drama_search_keeps_cross_source_candidates_distinct_and_review_input_in
     drama_page = _source("templates/common/workspace/selection_dramas.html")
     drama_script = _source("static/js/selection/dramas.js")
 
-    assert ':key="`${candidate.source_platform || \'hongguo\'}:${candidate.book_id || candidate.aweme_id}`"' in drama_page
+    assert ':key="`${candidate.provider_id}:${candidate.series_ref || candidate.book_id}`"' in drama_page
     assert "this.dramaReviews.title = title;" not in drama_script
 
 

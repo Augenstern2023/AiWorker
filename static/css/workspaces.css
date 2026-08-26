@@ -304,13 +304,35 @@
             min-width: 0; padding: 10px; background: #191d26;
             border: 1px solid #2b3545; border-radius: 6px;
         }
+        .outline-field-header {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 8px; min-width: 0; margin-bottom: 6px;
+        }
         .outline-field-label {
-            display: block; margin-bottom: 6px; color: #79b2ff;
+            display: block; margin: 0; color: #79b2ff;
             font-size: 12px; font-weight: 700;
         }
+        .outline-field-ai-action {
+            display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto;
+            min-height: 30px; padding: 2px 6px; color: #9bc6ff;
+            font-size: 12px; text-decoration: none;
+        }
+        .outline-field-ai-action:hover { color: #d6e9ff; background: rgba(59, 149, 246, .1); }
+        .outline-field-ai-action:focus-visible { outline: 2px solid #78b1ff; outline-offset: 1px; }
         .outline-field-textarea {
             width: 100%; min-height: 88px; max-height: 180px;
             overflow-y: auto; line-height: 1.45; resize: vertical;
+        }
+        .outline-field-rewrite-modal { min-width: 0; }
+        .outline-field-rewrite-source {
+            min-height: 92px; max-height: 210px; overflow-y: auto;
+            padding: 10px 12px; color: #cbd5e1; background: #151922;
+            border: 1px solid #30394a; border-radius: 6px;
+            line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere;
+        }
+        .outline-field-rewrite-candidate {
+            width: 100%; min-height: 160px; max-height: 360px;
+            resize: vertical; overflow-y: auto;
         }
         .outline-empty-state {
             padding: 28px 16px; color: var(--muted); text-align: center;
@@ -907,6 +929,13 @@
                 grid-column: 1 / -1; grid-row: 2; padding-inline: 4px;
             }
             .outline-field-grid { grid-template-columns: minmax(0, 1fr); }
+            .outline-field-header { align-items: flex-start; }
+            .outline-field-ai-action { min-height: 36px; }
+            .outline-field-rewrite-modal .modal-footer {
+                display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+            .outline-field-rewrite-modal .modal-footer .btn { min-width: 0; margin: 0; }
+            .outline-field-rewrite-modal .modal-footer .btn:last-child { grid-column: 1 / -1; }
             .outline-overview-header { align-items: flex-start; flex-direction: column; }
             .outline-overview-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
             .outline-overview-actions .btn { min-width: 0; }
@@ -970,6 +999,50 @@
         .project-source-cell { max-width: 360px; overflow-wrap: anywhere; }
         .original-direction-grid td { max-width: 260px; overflow-wrap: anywhere; }
         .variant-instruction { flex: 1 1 260px; min-width: 180px; }
+
+        .writer-project-review-drawer {
+            position: fixed; inset: 0 0 0 auto; z-index: 1080; width: min(520px, 100vw);
+            color: var(--text); background: rgba(4, 7, 13, .54);
+        }
+        .writer-project-review-drawer[hidden] { display: none; }
+        .writer-project-review-drawer__surface {
+            display: flex; flex-direction: column; height: 100%; overflow: hidden;
+            background: var(--bg-panel); border-left: 1px solid var(--border);
+            box-shadow: -16px 0 38px rgba(0, 0, 0, .32);
+        }
+        .writer-project-review-drawer__header {
+            display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+            padding: 18px 20px; border-bottom: 1px solid var(--border);
+        }
+        .writer-project-review-drawer__content { min-width: 0; overflow-y: auto; padding: 20px; }
+        .writer-project-review-kicker { color: var(--accent); font-size: .78rem; font-weight: 700; }
+        .writer-project-review-project, .writer-project-review-state { margin-top: 8px; font-size: 1.08rem; font-weight: 700; overflow-wrap: anywhere; }
+        .writer-project-review-state.is-complete { color: var(--success, #39b980); }
+        .writer-project-review-state.is-error { color: var(--danger, #e15d68); }
+        .writer-project-review-section { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+        .writer-project-review-notice { color: var(--text); background: rgba(59, 149, 246, .07); border-radius: 6px; padding: 12px; }
+        .writer-project-review-resource { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: rgba(255, 255, 255, .02); }
+        .writer-project-review-resource summary { cursor: pointer; font-weight: 600; overflow-wrap: anywhere; }
+        .writer-project-review-actions { display: flex; gap: 8px; margin-top: 22px; }
+        .writer-project-review-actions .btn { width: 100%; min-height: 42px; }
+        .writer-project-review-loading, .writer-project-review-slow { padding: 10px 12px; border-radius: 6px; background: rgba(255, 255, 255, .05); }
+        .writer-project-review-slow { color: #ffd77b; background: rgba(229, 163, 45, .12); }
+        .writer-project-review-offer { max-width: min(760px, 100%); padding: 14px 16px; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; background: rgba(255,255,255,.025); }
+        .writer-project-review-drawer button:focus-visible,
+        .writer-project-review-drawer a:focus-visible,
+        .writer-project-review-offer button:focus-visible { outline: 2px solid #9bc6ff; outline-offset: 2px; }
+        @media (max-width: 1100px) {
+            .writer-project-review-drawer { width: min(480px, 100vw); }
+        }
+        @media (max-width: 760px) {
+            .writer-project-review-drawer { inset: auto 0 0 0; width: 100%; height: min(88vh, 760px); }
+            .writer-project-review-drawer__surface { border-top: 1px solid var(--border); border-left: 0; }
+            .writer-project-review-drawer__header, .writer-project-review-drawer__content { padding-right: 14px; padding-left: 14px; }
+            .writer-project-review-actions { position: sticky; bottom: -20px; padding: 12px 0; background: var(--bg-panel); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .writer-project-review-drawer, .writer-project-review-drawer * { transition: none !important; animation: none !important; }
+        }
 
         @media (max-width: 767.98px) {
             .creative-project-list,

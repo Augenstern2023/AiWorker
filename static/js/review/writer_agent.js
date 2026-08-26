@@ -32,8 +32,15 @@
         if (!mountedWriterSession || !updated?.id) return;
         const actions = mountedWriterSession.actions || (mountedWriterSession.actions = []);
         const index = actions.findIndex((item) => String(item.id) === String(updated.id));
+        const previousStatus = index >= 0 ? actions[index]?.status : '';
         if (index >= 0) actions[index] = Object.assign({}, actions[index], updated);
         else actions.push(updated);
+        if (updated.status === 'succeeded' && previousStatus !== 'succeeded') {
+            const projectId = Number(updated.project_id || updated.result?.project_id || mountedWriterSession.project_id || 0);
+            if (Number.isInteger(projectId) && projectId > 0) mountedWriterSession.project_id = projectId;
+            delete mountedWriterSession.project;
+            delete mountedWriterSession.__projectLoadError;
+        }
         if (typeof writerWorkbenchCallbacks.onSession === 'function') {
             writerWorkbenchCallbacks.onSession(mountedWriterSession);
         } else {
@@ -358,18 +365,321 @@
         }
     }
 
-    async function hydrateWriterProject(session) {
-        if (!session?.project_id || session.project || session.__projectLoading) return;
+    function writerProjectTarget(project) {
+        const value = Number(project?.target_episode_count || 0);
+        return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+    }
+
+    function writerProjectEpisodeNumber(project, episode) {
+        const number = Number(episode?.episode_number || 0);
+        const total = writerProjectTarget(project);
+        return Number.isInteger(number) && number > 0 && (!total || number <= total) ? number : 0;
+    }
+
+    function writerProjectResourceIsCurrent(item) {
+        return item && !['superseded', 'historical'].includes(item.status);
+    }
+
+    function writerLatestProjectResource(items) {
+        return [...items].sort((left, right) =>
+            Number(right.version || 0) - Number(left.version || 0)
+            || Number(right.id || 0) - Number(left.id || 0)
+        )[0] || null;
+    }
+
+    function writerCurrentProjectBlueprints(project) {
+        const latest = new Map();
+        (project?.blueprints || []).filter(writerProjectResourceIsCurrent).forEach((item) => {
+            const key = String(item.candidate_group_id || item.id || '');
+            const prior = latest.get(key);
+            if (!prior || writerLatestProjectResource([prior, item]) === item) latest.set(key, item);
+        });
+        return [...latest.values()];
+    }
+
+    function writerCurrentProjectCharacters(project) {
+        const items = (project?.characters || []).filter(writerProjectResourceIsCurrent);
+        let batchId = String(project?.character_batch_id || '');
+        if (!batchId) {
+            const latest = writerLatestProjectResource(items.filter((item) =>
+                ['draft', 'submitted', 'returned'].includes(item.status)
+                && Number(item.source_refs?.brief_id || 0) === Number(project?.locked_brief_id || 0)
+            ));
+            batchId = String(latest?.batch_id || '');
+        }
+        return batchId ? items.filter((item) => String(item.batch_id || '') === batchId) : [];
+    }
+
+    function writerCurrentProjectOutlines(project) {
+        const items = (project?.episodes || []).filter((item) =>
+            item?.stage === 'outline'
+            && writerProjectResourceIsCurrent(item)
+            && writerProjectEpisodeNumber(project, item)
+        );
+        let batchId = String(project?.outline_batch_id || '');
+        if (!batchId && project?.locked_brief_id && project?.character_batch_id) {
+            const latest = writerLatestProjectResource(items.filter((item) =>
+                ['draft', 'submitted', 'returned'].includes(item.status)
+                && Number(item.upstream_refs?.brief_id || 0) === Number(project.locked_brief_id)
+                && String(item.upstream_refs?.character_batch_id || '') === String(project.character_batch_id)
+            ));
+            batchId = String(latest?.batch_id || '');
+        }
+        if (!batchId) return [];
+        const byEpisode = new Map();
+        items.filter((item) => String(item.batch_id || '') === batchId).forEach((item) => {
+            const number = writerProjectEpisodeNumber(project, item);
+            const prior = byEpisode.get(number);
+            if (!prior || writerLatestProjectResource([prior, item]) === item) byEpisode.set(number, item);
+        });
+        return [...byEpisode.values()];
+    }
+
+    function writerCurrentProjectBeats(project) {
+        const outlineBatchId = String(project?.outline_batch_id || '');
+        const byEpisode = new Map();
+        if (!outlineBatchId) return byEpisode;
+        (project?.episodes || []).forEach((item) => {
+            const number = writerProjectEpisodeNumber(project, item);
+            if (
+                item?.stage !== 'beats'
+                || !number
+                || !writerProjectResourceIsCurrent(item)
+                || String(item.upstream_refs?.outline_batch_id || '') !== outlineBatchId
+            ) return;
+            const prior = byEpisode.get(number);
+            if (!prior || writerLatestProjectResource([prior, item]) === item) byEpisode.set(number, item);
+        });
+        return byEpisode;
+    }
+
+    function writerCurrentProjectScripts(project, beatsByEpisode = writerCurrentProjectBeats(project)) {
+        const lockedStatuses = new Set(['locked', 'approved']);
+        const lockedBeats = new Map([...beatsByEpisode].filter(([, item]) => lockedStatuses.has(item.status)));
+        const byEpisode = new Map();
+        (project?.episodes || []).forEach((item) => {
+            const number = writerProjectEpisodeNumber(project, item);
+            const beats = lockedBeats.get(number);
+            if (
+                item?.stage !== 'script'
+                || !beats
+                || !writerProjectResourceIsCurrent(item)
+                || Number(item.upstream_refs?.beats_id || 0) !== Number(beats.id)
+                || Number(item.upstream_refs?.beats_version || 0) !== Number(beats.version)
+            ) return;
+            const prior = byEpisode.get(number);
+            if (!prior || writerLatestProjectResource([prior, item]) === item) byEpisode.set(number, item);
+        });
+        return byEpisode;
+    }
+
+    function writerProjectMetrics(project) {
+        const blueprints = writerCurrentProjectBlueprints(project);
+        const characters = writerCurrentProjectCharacters(project);
+        const outlines = writerCurrentProjectOutlines(project);
+        const beats = writerCurrentProjectBeats(project);
+        const scripts = writerCurrentProjectScripts(project, beats);
+        const locked = (items) => [...items].filter((item) => ['locked', 'approved'].includes(item.status)).length;
+        return {
+            blueprints, characters, outlines, beats, scripts,
+            outlineLocked: locked(outlines),
+            beatsLocked: locked(beats.values()),
+            scriptsLocked: locked(scripts.values()),
+        };
+    }
+
+    function writerProjectStage(project) {
+        if (!project) return 'brief';
+        const metrics = writerProjectMetrics(project);
+        if (metrics.scripts.size) return 'script';
+        if (metrics.beats.size) return 'beats';
+        if (metrics.outlines.length) return 'outline';
+        if (metrics.characters.length) return 'characters';
+        if (project.locked_brief_id) return 'brief';
+        const stage = String(project.current_stage || '').toLowerCase();
+        return ['brief', 'characters', 'outline', 'beats', 'script'].includes(stage) ? stage : 'brief';
+    }
+
+    function writerProjectUrl(project, stage = writerProjectStage(project)) {
+        const projectId = Number(project?.id);
+        if (!Number.isInteger(projectId) || projectId < 1) return '';
+        if (stage === 'brief') return `/planning/projects/${projectId}/brief`;
+        if (stage === 'characters') return `/planning/projects/${projectId}/characters`;
+        if (stage === 'beats' || stage === 'script') {
+            const metrics = writerProjectMetrics(project);
+            const resources = stage === 'beats' ? metrics.beats : metrics.scripts;
+            const episode = Math.min(...resources.keys());
+            if (Number.isFinite(episode)) return `/writing/projects/${projectId}/episodes/${episode}/${stage === 'beats' ? 'beats' : 'scripts'}`;
+        }
+        return `/writing/projects/${projectId}/outlines`;
+    }
+
+    function writerProjectUnit(project) {
+        const medium = `${project?.target_platform || ''} ${project?.genre || ''}`;
+        return medium.includes('小说') ? '章' : '集';
+    }
+
+    function writerProjectDuration(seconds) {
+        const value = Number(seconds || 0);
+        if (!value) return '';
+        if (value < 60) return `${value} 秒`;
+        const minutes = Math.round((value / 60) * 10) / 10;
+        return `${minutes} 分钟`;
+    }
+
+    function renderWriterProjectProgressState(host, message, retry) {
+        host.replaceChildren();
+        const state = document.createElement('div');
+        state.className = 'writer-project-progress-state';
+        state.setAttribute('role', 'status');
+        const heading = document.createElement('h5');
+        heading.className = 'mb-2 text-body';
+        heading.textContent = '项目进度';
+        const copy = document.createElement('span');
+        copy.className = 'small';
+        copy.textContent = message;
+        state.append(heading, copy);
+        if (retry) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'btn btn-outline-light btn-sm mt-3 align-self-start';
+            button.textContent = '重试读取';
+            button.addEventListener('click', retry);
+            state.append(button);
+        }
+        host.append(state);
+    }
+
+    function renderWriterProjectProgress(session) {
+        const host = document.getElementById('writer-agent-project-progress');
+        if (!host) return;
+        if (session?.__projectLoading) {
+            renderWriterProjectProgressState(host, '正在读取项目进度…');
+            return;
+        }
+        if (session?.__projectLoadError) {
+            renderWriterProjectProgressState(
+                host,
+                `项目进度读取失败：${session.__projectLoadError}`,
+                () => hydrateWriterProject(session, true)
+            );
+            return;
+        }
+        const project = session?.project;
+        if (!project) {
+            renderWriterProjectProgressState(
+                host,
+                session?.project_id
+                    ? '正在读取项目进度…'
+                    : '关联或创建项目后，这里会显示创作阶段与分章进度。'
+            );
+            return;
+        }
+
+        const total = writerProjectTarget(project);
+        const unit = writerProjectUnit(project);
+        const currentStage = writerProjectStage(project);
+        const metrics = writerProjectMetrics(project);
+        const blueprintCount = metrics.blueprints.length;
+        const outlineCount = metrics.outlines.length;
+        const beatsCount = metrics.beats.size;
+        const scriptCount = metrics.scripts.size;
+        const briefComplete = Boolean(project.locked_brief_id);
+        const charactersComplete = Boolean(project.character_batch_id);
+        const outlineComplete = Boolean(project.outline_batch_id && total && metrics.outlineLocked >= total);
+        const beatsComplete = Boolean(total && metrics.beatsLocked >= total);
+        const scriptsComplete = Boolean(total && metrics.scriptsLocked >= total);
+        const countLabel = (count) => total ? `${count} / ${total} ${unit}` : `${count} ${unit}`;
+        const stages = [
+            {
+                key: 'brief', label: '方向 / Brief', complete: briefComplete,
+                value: briefComplete ? 'Brief 已锁定' : blueprintCount ? `${blueprintCount} 个方向 · 待锁定` : '待生成方向',
+            },
+            {
+                key: 'characters', label: '人物关系', complete: charactersComplete,
+                value: charactersComplete ? '已锁定' : metrics.characters.length ? `${metrics.characters.length} 个人物 · 待锁定` : '待生成',
+            },
+            {key: 'outline', label: '全剧大纲', complete: outlineComplete, value: countLabel(outlineCount)},
+            {key: 'beats', label: `分${unit} Beats`, complete: beatsComplete, value: countLabel(beatsCount)},
+            {key: 'script', label: '正文', complete: scriptsComplete, value: countLabel(scriptCount)},
+        ];
+        const ratios = [
+            briefComplete ? 1 : 0,
+            charactersComplete ? 1 : 0,
+            outlineComplete ? 1 : 0,
+            total ? Math.min(metrics.beatsLocked / total, 1) : 0,
+            total ? Math.min(metrics.scriptsLocked / total, 1) : 0,
+        ];
+        const percent = Math.round((ratios.reduce((sum, value) => sum + value, 0) / ratios.length) * 100);
+
+        host.replaceChildren();
+        const headingRow = document.createElement('div');
+        headingRow.className = 'd-flex align-items-start justify-content-between gap-2';
+        const heading = document.createElement('h5');
+        heading.className = 'mb-0';
+        heading.textContent = '项目进度';
+        const mode = document.createElement('span');
+        mode.className = 'small text-muted';
+        mode.textContent = project.creation_mode === 'imitation' ? '仿写' : '原创';
+        headingRow.append(heading, mode);
+        const name = document.createElement('div');
+        name.className = 'writer-project-progress-name fw-semibold mt-3';
+        name.textContent = project.name || `项目 #${project.id}`;
+        const meta = document.createElement('div');
+        meta.className = 'writer-project-progress-meta mt-2';
+        if (total) writerCardText(meta, 'writer-project-progress-chip', `目标 ${total} ${unit}`);
+        const duration = writerProjectDuration(project.episode_duration_seconds);
+        if (duration) writerCardText(meta, 'writer-project-progress-chip', `单${unit} ${duration}`);
+        const overall = document.createElement('div');
+        overall.className = 'writer-project-progress-overall mt-3';
+        overall.setAttribute('role', 'progressbar');
+        overall.setAttribute('aria-label', '项目已锁定成果进度');
+        overall.setAttribute('aria-valuemin', '0');
+        overall.setAttribute('aria-valuemax', '100');
+        overall.setAttribute('aria-valuenow', String(percent));
+        const fill = document.createElement('span');
+        fill.style.width = `${percent}%`;
+        overall.append(fill);
+        const list = document.createElement('div');
+        list.className = 'writer-project-stage-list';
+        stages.forEach((stage) => {
+            const item = document.createElement('div');
+            item.className = `writer-project-stage${stage.complete ? ' is-complete' : ''}${stage.key === currentStage ? ' is-current' : ''}`;
+            const row = document.createElement('div');
+            row.className = 'writer-project-stage-row';
+            const label = document.createElement('span');
+            label.className = stage.key === currentStage ? 'fw-semibold' : '';
+            label.textContent = stage.label;
+            const value = document.createElement('span');
+            value.className = 'writer-project-stage-value';
+            value.textContent = stage.value;
+            row.append(label, value);
+            item.append(row);
+            list.append(item);
+        });
+        const link = document.createElement('a');
+        link.className = 'btn btn-outline-light btn-sm w-100 mt-3';
+        link.href = writerProjectUrl(project, currentStage);
+        link.textContent = '打开当前阶段';
+        host.append(headingRow, name, meta, overall, list, link);
+    }
+
+    async function hydrateWriterProject(session, force = false) {
+        if (!session?.project_id || session.__projectLoading || (session.project && !force)) return;
+        if (session.__projectLoadError && !force) return;
+        delete session.__projectLoadError;
         session.__projectLoading = true;
+        renderWriterProjectProgress(session);
         try {
             const project = await writerApiJson(await window.aiworkerApi.request(`/api/creative/projects/${session.project_id}`));
             session.project = project;
             if (typeof writerWorkbenchCallbacks.onSession === 'function') writerWorkbenchCallbacks.onSession(session);
             else window.writerAgentWorkbench.mount(session);
-        } catch (_error) {
-            // The linked ID remains visible even when project details are temporarily unavailable.
+        } catch (error) {
+            session.__projectLoadError = error?.message || '请求失败';
         } finally {
             delete session.__projectLoading;
+            renderWriterProjectProgress(session);
         }
     }
 
@@ -378,6 +688,7 @@
         mount(session) {
             mountedWriterSession = session || {id: null, actions: []};
             renderWriterProjectContext(mountedWriterSession);
+            renderWriterProjectProgress(mountedWriterSession);
             hydrateWriterProject(mountedWriterSession);
             const host = writerActionHost();
             if (!host) return;
@@ -412,6 +723,8 @@
     let pendingMessage = '';
     let thinkingStageIndex = 0;
     let thinkingTimer = null;
+    let thinkingStartedAt = 0;
+    let mountedProjectReviewSessionId = null;
     const thinkingStages = [
         '正在阅读你提交的材料',
         '正在结合材料与对话上下文',
@@ -426,7 +739,7 @@
 
     function toggleReportsPanel() {
         const isHidden = layoutElement.classList.toggle('reports-hidden');
-        reportsToggleButton.title = isHidden ? '展开评审报告' : '隐藏评审报告';
+        reportsToggleButton.title = isHidden ? '展开项目面板' : '隐藏项目面板';
         reportsToggleButton.setAttribute('aria-label', reportsToggleButton.title);
         reportsToggleButton.setAttribute('aria-pressed', String(!isHidden));
         const icon = reportsToggleButton.querySelector('i');
@@ -492,7 +805,11 @@
         spinner.className = 'spinner-border spinner-border-sm';
         spinner.setAttribute('aria-hidden', 'true');
         const label = document.createElement('span');
-        label.textContent = thinkingStages[thinkingStageIndex];
+        const slowResponse = thinkingStartedAt > 0
+            && Date.now() - thinkingStartedAt >= 60_000;
+        label.textContent = slowResponse
+            ? '模型响应较慢，仍在处理；超时后可直接重试'
+            : thinkingStages[thinkingStageIndex];
         const dots = document.createElement('span');
         dots.className = 'writer-agent-thinking-dots';
         line.append(spinner, label, dots);
@@ -503,6 +820,7 @@
     function beginThinking(message = '', showPendingMessage = true) {
         pendingMessage = showPendingMessage ? message : '';
         thinkingStageIndex = 0;
+        thinkingStartedAt = Date.now();
         if (thinkingTimer) window.clearInterval(thinkingTimer);
         thinkingTimer = window.setInterval(() => {
             thinkingStageIndex = (thinkingStageIndex + 1) % thinkingStages.length;
@@ -515,6 +833,7 @@
         pendingMessage = '';
         if (thinkingTimer) window.clearInterval(thinkingTimer);
         thinkingTimer = null;
+        thinkingStartedAt = 0;
         if (render) renderConversation();
     }
 
@@ -567,6 +886,10 @@
             if (message.kind === 'material') { conversation.append(renderMaterialMessage(message)); return; }
             const article = document.createElement('article');
             article.className = `writer-agent-message${message.role === 'user' ? ' is-user' : ''}`;
+            if (['project_review_offer', 'project_review'].includes(message.kind)
+                && window.writerProjectReviewUI?.renderMessage(article, message, {session: activeSession, showError})) {
+                conversation.append(article); return;
+            }
             addText(article, 'small text-muted mb-2', message.role === 'assistant' ? '编剧大师' : '你');
             addText(article, 'text-break text-wrap', message.content || '');
             if (message.role === 'assistant') renderStructuredReport(article, reportForMessage(message));
@@ -605,11 +928,17 @@
 
     function renderActiveSession() {
         const hasSession = Boolean(activeSession);
+        const nextProjectReviewSessionId = activeSession?.id ?? null;
+        if (mountedProjectReviewSessionId !== null && Number(mountedProjectReviewSessionId) !== Number(nextProjectReviewSessionId)) {
+            window.writerProjectReviewUI?.disposeSession(mountedProjectReviewSessionId);
+        }
+        mountedProjectReviewSessionId = nextProjectReviewSessionId;
         detailElement.classList.toggle('d-none', !hasSession);
         if (hasSession) { titleElement.textContent = activeSession.title || '未命名创作会话'; materialNameElement.textContent = activeSession.filename ? `来源文件：${activeSession.filename}` : '来源：直接输入'; }
         renderSessions(); renderConversation(); renderReportFiles(); setBusy(isBusy);
         window.writerAgentWorkbench.configure({sendMessage: sendSuggestedMessage, sendProjectLink: sendSuggestedProjectLink, onSession: updateSession, showError});
         window.writerAgentWorkbench.mount(activeSession);
+        window.writerProjectReviewUI?.mountSession(activeSession, {showError});
     }
 
     function updateSession(updated) {

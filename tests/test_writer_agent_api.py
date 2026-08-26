@@ -285,6 +285,57 @@ def _client(
     return TestClient(app)
 
 
+class _ProjectReviewJobs:
+    """In-memory JobManager boundary that records review operation contracts."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict, dict]] = []
+        self.jobs: dict[str, SimpleNamespace] = {}
+
+    def get_or_create_job(self, operation_id, payload, **kwargs):
+        self.calls.append((operation_id, payload, kwargs))
+        return self.jobs.setdefault(
+            operation_id,
+            SimpleNamespace(job_id=f"job-{len(self.jobs) + 1}"),
+        )
+
+
+def _project_review_api_context(
+    tmp_path,
+    *,
+    principal: Principal | None = None,
+    session_user_id: str = "writer-1",
+    project_creator_id: str = "writer-1",
+):
+    repository = writer_agent_api.CreativeRepository(tmp_path / "creative.db")
+    project = repository.create_original_project(
+        seed_text="完整审核项目",
+        name="审核项目",
+        target_episode_count=2,
+        created_by=project_creator_id,
+        creation_request_id="writer-agent-project-review",
+    )
+    store = WriterAgentStore(tmp_path / "writer-agent-project-review.db")
+    session = store.create(session_user_id, "继续创作", "完整审核会话")
+    store.bind_project(session["id"], project["id"], expected_context_revision=0)
+    permissions = MagicMock()
+    permissions.can_read_project.return_value = True
+    jobs = _ProjectReviewJobs()
+    current = {"principal": principal or _principal(
+        session_user_id, frozenset({"script.review.generate", "script.review.read"})
+    )}
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = lambda: current["principal"]
+    app.include_router(writer_agent_api.build_writer_agent_router(
+        tmp_path,
+        store=store,
+        creative_repository=repository,
+        permission_service=permissions,
+        job_manager=jobs,
+    ))
+    return TestClient(app), repository, store, session, permissions, jobs, current
+
+
 @pytest.mark.parametrize(("message", "expected"), [
     ("审核更新后的项目大纲", "outline"),
     ("审核全部大纲", "outline"),
@@ -329,6 +380,165 @@ def test_chat_offers_linked_long_project_review_without_provider(
     assert response.status_code == 200
     assert response.json()["messages"][-1]["kind"] == "project_review_offer"
     assert response.json()["messages"][-1]["audit_scope"] == "outline"
+
+
+def test_project_review_preview_create_is_idempotent_and_session_owner_can_read_admin_review(
+    tmp_path,
+) -> None:
+    client, repository, store, session, _permissions, jobs, current = (
+        _project_review_api_context(tmp_path, principal=_admin_principal())
+    )
+    base = f"/api/writer-agent/sessions/{session['id']}/project-reviews"
+
+    preview = client.post(f"{base}/preview", json={"audit_scope": "outline"})
+    assert preview.status_code == 200
+    original = preview.json()
+    assert original["manifest"]["project_id"] == store.get(session["id"], "writer-1")["project_id"]
+    assert original["batches"] == {"outline": []}
+
+    repository.update_project(
+        store.get(session["id"], "writer-1")["project_id"],
+        {"name": "审核项目（已更新）"},
+    )
+    stale = client.post(base, json={
+        "audit_scope": "outline",
+        "expected_fingerprint": original["fingerprint"],
+        "client_request_id": "confirm-stale",
+    })
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["fingerprint"] != original["fingerprint"]
+    assert stale.json()["detail"]["manifest"]["project"]["name"] == "审核项目（已更新）"
+
+    refreshed = client.post(f"{base}/preview", json={"audit_scope": "outline"})
+    payload = {
+        "audit_scope": "outline",
+        "expected_fingerprint": refreshed.json()["fingerprint"],
+        "client_request_id": "confirm-admin-review",
+    }
+    created = client.post(base, json=payload)
+    replayed = client.post(base, json=payload)
+    assert created.status_code == 201
+    assert replayed.status_code == 201
+    assert created.json()["review"]["id"] == replayed.json()["review"]["id"]
+    assert created.json()["review"]["created_by"] == "admin-1"
+    assert len(jobs.jobs) == 1
+
+    review_id = created.json()["review"]["id"]
+    assert client.get(f"{base}/{review_id}").status_code == 200
+    messages = store.get(session["id"], "writer-1")["messages"]
+    linked_messages = [
+        message for message in messages
+        if message.get("kind") == "project_review" and message.get("review_id") == review_id
+    ]
+    assert len(linked_messages) == 1
+
+    current["principal"] = _principal(
+        "writer-1", frozenset({"script.review.generate", "script.review.read"})
+    )
+    retrieved = client.get(f"{base}/{review_id}")
+    assert retrieved.status_code == 200
+    assert retrieved.json()["id"] == review_id
+    assert client.get(f"{base}/{review_id}/export").status_code == 409
+    repository.complete_project_review(review_id, {
+        "ai_verdict": "通过",
+        "summary": "审核完成",
+    })
+    exported = client.get(f"{base}/{review_id}/export")
+    assert exported.status_code == 200
+    assert "完整项目审核报告" in exported.text
+
+
+def test_project_review_requires_associated_readable_project_and_allows_readable_callers(
+    tmp_path,
+) -> None:
+    client, _repository, store, session, permissions, jobs, current = (
+        _project_review_api_context(tmp_path)
+    )
+    base = f"/api/writer-agent/sessions/{session['id']}/project-reviews"
+    # A separate, unbound session proves the 409 guard without bypassing the API.
+    unbound = store.create("writer-1", "继续创作", "未关联项目")
+    unbound_response = client.post(
+        f"/api/writer-agent/sessions/{unbound['id']}/project-reviews/preview",
+        json={"audit_scope": "outline"},
+    )
+    assert unbound_response.status_code == 409
+
+    permissions.can_read_project.return_value = False
+    denied = client.post(f"{base}/preview", json={"audit_scope": "outline"})
+    assert denied.status_code == 403
+
+    permissions.can_read_project.return_value = True
+    for caller in (
+        _principal("writer-1", frozenset({"script.review.generate", "script.review.read"})),
+        _admin_principal(),
+    ):
+        current["principal"] = caller
+        assert client.post(f"{base}/preview", json={"audit_scope": "outline"}).status_code == 200
+    assert jobs.calls == []
+
+
+@pytest.mark.parametrize(("user_id", "role_codes", "project_creator_id"), [
+    ("writer-1", ("screenwriter",), "writer-1"),
+    ("project-member-1", ("screenwriter",), "writer-1"),
+    ("project-manager-1", ("project_manager",), "writer-1"),
+])
+def test_project_review_allows_project_creator_member_and_manager_with_read_grant(
+    tmp_path, user_id, role_codes, project_creator_id,
+) -> None:
+    principal = Principal(
+        user_id=user_id,
+        username=user_id,
+        display_name=user_id,
+        role_codes=role_codes,
+        permissions=frozenset({"script.review.generate", "script.review.read"}),
+        data_scope="managed_projects" if "project_manager" in role_codes else "project",
+        session_id=f"session-{user_id}",
+    )
+    client, _repository, _store, session, _permissions, _jobs, _current = (
+        _project_review_api_context(
+            tmp_path,
+            principal=principal,
+            session_user_id=user_id,
+            project_creator_id=project_creator_id,
+        )
+    )
+    base = f"/api/writer-agent/sessions/{session['id']}/project-reviews"
+
+    preview = client.post(f"{base}/preview", json={"audit_scope": "outline"})
+    assert preview.status_code == 200
+    created = client.post(base, json={
+        "audit_scope": "outline",
+        "expected_fingerprint": preview.json()["fingerprint"],
+        "client_request_id": f"readable-{user_id}",
+    })
+    assert created.status_code == 201
+    assert client.get(f"{base}/{created.json()['review']['id']}").status_code == 200
+
+
+def test_project_review_resume_reuses_operation_only_for_failed_review(tmp_path) -> None:
+    client, repository, _store, session, _permissions, jobs, _current = (
+        _project_review_api_context(tmp_path)
+    )
+    base = f"/api/writer-agent/sessions/{session['id']}/project-reviews"
+    preview = client.post(f"{base}/preview", json={"audit_scope": "outline"}).json()
+    created = client.post(base, json={
+        "audit_scope": "outline",
+        "expected_fingerprint": preview["fingerprint"],
+        "client_request_id": "resume-review",
+    })
+    review_id = created.json()["review"]["id"]
+    repository.fail_script_review(review_id, "worker failed")
+
+    resumed = client.post(f"{base}/{review_id}/resume")
+    assert resumed.status_code == 200
+    assert jobs.calls[-1][0] == f"project-review:{review_id}"
+    assert jobs.calls[-1][1]["extra"]["retry_failed_operation"] is True
+    assert len(jobs.jobs) == 1
+    assert client.post(f"{base}/{review_id}/resume").status_code == 409
+    assert len(jobs.jobs) == 1
+
+    repository.complete_project_review(review_id, {"ai_verdict": "通过", "summary": "已完成"})
+    assert client.post(f"{base}/{review_id}/resume").status_code == 409
 
 
 def test_writer_router_retains_injected_creative_dependencies(tmp_path) -> None:

@@ -88,17 +88,17 @@ class ProjectReviewCoordinator:
             raise
         review = self.repository.set_script_review_job(review["id"], str(state.job_id))
         self.store.append_project_review_message_once(
-            session_id, principal.user_id, review_id=int(review["id"]),
+            session_id, str(session["user_id"]), review_id=int(review["id"]),
             audit_scope=audit_scope,
         )
         return {"review": review, "job_id": str(state.job_id), "created": _created}
 
     def get(self, session_id: int, principal: Any, review_id: int) -> dict[str, Any]:
-        self._session_project(session_id, principal)
+        session, _project = self._session_project(session_id, principal)
         review = self.repository.get_script_review(int(review_id))
         if not review or not self._belongs_to_session(review, session_id):
             raise ProjectReviewError(404, "完整项目审核不存在")
-        self._assert_review_readable(review, principal)
+        self._assert_review_readable(review, session, principal)
         return review
 
     def resume(self, session_id: int, principal: Any, review_id: int) -> dict[str, Any]:
@@ -152,8 +152,13 @@ class ProjectReviewCoordinator:
     def _belongs_to_session(review: dict[str, Any], session_id: int) -> bool:
         return int(dict(review.get("source_payload") or {}).get("writer_session_id") or 0) == int(session_id)
 
-    def _assert_review_readable(self, review: dict[str, Any], principal: Any) -> None:
-        if not principal.is_system_admin and review.get("created_by") != principal.user_id:
+    def _assert_review_readable(
+        self, review: dict[str, Any], session: dict[str, Any], principal: Any
+    ) -> None:
+        if (
+            not principal.is_system_admin
+            and str(session.get("user_id") or "") != str(principal.user_id)
+        ):
             raise ProjectReviewError(403, "没有访问此完整项目审核的权限")
         project_id = review.get("project_id")
         if project_id is None or self.permission_service is None or not self.permission_service.can_read_project(principal, str(project_id)):

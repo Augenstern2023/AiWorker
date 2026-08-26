@@ -421,6 +421,9 @@ def test_project_review_preview_create_is_idempotent_and_session_owner_can_read_
     assert replayed.status_code == 201
     assert created.json()["review"]["id"] == replayed.json()["review"]["id"]
     assert created.json()["review"]["created_by"] == "admin-1"
+    assert set(created.json()["review"]["source_payload"]) == {
+        "audit_scope", "manifest"
+    }
     assert len(jobs.jobs) == 1
 
     review_id = created.json()["review"]["id"]
@@ -438,6 +441,7 @@ def test_project_review_preview_create_is_idempotent_and_session_owner_can_read_
     retrieved = client.get(f"{base}/{review_id}")
     assert retrieved.status_code == 200
     assert retrieved.json()["id"] == review_id
+    assert set(retrieved.json()["source_payload"]) == {"audit_scope", "manifest"}
     assert client.get(f"{base}/{review_id}/export").status_code == 409
     repository.complete_project_review(review_id, {
         "ai_verdict": "通过",

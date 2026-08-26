@@ -91,7 +91,11 @@ class ProjectReviewCoordinator:
             session_id, str(session["user_id"]), review_id=int(review["id"]),
             audit_scope=audit_scope,
         )
-        return {"review": review, "job_id": str(state.job_id), "created": _created}
+        return {
+            "review": self._public_review(review),
+            "job_id": str(state.job_id),
+            "created": _created,
+        }
 
     def get(self, session_id: int, principal: Any, review_id: int) -> dict[str, Any]:
         session, _project = self._session_project(session_id, principal)
@@ -99,7 +103,7 @@ class ProjectReviewCoordinator:
         if not review or not self._belongs_to_session(review, session_id):
             raise ProjectReviewError(404, "完整项目审核不存在")
         self._assert_review_readable(review, session, principal)
-        return review
+        return self._public_review(review)
 
     def resume(self, session_id: int, principal: Any, review_id: int) -> dict[str, Any]:
         self._session_project(session_id, principal)
@@ -116,7 +120,7 @@ class ProjectReviewCoordinator:
             self.repository.fail_script_review(review["id"], str(exc))
             raise
         review = self.repository.set_script_review_job(review["id"], str(state.job_id))
-        return {"review": review, "job_id": str(state.job_id)}
+        return {"review": self._public_review(review), "job_id": str(state.job_id)}
 
     def _session_project(self, session_id: int, principal: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         session = self.store.get(
@@ -151,6 +155,19 @@ class ProjectReviewCoordinator:
     @staticmethod
     def _belongs_to_session(review: dict[str, Any], session_id: int) -> bool:
         return int(dict(review.get("source_payload") or {}).get("writer_session_id") or 0) == int(session_id)
+
+    @staticmethod
+    def _public_review(review: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(review)
+        source = dict(payload.get("source_payload") or {})
+        payload["audit_scope"] = str(
+            payload.get("audit_scope") or source.get("audit_scope") or ""
+        )
+        payload["source_payload"] = {
+            "audit_scope": payload["audit_scope"],
+            "manifest": dict(source.get("manifest") or {}),
+        }
+        return payload
 
     def _assert_review_readable(
         self, review: dict[str, Any], session: dict[str, Any], principal: Any

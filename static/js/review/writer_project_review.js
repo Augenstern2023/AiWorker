@@ -128,6 +128,30 @@
         const completed = review.status === 'completed' ? (total || Math.max(current, resultCount)) : Math.max(resultCount, current ? current - 1 : 0);
         return {total, current, completed, batchStart: number(meta.batch_start), batchEnd: number(meta.batch_end), startedAt: Number(meta.request_started_at || 0), attempt: number(meta.request_attempt) || 1};
     }
+    function renderCurrentRequest(host, review) {
+        const meta = reportMeta(review);
+        const refs = Array.isArray(meta.loaded_resource_refs) ? meta.loaded_resource_refs : [];
+        if (!meta.request_kind && !meta.stage_kind && !refs.length) return;
+        const section = document.createElement('section'); section.className = 'writer-project-review-section';
+        addText(section, 'fw-semibold', '当前请求内容');
+        const requestLabels = {unit_review: '逐集审核', batch_summary: '批次汇总', final_summary: '最终汇总'};
+        const stageLabels = {outline: '大纲', script: '剧本'};
+        const requestLabel = requestLabels[meta.request_kind] || meta.request_kind || '审核请求';
+        const stageLabel = stageLabels[meta.stage_kind] || meta.stage_kind || '全项目';
+        addText(section, 'small mt-2', `${requestLabel} · ${stageLabel}`);
+        if (number(meta.prompt_chars) || meta.reasoning_effort) addText(section, 'small text-muted mt-1', `提示词 ${number(meta.prompt_chars).toLocaleString()} 字符 · 推理档位 ${meta.reasoning_effort || '-'}`);
+        refs.forEach((ref) => {
+            const parts = [];
+            const refStage = stageLabels[ref.stage_kind] || ref.stage_kind || '';
+            if (refStage && ref.episode_number) parts.push(`${refStage}第 ${number(ref.episode_number)} 集`);
+            else if (refStage && Array.isArray(ref.episode_numbers) && ref.episode_numbers.length) parts.push(`${refStage}第 ${number(ref.episode_numbers[0])}–${number(ref.episode_numbers.at(-1))} 集`);
+            else parts.push({project: '项目', brief: 'Brief', stage: '阶段'}[ref.kind] || ref.kind || '资源');
+            if (ref.id !== undefined && ref.id !== null) parts.push(`资源 #${ref.id}`);
+            if (ref.version !== undefined && ref.version !== null) parts.push(`v${ref.version}`);
+            addText(section, 'small text-muted mt-1', parts.join(' · '));
+        });
+        host.append(section);
+    }
     function renderReview(review) {
         const host = content(); if (!host) return;
         host.replaceChildren();
@@ -145,6 +169,7 @@
             const resume = document.createElement('button'); resume.type = 'button'; resume.className = 'btn btn-primary mt-3'; resume.textContent = `从第 ${resumeAt} 集继续`;
             resume.addEventListener('click', () => resumeReview(review, resume)); host.append(resume); return;
         }
+        renderCurrentRequest(host, review);
         const label = progress.current ? `正在审核第 ${progress.current} 集${progress.batchStart && progress.batchEnd ? `（当前批次第 ${progress.batchStart}–${progress.batchEnd} 集）` : ''}` : '正在准备完整项目审核';
         addText(host, 'writer-project-review-state', label);
         if (progress.total) addText(host, 'small text-muted mt-2', `已完成 ${progress.completed}/${progress.total} 集`);

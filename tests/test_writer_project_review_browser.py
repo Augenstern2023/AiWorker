@@ -190,8 +190,14 @@ def test_project_review_uses_worker_event_payload_for_live_request_metadata(page
     mount_review_ui(page, [review], job_responses=[{
         "job_id": "project-review-job-87", "status": "running",
         "events": [{"event": "progress", "payload": {
+            "request_kind": "unit_review", "stage_kind": "outline",
             "current_episode": 31, "batch_start": 31, "batch_end": 40,
             "request_started_at": 1_000_000, "request_attempt": 2,
+            "reasoning_effort": "high", "prompt_chars": 4567,
+            "loaded_resource_refs": [{
+                "kind": "resource", "id": 501, "version": 8,
+                "stage_kind": "outline", "episode_number": 31,
+            }],
         }}],
     }])
     page.evaluate(f"Date.now = () => {now * 1000};")
@@ -202,6 +208,10 @@ def test_project_review_uses_worker_event_payload_for_live_request_metadata(page
     drawer.get_by_text("正在审核第 31 集（当前批次第 31–40 集）").wait_for()
     assert drawer.get_by_text("模型响应较慢，任务仍在运行").is_visible()
     assert drawer.get_by_text("第 31 集正在进行第 2 次尝试").is_visible()
+    assert drawer.get_by_text("当前请求内容").is_visible()
+    assert drawer.get_by_text("逐集审核 · 大纲").is_visible()
+    assert drawer.get_by_text("提示词 4,567 字符 · 推理档位 high").is_visible()
+    assert drawer.get_by_text("大纲第 31 集 · 资源 #501 · v8").is_visible()
     assert "/api/jobs/project-review-job-87" in [
         request["url"] for request in page.evaluate("window.__reviewRequests")
     ]

@@ -53,8 +53,6 @@ def _review_request_key(row: sqlite3.Row) -> str:
 
 
 def _is_project_long_review(row: sqlite3.Row) -> bool:
-    if str(row["source_type"] or "") != "project":
-        return False
     try:
         payload = json.loads(row["source_payload_json"] or "{}")
     except (TypeError, ValueError, json.JSONDecodeError):

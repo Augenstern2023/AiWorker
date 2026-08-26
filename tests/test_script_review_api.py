@@ -168,6 +168,57 @@ def test_formal_review_list_and_confirmation_exclude_project_long_audit(tmp_path
     assert confirmation.json()["detail"] == "完整项目审核不进入人工确认流程"
 
 
+def test_formal_review_routes_reject_project_long_audit_and_keep_formal_access(tmp_path) -> None:
+    """Removing an endpoint audit-scope guard exposes project-long audit data."""
+    repository = CreativeRepository(tmp_path / "creative.db")
+    formal = repository.create_script_review(
+        source_type="project",
+        mode="single",
+        project_id=11,
+        episode_numbers=[1],
+        source_fingerprint="formal-fingerprint",
+        source_payload={"formal": True},
+        created_by="writer-1",
+    )
+    repository.complete_script_review(
+        formal["id"],
+        {
+            "ai_verdict": "通过",
+            "summary": "结构清楚。",
+            "core_findings": [],
+            "episode_reviews": [],
+            "cross_episode_findings": [],
+        },
+    )
+    project_audit, _ = repository.create_project_review_once(
+        project_id=11,
+        episode_numbers=[1, 2],
+        source_fingerprint="audit-fingerprint",
+        source_payload={"audit_scope": "outline", "request_key": "route-guard-1"},
+        created_by="writer-1",
+        request_key="route-guard-1",
+    )
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = _admin_principal
+    app.include_router(build_script_review_router(repository, FakeJobManager()))
+    client = TestClient(app)
+
+    formal_detail = client.get(f"/api/script-reviews/{formal['id']}")
+    formal_export = client.get(f"/api/script-reviews/{formal['id']}/export")
+    formal_delete = client.delete(f"/api/script-reviews/{formal['id']}")
+    audit_detail = client.get(f"/api/script-reviews/{project_audit['id']}")
+    audit_export = client.get(f"/api/script-reviews/{project_audit['id']}/export")
+    audit_delete = client.delete(f"/api/script-reviews/{project_audit['id']}")
+
+    assert formal_detail.status_code == 200
+    assert formal_export.status_code == 200
+    assert formal_delete.status_code == 200
+    assert audit_detail.status_code == 409
+    assert audit_export.status_code == 409
+    assert audit_delete.status_code == 409
+    assert repository.get_script_review(project_audit["id"]) is not None
+
+
 def test_completed_review_history_can_be_deleted_by_its_owner(tmp_path) -> None:
     repository = CreativeRepository(tmp_path / "creative.db")
     review = repository.create_script_review(

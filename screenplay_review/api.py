@@ -262,6 +262,8 @@ def build_script_review_router(
             raise HTTPException(404, "审核记录不存在")
         if not can_read_review(request, principal, review):
             raise HTTPException(403, "没有访问此审核记录的权限")
+        if bool((review.get("source_payload") or {}).get("audit_scope")):
+            raise HTTPException(409, "完整项目审核不属于正式审核流程")
         review = refresh_review(review)
         return PlainTextResponse(
             build_review_markdown(review),
@@ -283,6 +285,8 @@ def build_script_review_router(
             raise HTTPException(404, "审核记录不存在")
         if not can_read_review(request, principal, review):
             raise HTTPException(403, "没有访问此审核记录的权限")
+        if bool((review.get("source_payload") or {}).get("audit_scope")):
+            raise HTTPException(409, "完整项目审核不属于正式审核流程")
         return refresh_review(review)
 
     @router.delete("/{review_id}")
@@ -297,6 +301,8 @@ def build_script_review_router(
             raise HTTPException(404, "审核记录不存在")
         if not can_read_review(request, principal, review):
             raise HTTPException(403, "没有访问此审核记录的权限")
+        if bool((review.get("source_payload") or {}).get("audit_scope")):
+            raise HTTPException(409, "完整项目审核不属于正式审核流程")
         if review["status"] in {"queued", "running"}:
             raise HTTPException(409, "审核仍在执行，无法删除")
         repository.delete_script_review(review_id)

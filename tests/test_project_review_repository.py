@@ -51,6 +51,39 @@ def test_project_review_creation_is_idempotent_and_completes_without_confirmatio
     assert completed["report"] == {"ai_verdict": "通过"}
 
 
+def test_audit_scope_alone_identifies_legacy_project_review_lifecycle(tmp_path) -> None:
+    """Adding a source-type condition would strand persisted audit-scope reviews."""
+    repository = CreativeRepository(tmp_path / "creative.db")
+    completeable = repository.create_script_review(
+        source_type="text",
+        mode="collection",
+        project_id=11,
+        episode_numbers=[1, 2],
+        source_fingerprint="legacy-complete",
+        source_payload={"audit_scope": "outline"},
+        created_by="writer-1",
+    )
+    resumable = repository.create_script_review(
+        source_type="text",
+        mode="collection",
+        project_id=11,
+        episode_numbers=[1, 2],
+        source_fingerprint="legacy-resume",
+        source_payload={"audit_scope": "outline"},
+        created_by="writer-1",
+    )
+    repository.fail_script_review(resumable["id"], "provider unavailable")
+
+    completed = repository.complete_project_review(
+        completeable["id"], {"ai_verdict": "通过"}
+    )
+    resumed = repository.prepare_project_review_resume(resumable["id"])
+
+    assert completed["status"] == "completed"
+    assert resumed["status"] == "queued"
+    assert resumed["source_payload"]["audit_scope"] == "outline"
+
+
 def test_concurrent_project_review_creation_stores_one_request_key(tmp_path) -> None:
     """Removing the immediate write transaction must allow duplicate rows here."""
     repository = CreativeRepository(tmp_path / "creative.db")

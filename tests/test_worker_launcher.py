@@ -94,6 +94,20 @@ def test_build_creative_screenplay_review_worker_command():
     ]
 
 
+def test_build_creative_project_review_worker_command():
+    assert build_worker_command(
+        ".runtime/jobs/project-review.json",
+        platform="creative",
+        crawler_type="project_review",
+    ) == [
+        sys.executable,
+        "-m",
+        "project_review.worker",
+        "--job-file",
+        ".runtime/jobs/project-review.json",
+    ]
+
+
 def test_build_creative_screenplay_optimization_worker_command():
     assert build_worker_command(
         ".runtime/jobs/script-optimization.json",

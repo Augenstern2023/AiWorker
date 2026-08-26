@@ -222,6 +222,80 @@ def test_job_manager_allows_independent_script_reviews_to_run_together(
         )
 
 
+def test_job_manager_shares_review_concurrency_by_review_id(monkeypatch, tmp_path):
+    launches = []
+
+    def launch(*_args, **_kwargs):
+        launches.append(True)
+        return FakeProcess()
+
+    monkeypatch.setattr("runtime.job_manager.launch_worker", launch)
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    screenplay = CrawlJob(
+        job_id="screenplay-review-a",
+        platform="creative",
+        crawler_type="screenplay_review",
+        extra={"review_id": 101},
+    )
+    manager.jobs[screenplay.job_id] = JobState(job=screenplay, status="running")
+    manager.processes[screenplay.job_id] = FakeProcess()
+
+    project_review = manager.start_job(
+        CrawlJob(
+            job_id="project-review-b",
+            platform="creative",
+            crawler_type="project_review",
+            extra={"review_id": 102},
+        )
+    )
+
+    assert project_review.job_id == "project-review-b"
+    with pytest.raises(JobConflictError, match="platform 'creative'"):
+        manager.start_job(
+            CrawlJob(
+                job_id="project-review-a-duplicate",
+                platform="creative",
+                crawler_type="project_review",
+                extra={"review_id": 101},
+            )
+        )
+    assert len(launches) == 1
+
+
+def test_project_review_operation_is_reused_without_second_launch(monkeypatch, tmp_path):
+    launches = []
+
+    def launch(*_args, **_kwargs):
+        launches.append(True)
+        return FakeProcess()
+
+    monkeypatch.setattr("runtime.job_manager.launch_worker", launch)
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    payload = {
+        "platform": "creative",
+        "crawler_type": "project_review",
+        "extra": {"review_id": 303},
+    }
+
+    first = manager.get_or_create_job(
+        "project-review-operation-303",
+        payload,
+        created_by_user_id="user-1",
+        workflow_task_id="task-1",
+        project_id=17,
+    )
+    second = manager.get_or_create_job(
+        "project-review-operation-303",
+        payload,
+        created_by_user_id="user-1",
+        workflow_task_id="task-1",
+        project_id=17,
+    )
+
+    assert second.job_id == first.job_id
+    assert len(launches) == 1
+
+
 def test_job_manager_allows_independent_creative_generation_jobs(
     monkeypatch, tmp_path
 ):

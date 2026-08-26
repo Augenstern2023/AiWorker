@@ -26,6 +26,8 @@ def build_worker_command(job_file: str | Path, platform: str = "", crawler_type:
         return [sys.executable, "-m", "creative.phase4_worker", "--job-file", str(job_file)]
     if platform == "creative" and crawler_type == "screenplay_review":
         return [sys.executable, "-m", "screenplay_review.worker", "--job-file", str(job_file)]
+    if platform == "creative" and crawler_type == "project_review":
+        return [sys.executable, "-m", "project_review.worker", "--job-file", str(job_file)]
     if platform == "creative" and crawler_type == "screenplay_optimization":
         return [sys.executable, "-m", "screenplay_optimization.worker", "--job-file", str(job_file)]
     if platform == "hg" and crawler_type == "drama_analysis":

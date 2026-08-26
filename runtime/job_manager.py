@@ -33,7 +33,9 @@ _CONCURRENT_DRAMA_DOWNLOAD_TYPES = frozenset(
 )
 _CONCURRENT_BREAKDOWN_TYPES = frozenset({"breakdown_generate"})
 _CONCURRENT_CREATIVE_GENERATION_TYPES = frozenset({"phase4_generate"})
-_CONCURRENT_SCREENPLAY_REVIEW_TYPES = frozenset({"screenplay_review"})
+_CONCURRENT_SCREENPLAY_REVIEW_TYPES = frozenset(
+    {"screenplay_review", "project_review"}
+)
 _CONCURRENT_SCREENPLAY_OPTIMIZATION_TYPES = frozenset({"screenplay_optimization"})
 _PENDING_LAUNCH_GRACE_SECONDS = 30.0
 _LAUNCH_LEASE_SECONDS = 30.0

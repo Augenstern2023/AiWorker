@@ -16,7 +16,11 @@
 #
 # 详细许可条款请参阅项目根目录下的LICENSE文件。
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
+import logging
 import os
+
+
+logger = logging.getLogger(__name__)
 
 # bilili 平台配置
 
@@ -26,6 +30,28 @@ def _env_bool(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.warning("Invalid integer for %s; using default %s", name, default)
+        return default
+
+
+def _env_choice(name: str, default: str, allowed: set[str]) -> str:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in allowed:
+        return normalized
+    logger.warning("Invalid choice for %s; using default %s", name, default)
+    return default
 
 # 每天爬取视频/帖子的数量控制
 MAX_NOTES_PER_DAY = 1
@@ -97,6 +123,31 @@ LLM_ALLOW_INSECURE_HTTP = os.getenv("LLM_ALLOW_INSECURE_HTTP", "")
 LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", "180"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
 LLM_RETRY_BASE_DELAY = float(os.getenv("LLM_RETRY_BASE_DELAY", "1"))
+PROJECT_REVIEW_LLM_REASONING_EFFORT = _env_choice(
+    "PROJECT_REVIEW_LLM_REASONING_EFFORT",
+    "high",
+    {"low", "medium", "high", "xhigh", "max"},
+)
+PROJECT_REVIEW_LLM_TIMEOUT_SECONDS = _env_int(
+    "PROJECT_REVIEW_LLM_TIMEOUT_SECONDS", 600
+)
+PROJECT_REVIEW_LLM_MAX_RETRIES = _env_int(
+    "PROJECT_REVIEW_LLM_MAX_RETRIES", 2
+)
+# 编剧大师是同步对话，不复用长任务的 600 秒读取超时与多次自动重试。
+# 单轮模型调用最多等待 180 秒，外层请求再以 210 秒作最终兜底。
+WRITER_AGENT_LLM_REASONING_EFFORT = os.getenv(
+    "WRITER_AGENT_LLM_REASONING_EFFORT", "high"
+)
+WRITER_AGENT_LLM_TIMEOUT_SECONDS = int(
+    os.getenv("WRITER_AGENT_LLM_TIMEOUT_SECONDS", "180")
+)
+WRITER_AGENT_LLM_MAX_RETRIES = int(
+    os.getenv("WRITER_AGENT_LLM_MAX_RETRIES", "0")
+)
+WRITER_AGENT_MESSAGE_TIMEOUT_SECONDS = float(
+    os.getenv("WRITER_AGENT_MESSAGE_TIMEOUT_SECONDS", "210")
+)
 BILI_LLM_MAX_TRANSCRIPT_CHARS = int(os.getenv("BILI_LLM_MAX_TRANSCRIPT_CHARS", "30000"))
 
 # 是否爬取用户信息

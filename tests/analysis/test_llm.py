@@ -18,7 +18,9 @@
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
 import asyncio
+import importlib
 import json
+import logging
 
 import httpx
 import config
@@ -696,6 +698,96 @@ def test_provider_uses_configured_request_timeout_for_long_generation():
     assert provider.timeout == 600
     assert provider.max_retries == 4
     assert provider.retry_base_delay == 2
+
+
+def test_prefixed_llm_profile_can_disable_global_retries():
+    class DummyConfig:
+        LLM_PROVIDER = "sub2api"
+        LLM_MAX_RETRIES = 4
+        WRITER_AGENT_LLM_MAX_RETRIES = 0
+
+    settings = resolve_llm_settings(DummyConfig, prefix="WRITER_AGENT_LLM")
+
+    assert settings["max_retries"] == 0
+
+
+def test_project_review_profile_uses_high_600_seconds_and_two_retries(monkeypatch):
+    from config import bilibili_config
+
+    for name in (
+        "PROJECT_REVIEW_LLM_REASONING_EFFORT",
+        "PROJECT_REVIEW_LLM_TIMEOUT_SECONDS",
+        "PROJECT_REVIEW_LLM_MAX_RETRIES",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    profile = importlib.reload(bilibili_config)
+
+    settings = resolve_llm_settings(profile, prefix="PROJECT_REVIEW_LLM")
+
+    assert settings["reasoning_effort"] == "high"
+    assert settings["timeout_seconds"] == 600
+    assert settings["max_retries"] == 2
+
+
+def test_project_review_provider_factory_accepts_retry_callback():
+    class DummyConfig:
+        LLM_PROVIDER = "openai-compatible"
+        LLM_BASE_URL = "https://example.test/v1"
+        LLM_API_KEY = "key"
+        LLM_MODEL = "review-model"
+        PROJECT_REVIEW_LLM_REASONING_EFFORT = "high"
+        PROJECT_REVIEW_LLM_TIMEOUT_SECONDS = 600
+        PROJECT_REVIEW_LLM_MAX_RETRIES = 2
+
+    callback = lambda _number, _total, _reason: None
+
+    provider = create_llm_provider_from_config(
+        DummyConfig,
+        prefix="PROJECT_REVIEW_LLM",
+        retry_callback=callback,
+    )
+
+    assert provider.retry_callback is callback
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "attribute", "expected"),
+    [
+        (
+            "PROJECT_REVIEW_LLM_TIMEOUT_SECONDS",
+            "invalid",
+            "PROJECT_REVIEW_LLM_TIMEOUT_SECONDS",
+            600,
+        ),
+        (
+            "PROJECT_REVIEW_LLM_MAX_RETRIES",
+            "invalid",
+            "PROJECT_REVIEW_LLM_MAX_RETRIES",
+            2,
+        ),
+        (
+            "PROJECT_REVIEW_LLM_REASONING_EFFORT",
+            "ultra-invalid",
+            "PROJECT_REVIEW_LLM_REASONING_EFFORT",
+            "high",
+        ),
+    ],
+)
+def test_invalid_project_review_profile_values_warn_and_fall_back(
+    monkeypatch, caplog, name, value, attribute, expected
+):
+    from config import bilibili_config
+
+    monkeypatch.setenv(name, value)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=bilibili_config.__name__):
+        profile = importlib.reload(bilibili_config)
+
+    assert getattr(profile, attribute) == expected
+    assert name in caplog.text
+
+    monkeypatch.delenv(name)
+    importlib.reload(profile)
 
 
 def test_chat_completions_reports_the_configured_timeout_after_retries():

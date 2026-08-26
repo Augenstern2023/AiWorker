@@ -357,6 +357,14 @@ def resolve_llm_settings(config_module: Any, prefix: str = "LLM") -> Dict[str, A
         or str(getattr(config_module, "LLM_API_KEY", "") or "")
         or os.getenv("LLM_API_KEY", "")
     )
+    prefixed_max_retries = getattr(
+        config_module, f"{prefix}_MAX_RETRIES", ""
+    )
+    max_retries_value = (
+        prefixed_max_retries
+        if prefixed_max_retries not in (None, "")
+        else getattr(config_module, "LLM_MAX_RETRIES", "")
+    )
     return {
         "provider": provider,
         "base_url": str(getattr(config_module, f"{prefix}_BASE_URL", "") or getattr(config_module, "LLM_BASE_URL", "") or defaults["base_url"]),
@@ -377,8 +385,7 @@ def resolve_llm_settings(config_module: Any, prefix: str = "LLM") -> Dict[str, A
             or getattr(config_module, "LLM_TIMEOUT_SECONDS", "")
         ),
         "max_retries": _max_retries(
-            getattr(config_module, f"{prefix}_MAX_RETRIES", "")
-            or getattr(config_module, "LLM_MAX_RETRIES", "")
+            max_retries_value
         ),
         "retry_base_delay": _retry_base_delay(
             getattr(config_module, f"{prefix}_RETRY_BASE_DELAY", "")
@@ -402,7 +409,8 @@ def _timeout_seconds(value: Any, default: int = 180) -> int:
 
 def _max_retries(value: Any, default: int = 2) -> int:
     try:
-        return max(0, min(5, int(value or default)))
+        normalized = default if value in (None, "") else value
+        return max(0, min(5, int(normalized)))
     except (TypeError, ValueError):
         return default
 
@@ -414,7 +422,12 @@ def _retry_base_delay(value: Any, default: float = 1.0) -> float:
         return default
 
 
-def create_llm_provider_from_config(config_module: Any, prefix: str = "LLM") -> OpenAICompatibleLLMProvider:
+def create_llm_provider_from_config(
+    config_module: Any,
+    prefix: str = "LLM",
+    *,
+    retry_callback: Callable[[int, int, str], None] | None = None,
+) -> OpenAICompatibleLLMProvider:
     settings = resolve_llm_settings(config_module, prefix=prefix)
     return OpenAICompatibleLLMProvider(
         base_url=settings["base_url"],
@@ -429,6 +442,7 @@ def create_llm_provider_from_config(config_module: Any, prefix: str = "LLM") -> 
         timeout=settings["timeout_seconds"],
         max_retries=settings["max_retries"],
         retry_base_delay=settings["retry_base_delay"],
+        retry_callback=retry_callback,
     )
 
 

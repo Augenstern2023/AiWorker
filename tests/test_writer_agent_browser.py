@@ -347,6 +347,98 @@ def test_writer_agent_renders_project_context_and_confirms_action(page: Page) ->
     assert request["body"]["expected_revision"] == 2
 
 
+def test_writer_agent_collapses_successful_retry_chain_into_read_only_history(
+    page: Page,
+) -> None:
+    mount_writer_agent(
+        page,
+        session={
+            "id": 1,
+            "messages": [],
+            "actions": [
+                {
+                    "id": "original",
+                    "root_action_id": "original",
+                    "status": "failed",
+                    "retryable": True,
+                    "title": "创建原创项目",
+                    "completed_steps": 0,
+                    "total_steps": 1,
+                    "created_at": 10,
+                },
+                {
+                    "id": "retry-1",
+                    "root_action_id": "original",
+                    "retry_of_action_id": "original",
+                    "status": "succeeded",
+                    "title": "创建原创项目",
+                    "completed_steps": 1,
+                    "total_steps": 1,
+                    "created_at": 20,
+                },
+                {
+                    "id": "retry-2",
+                    "root_action_id": "original",
+                    "retry_of_action_id": "original",
+                    "status": "succeeded",
+                    "title": "创建原创项目",
+                    "completed_steps": 1,
+                    "total_steps": 1,
+                    "created_at": 30,
+                },
+            ],
+        },
+    )
+
+    assert page.locator(".writer-action-card").count() == 1
+    assert page.get_by_role("button", name="重试").count() == 0
+    history = page.get_by_text("查看执行历史（2）")
+    assert history.is_visible()
+    history.click()
+    assert page.locator(".writer-action-history-item").count() == 2
+    assert page.locator(".writer-action-history-item button").count() == 0
+
+
+def test_writer_agent_retries_only_the_latest_failed_action_in_a_chain(
+    page: Page,
+) -> None:
+    mount_writer_agent(
+        page,
+        session={
+            "id": 1,
+            "messages": [],
+            "actions": [
+                {
+                    "id": "original",
+                    "root_action_id": "original",
+                    "status": "failed",
+                    "retryable": True,
+                    "title": "生成剧本",
+                    "created_at": 10,
+                },
+                {
+                    "id": "retry-latest",
+                    "root_action_id": "original",
+                    "retry_of_action_id": "original",
+                    "status": "failed",
+                    "retryable": True,
+                    "title": "生成剧本",
+                    "created_at": 20,
+                },
+            ],
+        },
+    )
+
+    assert page.locator(".writer-action-card").count() == 1
+    retry = page.get_by_role("button", name="重试")
+    assert retry.count() == 1
+    retry.click()
+    page.wait_for_function("window.__writerActionRequests.length === 1")
+    assert page.evaluate("window.__writerActionRequests[0].url").endswith(
+        "/actions/retry-latest/retry"
+    )
+
+
 def test_multiple_action_cards_disable_only_the_clicked_card(page: Page) -> None:
     mount_writer_agent(
         page,

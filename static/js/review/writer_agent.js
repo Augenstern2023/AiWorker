@@ -132,7 +132,71 @@
         }
     }
 
-    function renderWriterActionCard(action) {
+    function writerActionChainKey(action) {
+        return String(action?.root_action_id || action?.id || '');
+    }
+
+    function writerActionOrder(entry) {
+        const action = entry.action || {};
+        return [
+            Number(action.created_at || 0),
+            Number(action.updated_at || 0),
+            Number(entry.index || 0),
+        ];
+    }
+
+    function writerActionChains(actions) {
+        const grouped = new Map();
+        (actions || []).forEach((action, index) => {
+            const key = writerActionChainKey(action);
+            if (!grouped.has(key)) grouped.set(key, []);
+            grouped.get(key).push({action, index});
+        });
+        return [...grouped.values()].map((entries) => {
+            entries.sort((left, right) => {
+                const a = writerActionOrder(left);
+                const b = writerActionOrder(right);
+                return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+            });
+            return {
+                current: entries.at(-1).action,
+                history: entries.slice(0, -1).reverse().map((entry) => entry.action),
+            };
+        });
+    }
+
+    function writerActionStatusLabel(action) {
+        return ({
+            pending: '待确认', queued: '已排队', running: '生成中',
+            succeeded: '已完成', failed: '执行失败', cancelled: '已取消',
+        })[action?.status] || action?.status || '';
+    }
+
+    function renderWriterActionHistory(actions) {
+        const details = document.createElement('details');
+        details.className = 'writer-action-history border-top mt-3 pt-2';
+        const summary = document.createElement('summary');
+        summary.className = 'small text-muted';
+        summary.textContent = `查看执行历史（${actions.length}）`;
+        details.append(summary);
+        actions.forEach((action) => {
+            const item = document.createElement('section');
+            item.className = 'writer-action-history-item small border-top mt-2 pt-2';
+            writerCardText(item, 'fw-semibold', action.title || action.action_type || '创作动作');
+            const progress = Number(action.total_steps || 0) > 0
+                ? ` · ${Number(action.completed_steps || 0)} / ${Number(action.total_steps)}`
+                : '';
+            const occurredAt = sessionTime(action.updated_at || action.created_at);
+            writerCardText(
+                item, 'text-muted mt-1',
+                `${writerActionStatusLabel(action)}${progress}${occurredAt ? ` · ${occurredAt}` : ''}`
+            );
+            details.append(item);
+        });
+        return details;
+    }
+
+    function renderWriterActionCard(action, history = []) {
         const card = document.createElement('article');
         card.className = `writer-action-card status-${action.status || 'pending'}`;
         card.dataset.actionId = String(action.id);
@@ -143,7 +207,7 @@
         summary.textContent = action.summary || '';
         const status = document.createElement('div');
         status.className = 'small writer-action-status';
-        status.textContent = ({pending: '待确认', queued: '已排队', running: '生成中', succeeded: '已完成', failed: '执行失败', cancelled: '已取消'})[action.status] || action.status || '';
+        status.textContent = writerActionStatusLabel(action);
         card.append(title, summary, status);
         if (Number(action.total_steps || 0) > 0) {
             writerCardText(
@@ -190,6 +254,7 @@
             retry.addEventListener('click', () => retryWriterAction(action, retry));
             card.append(retry);
         }
+        if (history.length > 0) card.append(renderWriterActionHistory(history));
         if (['queued', 'running'].includes(action.status)) startWriterActionPolling(action.id);
         return card;
     }
@@ -694,7 +759,11 @@
             if (!host) return;
             renderMountedCreativeCards(host, mountedWriterSession);
             host.querySelectorAll('.writer-action-card').forEach((card) => card.remove());
-            (mountedWriterSession.actions || []).forEach((action) => host.append(renderWriterActionCard(action)));
+            writerActionChains(mountedWriterSession.actions || []).forEach(
+                ({current, history}) => host.append(
+                    renderWriterActionCard(current, history)
+                )
+            );
         },
         stop(actionId) { stopWriterActionPolling(actionId); },
     };

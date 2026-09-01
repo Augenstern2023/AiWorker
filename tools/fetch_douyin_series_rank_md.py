@@ -32,6 +32,7 @@ from tools.cdp_browser import CDPBrowserManager
 
 
 SERIES_URL = "https://www.douyin.com/series"
+SERIES_ENTRY_URL = f"{SERIES_URL}?from_nav=1"
 DEFAULT_COOKIE_FILE = PROJECT_ROOT / "browser_data" / "douyin_series_cookies.json"
 RANK_CATEGORIES = ["短剧", "漫剧"]
 TABS = ["热榜", "榜单"]
@@ -195,7 +196,7 @@ async def save_current_cookies(context: BrowserContext, cookie_path: Path) -> in
 async def wait_for_manual_login(page: Page, seconds: float, cookie_path: Path, context: BrowserContext) -> None:
     if seconds <= 0:
         return
-    await page.goto(SERIES_URL, wait_until="domcontentloaded", timeout=120_000)
+    await page.goto(SERIES_ENTRY_URL, wait_until="domcontentloaded", timeout=120_000)
     safe_print(
         f"[login] waiting {seconds:g}s on Douyin page. "
         "Please finish login in the opened browser if needed."
@@ -664,6 +665,14 @@ def first_text(*values: Any) -> str:
     return ""
 
 
+def first_nonzero_id(*values: Any) -> str:
+    for value in values:
+        text = clean_text(value)
+        if text and text != "0":
+            return text
+    return ""
+
+
 def format_timestamp_text(value: Any) -> str:
     text = clean_text(value)
     if not text:
@@ -779,6 +788,111 @@ def find_first_label_by_keys(value: Any, keys: Iterable[str]) -> str:
             if found:
                 return found
     return ""
+
+
+IDENTITY_ITEM_KEYS = (
+    "aweme_id",
+    "awemeId",
+    "item_id",
+    "itemId",
+    "watched_item",
+    "watchedItem",
+)
+IDENTITY_SERIES_KEYS = (
+    "series_id",
+    "seriesId",
+    "playlet_id",
+    "playletId",
+    "album_id",
+    "albumId",
+)
+
+
+def _direct_identity_values(item: dict[str, Any], keys: Iterable[str]) -> set[str]:
+    values: set[str] = set()
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, (dict, list)):
+            continue
+        text = clean_text(value)
+        if text and text != "0":
+            values.add(text)
+    for key in ("url", "href", "link", "schema", "jump_url", "detail_url", "share_url"):
+        value = item.get(key)
+        if not isinstance(value, str):
+            continue
+        series_id, _, item_id = extract_id_from_url(value)
+        if keys is IDENTITY_ITEM_KEYS and item_id:
+            values.add(item_id)
+        if keys is IDENTITY_SERIES_KEYS and series_id:
+            values.add(series_id)
+    return values
+
+
+def object_matches_info(item: dict[str, Any], info: DramaInfo) -> bool:
+    item_ids = _direct_identity_values(item, IDENTITY_ITEM_KEYS)
+    series_ids = _direct_identity_values(item, IDENTITY_SERIES_KEYS)
+    if info.item_id and info.item_id in item_ids:
+        return True
+    if info.series_id and info.series_id in series_ids:
+        return True
+    return False
+
+
+def matching_detail_objects(
+    captures: list[dict[str, Any] | list[Any]],
+    info: DramaInfo,
+) -> Iterable[dict[str, Any]]:
+    seen: set[int] = set()
+    matched: list[tuple[int, dict[str, Any]]] = []
+    for data in captures:
+        for item in iter_dicts(data):
+            if id(item) in seen or not object_matches_info(item, info):
+                continue
+            seen.add(id(item))
+            item_ids = _direct_identity_values(item, IDENTITY_ITEM_KEYS)
+            priority = 0 if info.item_id and info.item_id in item_ids else 1
+            matched.append((priority, item))
+    for _, item in sorted(matched, key=lambda entry: entry[0]):
+        yield item
+
+
+def direct_value_by_keys(item: dict[str, Any], keys: Iterable[str]) -> str:
+    wanted = {key.lower() for key in keys}
+    for key, value in item.items():
+        if str(key).lower() not in wanted or isinstance(value, (dict, list)):
+            continue
+        text = useful_text(value, max_len=500)
+        if text:
+            return text
+    return ""
+
+
+def direct_stat_by_keys(item: dict[str, Any], keys: Iterable[str]) -> str:
+    wanted = {key.lower() for key in keys}
+    containers = [item]
+    containers.extend(
+        value
+        for key, value in item.items()
+        if str(key).lower() in {"stats", "stat", "statistics", "statistics_info", "aweme_statistics"}
+        and isinstance(value, dict)
+    )
+    for container in containers:
+        for key, value in container.items():
+            if str(key).lower() not in wanted or isinstance(value, (dict, list)):
+                continue
+            text = clean_text(value)
+            if text and re.fullmatch(r"[0-9.,万亿wWkK]+", text):
+                return text
+    return ""
+
+
+def direct_author_name(item: dict[str, Any]) -> str:
+    author = item.get("author") if isinstance(item.get("author"), dict) else {}
+    return first_text(
+        direct_value_by_keys(item, ("author_name", "producer", "publisher", "provider", "studio", "出品方", "剧场")),
+        direct_value_by_keys(author, ("nickname", "name", "author_name")),
+    )
 
 
 def collect_dicts_with_keys(value: Any, keys: set[str], limit: int = 20) -> list[dict[str, Any]]:
@@ -906,11 +1020,15 @@ def iter_video_ids(value: Any) -> Iterable[str]:
 def first_video_id_from_captures(captures: list[dict[str, Any] | list[Any]], series_id: str = "") -> str:
     seen: set[str] = set()
     for data in captures:
-        for item_id in iter_video_ids(data):
-            if item_id in seen or item_id == series_id:
+        for item in iter_dicts(data):
+            series_ids = _direct_identity_values(item, IDENTITY_SERIES_KEYS)
+            if series_id and series_id not in series_ids:
                 continue
-            seen.add(item_id)
-            return item_id
+            for item_id in _direct_identity_values(item, IDENTITY_ITEM_KEYS):
+                if item_id in seen or item_id == series_id:
+                    continue
+                seen.add(item_id)
+                return item_id
     return ""
 
 
@@ -1486,19 +1604,19 @@ async def collect_rank_cards_from_text(page: Page, category: str, tab: str, limi
 
 
 def merge_detail_from_json(info: DramaInfo, captures: list[dict[str, Any] | list[Any]]) -> None:
-    for data in captures:
+    for data in matching_detail_objects(captures, info):
         if not info.description:
             info.description = useful_description(
-                find_first_by_keys(
+                direct_value_by_keys(
                     data,
                     ("desc", "description", "intro", "introduction", "series_intro", "album_desc"),
                 )
             )
-        info.like_count = info.like_count or find_first_stat(
+        info.like_count = info.like_count or direct_stat_by_keys(
             data,
             ("like_count", "digg_count", "diggCount", "digg", "likes", "zan_count"),
         )
-        info.favorite_count = info.favorite_count or find_first_stat(
+        info.favorite_count = info.favorite_count or direct_stat_by_keys(
             data,
             (
                 "favorite_count",
@@ -1510,40 +1628,39 @@ def merge_detail_from_json(info: DramaInfo, captures: list[dict[str, Any] | list
                 "收藏",
             ),
         )
-        info.comment_count = info.comment_count or find_first_stat(
+        info.comment_count = info.comment_count or direct_stat_by_keys(
             data,
             ("comment_count", "commentCount", "comments_count", "reply_count"),
         )
         info.heat_text = info.heat_text or find_first_heat(data)
-        info.episode_count = info.episode_count or find_first_by_keys(
+        info.episode_count = info.episode_count or direct_value_by_keys(
             data,
             ("episode_count", "episode_cnt", "total_episode", "total", "集数"),
         )
-        info.producer = info.producer or find_first_by_keys(
-            data,
-            ("author", "producer", "publisher", "provider", "出品方"),
+        info.producer = info.producer or direct_author_name(data)
+        info.category = info.category or useful_label(
+            direct_value_by_keys(data, ("category", "tag", "type", "genre"))
         )
-        info.category = info.category or find_first_label_by_keys(data, ("category", "tag", "type", "genre"))
         info.online_time = info.online_time or format_timestamp_text(
-            find_first_by_keys(
-            data,
-            ("online_time", "publish_time", "release_time", "create_time", "update_time"),
+            direct_value_by_keys(
+                data,
+                ("online_time", "publish_time", "release_time", "create_time", "update_time"),
             )
         )
 
 
 def merge_record_from_json_object(info: DramaInfo, item: dict[str, Any]) -> None:
-    info.description = info.description or find_first_by_keys(
+    info.description = info.description or direct_value_by_keys(
         item,
         ("desc", "description", "intro", "introduction", "series_intro", "album_desc", "简介"),
     )
     if info.description:
         info.description = useful_description(info.description)
-    info.like_count = info.like_count or find_first_stat(
+    info.like_count = info.like_count or direct_stat_by_keys(
         item,
         ("like_count", "digg_count", "diggCount", "digg", "likes", "zan_count"),
     )
-    info.favorite_count = info.favorite_count or find_first_stat(
+    info.favorite_count = info.favorite_count or direct_stat_by_keys(
         item,
         (
             "favorite_count",
@@ -1555,39 +1672,59 @@ def merge_record_from_json_object(info: DramaInfo, item: dict[str, Any]) -> None
             "收藏",
         ),
     )
-    info.comment_count = info.comment_count or find_first_stat(
+    info.comment_count = info.comment_count or direct_stat_by_keys(
         item,
         ("comment_count", "commentCount", "comments_count", "reply_count", "评论数"),
     )
     info.heat_text = info.heat_text or find_first_heat(item)
-    info.episode_count = info.episode_count or find_first_by_keys(
+    info.episode_count = info.episode_count or direct_value_by_keys(
         item,
         ("episode_count", "episode_cnt", "total_episode", "total_episodes", "total", "集数"),
     )
-    info.producer = info.producer or find_first_by_keys(
-        item,
-        ("author", "author_name", "producer", "publisher", "provider", "studio", "出品方", "剧场"),
+    info.producer = info.producer or direct_author_name(item)
+    info.category = info.category or useful_label(
+        direct_value_by_keys(item, ("category", "tag", "type", "genre", "题材", "类型"))
     )
-    info.category = info.category or find_first_label_by_keys(item, ("category", "tag", "type", "genre", "题材", "类型"))
     info.online_time = info.online_time or format_timestamp_text(
-        find_first_by_keys(
-        item,
-        ("online_time", "publish_time", "release_time", "create_time", "update_time", "上线时间", "更新时间"),
+        direct_value_by_keys(
+            item,
+            ("online_time", "publish_time", "release_time", "create_time", "update_time", "上线时间", "更新时间"),
         )
     )
-    info.series_id = info.series_id or find_first_by_keys(
+    info.series_id = info.series_id or direct_value_by_keys(
         item,
         ("series_id", "seriesId", "series", "playlet_id", "playletId"),
     )
-    info.album_id = info.album_id or find_first_by_keys(item, ("album_id", "albumId"))
-    info.item_id = info.item_id or find_first_by_keys(item, ("aweme_id", "item_id", "itemId", "id"))
-    url = find_first_url(item)
+    info.album_id = info.album_id or direct_value_by_keys(item, ("album_id", "albumId"))
+    info.item_id = info.item_id or direct_value_by_keys(item, ("aweme_id", "item_id", "itemId"))
+    url = first_text(
+        *(
+            item.get(key)
+            for key in (
+                "url",
+                "href",
+                "link",
+                "schema",
+                "jump_url",
+                "jumpUrl",
+                "open_url",
+                "openUrl",
+                "detail_url",
+                "detailUrl",
+                "play_url",
+                "playUrl",
+                "share_url",
+                "shareUrl",
+            )
+            if isinstance(item.get(key), str)
+        )
+    )
     series_from_url, album_from_url, item_from_url = extract_id_from_url(url)
     info.series_id = info.series_id or series_from_url
     info.album_id = info.album_id or album_from_url
     info.item_id = info.item_id or item_from_url
     normalized = normalize_detail_url(url, info.series_id, info.item_id)
-    if normalized and not normalized.startswith("dom://"):
+    if not info.detail_url and normalized and not normalized.startswith("dom://"):
         info.detail_url = normalized
     info.cover_url = info.cover_url or first_image_from_json(item)
 
@@ -1615,6 +1752,30 @@ def normalize_series_item(raw_item: dict[str, Any], category: str, tab: str, ran
         title=normalize_title_key(title),
         rank_category=category,
         tab=tab,
+        series_id=first_nonzero_id(
+            item.get("series_id"),
+            item.get("seriesId"),
+            item.get("playlet_id"),
+            item.get("playletId"),
+            raw_item.get("series_id"),
+            raw_item.get("seriesId"),
+            raw_item.get("playlet_id"),
+            raw_item.get("playletId"),
+        ),
+        album_id=first_nonzero_id(
+            item.get("album_id"),
+            item.get("albumId"),
+            raw_item.get("album_id"),
+            raw_item.get("albumId"),
+        ),
+        item_id=first_nonzero_id(
+            item.get("aweme_id"),
+            item.get("item_id"),
+            item.get("watched_item"),
+            raw_item.get("aweme_id"),
+            raw_item.get("item_id"),
+            raw_item.get("watched_item"),
+        ),
         heat_text=first_text(
             item.get("hot_value"),
             item.get("hot"),
@@ -1648,14 +1809,6 @@ def normalize_series_item(raw_item: dict[str, Any], category: str, tab: str, ran
     )
     merge_record_from_json_object(info, raw_item)
     merge_record_from_json_object(info, item)
-    info.item_id = info.item_id or first_text(
-        raw_item.get("aweme_id"),
-        raw_item.get("item_id"),
-        raw_item.get("watched_item"),
-        item.get("aweme_id"),
-        item.get("item_id"),
-        item.get("watched_item"),
-    )
     if info.item_id == "0":
         info.item_id = ""
     if not info.heat_text:
@@ -1704,19 +1857,41 @@ def collect_records_from_tab_json(
 def merge_records_from_json(records: list[DramaInfo], captures: list[dict[str, Any] | list[Any]]) -> None:
     if not records or not captures:
         return
-    unmatched = [record for record in records if record.title]
-    for data in captures:
-        for item in iter_dicts(data):
-            item_text = json.dumps(item, ensure_ascii=False)
-            if len(item_text) > 20_000:
-                continue
-            for record in unmatched:
-                if record.title and record.title in item_text:
-                    before = (record.detail_url, record.series_id, record.item_id)
-                    merge_record_from_json_object(record, item)
-                    after = (record.detail_url, record.series_id, record.item_id)
-                    if after != before:
-                        break
+    for record in records:
+        for item in matching_detail_objects(captures, record):
+            merge_record_from_json_object(record, item)
+
+
+def category_rankings_are_identical(grouped_records: dict[str, list[DramaInfo]], tab: str) -> bool:
+    short_records = grouped_records.get(group_key("短剧", tab), [])
+    comic_records = grouped_records.get(group_key("漫剧", tab), [])
+    if not short_records or not comic_records or len(short_records) != len(comic_records):
+        return False
+
+    def signature(records: list[DramaInfo]) -> list[tuple[int, str, str]]:
+        return [
+            (
+                int(item.rank or 0),
+                clean_text(item.series_id or item.item_id),
+                normalize_title_key(item.title),
+            )
+            for item in records
+        ]
+
+    return signature(short_records) == signature(comic_records)
+
+
+def assert_distinct_category_rankings(grouped_records: dict[str, list[DramaInfo]]) -> None:
+    populated_tabs = [
+        tab
+        for tab in TABS
+        if grouped_records.get(group_key("短剧", tab)) and grouped_records.get(group_key("漫剧", tab))
+    ]
+    duplicated_tabs = [tab for tab in populated_tabs if category_rankings_are_identical(grouped_records, tab)]
+    if populated_tabs and len(duplicated_tabs) == len(populated_tabs):
+        raise RuntimeError(
+            "短剧与漫剧榜单完全相同，分类切换未生效: " + "、".join(duplicated_tabs)
+        )
 
 
 def comments_from_json(captures: list[dict[str, Any] | list[Any]], limit: int) -> list[CommentInfo]:
@@ -1960,7 +2135,7 @@ async def open_detail_page(
                 try:
                     await list_page.go_back(wait_until="domcontentloaded", timeout=20_000)
                 except Exception:
-                    await list_page.goto(SERIES_URL, wait_until="domcontentloaded", timeout=60_000)
+                    await list_page.goto(SERIES_ENTRY_URL, wait_until="domcontentloaded", timeout=60_000)
                     await click_text(list_page, item.rank_category or "短剧", timeout=10_000)
                     await click_text(list_page, item.tab, timeout=10_000)
                 return page
@@ -2070,13 +2245,40 @@ async def _enrich_detail(
     return item
 
 
+async def active_rank_category(page: Page) -> str:
+    try:
+        return clean_text(
+            await page.evaluate(
+                r"""() => {
+                    const clean = value => (value || '').replace(/\s+/g, ' ').trim();
+                    const candidates = Array.from(document.querySelectorAll('body *')).filter(node => {
+                        const text = clean(node.innerText || node.textContent || '');
+                        if (!['短剧', '漫剧'].includes(text)) return false;
+                        const rect = node.getBoundingClientRect();
+                        if (rect.width < 8 || rect.height < 8 || rect.x > 360) return false;
+                        const style = getComputedStyle(node);
+                        const aria = node.getAttribute('aria-selected');
+                        const className = String(node.className || '').toLowerCase();
+                        return aria === 'true' || /active|selected|current|checked/.test(className)
+                            || style.fontWeight === '600' || style.fontWeight === '700';
+                    });
+                    return candidates.length ? clean(candidates[0].innerText || candidates[0].textContent) : '';
+                }"""
+            )
+        )
+    except Exception:
+        return ""
+
+
 async def prepare_series_page(page: Page, category: str) -> None:
-    await page.goto(SERIES_URL, wait_until="domcontentloaded", timeout=120_000)
+    await page.goto(SERIES_ENTRY_URL, wait_until="domcontentloaded", timeout=120_000)
     await page.wait_for_timeout(3_000)
-    if not await click_text(page, category, timeout=15_000):
-        body_text = await visible_text(page.locator("body"))
-        if not ("热榜" in body_text and "榜单" in body_text and "集" in body_text):
-            raise RuntimeError(f"无法点击左侧{category}入口")
+    clicked = await click_text(page, category, timeout=15_000)
+    if not clicked:
+        raise RuntimeError(f"无法点击左侧{category}入口")
+    active_category = await active_rank_category(page)
+    if active_category and active_category != category:
+        raise RuntimeError(f"分类切换未生效：期望{category}，实际{active_category}")
 
 
 async def collect_tab(
@@ -2255,6 +2457,7 @@ async def run(args: argparse.Namespace) -> Path:
                         args.detail_timeout,
                         args.debug,
                     )
+            assert_distinct_category_rankings(grouped_records)
             await page.close()
         finally:
             if context:

@@ -3,4 +3,4 @@
 {% block content %}
 {% include "common/workspace/selection_dramas.html" %}
 {% endblock %}
-{% block scripts %}<script src="/static/js/common/creative.js"></script><script src="/static/js/selection/dramas.js"></script>{% endblock %}
+{% block scripts %}<script src="/static/js/common/creative.js?v={{ asset_version }}"></script><script src="/static/js/selection/dramas.js?v={{ asset_version }}"></script>{% endblock %}

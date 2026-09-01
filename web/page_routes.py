@@ -47,7 +47,7 @@ PAGE_ROUTES = (
     ("/admin/analytics", "analytics.read", "数据分析"),
     ("/admin/data", "page.data_management", "数据管理"),
     ("/admin/drama-player", "page.data_management", "已下载剧目播放"),
-    ("/admin/jobs", "*", "机器任务"),
+    ("/admin/jobs", "*", "系统后台"),
     ("/admin/deliveries", "*", "成果交付"),
     ("/admin/audit", "*", "审计日志"),
     ("/admin/departments", "*", "组织架构"),

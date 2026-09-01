@@ -143,6 +143,9 @@ RAG_LLM_WIRE_API = ""
 RAG_LLM_REASONING_EFFORT = ""
 RAG_VECTOR_STORE_DIR = ".runtime/rag/chroma"
 
+# 分集大纲需要在跨批次生成时维持较强的连续性推理。
+CREATIVE_OUTLINE_REASONING_EFFORT = "high"
+
 from .bilibili_config import *
 from .xhs_config import *
 from .dy_config import *

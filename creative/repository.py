@@ -44,6 +44,10 @@ class DuplicateTopicError(ValueError):
     """Raised when a title has already been collected into the topic store."""
 
 
+class DownloadTopicDecisionConflict(ValueError):
+    """Raised when download intent conflicts with a manual topic decision."""
+
+
 def _review_request_key(row: sqlite3.Row) -> str:
     try:
         payload = json.loads(row["source_payload_json"] or "{}")
@@ -722,6 +726,148 @@ class CreativeRepository:
                 ),
             )
         return self.get_topic(topic_id) or {}
+
+    def ensure_download_topic(
+        self,
+        *,
+        title: str,
+        platform: str,
+        provider_id: str,
+        source_ref: str,
+        actor_user_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        normalized_title = str(title or "").strip()
+        title_key = self._title_key(normalized_title)
+        if not title_key:
+            raise ValueError("剧名不能为空")
+        normalized_platform = str(platform or "").strip().lower()
+        if normalized_platform not in {"hg", "dy"}:
+            raise ValueError("下载选题平台必须是 hg 或 dy")
+        normalized_provider = str(provider_id or "").strip() or normalized_platform
+        normalized_source_ref = str(source_ref or "").strip()
+        if not normalized_source_ref:
+            raise ValueError("下载选题缺少来源标识")
+
+        now = time.time()
+        before: dict[str, Any] | None = None
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            matching_rows = [
+                row
+                for row in conn.execute(
+                    "SELECT * FROM creative_topics WHERE deleted = 0"
+                ).fetchall()
+                if self._title_key(row["title"]) == title_key
+            ]
+            decided_rows = [
+                row for row in matching_rows if row["status"] != "pending_review"
+            ]
+            selected = max(
+                decided_rows or matching_rows,
+                key=lambda row: float(row["updated_at"] or 0),
+                default=None,
+            )
+
+            if selected is not None:
+                before = self._topic(dict(selected))
+                if selected["status"] in {"rejected", "archived"}:
+                    raise DownloadTopicDecisionConflict(
+                        "该剧目已被拒绝或归档，请先在选题库恢复后再下载"
+                    )
+                topic_id = int(selected["id"])
+                if selected["status"] == "adopted":
+                    return self.get_topic(topic_id) or {}, before
+                conn.execute(
+                    "UPDATE creative_topics SET status = 'adopted', decision_note = ?, "
+                    "updated_at = ? WHERE id = ?",
+                    ("下载时自动采纳", now, topic_id),
+                )
+                source_job_id = str(selected["job_id"] or "")
+            else:
+                source_path = (
+                    f"download-search:{normalized_provider}:{normalized_source_ref}"
+                )
+                evidence = [
+                    {
+                        "source_type": "download_search",
+                        "provider_id": normalized_provider,
+                        "source_ref": normalized_source_ref,
+                    }
+                ]
+                source_job_id = f"download:{normalized_source_ref}"
+                cursor = conn.execute(
+                    """
+                    INSERT INTO creative_topics (
+                        platform, job_id, source_path, captured_at, title, description,
+                        category, rank_type, rank_source, status, score, confidence,
+                        score_details_json, recommendation, evidence_json,
+                        source_platforms_json, decision_note, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, '', '', 'download_search',
+                              'download_search', 'adopted', 0, 'medium', ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_platform,
+                        source_job_id,
+                        source_path,
+                        time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+                        normalized_title,
+                        json.dumps({}, ensure_ascii=False),
+                        "下载时自动采纳",
+                        json.dumps(evidence, ensure_ascii=False),
+                        json.dumps([normalized_platform], ensure_ascii=False),
+                        "下载时自动采纳",
+                        now,
+                        now,
+                    ),
+                )
+                topic_id = int(cursor.lastrowid)
+
+            snapshot = {
+                "topic_id": topic_id,
+                "title": normalized_title,
+                "outcome": "adopted",
+                "decision_note": "下载时自动采纳",
+                "source": "download_search",
+                "provider_id": normalized_provider,
+                "source_ref": normalized_source_ref,
+            }
+            canonical = json.dumps(
+                snapshot,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            version = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(version), 0) + 1 "
+                    "FROM selection_stage_snapshots "
+                    "WHERE stage = 'topic_decision' AND topic_id = ?",
+                    (topic_id,),
+                ).fetchone()[0]
+            )
+            conn.execute(
+                """
+                INSERT INTO selection_stage_snapshots (
+                    id, stage, topic_id, version, outcome, snapshot_json,
+                    content_fingerprint, resource_type, resource_id,
+                    actor_user_id, source_job_id, created_at
+                ) VALUES (?, 'topic_decision', ?, ?, 'adopted', ?, ?,
+                          'topic', ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    topic_id,
+                    version,
+                    canonical,
+                    hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+                    str(topic_id),
+                    actor_user_id,
+                    source_job_id,
+                    now,
+                ),
+            )
+
+        return self.get_topic(topic_id) or {}, before
 
     def decided_title_keys(self) -> set[str]:
         with self._connect() as conn:

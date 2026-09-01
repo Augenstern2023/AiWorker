@@ -197,6 +197,13 @@ backups/
 /logs/
 /.worktrees/
 /.superpowers/
+/.pytest-*/
+/.pytest_*/
+/.pre-commit-*/
+/.precommit-*/
+/.review-*/
+/temp_pytest_*/
+/temp_pycache_*/
 /test/hg_decrypted_mp4_asr_*/
 /creative-*-beats.md
 /今日榜单.png

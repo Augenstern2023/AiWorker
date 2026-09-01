@@ -758,6 +758,13 @@ def persist_proposed_actions(
         project_id = action.project_id
         if project_id is None and isinstance(project_context.get("project_id"), int):
             project_id = project_context["project_id"]
+        if (
+            action.action_type in {"creative.run_plan", "creative.lock"}
+            and project_id is None
+        ):
+            # Model output is untrusted. Never render a confirmable action that
+            # the authority boundary can only reject as an unbound write.
+            continue
         request_hash = hashlib.sha256(
             _canonical({"action_type": action.action_type, "project_id": project_id, "payload": payload, "snapshot": saved_snapshot["fingerprint"]}).encode("utf-8")
         ).hexdigest()

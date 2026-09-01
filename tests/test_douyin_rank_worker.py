@@ -84,3 +84,34 @@ def test_douyin_rank_worker_can_skip_auto_analysis(tmp_path, monkeypatch):
 
     assert douyin_rank_worker.run_job(job) == 0
     assert analysis_calls == []
+
+
+def test_douyin_rank_worker_pushes_after_rank_artifact_is_ready(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    pushes = []
+
+    async def fake_run_douyin_rank(args):
+        output_path = Path(args.output_dir) / "douyin_series_rank_20260831_101010.md"
+        output_path.write_text("# rank", encoding="utf-8")
+        output_path.with_suffix(".json").write_text(
+            json.dumps({"captured_at": "2026-08-31 10:10:10", "records": [{"title": "测试剧"}]}),
+            encoding="utf-8",
+        )
+        return output_path
+
+    monkeypatch.setattr(douyin_rank_worker, "run_douyin_rank", fake_run_douyin_rank)
+    monkeypatch.setattr(douyin_rank_worker, "analyze_rank_file", lambda *args, **kwargs: {"items": []})
+    monkeypatch.setattr(douyin_rank_worker, "deliver_rank_update", lambda platform, path: pushes.append((platform, Path(path))) or {"status": "sent"})
+    monkeypatch.setattr(douyin_rank_worker, "emit_event", lambda *args, **kwargs: None)
+
+    job = CrawlJob(
+        job_id="job-dy",
+        platform="dy",
+        crawler_type="rank",
+        extra={"DOUYIN_AUTO_ANALYZE_TOP10": False},
+    )
+
+    assert douyin_rank_worker.run_job(job) == 0
+    assert [(platform, path.resolve()) for platform, path in pushes] == [
+        ("dy", tmp_path / "data/dy/jobs/job-dy/rank/douyin_series_rank_20260831_101010.json")
+    ]

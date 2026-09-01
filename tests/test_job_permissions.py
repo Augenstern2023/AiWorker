@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 import WebGUI
@@ -135,132 +135,303 @@ def role_client(job_environment, role_code: str, username: str) -> TestClient:
     return client
 
 
-def test_selection_download_job_records_owner_task_link_and_audit(job_environment):
-    client = role_client(job_environment, "selection_operator", "selector")
-    topic = job_environment.creative.upsert_topics([{
-        "platform": "hg", "job_id": "source-topic", "source_path": "source.json",
-        "captured_at": "2026-07-23", "title": "测试剧", "score": 90,
-        "confidence": "high", "score_details": {}, "recommendation": "adopt",
-        "evidence": [],
-    }])[0]
-    wrong_task = job_environment.workflow.create_task(
-        "workflow-download-wrong",
-        "breakdown",
-        "selection_operator",
-        topic_id=topic["id"],
-        actor=SYSTEM_ACTOR,
-    )
-    job_environment.workflow.claim_task(wrong_task["id"], client.principal)
+class DownloadJobRecordingManager:
+    def __init__(self, jobs_dir: Path):
+        self.jobs_dir = jobs_dir
+        self.jobs: list[dict] = []
 
-    wrong_node = client.post(
-        "/api/hongguo/drama/download/jobs",
-        json={
-            "title": "测试剧",
-            "book_id": "book-1",
-            "episodes": [1],
-            "topic_id": topic["id"],
-            "workflow_task_id": wrong_task["id"],
-        },
-    )
+    def generate_job_id(self, platform: str) -> str:
+        return f"{platform}-download-{len(self.jobs) + 1}"
 
-    assert wrong_node.status_code == 409
-    assert job_environment.manager.list_jobs() == []
-
-    omitted_without_source = client.post(
-        "/api/hongguo/drama/download/jobs",
-        json={
-            "title": "测试剧",
-            "book_id": "book-1",
-            "episodes": [1],
-            "topic_id": topic["id"],
-        },
-    )
-    assert omitted_without_source.status_code == 409
-    assert job_environment.manager.list_jobs() == []
-
-    task = job_environment.workflow.create_task(
-        "workflow-download",
-        "source_package",
-        "selection_operator",
-        topic_id=topic["id"],
-        actor=SYSTEM_ACTOR,
-    )
-    job_environment.workflow.claim_task(task["id"], client.principal)
-
-    response = client.post(
-        "/api/hongguo/drama/download/jobs",
-        json={
-            "title": "测试剧",
-            "book_id": "book-1",
-            "episodes": [1],
-            "topic_id": topic["id"],
-        },
-    )
-
-    assert response.status_code == 200
-    job = response.json()["job"]
-    assert job["created_by_user_id"] == client.user_id
-    assert job["job"]["extra"]["topic_id"] == topic["id"]
-    assert job["workflow_task_id"] == task["id"]
-    assert job_environment.workflow.list_task_job_ids(task["id"]) == [job["job_id"]]
-    events = job_environment.audit.query(action="job.create", target_id=job["job_id"])
-    assert events[0]["actor_user_id"] == client.user_id
-
-
-def test_source_job_rejects_unknown_or_mismatched_topic(job_environment):
-    client = role_client(job_environment, "selection_operator", "topic-selector")
-    topics = job_environment.creative.upsert_topics([
-        {
-            "platform": "hg", "job_id": f"topic-{index}",
-            "source_path": f"topic-{index}.json", "captured_at": "2026-07-23",
-            "title": title, "score": 90 - index, "confidence": "high",
-            "score_details": {}, "recommendation": "adopt", "evidence": [],
+    def create_job(
+        self,
+        job: CrawlJob,
+        *,
+        created_by_user_id=None,
+        workflow_task_id=None,
+        project_id=None,
+    ) -> JobState:
+        public_job = {
+            "job_id": job.job_id,
+            "platform": job.platform,
+            "crawler_type": job.crawler_type,
+            "status": "pending",
+            "job": job.to_dict(),
+            "created_by_user_id": created_by_user_id,
+            "workflow_task_id": workflow_task_id,
+            "project_id": project_id,
         }
-        for index, title in enumerate(("精确剧名", "另一个剧"), start=1)
-    ])
-    task = job_environment.workflow.create_task(
-        "workflow-topic-source",
-        "source_package",
-        "selection_operator",
-        topic_id=topics[0]["id"],
-        actor=SYSTEM_ACTOR,
-    )
-    job_environment.workflow.claim_task(task["id"], client.principal)
+        self.jobs.append(public_job)
+        return JobState(job=job)
 
-    unknown = client.post(
-        "/api/hongguo/drama/download/jobs",
-        json={
-            "topic_id": 999999,
-            "title": "精确剧名",
-            "book_id": "book-unknown",
-            "episodes": [1],
-            "workflow_task_id": task["id"],
-        },
+    def get_job(self, job_id: str) -> dict:
+        return next(job for job in self.jobs if job["job_id"] == job_id)
+
+
+class DownloadAuditRecorder:
+    def __init__(self):
+        self.events: list[dict] = []
+
+    def record(self, **event) -> str:
+        self.events.append(event)
+        return f"audit-{len(self.events)}"
+
+
+def _download_principal(*permissions: str) -> WebGUI.Principal:
+    return WebGUI.Principal(
+        user_id="download-selector",
+        username="download-selector",
+        display_name="下载选品员",
+        role_codes=("selection_operator",),
+        permissions=frozenset(permissions),
+        data_scope="task",
+        session_id="download-session",
     )
-    assert unknown.status_code == 404
-    mismatched_title = client.post(
-        "/api/hongguo/drama/download/jobs",
-        json={
-            "topic_id": topics[0]["id"],
-            "title": "另一个剧",
-            "book_id": "book-title",
-            "episodes": [1],
-            "workflow_task_id": task["id"],
-        },
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["hongguo", "douyin"])
+async def test_download_without_topic_auto_adopts_and_has_no_workflow_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
+):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    manager = DownloadJobRecordingManager(tmp_path / "jobs")
+    audit = DownloadAuditRecorder()
+    principal = _download_principal("job.create.selection", "drama.download")
+    monkeypatch.setattr(WebGUI, "creative_repository", repository)
+    monkeypatch.setattr(WebGUI, "job_manager", manager)
+    monkeypatch.setattr(WebGUI, "audit_service", audit)
+
+    if source == "hongguo":
+        payload = WebGUI.HongguoDramaDownloadJobRequest(
+            title="自动采纳短剧",
+            provider_id="provider-a",
+            series_ref="series-a",
+            episodes=[1],
+        )
+        response = await WebGUI.create_hongguo_drama_download_job(
+            payload, principal, None
+        )
+    else:
+        payload = WebGUI.DouyinFallbackDramaJobRequest(
+            title="自动采纳短剧",
+            aweme_id="aweme-a",
+            fallback_reason="红果无结果",
+        )
+        response = await WebGUI.create_douyin_fallback_drama_job(
+            payload, principal, None
+        )
+
+    topic = response["topic"]
+    job = response["job"]
+    assert topic["status"] == "adopted"
+    assert repository.get_topic(topic["id"])["title"] == "自动采纳短剧"
+    assert job["workflow_task_id"] is None
+    assert job["project_id"] is None
+    assert job["job"]["extra"]["topic_id"] == topic["id"]
+    assert job["job"]["extra"]["legacy_workflow_task_id"] is None
+    adoption_events = [
+        event
+        for event in audit.events
+        if event["action"] == "selection.topic_adopt_from_download"
+    ]
+    assert len(adoption_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_download_without_topic_returns_conflict_for_rejected_title(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic = repository.upsert_topics(
+        [
+            {
+                "platform": "hg",
+                "job_id": "rank-rejected",
+                "source_path": "rank.json",
+                "captured_at": "2026-08-28",
+                "title": "已拒绝短剧",
+                "score": 0,
+                "confidence": "medium",
+                "score_details": {},
+                "recommendation": "",
+                "evidence": [],
+            }
+        ]
+    )[0]
+    repository.decide_topic(topic["id"], "rejected", "人工拒绝", "selector")
+    manager = DownloadJobRecordingManager(tmp_path / "jobs")
+    monkeypatch.setattr(WebGUI, "creative_repository", repository)
+    monkeypatch.setattr(WebGUI, "job_manager", manager)
+    payload = WebGUI.HongguoDramaDownloadJobRequest(
+        title="已拒绝短剧", book_id="book-a", episodes=[1]
     )
-    assert mismatched_title.status_code == 409
-    mismatched_task = client.post(
-        "/api/hongguo/drama/download/jobs",
-        json={
-            "topic_id": topics[1]["id"],
-            "title": "另一个剧",
-            "book_id": "book-task",
-            "episodes": [1],
-            "workflow_task_id": task["id"],
-        },
+
+    with pytest.raises(HTTPException) as conflict:
+        await WebGUI.create_hongguo_drama_download_job(
+            payload,
+            _download_principal("job.create.selection", "drama.download"),
+            None,
+        )
+
+    assert conflict.value.status_code == 409
+    assert conflict.value.detail == "该剧目已被拒绝或归档，请先在选题库恢复后再下载"
+    assert manager.jobs == []
+
+
+@pytest.mark.asyncio
+async def test_download_permission_is_checked_before_auto_adopt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    manager = DownloadJobRecordingManager(tmp_path / "jobs")
+    monkeypatch.setattr(WebGUI, "creative_repository", repository)
+    monkeypatch.setattr(WebGUI, "job_manager", manager)
+    payload = WebGUI.HongguoDramaDownloadJobRequest(
+        title="无权限短剧", book_id="book-denied", episodes=[1]
     )
-    assert mismatched_task.status_code == 409
-    assert job_environment.manager.list_jobs() == []
+
+    with pytest.raises(HTTPException) as denied:
+        await WebGUI.create_hongguo_drama_download_job(
+            payload, _download_principal("job.create.selection"), None
+        )
+
+    assert denied.value.status_code == 403
+    assert repository.list_topics(limit=None) == []
+    assert manager.jobs == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_download_payload_is_rejected_before_auto_adopt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    monkeypatch.setattr(WebGUI, "creative_repository", repository)
+    payload = WebGUI.HongguoDramaDownloadJobRequest(
+        title="无效请求短剧", book_id="book-invalid", episodes=[]
+    )
+
+    with pytest.raises(HTTPException) as invalid:
+        await WebGUI.create_hongguo_drama_download_job(
+            payload,
+            _download_principal("job.create.selection", "drama.download"),
+            None,
+        )
+
+    assert invalid.value.status_code == 400
+    assert repository.list_topics(limit=None) == []
+
+
+@pytest.mark.asyncio
+async def test_selection_download_job_records_owner_without_task_link_and_audits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic = repository.upsert_topics(
+        [
+            {
+                "platform": "hg",
+                "job_id": "source-topic",
+                "source_path": "source.json",
+                "captured_at": "2026-07-23",
+                "title": "测试剧",
+                "score": 90,
+                "confidence": "high",
+                "score_details": {},
+                "recommendation": "adopt",
+                "evidence": [],
+            }
+        ]
+    )[0]
+    repository.decide_topic(topic["id"], "adopted", "", "selector")
+    manager = DownloadJobRecordingManager(tmp_path / "jobs")
+    audit = DownloadAuditRecorder()
+    principal = _download_principal("job.create.selection", "drama.download")
+    monkeypatch.setattr(WebGUI, "creative_repository", repository)
+    monkeypatch.setattr(WebGUI, "job_manager", manager)
+    monkeypatch.setattr(WebGUI, "audit_service", audit)
+
+    response = await WebGUI.create_hongguo_drama_download_job(
+        WebGUI.HongguoDramaDownloadJobRequest(
+            title="测试剧",
+            book_id="book-1",
+            episodes=[1],
+            topic_id=topic["id"],
+            workflow_task_id="ignored-source-package-task",
+        ),
+        principal,
+        None,
+    )
+
+    job = response["job"]
+    assert response["topic"]["id"] == topic["id"]
+    assert job["created_by_user_id"] == principal.user_id
+    assert job["job"]["extra"]["topic_id"] == topic["id"]
+    assert job["job"]["extra"]["legacy_workflow_task_id"] is None
+    assert job["workflow_task_id"] is None
+    assert job["project_id"] is None
+    assert [event["action"] for event in audit.events] == ["job.create"]
+
+
+def test_source_job_rejects_unknown_mismatched_or_unadopted_topic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topics = repository.upsert_topics(
+        [
+            {
+                "platform": "hg",
+                "job_id": f"topic-{index}",
+                "source_path": f"topic-{index}.json",
+                "captured_at": "2026-07-23",
+                "title": title,
+                "score": 90 - index,
+                "confidence": "high",
+                "score_details": {},
+                "recommendation": "adopt",
+                "evidence": [],
+            }
+            for index, title in enumerate(("精确剧名", "待采纳剧"), start=1)
+        ]
+    )
+    repository.decide_topic(topics[0]["id"], "adopted", "", "selector")
+    principal = _download_principal("job.create.selection", "drama.download")
+    monkeypatch.setattr(WebGUI, "creative_repository", repository)
+
+    with pytest.raises(HTTPException) as unknown:
+        WebGUI._resolve_download_topic(
+            topic_id=999999,
+            title="精确剧名",
+            platform="hg",
+            provider_id="provider-a",
+            source_ref="book-a",
+            actor=principal,
+            request=None,
+        )
+    with pytest.raises(HTTPException) as mismatched:
+        WebGUI._resolve_download_topic(
+            topic_id=topics[0]["id"],
+            title="另一个剧",
+            platform="hg",
+            provider_id="provider-a",
+            source_ref="book-a",
+            actor=principal,
+            request=None,
+        )
+    with pytest.raises(HTTPException) as pending:
+        WebGUI._resolve_download_topic(
+            topic_id=topics[1]["id"],
+            title="待采纳剧",
+            platform="hg",
+            provider_id="provider-a",
+            source_ref="book-b",
+            actor=principal,
+            request=None,
+        )
+
+    assert unknown.value.status_code == 404
+    assert mismatched.value.status_code == 409
+    assert pending.value.status_code == 409
 
 
 def add_job(
@@ -547,6 +718,140 @@ def test_generic_job_create_strips_unvalidated_client_project_ownership(
     assert job["created_by_user_id"] == creator.user_id
     assert job["project_id"] is None
     assert "project_id" not in job["job"]["extra"]
+
+
+def test_only_system_admin_can_start_rank_crawl_jobs():
+    operator = WebGUI.Principal(
+        user_id="rank-operator",
+        username="rank-operator",
+        display_name="榜单运营",
+        role_codes=("selection_operator",),
+        permissions=frozenset({"page.selection", "job.create.selection"}),
+        data_scope="task",
+        session_id="rank-operator-session",
+    )
+    admin = WebGUI.Principal(
+        user_id="rank-admin",
+        username="rank-admin",
+        display_name="系统管理员",
+        role_codes=("system_admin",),
+        permissions=frozenset({"*"}),
+        data_scope="all",
+        session_id="rank-admin-session",
+    )
+
+    with pytest.raises(HTTPException) as denied:
+        WebGUI._require_system_admin_rank_update(operator, "rank")
+
+    assert denied.value.status_code == 403
+    assert denied.value.detail == "只有系统管理员可以更新并抓取榜单"
+    WebGUI._require_system_admin_rank_update(admin, "rank")
+    WebGUI._require_system_admin_rank_update(operator, "search")
+
+
+class RankCreationRecordingManager:
+    def __init__(self):
+        self.jobs: list[CrawlJob] = []
+
+    def generate_job_id(self, platform: str) -> str:
+        return f"{platform}-rank-admin-job"
+
+    def create_job(self, payload, **_kwargs):
+        if isinstance(payload, CrawlJob):
+            job = payload
+        else:
+            data = dict(payload)
+            data.setdefault("job_id", self.generate_job_id(str(data["platform"])))
+            job = CrawlJob.from_dict(data)
+        self.jobs.append(job)
+        return JobState(job=job)
+
+    def get_job(self, job_id: str):
+        job = next(job for job in self.jobs if job.job_id == job_id)
+        return {
+            "job_id": job.job_id,
+            "platform": job.platform,
+            "crawler_type": job.crawler_type,
+            "status": "pending",
+            "job": job.to_dict(),
+            "created_by_user_id": None,
+            "workflow_task_id": None,
+            "project_id": None,
+        }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["jobs", "run"])
+async def test_all_generic_rank_job_entrypoints_enforce_system_admin_gate(
+    monkeypatch, endpoint
+):
+    operator = WebGUI.Principal(
+        user_id="rank-entry-operator",
+        username="rank-entry-operator",
+        display_name="榜单运营",
+        role_codes=("selection_operator",),
+        permissions=frozenset({"page.selection", "job.create.selection"}),
+        data_scope="task",
+        session_id="rank-entry-operator-session",
+    )
+    admin = WebGUI.Principal(
+        user_id="rank-entry-admin",
+        username="rank-entry-admin",
+        display_name="系统管理员",
+        role_codes=("system_admin",),
+        permissions=frozenset({"*"}),
+        data_scope="all",
+        session_id="rank-entry-admin-session",
+    )
+    manager = RankCreationRecordingManager()
+    monkeypatch.setattr(WebGUI, "job_manager", manager)
+    monkeypatch.setattr(WebGUI, "_record_job_audit", lambda *_args, **_kwargs: None)
+
+    if endpoint == "jobs":
+        payload = WebGUI.JobCreateRequest(platform="dy", crawler_type="rank")
+
+        async def invoke(principal):
+            return await WebGUI.create_job(payload, principal, None)
+
+    else:
+        payload = WebGUI.CrawlerConfig(
+            platform="dy",
+            login_type="qrcode",
+            crawler_type="rank",
+            keywords="",
+            start_page=1,
+            headless=False,
+            save_option="json",
+            get_comment=False,
+            get_sub_comment=False,
+        )
+
+        async def invoke(principal):
+            return await WebGUI.run_crawler(payload, None, principal)
+
+    with pytest.raises(HTTPException) as denied:
+        await invoke(operator)
+
+    assert denied.value.status_code == 403
+    assert manager.jobs == []
+
+    response = await invoke(admin)
+
+    assert response["job"]["crawler_type"] == "rank"
+    assert len(manager.jobs) == 1
+
+
+def test_rank_resume_and_retry_entrypoints_enforce_system_admin_gate():
+    source = Path("WebGUI.py").read_text(encoding="utf-8")
+    resume_endpoint = source.split('@app.post("/api/jobs/{job_id}/resume")', 1)[
+        1
+    ].split('@app.post("/api/jobs/{job_id}/retry")', 1)[0]
+    retry_endpoint = source.split('@app.post("/api/jobs/{job_id}/retry")', 1)[
+        1
+    ].split('@app.delete("/api/jobs/{job_id}")', 1)[0]
+
+    assert "_require_system_admin_rank_update" in resume_endpoint
+    assert "_require_system_admin_rank_update" in retry_endpoint
 
 
 def test_legacy_run_endpoint_rejects_sensitive_worker_combinations(job_environment):

@@ -161,3 +161,20 @@ def test_member_editor_uses_deactivation_copy_for_project_creator() -> None:
             "确定停用项目创建负责人的项目创建负责人角色吗？"
         ]
         browser.close()
+
+
+def test_member_editor_allows_authorized_manager_to_remove_the_last_project_owner() -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        _install_api(page)
+        page.set_content(_editor_markup())
+        page.add_script_tag(path=str(PROJECTS_SCRIPT))
+
+        remove_owner = page.get_by_role(
+            "button", name="移除项目负责人的项目负责人角色"
+        )
+        expect(remove_owner).to_be_enabled()
+        remove_owner.click()
+        expect(remove_owner).to_have_count(0)
+        browser.close()

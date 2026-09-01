@@ -15,7 +15,7 @@ from io import BytesIO, StringIO
 import json
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 import uuid
 
@@ -31,9 +31,10 @@ from creative.lifecycle_service import TopicLifecycleService, content_fingerprin
 from creative.market_reference_service import MarketReferenceService
 from creative.original_direction_service import validate_original_direction_content
 from creative.original_project_service import OriginalProjectService
+from creative.outline_fields import OUTLINE_TEXT_FIELDS, outline_field_source_fingerprint
 from creative.outline_overview import SERIES_OVERVIEW_FIELD_LABELS, read_series_overview
 from creative.repository import CreativeRepository, DuplicateTopicError
-from creative.script_service import normalize_script_content, validate_script
+from creative.script_service import normalize_script_content, rewrite_outline_field, validate_script
 from creative.selection_stage_service import SelectionStageService
 from creative.workflow_adapter import CreativeWorkflowAdapter
 
@@ -49,6 +50,8 @@ from creative.schema import (
 
     EpisodeBeatsRequest,
     OutlineBatchRequest,
+    OutlineFieldRewriteApplyRequest,
+    OutlineFieldRewriteRequest,
     OutlineOverviewRequest,
     OriginalProjectCreateRequest,
     PlanningAssignmentRequest,
@@ -708,6 +711,7 @@ def build_creative_router(
     workflow_repository: WorkflowRepository | None = None,
     repository: CreativeRepository | None = None,
     application_service: CreativeApplicationService | None = None,
+    llm_provider_factory: Callable[[], Any] | None = None,
 ) -> APIRouter:
     router = APIRouter(
         prefix="/api/creative",
@@ -1460,6 +1464,14 @@ def build_creative_router(
 
     def persist_legacy_draft(**kwargs: Any) -> dict[str, Any]:
         return application_service.persist_legacy_draft(**kwargs)
+
+    def outline_field_context_or_http(episode_id: int) -> dict[str, Any]:
+        try:
+            return repository.get_outline_field_rewrite_context(episode_id)
+        except ValueError as exc:
+            detail = str(exc)
+            status_code = 404 if detail in {"分集大纲不存在", "创作项目不存在"} else 409
+            raise HTTPException(status_code, detail) from exc
 
     def batch_resource_for(table: str, item_id: int) -> str | None:
         if table not in {"creative_characters", "creative_relationships"}:
@@ -2541,7 +2553,11 @@ def build_creative_router(
         try:
             task = workflow_repository.ensure_project_task(
                 str(project_id),
-                int(project["topic_id"]),
+                (
+                    int(project["topic_id"])
+                    if project.get("topic_id") is not None
+                    else None
+                ),
                 task_type=resource_type,
                 role_code=role_code,
                 actor=principal,
@@ -2668,6 +2684,10 @@ def build_creative_router(
             ):
                 raise HTTPException(403, "只能修改本人创建或参与的项目草稿")
             updates = payload.model_dump(exclude_none=True)
+            draft_brief_id = updates.pop("draft_brief_id", None)
+            expected_project_revision = updates.pop(
+                "expected_project_revision", None
+            )
             if updates.get("status") == "archived":
                 if not principal.is_system_admin and "project.archive" not in principal.permissions:
                     raise HTTPException(403, "没有归档项目的权限")
@@ -2675,7 +2695,12 @@ def build_creative_router(
                     principal, str(project_id)
                 ):
                     raise HTTPException(403, "无权管理该项目")
-            return repository.update_project(project_id, updates)
+            return repository.update_project(
+                project_id,
+                updates,
+                draft_brief_id=draft_brief_id,
+                expected_revision=expected_project_revision,
+            )
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -2977,6 +3002,7 @@ def build_creative_router(
                 operation_id=payload.operation_id or uuid.uuid4().hex,
                 actor=principal,
                 difference_note=payload.difference_note,
+                expected_project_revision=payload.expected_project_revision,
             )
         except KeyError as exc:
             raise HTTPException(404, "creative resource or workflow task not found") from exc
@@ -3161,6 +3187,157 @@ def build_creative_router(
             )
         except PermissionError as exc:
             raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post("/episodes/{episode_id}/fields/{field}/rewrite")
+    async def generate_outline_field_rewrite(
+        episode_id: int,
+        field: str,
+        payload: OutlineFieldRewriteRequest,
+        principal: Principal = Depends(current_principal),
+    ):
+        context = outline_field_context_or_http(episode_id)
+        if field not in OUTLINE_TEXT_FIELDS:
+            raise HTTPException(400, "不支持的大纲字段")
+        episode = context["episode"]
+        project_id = int(episode["project_id"])
+        try:
+            application_service.assert_stage_write_access(
+                project_id, "outline", principal
+            )
+            if episode.get("status") == "draft":
+                workflow_adapter.assert_editable(
+                    "outline", f"{project_id}:{episode['batch_id']}"
+                )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if llm_provider_factory is None:
+            raise HTTPException(503, "LLM provider is not configured")
+        try:
+            provider = llm_provider_factory()
+        except Exception as exc:
+            raise HTTPException(503, "LLM provider is not configured") from exc
+        try:
+            candidate, meta = await rewrite_outline_field(
+                provider,
+                project=context["project"],
+                brief=context["brief"],
+                characters=context["characters"],
+                relationships=context["relationships"],
+                episode=episode["content"],
+                previous_episode=(
+                    context["previous_episode"]["content"]
+                    if context["previous_episode"]
+                    else None
+                ),
+                next_episode=(
+                    context["next_episode"]["content"]
+                    if context["next_episode"]
+                    else None
+                ),
+                field=field,
+                instruction=payload.instruction,
+            )
+        except Exception as exc:
+            raise HTTPException(502, "大纲字段重写失败") from exc
+        return {
+            "episode_id": episode["id"],
+            "project_id": project_id,
+            "batch_id": episode["batch_id"],
+            "field": field,
+            "original_value": episode["content"].get(field, ""),
+            "candidate_value": candidate,
+            "source_fingerprint": outline_field_source_fingerprint(episode, field),
+            "source_status": episode["status"],
+            "meta": meta,
+        }
+
+    @router.post("/episodes/{episode_id}/fields/{field}/apply-rewrite")
+    async def apply_outline_field_rewrite(
+        episode_id: int,
+        field: str,
+        payload: OutlineFieldRewriteApplyRequest,
+        principal: Principal = Depends(current_principal),
+    ):
+        context = outline_field_context_or_http(episode_id)
+        if field not in OUTLINE_TEXT_FIELDS:
+            raise HTTPException(400, "不支持的大纲字段")
+        episode = context["episode"]
+        project_id = int(episode["project_id"])
+        try:
+            application_service.assert_stage_write_access(
+                project_id, "outline", principal
+            )
+            if episode.get("status") == "draft":
+                workflow_adapter.assert_editable(
+                    "outline", f"{project_id}:{episode['batch_id']}"
+                )
+                saved = repository.apply_outline_field_rewrite(
+                    episode_id,
+                    field,
+                    payload.candidate_value,
+                    payload.source_fingerprint,
+                )
+                return {
+                    "episode": saved,
+                    "batch_id": saved["batch_id"],
+                    "version": saved["version"],
+                    "created_new_version": False,
+                }
+
+            if outline_field_source_fingerprint(episode, field) != payload.source_fingerprint:
+                raise CreativeContextConflict("该字段已被更新，请重新生成")
+            if int(context["project"].get("revision") or 0) != payload.expected_project_revision:
+                raise CreativeContextConflict("project authority changed")
+            source_batch = repository.get_outline_batch(
+                project_id, str(episode["batch_id"])
+            )
+            source_episodes = sorted(
+                source_batch["episodes"], key=lambda item: int(item["episode_number"])
+            )
+            episodes = [dict(item["content"]) for item in source_episodes]
+            target_number = int(episode["episode_number"])
+            for item in episodes:
+                if int(item.get("episode") or 0) == target_number:
+                    item[field] = payload.candidate_value.strip()
+                    break
+            workflow_task_id = application_task_id(
+                None, "outline", project_id, principal
+            )
+            ref = application_service.create_revision(
+                project_id=project_id,
+                stage="outline",
+                replaces_resource_id=f"{project_id}:{episode['batch_id']}",
+                payload={
+                    "episodes": episodes,
+                    "series_arc": str(
+                        (source_episodes[0].get("content") or {}).get("series_arc") or ""
+                    ),
+                },
+                workflow_task_id=workflow_task_id,
+                operation_id=payload.operation_id or uuid.uuid4().hex,
+                expected_project_revision=payload.expected_project_revision,
+                actor=principal,
+            )
+            derived = application_service.hydrate_resource_ref(ref)
+            saved = next(
+                item
+                for item in derived["episodes"]
+                if int(item["episode_number"]) == target_number
+            )
+            return {
+                "episode": saved,
+                "batch_id": derived["batch_id"],
+                "version": saved["version"],
+                "created_new_version": True,
+            }
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except CreativeContextConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -3509,6 +3686,7 @@ def register_creative_routes(
     workflow_repository: WorkflowRepository | None = None,
     repository: CreativeRepository | None = None,
     application_service: CreativeApplicationService | None = None,
+    llm_provider_factory: Callable[[], Any] | None = None,
 ) -> None:
     app.include_router(
         build_creative_router(
@@ -3518,5 +3696,6 @@ def register_creative_routes(
             workflow_repository=workflow_repository,
             repository=repository,
             application_service=application_service,
+            llm_provider_factory=llm_provider_factory,
         )
     )

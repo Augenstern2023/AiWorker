@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
@@ -701,6 +703,399 @@ def test_today_rank_enriches_sparse_hongguo_history_csv_from_raw_mitm_response(t
     assert entry["description"] == "来自 MITM 原始响应的简介"
     assert entry["topic_tags"] == ["漫剧", "玄幻"]
     assert entry["subject"] == "漫剧 / 玄幻"
+
+
+def test_today_rank_reuses_persistent_hongguo_cache_until_sources_change(tmp_path, monkeypatch):
+    exports = tmp_path / "exports"
+    write_csv(
+        exports / "20260708/top10_rankings.csv",
+        [["红果短剧热播榜", "1", "缓存剧", "都市", "简介", "无", "无", "1w", "无", "100w", "无", "无", "无", "无", "无", ""]],
+    )
+    cache_dir = tmp_path / ".runtime" / "rank-cache"
+    first_service = TodayRankService(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir)
+    first = first_service.get_today_rank("hg", limit=10)
+    restarted = TodayRankService(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir)
+
+    def fail_list_snapshots(*_args, **_kwargs):
+        raise AssertionError("unchanged Hongguo sources must load the persistent response cache")
+
+    monkeypatch.setattr(restarted, "list_snapshots", fail_list_snapshots)
+    cached = restarted.get_today_rank("hg", limit=10)
+
+    assert first["current_entries"][0]["title"] == "缓存剧"
+    assert cached["current_entries"][0]["title"] == "缓存剧"
+    assert cached["cache_status"] == "hit"
+
+    write_csv(
+        exports / "20260708/top10_rankings.csv",
+        [["红果短剧热播榜", "1", "更新剧", "都市", "简介", "无", "无", "1w", "无", "100w", "无", "无", "无", "无", "无", ""]],
+    )
+    changed = TodayRankService(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir).get_today_rank("hg", limit=10)
+
+    assert changed["current_entries"][0]["title"] == "更新剧"
+    assert changed["cache_status"] == "generated"
+
+
+def test_today_rank_reuses_persistent_douyin_cache_until_sources_change(
+    tmp_path, monkeypatch
+):
+    rank_path = (
+        tmp_path
+        / "data/dy/jobs/cache/rank/douyin_series_rank_20260708_100000.json"
+    )
+    write_json(
+        rank_path,
+        {
+            "captured_at": "2026-07-08 10:00:00",
+            "records": [dy_record(1, "缓存剧", "cache-series")],
+        },
+    )
+    cache_dir = tmp_path / ".runtime" / "rank-cache"
+    first_service = TodayRankService(root=tmp_path, cache_dir=cache_dir)
+    first = first_service.get_today_rank("dy")
+    restarted = TodayRankService(root=tmp_path, cache_dir=cache_dir)
+
+    def fail_list_snapshots(*_args, **_kwargs):
+        raise AssertionError("unchanged Douyin sources must load the persistent cache")
+
+    monkeypatch.setattr(restarted, "list_snapshots", fail_list_snapshots)
+    cached = restarted.get_today_rank("dy")
+
+    assert first["current_entries"][0]["title"] == "缓存剧"
+    assert cached["current_entries"][0]["title"] == "缓存剧"
+    assert cached["cache_status"] == "hit"
+
+    write_json(
+        rank_path,
+        {
+            "captured_at": "2026-07-08 10:00:00",
+            "records": [dy_record(1, "更新剧", "cache-series")],
+        },
+    )
+    changed = TodayRankService(root=tmp_path, cache_dir=cache_dir).get_today_rank(
+        "dy"
+    )
+
+    assert changed["current_entries"][0]["title"] == "更新剧"
+    assert changed["cache_status"] == "generated"
+
+
+def test_today_rank_force_refresh_rebuilds_unchanged_cached_response(tmp_path):
+    write_json(
+        tmp_path
+        / "data/dy/jobs/cache/rank/douyin_series_rank_20260708_100000.json",
+        {
+            "captured_at": "2026-07-08 10:00:00",
+            "records": [dy_record(1, "强制刷新剧", "refresh-series")],
+        },
+    )
+    service = TodayRankService(root=tmp_path)
+
+    first = service.get_today_rank("dy")
+    refreshed = service.get_today_rank("dy", force_refresh=True)
+
+    assert first["cache_status"] == "generated"
+    assert refreshed["cache_status"] == "refreshed"
+
+
+def test_today_rank_memory_cache_ttl_starts_after_slow_generation(
+    tmp_path, monkeypatch
+):
+    write_json(
+        tmp_path
+        / "data/dy/jobs/cache/rank/douyin_series_rank_20260708_100000.json",
+        {
+            "captured_at": "2026-07-08 10:00:00",
+            "records": [dy_record(1, "慢生成剧", "slow-series")],
+        },
+    )
+    service = TodayRankService(root=tmp_path)
+    clock = {"now": 100.0}
+    revision_calls = 0
+    original_source_revision = service._source_revision
+    original_list_snapshots = service.list_snapshots
+
+    def counted_source_revision(platform):
+        nonlocal revision_calls
+        revision_calls += 1
+        return original_source_revision(platform)
+
+    def slow_list_snapshots(platform):
+        clock["now"] += 60.0
+        return original_list_snapshots(platform)
+
+    monkeypatch.setattr(
+        "analysis.today_rank_service.time.monotonic", lambda: clock["now"]
+    )
+    monkeypatch.setattr(service, "_source_revision", counted_source_revision)
+    monkeypatch.setattr(service, "list_snapshots", slow_list_snapshots)
+
+    service.get_today_rank("dy", force_refresh=True)
+    cached = service.get_today_rank("dy")
+
+    assert cached["cache_status"] == "hit"
+    assert revision_calls == 1
+
+
+def test_today_rank_source_change_invalidates_all_platform_memory_keys(tmp_path):
+    rank_path = (
+        tmp_path
+        / "data/dy/jobs/cache/rank/douyin_series_rank_20260708_100000.json"
+    )
+    write_json(
+        rank_path,
+        {
+            "captured_at": "2026-07-08 10:00:00",
+            "records": [dy_record(1, "旧缓存剧", "cache-series")],
+        },
+    )
+    service = TodayRankService(root=tmp_path)
+    service.get_today_rank("dy", limit=10)
+    service.get_today_rank("dy", limit=5)
+    write_json(
+        rank_path,
+        {
+            "captured_at": "2026-07-08 10:00:00",
+            "records": [dy_record(1, "新缓存剧", "cache-series")],
+        },
+    )
+
+    service.get_today_rank("dy", limit=10, force_refresh=True)
+    other_key = service.get_today_rank("dy", limit=5)
+
+    assert other_key["current_entries"][0]["title"] == "新缓存剧"
+
+
+def test_today_rank_normalizes_and_validates_date_before_caching(tmp_path):
+    write_json(
+        tmp_path
+        / "data/dy/jobs/cache/rank/douyin_series_rank_20260708_100000.json",
+        {
+            "captured_at": "2026-07-08 10:00:00",
+            "records": [dy_record(1, "日期剧", "date-series")],
+        },
+    )
+    service = TodayRankService(root=tmp_path)
+
+    normalized = service.get_today_rank("dy", date=" 2026-07-08 ")
+
+    assert normalized["date"] == "2026-07-08"
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        service.get_today_rank("dy", date="2026/07/08")
+
+
+def test_today_rank_cache_write_is_safe_for_concurrent_same_key(
+    tmp_path, monkeypatch
+):
+    service = TodayRankService(root=tmp_path)
+    observed_temporary_paths = []
+    observed_paths_lock = threading.Lock()
+    original_replace = type(tmp_path).replace
+
+    def synchronized_replace(path, target):
+        with observed_paths_lock:
+            observed_temporary_paths.append(path)
+        return original_replace(path, target)
+
+    monkeypatch.setattr(type(tmp_path), "replace", synchronized_replace)
+
+    def write_cache(marker):
+        service._write_response_cache(
+            "dy", "revision", "", 10, {"platform": "dy", "marker": marker}
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(write_cache, marker) for marker in (1, 2)]
+        for future in futures:
+            future.result(timeout=10)
+
+    assert len(set(observed_temporary_paths)) == 2
+    cached = json.loads(
+        service._response_cache_path("dy", "", 10).read_text(encoding="utf-8")
+    )
+    assert cached["response"]["marker"] in {1, 2}
+
+
+def test_today_rank_hongguo_cache_is_scoped_by_date_and_limit(tmp_path):
+    exports = tmp_path / "exports"
+    for day, titles in (
+        ("20260707", ("旧剧一", "旧剧二")),
+        ("20260708", ("新剧一", "新剧二")),
+    ):
+        write_csv(
+            exports / day / "top10_rankings.csv",
+            [
+                ["红果短剧热播榜", str(index), title, "都市", "简介", "无", "无", "1w", "无", "100w", "无", "无", "无", "无", "无", ""]
+                for index, title in enumerate(titles, start=1)
+            ],
+        )
+    service = TodayRankService(root=tmp_path, hongguo_exports_root=exports, cache_dir=tmp_path / ".runtime" / "rank-cache")
+
+    latest_one = service.get_today_rank("hg", limit=1)
+    history_two = service.get_today_rank("hg", date="2026-07-07", limit=2)
+    latest_one_cached = service.get_today_rank("hg", limit=1)
+
+    assert len(latest_one["current_entries"]) == 1
+    assert [item["title"] for item in history_two["current_entries"]] == ["旧剧一", "旧剧二"]
+    assert latest_one_cached["current_entries"][0]["title"] == "新剧一"
+    assert latest_one_cached["cache_status"] == "hit"
+
+
+def test_today_rank_cache_hit_skips_raw_source_revision_scan(tmp_path, monkeypatch):
+    exports = tmp_path / "exports"
+    write_csv(
+        exports / "20260708/top10_rankings.csv",
+        [["红果短剧热播榜", "1", "进程缓存剧", "都市", "简介", "无", "无", "1w", "无", "100w", "无", "无", "无", "无", "无", ""]],
+    )
+    service = TodayRankService(root=tmp_path, hongguo_exports_root=exports, cache_dir=tmp_path / ".runtime" / "rank-cache")
+    service.get_today_rank("hg", limit=10)
+
+    def fail_revision():
+        raise AssertionError("same-process cache hit must not rescan Hongguo source metadata")
+
+    monkeypatch.setattr(service, "_hongguo_source_revision", fail_revision)
+
+    cached = service.get_today_rank("hg", limit=10)
+
+    assert cached["cache_status"] == "hit"
+
+
+def test_hongguo_cache_revision_ignores_unrelated_raw_response_files(tmp_path):
+    exports = tmp_path / "exports"
+    write_csv(
+        exports / "20260708/top10_rankings.csv",
+        [["红果短剧热播榜", "1", "相关剧", "都市", "完整简介", "无", "无", "1w", "无", "100w", "无", "无", "无", "无", "无", ""]],
+    )
+    unrelated = tmp_path / "raw" / "mitm_responses_20260708" / "unrelated.json"
+    write_json(unrelated, {"series_id": "not-ranked", "title": "无关剧"})
+    cache_dir = tmp_path / ".runtime" / "rank-cache"
+    TodayRankService(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir).get_today_rank("hg", limit=10)
+    unrelated.write_text('{"series_id":"not-ranked","title":"已变化但仍无关"}', encoding="utf-8")
+
+    cached = TodayRankService(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir).get_today_rank("hg", limit=10)
+
+    assert cached["cache_status"] == "hit"
+
+
+def test_hongguo_cache_revision_tracks_raw_metadata_for_sparse_exports(tmp_path):
+    exports = tmp_path / "exports"
+    sparse_header = (
+        "榜单类型,排名,series_id,剧名,标签,简介,评分,分享,点赞,收藏,热度,推荐指数,"
+        "评分人数,期待指数,热搜指数,最高热度,热评,source_flow,selected_items,sub_selected_items,offset"
+    )
+    write_text(
+        exports / "20260731_top10" / "top10_rankings.csv",
+        "\n".join([sparse_header, ",,series-raw,,,,无,无,12w,无,500w,900w,无,无,无,无,,610,all,ranklist_hot_play_sc,"]),
+    )
+    raw = tmp_path / "raw" / "mitm_responses_20260731" / "response.json"
+    write_json(raw, {"series_id": "series-raw", "title": "初始剧名", "video_desc": "简介", "sub_title_list": [{"content": "玄幻"}]})
+    cache_dir = tmp_path / ".runtime" / "rank-cache"
+    first = TodayRankService(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir).get_today_rank("hg", limit=10)
+    write_json(raw, {"series_id": "series-raw", "title": "更新剧名", "video_desc": "简介", "sub_title_list": [{"content": "玄幻"}]})
+
+    changed = TodayRankService(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir).get_today_rank("hg", limit=10)
+
+    assert first["current_entries"][0]["title"] == "初始剧名"
+    assert changed["current_entries"][0]["title"] == "更新剧名"
+    assert changed["cache_status"] == "generated"
+
+
+def test_hongguo_cache_revision_tracks_raw_cover_for_complete_exports(tmp_path):
+    exports = tmp_path / "exports"
+    header = (
+        "榜单类型,排名,series_id,剧名,标签,简介,评分,分享,点赞,收藏,热度,推荐指数,"
+        "评分人数,期待指数,热搜指数,最高热度,热评"
+    )
+    write_text(
+        exports / "20260731_top10" / "top10_rankings.csv",
+        "\n".join(
+            [
+                header,
+                "红果热播榜,1,series-cover,完整剧名,都市,完整简介,无,无,12w,无,500w,"
+                "900w,无,无,无,无,完整热评",
+            ]
+        ),
+    )
+    raw = tmp_path / "raw" / "mitm_responses_20260731" / "response.json"
+    write_json(
+        raw,
+        {
+            "series_id": "series-cover",
+            "title": "完整剧名",
+            "cover_url": "https://example.test/old.jpg",
+        },
+    )
+    cache_dir = tmp_path / ".runtime" / "rank-cache"
+    first = TodayRankService(
+        root=tmp_path,
+        hongguo_exports_root=exports,
+        cache_dir=cache_dir,
+    ).get_today_rank("hg", limit=10)
+    write_json(
+        raw,
+        {
+            "series_id": "series-cover",
+            "title": "完整剧名",
+            "cover_url": "https://example.test/new.jpg",
+        },
+    )
+
+    changed = TodayRankService(
+        root=tmp_path,
+        hongguo_exports_root=exports,
+        cache_dir=cache_dir,
+    ).get_today_rank("hg", limit=10)
+
+    assert first["current_entries"][0]["cover_url"].endswith("old.jpg")
+    assert changed["current_entries"][0]["cover_url"].endswith("new.jpg")
+    assert changed["cache_status"] == "generated"
+
+
+def test_hongguo_persistent_raw_index_skips_unchanged_file_reads(
+    tmp_path, monkeypatch
+):
+    exports = tmp_path / "exports"
+    header = "榜单类型,排名,series_id,剧名,标签,简介,热评"
+    write_text(
+        exports / "20260731_top10" / "top10_rankings.csv",
+        "\n".join(
+            [
+                header,
+                "红果热播榜,1,series-index,索引剧,都市,完整简介,完整热评",
+            ]
+        ),
+    )
+    raw = tmp_path / "raw" / "mitm_responses_20260731" / "response.json"
+    write_json(
+        raw,
+        {
+            "series_id": "series-index",
+            "title": "索引剧",
+            "cover_url": "https://example.test/cover.jpg",
+        },
+    )
+    cache_dir = tmp_path / ".runtime" / "rank-cache"
+    first = TodayRankService(
+        root=tmp_path,
+        hongguo_exports_root=exports,
+        cache_dir=cache_dir,
+    ).get_today_rank("hg", limit=10)
+    original_read_text = type(tmp_path).read_text
+
+    def reject_unchanged_raw_read(path, *args, **kwargs):
+        if path == raw:
+            raise AssertionError("unchanged raw file should use its persistent index")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(tmp_path), "read_text", reject_unchanged_raw_read)
+    cached = TodayRankService(
+        root=tmp_path,
+        hongguo_exports_root=exports,
+        cache_dir=cache_dir,
+    ).get_today_rank("hg", limit=10)
+
+    assert first["current_entries"][0]["cover_url"].endswith("cover.jpg")
+    assert cached["cache_status"] == "hit"
 
 
 def test_today_rank_date_filter_and_missing_previous(tmp_path):

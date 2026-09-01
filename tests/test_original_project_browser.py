@@ -68,7 +68,13 @@ def mount_original_project_form(page) -> None:
     page.add_script_tag(content=_source("static/js/alpine.min.js"))
 
 
-def mount_blueprint_workspace(page) -> None:
+def mount_blueprint_workspace(
+    page,
+    *,
+    blueprint_status: str = "draft",
+    locked_brief_id: int | None = None,
+    parent_version_id: int | None = None,
+) -> None:
     blueprint = _source("templates/common/workspace/project_blueprints.html")
     bootstrap_css = _source("static/css/bootstrap.min.css")
     workspace_css = _source("static/css/workspaces.css")
@@ -80,11 +86,23 @@ def mount_blueprint_workspace(page) -> None:
         f"{blueprint}</main>"
     )
     page.add_script_tag(
+        content=(
+            f"window.__blueprintStatus = {blueprint_status!r};"
+            f"window.__lockedBriefId = {locked_brief_id if locked_brief_id is not None else 'null'};"
+            f"window.__parentVersionId = {parent_version_id if parent_version_id is not None else 'null'};"
+        )
+    )
+    page.add_script_tag(
         content="""
         window.__project = {
-          id: 9, creation_mode: 'original', seed: {id: 7, version: 1, status: 'frozen'},
+          id: 9, revision: 7, name: '情绪公司', creation_mode: 'original', genre: '都市奇幻',
+          locked_brief_id: window.__lockedBriefId,
+          target_platform: '长篇小说', target_audience: '18-35岁',
+          target_episode_count: 100, episode_duration_seconds: 900,
+          seed: {id: 7, version: 1, status: 'frozen'},
           blueprints: [{
-            id: 11, version: 1, status: 'draft', risk_level: 'low', risk_score: 0,
+            id: 11, version: 2, parent_version_id: window.__parentVersionId,
+            status: window.__blueprintStatus, risk_level: 'low', risk_score: 0,
             content: {
               title: '情绪公司', theme: '人在制度中保持选择', protagonist: '林岚',
               core_conflict: '情绪考核', differentiators: ['情绪劳动具象化'],
@@ -94,7 +112,32 @@ def mount_blueprint_workspace(page) -> None:
             }
           }]
         };
-        window.aiworkerApi = {request: async () => ({ok: true, json: async () => ({})})};
+        window.__blueprintRequests = [];
+        window.aiworkerApi = {request: async (url, options = {}) => {
+          const body = JSON.parse(options.body || '{}');
+          window.__blueprintRequests.push({url, method: options.method || 'GET', body});
+          if (url === '/api/workflow/tasks') return {ok: true, json: async () => []};
+          if (url.includes('/workflow-tasks/brief/ensure')) {
+            return {ok: true, json: async () => ({id: 'brief-task-9', status: 'in_progress'})};
+          }
+          if (url.endsWith('/versions')) {
+            return {ok: true, json: async () => ({id: 12, version: 2, status: 'draft'})};
+          }
+          if (url === '/api/creative/projects/9' && options.method === 'PATCH') {
+            Object.assign(window.__project, body, {revision: 8});
+            return {ok: true, json: async () => ({...window.__project})};
+          }
+          if (url === '/api/creative/projects') {
+            return {ok: true, json: async () => ({items: [window.__project]})};
+          }
+          if (url.startsWith('/api/creative/topics')) {
+            return {ok: true, json: async () => ({items: []})};
+          }
+          if (url === '/api/creative/projects/9') {
+            return {ok: true, json: async () => ({...window.__project})};
+          }
+          return {ok: true, json: async () => ({...window.__project, ...body})};
+        }};
         """
     )
     page.add_script_tag(content=_source("static/js/common/creative.js"))
@@ -141,6 +184,94 @@ def test_original_brief_uses_mode_templates_and_original_fields() -> None:
     assert "原创性说明" in source
     assert 'x-if="creativeWorkspace.project?.creation_mode === \'original\'"' in source
     assert 'x-if="creativeWorkspace.project?.creation_mode !== \'original\'"' in source
+
+
+def test_original_brief_shows_and_saves_project_episode_settings() -> None:
+    """Would catch original Brief omitting the project settings shown for imitation."""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        mount_blueprint_workspace(page)
+
+        episode_count = page.get_by_label("目标集数/章数")
+        duration = page.get_by_label("单集/章时长（秒）")
+        assert episode_count.input_value() == "100"
+        assert duration.input_value() == "900"
+
+        episode_count.fill("80")
+        duration.fill("600")
+        page.get_by_role("button", name="保存任务书参数").click()
+        page.wait_for_function(
+            "window.__blueprintRequests.some(item => item.method === 'PATCH')"
+        )
+        request = page.evaluate(
+            "window.__blueprintRequests.find(item => item.method === 'PATCH')"
+        )
+        browser.close()
+
+    assert request["url"] == "/api/creative/projects/9"
+    assert request["body"]["target_episode_count"] == 80
+    assert request["body"]["episode_duration_seconds"] == 600
+    assert request["body"]["expected_project_revision"] == 7
+
+
+def test_successor_brief_save_and_lock_requests_keep_revision_scope() -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        mount_blueprint_workspace(
+            page,
+            blueprint_status="draft",
+            locked_brief_id=10,
+            parent_version_id=10,
+        )
+
+        page.get_by_label("目标集数/章数").fill("80")
+        page.get_by_role("button", name="完成并锁定").click()
+        page.wait_for_function(
+            "window.__blueprintRequests.some(item => item.url.endsWith('/lock-brief'))"
+        )
+        requests = page.evaluate("window.__blueprintRequests")
+        browser.close()
+
+    settings_request = next(
+        request for request in requests
+        if request["url"] == "/api/creative/projects/9" and request["method"] == "PATCH"
+    )
+    lock_request = next(
+        request for request in requests if request["url"].endswith("/lock-brief")
+    )
+    assert settings_request["body"]["draft_brief_id"] == 11
+    assert settings_request["body"]["expected_project_revision"] == 7
+    assert lock_request["body"]["expected_project_revision"] == 8
+
+
+def test_locked_original_brief_can_create_an_editable_version() -> None:
+    """Would catch the locked-version action existing only in imitation mode."""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_default_timeout(2_000)
+        mount_blueprint_workspace(page, blueprint_status="brief_locked")
+
+        page.get_by_role("button", name="基于此版本新建").click()
+        page.wait_for_function(
+            "window.__blueprintRequests.some(item => item.url.endsWith('/versions'))"
+        )
+        requests = page.evaluate("window.__blueprintRequests")
+        browser.close()
+
+    version_request = next(
+        request for request in requests if request["url"].endswith("/versions")
+    )
+    assert version_request == {
+        "url": "/api/creative/blueprints/11/versions",
+        "method": "POST",
+        "body": {
+            "workflow_task_id": "brief-task-9",
+            "expected_project_revision": 7,
+        },
+    }
 
 
 def test_original_brief_does_not_mount_imitation_only_fields() -> None:
@@ -253,6 +384,144 @@ def test_original_brief_query_starts_direction_generation_once() -> None:
     assert len(result["requests"]) == 1
     assert result["requests"][0]["url"] == "/api/creative/projects/9/blueprints/generate"
     assert "generate_original" not in result["search"]
+
+
+def test_direction_button_tracks_running_server_job_until_it_finishes() -> None:
+    """Would catch losing the generation lock after a page reload."""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        mount_blueprint_workspace(page)
+        button = page.locator(".original-direction-actions button.btn-primary")
+
+        page.evaluate(
+            """
+            () => {
+              const workspace = document.querySelector('main')._x_dataStack[0];
+              workspace.jobs = [{
+                job_id: 'creative-running-9',
+                platform: 'creative',
+                crawler_type: 'phase4_generate',
+                status: 'running',
+                project_id: '9',
+                job: {extra: {project_id: '9', action: 'blueprints'}},
+              }];
+            }
+            """
+        )
+        page.wait_for_function("document.querySelector('button.btn-primary').disabled")
+        assert button.is_disabled()
+
+        page.evaluate(
+            """
+            () => {
+              const workspace = document.querySelector('main')._x_dataStack[0];
+              workspace.jobs = workspace.jobs.map(job => ({...job, status: 'succeeded'}));
+            }
+            """
+        )
+        page.wait_for_function("!document.querySelector('button.btn-primary').disabled")
+        assert button.is_enabled()
+        browser.close()
+
+
+def test_direction_button_keeps_last_running_state_when_job_poll_temporarily_fails() -> None:
+    """Would catch a transient poll error reopening a duplicate-submit window."""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        mount_blueprint_workspace(page)
+        disabled = page.evaluate(
+            """
+            async () => {
+              const workspace = document.querySelector('main')._x_dataStack[0];
+              workspace.jobs = [{
+                job_id: 'creative-running-9',
+                platform: 'creative',
+                crawler_type: 'phase4_generate',
+                status: 'running',
+                project_id: '9',
+                job: {extra: {project_id: '9', action: 'blueprints'}},
+              }];
+              window.aiworkerApi.request = async () => {
+                throw new Error('temporary poll failure');
+              };
+              await workspace.fetchJobs();
+              return workspace.creativeActionDisabled('blueprints');
+            }
+            """
+        )
+        browser.close()
+
+    assert disabled is True
+
+
+def test_direction_button_keeps_last_running_state_on_job_poll_http_error() -> None:
+    """Would catch an HTTP 5xx response being mistaken for an empty job list."""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        mount_blueprint_workspace(page)
+        disabled = page.evaluate(
+            """
+            async () => {
+              const workspace = document.querySelector('main')._x_dataStack[0];
+              workspace.jobs = [{
+                job_id: 'creative-running-9',
+                platform: 'creative',
+                crawler_type: 'phase4_generate',
+                status: 'running',
+                project_id: '9',
+                job: {extra: {project_id: '9', action: 'blueprints'}},
+              }];
+              window.aiworkerApi.request = async () => ({
+                ok: false,
+                status: 503,
+                json: async () => ({detail: 'temporarily unavailable'}),
+              });
+              await workspace.fetchJobs();
+              return workspace.creativeActionDisabled('blueprints');
+            }
+            """
+        )
+        browser.close()
+
+    assert disabled is True
+
+
+def test_series_job_only_disables_episode_buttons_inside_its_range() -> None:
+    """Would catch a partial-series task locking unrelated episodes."""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        mount_blueprint_workspace(page)
+        result = page.evaluate(
+            """
+            () => {
+              const workspace = document.querySelector('main')._x_dataStack[0];
+              workspace.jobs = [{
+                job_id: 'creative-series-9',
+                platform: 'creative',
+                crawler_type: 'phase4_generate',
+                status: 'running',
+                project_id: '9',
+                job: {extra: {
+                  project_id: '9', action: 'beats', series: true,
+                  episode_start: 4, episode_end: 6,
+                }},
+              }];
+              workspace.creativeWorkspace.selectedEpisode = 2;
+              const outside = workspace.creativeActionDisabled('beats');
+              const wholeSeries = workspace.creativeActionDisabled('beats', {series: true});
+              workspace.creativeWorkspace.selectedEpisode = 5;
+              const inside = workspace.creativeActionDisabled('beats');
+              return {outside, inside, wholeSeries};
+            }
+            """
+        )
+        browser.close()
+
+    assert result == {"outside": False, "inside": True, "wholeSeries": True}
 
 
 def test_original_direction_workspace_has_no_horizontal_overflow_at_390px() -> None:

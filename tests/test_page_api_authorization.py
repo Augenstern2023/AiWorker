@@ -13,8 +13,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
+
+import WebGUI
 
 from core.job import CrawlJob
 from creative.api import (
@@ -25,12 +27,18 @@ from creative.api import (
 from creative.delivery import DeliveryService, build_delivery_router
 from creative.repository import CreativeRepository
 from creative.workflow_adapter import CreativeWorkflowAdapter
-from identity.dependencies import require_permission
+from identity.dependencies import current_principal, require_permission
 from identity.permission_service import PermissionService
 from identity.schema import Principal
 from identity.session_service import SessionContext
 from runtime.job_state import JobState
-from WebGUI import install_security_middleware, project_member_stage_api_path
+from WebGUI import (
+    _assert_creator_has_live_job_scope,
+    _can_read_job,
+    _require_permission,
+    install_security_middleware,
+    project_member_stage_api_path,
+)
 from web.page_access_service import PageAccessService
 from workflow.repository import WorkflowRepository
 
@@ -123,6 +131,8 @@ def _secured_identity_app(
                     ("GET", "/api/admin/users"),
                     ("POST", "/api/admin/users"),
                     ("GET", "/api/admin/users/scoped"),
+                    ("GET", "/api/admin/users/manual"),
+                    ("GET", "/api/admin/users/{user_id}/resource"),
                 ),
             },
         ),
@@ -146,6 +156,27 @@ def _secured_identity_app(
         _: Principal = Depends(require_permission("business.user.scope")),
     ) -> dict[str, bool]:
         return {"ok": True}
+
+    @app.get("/api/admin/users/manual")
+    def manually_scoped_user_data(
+        principal: Principal = Depends(current_principal),
+        request: Request = None,
+    ) -> dict[str, bool]:
+        _require_permission(principal, "business.user.scope", request)
+        return {"ok": True}
+
+    @app.get("/api/admin/users/{user_id}/resource")
+    def user_resource(
+        user_id: str,
+        _: Principal = Depends(
+            require_permission(
+                "business.user.scope",
+                lambda service, principal, request: request.path_params["user_id"]
+                == "allowed",
+            )
+        ),
+    ) -> dict[str, str]:
+        return {"user_id": user_id}
 
     @app.get("/api/unassigned")
     def unassigned_api(
@@ -346,15 +377,174 @@ def test_unassigned_api_keeps_legacy_permission_check_after_page_grant(
     assert response.json() == {"detail": "没有执行此操作的权限"}
 
 
-def test_page_grant_does_not_skip_endpoint_business_permission() -> None:
+def test_page_grant_replaces_endpoint_permission_for_bound_page_api() -> None:
     app, page_repository, user_id = _secured_identity_app()
     page_repository.user_ids.add(user_id)
     client = _session_client(app)
 
     response = client.get("/api/admin/users/scoped")
 
-    assert response.status_code == 403
-    assert response.json() == {"detail": "没有执行此操作的权限"}
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True}
+
+
+def test_page_grant_replaces_manual_endpoint_permission_check() -> None:
+    app, page_repository, user_id = _secured_identity_app()
+    page_repository.user_ids.add(user_id)
+    client = _session_client(app)
+
+    response = client.get("/api/admin/users/manual")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True}
+
+
+def test_page_grant_keeps_bound_api_resource_scope_check() -> None:
+    app, page_repository, user_id = _secured_identity_app()
+    page_repository.user_ids.add(user_id)
+    client = _session_client(app)
+
+    allowed = client.get("/api/admin/users/allowed/resource")
+    denied = client.get("/api/admin/users/denied/resource")
+
+    assert allowed.status_code == 200, allowed.text
+    assert denied.status_code == 403
+    assert denied.json() == {"detail": "没有访问此数据的权限"}
+
+
+def _bound_page_request(
+    principal: Principal,
+    *,
+    page_route: str,
+    method: str,
+    api_path: str,
+) -> Request:
+    repository = MutablePageAccessRepository()
+    repository.items = [{"route": page_route, "is_enabled": True}]
+    repository.user_ids.add(principal.user_id)
+    app = FastAPI()
+    app.state.page_access_service = PageAccessService(
+        repository,
+        catalog=(
+            {
+                "page_route": page_route,
+                "api_routes": ((method, api_path),),
+            },
+        ),
+    )
+    return Request(
+        {
+            "type": "http",
+            "method": method,
+            "scheme": "http",
+            "path": api_path,
+            "headers": [],
+            "app": app,
+        }
+    )
+
+
+def test_page_grant_replaces_job_read_permission_but_keeps_ownership_scope() -> None:
+    principal = Principal(
+        user_id="job-owner",
+        username="job-owner",
+        display_name="Job Owner",
+        role_codes=(),
+        permissions=frozenset(),
+        data_scope="task",
+        session_id="job-owner-session",
+    )
+    request = _bound_page_request(
+        principal,
+        page_route="/admin/jobs",
+        method="GET",
+        api_path="/api/jobs/job-1",
+    )
+
+    assert (
+        _can_read_job(
+            {"job_id": "job-1", "created_by_user_id": principal.user_id},
+            principal,
+            request,
+        )
+        is True
+    )
+    assert (
+        _can_read_job(
+            {"job_id": "job-2", "created_by_user_id": "another-user"},
+            principal,
+            request,
+        )
+        is False
+    )
+
+
+def test_page_grant_replaces_job_control_permissions_but_keeps_creator_scope() -> None:
+    principal = Principal(
+        user_id="job-owner",
+        username="job-owner",
+        display_name="Job Owner",
+        role_codes=(),
+        permissions=frozenset(),
+        data_scope="task",
+        session_id="job-owner-session",
+    )
+    request = _bound_page_request(
+        principal,
+        page_route="/admin/jobs",
+        method="POST",
+        api_path="/api/jobs/job-1/pause",
+    )
+
+    _assert_creator_has_live_job_scope(
+        {"job_id": "job-1", "created_by_user_id": principal.user_id},
+        principal,
+        request,
+    )
+    with pytest.raises(HTTPException, match="只有机器任务创建人"):
+        _assert_creator_has_live_job_scope(
+            {"job_id": "job-2", "created_by_user_id": "another-user"},
+            principal,
+            request,
+        )
+
+
+@pytest.mark.asyncio
+async def test_admin_jobs_page_grant_replaces_delete_system_admin_gate(
+    monkeypatch,
+) -> None:
+    principal = Principal(
+        user_id="jobs-page-user",
+        username="jobs-page-user",
+        display_name="Jobs Page User",
+        role_codes=(),
+        permissions=frozenset(),
+        data_scope="task",
+        session_id="jobs-page-session",
+    )
+    request = _bound_page_request(
+        principal,
+        page_route="/admin/jobs",
+        method="DELETE",
+        api_path="/api/jobs/job-1",
+    )
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        WebGUI.job_manager,
+        "get_job",
+        lambda job_id: {"job_id": job_id, "project_id": None},
+    )
+    monkeypatch.setattr(
+        WebGUI.job_manager,
+        "delete_job",
+        lambda job_id, force_missing: deleted.append(job_id),
+    )
+    monkeypatch.setattr(WebGUI.audit_service, "record", lambda **kwargs: None)
+
+    response = await WebGUI.delete_job("job-1", request, principal)
+
+    assert response == {"status": "success", "message": "job deleted"}
+    assert deleted == ["job-1"]
 
 
 def test_delivery_service_rejects_non_admin_calls_without_page_authorization() -> None:

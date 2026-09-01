@@ -47,35 +47,65 @@ window.aiworkerModules.push(() => ({
                     document.getElementById('crawlerSettings')?.scrollIntoView({behavior: 'smooth', block: 'start'});
                 },
 
-                async refreshAnalyticsDashboard() {
+                async refreshAnalyticsDashboard({notify = false} = {}) {
                     this.analyticsError = '';
-                    await this.fetchWeeklyReports();
+                    const refreshed = await this.fetchWeeklyReports({notify});
+                    if (!refreshed) return;
                     this.$nextTick(() => {
                         this.renderAnalyticsCharts();
                         setTimeout(() => this.resizeAnalyticsCharts(), 80);
                     });
                 },
 
-                async fetchWeeklyReports() {
+                async fetchWeeklyReports({notify = false} = {}) {
                     this.weeklyReportLoading = true;
                     this.weeklyReportError = '';
+                    this.analyticsError = '';
                     try {
                         const params = new URLSearchParams();
                         if (this.analyticsPlatform) params.set('platform', this.analyticsPlatform);
                         const res = await aiworkerApi.request(`/api/analytics/weekly-reports?${params.toString()}`);
-                        const data = await res.json();
-                        if (!res.ok) throw new Error(data.detail || '加载周度报告失败');
+                        let data = {};
+                        try {
+                            data = await res.json();
+                        } catch (_) {}
+                        if (!res.ok) throw new Error(data.detail || data.message || `加载周度报告失败（HTTP ${res.status || '-'}）`);
                         this.weeklyReports = data.items || [];
                         const selected = this.weeklyReport?.report_id;
                         const report = this.weeklyReports.find(item => item.report_id === selected) || this.weeklyReports[0] || null;
                         this.weeklyReport = report;
+                        if (notify) {
+                            const generatedCount = this.weeklyReports.filter(item => item.cache_status === 'generated').length;
+                            const period = report?.period?.start && report?.period?.end
+                                ? `${report.period.start} 至 ${report.period.end}`
+                                : '';
+                            const message = generatedCount
+                                ? `已生成 ${generatedCount} 份周报${period ? `，最新周期：${period}` : ''}`
+                                : this.weeklyReports.length
+                                    ? `当前周报已是最新${period ? `，最新周期：${period}` : ''}`
+                                    : '暂无完整周度数据，请确认上周工作日快照是否齐全。';
+                            this.showWeeklyReportRefreshToast('success', '周报已更新', message);
+                        }
+                        return true;
                     } catch (e) {
                         this.weeklyReports = [];
                         this.weeklyReport = null;
-                        this.weeklyReportError = e.message || '加载周度报告失败';
+                        const message = e.message || '加载周度报告失败';
+                        this.weeklyReportError = message;
+                        this.analyticsError = message;
+                        if (notify) this.showWeeklyReportRefreshToast('danger', '周报更新失败', message);
+                        return false;
                     } finally {
                         this.weeklyReportLoading = false;
                     }
+                },
+
+                showWeeklyReportRefreshToast(kind, title, message) {
+                    if (window.aiworkerUi?.showToast) {
+                        window.aiworkerUi.showToast({kind, title, message});
+                        return;
+                    }
+                    window.alert(`${title}：${message}`);
                 },
 
                 async selectWeeklyReport(reportId) {
@@ -746,15 +776,351 @@ window.aiworkerModules.push(() => ({
                     await this.fetchQrcodeStatus();
                 },
 
+                llmResponseMessage(data, fallback) {
+                    return data?.detail || data?.message || fallback;
+                },
+
+                selectedLLMProvider() {
+                    return this.llmSettings.providers.find(
+                        provider => provider.id === this.llmSettings.selectedProviderId
+                    ) || null;
+                },
+
+                defaultLLMModel() {
+                    for (const provider of this.llmSettings.providers) {
+                        const model = (provider.models || []).find(
+                            item => item.id === this.llmSettings.defaultModelId
+                        );
+                        if (model) return {provider, model};
+                    }
+                    return null;
+                },
+
+                llmEndpointWarning(baseUrl) {
+                    try {
+                        const endpoint = new URL(String(baseUrl || '').trim());
+                        const localHosts = ['localhost', '127.0.0.1', '::1'];
+                        if (endpoint.protocol === 'http:' && !localHosts.includes(endpoint.hostname.toLowerCase())) {
+                            return '该端点使用公网或局域网 HTTP，API Key 和请求内容可能被明文传输。';
+                        }
+                    } catch (_) {}
+                    return '';
+                },
+
+                async fetchLLMSettings({selectedProviderId = ''} = {}) {
+                    const state = this.llmSettings;
+                    state.loading = true;
+                    state.error = '';
+                    try {
+                        const response = await aiworkerApi.request('/api/llm/settings');
+                        let data = {};
+                        try { data = await response.json(); } catch (_) {}
+                        if (!response.ok) throw new Error(this.llmResponseMessage(data, '读取 LLM 设置失败'));
+                        state.presets = data.presets || {};
+                        state.providers = Array.isArray(data.providers) ? data.providers : [];
+                        state.defaultModelId = data.default_model_id || '';
+                        const preferredId = selectedProviderId || state.selectedProviderId;
+                        const provider = state.providers.find(item => item.id === preferredId)
+                            || state.providers[0]
+                            || null;
+                        if (provider) this.selectLLMProvider(provider);
+                        else this.startNewLLMProvider(Object.keys(state.presets)[0] || 'custom');
+                    } catch (error) {
+                        state.error = error.message || '读取 LLM 设置失败，请重试';
+                    } finally {
+                        state.loading = false;
+                    }
+                },
+
+                selectLLMProvider(provider) {
+                    if (!provider) return;
+                    const state = this.llmSettings;
+                    state.selectedProviderId = provider.id;
+                    state.editor = {
+                        id: provider.id,
+                        name: provider.name || '',
+                        preset: provider.preset || 'custom',
+                        base_url: provider.base_url || '',
+                        wire_api: provider.wire_api || 'chat_completions',
+                        api_key: '',
+                        has_api_key: Boolean(provider.has_api_key),
+                        credential_status: provider.credential_status
+                            || (provider.has_api_key ? 'configured' : 'missing'),
+                        is_enabled: provider.is_enabled !== false,
+                        clear_api_key: false
+                    };
+                    state.modelDraft = {model_id: '', display_name: ''};
+                    state.modelEditor = null;
+                    state.test = {
+                        model_id: (provider.models || []).find(model => model.is_default)?.model_id
+                            || (provider.models || []).find(model => model.is_enabled)?.model_id
+                            || '',
+                        result: null
+                    };
+                    state.error = '';
+                },
+
+                startNewLLMProvider(presetName = 'openai') {
+                    const state = this.llmSettings;
+                    const preset = state.presets[presetName]
+                        || state.presets.custom
+                        || {label: '', base_url: '', wire_api: 'chat_completions'};
+                    state.selectedProviderId = '';
+                    state.editor = {
+                        id: '',
+                        name: preset.label || '',
+                        preset: state.presets[presetName] ? presetName : 'custom',
+                        base_url: preset.base_url || '',
+                        wire_api: preset.wire_api || 'chat_completions',
+                        api_key: '',
+                        has_api_key: false,
+                        credential_status: 'missing',
+                        is_enabled: true,
+                        clear_api_key: false
+                    };
+                    state.modelDraft = {model_id: '', display_name: ''};
+                    state.modelEditor = null;
+                    state.test = {model_id: '', result: null};
+                    state.error = '';
+                    state.notice = '';
+                    this.$nextTick?.(() => document.getElementById('llm-provider-name')?.focus());
+                },
+
+                applyLLMProviderPreset() {
+                    const editor = this.llmSettings.editor;
+                    const preset = this.llmSettings.presets[editor.preset];
+                    if (!preset) return;
+                    if (!editor.id) editor.name = preset.label || editor.name;
+                    editor.base_url = preset.base_url || '';
+                    editor.wire_api = preset.wire_api || 'chat_completions';
+                    this.llmSettings.test.result = null;
+                },
+
+                async saveLLMProvider() {
+                    const state = this.llmSettings;
+                    const editor = state.editor;
+                    if (!String(editor.name || '').trim() || !String(editor.base_url || '').trim()) {
+                        state.error = '请填写提供商名称和 Base URL';
+                        return;
+                    }
+                    state.saving = true;
+                    state.error = '';
+                    state.notice = '';
+                    const payload = {
+                        name: String(editor.name).trim(),
+                        preset: editor.preset,
+                        base_url: String(editor.base_url).trim(),
+                        wire_api: editor.wire_api,
+                        is_enabled: Boolean(editor.is_enabled)
+                    };
+                    if (editor.id) {
+                        if (String(editor.api_key || '').trim()) payload.api_key = String(editor.api_key).trim();
+                        if (editor.clear_api_key) payload.clear_api_key = true;
+                    } else {
+                        payload.api_key = String(editor.api_key || '').trim();
+                    }
+                    try {
+                        const response = await aiworkerApi.request(
+                            editor.id ? `/api/llm/providers/${editor.id}` : '/api/llm/providers',
+                            {
+                                method: editor.id ? 'PUT' : 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify(payload)
+                            }
+                        );
+                        let data = {};
+                        try { data = await response.json(); } catch (_) {}
+                        if (!response.ok) throw new Error(this.llmResponseMessage(data, '保存提供商失败'));
+                        const providerId = data.id || editor.id;
+                        editor.api_key = '';
+                        editor.clear_api_key = false;
+                        state.notice = editor.id ? '提供商设置已更新' : '提供商已添加';
+                        await this.fetchLLMSettings({selectedProviderId: providerId});
+                    } catch (error) {
+                        state.error = error.message || '保存提供商失败';
+                    } finally {
+                        state.saving = false;
+                    }
+                },
+
+                async syncLLMModels() {
+                    const state = this.llmSettings;
+                    const providerId = state.editor.id;
+                    if (!providerId || state.syncing) return;
+                    state.syncing = true;
+                    state.error = '';
+                    state.notice = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/llm/providers/${providerId}/models/sync`,
+                            {method: 'POST'}
+                        );
+                        let data = {};
+                        try { data = await response.json(); } catch (_) {}
+                        if (!response.ok) throw new Error(this.llmResponseMessage(data, '模型同步失败'));
+                        state.notice = `模型同步完成：新增 ${Number(data.added || 0)} 个，更新 ${Number(data.updated || 0)} 个`;
+                        await this.fetchLLMSettings({selectedProviderId: providerId});
+                    } catch (error) {
+                        const message = error.message || '模型同步失败';
+                        state.error = message.includes('手工新增')
+                            ? message
+                            : `${message}；可继续使用下方表单手工新增模型。`;
+                    } finally {
+                        state.syncing = false;
+                    }
+                },
+
+                async addLLMModel() {
+                    const state = this.llmSettings;
+                    const providerId = state.editor.id;
+                    const modelId = String(state.modelDraft.model_id || '').trim();
+                    if (!providerId || !modelId) {
+                        state.error = '请先保存提供商并填写模型 ID';
+                        return;
+                    }
+                    state.modelSaving = true;
+                    state.error = '';
+                    state.notice = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/llm/providers/${providerId}/models`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    model_id: modelId,
+                                    display_name: String(state.modelDraft.display_name || '').trim(),
+                                    is_enabled: true
+                                })
+                            }
+                        );
+                        let data = {};
+                        try { data = await response.json(); } catch (_) {}
+                        if (!response.ok) throw new Error(this.llmResponseMessage(data, '添加模型失败'));
+                        state.modelDraft = {model_id: '', display_name: ''};
+                        state.notice = '模型已添加';
+                        await this.fetchLLMSettings({selectedProviderId: providerId});
+                    } catch (error) {
+                        state.error = error.message || '添加模型失败';
+                    } finally {
+                        state.modelSaving = false;
+                    }
+                },
+
+                startEditLLMModel(model) {
+                    this.llmSettings.modelEditor = {
+                        id: model.id,
+                        model_id: model.model_id || '',
+                        display_name: model.display_name || '',
+                        is_enabled: model.is_enabled !== false,
+                        is_default: Boolean(model.is_default)
+                    };
+                    this.llmSettings.error = '';
+                },
+
+                async saveLLMModel() {
+                    const state = this.llmSettings;
+                    const editor = state.modelEditor;
+                    if (!editor || !String(editor.model_id || '').trim()) {
+                        state.error = '模型 ID 不能为空';
+                        return;
+                    }
+                    state.modelSaving = true;
+                    state.error = '';
+                    state.notice = '';
+                    try {
+                        const response = await aiworkerApi.request(`/api/llm/models/${editor.id}`, {
+                            method: 'PUT',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({
+                                model_id: String(editor.model_id).trim(),
+                                display_name: String(editor.display_name || '').trim(),
+                                is_enabled: Boolean(editor.is_enabled)
+                            })
+                        });
+                        let data = {};
+                        try { data = await response.json(); } catch (_) {}
+                        if (!response.ok) throw new Error(this.llmResponseMessage(data, '更新模型失败'));
+                        state.modelEditor = null;
+                        state.notice = '模型设置已更新';
+                        await this.fetchLLMSettings({selectedProviderId: state.editor.id});
+                    } catch (error) {
+                        state.error = error.message || '更新模型失败';
+                    } finally {
+                        state.modelSaving = false;
+                    }
+                },
+
+                async setDefaultLLMModel(model) {
+                    const state = this.llmSettings;
+                    if (!model?.id || state.defaultSavingId) return;
+                    state.defaultSavingId = model.id;
+                    state.error = '';
+                    state.notice = '';
+                    try {
+                        const response = await aiworkerApi.request('/api/llm/default-model', {
+                            method: 'PUT',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({model_id: model.id})
+                        });
+                        let data = {};
+                        try { data = await response.json(); } catch (_) {}
+                        if (!response.ok) throw new Error(this.llmResponseMessage(data, '切换默认模型失败'));
+                        state.notice = `默认模型已切换为 ${model.display_name || model.model_id}`;
+                        await this.fetchLLMSettings({selectedProviderId: state.editor.id});
+                    } catch (error) {
+                        state.error = error.message || '切换默认模型失败';
+                    } finally {
+                        state.defaultSavingId = '';
+                    }
+                },
+
+                async testLLMConnection() {
+                    const state = this.llmSettings;
+                    const editor = state.editor;
+                    const modelId = String(state.test.model_id || '').trim();
+                    if (!String(editor.base_url || '').trim() || !modelId) {
+                        state.error = '请填写 Base URL 和测试模型 ID';
+                        return;
+                    }
+                    if (state.testing) return;
+                    state.testing = true;
+                    state.error = '';
+                    state.test.result = null;
+                    const payload = {
+                        ...(editor.id ? {provider_id: editor.id} : {}),
+                        base_url: String(editor.base_url).trim(),
+                        ...(String(editor.api_key || '').trim() ? {api_key: String(editor.api_key).trim()} : {}),
+                        model_id: modelId,
+                        wire_api: editor.wire_api
+                    };
+                    try {
+                        const response = await aiworkerApi.request('/api/llm/test', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify(payload)
+                        });
+                        let data = {};
+                        try { data = await response.json(); } catch (_) {}
+                        if (!response.ok) throw new Error(this.llmResponseMessage(data, '模型连接测试失败'));
+                        state.test.result = data;
+                    } catch (error) {
+                        const message = error.message || '模型连接测试失败';
+                        state.test.result = {status: 'error', message};
+                        state.error = message;
+                    } finally {
+                        state.testing = false;
+                    }
+                },
+
                 async fetchDramaSettings() {
                     try {
                         const response = await aiworkerApi.request('/api/hongguo/drama/settings');
                         const data = await response.json();
                         if (!response.ok) throw new Error(data.message || '读取设置失败');
-                        this.dramaAnalysis.settings = data;
-                        this.dramaAnalysis.activationCode = '';
+                        this.dramaAnalysis.settings = {...data, activation_code: ''};
                     } catch (error) {
-                        this.dramaAnalysis.error = error.message || '读取剧目检索设置失败';
+                        this.dramaAnalysis.error = error.message || '读取红果抓包设置失败';
                     }
                 },
 
@@ -762,8 +1128,14 @@ window.aiworkerModules.push(() => ({
                     this.dramaAnalysis.loading = true;
                     this.dramaAnalysis.error = '';
                     try {
-                        const payload = {config_url: this.dramaAnalysis.settings.config_url};
-                        if (this.dramaAnalysis.activationCode) payload.activation_code = this.dramaAnalysis.activationCode;
+                        const activationCode = String(this.dramaAnalysis.settings.activation_code || '').trim();
+                        const payload = {
+                            config_url: this.dramaAnalysis.settings.config_url,
+                            capture_root: this.dramaAnalysis.settings.capture_root,
+                            capture_service_url: this.dramaAnalysis.settings.capture_service_url,
+                            wait_timeout_seconds: Number(this.dramaAnalysis.settings.wait_timeout_seconds),
+                            ...(activationCode ? {activation_code: activationCode} : {})
+                        };
                         const response = await aiworkerApi.request('/api/hongguo/drama/settings', {
                             method: 'PUT',
                             headers: {'Content-Type': 'application/json'},
@@ -771,8 +1143,7 @@ window.aiworkerModules.push(() => ({
                         });
                         const data = await response.json();
                         if (!response.ok || data.status === 'error') throw new Error(data.message || '保存设置失败');
-                        this.dramaAnalysis.settings = data;
-                        this.dramaAnalysis.activationCode = '';
+                        this.dramaAnalysis.settings = {...data, activation_code: ''};
                         alert('设置已保存');
                     } catch (error) {
                         this.dramaAnalysis.error = error.message || '保存设置失败';
@@ -782,12 +1153,19 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async testDramaInterface() {
-                    this.dramaAnalysis.loading = true;
+                    if (this.dramaAnalysis.interfaceTesting) return;
+                    this.dramaAnalysis.interfaceTesting = true;
                     this.dramaAnalysis.error = '';
                     this.dramaAnalysis.interfaceTest = null;
                     try {
-                        const payload = {config_url: this.dramaAnalysis.settings.config_url};
-                        if (this.dramaAnalysis.activationCode) payload.activation_code = this.dramaAnalysis.activationCode;
+                        const activationCode = String(this.dramaAnalysis.settings.activation_code || '').trim();
+                        const payload = {
+                            config_url: this.dramaAnalysis.settings.config_url,
+                            capture_root: this.dramaAnalysis.settings.capture_root,
+                            capture_service_url: this.dramaAnalysis.settings.capture_service_url,
+                            wait_timeout_seconds: Number(this.dramaAnalysis.settings.wait_timeout_seconds),
+                            ...(activationCode ? {activation_code: activationCode} : {})
+                        };
                         const response = await aiworkerApi.request('/api/hongguo/drama/test', {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json'},
@@ -796,12 +1174,17 @@ window.aiworkerModules.push(() => ({
                         const data = await response.json();
                         this.dramaAnalysis.interfaceTest = {
                             status: data.status || (response.ok ? 'success' : 'error'),
-                            message: data.message || (response.ok ? '接口可用' : '接口不可用'),
+                            message: data.message || (response.ok ? '来源与服务检查完成' : '来源或服务检查失败'),
+                            checks: Array.isArray(data.checks) ? data.checks : [],
                         };
                     } catch (error) {
-                        this.dramaAnalysis.interfaceTest = {status: 'error', message: error.message || '接口测试失败'};
+                        this.dramaAnalysis.interfaceTest = {
+                            status: 'error',
+                            message: error.message || '检查来源与服务失败',
+                            checks: [],
+                        };
                     } finally {
-                        this.dramaAnalysis.loading = false;
+                        this.dramaAnalysis.interfaceTesting = false;
                     }
                 },
 

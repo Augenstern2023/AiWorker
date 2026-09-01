@@ -158,6 +158,129 @@ def create_original_project(client: TestClient, request_id: str) -> dict[str, ob
     return response.json()
 
 
+def test_original_project_can_ensure_a_successor_brief_task(
+    client: TestClient,
+) -> None:
+    """Would catch coercing an original project's null topic_id to int."""
+    project = create_original_project(client, "ensure-original-brief-successor")
+
+    response = client.post(
+        f"/api/creative/projects/{project['id']}/workflow-tasks/brief/ensure"
+    )
+
+    assert response.status_code == 200, response.text
+    task = response.json()
+    assert task["project_id"] == str(project["id"])
+    assert task["topic_id"] is None
+    assert task["task_type"] == "brief"
+    assert task["status"] in {"assigned", "in_progress", "returned"}
+    assert task["assignee_user_id"] == client.principal.user_id
+
+
+def test_original_successor_brief_can_update_version_scoped_project_settings(
+    client: TestClient,
+) -> None:
+    project = create_original_project(client, "successor-brief-settings")
+    first = client.repository.create_blueprints(
+        project["id"],
+        [{"content": {"title": "20 集初版"}}],
+        direction_type="original",
+    )[0]
+    client.repository.lock_brief(first["id"])
+    second = client.repository.create_blueprint_version(first["id"])
+    current = client.repository.get_project(project["id"])
+
+    response = client.patch(
+        f"/api/creative/projects/{project['id']}",
+        json={
+            "target_episode_count": 30,
+            "episode_duration_seconds": 150,
+            "draft_brief_id": second["id"],
+            "expected_project_revision": current["revision"],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["target_episode_count"] == 30
+    assert response.json()["episode_duration_seconds"] == 150
+    locked_second = client.repository.lock_brief(
+        second["id"], expected_revision=response.json()["revision"]
+    )
+    assert client.repository.get_blueprint(first["id"])["content"][
+        "target_episode_count"
+    ] == 20
+    assert locked_second["content"]["target_episode_count"] == 30
+    assert locked_second["content"]["episode_duration_seconds"] == 150
+
+
+def test_successor_brief_lock_requires_current_project_revision(
+    client: TestClient,
+) -> None:
+    project = create_original_project(client, "successor-lock-revision")
+    ensured = client.post(
+        f"/api/creative/projects/{project['id']}/workflow-tasks/brief/ensure"
+    )
+    assert ensured.status_code == 200, ensured.text
+    first_task = ensured.json()
+    if first_task["status"] in {"assigned", "returned"}:
+        first_task = client.workflow.start_task(first_task["id"], client.principal)
+    first = client.repository.create_blueprints(
+        project["id"],
+        [{"content": {"title": "初版"}}],
+        workflow_task_id=first_task["id"],
+        direction_type="original",
+    )[0]
+    first_lock = client.post(
+        f"/api/creative/blueprints/{first['id']}/lock-brief",
+        json={
+            "workflow_task_id": first_task["id"],
+            "expected_project_revision": client.repository.get_project(project["id"])[
+                "revision"
+            ],
+        },
+    )
+    assert first_lock.status_code == 200, first_lock.text
+
+    successor_task_response = client.post(
+        f"/api/creative/projects/{project['id']}/workflow-tasks/brief/ensure"
+    )
+    assert successor_task_response.status_code == 200, successor_task_response.text
+    successor_task = successor_task_response.json()
+    if successor_task["status"] in {"assigned", "returned"}:
+        successor_task = client.workflow.start_task(
+            successor_task["id"], client.principal
+        )
+    second = client.repository.create_blueprint_version(
+        first["id"], workflow_task_id=successor_task["id"]
+    )
+    current_revision = client.repository.get_project(project["id"])["revision"]
+
+    missing = client.post(
+        f"/api/creative/blueprints/{second['id']}/lock-brief",
+        json={"workflow_task_id": successor_task["id"]},
+    )
+    stale = client.post(
+        f"/api/creative/blueprints/{second['id']}/lock-brief",
+        json={
+            "workflow_task_id": successor_task["id"],
+            "expected_project_revision": current_revision - 1,
+        },
+    )
+
+    assert missing.status_code == 409, missing.text
+    assert stale.status_code == 409, stale.text
+    assert client.repository.get_project(project["id"])["locked_brief_id"] == first["id"]
+    locked = client.post(
+        f"/api/creative/blueprints/{second['id']}/lock-brief",
+        json={
+            "workflow_task_id": successor_task["id"],
+            "expected_project_revision": current_revision,
+        },
+    )
+    assert locked.status_code == 200, locked.text
+    assert client.repository.get_project(project["id"])["locked_brief_id"] == second["id"]
+
+
 def test_project_delete_retries_cross_database_cleanup_from_durable_tombstone(
     client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

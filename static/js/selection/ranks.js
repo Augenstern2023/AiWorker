@@ -1,40 +1,116 @@
 window.aiworkerModules = window.aiworkerModules || [];
 window.aiworkerModules.push(() => ({
-                async fetchTodayRank() {
-                    this.todayRankLoading = true;
-                    this.todayRankError = '';
-                    const params = new URLSearchParams({
-                        platform: this.todayRankPlatform || 'dy',
-                        _: String(Date.now())
-                    });
-                    if (this.todayRankDate) params.set('date', this.todayRankDate);
-                    try {
-                        const res = await aiworkerApi.request(`/api/rank/today?${params.toString()}`);
-                        const data = await res.json();
-                        if (!res.ok) throw new Error(data.detail || '加载今日榜单失败');
-                        if (this.todayRankDate && !(data.available_dates || []).includes(this.todayRankDate)) {
-                            this.todayRankDate = '';
-                            this.todayRankData = data;
-                            await this.fetchTodayRank();
-                            return;
-                        }
-                        this.todayRankData = data;
-                        if (this.todayRankPlatform === 'hg') {
-                            this.ensureHongguoRoute(true);
-                        } else {
-                            this.ensureDouyinRoute(true);
-                        }
-                    } catch (e) {
-                        this.todayRankData = null;
-                        this.todayRankError = e.message || '加载今日榜单失败';
-                    } finally {
-                        this.todayRankLoading = false;
+                todayRankCacheKey(platform = '', date = '') {
+                    return `${platform || 'dy'}:${date || 'latest'}`;
+                },
+
+                applyTodayRankData(data, platform) {
+                    this.todayRankData = data;
+                    if (platform === 'hg') {
+                        this.ensureHongguoRoute(true);
+                    } else {
+                        this.ensureDouyinRoute(true);
                     }
                 },
 
-                async refreshTodayRank() {
+                isTodayRankSelection(platform, date) {
+                    return (this.todayRankPlatform || 'dy') === platform
+                        && (this.todayRankDate || '') === date;
+                },
+
+                async fetchTodayRank(forceRefresh = false) {
+                    const requestedPlatform = this.todayRankPlatform || 'dy';
+                    const requestedDate = this.todayRankDate || '';
+                    const cacheKey = this.todayRankCacheKey(requestedPlatform, requestedDate);
+                    this.todayRankError = '';
+                    const cached = this.todayRankCache?.[cacheKey];
+                    if (!forceRefresh && cached) {
+                        this.todayRankLoading = false;
+                        this.applyTodayRankData(cached, requestedPlatform);
+                        return cached;
+                    }
+                    this.todayRankLoading = true;
+                    const params = new URLSearchParams({
+                        platform: requestedPlatform
+                    });
+                    if (requestedDate) params.set('date', requestedDate);
+                    if (forceRefresh) params.set('refresh', 'true');
+                    let pendingEntry = !forceRefresh ? this.todayRankInflight?.[cacheKey] : null;
+                    if (!pendingEntry) {
+                        const versions = {...(this.todayRankCacheVersion || {})};
+                        if (forceRefresh) {
+                            const platformPrefix = `${requestedPlatform}:`;
+                            Object.keys(versions).forEach(key => {
+                                if (key.startsWith(platformPrefix) && key !== cacheKey) {
+                                    versions[key] = Number(versions[key] || 0) + 1;
+                                }
+                            });
+                        }
+                        const requestVersion = Number(versions[cacheKey] || 0) + 1;
+                        versions[cacheKey] = requestVersion;
+                        this.todayRankCacheVersion = versions;
+                        const promise = (async () => {
+                            const res = await aiworkerApi.request(`/api/rank/today?${params.toString()}`, {
+                                cache: forceRefresh ? 'no-store' : 'default'
+                            });
+                            const data = await res.json();
+                            if (!res.ok) throw new Error(data.detail || '加载今日榜单失败');
+                            return data;
+                        })();
+                        pendingEntry = {promise, version: requestVersion};
+                        if (!forceRefresh) {
+                            this.todayRankInflight = {...(this.todayRankInflight || {}), [cacheKey]: pendingEntry};
+                        }
+                    }
+                    const {promise: pending, version: requestVersion} = pendingEntry;
+                    try {
+                        const data = await pending;
+                        if (this.todayRankCacheVersion?.[cacheKey] !== requestVersion) return data;
+                        const canonicalKey = this.todayRankCacheKey(requestedPlatform, data.date || requestedDate);
+                        const existingCache = forceRefresh
+                            ? Object.fromEntries(
+                                Object.entries(this.todayRankCache || {}).filter(
+                                    ([key]) => !key.startsWith(`${requestedPlatform}:`)
+                                )
+                            )
+                            : (this.todayRankCache || {});
+                        this.todayRankCache = {
+                            ...existingCache,
+                            [cacheKey]: data,
+                            [canonicalKey]: data
+                        };
+                        if (!this.isTodayRankSelection(requestedPlatform, requestedDate)) return data;
+                        if (this.todayRankDate && !(data.available_dates || []).includes(this.todayRankDate)) {
+                            this.todayRankDate = '';
+                            await this.fetchTodayRank(forceRefresh);
+                            return;
+                        }
+                        this.applyTodayRankData(data, requestedPlatform);
+                        return data;
+                    } catch (e) {
+                        if (this.todayRankCacheVersion?.[cacheKey] !== requestVersion) return;
+                        if (!this.isTodayRankSelection(requestedPlatform, requestedDate)) return;
+                        if (this.todayRankData?.platform !== requestedPlatform) this.todayRankData = null;
+                        this.todayRankError = e.message || '加载今日榜单失败';
+                    } finally {
+                        if (!forceRefresh && this.todayRankInflight?.[cacheKey] === pendingEntry) {
+                            const {[cacheKey]: _completed, ...remaining} = this.todayRankInflight;
+                            this.todayRankInflight = remaining;
+                        }
+                        if (
+                            this.todayRankCacheVersion?.[cacheKey] === requestVersion
+                            && this.isTodayRankSelection(requestedPlatform, requestedDate)
+                        ) this.todayRankLoading = false;
+                    }
+                },
+
+                async refreshTodayRank(canUpdateRank = false) {
+                    if (!canUpdateRank) {
+                        await this.fetchTodayRank(true);
+                        return;
+                    }
                     if (this.todayRankPlatform !== 'dy') {
-                        await this.fetchTodayRank();
+                        await this.fetchTodayRank(true);
                         return;
                     }
                     if (this.todayRankRefreshing) return;
@@ -97,7 +173,7 @@ window.aiworkerModules.push(() => ({
                         }
                         this.todayRankRefreshMessage = '抖音榜单已更新';
                         await this.fetchJobs();
-                        await this.fetchTodayRank();
+                        await this.fetchTodayRank(true);
                     } catch (error) {
                         this.todayRankRefreshing = false;
                         this.todayRankRefreshJobId = '';
@@ -200,8 +276,6 @@ window.aiworkerModules.push(() => ({
                     if (window.location.hash !== target) {
                         window.location.hash = target;
                         if (platformChanged) this.fetchTodayRank();
-                    } else {
-                        this.fetchTodayRank();
                     }
                 },
 
@@ -327,15 +401,43 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
-                rankingTables(ranking) {
-                    const columns = ranking.columns || {};
+                rankingTableTabs() {
                     return [
-                        {key: 'current', title: '当前榜单', mode: 'current', items: ranking.current_entries || [], columns: this.rankColumnsForTable(columns.current, ranking.current_entries || [], 'current')},
-                        {key: 'new', title: '新上榜', mode: 'base', items: ranking.new_entries || [], columns: this.rankColumnsForTable(columns.new, ranking.new_entries || [], 'base')},
-                        {key: 'dropped', title: '下榜', mode: 'base', items: ranking.dropped_entries || [], columns: this.rankColumnsForTable(columns.dropped, ranking.dropped_entries || [], 'base')},
-                        {key: 'rank-up', title: '排名上升', mode: 'rank', items: ranking.rank_up || [], columns: this.rankColumnsForTable(columns.rank_up, ranking.rank_up || [], 'rank')},
-                        {key: 'rank-down', title: '排名下降', mode: 'rank', items: ranking.rank_down || [], columns: this.rankColumnsForTable(columns.rank_down, ranking.rank_down || [], 'rank')}
+                        {key: 'current', title: '当前榜单'},
+                        {key: 'new', title: '新上榜'},
+                        {key: 'dropped', title: '下榜'},
+                        {key: 'rank-up', title: '排名上升'},
+                        {key: 'rank-down', title: '排名下降'}
                     ];
+                },
+
+                rankingTable(ranking = {}, tableKey = 'current') {
+                    const definitions = {
+                        current: {title: '当前榜单', mode: 'current', itemsKey: 'current_entries', columnsKey: 'current'},
+                        new: {title: '新上榜', mode: 'base', itemsKey: 'new_entries', columnsKey: 'new'},
+                        dropped: {title: '下榜', mode: 'base', itemsKey: 'dropped_entries', columnsKey: 'dropped'},
+                        'rank-up': {title: '排名上升', mode: 'rank', itemsKey: 'rank_up', columnsKey: 'rank_up'},
+                        'rank-down': {title: '排名下降', mode: 'rank', itemsKey: 'rank_down', columnsKey: 'rank_down'}
+                    };
+                    const key = definitions[tableKey] ? tableKey : 'current';
+                    const definition = definitions[key];
+                    const items = ranking[definition.itemsKey] || [];
+                    return {
+                        key,
+                        title: definition.title,
+                        mode: definition.mode,
+                        items,
+                        columns: this.rankColumnsForTable(
+                            (ranking.columns || {})[definition.columnsKey],
+                            items,
+                            definition.mode
+                        )
+                    };
+                },
+
+                activeRankingTables(ranking) {
+                    const activeKey = this.getRankingActiveTable(ranking?.key);
+                    return [this.rankingTable(ranking, activeKey)];
                 },
 
                 getRankingActiveTable(rankingKey) {

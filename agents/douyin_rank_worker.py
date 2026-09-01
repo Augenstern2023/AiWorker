@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from agents.douyin_analysis_agent import AnalyzeOptions, analyze_rank_file
+from agents.rank_zentao_delivery import deliver_rank_update
 from core.events import emit_event
 from core.job import CrawlJob
 from tools.fetch_douyin_series_rank_md import parse_args as parse_tool_args
@@ -198,6 +199,31 @@ def run_job(job: CrawlJob) -> int:
                 platform="dy",
                 level="warning",
                 message=f"抖音榜单 Top10 自动分析失败，榜单抓取结果已保留: {exc}",
+                payload={"error_type": type(exc).__name__},
+            )
+        try:
+            delivery = deliver_rank_update("dy", json_path)
+            emit_event(
+                "log",
+                job_id=job.job_id,
+                worker_id=worker_id,
+                platform="dy",
+                level="info",
+                message=f"抖音榜单禅道推送：{delivery.get('status', 'unknown')}",
+                payload={
+                    "part_key": delivery.get("part_key", "douyin-rank"),
+                    "status": delivery.get("status", "unknown"),
+                    "reason": delivery.get("reason", ""),
+                },
+            )
+        except Exception as exc:
+            emit_event(
+                "log",
+                job_id=job.job_id,
+                worker_id=worker_id,
+                platform="dy",
+                level="warning",
+                message=f"抖音榜单已更新，但禅道推送失败: {exc}",
                 payload={"error_type": type(exc).__name__},
             )
     else:

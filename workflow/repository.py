@@ -1376,7 +1376,10 @@ class WorkflowRepository:
                 and member["project_role"] in OWNER_PROJECT_ROLES
                 for member in members
             )
-            if removes_active_owner:
+            if removes_active_owner and not (
+                live_actor["is_system_admin"]
+                or "project_owner" in live_actor["role_codes"]
+            ):
                 other_roles = connection.exec_driver_sql(
                     """
                     SELECT project_role FROM project_members

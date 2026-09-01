@@ -95,17 +95,48 @@ def writer_messages(
         "findings": [{"priority": "P1/P2", "dimension": "剧情结构/人物/节奏/爽点/钩子", "title": "问题", "evidence": "输入中的证据", "suggestion": "可执行改法", "route": "下一步处理"}],
         "next_questions": ["有助于继续创作的追问"],
     }
+    linked_project_id = (project_context or {}).get("project_id")
+    has_linked_project = type(linked_project_id) is int and linked_project_id > 0
+    generation_action: dict[str, Any]
+    if has_linked_project:
+        generation_action = {
+            "action_type": "creative.run_plan",
+            "title": "生成第1-5集剧本",
+            "target_stage": "script",
+            "episode_start": 1,
+            "episode_end": 5,
+            "payload": {},
+            "assumptions": [],
+        }
+    else:
+        generation_action = {
+            "action_type": "project.create_original",
+            "title": "创建原创项目并生成第1-5集剧本",
+            "source_card_id": "card-1",
+            "target_stage": "script",
+            "episode_start": 1,
+            "episode_end": 5,
+            "payload": {
+                "seed_text": "从全部材料提炼的原创种子",
+                "name": "从材料提炼的项目名称",
+                "genre": "从材料判断的题材类型",
+                "target_platform": "适合该作品的目标平台",
+                "target_audience": "目标受众说明",
+                "target_episode_count": 20,
+                "episode_duration_seconds": 120,
+                "cost_level": "中",
+                "content_boundaries": [],
+                "reference_refs": [],
+            },
+            "assumptions": [],
+        }
     creative_contract: dict[str, Any] = {
         "reply": "直接答复",
         "cards": [{
             "card_id": "card-1", "card_type": "brief",
             "content": {"title": "可执行创作简介"}, "assumptions": [],
         }],
-        "proposed_actions": [{
-            "action_type": "creative.run_plan", "title": "生成第1-5集剧本",
-            "target_stage": "script", "episode_start": 1, "episode_end": 5,
-            "payload": {}, "assumptions": [],
-        }],
+        "proposed_actions": [generation_action],
     }
     if direction_required:
         creative_contract["cards"] = [{
@@ -147,6 +178,14 @@ def writer_messages(
             "当前是一句话灵感起点，必须先返回唯一 directions 卡片，"
             "其中包含 3–5 个实质不同的创作方向。"
             if direction_required else ""
+        )
+        + (
+            "当前会话已关联项目；需要写入或生成阶段成果时使用 creative.run_plan。"
+            if has_linked_project
+            else
+            "当前会话未关联项目；需要写入或生成阶段成果时必须使用 "
+            "project.create_original，在同一动作中提供完整项目资料和目标阶段，"
+            "不得输出没有 project_id 的 creative.run_plan。"
         )
         + "只直接回答本轮问题，不输出评分、总评、评审报告或固定诊断栏目。"
     )

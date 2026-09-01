@@ -58,6 +58,9 @@
             const body = await cloned.json();
             if (body.detail) {
                 if (typeof body.detail === 'string') return body.detail;
+                if (body.detail && typeof body.detail.message === 'string') {
+                    return body.detail.message;
+                }
                 if (Array.isArray(body.detail) && body.detail.length > 0 && body.detail[0].msg) {
                     return body.detail[0].msg;
                 }

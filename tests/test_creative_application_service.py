@@ -173,6 +173,44 @@ def test_application_service_generation_job_contains_context(
     assert job.job.extra["operation_id"] == "act-7:outline"
 
 
+def test_application_service_forwards_original_brief_context_to_job_and_hash(
+    creative_context,
+) -> None:
+    """Would catch dropping frozen original inputs on the typed service boundary."""
+    project = creative_context.create_original_project()
+    creative_context.jobs.get_or_create_job.return_value = SimpleNamespace(
+        job_id="original-brief-job", status="pending"
+    )
+    common = {
+        "project_id": project["id"],
+        "stage": "brief",
+        "actor": creative_context.actor,
+        "workflow_task_id": "brief-task",
+        "operation_id": "original-brief-operation",
+        "generation_instruction": "从冻结种子生成一个原创 Brief",
+        "source_snapshot_id": "original-brief-snapshot",
+        "source_snapshot": {"snapshot_id": "original-brief-snapshot"},
+        "count": 1,
+        "market_context": [{"resource_type": "topic", "resource_id": 9}],
+        "blocked_terms": ["市场角色名"],
+        "reference_snapshot": [{
+            "resource_type": "topic", "resource_id": 9, "captured_at": 1.0,
+        }],
+    }
+
+    creative_context.application_service.start_generation(seed_id=71, **common)
+    first = creative_context.jobs.get_or_create_job.call_args.args[1]["extra"]
+    creative_context.application_service.start_generation(seed_id=72, **common)
+    second = creative_context.jobs.get_or_create_job.call_args.args[1]["extra"]
+
+    assert first["seed_id"] == 71
+    assert first["count"] == 1
+    assert first["market_context"] == common["market_context"]
+    assert first["blocked_terms"] == ["市场角色名"]
+    assert first["reference_snapshot"] == common["reference_snapshot"]
+    assert first["generation_request_hash"] != second["generation_request_hash"]
+
+
 def test_application_service_reserves_generation_job_by_operation_id(
     creative_context,
 ) -> None:

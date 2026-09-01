@@ -14,6 +14,7 @@ import hmac
 import json
 from pathlib import Path
 import threading
+import time
 from typing import Any
 
 import config
@@ -53,6 +54,22 @@ def create_provider():
 
 def emit(job: CrawlJob, event: str, message: str, level: str = "info", payload: dict[str, Any] | None = None) -> None:
     emit_event(event, job.job_id, "creative-phase4-worker", "creative", level, message, payload or {})
+
+
+def _resolve_outline_reasoning_effort(job: CrawlJob) -> str:
+    configured = str(
+        getattr(config, "CREATIVE_OUTLINE_REASONING_EFFORT", "high") or "high"
+    ).strip().lower()
+    if configured == "high":
+        return "high"
+    emit(
+        job,
+        "log",
+        "CREATIVE_OUTLINE_REASONING_EFFORT 仅支持 high，已回退为 high",
+        "warning",
+        {"stage": "outlines", "configured_reasoning_effort": configured, "reasoning_effort": "high"},
+    )
+    return "high"
 
 
 async def wait_if_paused(job: CrawlJob) -> None:
@@ -350,16 +367,33 @@ async def _run_once(job: CrawlJob) -> None:
             )
             return
     provider = create_provider()
-    total_episodes = int(project.get("target_episode_count") or 0) if series_generation else 1
+    outline_reasoning_effort = "high"
+    if action == "outlines":
+        outline_reasoning_effort = _resolve_outline_reasoning_effort(job)
+        if hasattr(provider, "reasoning_effort"):
+            provider.reasoning_effort = outline_reasoning_effort
+    total_episodes = (
+        int(project.get("target_episode_count") or 0)
+        if action == "outlines" or series_generation
+        else 1
+    )
     retry_completed = 0
+    active_outline_request: dict[str, Any] = {}
 
     def report_retry(retry_number: int, max_retries: int, reason: str) -> None:
+        active_request = dict(active_outline_request) if action == "outlines" else {}
+        if active_request.get("batch_started_at"):
+            active_request["request_elapsed_seconds"] = max(
+                0.0,
+                time.time() - float(active_request["batch_started_at"]),
+            )
         emit(
             job,
             "progress",
             f"模型服务暂时不可用，正在进行第 {retry_number}/{max_retries} 次自动重试：{reason}",
             "warning",
             {
+                **active_request,
                 "stage": action,
                 "completed": retry_completed,
                 "total": total_episodes,
@@ -487,6 +521,7 @@ async def _run_once(job: CrawlJob) -> None:
         resume_episodes = [item["content"] for item in resumable["episodes"]] if resumable else None
         resume_series_arc = resumable["series_arc"] if resumable else None
         resume_stages = resumable["stages"] if resumable else None
+        resume_series_overview = resumable["series_overview"] if resumable else None
         if resumable:
             completed = len(resume_episodes or [])
             total = int(project["target_episode_count"])
@@ -497,6 +532,52 @@ async def _run_once(job: CrawlJob) -> None:
                 f"已恢复 {completed}/{total} 集大纲",
                 payload={"stage": action, "completed": completed, "total": total},
             )
+
+        outline_completed = len(resume_episodes or [])
+        outline_total = int(project["target_episode_count"])
+        retry_completed = outline_completed
+
+        def report_outline_request_progress(request: dict[str, Any]) -> None:
+            phase = str(request.get("phase") or "")
+            request_kind = str(request.get("request_kind") or "")
+            if phase == "started":
+                active_outline_request.clear()
+                active_outline_request.update(
+                    {
+                        key: request.get(key)
+                        for key in (
+                            "request_kind", "batch_start", "batch_end",
+                            "batch_started_at", "reasoning_effort", "prompt_chars",
+                            "request_elapsed_seconds", "batch_in_flight",
+                        )
+                    }
+                )
+            scope = "全剧阶段弧线" if request_kind == "series_arc" else (
+                f"第 {request.get('batch_start')}-{request.get('batch_end')} 集"
+            )
+            if request_kind == "series_arc":
+                message = "正在规划全剧阶段弧线" if phase == "started" else (
+                    f"{scope}模型响应{'失败' if phase == 'failed' else '完成'}"
+                )
+            else:
+                message = f"正在生成{scope}大纲" if phase == "started" else (
+                    f"{scope}大纲模型响应{'失败' if phase == 'failed' else '完成'}"
+                )
+            payload = {
+                **request,
+                "stage": action,
+                "completed": outline_completed,
+                "total": outline_total,
+            }
+            emit(
+                job,
+                "progress",
+                message,
+                "error" if phase == "failed" else "info",
+                payload,
+            )
+            if phase in {"finished", "failed"}:
+                active_outline_request.clear()
 
         def save_outline_checkpoint(
             arc: dict[str, Any], episodes: list[dict[str, Any]], meta: dict[str, Any]
@@ -540,6 +621,9 @@ async def _run_once(job: CrawlJob) -> None:
             outline_batch_id = saved["batch_id"]
 
         def progress(done: int, total: int) -> None:
+            nonlocal outline_completed, retry_completed
+            outline_completed = done
+            retry_completed = done
             emit(
                 job,
                 "progress",
@@ -555,11 +639,14 @@ async def _run_once(job: CrawlJob) -> None:
                 characters,
                 relationships,
                 on_progress=progress,
+                on_request_progress=report_outline_request_progress,
                 on_checkpoint=save_outline_checkpoint,
                 checkpoint=lambda: wait_if_paused(job),
                 resume_episodes=resume_episodes,
                 resume_series_arc=resume_series_arc,
                 resume_stages=resume_stages,
+                resume_series_overview=resume_series_overview,
+                reasoning_effort=outline_reasoning_effort,
             )
         if outline_batch_id is None:
             raise RuntimeError("分集大纲未创建任何生成检查点")

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ProjectCreateRequest(BaseModel):
@@ -74,6 +74,8 @@ class ProjectUpdateRequest(BaseModel):
     target_episode_count: int | None = Field(None, ge=1, le=100)
     episode_duration_seconds: int | None = Field(None, ge=30, le=1800)
     status: str | None = None
+    draft_brief_id: int | None = Field(None, ge=1)
+    expected_project_revision: int | None = Field(None, ge=0)
 
 
 class BlueprintGenerateRequest(BaseModel):
@@ -112,6 +114,7 @@ class BriefLockRequest(BaseModel):
     difference_note: str = ""
     workflow_task_id: str = Field(min_length=1)
     operation_id: str | None = Field(None, max_length=200)
+    expected_project_revision: int | None = Field(None, ge=0)
 
 
 class CharacterBatchRequest(BaseModel):
@@ -140,6 +143,25 @@ class OutlineBatchRequest(BaseModel):
 class OutlineOverviewRequest(BaseModel):
     series_overview: dict[str, Any] = Field(default_factory=dict)
     operation_id: str | None = Field(None, max_length=200)
+
+
+class OutlineFieldRewriteRequest(BaseModel):
+    instruction: str = Field("", max_length=2000)
+
+
+class OutlineFieldRewriteApplyRequest(BaseModel):
+    candidate_value: str = Field(min_length=1, max_length=6000)
+    source_fingerprint: str = Field(min_length=64, max_length=64)
+    expected_project_revision: int = Field(ge=0)
+    operation_id: str | None = Field(None, max_length=200)
+
+    @field_validator("candidate_value")
+    @classmethod
+    def candidate_value_must_contain_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("candidate_value 不能为空")
+        return normalized
 
 
 class EpisodeBeatsRequest(BaseModel):

@@ -640,6 +640,53 @@ def test_writer_agent_project_context_shows_mode_stage_and_valid_entry(page: Pag
     assert context.get_by_role("link", name="打开项目").get_attribute("href") == "/writing/projects/9/outlines"
 
 
+def test_writer_agent_empty_project_progress_keeps_dark_theme_text_readable(
+    page: Page,
+) -> None:
+    """Would catch a light-theme text utility making the dark inspector unreadable."""
+    mount_writer_agent(
+        page,
+        session={"id": 1, "project_id": None, "messages": [], "actions": []},
+    )
+    template = (ROOT / "templates/review/writer_agent.html").read_text(
+        encoding="utf-8"
+    )
+    inline_styles = template.split("<style>", 1)[1].split("</style>", 1)[0]
+    page.add_style_tag(path=ROOT / "static/css/bootstrap.min.css")
+    page.add_style_tag(path=ROOT / "static/css/workspaces.css")
+    page.add_style_tag(content=inline_styles)
+
+    contrast = page.locator(".writer-project-progress-state").evaluate(
+        """
+        state => {
+          const rgb = value => (value.match(/[\\d.]+/g) || []).slice(0, 3).map(Number);
+          const luminance = value => {
+            const channels = rgb(value).map(channel => {
+              const normalized = channel / 255;
+              return normalized <= 0.04045
+                ? normalized / 12.92
+                : ((normalized + 0.055) / 1.055) ** 2.4;
+            });
+            return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+          };
+          const ratio = (foreground, background) => {
+            const values = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
+            return (values[0] + 0.05) / (values[1] + 0.05);
+          };
+          const background = getComputedStyle(document.body).backgroundColor;
+          return {
+            heading: ratio(getComputedStyle(state.querySelector('h5')).color, background),
+            copy: ratio(getComputedStyle(state.querySelector('span')).color, background),
+          };
+        }
+        """
+    )
+
+    assert contrast["heading"] >= 4.5
+    assert contrast["copy"] >= 4.5
+    assert contrast["heading"] > contrast["copy"]
+
+
 def test_writer_agent_right_panel_shows_project_stage_and_episode_progress(
     page: Page,
 ) -> None:

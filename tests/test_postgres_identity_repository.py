@@ -599,13 +599,14 @@ def test_postgres_registration_creates_a_disabled_user_pending_activation(
     )
     client = TestClient(app)
     username = f"registration-user-{uuid.uuid4()}"
+    contact_suffix = f"{uuid.uuid4().int % 100_000_000:08d}"
     payload = {
         "username": username,
         "display_name": "注册运营",
         "password": "Registration-Strong-123!",
-        "role_codes": ["selection_operator", "screenwriter"],
-        "email": "registration@example.com",
-        "phone": "13800138000",
+        "role_codes": ["project_owner", "selection_operator", "screenwriter"],
+        "email": f"registration-{contact_suffix}@example.com",
+        "phone": f"139{contact_suffix}",
         "gender": "female",
     }
 
@@ -620,9 +621,11 @@ def test_postgres_registration_creates_a_disabled_user_pending_activation(
     assert len(users) == 1
     assert users[0]["username"] == username
     assert users[0]["status"] == "disabled"
-    assert users[0]["role_codes"] == ["screenwriter", "selection_operator"]
-    assert users[0]["email"] == "registration@example.com"
-    assert users[0]["phone"] == "13800138000"
+    assert users[0]["role_codes"] == [
+        "project_owner", "screenwriter", "selection_operator"
+    ]
+    assert users[0]["email"] == payload["email"]
+    assert users[0]["phone"] == payload["phone"]
     assert users[0]["gender"] == "female"
     assert client.post(
         "/api/auth/login",
@@ -658,6 +661,68 @@ def test_postgres_registration_rejects_privileged_role_selection(
 
     assert response.status_code == 422
     assert response.json() == {"detail": "所选角色不可注册"}
+
+
+def test_postgres_admin_can_assign_project_owner_to_multiple_users(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required for PostgreSQL tests")
+    if make_url(postgres_url).database == "aiworker_system":
+        raise ValueError("tests must not run against the aiworker_system database")
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
+    command.upgrade(Config("alembic.ini"), "head")
+    database = SystemDatabase(SystemDatabaseSettings(postgres_url))
+    repository = IdentityRepository(database)
+    repository.seed_defaults()
+    password_service = PasswordService()
+    app = FastAPI()
+    app.include_router(
+        build_identity_router(
+            repository,
+            SessionService(repository),
+            password_service=password_service,
+        )
+    )
+    client = TestClient(app)
+    admin_username = f"owner-admin-{uuid.uuid4()}"
+    admin = repository.create_user(
+        admin_username,
+        "Owner Administrator",
+        password_service.hash("Owner-Admin-123!"),
+    )
+    system_admin = repository.get_role_by_code("system_admin")
+    assert system_admin is not None
+    repository.replace_user_roles(admin["id"], [system_admin["id"]])
+    login = client.post(
+        "/api/auth/login",
+        json={"username": admin_username, "password": "Owner-Admin-123!"},
+    )
+    assert login.status_code == 200
+    target = repository.create_user(
+        f"second-owner-{uuid.uuid4()}",
+        "Second Project Owner",
+        password_service.hash("Second-Owner-123!"),
+    )
+    first_owner = repository.create_user(
+        f"first-owner-{uuid.uuid4()}",
+        "First Project Owner",
+        password_service.hash("First-Owner-123!"),
+    )
+    project_owner = repository.get_role_by_code("project_owner")
+    assert project_owner is not None
+    repository.replace_user_roles(first_owner["id"], [project_owner["id"]])
+
+    response = client.patch(
+        f"/api/admin/users/{target['id']}",
+        headers={"X-CSRF-Token": login.json()["csrf_token"]},
+        json={"role_ids": [project_owner["id"]]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["role_codes"] == ["project_owner"]
+    assert repository.get_user(first_owner["id"])["role_codes"] == ["project_owner"]
 
 
 def test_postgres_admin_user_list_marks_other_users_as_deletable(

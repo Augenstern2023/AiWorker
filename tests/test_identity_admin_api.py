@@ -16,8 +16,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from identity.api import build_identity_router
+from identity.dependencies import current_principal
 from identity.password_service import PasswordService
 from identity.repository import IdentityRepository
+from identity.schema import Principal
 from identity.session_service import SessionService
 
 
@@ -221,6 +223,38 @@ def test_admin_can_replace_role_page_access_and_clone_it(
     )
     assert cloned.status_code == 201
     assert cloned.json()["page_routes"] == replaced.json()["page_routes"]
+
+
+def test_role_page_catalog_includes_system_backend_page():
+    class CatalogRepository:
+        @staticmethod
+        def seed_defaults() -> None:
+            return None
+
+    app = FastAPI()
+    app.include_router(
+        build_identity_router(
+            CatalogRepository(),
+            object(),
+            permission_service=object(),
+        )
+    )
+    app.dependency_overrides[current_principal] = lambda: Principal(
+        user_id="admin-1",
+        username="admin",
+        display_name="Administrator",
+        role_codes=("system_admin",),
+        permissions=frozenset({"*"}),
+        data_scope="all",
+        session_id="admin-session-1",
+    )
+    client = TestClient(app)
+
+    response = client.get("/api/admin/roles/page-catalog")
+
+    assert response.status_code == 200
+    pages = {item["route"]: item["label"] for item in response.json()}
+    assert pages["/admin/jobs"] == "系统后台"
 
 
 def test_required_dependency_is_restored_while_parent_remains(

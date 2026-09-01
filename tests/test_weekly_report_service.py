@@ -209,6 +209,139 @@ def test_generates_every_available_complete_week_for_historical_backfill(tmp_pat
     assert [report["report_id"] for report in service.list_reports("dy")] == ["dy-2026-08-03", "dy-2026-07-13"]
 
 
+def test_list_reports_reuses_cache_until_source_or_analysis_script_changes(tmp_path, monkeypatch):
+    days = ("2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07")
+    for day in days:
+        _write_snapshot(tmp_path, day, [_record(1, "缓存剧", "cached", 100)])
+    script = tmp_path / "weekly_report_service.py"
+    script.write_text("version one", encoding="utf-8")
+    service = WeeklyReportService(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        analysis_script_path=script,
+    )
+    calls = 0
+    original = service._build_report
+
+    def counted_build(platform, snapshots):
+        nonlocal calls
+        calls += 1
+        return original(platform, snapshots)
+
+    monkeypatch.setattr(service, "_build_report", counted_build)
+
+    first = service.list_reports("dy", as_of=datetime(2026, 8, 10, 23, 59))
+    second = service.list_reports("dy", as_of=datetime(2026, 8, 10, 23, 59))
+
+    assert first[0]["cache_status"] == "generated"
+    assert second[0]["cache_status"] == "hit"
+    assert calls == 1
+
+    _write_snapshot(tmp_path, days[-1], [_record(1, "缓存剧", "cached", 200)])
+    source_changed = service.list_reports("dy", as_of=datetime(2026, 8, 10, 23, 59))
+    assert source_changed[0]["cache_status"] == "generated"
+    assert calls == 2
+
+    script.write_text("version two", encoding="utf-8")
+    script_changed = service.list_reports("dy", as_of=datetime(2026, 8, 10, 23, 59))
+    assert script_changed[0]["cache_status"] == "generated"
+    assert calls == 3
+
+
+def test_cache_survives_service_restart(tmp_path, monkeypatch):
+    for day in ("2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07"):
+        _write_snapshot(tmp_path, day, [_record(1, "持久缓存剧", "persistent", 100)])
+    script = tmp_path / "weekly_report_service.py"
+    script.write_text("stable", encoding="utf-8")
+    runtime_dir = tmp_path / ".runtime"
+    WeeklyReportService(
+        root=tmp_path,
+        runtime_dir=runtime_dir,
+        analysis_script_path=script,
+    ).list_reports("dy", as_of=datetime(2026, 8, 10, 23, 59))
+    restarted = WeeklyReportService(
+        root=tmp_path,
+        runtime_dir=runtime_dir,
+        analysis_script_path=script,
+    )
+
+    def fail_build(*_args, **_kwargs):
+        raise AssertionError("unchanged report must be loaded from the persistent cache")
+
+    monkeypatch.setattr(restarted, "_build_report", fail_build)
+
+    reports = restarted.list_reports("dy", as_of=datetime(2026, 8, 10, 23, 59))
+
+    assert reports[0]["cache_status"] == "hit"
+
+
+def test_cache_validation_does_not_load_raw_snapshot_contents(tmp_path, monkeypatch):
+    for day in ("2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07"):
+        _write_snapshot(tmp_path, day, [_record(1, "轻量缓存剧", "lightweight", 100)])
+    script = tmp_path / "weekly_report_service.py"
+    script.write_text("stable", encoding="utf-8")
+    runtime_dir = tmp_path / ".runtime"
+    WeeklyReportService(
+        root=tmp_path,
+        runtime_dir=runtime_dir,
+        analysis_script_path=script,
+    ).list_reports("dy", as_of=datetime(2026, 8, 10, 23, 59))
+    restarted = WeeklyReportService(
+        root=tmp_path,
+        runtime_dir=runtime_dir,
+        analysis_script_path=script,
+    )
+
+    def fail_list_snapshots(*_args, **_kwargs):
+        raise AssertionError("cache validation must use file metadata instead of loading reports")
+
+    monkeypatch.setattr(restarted.rank_service, "list_snapshots", fail_list_snapshots)
+
+    reports = restarted.list_reports("dy", as_of=datetime(2026, 8, 10, 23, 59))
+
+    assert reports[0]["cache_status"] == "hit"
+
+
+def test_cached_report_exports_are_rebuilt_when_files_are_missing(tmp_path):
+    for day in ("2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07"):
+        _write_snapshot(tmp_path, day, [_record(1, "导出恢复剧", "export-recovery", 100)])
+    script = tmp_path / "weekly_report_service.py"
+    script.write_text("stable", encoding="utf-8")
+    service = WeeklyReportService(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        analysis_script_path=script,
+    )
+    first = service.list_reports("dy", as_of=datetime(2026, 8, 10, 23, 59))[0]
+    markdown_path = Path(first["markdown_path"])
+    markdown_path.unlink()
+
+    rebuilt = service.list_reports("dy", as_of=datetime(2026, 8, 10, 23, 59))[0]
+
+    assert rebuilt["cache_status"] == "generated"
+    assert markdown_path.is_file()
+
+
+def test_with_llm_generation_does_not_reuse_rule_only_cache(tmp_path, monkeypatch):
+    for day in ("2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07"):
+        _write_snapshot(tmp_path, day, [_record(1, "智能分析剧", "llm-cache", 100)])
+    service = WeeklyReportService(root=tmp_path, runtime_dir=tmp_path / ".runtime")
+    service.generate_all_available("dy", as_of=datetime(2026, 8, 10, 23, 59), with_llm=False)
+    calls = 0
+
+    def ready_llm(_report):
+        nonlocal calls
+        calls += 1
+        return {"status": "ready", "content": {"management_summary": "智能摘要"}}
+
+    monkeypatch.setattr(service, "_llm_summary", ready_llm)
+
+    report = service.generate_all_available("dy", as_of=datetime(2026, 8, 10, 23, 59), with_llm=True)[0]
+
+    assert calls == 1
+    assert report["llm"]["status"] == "ready"
+
+
 def _write_snapshot(root: Path, day: str, records: list[dict], suffix: str = "100000") -> None:
     target = root / "data" / "dy" / "jobs" / f"job-{day}" / "rank" / f"douyin_series_rank_{day.replace('-', '')}_{suffix}.json"
     target.parent.mkdir(parents=True, exist_ok=True)

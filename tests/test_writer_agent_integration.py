@@ -20,10 +20,13 @@ from creative.application_service import (
     CreativeApplicationService,
     CreativeContextConflict,
 )
+from creative.market_reference_service import MarketReferenceBundle, MarketReferenceService
 from creative import phase4_worker
 from creative.repository import CreativeRepository, canonical_request_hash
 from creative.workflow_adapter import CreativeWorkflowAdapter
 from identity.schema import Principal
+from runtime.job_manager import JobManager
+from runtime.job_state import JobState
 from workflow.transition_service import TransitionService
 from writer_agent.orchestrator import WriterProjectOrchestrator
 from writer_agent.schema import CreativePlan, PlanStep, WriterActionError
@@ -218,6 +221,238 @@ def valid_brief(title: str = "情绪公司") -> dict[str, Any]:
         "assumptions": ["观众理解积分"],
         "open_questions": ["制度由谁建立"],
     }
+
+
+def test_writer_original_brief_generation_freezes_seed_and_passes_context(
+    real_writer_context,
+) -> None:
+    """Would catch a writer-created original project launching Brief without its seed."""
+    project = real_writer_context.create_project("writer-original-brief-outline")
+    seed = real_writer_context.repository.get_current_seed(project["id"])
+    assert seed is not None
+    plan = real_writer_context.orchestrator.build_plan(
+        project=project,
+        target_stage="outline",
+        episode_start=1,
+        episode_end=1,
+        source_snapshot_id="writer-original-brief-snapshot",
+    )
+    assert [step.step_key for step in plan.steps] == ["brief.generate"]
+
+    real_writer_context.orchestrator.execute_step(
+        plan=plan,
+        step=plan.steps[0],
+        actor=real_writer_context.actor,
+        source_snapshot={"snapshot_id": "writer-original-brief-snapshot"},
+        payload={},
+    )
+
+    extra = real_writer_context.jobs.payloads[-1]["extra"]
+    assert extra["seed_id"] == seed["id"]
+    assert extra["count"] == 1
+    assert extra["market_context"] == []
+    assert extra["blocked_terms"] == []
+    assert extra["reference_snapshot"] == []
+    assert real_writer_context.repository.get_seed(seed["id"])["status"] == "frozen"
+
+
+def test_writer_original_brief_reference_replay_reuses_real_job_reservation(
+    real_writer_context, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Would catch a volatile reference capture time breaking operation replay."""
+    repository = real_writer_context.repository
+    topic = repository.upsert_topics([{
+        "platform": "hg", "job_id": "writer-replay-ref", "source_path": "rank.json",
+        "captured_at": "2026-08-24T17:08:44", "title": "市场参考剧",
+        "description": "市场参考描述", "category": "都市", "rank_type": "热播榜",
+        "score": 91, "confidence": "high", "score_details": {},
+        "recommendation": "参考市场信号", "evidence": [],
+    }])[0]
+    project = real_writer_context.create_project("writer-reference-replay")
+    seed = repository.get_current_seed(project["id"])
+    assert seed is not None
+    repository.update_seed(seed["id"], {
+        "reference_refs": [{"resource_type": "topic", "resource_id": topic["id"]}],
+    })
+    job_manager = JobManager(tmp_path / "writer-reference-replay-runtime", cwd=tmp_path)
+    monkeypatch.setattr(
+        job_manager,
+        "_launch_reserved_operation",
+        lambda _operation_id, _launcher_owner, job: JobState(job=job),
+    )
+    real_writer_context.service.job_manager = job_manager
+    original_resolve = MarketReferenceService.resolve
+    captured_at = iter([101.0, 202.0])
+
+    def resolve_with_volatile_capture(
+        service: MarketReferenceService, *args: Any, **kwargs: Any,
+    ) -> MarketReferenceBundle:
+        bundle = original_resolve(service, *args, **kwargs)
+        return MarketReferenceBundle(
+            context=bundle.context,
+            source_refs=bundle.source_refs,
+            blocked_terms=bundle.blocked_terms,
+            captured_at=next(captured_at),
+        )
+
+    monkeypatch.setattr(MarketReferenceService, "resolve", resolve_with_volatile_capture)
+    plan = real_writer_context.orchestrator.build_plan(
+        project=project,
+        target_stage="outline",
+        episode_start=1,
+        episode_end=1,
+        source_snapshot_id="writer-reference-replay-snapshot",
+    )
+    execution = {
+        "plan": plan,
+        "step": plan.steps[0],
+        "actor": real_writer_context.actor,
+        "source_snapshot": {"snapshot_id": "writer-reference-replay-snapshot"},
+        "payload": {},
+        "operation_id": "writer-reference-replay-operation",
+    }
+
+    first = real_writer_context.orchestrator.execute_step(**execution)
+    second = real_writer_context.orchestrator.execute_step(**execution)
+
+    stored = job_manager.find_job_by_operation("writer-reference-replay-operation")
+    assert first["job_id"] == second["job_id"]
+    assert stored is not None
+    snapshot = stored["job"]["extra"]["reference_snapshot"]
+    assert snapshot[0]["resource_id"] == topic["id"]
+    assert snapshot[0]["captured_at"] == repository.get_seed(seed["id"])["locked_at"]
+
+
+def test_writer_original_brief_generation_reports_malformed_reference_as_business_error(
+    real_writer_context,
+) -> None:
+    """Would catch historical malformed seed references becoming retryable failures."""
+    project = real_writer_context.create_project("writer-malformed-reference")
+    seed = real_writer_context.repository.get_current_seed(project["id"])
+    assert seed is not None
+    real_writer_context.repository.update_seed(seed["id"], {"reference_refs": ["not-a-ref"]})
+    plan = real_writer_context.orchestrator.build_plan(
+        project=project,
+        target_stage="outline",
+        episode_start=1,
+        episode_end=1,
+        source_snapshot_id="writer-malformed-reference-snapshot",
+    )
+
+    with pytest.raises(WriterActionError) as exc:
+        real_writer_context.orchestrator.execute_step(
+            plan=plan,
+            step=plan.steps[0],
+            actor=real_writer_context.actor,
+            source_snapshot={"snapshot_id": "writer-malformed-reference-snapshot"},
+            payload={},
+        )
+
+    assert exc.value.code == "ORIGINAL_REFERENCE_INVALID"
+    assert exc.value.retryable is False
+    assert real_writer_context.jobs.payloads == []
+
+
+def test_writer_original_brief_generation_rejects_revoked_reference_before_job(
+    real_writer_context,
+) -> None:
+    """Would catch launch after a seed reference loses read permission."""
+    project = real_writer_context.create_project("writer-original-revoked-reference")
+    seed = real_writer_context.repository.get_current_seed(project["id"])
+    assert seed is not None
+    real_writer_context.repository.update_seed(
+        seed["id"], {"reference_refs": [{"resource_type": "topic", "resource_id": 1}]}
+    )
+    real_writer_context.orchestrator.can_read_reference = (
+        lambda _actor, _kind, _identifier: False
+    )
+    plan = real_writer_context.orchestrator.build_plan(
+        project=project,
+        target_stage="script",
+        episode_start=1,
+        episode_end=1,
+        source_snapshot_id="writer-revoked-reference-snapshot",
+    )
+
+    with pytest.raises(WriterActionError) as exc:
+        real_writer_context.orchestrator.execute_step(
+            plan=plan,
+            step=plan.steps[0],
+            actor=real_writer_context.actor,
+            source_snapshot={"snapshot_id": "writer-revoked-reference-snapshot"},
+            payload={},
+        )
+
+    assert exc.value.code == "REFERENCE_UNAVAILABLE"
+    assert real_writer_context.jobs.payloads == []
+
+
+def test_writer_original_brief_generation_reports_missing_seed_as_business_error(
+    real_writer_context, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Would catch a missing original seed being flattened into GENERATION_FAILED."""
+    project = real_writer_context.create_project("writer-original-missing-seed")
+    plan = real_writer_context.orchestrator.build_plan(
+        project=project,
+        target_stage="outline",
+        episode_start=1,
+        episode_end=1,
+        source_snapshot_id="writer-missing-seed-snapshot",
+    )
+    monkeypatch.setattr(
+        real_writer_context.repository, "get_current_seed", lambda _project_id: None
+    )
+
+    with pytest.raises(WriterActionError) as exc:
+        real_writer_context.orchestrator.execute_step(
+            plan=plan,
+            step=plan.steps[0],
+            actor=real_writer_context.actor,
+            source_snapshot={"snapshot_id": "writer-missing-seed-snapshot"},
+            payload={},
+        )
+
+    assert exc.value.code == "ORIGINAL_SEED_UNAVAILABLE"
+    assert exc.value.retryable is False
+    assert real_writer_context.jobs.payloads == []
+
+
+def test_writer_non_brief_generation_does_not_prepare_original_seed(
+    real_writer_context, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Would catch original seed setup leaking into downstream stage generation."""
+    project = real_writer_context.create_project("writer-non-brief-seed")
+    plan = CreativePlan(
+        project_id=project["id"],
+        target_stage="characters",
+        episode_start=1,
+        episode_end=1,
+        source_snapshot_id="writer-non-brief-snapshot",
+        assumptions=[],
+        steps=[PlanStep(
+            step_key="characters.generate",
+            stage="characters",
+            kind="generate",
+            expected_context=real_writer_context.service.current_plan_context(project["id"]),
+        )],
+    )
+    step = plan.steps[0]
+    assert step.stage == "characters"
+    monkeypatch.setattr(
+        real_writer_context.repository,
+        "get_current_seed",
+        lambda _project_id: pytest.fail("non-Brief generation must not read a seed"),
+    )
+
+    real_writer_context.orchestrator.execute_step(
+        plan=plan,
+        step=step,
+        actor=real_writer_context.actor,
+        source_snapshot={"snapshot_id": "writer-non-brief-snapshot"},
+        payload={},
+    )
+
+    assert "seed_id" not in real_writer_context.jobs.payloads[-1]["extra"]
 
 
 def lock_competing_brief(context: SimpleNamespace, project_id: int) -> dict[str, Any]:

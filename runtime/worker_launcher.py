@@ -48,6 +48,8 @@ def build_worker_command(job_file: str | Path, platform: str = "", crawler_type:
 def build_worker_env() -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
+    if env.get("AIWORKER_SYSTEM_DATABASE_URL", "").strip():
+        env["AIWORKER_LLM_DATABASE_CONFIG_ENABLED"] = "1"
     node_options = env.get("NODE_OPTIONS", "")
     filtered_node_options = [
         option for option in node_options.split() if option != "--use-env-proxy"

@@ -147,14 +147,20 @@ def project_review_fingerprint(source: dict[str, object]) -> str:
 
 
 def _select_brief(items: list[dict[str, Any]], project: dict[str, Any]) -> dict[str, Any] | None:
+    """Select the locked downstream authority before any editable Brief draft."""
+    locked_id = _positive_int(project.get("locked_brief_id"))
+    locked = next(
+        (
+            item for item in _eligible(items)
+            if locked_id and _positive_int(item.get("id")) == locked_id
+        ),
+        None,
+    )
+    if locked is not None:
+        return _resource_snapshot(locked, "brief", _positive_int(project.get("id")))
     active_items = [item for item in _eligible(items) if _status(item) in _ACTIVE_STATUSES]
     if active_items:
         return _resource_snapshot(max(active_items, key=_version_key), "brief", _positive_int(project.get("id")))
-
-    locked_id = _positive_int(project.get("locked_brief_id"))
-    locked = next((item for item in _eligible(items) if _positive_int(item.get("id")) == locked_id), None)
-    if locked is not None:
-        return _resource_snapshot(locked, "brief", _positive_int(project.get("id")))
     current = _current(items)
     return _resource_snapshot(current, "brief", _positive_int(project.get("id"))) if current else None
 

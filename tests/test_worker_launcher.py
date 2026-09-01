@@ -140,6 +140,17 @@ def test_build_worker_env_sets_utf8():
     assert build_worker_env()["PYTHONIOENCODING"] == "utf-8"
 
 
+def test_build_worker_env_enables_database_llm_settings(monkeypatch):
+    """Would catch child workers continuing to use stale process environment defaults."""
+
+    monkeypatch.setenv(
+        "AIWORKER_SYSTEM_DATABASE_URL",
+        "postgresql+psycopg://app:secret@127.0.0.1:5432/aiworker_test",
+    )
+
+    assert build_worker_env()["AIWORKER_LLM_DATABASE_CONFIG_ENABLED"] == "1"
+
+
 def test_build_worker_env_removes_playwright_incompatible_node_proxy_option(monkeypatch):
     monkeypatch.setenv("NODE_OPTIONS", "--max-old-space-size=4096 --use-env-proxy")
 

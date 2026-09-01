@@ -2,13 +2,13 @@
             <div class="d-flex align-items-center justify-content-between mb-3">
                 <h3 class="mb-0">周报看板</h3>
                 <div class="d-flex gap-2">
-                    <select class="form-select form-select-sm" style="width: 130px;" x-model="analyticsPlatform" @change="refreshAnalyticsDashboard">
+                    <select class="form-select form-select-sm" style="width: 130px;" x-model="analyticsPlatform" @change="refreshAnalyticsDashboard()">
                         <option value="">全部平台</option>
                         <option value="dy">抖音</option>
                         <option value="hg">红果</option>
                     </select>
-                    <button class="btn btn-outline-secondary btn-sm" @click="refreshAnalyticsDashboard" :disabled="weeklyReportLoading">
-                        <i class="bi bi-arrow-clockwise me-1"></i>刷新
+                    <button class="btn btn-outline-secondary btn-sm" @click="refreshAnalyticsDashboard({notify: true})" :disabled="weeklyReportLoading" :aria-busy="weeklyReportLoading">
+                        <span class="spinner-border spinner-border-sm me-1" x-show="weeklyReportLoading" x-cloak aria-hidden="true"></span><i class="bi bi-arrow-clockwise me-1" x-show="!weeklyReportLoading" aria-hidden="true"></i><span x-text="weeklyReportLoading ? '更新中…' : '刷新'">刷新</span>
                     </button>
                 </div>
             </div>
@@ -32,7 +32,7 @@
                                 <option :value="item.report_id" x-text="`${item.platform === 'dy' ? '抖音' : '红果'} · ${item.period?.start || '-'} 至 ${item.period?.end || '-'}`"></option>
                             </template>
                         </select>
-                        <button class="btn btn-outline-secondary btn-sm btn-icon" @click="fetchWeeklyReports" :disabled="weeklyReportLoading" title="刷新周度报告" aria-label="刷新周度报告"><i class="bi bi-arrow-clockwise"></i></button>
+                        <button class="btn btn-outline-secondary btn-sm btn-icon" @click="refreshAnalyticsDashboard({notify: true})" :disabled="weeklyReportLoading" :aria-busy="weeklyReportLoading" title="刷新周度报告" aria-label="刷新周度报告"><span class="spinner-border spinner-border-sm" x-show="weeklyReportLoading" x-cloak aria-hidden="true"></span><i class="bi bi-arrow-clockwise" x-show="!weeklyReportLoading" aria-hidden="true"></i></button>
                         <button class="btn btn-outline-secondary btn-sm btn-icon" @click="weeklyReportExport('markdown')" :disabled="!weeklyReport" title="导出 Markdown" aria-label="导出 Markdown"><i class="bi bi-file-earmark-text"></i></button>
                         <button class="btn btn-outline-success btn-sm btn-icon" @click="weeklyReportExport('excel')" :disabled="!weeklyReport" title="导出 Excel" aria-label="导出 Excel"><i class="bi bi-file-earmark-spreadsheet"></i></button>
                     </div>

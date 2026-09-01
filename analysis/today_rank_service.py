@@ -10,10 +10,13 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import logging
 import os
 import re
+import tempfile
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -30,6 +33,7 @@ DEFAULT_HONGGUO_RAW_ROOT = Path(os.environ.get("HONGGUO_RAW_DIR", r"E:\hg\raw"))
 HONGGUO_SECTION_ORDER = ["全部", "真人剧", "漫剧", "AI剧"]
 HONGGUO_RANKING_ORDER = ["热播榜", "推荐榜", "必看榜", "热搜榜", "收藏榜", "新剧榜", "预约榜", "高分臻果榜"]
 DOUYIN_RANKING_ORDER = ["榜单", "热榜"]
+RANK_SOURCE_CHECK_INTERVAL_SECONDS = 5.0
 logger = logging.getLogger("aiworker.web.today_rank")
 HONGGUO_CSV_SECTION_BY_SELECTED = {
     "all": "红果",
@@ -91,6 +95,47 @@ RANK_CHANGE_COLUMNS = (
 )
 
 
+def _paths_revision(paths: set[Path]) -> str:
+    metadata: list[tuple[str, int, int]] = []
+    for path in sorted(paths, key=lambda item: str(item)):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        metadata.append((str(path.resolve()), stat.st_size, stat.st_mtime_ns))
+    return hashlib.sha256(
+        json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def _write_json_atomically(path: Path, payload: dict[str, Any], label: str) -> None:
+    temporary: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        )
+        temporary = Path(handle.name)
+        with handle:
+            json.dump(payload, handle, ensure_ascii=False)
+        temporary.replace(path)
+    except OSError as exc:
+        logger.warning("%s：path=%s error=%s", label, path, exc)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def _hongguo_raw_root_for_exports(exports_root: Path) -> Path:
     if exports_root == DEFAULT_HONGGUO_EXPORTS_ROOT:
         return DEFAULT_HONGGUO_RAW_ROOT
@@ -118,7 +163,12 @@ class RankSnapshot:
 
 
 class TodayRankService:
-    def __init__(self, root: str | Path = ".", hongguo_exports_root: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        root: str | Path = ".",
+        hongguo_exports_root: str | Path | None = None,
+        cache_dir: str | Path | None = None,
+    ) -> None:
         self.root = Path(root).resolve()
         if hongguo_exports_root is not None:
             self.hongguo_exports_root = Path(hongguo_exports_root)
@@ -127,32 +177,245 @@ class TodayRankService:
         else:
             self.hongguo_exports_root = self.root / "exports"
         self.hongguo_raw_root = _hongguo_raw_root_for_exports(self.hongguo_exports_root)
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else self.root / ".runtime" / "rank-cache"
+        if not self.cache_dir.is_absolute():
+            self.cache_dir = self.root / self.cache_dir
+        self._response_cache: dict[tuple[str, str, int], dict[str, Any]] = {}
+        self._source_revisions: dict[str, str] = {}
+        self._source_revision_checked_at: dict[str, float] = {}
+        self._hongguo_raw_index: dict[str, dict[str, Any]] | None = None
+        self._hongguo_raw_index_dirty = False
 
-    def get_today_rank(self, platform: str, date: str = "", limit: int = 10) -> dict[str, Any]:
+    def get_today_rank(
+        self,
+        platform: str,
+        date: str = "",
+        limit: int = 10,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
         platform = platform.strip().lower()
         if platform not in SUPPORTED_PLATFORMS:
             raise ValueError("platform must be dy or hg")
+        date = date.strip()
+        if date:
+            try:
+                parsed_date = datetime.strptime(date, "%Y-%m-%d").date()
+            except ValueError as exc:
+                raise ValueError("date must be YYYY-MM-DD") from exc
+            if parsed_date.isoformat() != date:
+                raise ValueError("date must be YYYY-MM-DD")
+
+        memory_key = (platform, date, limit)
+        memory_cached = self._response_cache.get(memory_key)
+        checked_at = self._source_revision_checked_at.get(platform, 0.0)
+        if (
+            not force_refresh
+            and memory_cached is not None
+            and time.monotonic() - checked_at
+            < RANK_SOURCE_CHECK_INTERVAL_SECONDS
+        ):
+            return {**memory_cached, "cache_status": "hit"}
+
+        cache_revision = self._source_revision(platform)
+        previous_revision = self._source_revisions.get(platform)
+        if force_refresh or (
+            previous_revision is not None
+            and previous_revision != cache_revision
+        ):
+            self._invalidate_memory_cache(platform)
+        self._source_revisions[platform] = cache_revision
+        if not force_refresh:
+            cached = self._read_response_cache(
+                platform, cache_revision, date, limit
+            )
+            if cached is not None:
+                self._response_cache[memory_key] = cached
+                self._source_revision_checked_at[platform] = time.monotonic()
+                return {**cached, "cache_status": "hit"}
 
         snapshots = self.list_snapshots(platform)
         available_dates = _available_dates(snapshots)
         selected = self._select_snapshot(snapshots, date)
         if selected is None:
-            return self._empty_response(platform, date, available_dates)
+            response = self._empty_response(platform, date, available_dates)
+        else:
+            previous = self._previous_snapshot(snapshots, selected)
+            selected = _annotate_rank_durations(selected, snapshots)
+            previous = (
+                _annotate_rank_durations(previous, snapshots)
+                if previous
+                else None
+            )
+            comparison = self._compare(selected, previous, limit=limit)
+            response = {
+                "platform": platform,
+                "date": selected.captured_at.date().isoformat(),
+                "available_dates": available_dates,
+                "selected_snapshot": selected.to_dict(self.root),
+                "previous_snapshot": (
+                    previous.to_dict(self.root) if previous else None
+                ),
+                "validation": selected.validation,
+                "records_with_warnings": [
+                    record
+                    for record in selected.records
+                    if record.get("validation_warnings")
+                ][:20],
+                **comparison,
+            }
 
-        previous = self._previous_snapshot(snapshots, selected)
-        selected = _annotate_rank_durations(selected, snapshots)
-        previous = _annotate_rank_durations(previous, snapshots) if previous else None
-        comparison = self._compare(selected, previous, limit=limit)
-        return {
-            "platform": platform,
-            "date": selected.captured_at.date().isoformat(),
-            "available_dates": available_dates,
-            "selected_snapshot": selected.to_dict(self.root),
-            "previous_snapshot": previous.to_dict(self.root) if previous else None,
-            "validation": selected.validation,
-            "records_with_warnings": [record for record in selected.records if record.get("validation_warnings")][:20],
-            **comparison,
+        response["cache_status"] = (
+            "refreshed" if force_refresh else "generated"
+        )
+        self._write_response_cache(
+            platform, cache_revision, date, limit, response
+        )
+        self._response_cache[memory_key] = response
+        self._source_revision_checked_at[platform] = time.monotonic()
+        return response
+
+    def _invalidate_memory_cache(self, platform: str) -> None:
+        self._response_cache = {
+            key: response
+            for key, response in self._response_cache.items()
+            if key[0] != platform
         }
+
+    def _source_revision(self, platform: str) -> str:
+        if platform == "hg":
+            return self._hongguo_source_revision()
+        paths: set[Path] = set(self.root.glob(RANK_PATTERNS[platform]))
+        paths.update(self.root.glob(f"data/{platform}/jobs/*/analysis/*.json"))
+        return _paths_revision(paths)
+
+    def _hongguo_source_revision(self) -> str:
+        paths: set[Path] = set(self.root.glob(RANK_PATTERNS["hg"]))
+        paths.update(self.root.glob("data/hg/jobs/*/analysis/*.json"))
+        export_paths = sorted(self.hongguo_exports_root.glob("*/top10_rankings.csv"))
+        paths.update(export_paths)
+        observed_raw_paths: set[str] = set()
+        for export_path in export_paths:
+            series_ids = _hongguo_csv_raw_series_ids(export_path)
+            if not series_ids:
+                continue
+            captured_at = _parse_datetime_from_export_path(export_path)
+            if captured_at is None:
+                continue
+            paths.update(
+                self._hongguo_relevant_raw_paths(
+                    self.hongguo_raw_root
+                    / f"mitm_responses_{captured_at:%Y%m%d}",
+                    series_ids,
+                    observed_raw_paths,
+                )
+            )
+        raw_index = self._load_hongguo_raw_index()
+        for stale_path in set(raw_index).difference(observed_raw_paths):
+            raw_index.pop(stale_path, None)
+            self._hongguo_raw_index_dirty = True
+        if self._hongguo_raw_index_dirty:
+            self._write_hongguo_raw_index()
+        return _paths_revision(paths)
+
+    def _hongguo_raw_index_path(self) -> Path:
+        return self.cache_dir / "hongguo-raw-source-index.json"
+
+    def _load_hongguo_raw_index(self) -> dict[str, dict[str, Any]]:
+        if self._hongguo_raw_index is not None:
+            return self._hongguo_raw_index
+        try:
+            payload = json.loads(
+                self._hongguo_raw_index_path().read_text(encoding="utf-8")
+            )
+            files = payload.get("files") if payload.get("version") == 1 else None
+            self._hongguo_raw_index = files if isinstance(files, dict) else {}
+        except (OSError, json.JSONDecodeError, AttributeError):
+            self._hongguo_raw_index = {}
+        return self._hongguo_raw_index
+
+    def _write_hongguo_raw_index(self) -> None:
+        _write_json_atomically(
+            self._hongguo_raw_index_path(),
+            {"version": 1, "files": self._load_hongguo_raw_index()},
+            "红果原始响应索引写入失败",
+        )
+        self._hongguo_raw_index_dirty = False
+
+    def _hongguo_relevant_raw_paths(
+        self,
+        folder: Path,
+        ranked_series_ids: set[str],
+        observed_paths: set[str],
+    ) -> set[Path]:
+        relevant: set[Path] = set()
+        if not folder.exists() or not ranked_series_ids:
+            return relevant
+        index = self._load_hongguo_raw_index()
+        for path in folder.glob("*.json"):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            key = str(path.resolve())
+            observed_paths.add(key)
+            cached = index.get(key, {})
+            if (
+                cached.get("size") == stat.st_size
+                and cached.get("mtime_ns") == stat.st_mtime_ns
+                and isinstance(cached.get("series_ids"), list)
+            ):
+                raw_series_ids = {
+                    str(item) for item in cached["series_ids"] if str(item)
+                }
+            else:
+                raw_series_ids = _hongguo_raw_file_series_ids(path)
+                index[key] = {
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                    "series_ids": sorted(raw_series_ids),
+                }
+                self._hongguo_raw_index_dirty = True
+            if raw_series_ids.intersection(ranked_series_ids):
+                relevant.add(path)
+        return relevant
+
+    def _response_cache_path(
+        self, platform: str, date: str, limit: int
+    ) -> Path:
+        date_key = date.strip() or "latest"
+        prefix = "hongguo" if platform == "hg" else "douyin"
+        return self.cache_dir / f"{prefix}-{date_key}-limit-{limit}.json"
+
+    def _read_response_cache(
+        self,
+        platform: str,
+        revision: str,
+        date: str,
+        limit: int,
+    ) -> dict[str, Any] | None:
+        path = self._response_cache_path(platform, date, limit)
+        try:
+            cached = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if cached.get("source_revision") != revision or not isinstance(cached.get("response"), dict):
+            return None
+        return cached["response"]
+
+    def _write_response_cache(
+        self,
+        platform: str,
+        revision: str,
+        date: str,
+        limit: int,
+        response: dict[str, Any],
+    ) -> None:
+        path = self._response_cache_path(platform, date, limit)
+        _write_json_atomically(
+            path,
+            {"source_revision": revision, "response": response},
+            "榜单响应缓存写入失败",
+        )
 
     def list_snapshots(self, platform: str) -> list[RankSnapshot]:
         if platform == "hg":
@@ -845,6 +1108,43 @@ def _assign_missing_hongguo_csv_ranks(records: list[dict[str, Any]]) -> None:
         counters[group] = counters.get(group, 0) + 1
         if not int(record.get("rank") or 0):
             record["rank"] = counters[group]
+
+
+def _hongguo_csv_raw_series_ids(path: Path) -> set[str]:
+    series_ids: set[str] = set()
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as file:
+            rows = csv.DictReader(file)
+            for row in rows:
+                series_id = _first_text(
+                    row.get("series_id"),
+                    row.get("短剧ID"),
+                    row.get("book_id"),
+                    row.get("id"),
+                )
+                if series_id:
+                    series_ids.add(series_id)
+    except OSError:
+        return set()
+    return series_ids
+
+
+def _hongguo_raw_file_series_ids(path: Path) -> set[str]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig", errors="ignore"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    series_ids: set[str] = set()
+    for item in _walk_json_objects(payload):
+        series_id = _first_text(
+            item.get("series_id"),
+            item.get("recommend_group_id"),
+            item.get("book_id"),
+            item.get("id"),
+        )
+        if series_id:
+            series_ids.add(series_id)
+    return series_ids
 
 
 def _enrich_hongguo_csv_snapshots(snapshots: list[RankSnapshot], raw_root: Path | None = None) -> list[RankSnapshot]:

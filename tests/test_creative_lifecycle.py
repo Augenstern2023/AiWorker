@@ -12,6 +12,7 @@ import csv
 from io import BytesIO, StringIO
 import json
 from pathlib import Path
+import sqlite3
 from urllib.parse import unquote
 
 from fastapi import FastAPI
@@ -76,6 +77,7 @@ def seed_topic(
         "description": "生命周期测试",
         "category": "都市",
         "rank_type": "热播榜",
+        "rank_source": "热榜" if platform == "dy" else "全部热播榜",
         "score": 90,
         "confidence": "high",
         "score_details": {},
@@ -282,6 +284,7 @@ def test_generating_today_hits_returns_only_unadopted_recommendations(
         "description": "新的爆款推荐",
         "category": "都市",
         "rank_type": "热播榜",
+        "rank_source": "全部热播榜",
         "score": 95,
         "confidence": "high",
         "score_details": {},
@@ -289,7 +292,10 @@ def test_generating_today_hits_returns_only_unadopted_recommendations(
         "evidence": [],
     }])
 
-    response = client.post("/api/creative/topics/generate", json={"platform": "hg", "limit": 10})
+    response = client.post(
+        "/api/creative/topics/generate",
+        json={"platform": "hg", "rank_source": "全部", "limit": 10},
+    )
 
     assert response.status_code == 200
     assert [item["title"] for item in response.json()["items"]] == ["待采纳剧目"]
@@ -480,6 +486,132 @@ def test_generate_topics_api_uses_and_returns_selected_rank_source(tmp_path: Pat
     assert response.json()["items"][0]["rank_source"] == "热榜"
 
 
+def test_generate_topics_api_uses_default_source_without_mixing_same_day_topics(
+    tmp_path: Path, monkeypatch
+):
+    client, repository, _ = build_client(tmp_path)
+    seed_topic_data = {
+        "platform": "dy",
+        "job_id": "existing-heat",
+        "source_path": "data/dy/same-day.json",
+        "captured_at": "2026-08-18",
+        "title": "已有热榜候选",
+        "description": "不应混入默认榜单",
+        "category": "都市",
+        "rank_type": "热榜",
+        "rank_source": "热榜",
+        "score": 99,
+        "confidence": "high",
+        "score_details": {},
+        "recommendation": "推荐",
+        "evidence": [],
+    }
+    repository.upsert_topics([seed_topic_data])
+    monkeypatch.setattr(TopicService, "generate", lambda *_args, **_kwargs: [{
+        **seed_topic_data,
+        "job_id": "default-ranking",
+        "title": "默认榜单候选",
+        "rank_type": "榜单",
+        "rank_source": "榜单",
+        "score": 90,
+    }])
+
+    response = client.post(
+        "/api/creative/topics/generate", json={"platform": "dy", "limit": 10}
+    )
+
+    assert response.status_code == 200
+    assert [item["title"] for item in response.json()["items"]] == ["默认榜单候选"]
+
+
+def test_generate_topics_api_does_not_fall_back_to_historical_pending_topics(
+    tmp_path: Path, monkeypatch
+):
+    client, repository, _ = build_client(tmp_path)
+    repository.upsert_topics([{
+        "platform": "dy",
+        "job_id": "historical-heat",
+        "source_path": "data/dy/historical.json",
+        "captured_at": "2026-08-17",
+        "title": "昨日热榜候选",
+        "description": "昨日数据",
+        "category": "都市",
+        "rank_type": "热榜",
+        "rank_source": "热榜",
+        "score": 90,
+        "confidence": "high",
+        "score_details": {},
+        "recommendation": "推荐",
+        "evidence": [],
+    }])
+    monkeypatch.setattr(TopicService, "generate", lambda *_args, **_kwargs: [])
+
+    response = client.post(
+        "/api/creative/topics/generate",
+        json={"platform": "dy", "rank_source": "热榜", "limit": 10},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+
+
+def test_generate_topics_api_rejects_invalid_rank_source(tmp_path: Path):
+    client, _, _ = build_client(tmp_path)
+
+    response = client.post(
+        "/api/creative/topics/generate",
+        json={"platform": "dy", "rank_source": "推荐榜", "limit": 10},
+    )
+
+    assert response.status_code == 400
+
+
+def test_list_topics_api_rejects_invalid_rank_source(tmp_path: Path):
+    client, _, _ = build_client(tmp_path)
+
+    response = client.get(
+        "/api/creative/topics",
+        params={"platform": "dy", "rank_source": "推荐榜"},
+    )
+
+    assert response.status_code == 400
+
+
+def test_repository_backfills_legacy_hongguo_rank_source(tmp_path: Path):
+    db_path = tmp_path / "legacy-creative.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("""
+            CREATE TABLE creative_topics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL, job_id TEXT NOT NULL, source_path TEXT NOT NULL,
+                captured_at TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+                category TEXT, rank_type TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending_review', score REAL NOT NULL,
+                confidence TEXT NOT NULL, score_details_json TEXT NOT NULL,
+                recommendation TEXT NOT NULL, evidence_json TEXT NOT NULL,
+                decision_note TEXT NOT NULL DEFAULT '', deleted INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                UNIQUE(platform, job_id, source_path, title)
+            )
+        """)
+        connection.execute("""
+            INSERT INTO creative_topics (
+                platform, job_id, source_path, captured_at, title, description,
+                category, rank_type, score, confidence, score_details_json,
+                recommendation, evidence_json, created_at, updated_at
+            ) VALUES (
+                'hg', 'legacy', 'legacy.csv', '2026-08-18', '旧版红果候选', '',
+                '都市', '热播榜', 90, 'high', '{}', '推荐', '[]', 1, 1
+            )
+        """)
+
+    repository = CreativeRepository(db_path)
+
+    topics = repository.list_topics(platform="hg", rank_source="全部")
+    assert [item["title"] for item in topics] == ["旧版红果候选"]
+    assert topics[0]["rank_source"] == "全部热播榜"
+
+
 def test_adopting_rank_entry_creates_an_adopted_topic_and_rejects_duplicates(
     tmp_path: Path,
 ):
@@ -535,18 +667,21 @@ def test_generating_today_hits_excludes_a_title_already_in_the_topic_library(
         {
             "platform": "hg", "job_id": "rank-today", "source_path": "data/hg/today.json",
             "captured_at": "2026-07-24", "title": "已入库剧目", "description": "重复候选",
-            "category": "都市", "rank_type": "热播榜", "score": 99, "confidence": "high",
+            "category": "都市", "rank_type": "热播榜", "rank_source": "全部热播榜", "score": 99, "confidence": "high",
             "score_details": {}, "recommendation": "重复推荐", "evidence": [],
         },
         {
             "platform": "hg", "job_id": "rank-today", "source_path": "data/hg/today.json",
             "captured_at": "2026-07-24", "title": "全新候选", "description": "新的候选",
-            "category": "都市", "rank_type": "热播榜", "score": 90, "confidence": "high",
+            "category": "都市", "rank_type": "热播榜", "rank_source": "全部热播榜", "score": 90, "confidence": "high",
             "score_details": {}, "recommendation": "新推荐", "evidence": [],
         },
     ])
 
-    response = client.post("/api/creative/topics/generate", json={"platform": "hg", "limit": 10})
+    response = client.post(
+        "/api/creative/topics/generate",
+        json={"platform": "hg", "rank_source": "全部", "limit": 10},
+    )
 
     assert response.status_code == 200
     assert [item["title"] for item in response.json()["items"]] == ["全新候选"]
@@ -569,7 +704,10 @@ def test_generating_today_hits_matches_snapshot_day_when_capture_time_is_present
         "score_details": {}, "recommendation": "推荐", "evidence": [],
     }])
 
-    response = client.post("/api/creative/topics/generate", json={"platform": "dy", "limit": 10})
+    response = client.post(
+        "/api/creative/topics/generate",
+        json={"platform": "dy", "rank_source": "热榜", "limit": 10},
+    )
 
     assert response.status_code == 200
     assert [item["title"] for item in response.json()["items"]] == ["当日候选"]
@@ -619,7 +757,10 @@ def test_generating_top_ten_is_not_reduced_by_higher_scored_adopted_topics(
     ]
     monkeypatch.setattr(TopicService, "generate", lambda *_args, **_kwargs: generated)
 
-    response = client.post("/api/creative/topics/generate", json={"platform": "dy", "limit": 10})
+    response = client.post(
+        "/api/creative/topics/generate",
+        json={"platform": "dy", "rank_source": "热榜", "limit": 10},
+    )
 
     assert response.status_code == 200
     assert [item["title"] for item in response.json()["items"]] == [

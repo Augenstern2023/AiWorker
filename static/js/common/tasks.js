@@ -99,7 +99,12 @@
                 dramaAnalysis: {
                     title: '',
                     platform: 'hg',
+                    topic: null,
                     candidates: [],
+                    providers: [],
+                    captureCandidates: [],
+                    thirdPartyError: '',
+                    captureError: '',
                     selected: null,
                     episodes: [],
                     episode: 0,
@@ -112,16 +117,49 @@
                     seriesRangeLabel: '',
                     seriesWarnings: [],
                     seriesLoading: false,
+                    searchRequestId: 0,
+                    seriesRequestId: 0,
                     loading: false,
+                    loadingMessage: '正在检索剧目来源…',
                     error: '',
                     jobId: '',
                     notifiedStatus: '',
+                    videoPreviewPath: '',
+                    videoPreviewUrl: '',
+                    videoPreviewError: '',
+                    interfaceTesting: false,
                     interfaceTest: null,
                     settings: {
+                        config_url: '',
+                        activation_code: '',
+                        has_activation_code: false,
                         capture_root: 'E:\\hg\\raw\\video_urls',
                         capture_service_url: 'http://127.0.0.1:8776',
                         wait_timeout_seconds: 600
                     }
+                },
+                llmSettings: {
+                    loading: false,
+                    saving: false,
+                    syncing: false,
+                    testing: false,
+                    modelSaving: false,
+                    defaultSavingId: '',
+                    error: '',
+                    notice: '',
+                    presets: {},
+                    providers: [],
+                    defaultModelId: '',
+                    selectedProviderId: '',
+                    editor: {
+                        id: '', name: '', preset: 'custom', base_url: '',
+                        wire_api: 'chat_completions', api_key: '',
+                        has_api_key: false, is_enabled: true,
+                        clear_api_key: false, credential_status: 'missing'
+                    },
+                    modelDraft: {model_id: '', display_name: ''},
+                    modelEditor: null,
+                    test: {model_id: '', result: null}
                 },
                 creative: {
                     platform: creativePlatformPreference(),
@@ -148,11 +186,17 @@
                     jobStartedAt: 0, jobElapsedSeconds: 0,
                     startingAction: '', activeAction: '', activeEpisode: 0, activeSeriesGeneration: false, activeBatchId: '',
                     outlineEpisodeUpdates: {episodeNumber: 0, records: []},
+                    outlineFieldRewrite: {
+                        projectId: 0, batchId: '', episodeId: 0, episodeNumber: 0,
+                        fieldKey: '', fieldLabel: '', sourceStatus: '', sourceText: '',
+                        sourceFingerprint: '', instruction: '', candidateText: '',
+                        loading: false, applying: false, error: '', requestSequence: 0
+                    },
                     outlineOverviewExpanded: true, outlineOverviewDraft: {},
                     outlineOverviewErrors: {}, outlineOverviewSaving: false, outlineOverviewSaveSequence: 0,
                     saveState: {}, notice: '', noticeType: 'success', noticeTimer: null
                 },
-                dramaDownload: {title: '', topic: null, source: 'hongguo', fallbackReason: '', candidates: [], selectedCandidate: null, selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], relatedVideos: [], missingEpisodes: [], seriesRangeLabel: '', seriesWarnings: [], selectedEpisodes: [], allEpisodes: false, episodesExpanded: true, searching: false, episodesLoading: false, starting: false, error: '', jobId: '', jobStatus: '', progress: {}, progressMessage: '', paused: false, finished: false, background: false, showFiles: false, logs: [], logCount: 0, videoPreviewPath: '', videoPreviewUrl: '', videoPreviewError: ''},
+                dramaDownload: {title: '', topic: null, source: 'hongguo', fallbackReason: '', candidates: [], providers: [], captureCandidates: [], thirdPartyError: '', captureError: '', selectedCandidate: null, selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], relatedVideos: [], missingEpisodes: [], seriesRangeLabel: '', seriesWarnings: [], selectedEpisodes: [], allEpisodes: false, episodesExpanded: true, searching: false, episodesLoading: false, starting: false, error: '', jobId: '', jobStatus: '', progress: {}, progressMessage: '', paused: false, finished: false, background: false, showFiles: false, logs: [], logCount: 0, videoPreviewPath: '', videoPreviewUrl: '', videoPreviewError: ''},
                 dramaReviews: {topic: null, title: '', platform: 'hg', limit: 100, allReviews: false, format: 'csv', jobId: '', status: '', reviewCount: 0, sourceTotal: 0, items: [], loading: false, polling: false, error: ''},
                 dramaReviewJobs: {},
                 analyticsPlatform: '',
@@ -166,6 +210,10 @@
                 todayRankSectionKey: '榜单',
                 todayRankRankingKey: '',
                 todayRankData: null,
+                todayRankCache: {},
+                todayRankInflight: {},
+                todayRankCacheVersion: {},
+                todayRankRequestId: 0,
                 todayRankLoading: false,
                 todayRankError: '',
                 todayRankRefreshing: false,
@@ -312,6 +360,7 @@
                         await this.loadConfig();
                         await this.fetchConfigForm();
                         await this.fetchBackups();
+                        await this.fetchLLMSettings();
                         await this.fetchDramaSettings();
                     }
                     if (this.page === 'admin-data') await this.fetchFiles();
@@ -658,6 +707,9 @@
                     try {
                         const res = await aiworkerApi.request('/api/jobs');
                         const data = await res.json();
+                        if (res.ok === false) {
+                            throw new Error(data.detail || data.message || '读取任务列表失败');
+                        }
                         this.jobs = data.jobs || [];
                         this.isRunning = this.jobs.some(job => this.isJobRunning(job));
                         if (!this.selectedJobId && this.jobs.length > 0) {
@@ -674,8 +726,7 @@
                         if (this.syncCreativeJobProgress) await this.syncCreativeJobProgress();
                         this.syncBreakdownGenerationProgress?.();
                     } catch (e) {
-                        this.jobs = [];
-                        this.isRunning = false;
+                        this.isRunning = this.jobs.some(job => this.isJobRunning(job));
                     }
                 },
 

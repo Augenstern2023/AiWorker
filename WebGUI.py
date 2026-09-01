@@ -65,14 +65,20 @@ from analysis.asr import (
     SenseVoiceASRProvider,
     default_sensevoice_script_path,
 )
-from analysis.llm import LLMError, create_llm_provider_from_config
+from analysis.llm import (
+    LLMError,
+    configure_llm_settings_repository,
+    create_llm_provider_from_config,
+)
+from analysis.llm_settings import LLMSecretCipher, LLMSettingsRepository
+from analysis.llm_settings_api import LLMSettingsService, build_llm_settings_router
 from analysis.today_rank_api import register_today_rank_routes
 from creative.api import register_creative_routes
 from creative.application_service import CreativeApplicationService
 from creative.market_reference_service import MarketReferenceService
 from creative.original_project_service import OriginalProjectService
 from creative.project_creator_migration import migrate_project_creator_memberships
-from creative.repository import CreativeRepository
+from creative.repository import CreativeRepository, DownloadTopicDecisionConflict
 from creative.transcript_assets import normalize_title
 from creative.workflow_adapter import CreativeWorkflowAdapter
 from screenplay_review.api import register_script_review_routes
@@ -473,11 +479,13 @@ job_manager = JobManager(cwd=Path(__file__).resolve().parent)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     backend_logger.info("Web GUI started")
+    configure_llm_settings_repository(llm_settings_repository)
     cleanup_task = asyncio.create_task(_periodic_data_operation_cleanup())
     writer_action_runner.resume_active_actions()
     try:
         yield
     finally:
+        configure_llm_settings_repository(None)
         cleanup_task.cancel()
         with suppress(asyncio.CancelledError):
             await cleanup_task
@@ -513,6 +521,27 @@ identity_permission_service = PermissionService(
     identity_repository, identity_session_service
 )
 audit_service = AuditService(identity_repository)
+llm_settings_repository = LLMSettingsRepository(
+    system_database,
+    LLMSecretCipher.from_environment(WORKSPACE_ROOT / ".runtime"),
+)
+legacy_llm_import = llm_settings_repository.import_legacy(config)
+if legacy_llm_import.get("imported"):
+    audit_service.record(
+        actor=None,
+        action="llm.settings.legacy_import",
+        target_type="llm_settings",
+        target_id="global",
+        before=None,
+        after={
+            "provider_id": legacy_llm_import.get("provider_id"),
+            "model_id": legacy_llm_import.get("model_id"),
+            "has_api_key": legacy_llm_import.get("has_api_key", False),
+        },
+        reason="startup migration",
+        result="success",
+    )
+llm_settings_service = LLMSettingsService(llm_settings_repository)
 workflow_repository = WorkflowRepository(identity_repository)
 creative_repository = CreativeRepository(
     WORKSPACE_ROOT / ".runtime" / "creative" / "creative.db"
@@ -659,6 +688,9 @@ app.include_router(
     )
 )
 app.include_router(build_audit_router(audit_service))
+app.include_router(
+    build_llm_settings_router(llm_settings_service, audit_service)
+)
 app.include_router(build_navigation_router())
 if system_database is not None:
     app.include_router(
@@ -808,7 +840,7 @@ class HongguoDramaJobRequest(BaseModel):
 
 
 class HongguoDramaDownloadJobRequest(BaseModel):
-    topic_id: int
+    topic_id: int = Field(default=0, ge=0)
     title: str
     book_id: str = ""
     series_ref: str = ""
@@ -820,7 +852,7 @@ class HongguoDramaDownloadJobRequest(BaseModel):
 
 
 class DouyinFallbackDramaJobRequest(BaseModel):
-    topic_id: int
+    topic_id: int = Field(default=0, ge=0)
     title: str
     aweme_id: str = ""
     aweme_ids: List[str] = []
@@ -1014,6 +1046,58 @@ def _job_task_context(
     if expected_task_type and task.get("topic_id") != topic_id:
         raise HTTPException(409, "machine job topic does not match workflow task")
     return resolved_task_id, task.get("project_id")
+
+
+def _resolve_download_topic(
+    *,
+    topic_id: int,
+    title: str,
+    platform: str,
+    provider_id: str,
+    source_ref: str,
+    actor: Principal,
+    request: Request | None,
+) -> dict[str, Any]:
+    normalized_title = title.strip()
+    if topic_id:
+        topic = creative_repository.get_topic(topic_id)
+        if topic is None:
+            raise HTTPException(404, "creative topic not found")
+        if CreativeRepository._title_key(
+            topic.get("title")
+        ) != CreativeRepository._title_key(normalized_title):
+            raise HTTPException(409, "machine job title does not match creative topic")
+        if topic.get("status") != "adopted":
+            raise HTTPException(409, "只有已采纳选题可以下载素材")
+        return topic
+
+    try:
+        topic, before = creative_repository.ensure_download_topic(
+            title=normalized_title,
+            platform=platform,
+            provider_id=provider_id,
+            source_ref=source_ref,
+            actor_user_id=actor.user_id,
+        )
+    except DownloadTopicDecisionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    if before is None or before.get("status") != topic.get("status"):
+        audit_service.record(
+            actor=actor,
+            action="selection.topic_adopt_from_download",
+            target_type="topic",
+            target_id=str(topic["id"]),
+            project_id=None,
+            before=before,
+            after=topic,
+            reason="下载时自动采纳",
+            result="success",
+            request=request,
+        )
+    return topic
 
 
 def _public_created_job(job_state) -> dict[str, Any]:
@@ -2893,24 +2977,26 @@ async def create_hongguo_drama_download_job(
     actor = principal
     _require_permission(actor, "job.create.selection", request)
     _require_permission(actor, "drama.download", request)
-    task_id, project_id = _job_task_context(
-        payload.workflow_task_id,
-        actor,
-        expected_task_type="source_package",
-        topic_id=payload.topic_id,
-        topic_title=payload.title,
-    )
     episodes = sorted({int(item) for item in payload.episodes if int(item) > 0})
     provider_id, series_ref = _resolved_drama_provider_identity(payload)
     if not payload.title.strip() or not series_ref or (not payload.all_episodes and not episodes):
         raise HTTPException(400, "剧名、book_id 和至少一个集数必须有效")
+    topic = _resolve_download_topic(
+        topic_id=payload.topic_id,
+        title=payload.title,
+        platform="hg",
+        provider_id=provider_id,
+        source_ref=series_ref,
+        actor=actor,
+        request=request,
+    )
     job_id = job_manager.generate_job_id("hg")
     job = CrawlJob(
         job_id=job_id,
         platform="hg",
         crawler_type="drama_download",
         extra={
-            "topic_id": payload.topic_id,
+            "topic_id": topic["id"],
             "title": payload.title.strip(),
             "book_id": series_ref,
             "series_ref": series_ref,
@@ -2922,22 +3008,20 @@ async def create_hongguo_drama_download_job(
             "creative_db_path": str(creative_repository.db_path.resolve()),
             "workspace_root": str(WORKSPACE_ROOT.resolve()),
             "created_by_user_id": actor.user_id,
-            "legacy_workflow_task_id": payload.workflow_task_id,
+            "legacy_workflow_task_id": None,
         },
     )
     try:
         job_state = job_manager.create_job(
             job,
             created_by_user_id=actor.user_id if actor is not None else None,
-            workflow_task_id=task_id,
-            project_id=project_id,
+            workflow_task_id=None,
+            project_id=None,
         )
         public_job = _public_created_job(job_state)
-        if task_id:
-            workflow_repository.link_task_job(task_id, job_state.job_id)
         if actor is not None:
-            _record_job_audit(None, actor, "job.create", public_job)
-        return {"status": "success", "job": public_job}
+            _record_job_audit(request, actor, "job.create", public_job)
+        return {"status": "success", "topic": topic, "job": public_job}
     except JobConflictError as exc:
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=409)
     except Exception as exc:
@@ -2955,13 +3039,6 @@ async def create_douyin_fallback_drama_job(
     actor = principal
     _require_permission(actor, "job.create.selection", request)
     _require_permission(actor, "drama.download", request)
-    task_id, project_id = _job_task_context(
-        payload.workflow_task_id,
-        actor,
-        expected_task_type="source_package",
-        topic_id=payload.topic_id,
-        topic_title=payload.title,
-    )
     aweme_ids: List[str] = []
     for value in [*payload.aweme_ids, payload.aweme_id]:
         aweme_id = str(value or "").strip()
@@ -2971,13 +3048,22 @@ async def create_douyin_fallback_drama_job(
         raise HTTPException(400, "剧名和用户确认的 aweme_id 必须有效")
     if len(aweme_ids) > 100:
         raise HTTPException(400, "单次最多下载 100 个抖音视频")
+    topic = _resolve_download_topic(
+        topic_id=payload.topic_id,
+        title=payload.title,
+        platform="dy",
+        provider_id="douyin",
+        source_ref=aweme_ids[0],
+        actor=actor,
+        request=request,
+    )
     job_id = job_manager.generate_job_id("hg")
     job = CrawlJob(
         job_id=job_id,
         platform="hg",
         crawler_type="douyin_fallback_analysis",
         extra={
-            "topic_id": payload.topic_id,
+            "topic_id": topic["id"],
             "title": payload.title.strip(),
             "aweme_id": aweme_ids[0],
             "aweme_ids": aweme_ids,
@@ -2986,22 +3072,20 @@ async def create_douyin_fallback_drama_job(
             "creative_db_path": str(creative_repository.db_path.resolve()),
             "workspace_root": str(WORKSPACE_ROOT.resolve()),
             "created_by_user_id": actor.user_id,
-            "legacy_workflow_task_id": payload.workflow_task_id,
+            "legacy_workflow_task_id": None,
         },
     )
     try:
         job_state = job_manager.create_job(
             job,
             created_by_user_id=actor.user_id if actor is not None else None,
-            workflow_task_id=task_id,
-            project_id=project_id,
+            workflow_task_id=None,
+            project_id=None,
         )
         public_job = _public_created_job(job_state)
-        if task_id:
-            workflow_repository.link_task_job(task_id, job_state.job_id)
         if actor is not None:
-            _record_job_audit(None, actor, "job.create", public_job)
-        return {"status": "success", "job": public_job}
+            _record_job_audit(request, actor, "job.create", public_job)
+        return {"status": "success", "topic": topic, "job": public_job}
     except JobConflictError as exc:
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=409)
     except Exception as exc:

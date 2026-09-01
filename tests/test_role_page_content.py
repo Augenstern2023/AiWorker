@@ -326,10 +326,11 @@ def test_selection_drama_page_cannot_edit_admin_credentials():
     ):
         assert forbidden not in selection
         assert forbidden not in selection_script
-    assert "红果抓包下载设置" in admin
+    assert "红果剧目来源与抓包设置" in admin
     assert "capture_root" in admin_script
     assert "wait_timeout_seconds" in admin_script
-    assert "activationCode" not in admin_script
+    assert "activation_code" in admin_script
+    assert "saveDramaSettings" in admin_script
     assert "saveDramaSettings" in admin_script
     assert "testDramaInterface" in admin_script
 

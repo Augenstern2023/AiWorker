@@ -202,6 +202,7 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
         ("POST", "/api/douyin/reviews/jobs"),
         ("GET", "/api/douyin/reviews/jobs/{job_id}"),
         ("GET", "/api/douyin/reviews/jobs/{job_id}/download"),
+        ("GET", "/api/file/preview"),
         ("GET", "/api/creative/topics/{topic_id}"),
     )
     + _CREATIVE_TASK_SUPPORT
@@ -313,6 +314,14 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
         ("GET", "/api/hongguo/drama/settings"),
         ("PUT", "/api/hongguo/drama/settings"),
         ("POST", "/api/hongguo/drama/test"),
+        ("GET", "/api/llm/settings"),
+        ("POST", "/api/llm/providers"),
+        ("PUT", "/api/llm/providers/{provider_id}"),
+        ("POST", "/api/llm/providers/{provider_id}/models/sync"),
+        ("POST", "/api/llm/providers/{provider_id}/models"),
+        ("PUT", "/api/llm/models/{model_record_id}"),
+        ("PUT", "/api/llm/default-model"),
+        ("POST", "/api/llm/test"),
     ),
     "/admin/analytics": (
         ("GET", "/api/analytics/weekly-reports"),

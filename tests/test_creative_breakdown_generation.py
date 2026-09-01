@@ -164,6 +164,73 @@ async def test_generation_allows_evidence_gap_risk_notes_without_fake_excerpt():
 
 
 @pytest.mark.asyncio
+async def test_generation_marks_target_audience_as_inferred_when_evidence_is_missing():
+    payload = personalized_breakdown_payload()
+    payload["content"]["target_audience"] = "偏好穿书反差关系的女性观众"
+    payload["field_sources"].pop("target_audience")
+    provider = SequentialProvider([payload])
+
+    content, sources, _, meta = await generate_breakdown(
+        provider,
+        {"title": transcript_bundle()["title"]},
+        transcript_bundle(),
+    )
+
+    assert content["target_audience"] == (
+        "偏好穿书反差关系的女性观众（基于现有转写推断）"
+    )
+    assert sources["target_audience"] == []
+    assert meta["repair_attempted"] is False
+
+
+@pytest.mark.asyncio
+async def test_generation_replaces_paraphrased_evidence_with_transcript_sentence():
+    payload = personalized_breakdown_payload()
+    payload["field_sources"]["hook_points"] = [{
+        "episode_number": 1,
+        "source_path": transcript_bundle()["episodes"][0]["script_path"],
+        "excerpt": "苏软认错反派顾宴后被迫同行",
+    }]
+    provider = SequentialProvider([payload])
+
+    _, sources, risks, meta = await generate_breakdown(
+        provider,
+        {"title": transcript_bundle()["title"]},
+        transcript_bundle(),
+    )
+
+    assert sources["hook_points"] == [{
+        "episode_number": 1,
+        "source_path": transcript_bundle()["episodes"][0]["script_path"],
+        "excerpt": "第一集真实剧情：苏软穿书后认错了反派顾宴，并被迫与他同行。",
+    }]
+    assert all("hook_points" not in risk for risk in risks)
+    assert meta["repair_attempted"] is False
+
+
+@pytest.mark.asyncio
+async def test_generation_drops_unverifiable_evidence_without_failing_breakdown():
+    payload = personalized_breakdown_payload()
+    payload["field_sources"]["hook_points"] = [{
+        "episode_number": 1,
+        "source_path": transcript_bundle()["episodes"][0]["script_path"],
+        "excerpt": "皇帝在月球开餐馆",
+    }]
+    provider = SequentialProvider([payload])
+
+    content, sources, risks, meta = await generate_breakdown(
+        provider,
+        {"title": transcript_bundle()["title"]},
+        transcript_bundle(),
+    )
+
+    assert sources["hook_points"] == []
+    assert any("hook_points" in risk and "需人工核验" in risk for risk in risks)
+    assert any("hook_points" in risk and "需人工核验" in risk for risk in content["risk_notes"])
+    assert meta["repair_attempted"] is False
+
+
+@pytest.mark.asyncio
 async def test_generation_uses_metadata_as_deterministic_title_evidence():
     payload = personalized_breakdown_payload()
     payload["field_sources"]["title"] = []

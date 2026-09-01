@@ -44,6 +44,28 @@ def current_principal(
     return principal
 
 
+def permission_granted(request: Request, principal: Principal, code: str) -> bool:
+    """Return whether an operation is granted by its page or permission code."""
+
+    page_api_decision = _page_api_decision(request, principal)
+    if page_api_decision is not None:
+        return page_api_decision
+    return principal.is_system_admin or code in principal.permissions
+
+
+def page_api_access_granted(request: Request, principal: Principal) -> bool:
+    """Return whether the current API is explicitly granted by a bound page."""
+
+    return _page_api_decision(request, principal) is True
+
+
+def enforce_permission(request: Request, principal: Principal, code: str) -> None:
+    """Enforce an operation permission unless a bound page grant replaces it."""
+
+    if not permission_granted(request, principal, code):
+        raise HTTPException(status_code=403, detail="没有执行此操作的权限")
+
+
 def require_permission(
     code: str, scope_resolver: ScopeResolver | None = None
 ) -> Callable[..., Awaitable[Principal]]:
@@ -52,16 +74,7 @@ def require_permission(
         principal: Principal = Depends(current_principal),
         permission_service: PermissionService = Depends(permission_service_for_request),
     ) -> Principal:
-        page_api_decision = _page_api_decision(request, principal)
-        if page_api_decision is False:
-            raise HTTPException(status_code=403, detail="没有执行此操作的权限")
-        page_grant_replaces_admin_gate = code == "*" and page_api_decision is True
-        if (
-            not page_grant_replaces_admin_gate
-            and not principal.is_system_admin
-            and code not in principal.permissions
-        ):
-            raise HTTPException(status_code=403, detail="没有执行此操作的权限")
+        enforce_permission(request, principal, code)
         if scope_resolver is not None:
             allowed = scope_resolver(permission_service, principal, request)
             if inspect.isawaitable(allowed):

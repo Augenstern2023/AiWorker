@@ -25,9 +25,15 @@ def build_today_rank_router(root: str | Path = ".") -> APIRouter:
         platform: str = Query(..., description="dy or hg"),
         date: str = "",
         limit: int = Query(10, ge=1, le=50),
+        refresh: bool = False,
     ):
         try:
-            return service.get_today_rank(platform=platform, date=date, limit=limit)
+            return service.get_today_rank(
+                platform=platform,
+                date=date,
+                limit=limit,
+                force_refresh=refresh,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:

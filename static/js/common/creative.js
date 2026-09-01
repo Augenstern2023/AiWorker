@@ -526,7 +526,10 @@ window.aiworkerModules.push(() => ({
                     }[resourceType];
                     if (!endpoint) throw new Error('不支持完成该创作阶段');
                     const body = {workflow_task_id: task.id};
-                    if (resourceType === 'brief') body.difference_note = differenceNote || '';
+                    if (resourceType === 'brief') {
+                        body.difference_note = differenceNote || '';
+                        body.expected_project_revision = Number(this.creativeWorkspace.project?.revision);
+                    }
                     const response = await aiworkerApi.request(endpoint, {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
@@ -690,12 +693,15 @@ window.aiworkerModules.push(() => ({
                         && Number(item.upstream_refs?.brief_id || 0) === Number(project.locked_brief_id || 0)
                         && String(item.upstream_refs?.character_batch_id || '') === String(project.character_batch_id || '')
                     );
-                    if (project.outline_batch_id && compatible.some(item => item.batch_id === project.outline_batch_id)) {
-                        return project.outline_batch_id;
-                    }
                     const drafts = compatible
                         .filter(item => ['draft', 'submitted', 'returned'].includes(item.status))
                         .sort((a, b) => Number(b.version) - Number(a.version));
+                    if (project.status === 'outline_draft' && drafts.length) {
+                        return drafts[0].batch_id;
+                    }
+                    if (project.outline_batch_id && compatible.some(item => item.batch_id === project.outline_batch_id)) {
+                        return project.outline_batch_id;
+                    }
                     if (drafts.length) return drafts[0].batch_id;
                     return '';
                 },
@@ -1184,8 +1190,42 @@ window.aiworkerModules.push(() => ({
                     }[action] || '创作内容生成任务已发起，正在后台处理';
                 },
 
+                creativeServerRunningJob(action, options = {}) {
+                    const projectId = String(this.creativeWorkspace.project?.id || '');
+                    const stage = {
+                        blueprints: 'brief', blueprint_variant: 'brief',
+                        characters: 'characters',
+                        outlines: 'outline', outline_overview: 'outline',
+                        beats: 'beats', script: 'script',
+                    }[action];
+                    if (!projectId || !stage) return null;
+                    const selectedEpisode = Number(this.creativeWorkspace.selectedEpisode || 0);
+                    return (this.jobs || []).find(job => {
+                        const extra = job.job?.extra || {};
+                        const jobStage = {
+                            blueprints: 'brief', blueprint_variant: 'brief',
+                            characters: 'characters',
+                            outlines: 'outline', outline_overview: 'outline',
+                            beats: 'beats', script: 'script',
+                        }[String(extra.action || '')];
+                        if (
+                            job.platform !== 'creative'
+                            || job.crawler_type !== 'phase4_generate'
+                            || !['pending', 'running', 'stopping'].includes(job.status)
+                            || String(job.project_id ?? extra.project_id ?? '') !== projectId
+                            || jobStage !== stage
+                        ) return false;
+                        if (!['beats', 'script'].includes(stage)) return true;
+                        if (options.series) return true;
+                        const start = Number(extra.episode_start ?? extra.episode_number ?? 0);
+                        const end = Number(extra.episode_end ?? extra.episode_number ?? start);
+                        return selectedEpisode > 0 && start <= selectedEpisode && selectedEpisode <= end;
+                    }) || null;
+                },
+
                 creativeActionRunning(action) {
                     if (this.creativeWorkspace.startingAction === action) return true;
+                    if (this.creativeServerRunningJob(action)) return true;
                     const isActiveRunning = this.creativeWorkspace.activeAction === action && this.creativeJobRunning();
                     if (!isActiveRunning) return false;
                     if (this.creativeWorkspace.activeSeriesGeneration) return true;
@@ -1193,10 +1233,12 @@ window.aiworkerModules.push(() => ({
                         || Number(this.creativeWorkspace.activeEpisode) === Number(this.creativeWorkspace.selectedEpisode);
                 },
 
-                creativeActionDisabled(action) {
+                creativeActionDisabled(action, options = {}) {
                     if (this.creativeWorkspace.startingAction) return true;
+                    if (this.creativeServerRunningJob(action, options)) return true;
                     const isActiveRunning = this.creativeWorkspace.activeAction === action && this.creativeJobRunning();
                     if (!isActiveRunning) return false;
+                    if (options.series) return true;
                     if (this.creativeWorkspace.activeSeriesGeneration) return true;
                     return !['beats', 'script'].includes(action)
                         || Number(this.creativeWorkspace.activeEpisode) === Number(this.creativeWorkspace.selectedEpisode);
@@ -1334,6 +1376,28 @@ window.aiworkerModules.push(() => ({
                     const prefix = this.creativeWorkspace.startingAction || this.creativeJobRunning() ? '已等待' : '用时';
                     return `${prefix} ${this.formatCreativeGenerationElapsed(seconds)}`;
                 },
+                creativeBatchElapsedSeconds() {
+                    if (!this.creativeWorkspace.jobProgress?.batch_in_flight) return 0;
+                    const startedAt = Number(this.creativeWorkspace.jobProgress?.batch_started_at || 0) * 1000;
+                    if (!startedAt) return 0;
+                    return Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+                },
+                creativeBatchProgressText() {
+                    if (!this.creativeWorkspace.jobProgress?.batch_in_flight) return '';
+                    const progress = this.creativeWorkspace.jobProgress || {};
+                    const start = Number(progress.batch_start || 0);
+                    const end = Number(progress.batch_end || 0);
+                    const scope = progress.request_kind === 'series_arc'
+                        ? '全剧阶段弧线'
+                        : (start && end ? `第 ${start}–${end} 集` : '当前批次');
+                    const effort = String(progress.reasoning_effort || '').trim();
+                    const effortText = effort ? ` · ${effort}` : '';
+                    return `${scope}${effortText} · 已等待 ${this.formatCreativeGenerationElapsed(this.creativeBatchElapsedSeconds())}`;
+                },
+                creativeBatchSlow() {
+                    return Boolean(this.creativeWorkspace.jobProgress?.batch_in_flight)
+                        && this.creativeBatchElapsedSeconds() >= 720;
+                },
                 formatCreativeGenerationElapsed(seconds) {
                     const value = Math.max(0, Math.floor(Number(seconds || 0)));
                     const minutes = Math.floor(value / 60);
@@ -1415,11 +1479,16 @@ window.aiworkerModules.push(() => ({
                 async saveCreativeProjectSettings() {
                     const project = this.creativeWorkspace.project;
                     if (!project) return;
+                    const brief = this.selectedProjectBlueprint();
                     const payload = {
                         name: project.name, genre: project.genre || '', target_platform: project.target_platform || '',
                         target_audience: project.target_audience || '', target_episode_count: Number(project.target_episode_count),
-                        episode_duration_seconds: Number(project.episode_duration_seconds)
+                        episode_duration_seconds: Number(project.episode_duration_seconds),
+                        expected_project_revision: Number(project.revision),
                     };
+                    if (project.locked_brief_id && brief?.status === 'draft') {
+                        payload.draft_brief_id = Number(brief.id);
+                    }
                     const res = await aiworkerApi.request(`/api/creative/projects/${project.id}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
                     const data = await res.json();
                     if (!res.ok) { this.creativeWorkspace.error = data.detail || '保存 Brief 参数失败'; return false; }
@@ -1447,7 +1516,10 @@ window.aiworkerModules.push(() => ({
                     const task = await this.resolveCreativeWorkflowTask('brief', this.creativeWorkspace.project.id);
                     const res = await aiworkerApi.request(`/api/creative/blueprints/${item.id}/versions`, {
                         method: 'POST', headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({workflow_task_id: task.id})
+                        body: JSON.stringify({
+                            workflow_task_id: task.id,
+                            expected_project_revision: Number(this.creativeWorkspace.project.revision),
+                        })
                     });
                     const data = await res.json();
                     if (!res.ok) { this.creativeWorkspace.error = data.detail || '创建新版本失败'; return; }
@@ -1592,44 +1664,6 @@ window.aiworkerModules.push(() => ({
                     if (!projectId || !resourceId) return '#';
                     const params = new URLSearchParams({stage, resource_id: resourceId, format});
                     return `/api/creative/projects/${projectId}/generated-content/download?${params.toString()}`;
-                },
-
-                async resolveSourcePackageWorkflowTask(title) {
-                    const response = await aiworkerApi.request('/api/workflow/tasks');
-                    const tasks = await response.json();
-                    if (!response.ok) throw new Error(tasks.detail || '读取素材包任务失败');
-                    const open = (tasks || []).filter(item =>
-                        item.task_type === 'source_package'
-                        && ['assigned', 'in_progress', 'returned'].includes(item.status)
-                        && item.topic_id
-                    );
-                    const normalizeTitle = value => String(value || '')
-                        .normalize('NFKC')
-                        .toLocaleLowerCase()
-                        .replace(/[^\p{L}\p{N}]/gu, '');
-                    const expectedTitle = normalizeTitle(title);
-                    const candidates = await Promise.all(open.map(async task => {
-                        const topicResponse = await aiworkerApi.request(
-                            `/api/creative/topics/${task.topic_id}`
-                        );
-                        const topic = await topicResponse.json();
-                        return topicResponse.ok && normalizeTitle(topic.title) === expectedTitle
-                            ? {task, topic}
-                            : null;
-                    }));
-                    const match = candidates.find(Boolean)?.task;
-                    if (!match) {
-                        throw new Error('请先在选题库采纳该剧目并领取对应素材包任务');
-                    }
-                    if (['assigned', 'returned'].includes(match.status)) {
-                        const startResponse = await aiworkerApi.request(
-                            `/api/workflow/tasks/${match.id}/start`, {method: 'POST'}
-                        );
-                        const started = await startResponse.json();
-                        if (!startResponse.ok) throw new Error(started.detail || '开始素材包任务失败');
-                        return started;
-                    }
-                    return match;
                 },
 
 }));

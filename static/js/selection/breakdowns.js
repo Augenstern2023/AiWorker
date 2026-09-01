@@ -486,7 +486,7 @@ window.aiworkerModules.push(() => ({
                             return;
                         }
                     } catch (_) {}
-                    this.dramaDownload = {title: topic.title || '', topic, source: 'hongguo', fallbackReason: '', candidates: [], selectedCandidate: null, selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], relatedVideos: [], missingEpisodes: [], seriesRangeLabel: '', seriesWarnings: [], selectedEpisodes: [], allEpisodes: false, episodesExpanded: true, searching: true, episodesLoading: false, starting: false, error: '', jobId: '', jobStatus: '', progress: {}, progressMessage: '', paused: false, finished: false, background: false, showFiles: false, videoPreviewPath: '', videoPreviewUrl: '', videoPreviewError: ''};
+                    this.dramaDownload = {title: topic.title || '', topic, source: 'hongguo', fallbackReason: '', candidates: [], providers: [], captureCandidates: [], thirdPartyError: '', captureError: '', selectedCandidate: null, selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], relatedVideos: [], missingEpisodes: [], seriesRangeLabel: '', seriesWarnings: [], selectedEpisodes: [], allEpisodes: false, episodesExpanded: true, searching: true, episodesLoading: false, starting: false, error: '', jobId: '', jobStatus: '', progress: {}, progressMessage: '', paused: false, finished: false, background: false, showFiles: false, videoPreviewPath: '', videoPreviewUrl: '', videoPreviewError: ''};
                     this.dramaDownloadModal.show();
                     try {
                         const res = await aiworkerApi.request('/api/hongguo/drama/download/search', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title: this.dramaDownload.title})});
@@ -495,12 +495,12 @@ window.aiworkerModules.push(() => ({
                         this.dramaDownload.fallbackReason = data.fallback_reason || '';
                         if (!res.ok || data.status === 'error') throw new Error(data.message || '剧目检索失败');
                         this.dramaDownload.candidates = data.candidates || [];
-                        if (!this.dramaDownload.candidates.length) this.dramaDownload.error = this.dramaDownload.source === 'douyin_fallback' ? '红果和抖音都没有找到可用视频，请确认剧名后重试' : '没有找到剧名完全匹配的红果剧目，请确认剧名后重试';
+                        this.dramaDownload.providers = data.providers || [];
+                        this.dramaDownload.captureCandidates = data.capture_candidates || [];
+                        this.dramaDownload.thirdPartyError = data.third_party_error || '';
+                        this.dramaDownload.captureError = data.capture_error || '';
+                        if (!this.dramaDownload.candidates.length && !this.dramaDownload.captureCandidates.length) this.dramaDownload.error = this.dramaDownload.source === 'douyin_fallback' ? '红果和抖音都没有找到可用视频，请确认剧名后重试' : '没有找到剧名完全匹配的红果剧目，请确认剧名后重试';
                         this.dramaDownload.searching = false;
-                        // Hongguo has a book/episode flow, but Douyin fallback always
-                        // requires an explicit user choice to avoid downloading an
-                        // unrelated promotion or clip that happens to match the title.
-                        if (this.dramaDownload.candidates.length === 1 && this.dramaDownload.source !== 'douyin_fallback') await this.selectDramaDownloadCandidate(this.dramaDownload.candidates[0]);
                     } catch (e) {
                         this.dramaDownload.error = e.message || '剧目检索失败';
                     } finally {
@@ -573,13 +573,15 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async refreshDramaDownloadEpisodes(candidate = this.dramaDownload.selectedCandidate) {
-                    if (!candidate?.book_id) return;
+                    if (!candidate?.series_ref && !candidate?.book_id) return;
                     const res = await aiworkerApi.request('/api/hongguo/drama/episodes', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify({
-                            book_id: candidate.book_id,
-                            source_platform: candidate.source_platform || 'hg',
+                            book_id: candidate.book_id || candidate.series_ref,
+                            series_ref: candidate.series_ref || candidate.book_id,
+                            source_platform: candidate.source_platform || candidate.provider_id || 'hongguo_capture',
+                            provider_id: candidate.provider_id || candidate.source_platform || 'hongguo_capture',
                             title: this.dramaDownload.title || candidate.title || ''
                         })
                     });
@@ -599,6 +601,21 @@ window.aiworkerModules.push(() => ({
 
                 downloadableDramaEpisodes() {
                     return this.dramaDownload.episodes.filter(episode => !this.isDramaEpisodeDownloaded(episode));
+                },
+
+                isDramaDownloadCandidateSelected(candidate) {
+                    const selected = this.dramaDownload.selectedCandidate;
+                    if (!selected || !candidate) return false;
+                    const provider = candidate.provider_id || candidate.source_platform || 'hongguo_capture';
+                    const selectedProvider = selected.provider_id || selected.source_platform || 'hongguo_capture';
+                    return provider === selectedProvider
+                        && (candidate.series_ref || candidate.book_id) === (selected.series_ref || selected.book_id);
+                },
+
+                dramaDownloadProviderLabel(providerId) {
+                    const id = providerId || 'hongguo_capture';
+                    if (id === 'hongguo_capture') return '抓包来源';
+                    return this.dramaDownload.providers.find(item => item.provider_id === id)?.display_name || id;
                 },
 
                 dramaSelectedEpisodesForDownload() {
@@ -644,7 +661,7 @@ window.aiworkerModules.push(() => ({
                         const endpoint = isDouyinFallback ? '/api/hongguo/drama/douyin-fallback/jobs' : '/api/hongguo/drama/download/jobs';
                         const payload = isDouyinFallback
                             ? {topic_id: this.dramaDownload.topic.id, title: this.dramaDownload.title, aweme_ids: this.dramaDownload.selectedAwemeIds, fallback_reason: this.dramaDownload.fallbackReason || ''}
-                            : {topic_id: this.dramaDownload.topic.id, title: this.dramaDownload.title, book_id: this.dramaDownload.selectedCandidate.book_id, source_platform: this.dramaDownload.selectedCandidate.source_platform || 'hg', episodes: episodeNumbers, all_episodes: this.dramaDownload.allEpisodes && episodeNumbers.length === this.dramaDownload.episodes.length};
+                            : {topic_id: this.dramaDownload.topic.id, title: this.dramaDownload.title, book_id: this.dramaDownload.selectedCandidate.book_id || this.dramaDownload.selectedCandidate.series_ref, series_ref: this.dramaDownload.selectedCandidate.series_ref || this.dramaDownload.selectedCandidate.book_id, source_platform: this.dramaDownload.selectedCandidate.source_platform || this.dramaDownload.selectedCandidate.provider_id || 'hongguo_capture', provider_id: this.dramaDownload.selectedCandidate.provider_id || this.dramaDownload.selectedCandidate.source_platform || 'hongguo_capture', episodes: episodeNumbers, all_episodes: this.dramaDownload.allEpisodes && episodeNumbers.length === this.dramaDownload.episodes.length};
                         const res = await aiworkerApi.request(endpoint, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
                         const data = await res.json();
                         if (!res.ok || data.status === 'error') throw new Error(data.message || '创建下载任务失败');
@@ -929,24 +946,38 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async generateCreativeTopics() {
+                    const platform = this.creative.platform;
+                    const rankSource = this.creative.rankSource;
+                    const cacheKey = `creative:topics:hits:${platform}:${rankSource}`;
+                    const requestId = (this.creative.generationRequestId || 0) + 1;
+                    this.creative.generationRequestId = requestId;
+                    const isCurrentRequest = () => (
+                        this.creative.generationRequestId === requestId
+                        && this.creative.platform === platform
+                        && this.creative.rankSource === rankSource
+                    );
                     this.creative.loading = true;
                     this.creative.error = '';
                     try {
                         const res = await aiworkerApi.request('/api/creative/topics/generate', {
                             method: 'POST', headers: {'Content-Type': 'application/json'},
                             body: JSON.stringify({
-                                platform: this.creative.platform,
-                                rank_source: this.creative.rankSource,
+                                platform,
+                                rank_source: rankSource,
                                 limit: 10
                             })
                         });
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.detail || '生成选题失败');
-                        this.creative.items = data.items || [];
+                        const items = data.items || [];
+                        window.aiworkerUi?.writeCache(cacheKey, items, {ttlMs: 30000});
+                        if (isCurrentRequest()) this.creative.items = items;
                     } catch (e) {
-                        this.creative.error = e.message || '生成选题失败';
+                        if (isCurrentRequest()) {
+                            this.creative.error = e.message || '生成选题失败';
+                        }
                     } finally {
-                        this.creative.loading = false;
+                        if (isCurrentRequest()) this.creative.loading = false;
                     }
                 },
 

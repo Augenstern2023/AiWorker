@@ -262,6 +262,69 @@ user_departments = Table(
     Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
 )
 
+llm_providers = Table(
+    "llm_providers",
+    SYSTEM_METADATA,
+    Column("id", Text, primary_key=True),
+    Column("name", Text, nullable=False),
+    Column("normalized_name", Text, nullable=False, unique=True),
+    Column("preset", Text, nullable=False),
+    Column("base_url", Text, nullable=False),
+    Column("wire_api", Text, nullable=False),
+    Column("api_key_encrypted", Text),
+    Column("is_enabled", Boolean, nullable=False, server_default=text("true")),
+    Column("created_by_user_id", Text, ForeignKey("users.id", ondelete="SET NULL")),
+    Column("updated_by_user_id", Text, ForeignKey("users.id", ondelete="SET NULL")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint(
+        "preset IN ('openai', 'deepseek', 'minimax', 'sub2api', 'custom')",
+        name="ck_llm_providers_preset",
+    ),
+    CheckConstraint(
+        "wire_api IN ('responses', 'chat_completions')",
+        name="ck_llm_providers_wire_api",
+    ),
+)
+
+llm_models = Table(
+    "llm_models",
+    SYSTEM_METADATA,
+    Column("id", Text, primary_key=True),
+    Column(
+        "provider_id",
+        Text,
+        ForeignKey("llm_providers.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("model_id", Text, nullable=False),
+    Column("display_name", Text, nullable=False, server_default=text("''")),
+    Column("source", Text, nullable=False, server_default=text("'manual'")),
+    Column("is_enabled", Boolean, nullable=False, server_default=text("true")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("provider_id", "model_id", name="uq_llm_models_provider_model"),
+    CheckConstraint(
+        "source IN ('manual', 'synced', 'imported')",
+        name="ck_llm_models_source",
+    ),
+)
+
+llm_settings = Table(
+    "llm_settings",
+    SYSTEM_METADATA,
+    Column("id", Text, primary_key=True),
+    Column(
+        "default_model_id",
+        Text,
+        ForeignKey("llm_models.id", ondelete="RESTRICT"),
+    ),
+    Column("legacy_imported_at", DateTime(timezone=True)),
+    Column("updated_by_user_id", Text, ForeignKey("users.id", ondelete="SET NULL")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint("id = 'global'", name="ck_llm_settings_global_id"),
+)
+
 workflow_instances = Table(
     "workflow_instances",
     SYSTEM_METADATA,

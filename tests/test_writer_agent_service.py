@@ -18,7 +18,7 @@
 
 import json
 
-from writer_agent.action_service import parse_creative_cards
+from writer_agent.action_service import parse_creative_cards, parse_proposed_actions
 from writer_agent.service import build_writer_report_markdown, normalize_writer_report, writer_messages
 
 
@@ -100,6 +100,55 @@ def test_non_review_prompt_contains_all_materials_and_project_authority():
     payload = json.loads(messages[-1]["content"])
     assert [item["name"] for item in payload["全部材料"]] == ["旧剧本.md", "人物补充.txt"]
     assert payload["项目权威上下文"]["locked_brief"]["id"] == 9
+
+
+def test_unlinked_conversation_requests_project_creation_before_generation():
+    """Catch unbound run plans that can only fail with PROJECT_ACCESS_DENIED."""
+
+    messages = writer_messages(
+        materials=[{"name": "故事大纲.md", "content": "顾则远在伤痕中学会自救。"}],
+        history=[],
+        user_message="根据大纲生成第1-5章正文",
+        review_requested=False,
+        project_context={},
+    )
+
+    contract = json.loads(messages[0]["content"].split("只返回 JSON：", 1)[1])
+    actions = parse_proposed_actions(contract)
+
+    assert len(actions) == 1
+    assert actions[0].action_type == "project.create_original"
+    assert actions[0].target_stage == "script"
+    assert actions[0].episode_start == 1
+    assert actions[0].episode_end == 5
+    assert {
+        "seed_text",
+        "name",
+        "genre",
+        "target_platform",
+        "target_audience",
+        "target_episode_count",
+        "episode_duration_seconds",
+        "cost_level",
+        "content_boundaries",
+        "reference_refs",
+    } <= actions[0].payload.keys()
+
+
+def test_linked_conversation_requests_generation_for_current_project():
+    messages = writer_messages(
+        materials=[{"name": "故事大纲.md", "content": "顾则远在伤痕中学会自救。"}],
+        history=[],
+        user_message="根据大纲生成第1-5章正文",
+        review_requested=False,
+        project_context={"project_id": 17},
+    )
+
+    contract = json.loads(messages[0]["content"].split("只返回 JSON：", 1)[1])
+    actions = parse_proposed_actions(contract)
+
+    assert len(actions) == 1
+    assert actions[0].action_type == "creative.run_plan"
 
 
 def test_one_line_inspiration_prompt_contract_contains_valid_distinct_directions():

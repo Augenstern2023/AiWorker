@@ -57,6 +57,16 @@ class WeeklyReportRepository:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS weekly_report_cache_state (
+                    platform TEXT PRIMARY KEY,
+                    source_revision TEXT NOT NULL,
+                    script_fingerprint TEXT NOT NULL,
+                    checked_at TEXT NOT NULL
+                )
+                """
+            )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -78,6 +88,61 @@ class WeeklyReportRepository:
         with self._connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [_decode_report_row(row) for row in rows]
+
+    def fingerprints(self, platform: str = "") -> dict[str, str]:
+        sql = "SELECT report_id, source_fingerprint FROM weekly_reports"
+        params: list[Any] = []
+        if platform:
+            sql += " WHERE platform = ?"
+            params.append(platform)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return {str(row["report_id"]): str(row["source_fingerprint"]) for row in rows}
+
+    def exports_available(self, platform: str) -> bool:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT markdown_path, excel_path FROM weekly_reports WHERE platform = ?",
+                (platform,),
+            ).fetchall()
+        return bool(rows) and all(
+            Path(str(row["markdown_path"])).is_file() and Path(str(row["excel_path"])).is_file()
+            for row in rows
+        )
+
+    def get_cache_state(self, platform: str) -> dict[str, str] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT source_revision, script_fingerprint, checked_at FROM weekly_report_cache_state WHERE platform = ?",
+                (platform,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_cache_state(
+        self,
+        platform: str,
+        source_revision: str,
+        script_fingerprint: str,
+        *,
+        checked_at: datetime | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO weekly_report_cache_state (platform, source_revision, script_fingerprint, checked_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(platform) DO UPDATE SET
+                    source_revision=excluded.source_revision,
+                    script_fingerprint=excluded.script_fingerprint,
+                    checked_at=excluded.checked_at
+                """,
+                (
+                    platform,
+                    source_revision,
+                    script_fingerprint,
+                    (checked_at or datetime.now()).isoformat(timespec="seconds"),
+                ),
+            )
 
     def upsert(self, report: dict[str, Any], markdown_path: Path, excel_path: Path) -> dict[str, Any]:
         generated_at = datetime.now().isoformat(timespec="seconds")
@@ -108,11 +173,17 @@ class WeeklyReportRepository:
 
 
 class WeeklyReportService:
-    def __init__(self, root: str | Path = ".", runtime_dir: str | Path = ".runtime") -> None:
+    def __init__(
+        self,
+        root: str | Path = ".",
+        runtime_dir: str | Path = ".runtime",
+        analysis_script_path: str | Path | None = None,
+    ) -> None:
         self.root = Path(root).resolve()
         self.runtime_dir = Path(runtime_dir)
         if not self.runtime_dir.is_absolute():
             self.runtime_dir = self.root / self.runtime_dir
+        self.analysis_script_path = Path(analysis_script_path or __file__).resolve()
         self.rank_service = TodayRankService(root=self.root)
         self.repository = WeeklyReportRepository(self.runtime_dir / "rag" / "weekly_reports.db")
         self.output_dir = self.root / "data" / "reports" / "weekly"
@@ -150,19 +221,102 @@ class WeeklyReportService:
         now = as_of or datetime.now()
         reports: list[dict[str, Any]] = []
         for value in selected_platforms:
+            source_revision = self._source_revision(value)
+            script_fingerprint = _file_fingerprint(self.analysis_script_path)
+            cache_state = self.repository.get_cache_state(value)
+            if (
+                cache_state
+                and cache_state.get("source_revision") == source_revision
+                and cache_state.get("script_fingerprint") == script_fingerprint
+                and _cache_covers_latest_complete_week(cache_state, now)
+                and self.repository.exports_available(value)
+                and (not with_llm or self._platform_llm_cache_ready(value))
+            ):
+                reports.extend(
+                    {
+                        "report_id": report_id,
+                        "platform": value,
+                        "status": "unchanged",
+                        "cache_status": "hit",
+                    }
+                    for report_id in self.repository.fingerprints(value)
+                )
+                continue
+            cached_fingerprints = self.repository.fingerprints(value)
             for snapshots in self._complete_weeks_snapshots(value, now):
-                reports.append(self._generate_snapshots(value, snapshots, with_llm=with_llm))
+                report_id = f"{value}-{snapshots[0].captured_at.date().isoformat()}"
+                source_fingerprint = self._fingerprint(value, snapshots)
+                existing = self.repository.get(report_id)
+                exports_available = bool(
+                    existing
+                    and Path(str(existing.get("markdown_path") or "")).is_file()
+                    and Path(str(existing.get("excel_path") or "")).is_file()
+                )
+                if (
+                    cached_fingerprints.get(report_id) == source_fingerprint
+                    and exports_available
+                    and (not with_llm or (existing.get("llm") or {}).get("status") == "ready")
+                ):
+                    reports.append({"report_id": report_id, "platform": value, "status": "unchanged", "cache_status": "hit"})
+                    continue
+                generated = self._generate_snapshots(value, snapshots, with_llm=with_llm)
+                reports.append({**generated, "cache_status": "generated"})
+            self.repository.set_cache_state(
+                value,
+                source_revision,
+                script_fingerprint,
+                checked_at=now,
+            )
         return reports
 
     def _generate_snapshots(self, platform: str, snapshots: list[RankSnapshot], with_llm: bool) -> dict[str, Any]:
         report = self._build_report(platform, snapshots)
         existing = self.repository.get(report["report_id"])
-        if existing and existing.get("source_fingerprint") == report["source_fingerprint"]:
+        if (
+            existing
+            and existing.get("source_fingerprint") == report["source_fingerprint"]
+            and Path(str(existing.get("markdown_path") or "")).is_file()
+            and Path(str(existing.get("excel_path") or "")).is_file()
+            and (not with_llm or (existing.get("llm") or {}).get("status") == "ready")
+        ):
             return {**existing, "status": "unchanged"}
         if with_llm:
             report["llm"] = self._llm_summary(report)
         markdown_path, excel_path = self._write_exports(report)
         return self.repository.upsert(report, markdown_path, excel_path)
+
+    def _fingerprint(self, platform: str, snapshots: list[RankSnapshot]) -> str:
+        return _fingerprint(platform, snapshots, self.analysis_script_path)
+
+    def _platform_llm_cache_ready(self, platform: str) -> bool:
+        reports = self.repository.list(platform)
+        return bool(reports) and all(
+            (report.get("llm") or {}).get("status") == "ready"
+            for report in reports
+        )
+
+    def _source_revision(self, platform: str) -> str:
+        paths: set[Path] = set()
+        if platform == "dy":
+            paths.update(self.root.glob("data/dy/jobs/*/rank/douyin_series_rank_*.json"))
+            paths.update(self.root.glob("data/dy/jobs/*/analysis/*.json"))
+        else:
+            paths.update(self.root.glob("data/hg/jobs/*/rank/hongguo*.json"))
+            paths.update(self.root.glob("data/hg/jobs/*/analysis/*.json"))
+            paths.update(self.rank_service.hongguo_exports_root.glob("*/top10_rankings.csv"))
+            raw_root = self.rank_service.hongguo_raw_root
+            if raw_root.exists():
+                paths.update(raw_root.glob("mitm_responses_*/*.json"))
+        metadata = []
+        for path in sorted(paths, key=lambda item: str(item)):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            metadata.append((str(path.resolve()), stat.st_size, stat.st_mtime_ns))
+        return hashlib.sha256(
+            json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
 
     def generate_all_latest(self, as_of: datetime | None = None, with_llm: bool = True) -> list[dict[str, Any]]:
         return [self.generate_latest(platform, as_of=as_of, with_llm=with_llm) for platform in sorted(PLATFORMS)]
@@ -175,17 +329,29 @@ class WeeklyReportService:
     ) -> list[dict[str, Any]]:
         now = as_of or datetime.now()
         if ensure_generated:
-            self.generate_all_available(platform=platform, as_of=now, with_llm=False)
+            generation_results = self.generate_all_available(platform=platform, as_of=now, with_llm=False)
+        else:
+            generation_results = []
+        cache_status_by_report = {
+            str(item.get("report_id")): str(item.get("cache_status"))
+            for item in generation_results
+            if item.get("report_id") and item.get("cache_status")
+        }
         reports = self.repository.list(platform=platform)
         latest_week_by_platform: dict[str, str] = {}
         for value in (platform,) if platform else PLATFORMS:
-            snapshots = self._complete_week_snapshots(value, now)
-            if snapshots:
-                latest_week_by_platform[value] = snapshots[0].captured_at.date().isoformat()
+            generated_periods = [
+                report["period"]["start"]
+                for report in reports
+                if report.get("platform") == value and report.get("period", {}).get("start")
+            ]
+            if generated_periods:
+                latest_week_by_platform[value] = max(generated_periods)
         for report in reports:
             quality = dict(report.get("data_quality") or {})
             quality["is_stale"] = bool(latest_week_by_platform.get(report["platform"], report["period"]["start"]) > report["period"]["start"])
             report["data_quality"] = quality
+            report["cache_status"] = cache_status_by_report.get(report["report_id"], "hit")
         return reports
 
     def get_report(self, report_id: str, as_of: datetime | None = None) -> dict[str, Any] | None:
@@ -253,7 +419,7 @@ class WeeklyReportService:
             "platform": platform,
             "status": "ready",
             "period": {"start": week_start.isoformat(), "end": week_end.isoformat()},
-            "source_fingerprint": _fingerprint(platform, snapshots),
+            "source_fingerprint": self._fingerprint(platform, snapshots),
             "data_quality": data_quality,
             "summary": _summary(platform, recommendations, movements, tags, data_quality),
             "recommendations": recommendations,
@@ -678,9 +844,36 @@ def _export_period_label(period: dict[str, Any]) -> str:
     return f"{start.month}月{start.day}日-{end.month}月{end.day}日"
 
 
-def _fingerprint(platform: str, snapshots: list[RankSnapshot]) -> str:
+def _fingerprint(
+    platform: str,
+    snapshots: list[RankSnapshot],
+    analysis_script_path: Path | None = None,
+) -> str:
     payload = [{"captured_at": item.captured_at.isoformat(), "source": str(item.source_path), "records": item.records} for item in snapshots]
-    return hashlib.sha256(json.dumps({"version": REPORT_VERSION, "platform": platform, "snapshots": payload}, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    script_fingerprint = _file_fingerprint(analysis_script_path or Path(__file__))
+    return hashlib.sha256(json.dumps({"version": REPORT_VERSION, "script": script_fingerprint, "platform": platform, "snapshots": payload}, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def _file_fingerprint(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return "missing"
+
+
+def _cache_covers_latest_complete_week(
+    cache_state: dict[str, str], as_of: datetime
+) -> bool:
+    try:
+        checked_at = datetime.fromisoformat(str(cache_state["checked_at"]))
+    except (KeyError, TypeError, ValueError):
+        return False
+    return _latest_complete_week_start(checked_at) == _latest_complete_week_start(as_of)
+
+
+def _latest_complete_week_start(value: datetime) -> date:
+    current_week_start = value.date() - timedelta(days=value.weekday())
+    return current_week_start - timedelta(days=7)
 
 
 def _decode_report_row(row: sqlite3.Row) -> dict[str, Any]:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ from fastapi.testclient import TestClient
 
 from audit.service import AuditService
 from creative.api import build_creative_router, creative_api_principal
+from creative import repository as creative_repository
 from creative.repository import CreativeRepository
 from creative.selection_stage_service import SelectionStageService
 from identity.dependencies import current_principal
@@ -327,6 +329,99 @@ def test_adopted_topic_download_context_does_not_require_source_package_task(
 
     assert task_id is None
     assert project_id is None
+
+
+def test_download_intent_creates_or_reuses_one_adopted_topic(tmp_path: Path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+
+    created, created_before = repository.ensure_download_topic(
+        title="下载短剧",
+        platform="hg",
+        provider_id="hongguo_capture",
+        source_ref="series-1",
+        actor_user_id="selector-1",
+    )
+    reused, reused_before = repository.ensure_download_topic(
+        title=" 下载短剧 ",
+        platform="hg",
+        provider_id="hongguo_capture",
+        source_ref="series-1",
+        actor_user_id="selector-1",
+    )
+
+    assert created["status"] == "adopted"
+    assert reused["id"] == created["id"]
+    assert created_before is None
+    assert reused_before is not None
+    assert reused_before["status"] == "adopted"
+    assert len(repository.list_topics(limit=None)) == 1
+
+
+def test_download_intent_adopts_pending_topic_and_records_actor(tmp_path: Path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    pending = _topic(repository, "待采纳短剧")
+
+    adopted, before = repository.ensure_download_topic(
+        title=pending["title"],
+        platform="hg",
+        provider_id="provider-a",
+        source_ref="series-2",
+        actor_user_id="selector-1",
+    )
+
+    assert before is not None
+    assert before["status"] == "pending_review"
+    assert adopted["status"] == "adopted"
+    snapshot = repository.get_latest_selection_stage_snapshot(
+        adopted["id"], "topic_decision"
+    )
+    assert snapshot is not None
+    assert snapshot["outcome"] == "adopted"
+    assert snapshot["actor_user_id"] == "selector-1"
+    assert snapshot["snapshot"]["decision_note"] == "下载时自动采纳"
+
+
+@pytest.mark.parametrize("status", ["rejected", "archived"])
+def test_download_intent_preserves_manual_negative_decision(
+    tmp_path: Path, status: str
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic = _topic(repository, "人工决策短剧")
+    repository.decide_topic(topic["id"], status, "人工决定", "selector-1")
+
+    with pytest.raises(
+        creative_repository.DownloadTopicDecisionConflict,
+        match="该剧目已被拒绝或归档，请先在选题库恢复后再下载",
+    ):
+        repository.ensure_download_topic(
+            title=topic["title"],
+            platform="hg",
+            provider_id="provider-a",
+            source_ref="series-3",
+            actor_user_id="selector-1",
+        )
+
+    assert repository.get_topic(topic["id"])["status"] == status
+
+
+def test_concurrent_download_intent_creates_one_topic(tmp_path: Path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+
+    def ensure() -> int:
+        topic, _ = repository.ensure_download_topic(
+            title="并发下载短剧",
+            platform="hg",
+            provider_id="provider-a",
+            source_ref="series-4",
+            actor_user_id="selector-1",
+        )
+        return int(topic["id"])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        ids = list(pool.map(lambda _: ensure(), range(2)))
+
+    assert len(set(ids)) == 1
+    assert len(repository.list_topics(limit=None)) == 1
 
 
 def test_breakdown_generation_uses_material_snapshot_without_personnel_task(

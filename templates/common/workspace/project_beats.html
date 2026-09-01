@@ -15,7 +15,7 @@
                 </select>
             </div>
             <button class="btn btn-primary btn-sm" @click="generateProjectBeats" :disabled="creativeActionDisabled('beats')"><span class="spinner-border spinner-border-sm me-1" x-show="creativeActionRunning('beats')"></span><i class="bi bi-arrow-clockwise me-1" x-show="!creativeActionRunning('beats') && selectedProjectBeats()"></i><i class="bi bi-magic me-1" x-show="!creativeActionRunning('beats') && !selectedProjectBeats()"></i><span x-text="creativeActionRunning('beats') ? '生成中' : projectBeatGenerationActionLabel()"></span></button>
-            <button class="btn btn-outline-primary btn-sm" @click="generateProjectBeatsSeries" :disabled="creativeActionDisabled('beats')"><i class="bi bi-collection-play me-1"></i><span x-text="seriesGenerationActionLabel('beats')"></span></button>
+            <button class="btn btn-outline-primary btn-sm" @click="generateProjectBeatsSeries" :disabled="creativeActionDisabled('beats', {series: true})"><i class="bi bi-collection-play me-1"></i><span x-text="seriesGenerationActionLabel('beats')"></span></button>
             <button class="btn btn-warning btn-sm" @click="completeProjectBeatsBatch" :disabled="creativeActionDisabled('beats') || !canBatchLockProjectBeats()" title="批量完成并锁定当前全部 Beats 草稿"><i class="bi bi-lock-fill me-1"></i>批量完成并锁定</button>
             <button type="button" class="btn btn-outline-primary btn-sm" @click="openProjectScriptWorkspace" title="场次剧本" aria-label="场次剧本"><i class="bi bi-file-earmark-richtext me-1" aria-hidden="true"></i>场次剧本</button>
             <a class="btn btn-outline-secondary btn-sm" x-show="currentGeneratedResourceId('beats')" :href="creativeGeneratedDownloadUrl('beats', 'md')" title="下载当前 Beats"><i class="bi bi-download"></i></a>

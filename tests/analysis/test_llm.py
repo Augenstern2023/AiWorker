@@ -819,3 +819,126 @@ def test_rag_llm_inherits_the_global_text_model_settings():
 
     for field in ("provider", "base_url", "model", "wire_api", "reasoning_effort", "timeout_seconds"):
         assert settings[field] == primary_settings[field]
+
+
+def test_database_default_overrides_legacy_global_configuration():
+    """Would catch the system settings page saving values that runtime ignores."""
+
+    class DummyConfig:
+        LLM_PROVIDER = "legacy"
+        LLM_BASE_URL = "https://legacy.example/v1"
+        LLM_API_KEY = "legacy-key"
+        LLM_MODEL = "legacy-model"
+        LLM_WIRE_API = "chat_completions"
+
+    class SettingsRepository:
+        @staticmethod
+        def effective_default():
+            return {
+                "provider": "openai",
+                "base_url": "https://api.openai.com/v1",
+                "api_key": "database-key",
+                "model": "gpt-5.6-sol",
+                "wire_api": "responses",
+                "allow_insecure_http": False,
+            }
+
+    settings = resolve_llm_settings(
+        DummyConfig, settings_repository=SettingsRepository()
+    )
+
+    assert settings["provider"] == "openai"
+    assert settings["api_key"] == "database-key"
+    assert settings["model"] == "gpt-5.6-sol"
+
+
+def test_cleared_database_credential_does_not_fall_back_to_legacy_key():
+    """Would catch an explicit credential clear silently reusing an old secret."""
+
+    class DummyConfig:
+        LLM_PROVIDER = "legacy"
+        LLM_BASE_URL = "https://legacy.example/v1"
+        LLM_API_KEY = "legacy-key"
+        LLM_MODEL = "legacy-model"
+
+    class SettingsRepository:
+        @staticmethod
+        def effective_default():
+            return {
+                "provider": "openai",
+                "base_url": "https://api.openai.com/v1",
+                "api_key": "",
+                "model": "gpt-5.6-sol",
+                "wire_api": "responses",
+                "allow_insecure_http": False,
+            }
+
+    settings = resolve_llm_settings(
+        DummyConfig, settings_repository=SettingsRepository()
+    )
+
+    assert settings["api_key"] == ""
+
+
+def test_explicit_scenario_values_override_database_default_per_field():
+    """Would catch a writer/review-specific model being replaced by the global default."""
+
+    class DummyConfig:
+        LLM_REASONING_EFFORT = "auto"
+        WRITER_AGENT_LLM_MODEL = "writer-specialized"
+        WRITER_AGENT_LLM_REASONING_EFFORT = "high"
+
+    class SettingsRepository:
+        @staticmethod
+        def effective_default():
+            return {
+                "provider": "openai",
+                "base_url": "https://api.openai.com/v1",
+                "api_key": "database-key",
+                "model": "global-model",
+                "wire_api": "responses",
+                "allow_insecure_http": False,
+            }
+
+    settings = resolve_llm_settings(
+        DummyConfig,
+        prefix="WRITER_AGENT_LLM",
+        settings_repository=SettingsRepository(),
+    )
+
+    assert settings["provider"] == "openai"
+    assert settings["model"] == "writer-specialized"
+    assert settings["reasoning_effort"] == "high"
+
+
+def test_configured_runtime_repository_applies_without_per_call_injection():
+    """Would catch in-process Web calls failing to observe a newly saved default."""
+
+    class DummyConfig:
+        LLM_PROVIDER = "legacy"
+        LLM_BASE_URL = "https://legacy.example/v1"
+        LLM_API_KEY = "legacy-key"
+        LLM_MODEL = "legacy-model"
+
+    class SettingsRepository:
+        @staticmethod
+        def effective_default():
+            return {
+                "provider": "minimax",
+                "base_url": "https://api.minimax.io/v1",
+                "api_key": "database-key",
+                "model": "MiniMax-M3",
+                "wire_api": "chat_completions",
+                "allow_insecure_http": False,
+            }
+
+    from analysis import llm as llm_module
+
+    llm_module.configure_llm_settings_repository(SettingsRepository())
+    try:
+        settings = resolve_llm_settings(DummyConfig)
+    finally:
+        llm_module.configure_llm_settings_repository(None)
+
+    assert settings["provider"] == "minimax"
+    assert settings["model"] == "MiniMax-M3"

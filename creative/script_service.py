@@ -9,21 +9,32 @@
 from __future__ import annotations
 
 import inspect
+import json
+import logging
 import re
+import time
 from typing import Any, Callable
 
 from creative.imitation_service import complete_with_one_repair
+from creative.outline_fields import OUTLINE_FIELD_LABELS, OUTLINE_TEXT_FIELDS
+from creative.outline_overview import normalize_series_overview
 from creative.prompt_templates import (
+    OUTLINE_FIELD_REWRITE_PROMPT_VERSION,
     PROMPT_TEMPLATE_VERSION,
     beats_chunk_messages,
     beats_messages,
     character_messages,
     outline_field_repair_messages,
+    outline_field_rewrite_messages,
     outline_messages,
     series_arc_messages,
+    series_overview_messages,
     script_messages,
     script_chunk_messages,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def _project_context(project: dict[str, Any]) -> dict[str, Any]:
@@ -86,12 +97,11 @@ def _validate_series_arc(payload: dict[str, Any]) -> dict[str, Any]:
     stages = payload.get("stages")
     if not arc or not isinstance(stages, list) or not stages:
         raise ValueError("全剧阶段弧线缺少 series_arc 或 stages")
-    return {"series_arc": arc, "stages": stages}
-
-
-_OUTLINE_TEXT_FIELDS = {
-    "core_event", "conflict", "character_progress", "highlight", "reversal", "cliffhanger",
-}
+    return {
+        "series_arc": arc,
+        "stages": stages,
+        "series_overview": normalize_series_overview(payload.get("series_overview")),
+    }
 
 
 def _normalize_outline_chunk(
@@ -115,7 +125,7 @@ def _normalize_outline_chunk(
     normalized = []
     missing_fields = {
         int(episode["episode"]): sorted(
-            field for field in _OUTLINE_TEXT_FIELDS
+            field for field in OUTLINE_TEXT_FIELDS
             if not str(episode.get(field) or "").strip()
         )
         for episode in episodes
@@ -133,7 +143,7 @@ def _normalize_outline_chunk(
             raise ValueError("分集大纲缺少字段：['episode']")
         episode_number = int(item["episode"])
         missing = []
-        for field in _OUTLINE_TEXT_FIELDS:
+        for field in OUTLINE_TEXT_FIELDS:
             if not str(item.get(field) or "").strip():
                 item[field] = ""
                 missing.append(field)
@@ -368,6 +378,190 @@ async def generate_character_bundle(
     return bundle, meta
 
 
+_OUTLINE_CHECKPOINT_FIELDS = (
+    "core_event", "character_progress", "reversal", "cliffhanger",
+)
+
+def _truncate_outline_checkpoint_text(value: Any) -> str:
+    text = str(value or "")
+    return text if len(text) <= 500 else text[:499] + "…"
+
+
+def build_outline_history_context(episodes: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a bounded, read-only continuity summary for the next outline chunk."""
+    ordered = sorted(
+        (dict(item) for item in episodes if isinstance(item, dict)),
+        key=lambda item: int(item.get("episode") or 0),
+    )
+    completed_through = max(
+        (int(item.get("episode") or 0) for item in ordered), default=0
+    )
+    recent_episodes = ordered[-10:]
+    prior_episodes = ordered[:-10]
+    checkpoints = []
+    for chunk_start in range(0, len(prior_episodes), 10):
+        episode = prior_episodes[min(chunk_start + 9, len(prior_episodes) - 1)]
+        checkpoints.append(
+            {
+                "episode": int(episode.get("episode") or 0),
+                **{
+                    field: _truncate_outline_checkpoint_text(episode.get(field))
+                    for field in _OUTLINE_CHECKPOINT_FIELDS
+                },
+            }
+        )
+    return {
+        "completed_through": completed_through,
+        "recent_episodes": recent_episodes,
+        "prior_chunk_checkpoints": checkpoints,
+    }
+
+
+async def _notify_outline_request_progress(
+    callback: Callable[[dict[str, Any]], Any] | None,
+    payload: dict[str, Any],
+) -> None:
+    if callback is None:
+        return
+    try:
+        result = callback(payload)
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        logger.warning("分集大纲请求进度回调失败，已忽略", exc_info=True)
+
+
+async def _complete_outline_request(
+    provider: Any,
+    messages: list[dict[str, str]],
+    validator: Callable[[Any], Any],
+    *,
+    request_kind: str,
+    batch_start: int | None,
+    batch_end: int | None,
+    reasoning_effort: str,
+    on_request_progress: Callable[[dict[str, Any]], Any] | None,
+    max_attempts: int = 2,
+) -> tuple[Any, dict[str, Any]]:
+    batch_started_at = time.time()
+    request_started_at = time.monotonic()
+    shared = {
+        "request_kind": request_kind,
+        "batch_start": batch_start,
+        "batch_end": batch_end,
+        "batch_started_at": batch_started_at,
+        "reasoning_effort": reasoning_effort,
+        "prompt_chars": sum(len(str(message.get("content") or "")) for message in messages),
+    }
+    await _notify_outline_request_progress(
+        on_request_progress,
+        {**shared, "phase": "started", "request_elapsed_seconds": 0.0, "batch_in_flight": True},
+    )
+    try:
+        result = await complete_with_one_repair(
+            provider, messages, validator, max_attempts=max_attempts
+        )
+    except Exception:
+        await _notify_outline_request_progress(
+            on_request_progress,
+            {
+                **shared,
+                "phase": "failed",
+                "request_elapsed_seconds": time.monotonic() - request_started_at,
+                "batch_in_flight": False,
+            },
+        )
+        raise
+    await _notify_outline_request_progress(
+        on_request_progress,
+        {
+            **shared,
+            "phase": "finished",
+            "request_elapsed_seconds": time.monotonic() - request_started_at,
+            "batch_in_flight": False,
+        },
+    )
+    return result
+
+
+def _looks_like_whole_episode_rewrite(value: str) -> bool:
+    json_candidate = value
+    fenced_json = re.fullmatch(
+        r"\s*```(?:json)?\s*(.*?)\s*```\s*",
+        value,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if fenced_json:
+        json_candidate = fenced_json.group(1)
+    try:
+        embedded = json.loads(json_candidate)
+    except (TypeError, ValueError):
+        embedded = None
+    if isinstance(embedded, dict):
+        if sum(field in embedded for field in OUTLINE_TEXT_FIELDS) >= 2:
+            return True
+
+    labels = "|".join(
+        re.escape(label)
+        for label in (*OUTLINE_TEXT_FIELDS, *OUTLINE_FIELD_LABELS.values())
+    )
+    structured_labels = set(re.findall(
+        rf"(?m)^\s*(?:[-*+]\s+|\d+[.)]\s+|#+\s+)?(?:\*\*)?"
+        rf"({labels})(?:\*\*)?(?:\s*[:：]|\s*$)",
+        value,
+    ))
+    table_labels = set(re.findall(
+        rf"(?m)^\s*\|\s*(?:\*\*)?({labels})(?:\*\*)?\s*\|",
+        value,
+    ))
+    return len(structured_labels | table_labels) >= 2
+
+
+def _validate_outline_field_rewrite(payload: Any) -> str:
+    if not isinstance(payload, dict) or set(payload) - {"value", "provider"}:
+        raise ValueError("字段重写只能返回 value")
+    value = payload.get("value")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("字段重写的 value 必须是非空字符串")
+    normalized = value.strip()
+    if _looks_like_whole_episode_rewrite(normalized):
+        raise ValueError("字段重写不能包含整集大纲")
+    return normalized
+
+
+async def rewrite_outline_field(
+    provider: Any,
+    project: dict[str, Any],
+    brief: dict[str, Any],
+    characters: list[dict[str, Any]],
+    relationships: list[dict[str, Any]],
+    episode: dict[str, Any],
+    previous_episode: dict[str, Any] | None,
+    next_episode: dict[str, Any] | None,
+    field: str,
+    instruction: str = "",
+) -> tuple[str, dict[str, Any]]:
+    if field not in OUTLINE_TEXT_FIELDS:
+        raise ValueError("不支持的大纲字段")
+    messages = outline_field_rewrite_messages({
+        "project": _project_context(project),
+        "locked_brief": brief,
+        "characters": characters,
+        "relationships": relationships,
+        "current_episode": episode,
+        "previous_episode": previous_episode,
+        "next_episode": next_episode,
+        "target_field": field,
+        "instruction": str(instruction or "").strip(),
+    })
+    payload = await provider.complete_json(messages)
+    value = _validate_outline_field_rewrite(payload)
+    return value, {
+        "provider": str(payload.get("provider") or getattr(provider, "provider_name", "")),
+        "prompt_template_version": OUTLINE_FIELD_REWRITE_PROMPT_VERSION,
+    }
+
+
 async def generate_outline_bundle(
     provider: Any,
     project: dict[str, Any],
@@ -376,11 +570,14 @@ async def generate_outline_bundle(
     relationships: list[dict[str, Any]],
     *,
     on_progress: Callable[[int, int], Any] | None = None,
+    on_request_progress: Callable[[dict[str, Any]], Any] | None = None,
     on_checkpoint: Callable[[dict[str, Any], list[dict[str, Any]], dict[str, Any]], Any] | None = None,
     checkpoint: Callable[[], Any] | None = None,
     resume_episodes: list[dict[str, Any]] | None = None,
     resume_series_arc: str | None = None,
     resume_stages: list[Any] | None = None,
+    resume_series_overview: dict[str, Any] | None = None,
+    reasoning_effort: str = "high",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     total = int(project.get("target_episode_count") or 0)
     if not 1 <= total <= 100:
@@ -403,26 +600,50 @@ async def generate_outline_bundle(
         series_arc = str(resume_series_arc or "").strip()
         if not series_arc or not isinstance(resume_stages, list) or not resume_stages:
             raise ValueError("可继续生成的大纲缺少全剧阶段弧线")
-        arc = {"series_arc": series_arc, "stages": list(resume_stages)}
+        arc = {
+            "series_arc": series_arc,
+            "stages": list(resume_stages),
+            "series_overview": (
+                normalize_series_overview(resume_series_overview)
+                if resume_series_overview is not None
+                else None
+            ),
+        }
         meta = {"resumed_from_episode": len(episodes)}
     else:
         await _checkpoint(checkpoint)
-        arc, meta = await complete_with_one_repair(
-            provider, series_arc_messages(base), _validate_series_arc
+        arc, meta = await _complete_outline_request(
+            provider,
+            series_arc_messages(base),
+            _validate_series_arc,
+            request_kind="series_arc",
+            batch_start=None,
+            batch_end=None,
+            reasoning_effort=reasoning_effort,
+            on_request_progress=on_request_progress,
         )
     missing_fields: dict[int, list[str]] = {}
     for start in range(len(episodes) + 1, total + 1, 10):
         end = min(total, start + 9)
         await _checkpoint(checkpoint)
-        chunk_result, chunk_meta = await complete_with_one_repair(
+        chunk_result, chunk_meta = await _complete_outline_request(
             provider,
-            outline_messages({**base, "series_arc": arc, "completed_episodes": episodes}, start, end),
+            outline_messages(
+                {**base, "series_arc": arc, "history_context": build_outline_history_context(episodes)},
+                start,
+                end,
+            ),
             lambda payload, chunk_start=start, chunk_end=end: _normalize_outline_chunk(
                 payload,
                 chunk_start,
                 chunk_end,
                 default_estimated_seconds=default_estimated_seconds,
             ),
+            request_kind="outline_chunk",
+            batch_start=start,
+            batch_end=end,
+            reasoning_effort=reasoning_effort,
+            on_request_progress=on_request_progress,
             max_attempts=4,
         )
         chunk = chunk_result["episodes"]
@@ -447,8 +668,51 @@ async def generate_outline_bundle(
             result = on_checkpoint(arc, episodes, meta)
             if inspect.isawaitable(result):
                 await result
+    if arc.get("series_overview") is None:
+        await _checkpoint(checkpoint)
+        overview, overview_meta = await generate_series_overview(
+            provider, project, episodes, arc["series_arc"]
+        )
+        arc["series_overview"] = overview
+        meta.update({key: value for key, value in overview_meta.items() if value})
+        if on_checkpoint:
+            result = on_checkpoint(arc, episodes, meta)
+            if inspect.isawaitable(result):
+                await result
     meta.update({"prompt_template_version": PROMPT_TEMPLATE_VERSION, "chunk_size": 10})
-    return {"series_arc": arc["series_arc"], "stages": arc["stages"], "episodes": episodes}, meta
+    return {
+        "series_arc": arc["series_arc"],
+        "stages": arc["stages"],
+        "series_overview": arc["series_overview"],
+        "episodes": episodes,
+    }, meta
+
+
+async def generate_series_overview(
+    provider: Any,
+    project: dict[str, Any],
+    episodes: list[dict[str, Any]],
+    series_arc: str,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """Summarize an existing draft outline without changing episode content."""
+
+    ordered_episodes = sorted(
+        (dict(item) for item in episodes),
+        key=lambda item: int(item.get("episode") or item.get("episode_number") or 0),
+    )
+    overview, meta = await complete_with_one_repair(
+        provider,
+        series_overview_messages(
+            {
+                "project": _project_context(project),
+                "series_arc": str(series_arc or "").strip(),
+                "episodes": ordered_episodes,
+            }
+        ),
+        lambda payload: normalize_series_overview(payload.get("series_overview")),
+    )
+    meta["prompt_template_version"] = PROMPT_TEMPLATE_VERSION
+    return overview, meta
 
 
 async def generate_episode_beats(

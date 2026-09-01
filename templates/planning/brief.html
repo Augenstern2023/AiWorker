@@ -9,4 +9,4 @@
 <template x-if="creativeWorkspace.project"><div>{% include "common/workspace/project_blueprints.html" %}</div></template>
 {% include "common/workspace/creative_progress_modal.html" %}
 {% endblock %}
-{% block scripts %}<script src="/static/js/common/creative.js"></script><script src="/static/js/planning/brief.js"></script>{% endblock %}
+{% block scripts %}<script src="/static/js/common/creative.js?v={{ asset_version }}"></script><script src="/static/js/planning/brief.js?v={{ asset_version }}"></script>{% endblock %}

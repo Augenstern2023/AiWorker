@@ -150,13 +150,6 @@
             return member.display_name || member.username || '已停用账号';
         }
 
-        function activeOwnerCount() {
-            return members.filter((member) => (
-                member.status === 'active'
-                && ['owner', 'project_owner'].includes(member.project_role)
-            )).length;
-        }
-
         function renderMembers() {
             loading.classList.add('d-none');
             if (!members.length) {
@@ -169,7 +162,6 @@
                 memberBody.replaceChildren(row);
                 return;
             }
-            const ownerCount = activeOwnerCount();
             memberBody.replaceChildren(...members.map((member) => {
                 const row = document.createElement('tr');
                 row.append(
@@ -185,14 +177,9 @@
                 removeButton.className = 'btn btn-sm btn-outline-danger';
                 const roleLabel = projectRoleLabels[member.project_role] || member.project_role;
                 const actionVerb = member.project_role === 'project_creator' ? '停用' : '移除';
-                const isLastActiveOwner = (
-                    member.status === 'active'
-                    && ['owner', 'project_owner'].includes(member.project_role)
-                    && ownerCount <= 1
-                );
                 removeButton.textContent = actionVerb;
-                removeButton.disabled = saving || isLastActiveOwner;
-                removeButton.title = isLastActiveOwner ? '请先添加另一位项目负责人' : `${actionVerb}${memberName(member)}的${roleLabel}角色`;
+                removeButton.disabled = saving;
+                removeButton.title = `${actionVerb}${memberName(member)}的${roleLabel}角色`;
                 removeButton.setAttribute('aria-label', removeButton.title);
                 removeButton.addEventListener('click', () => removeMember(member));
                 actions.appendChild(removeButton);

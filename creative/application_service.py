@@ -705,6 +705,7 @@ class CreativeApplicationService:
         operation_id: str,
         actor: Principal,
         difference_note: str = "",
+        expected_project_revision: int | None = None,
         expected_context: dict[str, Any] | None = None,
         episode_number: int | None = None,
     ) -> dict[str, Any]:
@@ -713,6 +714,11 @@ class CreativeApplicationService:
                 "workflow_task_id": workflow_task_id,
                 "resource_id": resource_id,
                 "difference_note": difference_note,
+                **(
+                    {"expected_project_revision": expected_project_revision}
+                    if expected_project_revision is not None
+                    else {}
+                ),
                 **(
                     {"expected_context": expected_context}
                     if expected_context is not None
@@ -769,7 +775,7 @@ class CreativeApplicationService:
                 "expected_project_revision": (
                     int(expected_context["revision"])
                     if expected_context is not None
-                    else None
+                    else expected_project_revision
                 ),
                 "expected_authority": expected_authority,
             }
@@ -948,6 +954,10 @@ class CreativeApplicationService:
         episode_end: int | None = None,
         series: bool = False,
         count: int | None = None,
+        seed_id: int | None = None,
+        market_context: list[dict[str, Any]] | None = None,
+        blocked_terms: list[str] | None = None,
+        reference_snapshot: list[dict[str, Any]] | None = None,
         expected_context: dict[str, Any] | None = None,
         retry_failed_operation: bool = False,
     ) -> dict[str, Any]:
@@ -965,6 +975,10 @@ class CreativeApplicationService:
             episode_end=episode_end,
             series=series,
             count=count,
+            seed_id=seed_id,
+            market_context=market_context,
+            blocked_terms=blocked_terms,
+            reference_snapshot=reference_snapshot,
             chunk_size=10,
             expected_context=expected_context,
             retry_failed_operation=retry_failed_operation,
@@ -990,6 +1004,10 @@ class CreativeApplicationService:
         source_snapshot_id: str,
         source_snapshot: dict[str, Any],
         action: str | None = None,
+        seed_id: int | None = None,
+        market_context: list[dict[str, Any]] | None = None,
+        blocked_terms: list[str] | None = None,
+        reference_snapshot: list[dict[str, Any]] | None = None,
         expected_context: dict[str, Any] | None = None,
         retry_failed_operation: bool = False,
         **legacy_extra: Any,
@@ -1025,6 +1043,16 @@ class CreativeApplicationService:
         )
         authority_sha = canonical_request_hash(authority)
         snapshot_extra = self._snapshot_extra(source_snapshot_id, source_snapshot)
+        original_generation_extra = {
+            key: value
+            for key, value in {
+                "seed_id": seed_id,
+                "market_context": market_context,
+                "blocked_terms": blocked_terms,
+                "reference_snapshot": reference_snapshot,
+            }.items()
+            if value is not None
+        }
         request_identity = {
             "project_id": project_id,
             "stage": stage,
@@ -1036,6 +1064,10 @@ class CreativeApplicationService:
             "source_snapshot_sha256": snapshot_extra["source_snapshot_sha256"],
             "source_authority_sha256": authority_sha,
             "flags": legacy_extra,
+            **(
+                {"original_generation": original_generation_extra}
+                if original_generation_extra else {}
+            ),
         }
         generation_request_hash = canonical_request_hash(request_identity)
         payload = {
@@ -1059,6 +1091,7 @@ class CreativeApplicationService:
                 "authority_schema_version": 1,
                 "generation_request_hash": generation_request_hash,
                 "retry_failed_operation": bool(retry_failed_operation),
+                **original_generation_extra,
                 **legacy_extra,
                 "db_path": str(self.repository.db_path.resolve()),
                 "runtime_dir": str(self.runtime_dir.resolve()),

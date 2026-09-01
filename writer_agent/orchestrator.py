@@ -20,6 +20,7 @@ from creative.application_service import (
     CreativeProjectAccessDenied,
     CreativeTaskOccupied,
 )
+from creative.market_reference_service import MarketReferenceService
 from identity.permission_service import PermissionService
 from identity.schema import Principal
 from runtime.job_manager import JobConflictError
@@ -313,6 +314,59 @@ class WriterProjectOrchestrator:
             reused_resources=reused_resources, steps=steps,
         )
 
+    def _original_brief_generation_context(
+        self, project_id: int, actor: Principal
+    ) -> dict[str, Any]:
+        """Freeze the current original seed after revalidating its market references."""
+        project = self.creative_service.get_project(project_id)
+        if project is None:
+            raise WriterActionError("PROJECT_NOT_AVAILABLE", "原创项目不存在", retryable=False)
+        if project.get("creation_mode") != "original":
+            return {}
+        repository = self.creative_service.repository
+        seed = repository.get_current_seed(project_id)
+        if seed is None:
+            raise WriterActionError(
+                "ORIGINAL_SEED_UNAVAILABLE", "原创项目缺少种子版本", retryable=False
+            )
+        reference_refs = seed.get("reference_refs")
+        if not isinstance(reference_refs, list) or any(
+            not isinstance(reference, dict) for reference in reference_refs
+        ):
+            raise WriterActionError(
+                "ORIGINAL_REFERENCE_INVALID", "原创种子参考无效", retryable=False
+            )
+        try:
+            bundle = MarketReferenceService(repository).resolve(
+                reference_refs,
+                can_read=lambda kind, identifier: self.can_read_reference(
+                    actor, kind, identifier
+                ),
+            )
+        except PermissionError as exc:
+            raise WriterActionError(
+                "REFERENCE_UNAVAILABLE", "参考已失效或无权读取", retryable=False
+            ) from exc
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise WriterActionError(
+                "ORIGINAL_REFERENCE_INVALID", "原创种子参考无效", retryable=False
+            ) from exc
+        try:
+            frozen_seed = repository.freeze_seed(int(seed["id"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise WriterActionError(
+                "ORIGINAL_SEED_UNAVAILABLE", "原创种子版本无效", retryable=False
+            ) from exc
+        return {
+            "seed_id": frozen_seed["id"],
+            "market_context": bundle.context,
+            "blocked_terms": bundle.blocked_terms,
+            "reference_snapshot": [
+                {**item, "captured_at": frozen_seed["locked_at"]}
+                for item in bundle.source_refs
+            ],
+        }
+
     def execute_step(
         self,
         *,
@@ -356,6 +410,11 @@ class WriterProjectOrchestrator:
                         expected_context=step.expected_context,
                     )
             elif step.kind == "generate":
+                original_brief_context = (
+                    self._original_brief_generation_context(plan.project_id, actor)
+                    if step.stage == "brief"
+                    else {}
+                )
                 result = self.creative_service.start_generation(
                     project_id=plan.project_id, stage=step.stage, actor=actor,
                     workflow_task_id=workflow_task_id, operation_id=operation_id,
@@ -367,6 +426,8 @@ class WriterProjectOrchestrator:
                     episode_end=step.episode_number,
                     expected_context=step.expected_context,
                     retry_failed_operation=retry_failed_operation,
+                    count=1 if original_brief_context else None,
+                    **original_brief_context,
                 )
             else:
                 resource_id = payload.get("resource_id")
@@ -421,6 +482,8 @@ class WriterProjectOrchestrator:
             raise WriterActionError(
                 "CREATIVE_OPERATION_FAILED", "创作操作暂时不可用", retryable=True
             ) from exc
+        except WriterActionError:
+            raise
         except (KeyError, TypeError, ValueError) as exc:
             raise WriterActionError(
                 "RESULT_VALIDATION_FAILED", "创作结果校验失败", retryable=False

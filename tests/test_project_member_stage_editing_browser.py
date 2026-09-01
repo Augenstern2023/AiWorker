@@ -31,7 +31,10 @@ def test_api_permission_error_preserves_backend_detail() -> None:
                 window.permissionMessages.push(event.detail.message);
               });
               window.fetch = async () => new Response(
-                JSON.stringify({detail: '成员关系已失效，不能编辑该项目'}),
+                JSON.stringify({detail: {
+                  code: 'PROJECT_ACCESS_DENIED',
+                  message: '成员关系已失效，不能编辑该项目'
+                }}),
                 {status: 403, headers: {'Content-Type': 'application/json'}}
               );
             }

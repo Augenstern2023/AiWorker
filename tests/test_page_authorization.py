@@ -254,6 +254,22 @@ def test_writer_can_open_read_only_planning_pages_from_a_project(page_app):
     assert characters_response.status_code == 200
 
 
+def test_project_brief_versions_permission_and_workspace_scripts(page_app):
+    """A deployed permission fix must not be hidden by cached workspace assets."""
+
+    principal = _principal(roles=("screenwriter",))
+    page_app[1].access_by_route["/writing/projects"] = {principal.user_id}
+
+    response = _client(page_app, principal).get(
+        "/planning/projects/project-1/brief"
+    )
+
+    assert response.status_code == 200
+    assert 'src="/static/js/common/api.js?v=' in response.text
+    assert 'src="/static/js/common/creative.js?v=' in response.text
+    assert 'src="/static/js/planning/brief.js?v=' in response.text
+
+
 def test_managed_project_page_grant_keeps_project_preview_navigation_available(
     page_app,
 ):

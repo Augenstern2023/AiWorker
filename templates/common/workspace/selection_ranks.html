@@ -19,15 +19,21 @@
                         <option value="dy">抖音</option>
                         <option value="hg">红果</option>
                     </select>
-                    <select class="form-select form-select-sm" style="width: 150px;" x-model="todayRankDate" @change="fetchTodayRank">
+                    <select class="form-select form-select-sm" style="width: 150px;" x-model="todayRankDate" @change="fetchTodayRank(false)">
                         <option value="">最新日期</option>
                         <template x-for="date in todayRankDates()" :key="date">
                             <option :value="date" x-text="date"></option>
                         </template>
                     </select>
-                    <button class="btn btn-outline-secondary btn-sm" @click="refreshTodayRank" :disabled="todayRankLoading || todayRankRefreshing">
-                        <i class="bi" :class="todayRankRefreshing ? 'bi-arrow-repeat' : 'bi-arrow-clockwise'"></i><span class="ms-1" x-text="todayRankPlatform === 'dy' ? (todayRankRefreshing ? '抓取中' : '刷新并爬取') : '刷新'"></span>
-                    </button>
+                    {% if principal.is_system_admin %}
+                        <button class="btn btn-outline-secondary btn-sm" @click="refreshTodayRank(true)" :disabled="todayRankLoading || todayRankRefreshing">
+                            <i class="bi" :class="todayRankRefreshing ? 'bi-arrow-repeat' : 'bi-arrow-clockwise'"></i><span class="ms-1" x-text="todayRankPlatform === 'dy' ? (todayRankRefreshing ? '抓取中' : '更新并抓取') : '刷新榜单'"></span>
+                        </button>
+                    {% else %}
+                        <button class="btn btn-outline-secondary btn-sm" @click="refreshTodayRank(false)" :disabled="todayRankLoading || todayRankRefreshing">
+                            <i class="bi bi-arrow-clockwise"></i><span class="ms-1">刷新榜单</span>
+                        </button>
+                    {% endif %}
                 </div>
             </div>
 
@@ -92,7 +98,8 @@
                 </div>
             </div>
 
-            <div class="row g-3" x-show="todayRankPlatform === 'dy'">
+            <template x-if="todayRankPlatform === 'dy'">
+            <div class="row g-3">
                 <template x-for="section in selectedDouyinSection() ? [selectedDouyinSection()] : []" :key="section.key">
                     <div class="col-12">
                         <div class="d-flex align-items-center justify-content-between mt-2 mb-2">
@@ -108,7 +115,7 @@
                                             <span></span>
                                         </div>
                                         <div class="card-header border-top py-1 d-flex gap-1 flex-wrap">
-                                            <template x-for="tbl in rankingTables(ranking)" :key="tbl.key">
+                                            <template x-for="tbl in rankingTableTabs()" :key="tbl.key">
                                                 <button class="btn btn-sm border-0 rounded-1 small px-2 rank-filter-btn"
                                                     :class="getRankingActiveTable(ranking.key) === tbl.key ? 'bg-info bg-opacity-10 text-info' : 'text-muted'"
                                                     @click="setRankingActiveTable(ranking.key, tbl.key)">
@@ -120,8 +127,8 @@
                                             </template>
                                         </div>
                                         <div class="card-body p-0">
-                                            <template x-for="tbl in rankingTables(ranking)" :key="tbl.key">
-                                                <div x-show="getRankingActiveTable(ranking.key) === tbl.key" class="scroll-pane">
+                                            <template x-for="tbl in activeRankingTables(ranking)" :key="tbl.key">
+                                                <div class="scroll-pane">
                                                     <table class="table table-sm table-hover align-middle mb-0">
                                                         <thead>
                                                             <tr>
@@ -171,8 +178,10 @@
                     </div>
                 </template>
             </div>
+            </template>
 
-            <div class="row g-3" x-show="todayRankPlatform === 'hg'">
+            <template x-if="todayRankPlatform === 'hg'">
+            <div class="row g-3">
                 <template x-if="selectedHongguoRanking()">
                     <div class="col-12">
                         <div class="card today-rank-table">
@@ -181,7 +190,7 @@
                                 <span></span>
                             </div>
                             <div class="card-header border-top py-1 d-flex gap-1 flex-wrap">
-                                <template x-for="tbl in rankingTables(selectedHongguoRanking())" :key="tbl.key">
+                                <template x-for="tbl in rankingTableTabs()" :key="tbl.key">
                                     <button class="btn btn-sm border-0 rounded-1 small px-2 rank-filter-btn"
                                         :class="getRankingActiveTable(selectedHongguoRanking().key) === tbl.key ? 'bg-info bg-opacity-10 text-info' : 'text-muted'"
                                         @click="setRankingActiveTable(selectedHongguoRanking().key, tbl.key)">
@@ -193,8 +202,8 @@
                                 </template>
                             </div>
                             <div class="card-body p-0">
-                                <template x-for="tbl in rankingTables(selectedHongguoRanking())" :key="tbl.key">
-                                    <div x-show="getRankingActiveTable(selectedHongguoRanking().key) === tbl.key" class="scroll-pane">
+                                <template x-for="tbl in activeRankingTables(selectedHongguoRanking())" :key="tbl.key">
+                                    <div class="scroll-pane">
                                         <table class="table table-sm table-hover align-middle mb-0">
                                             <thead>
                                                 <tr>
@@ -241,4 +250,5 @@
                     <div class="text-muted py-4">暂无数据</div>
                 </div>
             </div>
+            </template>
         </section>

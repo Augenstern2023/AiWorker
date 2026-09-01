@@ -518,14 +518,7 @@ class IdentityRepository:
 
 
     def replace_user_roles(self, user_id: str, role_ids: list, *, connection=None):
-        S = __import__('sqlalchemy')
-        user_roles_t = __import__('system_database.schema', fromlist=['user_roles']).user_roles
-        try:
-            user = self.update_user(user_id, role_ids=role_ids, connection=connection)
-        except S.exc.IntegrityError as exc:
-            if '项目负责人只能有一名' in str(exc):
-                raise ValueError('项目负责人只能有一名') from exc
-            raise
+        user = self.update_user(user_id, role_ids=role_ids, connection=connection)
         return user['role_codes']
 
     def assign_project_owner(self, user_id: str, *, connection=None):
@@ -550,19 +543,20 @@ class IdentityRepository:
             ).mappings().first()
             if role is None:
                 raise ValueError('项目负责人角色不可用')
-            current = conn.execute(
-                S.select(users_t.c.id, users_t.c.status, users_t.c.is_deleted).select_from(
-                    user_roles_t.join(users_t, users_t.c.id == user_roles_t.c.user_id)
-                ).where(user_roles_t.c.role_id == role['id'])
-            ).mappings().first()
-            if current is not None and current['id'] == user_id:
-                result_data = self.get_user(user_id, connection=conn)
-                assert result_data is not None
-                return result_data
-            if current is not None and current['status'] == 'active' and not current['is_deleted']:
-                raise ValueError('请先停用当前项目负责人')
-            conn.execute(S.delete(user_roles_t).where(user_roles_t.c.role_id == role['id']))
-            conn.execute(S.insert(user_roles_t).values(user_id=user_id, role_id=role['id']))
+            assignment_exists = conn.execute(
+                S.select(user_roles_t.c.user_id).where(
+                    S.and_(
+                        user_roles_t.c.user_id == user_id,
+                        user_roles_t.c.role_id == role['id'],
+                    )
+                )
+            ).scalar_one_or_none()
+            if assignment_exists is None:
+                conn.execute(
+                    S.insert(user_roles_t).values(
+                        user_id=user_id, role_id=role['id']
+                    )
+                )
         result_data = self.get_user(user_id, connection=connection)
         assert result_data is not None
         return result_data

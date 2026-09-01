@@ -49,6 +49,18 @@ def _principal(*permissions: str) -> Principal:
     )
 
 
+def _system_administrator() -> Principal:
+    return Principal(
+        user_id="admin-1",
+        username="admin",
+        display_name="Administrator",
+        role_codes=("system_admin",),
+        permissions=frozenset({"*"}),
+        data_scope="all",
+        session_id="admin-session-1",
+    )
+
+
 def test_admin_role_page_is_named_role_management():
     navigation_item = next(
         item for item in NAVIGATION_CATALOG if item["route"] == "/admin/roles"
@@ -57,6 +69,22 @@ def test_admin_role_page_is_named_role_management():
 
     assert navigation_item["label"] == "角色管理"
     assert page_route[2] == "角色管理"
+
+
+def test_system_administrator_navigation_keeps_system_backend_page():
+    repository = FakeNavigationRepository(NAVIGATION_CATALOG)
+    navigation = NavigationService(
+        page_access_service=PageAccessService(repository),
+    )
+
+    visible_routes = {
+        item["route"]
+        for group in navigation.items_for(_system_administrator())
+        for item in group["items"]
+    }
+
+    assert "/admin/jobs" in visible_routes
+    assert navigation.can_open(_system_administrator(), "/admin/jobs") is True
 
 
 def test_navigation_service_filters_configured_items_by_catalog_permissions():

@@ -20,6 +20,7 @@ from typing import Any
 
 from core.events import emit_event
 from core.job import CrawlJob
+from agents.rank_zentao_delivery import deliver_rank_update
 
 
 DEFAULT_EXPORTS_ROOT = Path(os.environ.get("HONGGUO_EXPORTS_DIR", r"E:\hg\exports"))
@@ -115,6 +116,37 @@ def run_job(job: CrawlJob, exports_root: str | Path = DEFAULT_EXPORTS_ROOT) -> i
                 "source_path": str(csv_path),
                 "records": len(rows),
             },
+        )
+
+    latest_path = selected_paths[-1]
+    try:
+        delivery = deliver_rank_update(
+            "hg",
+            latest_path,
+            report_date=datetime.strptime(snapshot_date(latest_path), "%Y%m%d").date().isoformat(),
+        )
+        emit_event(
+            "log",
+            job_id=job.job_id,
+            worker_id=worker_id,
+            platform="hg",
+            level="info",
+            message=f"红果榜单禅道推送：{delivery.get('status', 'unknown')}",
+            payload={
+                "part_key": delivery.get("part_key", "hongguo-rank"),
+                "status": delivery.get("status", "unknown"),
+                "reason": delivery.get("reason", ""),
+            },
+        )
+    except Exception as exc:
+        emit_event(
+            "log",
+            job_id=job.job_id,
+            worker_id=worker_id,
+            platform="hg",
+            level="warning",
+            message=f"红果榜单已更新，但禅道推送失败: {exc}",
+            payload={"error_type": type(exc).__name__},
         )
 
     emit_event(

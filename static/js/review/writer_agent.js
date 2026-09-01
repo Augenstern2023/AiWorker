@@ -598,7 +598,7 @@
         state.className = 'writer-project-progress-state';
         state.setAttribute('role', 'status');
         const heading = document.createElement('h5');
-        heading.className = 'mb-2 text-body';
+        heading.className = 'writer-project-progress-title mb-2';
         heading.textContent = '项目进度';
         const copy = document.createElement('span');
         copy.className = 'small';
@@ -681,7 +681,7 @@
         const headingRow = document.createElement('div');
         headingRow.className = 'd-flex align-items-start justify-content-between gap-2';
         const heading = document.createElement('h5');
-        heading.className = 'mb-0';
+        heading.className = 'writer-project-progress-title mb-0';
         heading.textContent = '项目进度';
         const mode = document.createElement('span');
         mode.className = 'small text-muted';

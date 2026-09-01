@@ -12,10 +12,11 @@ import json
 from typing import Any
 
 
-PROMPT_TEMPLATE_VERSION = "phase4-v4"
+PROMPT_TEMPLATE_VERSION = "phase4-v5"
 BREAKDOWN_PROMPT_TEMPLATE_VERSION = "transcript-breakdown-v1"
 ORIGINAL_PROMPT_TEMPLATE_VERSION = "original-direction-v1"
 ORIGINAL_VARIANT_PROMPT_TEMPLATE_VERSION = "original-direction-variant-v1"
+OUTLINE_FIELD_REWRITE_PROMPT_VERSION = "outline-field-rewrite-v1"
 
 DRAMA_CONSTRAINTS = (
     "每场冲突不得以重复的证据留存或口头反击收束；必须改变至少一项人物资源、关系、信息或选择。"
@@ -104,6 +105,7 @@ def outline_messages(payload: dict[str, Any], start: int, end: int) -> list[dict
         f"生成第 {start}-{end} 集分集大纲，返回 episodes 数组。每集必须包含 episode、core_event、"
         "conflict、character_progress、highlight、reversal、cliffhanger、estimated_seconds。"
         "在 character_progress 中标明主角当集的压力反应，并跨两集安排反派的软肋、分歧或真实代价。"
+        "必须继承 history_context 中的既有状态，不得改写已完成集。"
         "不得写完整正文或完整台词。" + DRAMA_CONSTRAINTS,
         payload,
     )
@@ -114,6 +116,16 @@ def outline_field_repair_messages(payload: dict[str, Any]) -> list[dict[str, str
         "你是短剧分集大纲编辑。仅补全输入 episode 中列出的 repair_fields，保持已生成的核心事件、"
         "人物进展、反转和悬念不变。顶层必须返回 {\"fields\": {...}}；fields 只能包含 repair_fields 中的键，"
         "每个值必须是非空纯文本字符串。不得重写整集或输出 Markdown。",
+        payload,
+    )
+
+
+def outline_field_rewrite_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
+    return _messages(
+        "你是短剧分集大纲编辑。只重写 target_field 指定的一个字段。"
+        "默认保留既定事件、人物动机、时间线和前后集衔接；只有 instruction 明确要求时才改变剧情事实。"
+        "同集其他字段、相邻集、锁定 Brief 和人物关系只作为约束，不得输出或改写。"
+        "只返回 {\"value\": \"目标字段新稿\"}，不得返回整集、其他字段或 Markdown。",
         payload,
     )
 

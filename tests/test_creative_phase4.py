@@ -25,6 +25,7 @@ from creative.api import (
     register_creative_routes,
 )
 from creative.imitation_service import assess_similarity_risk
+from creative.outline_fields import outline_field_source_fingerprint
 from creative.repository import CreativeRepository
 from creative.workflow_adapter import CreativeWorkflowAdapter
 from identity.dependencies import current_principal
@@ -270,6 +271,84 @@ def test_project_brief_settings_are_editable_until_brief_is_locked(tmp_path: Pat
         repository.update_project(project["id"], {"target_episode_count": 40})
 
 
+def test_successor_brief_draft_can_update_and_freeze_new_project_settings(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "版本参数", 20)
+    repository.update_project(project["id"], {
+        "genre": "都市", "target_platform": "hg", "target_audience": "初版受众",
+    })
+    first = repository.create_blueprints(project["id"], [{
+        "content": {"title": "20 集初版", "audience": "方向自身受众"},
+        "risk_score": 10, "risk_level": "low",
+    }])[0]
+    repository.lock_brief(first["id"])
+    second = repository.create_blueprint_version(first["id"])
+
+    with pytest.raises(ValueError, match="锁定 Brief"):
+        repository.update_project(project["id"], {"target_episode_count": 25})
+
+    updated = repository.update_project(
+        project["id"],
+        {
+            "name": "版本参数新版",
+            "genre": "悬疑",
+            "target_platform": "dy",
+            "target_audience": "新版受众",
+            "target_episode_count": 30,
+            "episode_duration_seconds": 150,
+        },
+        draft_brief_id=second["id"],
+        expected_revision=repository.get_project(project["id"])["revision"],
+    )
+    locked_second = repository.lock_brief(
+        second["id"], expected_revision=updated["revision"]
+    )
+
+    assert updated["name"] == "版本参数新版"
+    assert updated["genre"] == "悬疑"
+    assert updated["target_platform"] == "dy"
+    assert updated["target_audience"] == "新版受众"
+    assert updated["target_episode_count"] == 30
+    assert updated["episode_duration_seconds"] == 150
+    first_snapshot = repository.get_blueprint(first["id"])["content"]
+    assert first_snapshot["project_name"] == "版本参数"
+    assert first_snapshot["genre"] == "都市"
+    assert first_snapshot["target_platform"] == "hg"
+    assert first_snapshot["target_audience"] == "初版受众"
+    assert first_snapshot["target_episode_count"] == 20
+    assert first_snapshot["episode_duration_seconds"] == 120
+    assert locked_second["content"]["project_name"] == "版本参数新版"
+    assert locked_second["content"]["genre"] == "悬疑"
+    assert locked_second["content"]["target_platform"] == "dy"
+    assert locked_second["content"]["target_audience"] == "新版受众"
+    assert locked_second["content"]["target_episode_count"] == 30
+    assert locked_second["content"]["episode_duration_seconds"] == 150
+    current = repository.get_project(project["id"])
+    assert current["locked_brief_id"] == second["id"]
+    assert current["target_episode_count"] == 30
+    assert current["episode_duration_seconds"] == 150
+
+    restored_first = repository.select_locked_brief(
+        project["id"], first["id"], expected_revision=current["revision"]
+    )
+    assert restored_first["name"] == "版本参数"
+    assert restored_first["genre"] == "都市"
+    assert restored_first["target_platform"] == "hg"
+    assert restored_first["target_audience"] == "初版受众"
+    assert restored_first["target_episode_count"] == 20
+    assert restored_first["episode_duration_seconds"] == 120
+    restored_second = repository.select_locked_brief(
+        project["id"], second["id"], expected_revision=restored_first["revision"]
+    )
+    assert restored_second["name"] == "版本参数新版"
+    assert restored_second["genre"] == "悬疑"
+    assert restored_second["target_platform"] == "dy"
+    assert restored_second["target_audience"] == "新版受众"
+    assert restored_second["target_episode_count"] == 30
+    assert restored_second["episode_duration_seconds"] == 150
+
+
 def test_project_rejects_unadopted_topic_or_unlocked_breakdown(tmp_path: Path):
     repository = CreativeRepository(tmp_path / "creative.db")
     topic, breakdown = seed_adopted_topic(repository)
@@ -456,7 +535,10 @@ def test_locking_new_brief_keeps_history_but_invalidates_current_downstream(tmp_
 
     second = repository.create_blueprint_version(first["id"])
     repository.update_blueprint(second["id"], {"title": "方向二"})
-    repository.lock_brief(second["id"])
+    repository.lock_brief(
+        second["id"],
+        expected_revision=repository.get_project(project["id"])["revision"],
+    )
 
     detail = repository.get_project(project["id"])
     assert detail["locked_brief_id"] == second["id"]
@@ -478,7 +560,10 @@ def test_selecting_another_locked_brief_repoints_character_generation_context(tm
     repository.lock_character_batch(project["id"], people["batch_id"])
     second = repository.create_blueprint_version(first["id"])
     repository.update_blueprint(second["id"], {"title": "方向二"})
-    repository.lock_brief(second["id"])
+    repository.lock_brief(
+        second["id"],
+        expected_revision=repository.get_project(project["id"])["revision"],
+    )
 
     selected = repository.select_locked_brief(project["id"], first["id"])
 
@@ -496,7 +581,10 @@ def test_selecting_locked_brief_restores_its_frozen_episode_count(tmp_path: Path
     }])[0]
     repository.lock_brief(first["id"])
     second = repository.create_blueprint_version(first["id"])
-    repository.lock_brief(second["id"])
+    repository.lock_brief(
+        second["id"],
+        expected_revision=repository.get_project(project["id"])["revision"],
+    )
     with repository._connect() as connection:
         content = dict(repository.get_blueprint(second["id"])["content"])
         content["target_episode_count"] = 30
@@ -627,20 +715,55 @@ class RecordingJobManager:
         return JobState(job=CrawlJob.from_dict(payload), status="running")
 
 
-def build_phase4_client(tmp_path: Path) -> tuple[TestClient, CreativeRepository, RecordingJobManager]:
+class InlineSequentialProvider:
+    provider_name = "test"
+
+    def __init__(self, responses: list[dict | Exception]):
+        self.responses = list(responses)
+        self.calls: list[list[dict[str, str]]] = []
+
+    async def complete_json(self, messages):
+        self.calls.append(messages)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def build_phase4_client(
+    tmp_path: Path,
+    *,
+    llm_provider_factory=None,
+) -> tuple[TestClient, CreativeRepository, RecordingJobManager]:
     runtime_dir = tmp_path / ".runtime"
     manager = RecordingJobManager()
-    identity = IdentityRepository(runtime_dir / "system" / "system.db")
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required")
+    identity = IdentityRepository(
+        SystemDatabase(SystemDatabaseSettings(postgres_url))
+    )
     identity.seed_defaults()
     admin_role = identity.get_role_by_code("system_admin")
     assert admin_role is not None
-    admin = identity.create_user("phase4-admin", "Phase 4 Admin", "hash")
+    suffix = uuid.uuid4().hex
+    username = f"phase4-admin-{suffix}"
+    admin = identity.create_user(username, "Phase 4 Admin", "hash")
     identity.replace_user_roles(admin["id"], [admin_role["id"]])
     sessions = SessionService(identity, secure_cookie=False)
     permissions = PermissionService(identity, sessions)
+    workflow = WorkflowRepository(identity)
+    workflow.delete_project_data("1")
     app = FastAPI()
     app.state.identity_permission_service = permissions
-    register_creative_routes(app, root=tmp_path, runtime_dir=runtime_dir, job_manager=manager)
+    register_creative_routes(
+        app,
+        root=tmp_path,
+        runtime_dir=runtime_dir,
+        job_manager=manager,
+        workflow_repository=workflow,
+        llm_provider_factory=llm_provider_factory,
+    )
     session_app = FastAPI()
 
     @session_app.get("/session")
@@ -650,8 +773,8 @@ def build_phase4_client(tmp_path: Path) -> tuple[TestClient, CreativeRepository,
     raw_token, _ = TestClient(session_app).get("/session").json()
     client = TestClient(app)
     client.cookies.set(sessions.cookie_name, raw_token)
-    client.workflow = WorkflowRepository(identity)
-    client.principal = permissions.principal_for_user(admin["id"], "phase4-admin")
+    client.workflow = workflow
+    client.principal = permissions.principal_for_user(admin["id"], username)
     assert client.principal is not None
     return client, CreativeRepository(runtime_dir / "creative" / "creative.db"), manager
 
@@ -675,6 +798,474 @@ def assign_phase4_task(
         actor=SYSTEM_ACTOR,
     )
     return client.workflow.claim_task(task["id"], client.principal)
+
+
+def outline_series_overview() -> dict[str, str]:
+    return {
+        "core_event": "主角追查真相并守住团队",
+        "character_progress": "主角从逃避责任成长为主动担当",
+        "conflict": "内部背叛与外部围堵同步升级",
+        "reversal": "最可信任的盟友才是幕后推手",
+        "highlight": "主角在直播现场完成证据反击",
+        "cliffhanger": "终局订单指向尚未揭开的旧案",
+    }
+
+
+def seed_complete_outline_project(tmp_path: Path, *, locked: bool):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "字段重写", 2)
+    brief = repository.create_blueprints(
+        project["id"], [{"content": {"title": "旧剧院迷局"}}]
+    )[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(
+        project["id"], [{"name": "林舟"}], [{"relation": "盟友"}]
+    )
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    overview = outline_series_overview()
+    episodes = [
+        {
+            "episode": number,
+            "core_event": f"事件 {number}",
+            "conflict": f"冲突 {number}",
+            "character_progress": f"人物推进 {number}",
+            "highlight": f"亮点 {number}",
+            "reversal": f"反转 {number}",
+            "cliffhanger": f"悬念 {number}",
+            "series_overview": overview,
+        }
+        for number in (1, 2)
+    ]
+    batch = repository.create_outline_batch(project["id"], episodes, "调查、受阻、反击")
+    if locked:
+        repository.lock_outline_batch(project["id"], batch["batch_id"])
+        batch = repository.get_outline_batch(project["id"], batch["batch_id"])
+    return repository, repository.get_project(project["id"]), batch
+
+
+# These tests catch replacing the submitted whole episode, accepting a stale source,
+# or resolving rewrite authority from another outline batch.
+def test_repository_updates_only_one_outline_field_with_matching_fingerprint(tmp_path):
+    repository, project, batch = seed_complete_outline_project(tmp_path, locked=False)
+    episode = batch["episodes"][0]
+    before = dict(episode["content"])
+    fingerprint = outline_field_source_fingerprint(episode, "core_event")
+
+    saved = repository.apply_outline_field_rewrite(
+        episode["id"], "core_event", "重写后的核心事件", fingerprint
+    )
+
+    assert saved["content"]["core_event"] == "重写后的核心事件"
+    assert saved["content"]["conflict"] == before["conflict"]
+    assert saved["content"]["series_overview"] == before["series_overview"]
+
+
+def test_repository_rejects_outline_field_rewrite_with_stale_fingerprint(tmp_path):
+    repository, _, batch = seed_complete_outline_project(tmp_path, locked=False)
+    episode = batch["episodes"][0]
+    fingerprint = outline_field_source_fingerprint(episode, "core_event")
+    repository.apply_outline_field_rewrite(
+        episode["id"], "core_event", "第一次重写", fingerprint
+    )
+
+    with pytest.raises(ValueError, match="该字段已被更新，请重新生成"):
+        repository.apply_outline_field_rewrite(
+            episode["id"], "core_event", "过期重写", fingerprint
+        )
+
+
+def test_repository_rejects_in_place_outline_field_rewrite_for_locked_episode(tmp_path):
+    repository, _, batch = seed_complete_outline_project(tmp_path, locked=True)
+    episode = batch["episodes"][0]
+
+    with pytest.raises(ValueError, match="已完成的版本不能原地修改"):
+        repository.apply_outline_field_rewrite(
+            episode["id"],
+            "core_event",
+            "不能写入锁定版本",
+            outline_field_source_fingerprint(episode, "core_event"),
+        )
+
+
+def test_repository_rejects_outline_field_rewrite_for_non_outline_episode(tmp_path):
+    repository, project, batch = seed_complete_outline_project(tmp_path, locked=True)
+    beats = repository.create_episode_beats(
+        project["id"], 1, {"beats": [{"order": 1}]}
+    )
+
+    with pytest.raises(ValueError, match="分集大纲不存在"):
+        repository.apply_outline_field_rewrite(
+            beats["id"],
+            "core_event",
+            "不能写入 Beats",
+            outline_field_source_fingerprint(batch["episodes"][0], "core_event"),
+        )
+
+
+def test_repository_rejects_outline_field_rewrite_for_noncurrent_compatible_draft(tmp_path):
+    repository, project, first = seed_complete_outline_project(tmp_path, locked=False)
+    second = repository.create_outline_batch(
+        project["id"],
+        [
+            {**episode["content"], "core_event": f"第二版事件 {episode['episode_number']}"}
+            for episode in first["episodes"]
+        ],
+        "第二版调查、受阻、反击",
+    )
+    assert second["batch_id"] != first["batch_id"]
+    stale = first["episodes"][0]
+
+    with pytest.raises(ValueError, match="只能编辑当前大纲批次"):
+        repository.apply_outline_field_rewrite(
+            stale["id"],
+            "core_event",
+            "不能写入旧草稿",
+            outline_field_source_fingerprint(stale, "core_event"),
+        )
+
+
+def test_repository_rewrite_context_uses_adjacent_episodes_from_same_batch(tmp_path):
+    repository, project, first = seed_complete_outline_project(tmp_path, locked=False)
+    second = repository.create_outline_batch(
+        project["id"],
+        [
+            {**episode["content"], "core_event": f"第二版事件 {episode['episode_number']}"}
+            for episode in first["episodes"]
+        ],
+        "第二版调查、受阻、反击",
+    )
+    target = second["episodes"][1]
+
+    context = repository.get_outline_field_rewrite_context(target["id"])
+
+    assert context["project"]["id"] == project["id"]
+    assert context["brief"]["id"] == context["project"]["locked_brief_id"]
+    assert context["episode"]["id"] == target["id"]
+    assert context["previous_episode"]["batch_id"] == target["batch_id"]
+    assert context["previous_episode"]["content"]["core_event"] == "第二版事件 1"
+    assert context["next_episode"] is None
+
+
+def seed_draft_outline_for_api(
+    client: TestClient,
+    repository: CreativeRepository,
+) -> tuple[dict, dict, dict]:
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "概览项目", 2)
+    brief = repository.create_blueprints(
+        project["id"], [{"content": {"title": "概览方向"}}]
+    )[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(
+        project["id"], [{"name": "主角"}], []
+    )
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    task = assign_phase4_task(client, "outline", project_id=project["id"])
+    batch = repository.create_outline_batch(
+        project["id"],
+        [
+            {
+                "episode": number,
+                "core_event": core_event,
+                "conflict": f"冲突 {number}",
+                "character_progress": f"人物推进 {number}",
+                "highlight": f"亮点 {number}",
+                "reversal": f"反转 {number}",
+                "cliffhanger": f"悬念 {number}",
+                "series_overview": outline_series_overview(),
+            }
+            for number, core_event in ((1, "发现假账"), (2, "公开证据"))
+        ],
+        "调查、受阻、反击",
+        workflow_task_id=task["id"],
+    )
+    return project, batch, task
+
+
+# This test catches a generation endpoint that writes before the user accepts a candidate.
+def test_outline_field_rewrite_api_generates_candidate_without_writing(tmp_path: Path):
+    provider = InlineSequentialProvider([{"value": "候选核心事件"}])
+    client, repository, _ = build_phase4_client(
+        tmp_path, llm_provider_factory=lambda: provider
+    )
+    project, batch, _ = seed_draft_outline_for_api(client, repository)
+    episode = batch["episodes"][0]
+
+    response = client.post(
+        f"/api/creative/episodes/{episode['id']}/fields/core_event/rewrite",
+        json={"instruction": "强化危机"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["candidate_value"] == "候选核心事件"
+    assert response.json()["project_id"] == project["id"]
+    assert repository.get_episode(episode["id"])["content"]["core_event"] == "发现假账"
+    assert len(provider.calls) == 1
+
+
+# This test catches applying an entire browser episode payload instead of one field.
+def test_outline_field_rewrite_api_applies_only_selected_draft_field(tmp_path: Path):
+    client, repository, _ = build_phase4_client(tmp_path)
+    project, batch, _ = seed_draft_outline_for_api(client, repository)
+    episode = batch["episodes"][0]
+    before = dict(episode["content"])
+
+    response = client.post(
+        f"/api/creative/episodes/{episode['id']}/fields/core_event/apply-rewrite",
+        json={
+            "candidate_value": "采用后的核心事件",
+            "source_fingerprint": outline_field_source_fingerprint(episode, "core_event"),
+            "expected_project_revision": repository.get_project(project["id"])["revision"],
+            "operation_id": "draft-field-rewrite",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["created_new_version"] is False
+    assert payload["episode"]["content"]["core_event"] == "采用后的核心事件"
+    assert payload["episode"]["content"]["conflict"] == before["conflict"]
+    assert payload["episode"]["content"]["series_overview"] == before["series_overview"]
+
+
+# This test catches mutating a locked batch or dropping sibling episodes/metadata.
+def test_outline_field_rewrite_api_derives_complete_draft_from_locked_batch(tmp_path: Path):
+    client, repository, _ = build_phase4_client(tmp_path)
+    project, batch, _ = seed_draft_outline_for_api(client, repository)
+    repository.lock_outline_batch(project["id"], batch["batch_id"])
+    locked = repository.get_outline_batch(project["id"], batch["batch_id"])
+    source = locked["episodes"][0]
+    original = [dict(item["content"]) for item in locked["episodes"]]
+    current_project = repository.get_project(project["id"])
+
+    response = client.post(
+        f"/api/creative/episodes/{source['id']}/fields/core_event/apply-rewrite",
+        json={
+            "candidate_value": "锁定版派生的新核心事件",
+            "source_fingerprint": outline_field_source_fingerprint(source, "core_event"),
+            "expected_project_revision": current_project["revision"],
+            "operation_id": "locked-field-rewrite",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["created_new_version"] is True
+    assert payload["batch_id"] != locked["batch_id"]
+    derived = repository.get_outline_batch(project["id"], payload["batch_id"])
+    assert len(derived["episodes"]) == len(locked["episodes"]) == 2
+    assert derived["episodes"][0]["content"]["core_event"] == "锁定版派生的新核心事件"
+    assert derived["episodes"][0]["content"]["conflict"] == original[0]["conflict"]
+    assert derived["episodes"][1]["content"] == original[1]
+    assert repository.get_outline_batch(project["id"], locked["batch_id"])["episodes"][0]["content"] == original[0]
+
+
+def test_outline_field_rewrite_api_rejects_whitespace_candidate_without_deriving_locked_version(
+    tmp_path: Path,
+):
+    client, repository, _ = build_phase4_client(tmp_path)
+    project, batch, _ = seed_draft_outline_for_api(client, repository)
+    repository.lock_outline_batch(project["id"], batch["batch_id"])
+    locked = repository.get_outline_batch(project["id"], batch["batch_id"])
+    source = locked["episodes"][0]
+    before = repository.get_project(project["id"])
+
+    response = client.post(
+        f"/api/creative/episodes/{source['id']}/fields/core_event/apply-rewrite",
+        json={
+            "candidate_value": " \n\t ",
+            "source_fingerprint": outline_field_source_fingerprint(source, "core_event"),
+            "expected_project_revision": before["revision"],
+            "operation_id": "locked-whitespace-field-rewrite",
+        },
+    )
+
+    assert response.status_code == 422
+    after = repository.get_project(project["id"])
+    assert after["revision"] == before["revision"]
+    assert after["outline_batch_id"] == locked["batch_id"]
+    assert len(after["episodes"]) == len(locked["episodes"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("provider_factory", "expected_status"),
+    [
+        (None, 503),
+        (lambda: InlineSequentialProvider([RuntimeError("secret request body")]), 502),
+        (lambda: InlineSequentialProvider([{"value": ""}]), 502),
+    ],
+)
+def test_outline_field_rewrite_api_reports_provider_errors_without_writing(
+    tmp_path: Path, provider_factory, expected_status: int
+):
+    client, repository, _ = build_phase4_client(
+        tmp_path, llm_provider_factory=provider_factory
+    )
+    _, batch, _ = seed_draft_outline_for_api(client, repository)
+    episode = batch["episodes"][0]
+    before = repository.get_episode(episode["id"])["content"]
+
+    response = client.post(
+        f"/api/creative/episodes/{episode['id']}/fields/core_event/rewrite",
+        json={"instruction": "不要泄漏这一段"},
+    )
+
+    assert response.status_code == expected_status
+    assert "secret request body" not in response.text
+    assert "不要泄漏这一段" not in response.text
+    assert repository.get_episode(episode["id"])["content"] == before
+
+
+def test_outline_field_rewrite_api_rejects_invalid_field_and_stale_fingerprint(tmp_path: Path):
+    client, repository, _ = build_phase4_client(tmp_path)
+    project, batch, _ = seed_draft_outline_for_api(client, repository)
+    episode = batch["episodes"][0]
+
+    invalid = client.post(
+        f"/api/creative/episodes/{episode['id']}/fields/title/apply-rewrite",
+        json={
+            "candidate_value": "不能改标题",
+            "source_fingerprint": "0" * 64,
+            "expected_project_revision": repository.get_project(project["id"])["revision"],
+        },
+    )
+    stale = client.post(
+        f"/api/creative/episodes/{episode['id']}/fields/core_event/apply-rewrite",
+        json={
+            "candidate_value": "过期候选",
+            "source_fingerprint": "0" * 64,
+            "expected_project_revision": repository.get_project(project["id"])["revision"],
+        },
+    )
+
+    assert invalid.status_code == 400
+    assert stale.status_code == 409
+    assert repository.get_episode(episode["id"])["content"]["core_event"] == "发现假账"
+
+
+def test_outline_field_rewrite_api_rejects_locked_source_after_new_draft_exists(tmp_path: Path):
+    client, repository, _ = build_phase4_client(tmp_path)
+    project, batch, task = seed_draft_outline_for_api(client, repository)
+    repository.lock_outline_batch(project["id"], batch["batch_id"])
+    locked = repository.get_outline_batch(project["id"], batch["batch_id"])
+    source = locked["episodes"][0]
+    repository.create_outline_batch(
+        project["id"],
+        [dict(item["content"]) for item in locked["episodes"]],
+        "新草稿弧线",
+        workflow_task_id=task["id"],
+        replaces_resource_id=f"{project['id']}:{locked['batch_id']}",
+        expected_project_revision=repository.get_project(project["id"])["revision"],
+    )
+
+    response = client.post(
+        f"/api/creative/episodes/{source['id']}/fields/core_event/apply-rewrite",
+        json={
+            "candidate_value": "不应产生分支",
+            "source_fingerprint": outline_field_source_fingerprint(source, "core_event"),
+            "expected_project_revision": repository.get_project(project["id"])["revision"],
+        },
+    )
+
+    assert response.status_code == 409
+    assert len(repository.get_project(project["id"])["episodes"]) == 4
+
+
+def test_outline_overview_api_saves_and_starts_legacy_generation(tmp_path: Path):
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required")
+    runtime_dir = tmp_path / ".runtime"
+    identity = IdentityRepository(SystemDatabase(SystemDatabaseSettings(postgres_url)))
+    identity.seed_defaults()
+    admin_role = identity.get_role_by_code("system_admin")
+    assert admin_role is not None
+    suffix = uuid.uuid4().hex
+    admin = identity.create_user(f"outline-overview-{suffix}", "Outline Admin", "hash")
+    identity.replace_user_roles(admin["id"], [admin_role["id"]])
+    sessions = SessionService(identity, secure_cookie=False)
+    permissions = PermissionService(identity, sessions)
+    principal = permissions.principal_for_user(admin["id"], f"outline-overview-{suffix}")
+    assert principal is not None
+    workflow = WorkflowRepository(identity)
+    manager = RecordingJobManager()
+    app = FastAPI()
+    app.state.identity_permission_service = permissions
+    app.dependency_overrides[creative_api_principal] = lambda: principal
+    app.dependency_overrides[current_principal] = lambda: principal
+    app.include_router(build_creative_router(
+        root=tmp_path,
+        runtime_dir=runtime_dir,
+        job_manager=manager,
+        workflow_repository=workflow,
+    ))
+    client = TestClient(app)
+    session_app = FastAPI()
+
+    @session_app.get("/session")
+    async def create_outline_overview_session(request: Request):
+        return sessions.create_session(admin["id"], request)
+
+    raw_token, _ = TestClient(session_app).get("/session").json()
+    client.cookies.set(sessions.cookie_name, raw_token)
+    client.workflow = workflow
+    client.principal = principal
+    repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
+    project, batch, task = seed_draft_outline_for_api(client, repository)
+    latest = repository.create_outline_batch(
+        project["id"],
+        [{"episode": 1, "core_event": "第二版发现"}, {"episode": 2, "core_event": "第二版反击"}],
+        "第二版调查、受阻、反击",
+        workflow_task_id=task["id"],
+    )
+
+    stale = client.post(
+        f"/api/creative/projects/{project['id']}/outlines/{batch['batch_id']}/overview/generate",
+        json={"workflow_task_id": task["id"]},
+    )
+    assert stale.status_code == 409
+    assert manager.created == []
+
+    generated = client.post(
+        f"/api/creative/projects/{project['id']}/outlines/{latest['batch_id']}/overview/generate",
+        json={"workflow_task_id": task["id"]},
+    )
+    assert generated.status_code == 200, generated.text
+    assert manager.created[-1]["extra"]["action"] == "outline_overview"
+    assert manager.created[-1]["extra"]["batch_id"] == latest["batch_id"]
+    saved = client.patch(
+        f"/api/creative/projects/{project['id']}/outlines/{latest['batch_id']}/overview",
+        json={"series_overview": outline_series_overview()},
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["series_overview"] == outline_series_overview()
+    duplicate = client.post(
+        f"/api/creative/projects/{project['id']}/outlines/{latest['batch_id']}/overview/generate",
+        json={"workflow_task_id": task["id"]},
+    )
+    assert duplicate.status_code == 409
+
+    locked = repository.create_outline_batch(
+        project["id"],
+        [{"episode": 1, "core_event": "锁定版发现"}, {"episode": 2, "core_event": "锁定版反击"}],
+        "锁定版调查、受阻、反击",
+        workflow_task_id=task["id"],
+    )
+    repository.lock_outline_batch(project["id"], locked["batch_id"])
+    locked_generation = client.post(
+        f"/api/creative/projects/{project['id']}/outlines/{locked['batch_id']}/overview/generate",
+        json={},
+    )
+    assert locked_generation.status_code == 200, locked_generation.text
+    assert manager.created[-1]["extra"]["action"] == "outline_overview"
+    assert manager.created[-1]["extra"]["batch_id"] == locked["batch_id"]
+    assert manager.created[-1]["extra"].get("workflow_task_id") is None
+    locked_manual_save = client.patch(
+        f"/api/creative/projects/{project['id']}/outlines/{locked['batch_id']}/overview",
+        json={"series_overview": outline_series_overview()},
+    )
+    assert locked_manual_save.status_code == 409
 
 
 def write_episode_script(root: Path, title: str, episode_number: int, text: str) -> Path:

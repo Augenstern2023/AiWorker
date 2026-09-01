@@ -18,6 +18,7 @@
 
 import json
 
+from agents import hongguo_csv_worker
 from agents.hongguo_csv_worker import run_job
 from core.job import CrawlJob
 
@@ -38,6 +39,24 @@ def test_hongguo_csv_worker_imports_latest_two_snapshots(tmp_path, monkeypatch):
     payload = json.loads(files[-1].read_text(encoding="utf-8"))
     assert payload["source"] == "csv_import"
     assert payload["records"][0]["剧名"] == "今日剧"
+
+
+def test_hongguo_csv_worker_pushes_only_the_latest_snapshot(tmp_path, monkeypatch):
+    exports = tmp_path / "exports"
+    write_csv(exports / "20260830/top10_rankings.csv", [["红果短剧热播榜", "1", "昨日剧"]])
+    write_csv(exports / "20260831/top10_rankings.csv", [["红果短剧热播榜", "1", "今日剧"]])
+    monkeypatch.chdir(tmp_path)
+    pushes = []
+    monkeypatch.setattr(
+        hongguo_csv_worker,
+        "deliver_rank_update",
+        lambda platform, path, report_date="": pushes.append((platform, path, report_date)) or {"status": "sent"},
+    )
+
+    job = CrawlJob(job_id="job-hg", platform="hg", crawler_type="rank")
+
+    assert run_job(job, exports_root=exports) == 0
+    assert pushes == [("hg", exports / "20260831/top10_rankings.csv", "2026-08-31")]
 
 
 def write_csv(path, rows):

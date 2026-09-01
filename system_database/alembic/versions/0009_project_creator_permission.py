@@ -46,4 +46,3 @@ def downgrade() -> None:
     # Permissions are administrator-owned configuration.  A downgrade must not
     # guess whether a grant was created here or configured independently.
     pass
-

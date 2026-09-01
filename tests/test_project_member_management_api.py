@@ -241,6 +241,17 @@ def test_project_member_editor_lists_candidates_and_member_identity(
     )
     assert removed.status_code == 204, removed.text
 
+    owner_membership_id = next(
+        member["id"]
+        for member in workflow.list_project_members(project_id)
+        if member["project_role"] == "project_owner"
+    )
+    removed_last_owner = client.delete(
+        f"/api/workflow/projects/{project_id}/members/{owner_membership_id}"
+    )
+    assert removed_last_owner.status_code == 204, removed_last_owner.text
+    assert not workflow.list_project_members(project_id)
+
     app.dependency_overrides[current_principal] = lambda: outsider
     assert client.get(
         f"/api/workflow/projects/{project_id}/member-candidates",

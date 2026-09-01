@@ -54,7 +54,7 @@ from web.page_routes import PAGE_ROUTES
 AUTHENTICATION_ERROR = "用户名或密码错误"
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "templates" / "auth"
 REGISTRATION_ROLE_CODES = frozenset(
-    {"selection_operator", "creative_planner", "screenwriter"}
+    {"selection_operator", "creative_planner", "screenwriter", "project_owner"}
 )
 
 
@@ -1197,11 +1197,6 @@ def build_identity_router(
         known = set(roles)
         if not set(role_ids) <= known:
             raise HTTPException(status_code=422, detail="角色不存在")
-        if any(roles[role_id]["code"] == "project_owner" for role_id in role_ids):
-            raise HTTPException(
-                status_code=422,
-                detail="项目负责人角色只能通过专用接任操作变更",
-            )
 
     def _role_filter_status(status: str | None) -> str | None:
         normalized = (status or "").strip().casefold()

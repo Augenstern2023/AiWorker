@@ -28,6 +28,22 @@ import httpx
 from json_repair import repair_json
 
 
+_CONFIGURED_LLM_SETTINGS_REPOSITORY: Any | None = None
+
+
+def configure_llm_settings_repository(repository: Any | None) -> None:
+    global _CONFIGURED_LLM_SETTINGS_REPOSITORY
+    _CONFIGURED_LLM_SETTINGS_REPOSITORY = repository
+
+
+def _default_llm_settings_repository() -> Any | None:
+    if _CONFIGURED_LLM_SETTINGS_REPOSITORY is not None:
+        return _CONFIGURED_LLM_SETTINGS_REPOSITORY
+    from analysis.llm_settings import runtime_settings_repository
+
+    return runtime_settings_repository()
+
+
 SUPPORTED_REASONING_EFFORTS = frozenset(
     {"none", "low", "medium", "high", "xhigh", "max"}
 )
@@ -347,16 +363,64 @@ def provider_defaults(provider: str) -> Dict[str, str]:
     }
 
 
-def resolve_llm_settings(config_module: Any, prefix: str = "LLM") -> Dict[str, Any]:
-    provider = str(getattr(config_module, f"{prefix}_PROVIDER", "") or getattr(config_module, "LLM_PROVIDER", "") or "minimax")
-    defaults = provider_defaults(provider)
-    env_key = str(getattr(config_module, f"{prefix}_ENV_KEY", "") or getattr(config_module, "LLM_ENV_KEY", "") or defaults["env_key"])
-    api_key = (
-        str(getattr(config_module, f"{prefix}_API_KEY", "") or "")
-        or os.getenv(env_key, "")
-        or str(getattr(config_module, "LLM_API_KEY", "") or "")
-        or os.getenv("LLM_API_KEY", "")
+def resolve_llm_settings(
+    config_module: Any,
+    prefix: str = "LLM",
+    *,
+    settings_repository: Any | None = None,
+) -> Dict[str, Any]:
+    if settings_repository is None:
+        settings_repository = _default_llm_settings_repository()
+    database_default = (
+        settings_repository.effective_default()
+        if settings_repository is not None
+        else None
+    ) or {}
+    scenario_prefix = prefix if prefix != "LLM" else ""
+    scenario_provider = (
+        getattr(config_module, f"{scenario_prefix}_PROVIDER", "")
+        if scenario_prefix
+        else ""
     )
+    provider = str(
+        scenario_provider
+        or database_default.get("provider")
+        or getattr(config_module, "LLM_PROVIDER", "")
+        or "minimax"
+    )
+    defaults = provider_defaults(provider)
+    scenario_env_key = (
+        getattr(config_module, f"{scenario_prefix}_ENV_KEY", "")
+        if scenario_prefix
+        else ""
+    )
+    env_key = str(
+        scenario_env_key
+        or (
+            getattr(config_module, "LLM_ENV_KEY", "")
+            if not database_default
+            else ""
+        )
+        or defaults["env_key"]
+    )
+    scenario_api_key = (
+        str(getattr(config_module, f"{scenario_prefix}_API_KEY", "") or "")
+        if scenario_prefix
+        else ""
+    )
+    scenario_environment_key = (
+        os.getenv(env_key, "") if scenario_env_key else ""
+    )
+    if scenario_api_key or scenario_environment_key:
+        api_key = scenario_api_key or scenario_environment_key
+    elif database_default:
+        api_key = str(database_default.get("api_key") or "")
+    else:
+        api_key = (
+            str(getattr(config_module, "LLM_API_KEY", "") or "")
+            or os.getenv(env_key, "")
+            or os.getenv("LLM_API_KEY", "")
+        )
     prefixed_max_retries = getattr(
         config_module, f"{prefix}_MAX_RETRIES", ""
     )
@@ -365,19 +429,55 @@ def resolve_llm_settings(config_module: Any, prefix: str = "LLM") -> Dict[str, A
         if prefixed_max_retries not in (None, "")
         else getattr(config_module, "LLM_MAX_RETRIES", "")
     )
+    scenario_base_url = (
+        getattr(config_module, f"{scenario_prefix}_BASE_URL", "")
+        if scenario_prefix
+        else ""
+    )
+    scenario_model = (
+        getattr(config_module, f"{scenario_prefix}_MODEL", "")
+        if scenario_prefix
+        else ""
+    )
+    scenario_wire_api = (
+        getattr(config_module, f"{scenario_prefix}_WIRE_API", "")
+        if scenario_prefix
+        else ""
+    )
+    scenario_allow_insecure = (
+        getattr(config_module, f"{scenario_prefix}_ALLOW_INSECURE_HTTP", "")
+        if scenario_prefix
+        else ""
+    )
     return {
         "provider": provider,
-        "base_url": str(getattr(config_module, f"{prefix}_BASE_URL", "") or getattr(config_module, "LLM_BASE_URL", "") or defaults["base_url"]),
+        "base_url": str(
+            scenario_base_url
+            or database_default.get("base_url")
+            or getattr(config_module, "LLM_BASE_URL", "")
+            or defaults["base_url"]
+        ),
         "api_key": api_key,
-        "model": str(getattr(config_module, f"{prefix}_MODEL", "") or getattr(config_module, "LLM_MODEL", "") or defaults["model"]),
-        "wire_api": str(getattr(config_module, f"{prefix}_WIRE_API", "") or getattr(config_module, "LLM_WIRE_API", "") or defaults["wire_api"]),
+        "model": str(
+            scenario_model
+            or database_default.get("model")
+            or getattr(config_module, "LLM_MODEL", "")
+            or defaults["model"]
+        ),
+        "wire_api": str(
+            scenario_wire_api
+            or database_default.get("wire_api")
+            or getattr(config_module, "LLM_WIRE_API", "")
+            or defaults["wire_api"]
+        ),
         "reasoning_effort": str(
             getattr(config_module, f"{prefix}_REASONING_EFFORT", "")
             or getattr(config_module, "LLM_REASONING_EFFORT", "")
             or defaults["reasoning_effort"]
         ),
         "allow_insecure_http": _boolean_setting(
-            getattr(config_module, f"{prefix}_ALLOW_INSECURE_HTTP", "")
+            scenario_allow_insecure
+            or database_default.get("allow_insecure_http", "")
             or getattr(config_module, "LLM_ALLOW_INSECURE_HTTP", "")
         ),
         "timeout_seconds": _timeout_seconds(

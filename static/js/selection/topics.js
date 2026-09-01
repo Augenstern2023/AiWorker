@@ -12,6 +12,7 @@ window.aiworkerModules.push(() => ({
                     this.rememberCreativePlatform();
                     const sources = this.creativeRankSourceOptions();
                     this.creative.rankSource = this.creativeRankSourcePreference(sources);
+                    this.rememberCreativeRankSource();
                     await this.generateCreativeTopics();
                 },
 
@@ -47,6 +48,7 @@ window.aiworkerModules.push(() => ({
 
                 async changeCreativeRankSource(rankSource) {
                     if (!this.creativeRankSourceOptions().includes(rankSource)) return;
+                    if (this.creative.rankSource === rankSource) return;
                     this.creative.rankSource = rankSource;
                     this.rememberCreativeRankSource();
                     await this.generateCreativeTopics();
@@ -300,46 +302,20 @@ window.aiworkerModules.push(() => ({
                     return `${topic.title}（${this.breakdownStatusLabel(topic)}）`;
                 },
 
-                async openCreateProject(topic) {
+                openCreateProject(topic) {
                     this.planningAssignment = {
                         topic,
-                        plannerCandidates: [],
-                        writerCandidates: [],
-                        plannerMemberIds: [],
-                        writerMemberIds: [],
                         name: `${topic.title}创作项目`,
                         targetPlatform: (topic.source_platforms || [topic.platform])[0] || '',
                         targetEpisodeCount: 20,
                         creationRequestId: globalThis.crypto?.randomUUID?.()
                             || `planning-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-                        loading: true,
                         saving: false,
                         error: '',
                         result: null
                     };
                     this.planningAssignmentModal = this.modal('planningAssignmentModal');
                     this.planningAssignmentModal?.show();
-                    try {
-                        const [planner, writer] = await Promise.all([
-                            this.loadProjectMemberCandidates('creative_planner'),
-                            this.loadProjectMemberCandidates('screenwriter')
-                        ]);
-                        this.planningAssignment.plannerCandidates = planner;
-                        this.planningAssignment.writerCandidates = writer;
-                    } catch (error) {
-                        this.planningAssignment.error = error.message || '读取团队成员失败';
-                    } finally {
-                        this.planningAssignment.loading = false;
-                    }
-                },
-
-                async loadProjectMemberCandidates(roleCode) {
-                    const response = await aiworkerApi.request(
-                        `/api/creative/projects/member-candidates?role_code=${encodeURIComponent(roleCode)}`
-                    );
-                    const payload = await response.json();
-                    if (!response.ok) throw new Error(payload.detail || '读取团队成员失败');
-                    return payload || [];
                 },
 
                 async submitCreateProject() {
@@ -357,8 +333,6 @@ window.aiworkerModules.push(() => ({
                                     name: state.name.trim(),
                                     target_platform: state.targetPlatform,
                                     target_episode_count: Number(state.targetEpisodeCount || 20),
-                                    planner_member_ids: state.plannerMemberIds,
-                                    writer_member_ids: state.writerMemberIds,
                                     creation_request_id: state.creationRequestId
                                 })
                             }

@@ -713,21 +713,23 @@ def test_selection_adoption_download_and_breakdown_do_not_send_workflow_tasks():
     assert "topic_id: this.dramaDownload.topic.id" in download
 
 
-def test_drama_material_jobs_send_exact_source_topic_and_task():
+def test_drama_material_jobs_auto_adopt_without_workflow_task():
     script = _source("static/js/selection/dramas.js")
     method = script.split("async startDramaAnalysis", 1)[1].split(
         "dramaJobArtifacts", 1
     )[0]
+    template = _source("templates/common/workspace/selection_dramas.html")
+    creative = _source("static/js/common/creative.js")
 
-    assert "resolveSourcePackageWorkflowTask" in method
-    assert "topic_id: task.topic_id" in method
-    assert "workflow_task_id: task.id" in method
-    resolver = _source("static/js/common/creative.js").split(
-        "async resolveSourcePackageWorkflowTask", 1
-    )[1]
-    assert "/api/creative/topics?limit=500" not in resolver
-    assert "/api/creative/topics/${task.topic_id}" in resolver
-    assert "Promise.all" in resolver
+    assert "resolveSourcePackageWorkflowTask" not in method
+    assert "/api/workflow/tasks/" not in method
+    assert "workflow_task_id" not in method
+    assert "topic_id: task.topic_id" not in method
+    assert "正在采纳选题并创建下载任务" in method
+    assert "this.dramaAnalysis.topic = data.topic" in method
+    assert 'x-text="dramaAnalysis.loadingMessage"' in template
+    assert 'aria-live="polite"' in template
+    assert "resolveSourcePackageWorkflowTask" not in creative
 
 
 def test_project_table_shares_original_mode_source_and_open_action():
@@ -972,9 +974,9 @@ def test_topic_library_unifies_project_creation_and_open_actions():
     assert "openCreateProject(topic)" in topics
     assert "submitCreateProject" in topics
     assert "openTopicProject(topic)" in topics
-    assert "loadProjectMemberCandidates" in topics
-    assert "planner_member_ids" in topics
-    assert "writer_member_ids" in topics
+    assert "loadProjectMemberCandidates" not in topics
+    assert "planner_member_ids" not in topics
+    assert "writer_member_ids" not in topics
     assert "openStageWorkflowAssignment(topic)" not in topics
     assert "workflowAssignmentForStage" not in topics
     assert '@click="openCreateProject(topic)"' in table
@@ -989,8 +991,8 @@ def test_create_project_refreshes_the_topic_library_after_success():
     )[0]
 
     assert "await this.fetchTopicLibrary();" in submit_method
-    assert "planner_member_ids" in submit_method
-    assert "writer_member_ids" in submit_method
+    assert "planner_member_ids" not in submit_method
+    assert "writer_member_ids" not in submit_method
 
 
 def test_saving_a_scene_script_refreshes_topic_library_state():
@@ -1773,7 +1775,7 @@ def test_today_rank_update_is_admin_only_while_other_users_only_refresh_snapshot
 
     assert "async refreshTodayRank(canUpdateRank = false)" in script
     assert "if (!canUpdateRank)" in script
-    assert "await this.fetchTodayRank()" in script
+    assert "await this.fetchTodayRank(true)" in script
     assert "'/api/jobs'" in script
     assert "platform: 'dy'" in script
     assert "crawler_type: 'rank'" in script

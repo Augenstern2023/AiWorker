@@ -31,7 +31,7 @@ def _project() -> dict:
         "outline_batch_id": "outlines-v2",
         "blueprints": [
             {"id": 11, "version": 1, "status": "historical", "content": {"title": "旧 Brief"}},
-            {"id": 12, "version": 2, "status": "locked", "content": {"title": "锁定 Brief"}},
+            {"id": 12, "version": 2, "status": "brief_locked", "content": {"title": "锁定 Brief"}},
             {"id": 13, "version": 3, "status": "returned", "content": {"title": "退回 Brief"}},
         ],
         "characters": [
@@ -61,7 +61,10 @@ def _project() -> dict:
             },
         ],
     }
-    brief = project["blueprints"][-1]
+    brief = next(
+        item for item in project["blueprints"]
+        if item["id"] == project["locked_brief_id"]
+    )
     characters = project["characters"][-1:]
     relationships = project["relationships"][-1:]
     base_refs = {
@@ -124,7 +127,7 @@ def test_source_uses_current_resources_and_actual_stage_ranges() -> None:
     source = build_project_review_source(_project(), audit_scope="project")
 
     assert source["audit_scope"] == "project"
-    assert source["brief"]["version"] == 3
+    assert source["brief"]["version"] == 2
     assert source["characters"]["batch_id"] == "characters-v3"
     assert source["stages"]["outline"]["episode_numbers"] == [1, 2]
     assert source["stages"]["outline"]["units"][0]["resource"]["version"] == 3
@@ -207,6 +210,48 @@ def test_active_batch_selection_ranks_active_resources_before_locked_versions() 
     assert source["outline_batch_id"] == "outlines-v10"
 
 
+def test_outline_review_loads_locked_brief_even_when_a_draft_revision_exists() -> None:
+    """A draft sibling must not replace the Brief authority used by outlines."""
+    project = _project()
+    for item in project["episodes"]:
+        if item["stage"] == "outline":
+            item["upstream_refs"] = {
+                "brief_id": 12,
+                "character_batch_id": "characters-v3",
+            }
+
+    source = build_project_review_source(project, audit_scope="outline")
+
+    assert source["brief"]["id"] == 12
+    assert source["brief"]["version"] == 2
+    assert source["manifest"]["brief"]["id"] == 12
+    assert source["upstream_mismatches"] == []
+
+
+def test_review_falls_back_to_active_brief_when_project_has_no_locked_id() -> None:
+    """A malformed zero-ID row must not shadow the active Brief fallback."""
+    project = _project()
+    project["locked_brief_id"] = None
+    project["blueprints"].insert(0, {
+        "id": None,
+        "version": 99,
+        "status": "brief_locked",
+        "content": {"title": "无效 Brief"},
+    })
+    for item in project["episodes"]:
+        if item["stage"] == "outline":
+            item["upstream_refs"] = {
+                "brief_id": 13,
+                "character_batch_id": "characters-v3",
+            }
+
+    source = build_project_review_source(project, audit_scope="outline")
+
+    assert source["brief"]["id"] == 13
+    assert source["brief"]["version"] == 3
+    assert source["upstream_mismatches"] == []
+
+
 def test_upstream_mismatches_detect_missing_refs_and_accept_outline_authority_hash() -> None:
     project = _project()
     project["episodes"][2]["content"]["series_overview"] = {"theme": "仅概览变化"}
@@ -236,7 +281,7 @@ def test_outline_generation_refs_only_require_the_fields_the_repository_persists
     for item in project["episodes"]:
         if item["stage"] == "outline":
             item["upstream_refs"] = {
-                "brief_id": 13,
+                "brief_id": 12,
                 "character_batch_id": "characters-v3",
             }
 

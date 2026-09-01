@@ -49,6 +49,9 @@ def test_system_schema_declares_all_shared_tables():
     expected_tables = {
         "approval_records",
         "audit_logs",
+        "llm_models",
+        "llm_providers",
+        "llm_settings",
         "permission_dependencies",
         "permissions",
         "project_members",
@@ -88,6 +91,19 @@ def test_runtime_schema_uses_timestamptz_and_jsonb_for_system_events():
     assert isinstance(submissions.c.content_snapshot_json.type, JSONB)
 
 
+def test_baseline_users_structure_excludes_contact_profile():
+    users = BASELINE_METADATA.tables["users"]
+
+    assert not {"email", "phone", "gender"} & set(users.c)
+    assert "ck_users_gender" not in {constraint.name for constraint in users.constraints}
+    baseline_indexes = {
+        index.name
+        for table in BASELINE_METADATA.tables.values()
+        for index in table.indexes
+    }
+    assert not {"uq_users_active_email", "uq_users_active_phone"} & baseline_indexes
+
+
 def test_baseline_table_names_are_immutable():
     assert frozenset(BASELINE_METADATA.tables) == frozenset(
         {
@@ -120,6 +136,9 @@ def test_upgrade_head_creates_system_tables(postgres_url, monkeypatch):
         assert inspector.has_table("users")
         assert inspector.has_table("workflow_tasks")
         assert inspector.has_table("audit_logs")
+        assert inspector.has_table("llm_providers")
+        assert inspector.has_table("llm_models")
+        assert inspector.has_table("llm_settings")
     finally:
         engine.dispose()
 

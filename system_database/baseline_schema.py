@@ -35,9 +35,6 @@ users = Table(
     Column("normalized_username", Text, nullable=False),
     Column("display_name", Text, nullable=False),
     Column("password_hash", Text, nullable=False),
-    Column("email", Text),
-    Column("phone", Text),
-    Column("gender", Text, nullable=False, server_default=text("'unspecified'")),
     Column("status", Text, nullable=False, server_default=text("'active'")),
     Column("is_deleted", Integer, nullable=False, server_default=text("0")),
     Column("created_by_user_id", Text, ForeignKey("users.id", ondelete="SET NULL")),
@@ -47,23 +44,7 @@ users = Table(
     Column("created_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
     Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
     CheckConstraint("status IN ('active', 'disabled')", name="ck_users_status"),
-    CheckConstraint(
-        "gender IN ('unspecified', 'male', 'female')", name="ck_users_gender"
-    ),
     CheckConstraint("is_deleted IN (0, 1)", name="ck_users_is_deleted"),
-)
-
-Index(
-    "uq_users_active_email",
-    users.c.email,
-    unique=True,
-    postgresql_where=text("is_deleted = 0 AND email IS NOT NULL"),
-)
-Index(
-    "uq_users_active_phone",
-    users.c.phone,
-    unique=True,
-    postgresql_where=text("is_deleted = 0 AND phone IS NOT NULL"),
 )
 
 roles = Table(

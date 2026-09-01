@@ -88,6 +88,18 @@ def test_runtime_schema_uses_timestamptz_and_jsonb_for_system_events():
     assert isinstance(submissions.c.content_snapshot_json.type, JSONB)
 
 
+def test_baseline_users_structure_excludes_contact_profile():
+    users = BASELINE_METADATA.tables["users"]
+
+    assert not {"email", "phone", "gender"} & set(users.c.keys())
+    assert "ck_users_gender" not in {
+        constraint.name for constraint in users.constraints
+    }
+    assert not {"uq_users_active_email", "uq_users_active_phone"} & {
+        index.name for index in users.indexes
+    }
+
+
 def test_baseline_table_names_are_immutable():
     assert frozenset(BASELINE_METADATA.tables) == frozenset(
         {

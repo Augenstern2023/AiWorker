@@ -94,7 +94,8 @@ def test_runtime_schema_uses_timestamptz_and_jsonb_for_system_events():
 def test_baseline_users_structure_excludes_contact_profile():
     users = BASELINE_METADATA.tables["users"]
 
-    assert not {"email", "phone", "gender"} & set(users.c)
+    baseline_column_names = {column.name for column in users.c}
+    assert not {"email", "phone", "gender"} & baseline_column_names
     assert "ck_users_gender" not in {constraint.name for constraint in users.constraints}
     baseline_indexes = {
         index.name

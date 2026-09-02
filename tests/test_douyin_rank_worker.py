@@ -10,8 +10,27 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from agents import douyin_rank_worker
+from analysis.rank_importer import RankImportResult
+from analysis.rank_models import RankDatabaseUnavailable
 from core.job import CrawlJob
+
+
+@pytest.fixture(autouse=True)
+def _stub_central_rank_sync(monkeypatch):
+    monkeypatch.setattr(
+        douyin_rank_worker,
+        "sync_rank_source",
+        lambda platform, path, **kwargs: RankImportResult(
+            platform=platform,
+            source_ref=Path(path).name,
+            status="imported",
+            record_count=1,
+        ),
+        raising=False,
+    )
 
 
 def test_douyin_rank_worker_runs_top10_analysis(tmp_path, monkeypatch):
@@ -115,3 +134,120 @@ def test_douyin_rank_worker_pushes_after_rank_artifact_is_ready(tmp_path, monkey
     assert [(platform, path.resolve()) for platform, path in pushes] == [
         ("dy", tmp_path / "data/dy/jobs/job-dy/rank/douyin_series_rank_20260831_101010.json")
     ]
+
+
+def test_douyin_rank_worker_syncs_after_analysis_and_before_delivery(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    calls = []
+
+    async def fake_run_douyin_rank(args):
+        output_path = Path(args.output_dir) / "douyin_series_rank_20260902_100000.md"
+        output_path.write_text("# rank", encoding="utf-8")
+        output_path.with_suffix(".json").write_text(
+            json.dumps(
+                {
+                    "captured_at": "2026-09-02 10:00:00",
+                    "records": [{"rank": 1, "title": "集中榜单剧"}],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return output_path
+
+    def fake_analysis(*args, **kwargs):
+        calls.append("analysis")
+        output_dir = Path(kwargs["output_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        paths = {
+            "manifest": output_dir / "manifest.json",
+            "overview": output_dir / "overview.md",
+            "overview_json": output_dir / "overview.json",
+        }
+        for path in paths.values():
+            path.write_text("{}", encoding="utf-8")
+        return {key: str(path) for key, path in paths.items()} | {"items": []}
+
+    def fake_sync(platform, path, **kwargs):
+        calls.append(("sync", platform, Path(path).name))
+        assert kwargs["project_root"] == tmp_path
+        return RankImportResult(platform, Path(path).name, "imported", 1)
+
+    monkeypatch.setattr(douyin_rank_worker, "run_douyin_rank", fake_run_douyin_rank)
+    monkeypatch.setattr(douyin_rank_worker, "analyze_rank_file", fake_analysis)
+    monkeypatch.setattr(douyin_rank_worker, "sync_rank_source", fake_sync)
+    monkeypatch.setattr(
+        douyin_rank_worker,
+        "deliver_rank_update",
+        lambda *args, **kwargs: calls.append("delivery") or {"status": "sent"},
+    )
+    monkeypatch.setattr(douyin_rank_worker, "emit_event", lambda *args, **kwargs: None)
+
+    job = CrawlJob(job_id="job-dy-sync", platform="dy", crawler_type="rank")
+
+    assert douyin_rank_worker.run_job(job) == 0
+    assert calls == [
+        "analysis",
+        ("sync", "dy", "douyin_series_rank_20260902_100000.json"),
+        "delivery",
+    ]
+
+
+def test_douyin_rank_worker_reports_central_sync_failure_and_keeps_artifact(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    events = []
+    delivery_calls = []
+
+    async def fake_run_douyin_rank(args):
+        output_path = Path(args.output_dir) / "douyin_series_rank_20260902_110000.md"
+        output_path.write_text("# rank", encoding="utf-8")
+        output_path.with_suffix(".json").write_text(
+            json.dumps({"captured_at": "2026-09-02 11:00:00", "records": []}),
+            encoding="utf-8",
+        )
+        return output_path
+
+    monkeypatch.setattr(douyin_rank_worker, "run_douyin_rank", fake_run_douyin_rank)
+    monkeypatch.setattr(
+        douyin_rank_worker,
+        "sync_rank_source",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RankDatabaseUnavailable("postgresql+psycopg://secret@host/aiworker")
+        ),
+    )
+    monkeypatch.setattr(
+        douyin_rank_worker,
+        "deliver_rank_update",
+        lambda *args, **kwargs: delivery_calls.append(True),
+    )
+    monkeypatch.setattr(
+        douyin_rank_worker,
+        "emit_event",
+        lambda event, **kwargs: events.append((event, kwargs)),
+    )
+    job = CrawlJob(
+        job_id="job-dy-sync-failed",
+        platform="dy",
+        crawler_type="rank",
+        extra={"DOUYIN_AUTO_ANALYZE_TOP10": False},
+    )
+
+    assert douyin_rank_worker.run_job(job) == 1
+    json_path = (
+        tmp_path
+        / "data/dy/jobs/job-dy-sync-failed/rank/douyin_series_rank_20260902_110000.json"
+    )
+    assert json_path.exists()
+    failed = [kwargs for event, kwargs in events if event == "job_failed"]
+    assert failed[-1]["payload"] == {
+        "sync_status": "central_sync_failed",
+        "error_type": "RankDatabaseUnavailable",
+    }
+    assert delivery_calls == []
+    assert "secret" not in json.dumps(events, ensure_ascii=False)

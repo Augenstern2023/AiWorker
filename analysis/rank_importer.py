@@ -202,6 +202,35 @@ def rank_importer_from_environment(
     )
 
 
+def sync_rank_source(
+    platform: str,
+    path: str | Path,
+    *,
+    project_root: str | Path,
+    hongguo_exports_root: str | Path,
+) -> RankImportResult:
+    importer, database = rank_importer_from_environment(
+        project_root,
+        hongguo_exports_root,
+    )
+    try:
+        if platform == "dy":
+            return importer.import_path(
+                "dy",
+                path,
+                source_kind="douyin_json",
+                source_root=project_root,
+            )
+        return importer.import_path(
+            "hg",
+            path,
+            source_kind="hongguo_csv",
+            source_root=hongguo_exports_root,
+        )
+    finally:
+        database.dispose()
+
+
 def _source_ref(path: Path, source_root: Path) -> str:
     return path.resolve().relative_to(source_root.resolve()).as_posix()
 

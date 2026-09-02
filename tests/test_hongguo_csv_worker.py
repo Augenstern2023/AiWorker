@@ -17,10 +17,30 @@
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
 import json
+from pathlib import Path
+
+import pytest
 
 from agents import hongguo_csv_worker
 from agents.hongguo_csv_worker import run_job
+from analysis.rank_importer import RankImportResult
+from analysis.rank_models import RankDatabaseUnavailable
 from core.job import CrawlJob
+
+
+@pytest.fixture(autouse=True)
+def _stub_central_rank_sync(monkeypatch):
+    monkeypatch.setattr(
+        hongguo_csv_worker,
+        "sync_rank_source",
+        lambda platform, path, **kwargs: RankImportResult(
+            platform=platform,
+            source_ref=Path(path).name,
+            status="imported",
+            record_count=1,
+        ),
+        raising=False,
+    )
 
 
 def test_hongguo_csv_worker_imports_latest_two_snapshots(tmp_path, monkeypatch):
@@ -57,6 +77,89 @@ def test_hongguo_csv_worker_pushes_only_the_latest_snapshot(tmp_path, monkeypatc
 
     assert run_job(job, exports_root=exports) == 0
     assert pushes == [("hg", exports / "20260831/top10_rankings.csv", "2026-08-31")]
+
+
+def test_hongguo_csv_worker_syncs_both_snapshots_before_latest_delivery(
+    tmp_path,
+    monkeypatch,
+):
+    exports = tmp_path / "exports"
+    yesterday = exports / "20260901/top10_rankings.csv"
+    today = exports / "20260902/top10_rankings.csv"
+    write_csv(yesterday, [["红果短剧热播榜", "1", "昨日剧"]])
+    write_csv(today, [["红果短剧热播榜", "1", "今日剧"]])
+    monkeypatch.chdir(tmp_path)
+    calls = []
+
+    def fake_sync(platform, path, **kwargs):
+        calls.append(("sync", platform, Path(path)))
+        assert kwargs == {
+            "project_root": tmp_path,
+            "hongguo_exports_root": exports,
+        }
+        return RankImportResult(platform, Path(path).name, "imported", 1)
+
+    monkeypatch.setattr(hongguo_csv_worker, "sync_rank_source", fake_sync)
+    monkeypatch.setattr(
+        hongguo_csv_worker,
+        "deliver_rank_update",
+        lambda platform, path, **kwargs: calls.append(
+            ("delivery", platform, Path(path))
+        )
+        or {"status": "sent"},
+    )
+    monkeypatch.setattr(hongguo_csv_worker, "emit_event", lambda *args, **kwargs: None)
+    job = CrawlJob(job_id="job-hg-sync", platform="hg", crawler_type="rank")
+
+    assert run_job(job, exports_root=exports) == 0
+    assert calls == [
+        ("sync", "hg", yesterday),
+        ("sync", "hg", today),
+        ("delivery", "hg", today),
+    ]
+
+
+def test_hongguo_csv_worker_reports_central_sync_failure_and_keeps_files(
+    tmp_path,
+    monkeypatch,
+):
+    exports = tmp_path / "exports"
+    csv_path = exports / "20260902/top10_rankings.csv"
+    write_csv(csv_path, [["红果短剧热播榜", "1", "集中失败剧"]])
+    monkeypatch.chdir(tmp_path)
+    events = []
+    delivery_calls = []
+    monkeypatch.setattr(
+        hongguo_csv_worker,
+        "sync_rank_source",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RankDatabaseUnavailable("postgresql+psycopg://secret@host/aiworker")
+        ),
+    )
+    monkeypatch.setattr(
+        hongguo_csv_worker,
+        "deliver_rank_update",
+        lambda *args, **kwargs: delivery_calls.append(True),
+    )
+    monkeypatch.setattr(
+        hongguo_csv_worker,
+        "emit_event",
+        lambda event, **kwargs: events.append((event, kwargs)),
+    )
+    job = CrawlJob(job_id="job-hg-sync-failed", platform="hg", crawler_type="rank")
+
+    assert run_job(job, exports_root=exports) == 1
+    assert csv_path.exists()
+    assert (
+        tmp_path / "data/hg/jobs/job-hg-sync-failed/rank/hongguo_rank_20260902_000000.json"
+    ).exists()
+    failed = [kwargs for event, kwargs in events if event == "job_failed"]
+    assert failed[-1]["payload"] == {
+        "sync_status": "central_sync_failed",
+        "error_type": "RankDatabaseUnavailable",
+    }
+    assert delivery_calls == []
+    assert "secret" not in json.dumps(events, ensure_ascii=False)
 
 
 def write_csv(path, rows):

@@ -16,6 +16,8 @@ from pathlib import Path
 
 from agents.douyin_analysis_agent import AnalyzeOptions, analyze_rank_file
 from agents.rank_zentao_delivery import deliver_rank_update
+from analysis.rank_importer import sync_rank_source
+from analysis.today_rank_service import DEFAULT_HONGGUO_EXPORTS_ROOT
 from core.events import emit_event
 from core.job import CrawlJob
 from tools.fetch_douyin_series_rank_md import parse_args as parse_tool_args
@@ -201,6 +203,40 @@ def run_job(job: CrawlJob) -> int:
                 message=f"抖音榜单 Top10 自动分析失败，榜单抓取结果已保留: {exc}",
                 payload={"error_type": type(exc).__name__},
             )
+        try:
+            sync_result = sync_rank_source(
+                "dy",
+                json_path,
+                project_root=Path.cwd(),
+                hongguo_exports_root=DEFAULT_HONGGUO_EXPORTS_ROOT,
+            )
+            emit_event(
+                "log",
+                job_id=job.job_id,
+                worker_id=worker_id,
+                platform="dy",
+                level="info",
+                message="抖音榜单已同步到集中数据库",
+                payload={
+                    "status": sync_result.status,
+                    "source_ref": sync_result.source_ref,
+                    "record_count": sync_result.record_count,
+                },
+            )
+        except Exception as exc:
+            emit_event(
+                "job_failed",
+                job_id=job.job_id,
+                worker_id=worker_id,
+                platform="dy",
+                level="error",
+                message="抖音榜单已生成，但集中数据库同步失败",
+                payload={
+                    "sync_status": "central_sync_failed",
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return 1
         try:
             delivery = deliver_rank_update("dy", json_path)
             emit_event(

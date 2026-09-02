@@ -92,6 +92,65 @@ def test_rank_importer_uses_portable_source_ref_and_sha256(tmp_path: Path):
     assert repository.calls[0]["parser_version"] == 1
 
 
+def test_sync_rank_source_uses_platform_source_metadata_and_disposes_database(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _rank_importer_module()
+    exports = tmp_path / "exports"
+    douyin_path = tmp_path / "data/dy/jobs/job-1/rank/douyin.json"
+    hongguo_path = exports / "20260902/top10_rankings.csv"
+    calls = []
+    disposed = []
+
+    class FakeImporter:
+        def import_path(self, platform, path, **kwargs):
+            calls.append((platform, Path(path), kwargs))
+            return module.RankImportResult(
+                platform=platform,
+                source_ref=Path(path).name,
+                status="imported",
+                record_count=1,
+            )
+
+    class FakeDatabase:
+        def dispose(self):
+            disposed.append(True)
+
+    monkeypatch.setattr(
+        module,
+        "rank_importer_from_environment",
+        lambda *args: (FakeImporter(), FakeDatabase()),
+    )
+
+    module.sync_rank_source(
+        "dy",
+        douyin_path,
+        project_root=tmp_path,
+        hongguo_exports_root=exports,
+    )
+    module.sync_rank_source(
+        "hg",
+        hongguo_path,
+        project_root=tmp_path,
+        hongguo_exports_root=exports,
+    )
+
+    assert calls == [
+        (
+            "dy",
+            douyin_path,
+            {"source_kind": "douyin_json", "source_root": tmp_path},
+        ),
+        (
+            "hg",
+            hongguo_path,
+            {"source_kind": "hongguo_csv", "source_root": exports},
+        ),
+    ]
+    assert disposed == [True, True]
+
+
 def test_rank_importer_batch_isolates_bad_file_and_filters_dates(tmp_path: Path):
     module = _rank_importer_module()
     included = (

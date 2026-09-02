@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,20 @@ class RankSnapshotSource(Protocol):
 
     def revision(self, platform: str) -> str:
         raise NotImplementedError
+
+
+RankWriteAction = Literal["imported", "updated", "skipped"]
+
+
+@dataclass(frozen=True)
+class RankWriteResult:
+    action: RankWriteAction
+    snapshot_id: int
+    record_count: int
+
+
+class RankDatabaseUnavailable(RuntimeError):
+    pass
 
 
 def _relative_path(path: Path, root: Path) -> str:

@@ -17,10 +17,11 @@ import os
 import re
 import tempfile
 import time
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+from analysis.rank_models import RankSnapshot, RankSnapshotSource
 
 
 SUPPORTED_PLATFORMS = {"dy", "hg"}
@@ -142,27 +143,7 @@ def _hongguo_raw_root_for_exports(exports_root: Path) -> Path:
     return exports_root.parent / "raw"
 
 
-@dataclass(frozen=True)
-class RankSnapshot:
-    platform: str
-    job_id: str
-    source_path: Path
-    captured_at: datetime
-    records: list[dict[str, Any]]
-    validation: dict[str, Any]
-
-    def to_dict(self, root: Path) -> dict[str, Any]:
-        return {
-            "platform": self.platform,
-            "job_id": self.job_id,
-            "source_path": _relative_path(self.source_path, root),
-            "captured_at": self.captured_at.strftime("%Y-%m-%d %H:%M:%S"),
-            "date": self.captured_at.date().isoformat(),
-            "record_count": len(self.records),
-        }
-
-
-class TodayRankService:
+class _LegacyRankEngine:
     def __init__(
         self,
         root: str | Path = ".",
@@ -857,6 +838,39 @@ class TodayRankService:
             "like_growth_top": [],
             "message": "No rank snapshots found" if not available_dates else "No rank snapshot found for selected date",
         }
+
+
+class TodayRankService(_LegacyRankEngine):
+    def __init__(
+        self,
+        root: str | Path = ".",
+        hongguo_exports_root: str | Path | None = None,
+        cache_dir: str | Path | None = None,
+        snapshot_source: RankSnapshotSource | None = None,
+    ) -> None:
+        super().__init__(
+            root=root,
+            hongguo_exports_root=hongguo_exports_root,
+            cache_dir=cache_dir,
+        )
+        if snapshot_source is None:
+            from analysis.rank_file_source import RankFileSource
+
+            snapshot_source = RankFileSource(
+                root=self.root,
+                hongguo_exports_root=self.hongguo_exports_root,
+                cache_dir=self.cache_dir,
+            )
+        self.snapshot_source = snapshot_source
+
+    def _source_revision(self, platform: str) -> str:
+        return self.snapshot_source.revision(platform)
+
+    def source_revision(self, platform: str) -> str:
+        return self.snapshot_source.revision(platform)
+
+    def list_snapshots(self, platform: str) -> list[RankSnapshot]:
+        return self.snapshot_source.list_snapshots(platform)
 
 
 def _normalize_douyin_record(

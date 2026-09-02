@@ -18,6 +18,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from analysis.analytics_api import build_analytics_router
+from analysis.today_rank_service import TodayRankService
 from analysis.weekly_report_service import WeeklyReportService
 from identity.dependencies import current_principal, permission_service_for_request
 from identity.schema import Principal
@@ -31,7 +32,13 @@ def test_weekly_report_api_lists_detail_and_exports(tmp_path):
     principal = Principal("admin", "admin", "管理员", ("system_admin",), frozenset({"*"}), "all", "session")
     app.dependency_overrides[current_principal] = lambda: principal
     app.dependency_overrides[permission_service_for_request] = lambda: None
-    app.include_router(build_analytics_router(root=tmp_path, runtime_dir=tmp_path / ".runtime"))
+    app.include_router(
+        build_analytics_router(
+            root=tmp_path,
+            runtime_dir=tmp_path / ".runtime",
+            rank_service=service.rank_service,
+        )
+    )
     client = TestClient(app)
 
     listing = client.get("/api/analytics/weekly-reports?platform=dy")
@@ -56,7 +63,13 @@ def test_weekly_report_api_backfills_new_complete_week_before_listing(tmp_path, 
     principal = Principal("admin", "admin", "管理员", ("system_admin",), frozenset({"*"}), "all", "session")
     app.dependency_overrides[current_principal] = lambda: principal
     app.dependency_overrides[permission_service_for_request] = lambda: None
-    app.include_router(build_analytics_router(root=tmp_path, runtime_dir=tmp_path / ".runtime"))
+    app.include_router(
+        build_analytics_router(
+            root=tmp_path,
+            runtime_dir=tmp_path / ".runtime",
+            rank_service=TodayRankService(root=tmp_path),
+        )
+    )
     monkeypatch.setattr(
         "analysis.weekly_report_service.datetime",
         _FixedDateTime,
@@ -75,7 +88,13 @@ def test_weekly_report_api_marks_repeated_unchanged_reads_as_cache_hits(tmp_path
     principal = Principal("admin", "admin", "管理员", ("system_admin",), frozenset({"*"}), "all", "session")
     app.dependency_overrides[current_principal] = lambda: principal
     app.dependency_overrides[permission_service_for_request] = lambda: None
-    app.include_router(build_analytics_router(root=tmp_path, runtime_dir=tmp_path / ".runtime"))
+    app.include_router(
+        build_analytics_router(
+            root=tmp_path,
+            runtime_dir=tmp_path / ".runtime",
+            rank_service=TodayRankService(root=tmp_path),
+        )
+    )
     monkeypatch.setattr("analysis.weekly_report_service.datetime", _FixedDateTime)
     client = TestClient(app)
 

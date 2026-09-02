@@ -12,15 +12,24 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from analysis.today_rank_service import TodayRankService
 from analysis.weekly_report_service import WeeklyReportService
 from core.events import emit_event
 from core.job import CrawlJob
 
 
-def run_job(job: CrawlJob) -> int:
+def run_job(
+    job: CrawlJob,
+    service: WeeklyReportService | None = None,
+) -> int:
     worker_id = "weekly-report-worker"
     emit_event("log", job_id=job.job_id, worker_id=worker_id, platform="analytics", message="开始生成周度流行趋势报告")
-    service = WeeklyReportService(root=Path.cwd())
+    if service is None:
+        root = Path.cwd()
+        service = WeeklyReportService(
+            root=root,
+            rank_service=TodayRankService.from_environment(root=root),
+        )
     reports = service.generate_all_available(with_llm=True)
     for report in reports:
         if report.get("status") in {"ready", "unchanged"}:

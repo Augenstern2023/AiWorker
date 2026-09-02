@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from analysis.drama_repository import DramaRepository
 from analysis.metrics import MetricsService
+from analysis.today_rank_service import TodayRankService
 from analysis.weekly_report_service import WeeklyReportService
 from identity.dependencies import require_permission
 from identity.schema import Principal
@@ -29,7 +30,11 @@ class AnalyticsSyncRequest(BaseModel):
     rebuild: bool = False
 
 
-def build_analytics_router(root: str | Path = ".", runtime_dir: str | Path = ".runtime") -> APIRouter:
+def build_analytics_router(
+    root: str | Path = ".",
+    runtime_dir: str | Path = ".runtime",
+    rank_service: TodayRankService | None = None,
+) -> APIRouter:
     router = APIRouter(prefix="/api/analytics", tags=["analytics"])
     services: dict[str, Any] = {}
 
@@ -42,7 +47,14 @@ def build_analytics_router(root: str | Path = ".", runtime_dir: str | Path = ".r
 
     def get_weekly_reports() -> WeeklyReportService:
         if "weekly_reports" not in services:
-            services["weekly_reports"] = WeeklyReportService(root=root, runtime_dir=runtime_dir)
+            central_rank_service = rank_service or TodayRankService.from_environment(
+                root=root
+            )
+            services["weekly_reports"] = WeeklyReportService(
+                root=root,
+                runtime_dir=runtime_dir,
+                rank_service=central_rank_service,
+            )
         return services["weekly_reports"]
 
     @router.post("/sync")

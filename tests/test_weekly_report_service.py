@@ -15,7 +15,71 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
+from analysis.rank_models import RankSnapshot
+from analysis.today_rank_service import TodayRankService
 from analysis.weekly_report_service import WeeklyReportService, _tag_analysis, render_markdown, write_excel
+
+
+def test_weekly_report_uses_injected_central_rank_source_without_local_files(
+    tmp_path,
+):
+    snapshots = []
+    for offset, day in enumerate(
+        ("2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07"),
+        start=1,
+    ):
+        snapshots.append(
+            RankSnapshot(
+                platform="dy",
+                job_id=f"central-{offset}",
+                source_path=Path(f"central/{day}.json"),
+                captured_at=datetime.strptime(f"{day} 10:00:00", "%Y-%m-%d %H:%M:%S"),
+                records=[
+                    {
+                        "id": "central-week-1",
+                        "record_id": "central-week-1",
+                        "title": "集中周报剧",
+                        "rank": 6 - offset,
+                        "tab": "榜单",
+                        "category": "短剧",
+                        "category_label": "短剧",
+                        "group": "短剧 / 榜单",
+                        "heat": offset * 100,
+                        "like_count": offset * 20,
+                        "favorite_count": offset * 10,
+                        "comment_count": offset * 5,
+                        "description": "集中数据简介",
+                        "subject": "逆袭",
+                        "validation_warnings": [],
+                    }
+                ],
+                validation={"status": "passed", "has_warnings": False},
+            )
+        )
+
+    class CentralSource:
+        def list_snapshots(self, platform: str):
+            return snapshots
+
+        def revision(self, platform: str):
+            return "postgres-revision-1"
+
+    rank_service = TodayRankService(
+        root=tmp_path,
+        snapshot_source=CentralSource(),
+    )
+    service = WeeklyReportService(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        rank_service=rank_service,
+    )
+
+    report = service.build_latest("dy", as_of=datetime(2026, 8, 10, 23, 59))
+
+    assert service._source_revision("dy") == "postgres-revision-1"
+    assert report["status"] == "ready"
+    assert report["recommendations"][0]["title"] == "集中周报剧"
+    assert not (tmp_path / "data/dy/jobs").exists()
 
 
 def test_builds_latest_complete_week_and_keeps_latest_snapshot_per_day(tmp_path):

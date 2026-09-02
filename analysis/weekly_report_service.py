@@ -178,13 +178,14 @@ class WeeklyReportService:
         root: str | Path = ".",
         runtime_dir: str | Path = ".runtime",
         analysis_script_path: str | Path | None = None,
+        rank_service: TodayRankService | None = None,
     ) -> None:
         self.root = Path(root).resolve()
         self.runtime_dir = Path(runtime_dir)
         if not self.runtime_dir.is_absolute():
             self.runtime_dir = self.root / self.runtime_dir
         self.analysis_script_path = Path(analysis_script_path or __file__).resolve()
-        self.rank_service = TodayRankService(root=self.root)
+        self.rank_service = rank_service or TodayRankService(root=self.root)
         self.repository = WeeklyReportRepository(self.runtime_dir / "rag" / "weekly_reports.db")
         self.output_dir = self.root / "data" / "reports" / "weekly"
 
@@ -296,27 +297,7 @@ class WeeklyReportService:
         )
 
     def _source_revision(self, platform: str) -> str:
-        paths: set[Path] = set()
-        if platform == "dy":
-            paths.update(self.root.glob("data/dy/jobs/*/rank/douyin_series_rank_*.json"))
-            paths.update(self.root.glob("data/dy/jobs/*/analysis/*.json"))
-        else:
-            paths.update(self.root.glob("data/hg/jobs/*/rank/hongguo*.json"))
-            paths.update(self.root.glob("data/hg/jobs/*/analysis/*.json"))
-            paths.update(self.rank_service.hongguo_exports_root.glob("*/top10_rankings.csv"))
-            raw_root = self.rank_service.hongguo_raw_root
-            if raw_root.exists():
-                paths.update(raw_root.glob("mitm_responses_*/*.json"))
-        metadata = []
-        for path in sorted(paths, key=lambda item: str(item)):
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            metadata.append((str(path.resolve()), stat.st_size, stat.st_mtime_ns))
-        return hashlib.sha256(
-            json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
+        return self.rank_service.source_revision(platform)
 
     def generate_all_latest(self, as_of: datetime | None = None, with_llm: bool = True) -> list[dict[str, Any]]:
         return [self.generate_latest(platform, as_of=as_of, with_llm=with_llm) for platform in sorted(PLATFORMS)]

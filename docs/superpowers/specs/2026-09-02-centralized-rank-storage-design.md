@@ -86,7 +86,7 @@
 
 `snapshot_id` 外键指向 `rank_snapshots`，删除快照时级联删除条目。`rank` 必须大于零，且 `(snapshot_id, section_name, ranking_name, rank)` 唯一。为 `snapshot_id`、榜单分组和 `series_key` 建立索引。
 
-计数和热度类指标使用 `bigint`，评分和指数类指标使用 `numeric`；无法稳定映射或属于平台专有的数据仍完整保存在 `source_record_json`。`previous_rank`、`rank_delta` 和 `rank_duration` 属于查询期派生值，不持久化。
+计数类指标使用 `bigint`，热度、评分和指数类指标使用 `numeric`；这样既能保存整数热度，也能保存红果现有的 `88.5` 等小数热度。无法稳定映射或属于平台专有的数据仍完整保存在 `source_record_json`。`previous_rank`、`rank_delta` 和 `rank_duration` 属于查询期派生值，不持久化。
 
 ## 组件边界
 

@@ -424,3 +424,74 @@ def test_today_rank_only_builds_the_active_table_for_rendering():
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_today_rank_daily_update_is_hidden_after_current_date_snapshot_exists():
+    module_path = json.dumps((ROOT / "static/js/selection/ranks.js").as_posix())
+    script = textwrap.dedent(
+        f"""
+        let requestCount = 0;
+        global.window = {{
+            aiworkerModules: [], addEventListener() {{}}, dispatchEvent() {{}},
+            location: {{hash: ''}}, setTimeout
+        }};
+        global.document = {{addEventListener() {{}}, hidden: false}};
+        global.Event = function Event() {{}};
+        global.aiworkerApi = {{
+            async request() {{
+                requestCount += 1;
+                throw new Error('daily update must not start twice');
+            }}
+        }};
+        require({module_path});
+
+        const methods = window.aiworkerModules[0]();
+        const state = {{
+            ...methods,
+            todayRankPlatform: 'dy',
+            todayRankDate: '2026-09-01',
+            todayRankData: {{
+                platform: 'dy',
+                date: '2026-09-01',
+                available_dates: ['2026-09-02', '2026-09-01'],
+                selected_snapshot: {{captured_at: '2026-09-01 10:03:41'}},
+                business_date: '2026-09-02',
+                has_today_snapshot: true
+            }},
+            todayRankLoading: false,
+            todayRankRefreshing: false,
+            todayRankRefreshMessage: '',
+            todayRankError: ''
+        }};
+
+        (async () => {{
+            if (!methods.hasTodayRankSnapshot.call(state)) {{
+                throw new Error('today snapshot was not detected from available dates');
+            }}
+            await methods.refreshTodayRank.call(state, true);
+            if (requestCount !== 0) {{
+                throw new Error('a second daily crawl request was started');
+            }}
+            if (state.todayRankRefreshMessage !== '今日抖音榜单已更新') {{
+                throw new Error('updated status was not shown');
+            }}
+            state.todayRankData = {{
+                platform: 'dy',
+                date: '2026-09-02',
+                available_dates: ['2026-09-02'],
+                selected_snapshot: null,
+                business_date: '2026-09-02',
+                has_today_snapshot: false
+            }};
+            if (methods.hasTodayRankSnapshot.call(state)) {{
+                throw new Error('an empty response was treated as a real snapshot');
+            }}
+        }})().catch(error => {{ console.error(error.message); process.exitCode = 1; }});
+        """
+    )
+
+    result = subprocess.run(
+        ["node", "-e", script], cwd=ROOT, capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr

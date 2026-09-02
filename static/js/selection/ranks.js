@@ -109,6 +109,10 @@ window.aiworkerModules.push(() => ({
                         await this.fetchTodayRank(true);
                         return;
                     }
+                    if (this.todayRankPlatform === 'dy' && this.hasTodayRankSnapshot()) {
+                        this.todayRankRefreshMessage = '今日抖音榜单已更新';
+                        return;
+                    }
                     if (this.todayRankPlatform !== 'dy') {
                         await this.fetchTodayRank(true);
                         return;
@@ -142,6 +146,12 @@ window.aiworkerModules.push(() => ({
                             })
                         });
                         const data = await response.json().catch(() => ({}));
+                        if (response.status === 409 && data.status === 'already_updated') {
+                            this.todayRankRefreshing = false;
+                            this.todayRankRefreshMessage = data.message || '今日抖音榜单已更新';
+                            await this.fetchTodayRank(true);
+                            return;
+                        }
                         if (!response.ok || !data.job?.job_id) {
                             throw new Error(data.detail || data.message || '抖音榜单抓取任务创建失败');
                         }
@@ -560,6 +570,11 @@ window.aiworkerModules.push(() => ({
 
                 todayRankDates() {
                     return this.todayRankData?.available_dates || [];
+                },
+
+                hasTodayRankSnapshot() {
+                    const data = this.todayRankData || {};
+                    return data.platform === 'dy' && data.has_today_snapshot === true;
                 },
 
                 formatMetric(value) {

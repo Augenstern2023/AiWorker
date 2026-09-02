@@ -752,6 +752,8 @@ def test_only_system_admin_can_start_rank_crawl_jobs():
 class RankCreationRecordingManager:
     def __init__(self):
         self.jobs: list[CrawlJob] = []
+        self.jobs_by_operation: dict[str, JobState] = {}
+        self.operation_ids: list[str] = []
 
     def generate_job_id(self, platform: str) -> str:
         return f"{platform}-rank-admin-job"
@@ -765,6 +767,15 @@ class RankCreationRecordingManager:
             job = CrawlJob.from_dict(data)
         self.jobs.append(job)
         return JobState(job=job)
+
+    def get_or_create_job(self, operation_id, payload, **kwargs):
+        self.operation_ids.append(operation_id)
+        existing = self.jobs_by_operation.get(operation_id)
+        if existing is not None:
+            return existing
+        state = self.create_job(payload, **kwargs)
+        self.jobs_by_operation[operation_id] = state
+        return state
 
     def get_job(self, job_id: str):
         job = next(job for job in self.jobs if job.job_id == job_id)
@@ -806,6 +817,16 @@ async def test_all_generic_rank_job_entrypoints_enforce_system_admin_gate(
     manager = RankCreationRecordingManager()
     monkeypatch.setattr(WebGUI, "job_manager", manager)
     monkeypatch.setattr(WebGUI, "_record_job_audit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        WebGUI,
+        "today_rank_service",
+        SimpleNamespace(
+            daily_status=lambda _platform: {
+                "business_date": "2026-09-02",
+                "has_today_snapshot": False,
+            }
+        ),
+    )
 
     if endpoint == "jobs":
         payload = WebGUI.JobCreateRequest(platform="dy", crawler_type="rank")

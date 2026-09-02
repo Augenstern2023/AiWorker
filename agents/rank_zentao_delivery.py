@@ -108,7 +108,13 @@ def _group_and_title(platform: str, record: dict[str, Any]) -> tuple[str, str, i
     return group, title, rank
 
 
-def build_rank_message(platform: str, source_path: str | Path, report_date: str = "") -> RankMessage:
+def build_rank_message(
+    platform: str,
+    source_path: str | Path,
+    report_date: str = "",
+    workbook_url: str = "",
+    workbook_path: str = "",
+) -> RankMessage:
     platform = platform.strip().lower()
     if platform not in PLATFORM_NAMES:
         raise ValueError("platform must be dy or hg")
@@ -136,6 +142,10 @@ def build_rank_message(platform: str, source_path: str | Path, report_date: str 
         ordered = sorted(enumerate(items), key=lambda item: (item[1][0] <= 0, item[1][0], item[0]))
         titles = [title for _, (_, title) in ordered]
         lines.append(f"- {group}：{'、'.join(titles[:10])}")
+    if workbook_url:
+        lines.extend(["", f"[下载 Excel]({workbook_url})"])
+    if workbook_path:
+        lines.append(f"共享路径：`{workbook_path}`")
     lines.extend(["", f"数据源：`{source}`"])
     source_bytes = source.read_bytes()
     return RankMessage(
@@ -182,9 +192,9 @@ def post_json(endpoint: str, payload: dict[str, Any], timeout_seconds: float) ->
     return {"status_code": status_code, "body": response_body}
 
 
-def _delivery_key(config: RankDeliveryConfig, message: RankMessage) -> str:
+def _delivery_key(config: RankDeliveryConfig, message: RankMessage, mode: str = "text") -> str:
     identity = "\n".join(
-        (config.endpoint, config.gid, message.part_key, message.report_date)
+        (config.endpoint, config.gid, message.part_key, message.report_date, mode)
     )
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
@@ -207,6 +217,8 @@ def deliver_rank_update(
     *,
     config: RankDeliveryConfig | None = None,
     report_date: str = "",
+    workbook_url: str = "",
+    workbook_path: str = "",
     post_json: Callable[[str, dict[str, Any], float], dict[str, Any]] = post_json,
 ) -> dict[str, Any]:
     platform = platform.strip().lower()
@@ -215,8 +227,14 @@ def deliver_rank_update(
     if not settings.configured:
         return {"status": "skipped", "reason": "not-configured", "part_key": part_key}
 
-    message = build_rank_message(platform, source_path, report_date=report_date)
-    key = _delivery_key(settings, message)
+    message = build_rank_message(
+        platform,
+        source_path,
+        report_date=report_date,
+        workbook_url=workbook_url,
+        workbook_path=workbook_path,
+    )
+    key = _delivery_key(settings, message, "excel-link-v1" if workbook_url else "text")
     sent_path = settings.state_dir / f"{key}.sent.json"
     claim_path = settings.state_dir / f"{key}.claim"
     if sent_path.exists():

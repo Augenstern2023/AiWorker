@@ -359,6 +359,12 @@ def test_admin_identity_pages_expose_complete_management_flows():
     assert "toggleRoleStatus" in roles_js
 
 
+def test_password_reset_prompt_explains_password_rules():
+    users_js = _read("static/js/admin/users.js")
+
+    assert "密码需为 10 至 128 个字符，并包含字母、数字和特殊字符" in users_js
+
+
 def test_user_list_displays_role_names_instead_of_role_codes():
     users_js = _read("static/js/admin/users.js")
 

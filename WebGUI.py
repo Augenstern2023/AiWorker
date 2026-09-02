@@ -73,6 +73,7 @@ from analysis.llm import (
 from analysis.llm_settings import LLMSecretCipher, LLMSettingsRepository
 from analysis.llm_settings_api import LLMSettingsService, build_llm_settings_router
 from analysis.today_rank_api import register_today_rank_routes
+from analysis.today_rank_service import TodayRankService
 from creative.api import register_creative_routes
 from creative.application_service import CreativeApplicationService
 from creative.market_reference_service import MarketReferenceService
@@ -474,6 +475,7 @@ class AppState:
 
 state = AppState()
 job_manager = JobManager(cwd=Path(__file__).resolve().parent)
+today_rank_service = TodayRankService(root=WORKSPACE_ROOT)
 
 # FastAPI App
 @asynccontextmanager
@@ -702,7 +704,11 @@ app.include_router(
 app.include_router(build_page_router(templates, navigation_service))
 register_rag_routes(app, root=Path(__file__).resolve().parent, runtime_dir=Path(__file__).resolve().parent / ".runtime")
 register_analytics_routes(app, root=Path(__file__).resolve().parent, runtime_dir=Path(__file__).resolve().parent / ".runtime")
-register_today_rank_routes(app, root=Path(__file__).resolve().parent)
+register_today_rank_routes(
+    app,
+    root=Path(__file__).resolve().parent,
+    service=today_rank_service,
+)
 register_creative_routes(
     app,
     root=Path(__file__).resolve().parent,
@@ -3346,12 +3352,73 @@ async def create_job(
         "extra": safe_extra,
     }
     try:
-        job_state = job_manager.create_job(
-            data,
-            created_by_user_id=principal.user_id,
-            workflow_task_id=task_id,
-            project_id=project_id,
-        )
+        if platform == "dy" and crawler_type == "rank":
+            daily_status = today_rank_service.daily_status(platform)
+            business_date = str(daily_status["business_date"])
+            if daily_status["has_today_snapshot"]:
+                return JSONResponse(
+                    {
+                        "status": "already_updated",
+                        "message": "今日抖音榜单已更新",
+                        "business_date": business_date,
+                    },
+                    status_code=409,
+                )
+            operation_id = f"daily-rank:{platform}:{business_date}"
+            find_operation = getattr(job_manager, "find_job_by_operation", None)
+            existing_operation = (
+                find_operation(operation_id) if callable(find_operation) else None
+            )
+            retry_terminal_operation = bool(
+                existing_operation
+                and existing_operation.get("status")
+                in {"succeeded", "failed", "cancelled"}
+            )
+            if retry_terminal_operation:
+                latest_status = today_rank_service.daily_status(platform)
+                business_date = str(latest_status["business_date"])
+                if latest_status["has_today_snapshot"]:
+                    return JSONResponse(
+                        {
+                            "status": "already_updated",
+                            "message": "今日抖音榜单已更新",
+                            "business_date": business_date,
+                        },
+                        status_code=409,
+                    )
+                latest_operation_id = f"daily-rank:{platform}:{business_date}"
+                if latest_operation_id != operation_id:
+                    operation_id = latest_operation_id
+                    existing_operation = (
+                        find_operation(operation_id)
+                        if callable(find_operation)
+                        else None
+                    )
+                    retry_terminal_operation = bool(
+                        existing_operation
+                        and existing_operation.get("status")
+                        in {"succeeded", "failed", "cancelled"}
+                    )
+            data["extra"] = {
+                **data["extra"],
+                "idempotency_scope": "shared",
+            }
+            if retry_terminal_operation:
+                data["extra"]["retry_terminal_operation"] = True
+            job_state = job_manager.get_or_create_job(
+                operation_id,
+                data,
+                created_by_user_id=principal.user_id,
+                workflow_task_id=task_id or "",
+                project_id=project_id or "",
+            )
+        else:
+            job_state = job_manager.create_job(
+                data,
+                created_by_user_id=principal.user_id,
+                workflow_task_id=task_id,
+                project_id=project_id,
+            )
         public_job = _public_created_job(job_state)
         if task_id:
             workflow_repository.link_task_job(task_id, job_state.job_id)

@@ -446,6 +446,38 @@ class StorageAgent:
     ) -> tuple[bool, JobState | None]:
         """Move one failed operation reservation back to pending exactly once."""
 
+        return self._claim_terminal_job_operation(
+            operation_id,
+            retryable_statuses={"failed"},
+            launcher_owner=launcher_owner,
+            launcher_lease_expires_at=launcher_lease_expires_at,
+        )
+
+    def claim_terminal_job_operation(
+        self,
+        operation_id: str,
+        *,
+        launcher_owner: str | None = None,
+        launcher_lease_expires_at: float | None = None,
+    ) -> tuple[bool, JobState | None]:
+        """Move one terminal shared operation back to pending exactly once."""
+
+        return self._claim_terminal_job_operation(
+            operation_id,
+            retryable_statuses={"failed", "cancelled", "succeeded"},
+            launcher_owner=launcher_owner,
+            launcher_lease_expires_at=launcher_lease_expires_at,
+        )
+
+    def _claim_terminal_job_operation(
+        self,
+        operation_id: str,
+        *,
+        retryable_statuses: set[str],
+        launcher_owner: str | None,
+        launcher_lease_expires_at: float | None,
+    ) -> tuple[bool, JobState | None]:
+
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("BEGIN IMMEDIATE")
@@ -455,7 +487,8 @@ class StorageAgent:
             if row is None:
                 return False, None
             state = self._job_state_from_row(row)
-            if str(row["status"]) != "failed":
+            current_status = str(row["status"])
+            if current_status not in retryable_statuses:
                 return False, state
             if row["scope_project_id"] and row["scope_stage"]:
                 episode_range = (
@@ -472,13 +505,15 @@ class StorageAgent:
                 )
             changed = conn.execute(
                 "UPDATE agent_jobs SET status='pending', started_at=NULL, "
-                "finished_at=NULL, message='', scope_active=1, "
+                "finished_at=NULL, message='', pid=NULL, scope_active=?, "
                 "launcher_owner=?, launcher_lease_expires_at=?, "
-                "launch_phase='launching' WHERE operation_id=? AND status='failed'",
+                "launch_phase='launching' WHERE operation_id=? AND status=?",
                 (
+                    int(bool(row["scope_project_id"] and row["scope_stage"])),
                     launcher_owner,
                     launcher_lease_expires_at,
                     operation_id,
+                    current_status,
                 ),
             ).rowcount
             if changed != 1:
@@ -487,6 +522,7 @@ class StorageAgent:
             state.started_at = None
             state.finished_at = None
             state.message = ""
+            state.pid = None
             return True, state
 
     def claim_expired_prelaunch_operation(

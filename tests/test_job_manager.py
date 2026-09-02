@@ -296,6 +296,80 @@ def test_project_review_operation_is_reused_without_second_launch(monkeypatch, t
     assert len(launches) == 1
 
 
+@pytest.mark.parametrize("terminal_status", ["cancelled", "succeeded"])
+def test_shared_operation_can_retry_a_terminal_job_with_a_different_actor(
+    monkeypatch, tmp_path, terminal_status
+):
+    launches = []
+
+    def launch(*_args, **_kwargs):
+        launches.append(True)
+        return FakeProcess()
+
+    monkeypatch.setattr("runtime.job_manager.launch_worker", launch)
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    operation_id = "daily-rank:dy:2026-09-02"
+    payload = {
+        "platform": "dy",
+        "crawler_type": "rank",
+        "extra": {
+            "idempotency_scope": "shared",
+            "retry_terminal_operation": True,
+        },
+    }
+    stored_job = CrawlJob.from_dict({**payload, "job_id": "daily-rank-original"})
+    stored_job.extra.update(
+        {
+            "operation_id": operation_id,
+            "created_by_user_id": "admin-a",
+            "workflow_task_id": "",
+            "project_id": "",
+        }
+    )
+    terminal = JobState(job=stored_job, status=terminal_status)
+    manager.storage.reserve_job_operation(operation_id, terminal)
+    manager.jobs[stored_job.job_id] = terminal
+
+    retried = manager.get_or_create_job(
+        operation_id,
+        payload,
+        created_by_user_id="admin-b",
+        workflow_task_id="",
+        project_id="",
+    )
+
+    assert retried.job_id == "daily-rank-original"
+    assert len(launches) == 1
+
+
+def test_terminal_operation_retry_clears_stale_process_identity(tmp_path):
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    operation_id = "daily-rank:dy:2026-09-02"
+    job = CrawlJob(
+        job_id="daily-rank-terminal",
+        platform="dy",
+        crawler_type="rank",
+        extra={"operation_id": operation_id},
+    )
+    terminal = JobState(job=job, status="succeeded", pid=4321)
+    manager.storage.reserve_job_operation(operation_id, terminal)
+
+    claimed, pending = manager.storage.claim_terminal_job_operation(
+        operation_id,
+        launcher_owner="new-launcher",
+        launcher_lease_expires_at=10**12,
+    )
+
+    assert claimed is True
+    assert pending is not None
+    assert pending.pid is None
+    with sqlite3.connect(tmp_path / "agent_state.db") as connection:
+        pid = connection.execute(
+            "SELECT pid FROM agent_jobs WHERE operation_id=?", (operation_id,)
+        ).fetchone()[0]
+    assert pid is None
+
+
 def test_job_manager_allows_independent_creative_generation_jobs(
     monkeypatch, tmp_path
 ):

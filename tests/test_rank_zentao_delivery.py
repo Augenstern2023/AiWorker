@@ -72,6 +72,49 @@ def test_build_rank_message_summarizes_hongguo_csv(tmp_path):
     assert "真人剧推荐榜：丙" in message.content
 
 
+def test_build_rank_message_includes_excel_download_link(tmp_path):
+    source = tmp_path / "top10_rankings.csv"
+    source.write_text("榜单类型,排名,剧名\n红果热播榜,1,甲\n", encoding="utf-8")
+
+    message = build_rank_message(
+        "hg",
+        source,
+        report_date="2026-09-02",
+        workbook_url="file://///192.168.1.11/%E5%85%B1%E4%BA%AB/%E6%A6%9C%E5%8D%95%E6%97%A5%E6%8A%A5/2026-09-02%E7%BA%A2%E6%9E%9C%E6%A6%9C%E5%8D%95.xlsx",
+        workbook_path=r"\\192.168.1.11\共享\榜单日报\2026-09-02红果榜单.xlsx",
+    )
+
+    assert "[下载 Excel]" in message.content
+    assert r"\\192.168.1.11\共享\榜单日报\2026-09-02红果榜单.xlsx" in message.content
+
+
+def test_delivery_key_changes_when_excel_link_mode_is_enabled(tmp_path):
+    source = tmp_path / "top10_rankings.csv"
+    source.write_text("榜单类型,排名,剧名\n红果热播榜,1,甲\n", encoding="utf-8")
+    calls = []
+
+    def fake_post(endpoint, payload, timeout_seconds):
+        calls.append(payload)
+        return {"status_code": 200, "body": "success"}
+
+    first = deliver_rank_update(
+        "hg", source, config=_config(tmp_path), report_date="2026-09-02", post_json=fake_post
+    )
+    second = deliver_rank_update(
+        "hg",
+        source,
+        config=_config(tmp_path),
+        report_date="2026-09-02",
+        workbook_url="file://server/share/report.xlsx",
+        workbook_path=r"\\server\share\report.xlsx",
+        post_json=fake_post,
+    )
+
+    assert first["status"] == "sent"
+    assert second["status"] == "sent"
+    assert len(calls) == 2
+
+
 def test_deliver_rank_update_is_idempotent(tmp_path):
     source = tmp_path / "top10_rankings.csv"
     source.write_text("榜单类型,排名,剧名\n红果热播榜,1,甲\n", encoding="utf-8")

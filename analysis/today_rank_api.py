@@ -51,5 +51,9 @@ def build_today_rank_router(
     return router
 
 
-def register_today_rank_routes(app: FastAPI, root: str | Path = ".") -> None:
-    app.include_router(build_today_rank_router(root=root))
+def register_today_rank_routes(
+    app: FastAPI,
+    root: str | Path = ".",
+    service: TodayRankService | None = None,
+) -> None:
+    app.include_router(build_today_rank_router(root=root, service=service))

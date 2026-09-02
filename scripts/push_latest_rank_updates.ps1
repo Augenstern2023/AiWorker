@@ -16,10 +16,17 @@ if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
     exit 1
 }
 
-& $pythonPath -m scripts.push_latest_rank_updates 2>&1 | ForEach-Object {
-    Add-Content -LiteralPath $logPath -Value $_.ToString() -Encoding UTF8
+$previousErrorActionPreference = $ErrorActionPreference
+try {
+    $ErrorActionPreference = "Continue"
+    & $pythonPath -m scripts.push_latest_rank_updates 2>&1 | ForEach-Object {
+        Add-Content -LiteralPath $logPath -Value $_.ToString() -Encoding UTF8
+    }
+    $exitCode = $LASTEXITCODE
 }
-$exitCode = $LASTEXITCODE
+finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+}
 $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 Add-Content -LiteralPath $logPath -Value "[$timestamp] exit=$exitCode" -Encoding UTF8
 exit $exitCode

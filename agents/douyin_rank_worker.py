@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -238,7 +239,11 @@ def run_job(job: CrawlJob) -> int:
             )
             return 1
         try:
-            delivery = deliver_rank_update("dy", json_path)
+            delivery = (
+                deliver_rank_update("dy", json_path)
+                if os.environ.get("ZENTAO_RANK_EVENT_PUSH", "0").strip() == "1"
+                else {"status": "skipped", "reason": "excel-reconciliation-task", "part_key": "douyin-rank"}
+            )
             emit_event(
                 "log",
                 job_id=job.job_id,

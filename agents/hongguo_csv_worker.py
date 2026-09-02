@@ -155,10 +155,14 @@ def run_job(job: CrawlJob, exports_root: str | Path = DEFAULT_EXPORTS_ROOT) -> i
 
     latest_path = selected_paths[-1]
     try:
-        delivery = deliver_rank_update(
-            "hg",
-            latest_path,
-            report_date=datetime.strptime(snapshot_date(latest_path), "%Y%m%d").date().isoformat(),
+        delivery = (
+            deliver_rank_update(
+                "hg",
+                latest_path,
+                report_date=datetime.strptime(snapshot_date(latest_path), "%Y%m%d").date().isoformat(),
+            )
+            if os.environ.get("ZENTAO_RANK_EVENT_PUSH", "0").strip() == "1"
+            else {"status": "skipped", "reason": "excel-reconciliation-task", "part_key": "hongguo-rank"}
         )
         emit_event(
             "log",

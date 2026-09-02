@@ -107,6 +107,7 @@ def test_douyin_rank_worker_can_skip_auto_analysis(tmp_path, monkeypatch):
 
 def test_douyin_rank_worker_pushes_after_rank_artifact_is_ready(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ZENTAO_RANK_EVENT_PUSH", "1")
     pushes = []
 
     async def fake_run_douyin_rank(args):
@@ -141,6 +142,7 @@ def test_douyin_rank_worker_syncs_after_analysis_and_before_delivery(
     monkeypatch,
 ):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ZENTAO_RANK_EVENT_PUSH", "1")
     calls = []
 
     async def fake_run_douyin_rank(args):

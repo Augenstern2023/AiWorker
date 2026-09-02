@@ -26,9 +26,14 @@
                         </template>
                     </select>
                     {% if principal.is_system_admin %}
-                        <button class="btn btn-outline-secondary btn-sm" @click="refreshTodayRank(true)" :disabled="todayRankLoading || todayRankRefreshing">
-                            <i class="bi" :class="todayRankRefreshing ? 'bi-arrow-repeat' : 'bi-arrow-clockwise'"></i><span class="ms-1" x-text="todayRankPlatform === 'dy' ? (todayRankRefreshing ? '抓取中' : '更新并抓取') : '刷新榜单'"></span>
-                        </button>
+                        <template x-if="todayRankPlatform !== 'dy' || !hasTodayRankSnapshot()">
+                            <button class="btn btn-outline-secondary btn-sm" @click="refreshTodayRank(true)" :disabled="todayRankLoading || todayRankRefreshing">
+                                <i class="bi" :class="todayRankRefreshing ? 'bi-arrow-repeat' : 'bi-arrow-clockwise'"></i><span class="ms-1" x-text="todayRankPlatform === 'dy' ? (todayRankRefreshing ? '抓取中' : '更新并抓取') : '刷新榜单'"></span>
+                            </button>
+                        </template>
+                        <template x-if="todayRankPlatform === 'dy' && hasTodayRankSnapshot()">
+                            <span class="badge rounded-pill text-bg-success align-self-center px-3 py-2"><i class="bi bi-check-circle me-1"></i>今日已更新</span>
+                        </template>
                     {% else %}
                         <button class="btn btn-outline-secondary btn-sm" @click="refreshTodayRank(false)" :disabled="todayRankLoading || todayRankRefreshing">
                             <i class="bi bi-arrow-clockwise"></i><span class="ms-1">刷新榜单</span>

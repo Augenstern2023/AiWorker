@@ -20,6 +20,7 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from analysis.rank_models import RankSnapshot, RankSnapshotSource
 
@@ -35,6 +36,7 @@ HONGGUO_SECTION_ORDER = ["全部", "真人剧", "漫剧", "AI剧"]
 HONGGUO_RANKING_ORDER = ["热播榜", "推荐榜", "必看榜", "热搜榜", "收藏榜", "新剧榜", "预约榜", "高分臻果榜"]
 DOUYIN_RANKING_ORDER = ["榜单", "热榜"]
 RANK_SOURCE_CHECK_INTERVAL_SECONDS = 5.0
+RANK_BUSINESS_TIMEZONE = ZoneInfo("Asia/Shanghai")
 logger = logging.getLogger("aiworker.web.today_rank")
 HONGGUO_CSV_SECTION_BY_SELECTED = {
     "all": "红果",
@@ -143,6 +145,15 @@ def _hongguo_raw_root_for_exports(exports_root: Path) -> Path:
     return exports_root.parent / "raw"
 
 
+def rank_business_date(now: datetime | None = None) -> str:
+    current = now or datetime.now(RANK_BUSINESS_TIMEZONE)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=RANK_BUSINESS_TIMEZONE)
+    else:
+        current = current.astimezone(RANK_BUSINESS_TIMEZONE)
+    return current.date().isoformat()
+
+
 class _LegacyRankEngine:
     def __init__(
         self,
@@ -195,7 +206,9 @@ class _LegacyRankEngine:
             and time.monotonic() - checked_at
             < RANK_SOURCE_CHECK_INTERVAL_SECONDS
         ):
-            return {**memory_cached, "cache_status": "hit"}
+            return self._with_daily_status(
+                {**memory_cached, "cache_status": "hit"}
+            )
 
         cache_revision = self._source_revision(platform)
         previous_revision = self._source_revisions.get(platform)
@@ -212,7 +225,9 @@ class _LegacyRankEngine:
             if cached is not None:
                 self._response_cache[memory_key] = cached
                 self._source_revision_checked_at[platform] = time.monotonic()
-                return {**cached, "cache_status": "hit"}
+                return self._with_daily_status(
+                    {**cached, "cache_status": "hit"}
+                )
 
         snapshots = self.list_snapshots(platform)
         available_dates = _available_dates(snapshots)
@@ -253,7 +268,38 @@ class _LegacyRankEngine:
         )
         self._response_cache[memory_key] = response
         self._source_revision_checked_at[platform] = time.monotonic()
-        return response
+        return self._with_daily_status(response)
+
+    def daily_status(self, platform: str) -> dict[str, Any]:
+        platform = platform.strip().lower()
+        if platform not in SUPPORTED_PLATFORMS:
+            raise ValueError("platform must be dy or hg")
+        available_dates = _available_dates(self.list_snapshots(platform))
+        business_date = rank_business_date()
+        return {
+            "business_date": business_date,
+            "has_today_snapshot": business_date in available_dates,
+        }
+
+    @staticmethod
+    def _with_daily_status(response: dict[str, Any]) -> dict[str, Any]:
+        business_date = rank_business_date()
+        available_dates = {
+            str(item) for item in response.get("available_dates") or [] if item
+        }
+        selected_snapshot = response.get("selected_snapshot")
+        selected_date = (
+            str(selected_snapshot.get("date") or "")
+            if isinstance(selected_snapshot, dict)
+            else ""
+        )
+        return {
+            **response,
+            "business_date": business_date,
+            "has_today_snapshot": (
+                business_date in available_dates or selected_date == business_date
+            ),
+        }
 
     def _invalidate_memory_cache(self, platform: str) -> None:
         self._response_cache = {

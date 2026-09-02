@@ -66,6 +66,7 @@ def test_hongguo_csv_worker_pushes_only_the_latest_snapshot(tmp_path, monkeypatc
     write_csv(exports / "20260830/top10_rankings.csv", [["红果短剧热播榜", "1", "昨日剧"]])
     write_csv(exports / "20260831/top10_rankings.csv", [["红果短剧热播榜", "1", "今日剧"]])
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ZENTAO_RANK_EVENT_PUSH", "1")
     pushes = []
     monkeypatch.setattr(
         hongguo_csv_worker,
@@ -89,6 +90,7 @@ def test_hongguo_csv_worker_syncs_both_snapshots_before_latest_delivery(
     write_csv(yesterday, [["红果短剧热播榜", "1", "昨日剧"]])
     write_csv(today, [["红果短剧热播榜", "1", "今日剧"]])
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ZENTAO_RANK_EVENT_PUSH", "1")
     calls = []
 
     def fake_sync(platform, path, **kwargs):

@@ -69,7 +69,16 @@ def _operation_request(job: CrawlJob) -> str:
     payload.pop("job_id", None)
     extra = dict(payload.get("extra") or {})
     extra.pop("retry_failed_operation", None)
+    extra.pop("retry_terminal_operation", None)
     extra.pop("retry_of_job_id", None)
+    if extra.get("idempotency_scope") == "shared":
+        for field in (
+            "created_by_user_id",
+            "workflow_task_id",
+            "project_id",
+            "operation_id",
+        ):
+            extra.pop(field, None)
     payload["extra"] = extra
     return json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -220,6 +229,33 @@ class JobManager:
                     operation_id, launcher_owner, prelaunch_state.job
                 )
             if (
+                stored.status in TERMINAL_STATUSES
+                and job.extra.get("idempotency_scope") == "shared"
+                and bool(job.extra.get("retry_terminal_operation"))
+            ):
+                try:
+                    claimed, retry_state = (
+                        self.storage.claim_terminal_job_operation(
+                            operation_id,
+                            launcher_owner=launcher_owner,
+                            launcher_lease_expires_at=time.time()
+                            + _LAUNCH_LEASE_SECONDS,
+                        )
+                    )
+                except OperationScopeConflictError as exc:
+                    raise JobConflictError(
+                        f"creative scope is already reserved by job {exc}",
+                        kind="creative_scope_collision",
+                        conflicting_operation_id=exc.operation_id,
+                    ) from exc
+                if claimed and retry_state is not None:
+                    return self._launch_reserved_operation(
+                        operation_id, launcher_owner, retry_state.job
+                    )
+                refreshed = self.storage.get_job_by_operation(operation_id)
+                if refreshed is not None:
+                    stored = refreshed
+            elif (
                 stored.status == "failed"
                 and bool(job.extra.get("retry_failed_operation"))
             ):

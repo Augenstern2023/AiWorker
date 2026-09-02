@@ -1781,6 +1781,8 @@ def test_today_rank_update_is_admin_only_while_other_users_only_refresh_snapshot
     assert "crawler_type: 'rank'" in script
     assert "pollTodayRankRefresh" in script
     assert "更新并抓取" in admin_html
+    assert "hasTodayRankSnapshot()" in admin_html
+    assert "今日已更新" in admin_html
     assert "refreshTodayRank(true)" in admin_html
     assert "refreshTodayRank(false)" not in admin_html
     assert "刷新榜单" in user_html

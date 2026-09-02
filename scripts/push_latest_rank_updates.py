@@ -12,15 +12,19 @@ from __future__ import annotations
 import csv
 import json
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from agents.rank_zentao_delivery import deliver_rank_update
+from analysis.rank_excel_export import build_rank_workbook
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_HONGGUO_EXPORTS = Path(r"E:\hg\exports")
+DEFAULT_RANK_SHARE = Path(r"\\192.168.1.11\共享\榜单日报")
 
 
 def load_delivery_environment(project_root: str | Path = PROJECT_ROOT) -> None:
@@ -85,6 +89,53 @@ def validate_hongguo_export(source: str | Path) -> dict[str, int]:
     return {"groups": len(complete), "rows": len(rows)}
 
 
+def generate_today_workbooks(
+    project_root: str | Path,
+    hongguo_exports_root: str | Path,
+    report_date: str,
+    sources: dict[str, Path],
+) -> dict[str, Path]:
+    output_dir = Path(project_root) / ".runtime" / "rank-excel" / report_date
+    outputs: dict[str, Path] = {}
+    for platform in ("hg", "dy"):
+        if platform not in sources:
+            continue
+        outputs[platform] = build_rank_workbook(
+            platform,
+            report_date,
+            root=project_root,
+            hongguo_exports_root=hongguo_exports_root,
+            output_dir=output_dir,
+        )
+    return outputs
+
+
+def copy_workbooks_to_share(
+    workbooks: dict[str, Path],
+    share_root: str | Path = DEFAULT_RANK_SHARE,
+) -> dict[str, dict[str, Any]]:
+    root = Path(share_root)
+    root.mkdir(parents=True, exist_ok=True)
+    copied: dict[str, dict[str, Any]] = {}
+    for platform in ("hg", "dy"):
+        source = workbooks.get(platform)
+        if source is None:
+            continue
+        destination = root / source.name
+        shutil.copy2(source, destination)
+        if destination.read_bytes() != source.read_bytes():
+            raise OSError(f"共享目录文件校验失败：{destination}")
+        copied[platform] = {"path": destination, "url": _file_url(destination)}
+    return copied
+
+
+def _file_url(path: Path) -> str:
+    text = str(path).replace("\\", "/")
+    if text.startswith("//"):
+        return "file:" + quote(text, safe="/")
+    return "file:///" + quote(text, safe="/:")
+
+
 def push_latest_rank_updates(
     project_root: str | Path = PROJECT_ROOT,
     hongguo_exports_root: str | Path = DEFAULT_HONGGUO_EXPORTS,
@@ -93,6 +144,11 @@ def push_latest_rank_updates(
     load_delivery_environment(project_root)
     date = report_date or datetime.now().date().isoformat()
     sources = discover_today_sources(project_root, hongguo_exports_root, date)
+    workbooks = generate_today_workbooks(project_root, hongguo_exports_root, date, sources)
+    shared = copy_workbooks_to_share(
+        workbooks,
+        os.environ.get("ZENTAO_RANK_SHARE_DIR", str(DEFAULT_RANK_SHARE)),
+    )
     results: dict[str, Any] = {}
     for platform in ("hg", "dy"):
         source = sources.get(platform)
@@ -101,8 +157,23 @@ def push_latest_rank_updates(
             continue
         if platform == "hg":
             validate_hongguo_export(source)
-        results[platform] = deliver_rank_update(platform, source, report_date=date)
-    return {"report_date": date, "sources": {key: str(value) for key, value in sources.items()}, "results": results}
+        results[platform] = deliver_rank_update(
+            platform,
+            source,
+            report_date=date,
+            workbook_url=shared.get(platform, {}).get("url", ""),
+            workbook_path=str(shared.get(platform, {}).get("path", "")),
+        )
+    return {
+        "report_date": date,
+        "sources": {key: str(value) for key, value in sources.items()},
+        "workbooks": {key: str(value) for key, value in workbooks.items()},
+        "shared_workbooks": {
+            key: {"path": str(value["path"]), "url": value["url"]}
+            for key, value in shared.items()
+        },
+        "results": results,
+    }
 
 
 def main() -> int:

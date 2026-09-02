@@ -10,15 +10,19 @@
 from __future__ import annotations
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     Column,
+    Date,
     DateTime,
     Float,
     ForeignKey,
     Index,
     Integer,
     MetaData,
+    Numeric,
+    String,
     Table,
     Text,
     UniqueConstraint,
@@ -324,6 +328,120 @@ llm_settings = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     CheckConstraint("id = 'global'", name="ck_llm_settings_global_id"),
 )
+
+rank_snapshots = Table(
+    "rank_snapshots",
+    SYSTEM_METADATA,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("platform", String(16), nullable=False),
+    Column("captured_at", DateTime(timezone=True), nullable=False),
+    Column("snapshot_date", Date, nullable=False),
+    Column("job_id", Text),
+    Column("source_kind", String(32), nullable=False),
+    Column("source_ref", Text, nullable=False),
+    Column("source_checksum", String(64), nullable=False),
+    Column("parser_version", Integer, nullable=False, server_default=text("1")),
+    Column("record_count", Integer, nullable=False),
+    Column(
+        "validation_json",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    ),
+    Column(
+        "imported_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    ),
+    CheckConstraint(
+        "platform IN ('dy', 'hg')",
+        name="ck_rank_snapshots_platform",
+    ),
+    CheckConstraint(
+        "record_count >= 0",
+        name="ck_rank_snapshots_record_count",
+    ),
+    UniqueConstraint(
+        "platform",
+        "source_kind",
+        "source_ref",
+        name="uq_rank_snapshots_source_ref",
+    ),
+    UniqueConstraint(
+        "platform",
+        "source_checksum",
+        name="uq_rank_snapshots_checksum",
+    ),
+)
+
+Index(
+    "ix_rank_snapshots_platform_date_captured",
+    rank_snapshots.c.platform,
+    rank_snapshots.c.snapshot_date,
+    rank_snapshots.c.captured_at,
+)
+
+rank_entries = Table(
+    "rank_entries",
+    SYSTEM_METADATA,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column(
+        "snapshot_id",
+        BigInteger,
+        ForeignKey(
+            "rank_snapshots.id",
+            ondelete="CASCADE",
+            name="fk_rank_entries_snapshot_id",
+        ),
+        nullable=False,
+    ),
+    Column("section_name", Text, nullable=False, server_default=text("''")),
+    Column("ranking_name", Text, nullable=False, server_default=text("''")),
+    Column("rank", Integer, nullable=False),
+    Column("series_key", Text, nullable=False, server_default=text("''")),
+    Column("title", Text, nullable=False),
+    Column("category", Text),
+    Column("status", Text),
+    Column("subject", Text),
+    Column("description", Text),
+    Column("hot_comment", Text),
+    Column("score", Numeric(20, 4)),
+    Column("share_count", BigInteger),
+    Column("like_count", BigInteger),
+    Column("favorite_count", BigInteger),
+    Column("heat", Numeric(20, 4)),
+    Column("comment_count", BigInteger),
+    Column("recommend_index", Numeric(20, 4)),
+    Column("rating_count", BigInteger),
+    Column("expectation_index", Numeric(20, 4)),
+    Column("search_index", Numeric(20, 4)),
+    Column("max_heat", Numeric(20, 4)),
+    Column("source_record_json", JSONB, nullable=False),
+    Column(
+        "validation_warnings_json",
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+    ),
+    CheckConstraint("rank > 0", name="ck_rank_entries_rank_positive"),
+    UniqueConstraint(
+        "snapshot_id",
+        "section_name",
+        "ranking_name",
+        "rank",
+        name="uq_rank_entries_board_rank",
+    ),
+)
+
+Index("ix_rank_entries_snapshot_id", rank_entries.c.snapshot_id)
+Index(
+    "ix_rank_entries_board",
+    rank_entries.c.snapshot_id,
+    rank_entries.c.section_name,
+    rank_entries.c.ranking_name,
+)
+Index("ix_rank_entries_series_key", rank_entries.c.series_key)
 
 workflow_instances = Table(
     "workflow_instances",

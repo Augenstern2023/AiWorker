@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import DateTime, Text, create_engine, inspect, text
+from sqlalchemy import BigInteger, DateTime, Numeric, Text, create_engine, inspect, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import make_url
 
@@ -89,6 +89,40 @@ def test_runtime_schema_uses_timestamptz_and_jsonb_for_system_events():
     assert isinstance(audit_logs.c.details_json.type, JSONB)
     assert isinstance(task_events.c.details_json.type, JSONB)
     assert isinstance(submissions.c.content_snapshot_json.type, JSONB)
+
+
+def test_system_schema_declares_central_rank_tables():
+    snapshots = SYSTEM_METADATA.tables["rank_snapshots"]
+    entries = SYSTEM_METADATA.tables["rank_entries"]
+
+    assert snapshots.c.source_checksum.type.length == 64
+    assert isinstance(snapshots.c.validation_json.type, JSONB)
+    assert isinstance(entries.c.source_record_json.type, JSONB)
+    assert isinstance(entries.c.like_count.type, BigInteger)
+    assert isinstance(entries.c.heat.type, Numeric)
+    foreign_key = next(iter(entries.c.snapshot_id.foreign_keys))
+    assert foreign_key.ondelete == "CASCADE"
+
+
+def test_upgrade_head_creates_central_rank_constraints(postgres_url, monkeypatch):
+    run_alembic_upgrade(postgres_url, monkeypatch)
+    engine = create_engine(postgres_url)
+    try:
+        inspector = inspect(engine)
+        assert inspector.has_table("rank_snapshots")
+        assert inspector.has_table("rank_entries")
+        assert {
+            item["name"]
+            for item in inspector.get_unique_constraints("rank_snapshots")
+        } >= {
+            "uq_rank_snapshots_source_ref",
+            "uq_rank_snapshots_checksum",
+        }
+        assert {
+            item["name"] for item in inspector.get_foreign_keys("rank_entries")
+        } == {"fk_rank_entries_snapshot_id"}
+    finally:
+        engine.dispose()
 
 
 def test_baseline_users_structure_excludes_contact_profile():

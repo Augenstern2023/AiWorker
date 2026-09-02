@@ -13,12 +13,16 @@ from pathlib import Path
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query
 
+from analysis.rank_models import RankDatabaseUnavailable
 from analysis.today_rank_service import TodayRankService
 
 
-def build_today_rank_router(root: str | Path = ".") -> APIRouter:
+def build_today_rank_router(
+    root: str | Path = ".",
+    service: TodayRankService | None = None,
+) -> APIRouter:
     router = APIRouter(prefix="/api/rank", tags=["rank"])
-    service = TodayRankService(root=root)
+    rank_service = service or TodayRankService.from_environment(root=root)
 
     @router.get("/today")
     async def today_rank(
@@ -28,12 +32,17 @@ def build_today_rank_router(root: str | Path = ".") -> APIRouter:
         refresh: bool = False,
     ):
         try:
-            return service.get_today_rank(
+            return rank_service.get_today_rank(
                 platform=platform,
                 date=date,
                 limit=limit,
                 force_refresh=refresh,
             )
+        except RankDatabaseUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="榜单数据库暂不可用",
+            ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:

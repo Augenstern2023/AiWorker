@@ -863,6 +863,24 @@ class TodayRankService(_LegacyRankEngine):
             )
         self.snapshot_source = snapshot_source
 
+    @classmethod
+    def from_environment(
+        cls,
+        root: str | Path = ".",
+        cache_dir: str | Path | None = None,
+    ) -> "TodayRankService":
+        from analysis.rank_repository import RankRepository
+        from system_database import SystemDatabase, SystemDatabaseSettings
+
+        database = SystemDatabase(SystemDatabaseSettings.from_environment())
+        service = cls(
+            root=root,
+            cache_dir=cache_dir,
+            snapshot_source=RankRepository(database),
+        )
+        service._owned_database = database
+        return service
+
     def _source_revision(self, platform: str) -> str:
         return self.snapshot_source.revision(platform)
 

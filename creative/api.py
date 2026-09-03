@@ -33,7 +33,7 @@ from creative.original_direction_service import validate_original_direction_cont
 from creative.original_project_service import OriginalProjectService
 from creative.outline_fields import OUTLINE_TEXT_FIELDS, outline_field_source_fingerprint
 from creative.outline_overview import SERIES_OVERVIEW_FIELD_LABELS, read_series_overview
-from creative.repository import CreativeRepository, DuplicateTopicError
+from creative.repository import CreativeRepository, TopicDecisionConflict
 from creative.script_service import normalize_script_content, rewrite_outline_field, validate_script
 from creative.selection_stage_service import SelectionStageService
 from creative.workflow_adapter import CreativeWorkflowAdapter
@@ -1540,7 +1540,7 @@ def build_creative_router(
             topic = repository.adopt_rank_topic(
                 service.rank_entry_to_topic(entry, response), principal.user_id
             )
-        except DuplicateTopicError as exc:
+        except TopicDecisionConflict as exc:
             raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from exc

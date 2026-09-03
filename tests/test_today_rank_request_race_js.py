@@ -569,3 +569,60 @@ def test_today_rank_daily_update_is_hidden_after_current_date_snapshot_exists():
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_successful_rank_adoption_invalidates_the_topic_library_cache():
+    module_path = json.dumps((ROOT / "static/js/selection/ranks.js").as_posix())
+    script = textwrap.dedent(
+        f"""
+        const invalidated = [];
+        global.window = {{
+            aiworkerModules: [],
+            aiworkerUi: {{
+                invalidateCache(prefix) {{ invalidated.push(prefix); }}
+            }},
+            addEventListener() {{}}, dispatchEvent() {{}},
+            location: {{hash: ''}}, setTimeout
+        }};
+        global.document = {{addEventListener() {{}}, hidden: false}};
+        global.Event = function Event() {{}};
+        global.aiworkerApi = {{
+            async request() {{
+                return {{
+                    ok: true,
+                    status: 201,
+                    async json() {{
+                        return {{topic: {{id: 42, title: '待评估榜单短剧', status: 'adopted'}}}};
+                    }}
+                }};
+            }}
+        }};
+        require({module_path});
+
+        const methods = window.aiworkerModules[0]();
+        const state = {{
+            ...methods,
+            todayRankPlatform: 'dy',
+            todayRankDate: '2026-07-28',
+            todayRankData: {{date: '2026-07-28'}},
+            rankAdoptingRecordIds: {{}},
+            rankAdoptedTitleKeys: {{}},
+            showAdoptionNotice() {{}}
+        }};
+
+        (async () => {{
+            await methods.adoptRankEntry.call(state, {{
+                record_id: 'rank-drama-pending', title: '待评估榜单短剧'
+            }});
+            if (invalidated.length !== 1 || invalidated[0] !== 'creative:topics:library:') {{
+                throw new Error(`topic library cache was not invalidated: ${{JSON.stringify(invalidated)}}`);
+            }}
+        }})().catch(error => {{ console.error(error.message); process.exitCode = 1; }});
+        """
+    )
+
+    result = subprocess.run(
+        ["node", "-e", script], cwd=ROOT, capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr

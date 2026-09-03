@@ -19,6 +19,7 @@ from urllib.parse import unquote
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
+import pytest
 
 from analysis.today_rank_service import TodayRankService
 from core.job import CrawlJob
@@ -673,6 +674,264 @@ def test_adopting_rank_entry_creates_an_adopted_topic_and_rejects_duplicates(
     assert duplicate.status_code == 409
     assert duplicate.json()["detail"] == "剧目已收录"
     assert len(repository.list_topics(limit=None)) == 1
+
+
+def test_adopting_rank_entry_promotes_the_matching_pending_topic(tmp_path: Path):
+    client, repository, _ = build_client(tmp_path)
+    rank_path = tmp_path / "data/dy/jobs/rank-adopt/rank/douyin_series_rank_20260728_100000.json"
+    rank_path.parent.mkdir(parents=True)
+    rank_path.write_text(
+        json.dumps(
+            {
+                "captured_at": "2026-07-28 10:00:00",
+                "records": [
+                    {
+                        "series_id": "rank-drama-pending",
+                        "title": "待评估榜单短剧",
+                        "rank": 1,
+                        "rank_category": "真人剧",
+                        "tab": "榜单",
+                        "description": "来自今日榜单的待评估剧目",
+                        "heat_text": "12345",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    generated = client.post(
+        "/api/creative/topics/generate",
+        json={"platform": "dy", "date": "2026-07-28", "rank_source": "榜单", "limit": 10},
+    )
+    assert generated.status_code == 200
+    pending = next(
+        item
+        for item in repository.list_topics(status="pending_review", limit=None)
+        if item["title"] == "待评估榜单短剧"
+    )
+    with repository._connect() as connection:
+        connection.execute(
+            "UPDATE creative_topics SET description = '过期待刷新' WHERE id = ?",
+            (pending["id"],),
+        )
+
+    adopted = client.post(
+        "/api/creative/topics/adopt-from-rank",
+        json={"platform": "dy", "date": "2026-07-28", "record_id": "rank-drama-pending"},
+    )
+
+    assert adopted.status_code == 201
+    topic = adopted.json()["topic"]
+    assert topic["id"] == pending["id"]
+    assert topic["status"] == "adopted"
+    assert topic["description"] == "来自今日榜单的待评估剧目"
+    assert repository.get_latest_selection_stage_snapshot(
+        topic["id"], "topic_decision"
+    )["outcome"] == "adopted"
+    with repository._connect() as connection:
+        snapshot_count = connection.execute(
+            "SELECT COUNT(*) FROM selection_stage_snapshots "
+            "WHERE topic_id = ? AND stage = 'topic_decision' AND outcome = 'adopted'",
+            (topic["id"],),
+        ).fetchone()[0]
+    assert snapshot_count == 1
+    assert [
+        item["title"]
+        for item in repository.list_topics(status="adopted", limit=None)
+    ] == ["待评估榜单短剧"]
+    library = client.get("/api/creative/topics?status=adopted&all=true")
+    assert library.status_code == 200
+    assert [item["id"] for item in library.json()["items"]] == [topic["id"]]
+
+
+def test_historical_pending_topic_does_not_block_current_rank_adoption(tmp_path: Path):
+    client, repository, _ = build_client(tmp_path)
+    historical = seed_topic(repository, "跨日期待评估短剧", platform="dy")
+    historical_breakdown = repository.create_breakdown(
+        historical["id"], {"core_conflict": "历史拆解"}, {}, []
+    )
+    repository.lock_breakdown(historical_breakdown["id"])
+    rank_path = tmp_path / "data/dy/jobs/rank-current/rank/douyin_series_rank_20260728_100000.json"
+    rank_path.parent.mkdir(parents=True)
+    rank_path.write_text(
+        json.dumps(
+            {
+                "captured_at": "2026-07-28 10:00:00",
+                "records": [
+                    {
+                        "series_id": "rank-drama-current",
+                        "title": "跨日期待评估短剧",
+                        "rank": 1,
+                        "rank_category": "真人剧",
+                        "tab": "榜单",
+                        "description": "当前榜单描述",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    adopted = client.post(
+        "/api/creative/topics/adopt-from-rank",
+        json={"platform": "dy", "date": "2026-07-28", "record_id": "rank-drama-current"},
+    )
+
+    assert adopted.status_code == 201
+    current = adopted.json()["topic"]
+    assert current["id"] != historical["id"]
+    assert current["status"] == "adopted"
+    assert repository.get_topic(historical["id"])["status"] == "pending_review"
+    library = client.get("/api/creative/topics?status=adopted&all=true")
+    assert library.status_code == 200
+    assert [
+        (
+            item["id"], item["title"], item["description"], item["status"],
+            item["locked_breakdown_id"], item["latest_breakdown_id"],
+        )
+        for item in library.json()["items"]
+    ] == [
+        (
+            current["id"], "跨日期待评估短剧", "当前榜单描述", "adopted",
+            None, None,
+        )
+    ]
+
+
+def test_matching_current_pending_is_promoted_among_historical_snapshots(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    historical = seed_topic(repository, "多日期待评估短剧", platform="dy")
+    current_topic = {
+        "platform": "dy",
+        "job_id": "rank-current",
+        "source_path": "data/dy/current.json",
+        "captured_at": "2026-07-28",
+        "title": "多日期待评估短剧",
+        "description": "当前日期",
+        "category": "都市",
+        "rank_type": "榜单",
+        "rank_source": "榜单",
+        "score": 80,
+        "confidence": "medium",
+        "score_details": {},
+        "recommendation": "当前推荐",
+        "evidence": [],
+    }
+    repository.upsert_topics([current_topic])
+    with repository._connect() as connection:
+        current_id = int(
+            connection.execute(
+                "SELECT id FROM creative_topics WHERE job_id = 'rank-current'"
+            ).fetchone()[0]
+        )
+
+    adopted = repository.adopt_rank_topic(current_topic, "actor-1")
+
+    assert adopted["id"] == current_id
+    assert adopted["status"] == "adopted"
+    assert repository.get_topic(historical["id"])["status"] == "pending_review"
+
+
+@pytest.mark.parametrize(
+    ("existing_status", "detail"),
+    [
+        ("rejected", "该剧目已被拒绝，请先在选题库恢复后再收录"),
+        ("archived", "该剧目已归档，请先在选题库恢复后再收录"),
+    ],
+)
+def test_rank_adoption_reports_existing_topic_decision_conflicts(
+    tmp_path: Path,
+    existing_status: str,
+    detail: str,
+):
+    client, repository, _ = build_client(tmp_path)
+    existing = seed_topic(repository, "已有选题决策短剧", platform="dy")
+    repository.update_topic(existing["id"], existing_status)
+    rank_path = tmp_path / "data/dy/jobs/rank-decision/rank/douyin_series_rank_20260728_100000.json"
+    rank_path.parent.mkdir(parents=True)
+    rank_path.write_text(
+        json.dumps(
+            {
+                "captured_at": "2026-07-28 10:00:00",
+                "records": [
+                    {
+                        "series_id": "rank-drama-decision",
+                        "title": "已有选题决策短剧",
+                        "rank": 1,
+                        "rank_category": "真人剧",
+                        "tab": "榜单",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.post(
+        "/api/creative/topics/adopt-from-rank",
+        json={"platform": "dy", "date": "2026-07-28", "record_id": "rank-drama-decision"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == detail
+
+
+def test_pending_rank_adoption_rolls_back_when_snapshot_insert_fails(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    pending = seed_topic(repository, "收录事务回滚短剧", platform="dy")
+    with repository._connect() as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER reject_rank_adoption_snapshot
+            BEFORE INSERT ON selection_stage_snapshots
+            BEGIN
+                SELECT RAISE(ABORT, 'snapshot insert failed');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="snapshot insert failed"):
+        repository.adopt_rank_topic(pending, "actor-1")
+
+    assert repository.get_topic(pending["id"])["status"] == "pending_review"
+    assert repository.get_latest_selection_stage_snapshot(
+        pending["id"], "topic_decision"
+    ) is None
+
+
+def test_new_rank_adoption_rolls_back_when_snapshot_insert_fails(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    historical = seed_topic(repository, "新增收录事务回滚短剧", platform="dy")
+    current = {
+        **historical,
+        "job_id": "rank-current",
+        "source_path": "data/dy/current.json",
+        "captured_at": "2026-07-28",
+    }
+    with repository._connect() as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER reject_new_rank_adoption_snapshot
+            BEFORE INSERT ON selection_stage_snapshots
+            BEGIN
+                SELECT RAISE(ABORT, 'snapshot insert failed');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="snapshot insert failed"):
+        repository.adopt_rank_topic(current, "actor-1")
+
+    with repository._connect() as connection:
+        rows = connection.execute(
+            "SELECT id, status FROM creative_topics ORDER BY id"
+        ).fetchall()
+    assert [(row["id"], row["status"]) for row in rows] == [
+        (historical["id"], "pending_review")
+    ]
 
 
 def test_generating_today_hits_excludes_a_title_already_in_the_topic_library(

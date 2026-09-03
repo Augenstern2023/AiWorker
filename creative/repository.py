@@ -52,11 +52,15 @@ _WRITER_ROLLBACK_TECHNICAL_TABLES = (
 )
 
 
-class DuplicateTopicError(ValueError):
+class TopicDecisionConflict(ValueError):
+    """Raised when a topic action conflicts with an existing manual decision."""
+
+
+class DuplicateTopicError(TopicDecisionConflict):
     """Raised when a title has already been collected into the topic store."""
 
 
-class DownloadTopicDecisionConflict(ValueError):
+class DownloadTopicDecisionConflict(TopicDecisionConflict):
     """Raised when download intent conflicts with a manual topic decision."""
 
 
@@ -695,44 +699,117 @@ class CreativeRepository:
         now = time.time()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            existing = conn.execute(
-                "SELECT title FROM creative_topics WHERE deleted = 0"
-            ).fetchall()
-            if any(self._title_key(row["title"]) == title_key for row in existing):
+            matching_rows = [
+                row
+                for row in conn.execute(
+                    "SELECT * FROM creative_topics WHERE deleted = 0"
+                ).fetchall()
+                if self._title_key(row["title"]) == title_key
+            ]
+            if any(row["status"] == "adopted" for row in matching_rows):
                 raise DuplicateTopicError("剧目已收录")
-            cursor = conn.execute(
-                """
-                INSERT INTO creative_topics (
-                    platform, job_id, source_path, captured_at, title, description, category, rank_type, rank_source,
-                    status, score, confidence, score_details_json, recommendation, evidence_json,
-                    source_platforms_json, decision_note, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'adopted', ?, ?, ?, ?, ?, ?, '', ?, ?)
-                """,
-                (
-                    topic["platform"], topic["job_id"], topic["source_path"], topic["captured_at"],
-                    topic["title"], topic.get("description", ""), topic.get("category", ""),
-                    topic.get("rank_type", ""), topic.get("rank_source", topic.get("rank_type", "")),
-                    topic["score"], topic["confidence"],
-                    json.dumps(topic["score_details"], ensure_ascii=False), topic["recommendation"],
-                    json.dumps(topic["evidence"], ensure_ascii=False),
-                    json.dumps(sorted({str(topic.get("platform") or "")}), ensure_ascii=False), now, now,
+
+            decided_rows = [
+                row for row in matching_rows if row["status"] in {"rejected", "archived"}
+            ]
+            if decided_rows:
+                latest_decision = max(
+                    decided_rows,
+                    key=lambda row: (float(row["updated_at"] or 0), int(row["id"])),
+                )
+                if latest_decision["status"] == "rejected":
+                    raise TopicDecisionConflict(
+                        "该剧目已被拒绝，请先在选题库恢复后再收录"
+                    )
+                raise TopicDecisionConflict(
+                    "该剧目已归档，请先在选题库恢复后再收录"
+                )
+
+            current_pending_rows = [
+                row
+                for row in matching_rows
+                if row["status"] == "pending_review"
+                and str(row["platform"] or "") == str(topic.get("platform") or "")
+                and str(row["job_id"] or "") == str(topic.get("job_id") or "")
+                and str(row["source_path"] or "") == str(topic.get("source_path") or "")
+            ]
+            topic_values = (
+                topic["platform"],
+                topic["job_id"],
+                topic["source_path"],
+                topic["captured_at"],
+                topic["title"],
+                topic.get("description", ""),
+                topic.get("category", ""),
+                topic.get("rank_type", ""),
+                topic.get("rank_source", topic.get("rank_type", "")),
+                topic["score"],
+                topic["confidence"],
+                json.dumps(topic["score_details"], ensure_ascii=False),
+                topic["recommendation"],
+                json.dumps(topic["evidence"], ensure_ascii=False),
+                json.dumps(
+                    sorted({str(topic.get("platform") or "")}), ensure_ascii=False
                 ),
             )
-            topic_id = int(cursor.lastrowid)
+            if current_pending_rows:
+                current = max(
+                    current_pending_rows,
+                    key=lambda row: (
+                        row["title"] == topic["title"],
+                        float(row["updated_at"] or 0),
+                        int(row["id"]),
+                    ),
+                )
+                topic_id = int(current["id"])
+                conn.execute(
+                    """
+                    UPDATE creative_topics
+                    SET platform = ?, job_id = ?, source_path = ?, captured_at = ?,
+                        title = ?, description = ?, category = ?, rank_type = ?,
+                        rank_source = ?, status = 'adopted', score = ?, confidence = ?,
+                        score_details_json = ?, recommendation = ?, evidence_json = ?,
+                        source_platforms_json = ?, decision_note = '', updated_at = ?
+                    WHERE id = ? AND deleted = 0
+                    """,
+                    (*topic_values, now, topic_id),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO creative_topics (
+                        platform, job_id, source_path, captured_at, title, description,
+                        category, rank_type, rank_source, status, score, confidence,
+                        score_details_json, recommendation, evidence_json,
+                        source_platforms_json, decision_note, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'adopted', ?, ?, ?, ?, ?, ?, '', ?, ?)
+                    """,
+                    (*topic_values, now, now),
+                )
+                topic_id = int(cursor.lastrowid)
+
             snapshot = {
                 "topic_id": topic_id, "title": topic["title"], "outcome": "adopted",
                 "decision_note": "", "source": "today_rank",
             }
             canonical = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            version = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(version), 0) + 1 "
+                    "FROM selection_stage_snapshots "
+                    "WHERE stage = 'topic_decision' AND topic_id = ?",
+                    (topic_id,),
+                ).fetchone()[0]
+            )
             conn.execute(
                 """
                 INSERT INTO selection_stage_snapshots (
                     id, stage, topic_id, version, outcome, snapshot_json, content_fingerprint,
                     resource_type, resource_id, actor_user_id, source_job_id, created_at
-                ) VALUES (?, 'topic_decision', ?, 1, 'adopted', ?, ?, 'topic', ?, ?, ?, ?)
+                ) VALUES (?, 'topic_decision', ?, ?, 'adopted', ?, ?, 'topic', ?, ?, ?, ?)
                 """,
                 (
-                    str(uuid.uuid4()), topic_id, canonical,
+                    str(uuid.uuid4()), topic_id, version, canonical,
                     hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
                     str(topic_id), actor_user_id, topic["job_id"], now,
                 ),
@@ -5716,19 +5793,31 @@ class CreativeRepository:
                 float(topic.get("updated_at") or 0)
                 if topic.get("status") != "pending_review" else -1.0
             )
-            if decision_updated_at >= float(current.get("_decision_updated_at") or -1.0):
-                current["status"] = topic.get("status") or "pending_review"
-                current["decision_note"] = topic.get("decision_note") or ""
+            if (
+                decision_updated_at >= 0
+                and decision_updated_at
+                >= float(current.get("_decision_updated_at") or -1.0)
+            ):
+                for field in (
+                    "id", "platform", "job_id", "source_path", "captured_at", "title",
+                    "description", "category", "rank_type", "status", "score",
+                    "confidence", "score_details", "recommendation", "decision_note",
+                    "created_at", "updated_at", "deleted", "locked_breakdown_id",
+                    "latest_breakdown_id", "latest_breakdown_version",
+                    "latest_breakdown_status",
+                ):
+                    current[field] = topic.get(field)
                 current["_decision_updated_at"] = decision_updated_at
             if current.get("confidence") != "high" and topic.get("confidence") == "high":
                 current["confidence"] = "high"
-            if not current.get("locked_breakdown_id") and topic.get("locked_breakdown_id"):
-                current["locked_breakdown_id"] = topic["locked_breakdown_id"]
-            if topic.get("latest_breakdown_id") and int(topic["latest_breakdown_id"]) > int(current.get("latest_breakdown_id") or 0):
-                current["id"] = topic["id"]
-                current["latest_breakdown_id"] = topic["latest_breakdown_id"]
-                current["latest_breakdown_version"] = topic.get("latest_breakdown_version")
-                current["latest_breakdown_status"] = topic.get("latest_breakdown_status")
+            if float(current.get("_decision_updated_at") or -1.0) < 0:
+                if not current.get("locked_breakdown_id") and topic.get("locked_breakdown_id"):
+                    current["locked_breakdown_id"] = topic["locked_breakdown_id"]
+                if topic.get("latest_breakdown_id") and int(topic["latest_breakdown_id"]) > int(current.get("latest_breakdown_id") or 0):
+                    current["id"] = topic["id"]
+                    current["latest_breakdown_id"] = topic["latest_breakdown_id"]
+                    current["latest_breakdown_version"] = topic.get("latest_breakdown_version")
+                    current["latest_breakdown_status"] = topic.get("latest_breakdown_status")
         for topic in merged.values():
             topic.pop("_decision_updated_at", None)
         return list(merged.values())

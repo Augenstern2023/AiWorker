@@ -255,6 +255,7 @@ window.aiworkerModules.push(() => ({
                         }
                         const titleKey = this.rankAdoptionTitleKey(item.title);
                         if (titleKey) this.rankAdoptedTitleKeys = {...this.rankAdoptedTitleKeys, [titleKey]: true};
+                        window.aiworkerUi?.invalidateCache('creative:topics:library:');
                         this.showAdoptionNotice(true, data.topic?.title || item.title, '已收录至选题库。');
                     } catch (error) {
                         this.showAdoptionNotice(false, item?.title || '', error.message || '收录接口错误，请稍后重试。');

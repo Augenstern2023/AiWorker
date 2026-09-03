@@ -231,6 +231,52 @@ def test_runner_executes_project_action_before_marking_it_succeeded(
     assert completed["result"]["project_id"] == 17
 
 
+def test_runner_captures_undo_before_action_and_finalizes_the_terminal_state(
+    runner_context,
+) -> None:
+    """Would catch a completed action whose project mutation cannot be undone."""
+
+    checkpoint = runner_context.store.begin_turn(
+        runner_context.session["id"],
+        runner_context.actor.user_id,
+        "runner-undo-message",
+        original_message={"message": "关联项目"},
+        content_hash="runner-undo-message",
+    )
+    action = runner_context.store.create_action(
+        session_id=runner_context.session["id"],
+        actor_user_id=runner_context.actor.user_id,
+        action_type="project.link",
+        project_id=17,
+        idempotency_key="runner-undo-action",
+        request_hash="runner-undo-action",
+        payload={},
+        expected_context={"session_revision": 0},
+        source_snapshot_id=None,
+        turn_checkpoint_id=checkpoint["id"],
+    )
+    runner_context.store.claim_pending_action(action["id"], expected_revision=1)
+    order = []
+    rollback_service = MagicMock()
+    rollback_service.prepare_action_undo.side_effect = (
+        lambda _action, _actor: order.append("prepare")
+    )
+    rollback_service.finalize_action_undo.side_effect = (
+        lambda _action, _actor: order.append("finalize")
+    )
+    runner_context.runner.rollback_service = rollback_service
+    runner_context.orchestrator.execute_project_action.side_effect = (
+        lambda _action_id, _actor: (
+            order.append("execute")
+            or {"project_id": 17, "name": "项目", "open_url": "/planning/projects/17/brief"}
+        )
+    )
+
+    runner_context.runner.run(action["id"], runner_context.actor)
+
+    assert order == ["prepare", "execute", "finalize"]
+
+
 def test_runner_materializes_a_confirmed_plan_when_no_steps_exist(
     runner_context,
 ) -> None:

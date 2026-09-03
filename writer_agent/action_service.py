@@ -729,6 +729,7 @@ def persist_proposed_actions(
     model_version: str = "writer-agent",
     prompt_version: str = "creative-v1",
     client_message_id: str | None = None,
+    turn_checkpoint_id: str | None = None,
 ) -> list[dict[str, Any]]:
     if not proposed_actions:
         return []
@@ -782,6 +783,7 @@ def persist_proposed_actions(
             payload=payload,
             expected_context=project_context,
             source_snapshot_id=saved_snapshot["id"],
+            turn_checkpoint_id=turn_checkpoint_id,
         ))
     return saved_actions
 

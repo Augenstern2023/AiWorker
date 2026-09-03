@@ -110,6 +110,15 @@ class CapturingProvider(FakeProvider):
         return await super().complete_json(messages)
 
 
+class CountingProvider(FakeProvider):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete_json(self, messages):
+        self.calls += 1
+        return await super().complete_json(messages)
+
+
 class CreativeProvider:
     async def complete_json(self, messages):
         return {
@@ -283,6 +292,104 @@ def _client(
         job_manager=job_manager,
     ))
     return TestClient(app)
+
+
+def test_chat_rollback_preview_and_endpoint_restore_the_selected_boundary(
+    tmp_path, monkeypatch
+) -> None:
+    """Would catch an API rollback that only hides the selected message."""
+
+    monkeypatch.setattr(writer_agent_api, "create_provider", FakeProvider)
+    client = _client(tmp_path)
+    session = client.post(
+        "/api/writer-agent/sessions", json={"content": "初始材料"}
+    ).json()
+    first = client.post(
+        f"/api/writer-agent/sessions/{session['id']}/messages",
+        json={"message": "第一轮", "message_id": "rollback-message-1"},
+    )
+    assert first.status_code == 200
+    second = client.post(
+        f"/api/writer-agent/sessions/{session['id']}/messages",
+        json={"message": "第二轮", "message_id": "rollback-message-2"},
+    )
+    assert second.status_code == 200
+    first_user = next(
+        item
+        for item in second.json()["messages"]
+        if item.get("message_id") == "rollback-message-1"
+    )
+    assert first_user["turn_controls"] == {
+        "can_rollback": True,
+        "can_resend": True,
+        "blocked_reason": "",
+    }
+
+    preview = client.get(
+        f"/api/writer-agent/sessions/{session['id']}/messages/"
+        "rollback-message-1/rollback-preview"
+    )
+    assert preview.status_code == 200
+    assert preview.json()["messages_to_remove"] == 4
+    rolled_back = client.post(
+        f"/api/writer-agent/sessions/{session['id']}/messages/"
+        "rollback-message-1/rollback",
+        json={
+            "client_request_id": "api-rollback-1",
+            "expected_history_revision": preview.json()["history_revision"],
+        },
+    )
+
+    assert rolled_back.status_code == 200
+    assert [item["kind"] for item in rolled_back.json()["messages"]] == [
+        "material"
+    ]
+    assert rolled_back.json()["reports"] == []
+
+
+def test_chat_resend_rolls_back_and_uses_a_new_message_id(
+    tmp_path, monkeypatch
+) -> None:
+    """Would catch resend replaying the old idempotent message claim."""
+
+    provider = CountingProvider()
+    monkeypatch.setattr(writer_agent_api, "create_provider", lambda: provider)
+    client = _client(tmp_path)
+    session = client.post(
+        "/api/writer-agent/sessions", json={"content": "初始材料"}
+    ).json()
+    first = client.post(
+        f"/api/writer-agent/sessions/{session['id']}/messages",
+        json={"message": "请分析第一幕", "message_id": "resend-old-id"},
+    ).json()
+    old_user_id = next(
+        item["message_id"]
+        for item in first["messages"]
+        if item.get("role") == "user" and item.get("content") == "请分析第一幕"
+    )
+    preview = client.get(
+        f"/api/writer-agent/sessions/{session['id']}/messages/"
+        "resend-old-id/rollback-preview"
+    ).json()
+
+    resent = client.post(
+        f"/api/writer-agent/sessions/{session['id']}/messages/"
+        "resend-old-id/resend",
+        json={
+            "client_request_id": "api-resend-1",
+            "expected_history_revision": preview["history_revision"],
+        },
+    )
+
+    assert resent.status_code == 200
+    user_messages = [
+        item
+        for item in resent.json()["messages"]
+        if item.get("role") == "user" and item.get("kind") != "material"
+    ]
+    assert [item["content"] for item in user_messages] == ["请分析第一幕"]
+    assert user_messages[0]["message_id"] != old_user_id
+    assert provider.calls == 2
 
 
 class _ProjectReviewJobs:

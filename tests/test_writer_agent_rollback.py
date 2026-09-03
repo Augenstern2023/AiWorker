@@ -168,3 +168,68 @@ def test_rollback_service_rejects_external_project_changes(tmp_path: Path) -> No
 
     assert exc.value.code == "ROLLBACK_CONFLICT"
     assert creative.get_project(session["project_id"])["name"] == "其他页面的新修改"
+
+
+def test_rollback_service_removes_a_project_created_by_the_turn(
+    tmp_path: Path,
+) -> None:
+    """Would catch rollback leaving a newly created project in project lists."""
+
+    store = WriterAgentStore(tmp_path / "writer-agent.db")
+    creative = CreativeRepository(tmp_path / "creative.db")
+    workflow = StableWorkflowRepository()
+    service = RollbackService(store, creative, workflow)
+    actor = SimpleNamespace(user_id="writer-1")
+    session = store.create("writer-1", "创建项目", "新项目会话")
+    checkpoint = store.begin_turn(
+        session["id"],
+        "writer-1",
+        "create-message",
+        original_message={"message": "创建原创项目"},
+        content_hash="create-message",
+    )
+    action = store.create_action(
+        session_id=session["id"],
+        actor_user_id="writer-1",
+        action_type="project.create_original",
+        project_id=None,
+        idempotency_key="create-action",
+        request_hash="create-action",
+        payload={},
+        expected_context={"session_revision": 0},
+        source_snapshot_id=None,
+        turn_checkpoint_id=checkpoint["id"],
+    )
+    service.prepare_action_undo(action, actor)
+    action = store.claim_pending_action(action["id"], expected_revision=1)
+    store.start_action(action["id"])
+    project = ready_project(creative)
+    store.bind_project(session["id"], project["id"], expected_context_revision=0)
+    store.record_action_result(action["id"], {"project_id": project["id"]})
+    terminal = store.finish_action(action["id"], status="succeeded")
+    service.finalize_action_undo(terminal, actor)
+    current = store.get(session["id"], "writer-1")
+    saved = store.save_turn(
+        session["id"],
+        "writer-1",
+        [
+            *current["messages"],
+            {"role": "user", "content": "创建原创项目", "message_id": "create-message"},
+            {"role": "assistant", "content": "已创建"},
+        ],
+        None,
+        client_message_id="create-message",
+    )
+    store.complete_turn(checkpoint["id"])
+
+    restored = service.rollback(
+        session["id"],
+        "create-message",
+        actor=actor,
+        mode="rollback",
+        client_request_id="rollback-create",
+        expected_history_revision=saved["history_revision"],
+    )
+
+    assert creative.get_project(project["id"]) is None
+    assert restored["project_id"] is None

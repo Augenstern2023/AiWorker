@@ -47,7 +47,11 @@ class RollbackService:
                 raise
 
         action_type = str(action.get("action_type") or "")
-        project_id = action.get("project_id")
+        project_id = action.get("project_id") or (
+            (action.get("result") or {}).get("project_id")
+            if isinstance(action.get("result"), dict)
+            else None
+        )
         if action_type == "project.create_original":
             preimage = {"kind": "new_project"}
             workflow_preimage: dict[str, Any] = {}
@@ -89,7 +93,11 @@ class RollbackService:
         if not checkpoint_id:
             return None
         undo = self.store.require_action_undo(str(action["id"]))
-        project_id = action.get("project_id")
+        project_id = action.get("project_id") or (
+            (action.get("result") or {}).get("project_id")
+            if isinstance(action.get("result"), dict)
+            else None
+        )
         kind = str(undo["preimage"].get("kind") or "")
         postcondition: dict[str, Any] = {"kind": kind}
         if kind in {"existing_project", "new_project"} and project_id is not None:

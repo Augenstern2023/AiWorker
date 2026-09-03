@@ -47,12 +47,14 @@ class WriterActionRunner:
         job_manager: JobManager,
         principal_loader: Callable[[str], Principal | None],
         audit_service: Any | None = None,
+        rollback_service: Any | None = None,
     ) -> None:
         self.store = store
         self.orchestrator = orchestrator
         self.job_manager = job_manager
         self.principal_loader = principal_loader
         self.audit_service = audit_service
+        self.rollback_service = rollback_service
         self._poll_event = threading.Event()
         self._owner_id = f"writer-runner-{uuid.uuid4().hex}"
         self._lease_seconds = 30.0
@@ -112,6 +114,8 @@ class WriterActionRunner:
         *,
         error_code: str | None = None,
     ) -> None:
+        if self.rollback_service is not None:
+            self.rollback_service.finalize_action_undo(action, actor)
         if self.audit_service is None:
             return
         record = getattr(self.audit_service, "record", None)
@@ -357,6 +361,10 @@ class WriterActionRunner:
                     raise
         elif action["status"] != "running":
             raise WriterActionError("ACTION_STATE_INVALID", "动作当前状态不可执行")
+
+        if self.rollback_service is not None:
+            current_actor = self._load_current_principal(action)
+            self.rollback_service.prepare_action_undo(action, current_actor)
 
         continued_project_action = bool(
             action["action_type"] == "project.create_original"

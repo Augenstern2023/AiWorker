@@ -59,6 +59,7 @@ from .project_review import (
     ProjectReviewError,
     long_project_review_scope,
 )
+from .rollback_service import RollbackService
 from .service import build_writer_report_markdown, is_review_request, normalize_writer_report, writer_messages
 from .store import WriterAgentStore
 
@@ -153,6 +154,11 @@ class ActionDecisionRequest(BaseModel):
 
 class ActionRetryRequest(BaseModel):
     client_request_id: str = Field(min_length=1, max_length=200)
+
+
+class TurnRollbackRequest(BaseModel):
+    client_request_id: str = Field(min_length=1, max_length=200)
+    expected_history_revision: int = Field(ge=0)
 
 
 class ProjectReviewPreviewRequest(BaseModel):
@@ -299,6 +305,11 @@ def build_writer_agent_router(
         if authority_repository is not None
         else None
     )
+    rollback_service = RollbackService(
+        store, authority_repository, workflow_repository
+    )
+    if runner is not None and hasattr(runner, "rollback_service"):
+        runner.rollback_service = rollback_service
 
     def assert_access(principal: Principal) -> None:
         if not principal.is_system_admin and "script.review.generate" not in principal.permissions:
@@ -322,6 +333,13 @@ def build_writer_agent_router(
             "ACTIVE_ACTION_CONFLICT": 409,
             "IDEMPOTENCY_KEY_REUSED": 409,
             "RESULT_VALIDATION_FAILED": 422,
+            "TURN_CHECKPOINT_NOT_FOUND": 404,
+            "TURN_ROLLBACK_UNSUPPORTED": 409,
+            "HISTORY_REVISION_MISMATCH": 409,
+            "ROLLBACK_BUSY": 409,
+            "ROLLBACK_CONFLICT": 409,
+            "ROLLBACK_PERMISSION_DENIED": 403,
+            "ROLLBACK_PARTIAL_FAILURE": 500,
         }.get(exc.code, 409)
         return HTTPException(
             status,
@@ -489,6 +507,47 @@ def build_writer_agent_router(
             if prior_message.get("content") != message:
                 raise HTTPException(409, "消息 ID 已用于不同内容")
             return session
+        turn_hash = hashlib.sha256(
+            json.dumps(
+                payload.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        checkpoint: dict[str, Any] | None = None
+
+        def ensure_checkpoint() -> dict[str, Any]:
+            nonlocal checkpoint
+            if checkpoint is None:
+                try:
+                    checkpoint = store.begin_turn(
+                        session_id,
+                        principal.user_id,
+                        message_id,
+                        original_message=payload.model_dump(mode="json"),
+                        content_hash=turn_hash,
+                    )
+                except WriterActionError as exc:
+                    raise action_error(exc) from exc
+            return checkpoint
+
+        def save_completed_turn(
+            messages: list[dict[str, Any]],
+            report: dict[str, Any] | None,
+            *,
+            claim_token: str | None = None,
+        ) -> dict[str, Any]:
+            saved = store.save_turn(
+                session_id,
+                owned_user_id(principal),
+                messages,
+                report,
+                client_message_id=message_id,
+                claim_token=claim_token,
+            )
+            store.complete_turn(ensure_checkpoint()["id"])
+            return store.get(session_id, owned_user_id(principal)) or saved
         if payload.link_project_id is not None:
             project_id = int(payload.link_project_id)
             try:
@@ -503,6 +562,7 @@ def build_writer_agent_router(
             expected_context = {
                 "session_revision": int(session.get("context_revision") or 0)
             }
+            turn = ensure_checkpoint()
             actions = persist_proposed_actions(
                 store,
                 session_id=session_id,
@@ -522,6 +582,7 @@ def build_writer_agent_router(
                 ],
                 project_context=expected_context,
                 client_message_id=message_id,
+                turn_checkpoint_id=turn["id"],
             )
             history.extend(
                 [
@@ -538,13 +599,7 @@ def build_writer_agent_router(
                     },
                 ]
             )
-            return store.save_turn(
-                session_id,
-                owned_user_id(principal),
-                history,
-                None,
-                client_message_id=message_id,
-            )
+            return save_completed_turn(history, None)
         long_review_scope = long_project_review_scope(message)
         if long_review_scope is not None:
             linked_project_id = session.get("project_id")
@@ -556,6 +611,7 @@ def build_writer_agent_router(
                 principal, str(linked_project_id)
             ):
                 raise HTTPException(403, "当前账号已无权读取关联项目")
+            ensure_checkpoint()
             history.extend([
                 {
                     "role": "user", "content": message,
@@ -568,10 +624,7 @@ def build_writer_agent_router(
                     "content": "已识别为完整项目审核，请先预检并确认当前项目快照。",
                 },
             ])
-            return store.save_turn(
-                session_id, owned_user_id(principal), history, None,
-                client_message_id=message_id,
-            )
+            return save_completed_turn(history, None)
         try:
             natural_decision = match_natural_language_decision(
                 message, store.list_session_actions(session_id)
@@ -579,9 +632,11 @@ def build_writer_agent_router(
         except WriterActionError as exc:
             raise action_error(exc) from exc
         if natural_decision.action_id and not natural_decision.revision_required:
+            turn = ensure_checkpoint()
             action = store.require_action(
                 natural_decision.action_id, owned_user_id(principal)
             )
+            action = store.assign_action_turn(action["id"], turn["id"])
             request_id = f"message:{session_id}:{action['id']}:{message_id}"
             try:
                 updated_action = require_action_service().decide(
@@ -615,13 +670,7 @@ def build_writer_agent_router(
                     },
                 ]
             )
-            return store.save_turn(
-                session_id,
-                owned_user_id(principal),
-                history,
-                None,
-                client_message_id=message_id,
-            )
+            return save_completed_turn(history, None)
         materials = _session_materials(session)
         current_material = materials[-1]
         review_requested = is_review_request(message)
@@ -650,14 +699,7 @@ def build_writer_agent_router(
         direction_required = requires_direction_card(
             materials, message, project_context
         )
-        claim_hash = hashlib.sha256(
-            json.dumps(
-                payload.model_dump(mode="json"),
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
+        claim_hash = turn_hash
         claim_token = uuid4().hex
         try:
             claim_state = store.claim_client_message(
@@ -695,6 +737,7 @@ def build_writer_agent_router(
             claim_token=claim_token,
         ):
             raise HTTPException(409, "消息处理租约已由其他请求接管")
+        turn = ensure_checkpoint()
         heartbeat_stop = _start_message_claim_heartbeat(
             store,
             session_id,
@@ -808,6 +851,7 @@ def build_writer_agent_router(
                     project_context=project_context,
                     reference_refs=reference_refs,
                     client_message_id=message_id,
+                    turn_checkpoint_id=turn["id"],
                 )
             except Exception:
                 heartbeat_stop.set()
@@ -840,13 +884,8 @@ def build_writer_agent_router(
             heartbeat_stop.set()
             raise HTTPException(409, "消息处理租约已由其他请求接管")
         try:
-            saved = store.save_turn(
-                session_id,
-                owned_user_id(principal),
-                history,
-                report,
-                client_message_id=message_id,
-                claim_token=claim_token,
+            saved = save_completed_turn(
+                history, report, claim_token=claim_token
             )
         except Exception:
             heartbeat_stop.set()
@@ -859,6 +898,83 @@ def build_writer_agent_router(
             raise
         heartbeat_stop.set()
         return saved
+
+    @router.get(
+        "/sessions/{session_id}/messages/{message_id}/rollback-preview"
+    )
+    async def preview_turn_rollback(
+        session_id: int,
+        message_id: str,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        assert_access(principal)
+        try:
+            return rollback_service.preview(
+                session_id,
+                message_id,
+                actor_user_id=owned_user_id(principal),
+            )
+        except WriterActionError as exc:
+            raise action_error(exc) from exc
+
+    @router.post(
+        "/sessions/{session_id}/messages/{message_id}/rollback"
+    )
+    async def rollback_turn(
+        session_id: int,
+        message_id: str,
+        payload: TurnRollbackRequest,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        assert_access(principal)
+        try:
+            return rollback_service.rollback(
+                session_id,
+                message_id,
+                actor=principal,
+                mode="rollback",
+                client_request_id=payload.client_request_id,
+                expected_history_revision=payload.expected_history_revision,
+            )
+        except WriterActionError as exc:
+            raise action_error(exc) from exc
+
+    @router.post("/sessions/{session_id}/messages/{message_id}/resend")
+    async def resend_turn(
+        session_id: int,
+        message_id: str,
+        payload: TurnRollbackRequest,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        assert_access(principal)
+        try:
+            checkpoint = store.require_turn(
+                session_id, message_id, owned_user_id(principal)
+            )
+            rollback_service.rollback(
+                session_id,
+                message_id,
+                actor=principal,
+                mode="resend",
+                client_request_id=payload.client_request_id,
+                expected_history_revision=payload.expected_history_revision,
+            )
+            original = dict(checkpoint.get("original_message") or {})
+            new_message_id = "message-resend-" + hashlib.sha256(
+                f"{session_id}:{payload.client_request_id}".encode("utf-8")
+            ).hexdigest()[:32]
+            original.update(
+                {
+                    "message_id": new_message_id,
+                    "client_message_id": None,
+                }
+            )
+            resend_payload = ChatRequest.model_validate(original)
+        except (ValueError, WriterActionError) as exc:
+            if isinstance(exc, WriterActionError):
+                raise action_error(exc) from exc
+            raise HTTPException(422, "原始消息无法重新发送") from exc
+        return await chat(session_id, resend_payload, principal)
 
     @router.post("/sessions/{session_id}/project-reviews/preview")
     async def preview_project_review(

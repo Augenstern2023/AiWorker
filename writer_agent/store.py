@@ -992,6 +992,37 @@ class WriterAgentStore:
         item["project_id"] = item.get("project_id")
         item["context_revision"] = int(item.get("context_revision") or 0)
         item["history_revision"] = int(item.get("history_revision") or 0)
+        with self._connect() as conn:
+            turn_rows = conn.execute(
+                "SELECT checkpoint.*, EXISTS("
+                "SELECT 1 FROM writer_agent_actions action "
+                "WHERE action.turn_checkpoint_id=checkpoint.id "
+                "AND action.status IN ('queued','running')) AS has_active_action "
+                "FROM writer_agent_turn_checkpoints checkpoint "
+                "WHERE checkpoint.session_id=?",
+                (int(item["id"]),),
+            ).fetchall()
+        turns = {
+            str(turn["user_message_id"]): turn for turn in turn_rows
+        }
+        decorated_messages: list[dict[str, Any]] = []
+        for raw_message in item["messages"]:
+            message = dict(raw_message)
+            turn = turns.get(str(message.get("message_id") or ""))
+            if turn is not None and message.get("role") == "user":
+                completed = turn["status"] == "completed"
+                active = bool(turn["has_active_action"])
+                message["turn_controls"] = {
+                    "can_rollback": completed and not active,
+                    "can_resend": completed and not active,
+                    "blocked_reason": (
+                        "相关创作任务仍在运行"
+                        if active
+                        else "" if completed else "该轮对话尚未完成"
+                    ),
+                }
+            decorated_messages.append(message)
+        item["messages"] = decorated_messages
         item["actions"] = self.list_session_actions(int(item["id"]))
         return item
 
@@ -1347,6 +1378,28 @@ class WriterAgentStore:
             ).fetchall()
         return self._action_view(action, [self._step_row(row) for row in steps])
 
+    def assign_action_turn(
+        self, action_id: str, turn_checkpoint_id: str
+    ) -> dict[str, Any]:
+        """Attribute a naturally confirmed action to the confirming chat turn."""
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = self._require_action_conn(conn, action_id)
+            if row["turn_checkpoint_id"] == turn_checkpoint_id:
+                return self._action_row(row)
+            if row["status"] != "pending":
+                raise WriterActionError(
+                    "ACTION_NOT_PENDING", "动作已不在待确认状态"
+                )
+            conn.execute(
+                "UPDATE writer_agent_actions SET turn_checkpoint_id=?, "
+                "revision=revision+1, updated_at=? WHERE id=? AND status='pending'",
+                (turn_checkpoint_id, time.time(), action_id),
+            )
+            row = self._require_action_conn(conn, action_id)
+        return self._action_row(row)
+
     def revise_action(self, action_id: str, *, expected_revision: int, payload: dict[str, Any] | None = None, expected_context: dict[str, Any] | None = None, phase: str | None = None) -> dict[str, Any]:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -1626,7 +1679,11 @@ class WriterAgentStore:
 
     def list_session_actions(self, session_id: int) -> list[dict[str, Any]]:
         with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM writer_agent_actions WHERE session_id=? ORDER BY created_at", (session_id,)).fetchall()
+            rows = conn.execute(
+                "SELECT * FROM writer_agent_actions WHERE session_id=? "
+                "AND status<>'rolled_back' ORDER BY created_at",
+                (session_id,),
+            ).fetchall()
             actions = [self._action_row(row) for row in rows]
             steps_by_action = {
                 str(action["id"]): [

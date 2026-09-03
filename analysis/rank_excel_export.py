@@ -52,11 +52,12 @@ def build_rank_workbook(
     root: str | Path = ".",
     hongguo_exports_root: str | Path | None = None,
     output_dir: str | Path = ".runtime/rank-excel",
+    rank_service: TodayRankService | None = None,
 ) -> Path:
     platform = platform.strip().lower()
     if platform not in {"dy", "hg"}:
         raise ValueError("platform must be dy or hg")
-    service = TodayRankService(root=root, hongguo_exports_root=hongguo_exports_root)
+    service = rank_service or TodayRankService.from_environment(root=root)
     snapshots = service.list_snapshots(platform)
     selected = service._select_snapshot(snapshots, report_date)
     if selected is None:

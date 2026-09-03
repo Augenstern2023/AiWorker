@@ -26,7 +26,11 @@ from identity.schema import Principal
 
 def test_weekly_report_api_lists_detail_and_exports(tmp_path):
     _write_complete_week(tmp_path)
-    service = WeeklyReportService(root=tmp_path, runtime_dir=tmp_path / ".runtime")
+    service = WeeklyReportService(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        rank_service=TodayRankService.from_files(root=tmp_path),
+    )
     generated = service.generate_latest("dy", as_of=datetime(2026, 8, 10, 23, 59), with_llm=False)
     app = FastAPI()
     principal = Principal("admin", "admin", "管理员", ("system_admin",), frozenset({"*"}), "all", "session")
@@ -67,7 +71,7 @@ def test_weekly_report_api_backfills_new_complete_week_before_listing(tmp_path, 
         build_analytics_router(
             root=tmp_path,
             runtime_dir=tmp_path / ".runtime",
-            rank_service=TodayRankService(root=tmp_path),
+            rank_service=TodayRankService.from_files(root=tmp_path),
         )
     )
     monkeypatch.setattr(
@@ -92,7 +96,7 @@ def test_weekly_report_api_marks_repeated_unchanged_reads_as_cache_hits(tmp_path
         build_analytics_router(
             root=tmp_path,
             runtime_dir=tmp_path / ".runtime",
-            rank_service=TodayRankService(root=tmp_path),
+            rank_service=TodayRankService.from_files(root=tmp_path),
         )
     )
     monkeypatch.setattr("analysis.weekly_report_service.datetime", _FixedDateTime)
@@ -144,7 +148,11 @@ def test_weekly_report_cache_rechecks_sources_after_a_week_becomes_complete(tmp_
                 ),
                 encoding="utf-8",
             )
-    service = WeeklyReportService(root=tmp_path, runtime_dir=tmp_path / ".runtime")
+    service = WeeklyReportService(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        rank_service=TodayRankService.from_files(root=tmp_path),
+    )
 
     friday_reports = service.list_reports(
         platform="dy", as_of=datetime(2026, 8, 28, 18, 0)
@@ -163,7 +171,13 @@ def test_legacy_sync_all_endpoint_is_not_exposed(tmp_path):
     principal = Principal("admin", "admin", "管理员", ("system_admin",), frozenset({"*"}), "all", "session")
     app.dependency_overrides[current_principal] = lambda: principal
     app.dependency_overrides[permission_service_for_request] = lambda: None
-    app.include_router(build_analytics_router(root=tmp_path, runtime_dir=tmp_path / ".runtime"))
+    app.include_router(
+        build_analytics_router(
+            root=tmp_path,
+            runtime_dir=tmp_path / ".runtime",
+            rank_service=TodayRankService.from_files(root=tmp_path),
+        )
+    )
 
     assert TestClient(app).post("/api/analytics/sync-all", json={"platforms": ["dy", "hg"]}).status_code == 404
 

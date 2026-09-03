@@ -13,12 +13,14 @@ from io import BytesIO, StringIO
 import json
 from pathlib import Path
 import sqlite3
+from unittest.mock import patch
 from urllib.parse import unquote
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
+from analysis.today_rank_service import TodayRankService
 from core.job import CrawlJob
 from creative.api import creative_api_principal, register_creative_routes
 from creative.lifecycle_service import content_fingerprint, current_beats_content
@@ -59,7 +61,17 @@ def build_client(tmp_path: Path) -> tuple[TestClient, CreativeRepository, Lifecy
     )
     app.dependency_overrides[creative_api_principal] = lambda: principal
     app.dependency_overrides[current_principal] = lambda: principal
-    register_creative_routes(app, root=tmp_path, runtime_dir=runtime_dir, job_manager=manager)
+    with patch.object(
+        TodayRankService,
+        "from_environment",
+        return_value=TodayRankService.from_files(root=tmp_path),
+    ):
+        register_creative_routes(
+            app,
+            root=tmp_path,
+            runtime_dir=runtime_dir,
+            job_manager=manager,
+        )
     return TestClient(app), CreativeRepository(runtime_dir / "creative" / "creative.db"), manager
 
 
@@ -305,7 +317,10 @@ def test_generating_today_hits_returns_only_unadopted_recommendations(
 def test_topic_service_filters_hongguo_source_and_joins_duplicate_board_names(
     tmp_path: Path,
 ):
-    service = TopicService(root=str(tmp_path))
+    service = TopicService(
+        root=str(tmp_path),
+        rank_service=TodayRankService.from_files(root=tmp_path),
+    )
     response = {
         "date": "2026-08-18",
         "selected_snapshot": {
@@ -360,7 +375,10 @@ def test_topic_service_filters_hongguo_source_and_joins_duplicate_board_names(
 def test_topic_service_filters_douyin_source_and_keeps_cross_board_provenance(
     tmp_path: Path,
 ):
-    service = TopicService(root=str(tmp_path))
+    service = TopicService(
+        root=str(tmp_path),
+        rank_service=TodayRankService.from_files(root=tmp_path),
+    )
     response = {
         "date": "2026-08-18",
         "selected_snapshot": {

@@ -18,6 +18,22 @@ window.aiworkerModules.push(() => ({
                         && (this.todayRankDate || '') === date;
                 },
 
+                notifyMissingTodayRank(data, requestedPlatform, requestedDate) {
+                    if (requestedDate || data?.has_today_snapshot !== false || !data?.business_date) return;
+                    const key = `${requestedPlatform}:${data.business_date}`;
+                    if (this.todayRankMissingNoticeKeys?.[key]) return;
+                    this.todayRankMissingNoticeKeys = {
+                        ...(this.todayRankMissingNoticeKeys || {}),
+                        [key]: true
+                    };
+                    const platformName = requestedPlatform === 'hg' ? '红果' : '抖音';
+                    window.aiworkerUi?.showToast({
+                        kind: 'warning',
+                        title: '今日榜单尚未入库',
+                        message: `${platformName}今日榜单暂无 PostgreSQL 数据，请先抓取。`
+                    });
+                },
+
                 async fetchTodayRank(forceRefresh = false) {
                     const requestedPlatform = this.todayRankPlatform || 'dy';
                     const requestedDate = this.todayRankDate || '';
@@ -27,6 +43,7 @@ window.aiworkerModules.push(() => ({
                     if (!forceRefresh && cached) {
                         this.todayRankLoading = false;
                         this.applyTodayRankData(cached, requestedPlatform);
+                        this.notifyMissingTodayRank(cached, requestedPlatform, requestedDate);
                         return cached;
                     }
                     this.todayRankLoading = true;
@@ -86,6 +103,7 @@ window.aiworkerModules.push(() => ({
                             return;
                         }
                         this.applyTodayRankData(data, requestedPlatform);
+                        this.notifyMissingTodayRank(data, requestedPlatform, requestedDate);
                         return data;
                     } catch (e) {
                         if (this.todayRankCacheVersion?.[cacheKey] !== requestVersion) return;

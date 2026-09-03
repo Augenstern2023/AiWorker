@@ -22,8 +22,10 @@ def test_today_rank_ignores_stale_response_after_platform_change():
     script = textwrap.dedent(
         f"""
         const pending = [];
+        const toasts = [];
         global.window = {{
             aiworkerModules: [],
+            aiworkerUi: {{showToast(payload) {{ toasts.push(payload); }}}},
             addEventListener() {{}},
             dispatchEvent() {{}},
             location: {{hash: ''}},
@@ -60,12 +62,18 @@ def test_today_rank_ignores_stale_response_after_platform_change():
 
             pending[1].resolve({{
                 ok: true,
-                json: async () => ({{platform: 'hg', date: '2026-08-21', available_dates: []}})
+                json: async () => ({{
+                    platform: 'hg', date: '2026-08-21', available_dates: [],
+                    business_date: '2026-08-22', has_today_snapshot: true
+                }})
             }});
             await hongguoRequest;
             pending[0].resolve({{
                 ok: true,
-                json: async () => ({{platform: 'dy', date: '2026-08-20', available_dates: []}})
+                json: async () => ({{
+                    platform: 'dy', date: '2026-08-20', available_dates: [],
+                    business_date: '2026-08-22', has_today_snapshot: false
+                }})
             }});
             await douyinRequest;
 
@@ -74,6 +82,9 @@ def test_today_rank_ignores_stale_response_after_platform_change():
             }}
             if (state.todayRankLoading) {{
                 throw new Error('loading state was not cleared for the current request');
+            }}
+            if (toasts.length !== 0) {{
+                throw new Error('stale response displayed a missing-today toast');
             }}
         }})().catch(error => {{
             console.error(error.message);
@@ -98,8 +109,10 @@ def test_today_rank_reuses_platform_cache_and_force_refresh_bypasses_it():
     script = textwrap.dedent(
         f"""
         const requests = [];
+        const toasts = [];
         global.window = {{
             aiworkerModules: [],
+            aiworkerUi: {{showToast(payload) {{ toasts.push(payload); }}}},
             addEventListener() {{}},
             dispatchEvent() {{}},
             location: {{hash: ''}},
@@ -116,7 +129,9 @@ def test_today_rank_reuses_platform_cache_and_force_refresh_bypasses_it():
                     json: async () => ({{
                         platform,
                         date: platform === 'dy' ? '2026-08-26' : '2026-08-27',
-                        available_dates: []
+                        available_dates: [],
+                        business_date: '2026-08-28',
+                        has_today_snapshot: false
                     }})
                 }};
             }}
@@ -151,6 +166,9 @@ def test_today_rank_reuses_platform_cache_and_force_refresh_bypasses_it():
             if (state.todayRankData?.platform !== 'dy') {{
                 throw new Error('cached Douyin data was not restored');
             }}
+            if (toasts.length !== 2) {{
+                throw new Error(`missing-today toast was not deduplicated: ${{toasts.length}}`);
+            }}
 
             await methods.fetchTodayRank.call(state, true);
             if (requests.length !== 3) {{
@@ -159,10 +177,66 @@ def test_today_rank_reuses_platform_cache_and_force_refresh_bypasses_it():
             if (!new URL(requests[2], 'http://localhost').searchParams.has('refresh')) {{
                 throw new Error('force refresh was not forwarded to the server');
             }}
+            if (toasts.length !== 2) {{
+                throw new Error('force refresh repeated the same-day toast');
+            }}
         }})().catch(error => {{
             console.error(error.message);
             process.exitCode = 1;
         }});
+        """
+    )
+
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_today_rank_missing_notice_ignores_history_and_existing_today_snapshot():
+    module_path = json.dumps((ROOT / "static/js/selection/ranks.js").as_posix())
+    script = textwrap.dedent(
+        f"""
+        const toasts = [];
+        global.window = {{
+            aiworkerModules: [],
+            aiworkerUi: {{showToast(payload) {{ toasts.push(payload); }}}},
+            addEventListener() {{}}, dispatchEvent() {{}},
+            location: {{hash: ''}}, setTimeout
+        }};
+        global.document = {{addEventListener() {{}}, hidden: false}};
+        global.Event = function Event() {{}};
+        require({module_path});
+
+        const methods = window.aiworkerModules[0]();
+        const state = {{...methods, todayRankMissingNoticeKeys: {{}}}};
+        const missing = {{
+            platform: 'hg', date: '2026-09-02',
+            business_date: '2026-09-03', has_today_snapshot: false
+        }};
+
+        methods.notifyMissingTodayRank.call(state, missing, 'hg', '');
+        methods.notifyMissingTodayRank.call(state, missing, 'hg', '');
+        methods.notifyMissingTodayRank.call(state, missing, 'hg', '2026-09-02');
+        methods.notifyMissingTodayRank.call(state, {{
+            ...missing, has_today_snapshot: true
+        }}, 'hg', '');
+
+        if (toasts.length !== 1) {{
+            throw new Error(`missing-today toast count is invalid: ${{toasts.length}}`);
+        }}
+        if (
+            toasts[0].kind !== 'warning'
+            || toasts[0].title !== '今日榜单尚未入库'
+            || toasts[0].message !== '红果今日榜单暂无 PostgreSQL 数据，请先抓取。'
+        ) {{
+            throw new Error('missing-today toast content is invalid');
+        }}
         """
     )
 

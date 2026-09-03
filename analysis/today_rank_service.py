@@ -177,6 +177,7 @@ class _LegacyRankEngine:
         self._source_revision_checked_at: dict[str, float] = {}
         self._hongguo_raw_index: dict[str, dict[str, Any]] | None = None
         self._hongguo_raw_index_dirty = False
+        self.disk_response_cache_enabled = True
 
     def get_today_rank(
         self,
@@ -420,6 +421,8 @@ class _LegacyRankEngine:
         date: str,
         limit: int,
     ) -> dict[str, Any] | None:
+        if not self.disk_response_cache_enabled:
+            return None
         path = self._response_cache_path(platform, date, limit)
         try:
             cached = json.loads(path.read_text(encoding="utf-8"))
@@ -437,6 +440,8 @@ class _LegacyRankEngine:
         limit: int,
         response: dict[str, Any],
     ) -> None:
+        if not self.disk_response_cache_enabled:
+            return
         path = self._response_cache_path(platform, date, limit)
         _write_json_atomically(
             path,
@@ -893,21 +898,45 @@ class TodayRankService(_LegacyRankEngine):
         hongguo_exports_root: str | Path | None = None,
         cache_dir: str | Path | None = None,
         snapshot_source: RankSnapshotSource | None = None,
+        *,
+        disk_response_cache_enabled: bool = False,
     ) -> None:
         super().__init__(
             root=root,
             hongguo_exports_root=hongguo_exports_root,
             cache_dir=cache_dir,
         )
+        self.disk_response_cache_enabled = disk_response_cache_enabled
         if snapshot_source is None:
-            from analysis.rank_file_source import RankFileSource
+            from analysis.rank_repository import RankRepository
+            from system_database import SystemDatabase, SystemDatabaseSettings
 
-            snapshot_source = RankFileSource(
-                root=self.root,
-                hongguo_exports_root=self.hongguo_exports_root,
-                cache_dir=self.cache_dir,
-            )
+            database = SystemDatabase(SystemDatabaseSettings.from_environment())
+            snapshot_source = RankRepository(database)
+            self._owned_database = database
         self.snapshot_source = snapshot_source
+
+    @classmethod
+    def from_files(
+        cls,
+        root: str | Path = ".",
+        hongguo_exports_root: str | Path | None = None,
+        cache_dir: str | Path | None = None,
+    ) -> "TodayRankService":
+        from analysis.rank_file_source import RankFileSource
+
+        source = RankFileSource(
+            root=root,
+            hongguo_exports_root=hongguo_exports_root,
+            cache_dir=cache_dir,
+        )
+        return cls(
+            root=root,
+            hongguo_exports_root=hongguo_exports_root,
+            cache_dir=cache_dir,
+            snapshot_source=source,
+            disk_response_cache_enabled=True,
+        )
 
     @classmethod
     def from_environment(
@@ -923,6 +952,7 @@ class TodayRankService(_LegacyRankEngine):
             root=root,
             cache_dir=cache_dir,
             snapshot_source=RankRepository(database),
+            disk_response_cache_enabled=False,
         )
         service._owned_database = database
         return service

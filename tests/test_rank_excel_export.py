@@ -13,6 +13,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 
 from analysis.rank_excel_export import build_rank_workbook
+from analysis.today_rank_service import TodayRankService
 
 
 EXPECTED_FRONTEND_HEADERS = [
@@ -26,7 +27,13 @@ def test_build_douyin_workbook_uses_one_sheet_per_frontend_ranking(tmp_path):
     _write_douyin_snapshot(tmp_path, "old", "2026-09-01", "旧榜单剧", "旧热榜剧")
     _write_douyin_snapshot(tmp_path, "new", "2026-09-02", "新榜单剧", "新热榜剧")
 
-    output = build_rank_workbook("dy", "2026-09-02", root=tmp_path, output_dir=tmp_path / "exports")
+    output = build_rank_workbook(
+        "dy",
+        "2026-09-02",
+        root=tmp_path,
+        output_dir=tmp_path / "exports",
+        rank_service=TodayRankService.from_files(root=tmp_path),
+    )
     workbook = load_workbook(output, data_only=False)
 
     assert output.name == "2026-09-02抖音榜单.xlsx"
@@ -49,6 +56,10 @@ def test_build_hongguo_workbook_uses_one_sheet_per_section_and_ranking(tmp_path)
         root=tmp_path,
         hongguo_exports_root=exports,
         output_dir=tmp_path / "exports",
+        rank_service=TodayRankService.from_files(
+            root=tmp_path,
+            hongguo_exports_root=exports,
+        ),
     )
     workbook = load_workbook(output, data_only=False)
 
@@ -77,10 +88,38 @@ def test_build_rank_workbook_keeps_all_rows_beyond_frontend_page_limit(tmp_path)
         encoding="utf-8",
     )
 
-    output = build_rank_workbook("dy", "2026-09-02", root=tmp_path, output_dir=tmp_path / "exports")
+    output = build_rank_workbook(
+        "dy",
+        "2026-09-02",
+        root=tmp_path,
+        output_dir=tmp_path / "exports",
+        rank_service=TodayRankService.from_files(root=tmp_path),
+    )
     workbook = load_workbook(output, data_only=False)
 
     assert workbook["榜单"].max_row == 61
+
+
+def test_build_rank_workbook_accepts_an_explicit_rank_service(tmp_path):
+    _write_douyin_snapshot(
+        tmp_path,
+        "database-fixture",
+        "2026-09-02",
+        "注入的榜单剧",
+        "注入的热榜剧",
+    )
+    rank_service = TodayRankService.from_files(root=tmp_path)
+
+    output = build_rank_workbook(
+        "dy",
+        "2026-09-02",
+        root=tmp_path,
+        output_dir=tmp_path / "exports",
+        rank_service=rank_service,
+    )
+    workbook = load_workbook(output, data_only=False)
+
+    assert workbook["榜单"][2][1].value == "注入的榜单剧"
 
 
 def _write_douyin_snapshot(root: Path, job: str, date: str, ranking_title: str, heat_title: str) -> None:

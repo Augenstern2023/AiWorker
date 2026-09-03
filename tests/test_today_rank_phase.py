@@ -45,7 +45,7 @@ def test_today_rank_compares_douyin_snapshots(tmp_path):
         },
     )
 
-    data = TodayRankService(root=tmp_path).get_today_rank("dy")
+    data = TodayRankService.from_files(root=tmp_path).get_today_rank("dy")
 
     assert data["date"] == "2026-07-02"
     assert data["available_dates"] == ["2026-07-02", "2026-07-01"]
@@ -76,7 +76,7 @@ def test_today_rank_splits_douyin_tabs_without_changing_heat_count(tmp_path):
         {"captured_at": "2026-07-02 10:00:00", "records": ranking_records + heat_records + duplicated_heat_records},
     )
 
-    data = TodayRankService(root=tmp_path).get_today_rank("dy", limit=20)
+    data = TodayRankService.from_files(root=tmp_path).get_today_rank("dy", limit=20)
     sections = {section["key"]: section for section in data["sections"]}
 
     assert [section["key"] for section in data["sections"]] == ["榜单", "热榜"]
@@ -110,7 +110,7 @@ def test_today_rank_normalizes_hongguo_nested_records(tmp_path):
         },
     )
 
-    data = TodayRankService(root=tmp_path).get_today_rank("hg")
+    data = TodayRankService.from_files(root=tmp_path).get_today_rank("hg")
 
     assert data["summary"]["current_count"] == 1
     assert data["summary"]["previous_count"] == 0
@@ -138,7 +138,7 @@ def test_today_rank_douyin_heat_falls_back_to_analysis_and_tags(tmp_path):
         },
     )
 
-    data = TodayRankService(root=tmp_path).get_today_rank("dy")
+    data = TodayRankService.from_files(root=tmp_path).get_today_rank("dy")
     item = data["new_entries"][0]
 
     assert item["heat"] == 12345
@@ -154,7 +154,7 @@ def test_today_rank_douyin_missing_heat_is_not_zero(tmp_path):
         {"captured_at": "2026-07-02 10:00:00", "records": [dy_record(1, "A", "s1", heat_text="")]},
     )
 
-    data = TodayRankService(root=tmp_path).get_today_rank("dy")
+    data = TodayRankService.from_files(root=tmp_path).get_today_rank("dy")
     item = data["new_entries"][0]
 
     assert item["heat"] is None
@@ -178,7 +178,7 @@ def test_today_rank_logs_import_and_data_quality_audit(tmp_path):
     handler = CaptureHandler()
     logger.addHandler(handler)
     try:
-        TodayRankService(root=tmp_path).get_today_rank("dy")
+        TodayRankService.from_files(root=tmp_path).get_today_rank("dy")
     finally:
         logger.removeHandler(handler)
 
@@ -196,7 +196,7 @@ def test_today_rank_douyin_tags_fall_back_from_rank_text(tmp_path):
         {"captured_at": "2026-07-02 10:00:00", "records": [record]},
     )
 
-    data = TodayRankService(root=tmp_path).get_today_rank("dy")
+    data = TodayRankService.from_files(root=tmp_path).get_today_rank("dy")
     item = data["new_entries"][0]
 
     assert item["topic_tags"]
@@ -214,7 +214,7 @@ def test_today_rank_douyin_tags_fall_back_from_title_when_description_is_generic
         {"captured_at": "2026-07-02 10:00:00", "records": [record]},
     )
 
-    data = TodayRankService(root=tmp_path).get_today_rank("dy")
+    data = TodayRankService.from_files(root=tmp_path).get_today_rank("dy")
     item = data["new_entries"][0]
 
     assert item["topic_tags"] == ["虐恋", "豪门", "身份反转"]
@@ -234,7 +234,7 @@ def test_today_rank_hongguo_category_mapping_and_favorite_missing(tmp_path):
         },
     )
 
-    data = TodayRankService(root=tmp_path).get_today_rank("hg")
+    data = TodayRankService.from_files(root=tmp_path).get_today_rank("hg")
     items = data["new_entries"]
 
     assert [item["category_label"] for item in items] == ["短剧", "漫剧", "漫剧"]
@@ -282,7 +282,7 @@ def test_today_rank_hongguo_favorite_fallbacks_and_tags(tmp_path):
         },
     )
 
-    data = TodayRankService(root=tmp_path).get_today_rank("hg")
+    data = TodayRankService.from_files(root=tmp_path).get_today_rank("hg")
     item = data["new_entries"][0]
 
     assert item["favorite_count"] == 321
@@ -326,7 +326,7 @@ def test_today_rank_hongguo_comment_zero_is_missing_but_detail_count_is_used(tmp
         },
     )
 
-    data = TodayRankService(root=tmp_path).get_today_rank("hg")
+    data = TodayRankService.from_files(root=tmp_path).get_today_rank("hg")
     items = data["new_entries"]
 
     assert items[0]["comment_count"] is None
@@ -381,7 +381,7 @@ def test_today_rank_hongguo_limits_business_scope_to_short_and_comic_top10(tmp_p
         {"captured_at": "2026-07-02 09:16:52", "records": records},
     )
 
-    data = TodayRankService(root=tmp_path).get_today_rank("hg", limit=30)
+    data = TodayRankService.from_files(root=tmp_path).get_today_rank("hg", limit=30)
 
     assert data["summary"]["current_count"] == 20
     assert data["summary"]["new_count"] == 20
@@ -409,7 +409,7 @@ def test_today_rank_reads_hongguo_csv_exports(tmp_path):
         ],
     )
 
-    data = TodayRankService(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", limit=10)
+    data = TodayRankService.from_files(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", limit=10)
 
     assert data["date"] == "2026-07-08"
     assert data["available_dates"] == ["2026-07-08", "2026-07-07"]
@@ -432,7 +432,7 @@ def test_today_rank_reads_date_from_suffixed_hongguo_export_directory(tmp_path):
         [["红果短剧热播榜", "1", "历史导出剧", "都市", "", "无", "无", "1w", "无", "100w", "无", "无", "无", "无", "无", ""]],
     )
 
-    data = TodayRankService(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", limit=10)
+    data = TodayRankService.from_files(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", limit=10)
 
     assert data["date"] == "2026-07-13"
     assert data["available_dates"] == ["2026-07-13"]
@@ -463,7 +463,7 @@ def test_today_rank_merges_hongguo_json_history_with_newer_csv_export(tmp_path):
         [["红果短剧热播榜", "1", "今日剧", "都市", "", "无", "无", "1w", "无", "100w", "无", "无", "无", "无", "无", ""]],
     )
 
-    data = TodayRankService(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", limit=10)
+    data = TodayRankService.from_files(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", limit=10)
 
     assert data["available_dates"] == ["2026-07-08", "2026-07-07"]
     assert data["previous_snapshot"]["date"] == "2026-07-07"
@@ -495,7 +495,7 @@ def test_today_rank_prefers_hongguo_csv_export_over_import_on_same_date(tmp_path
         [["红果短剧热播榜", "1", "CSV权威剧", "都市", "", "无", "无", "1w", "无", "100w", "无", "无", "无", "无", "无", ""]],
     )
 
-    data = TodayRankService(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", limit=10)
+    data = TodayRankService.from_files(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", limit=10)
 
     assert data["available_dates"] == ["2026-07-08"]
     assert data["current_entries"][0]["title"] == "CSV权威剧"
@@ -511,7 +511,7 @@ def test_today_rank_returns_dynamic_columns_for_each_rank_table(tmp_path):
         ],
     )
 
-    data = TodayRankService(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", limit=10)
+    data = TodayRankService.from_files(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", limit=10)
     ranking = data["sections"][0]["rankings"][0]
 
     assert [column["key"] for column in ranking["columns"]["current"]] == [
@@ -531,7 +531,7 @@ def test_today_rank_dynamic_columns_include_zero_and_all_csv_fields(tmp_path):
         ],
     )
 
-    data = TodayRankService(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", limit=10)
+    data = TodayRankService.from_files(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", limit=10)
     ranking = data["sections"][0]["rankings"][0]
     column_keys = [column["key"] for column in ranking["columns"]["current"]]
 
@@ -570,7 +570,7 @@ def test_today_rank_compares_hongguo_csv_by_section_and_rank_list(tmp_path):
         ],
     )
 
-    data = TodayRankService(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", limit=10)
+    data = TodayRankService.from_files(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", limit=10)
 
     sections = {section["label"]: section for section in data["sections"]}
     assert list(sections) == ["全部", "真人剧", "漫剧", "AI剧"]
@@ -604,7 +604,7 @@ def test_today_rank_hongguo_csv_ignores_board_level_unavailable_favorite(tmp_pat
         ],
     )
 
-    data = TodayRankService(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", limit=10)
+    data = TodayRankService.from_files(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", limit=10)
 
     assert data["validation"]["missing_favorite_count"] == 1
     sections = {section["label"]: section for section in data["sections"]}
@@ -644,7 +644,7 @@ def test_today_rank_reads_sparse_hongguo_history_csv_with_flow_metadata(tmp_path
         ),
     )
 
-    data = TodayRankService(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", date="2026-08-05", limit=10)
+    data = TodayRankService.from_files(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", date="2026-08-05", limit=10)
 
     assert data["summary"]["current_count"] == 3
     sections = {section["label"]: section for section in data["sections"]}
@@ -694,7 +694,7 @@ def test_today_rank_enriches_sparse_hongguo_history_csv_from_raw_mitm_response(t
         },
     )
 
-    data = TodayRankService(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", date="2026-07-31", limit=10)
+    data = TodayRankService.from_files(root=tmp_path, hongguo_exports_root=exports).get_today_rank("hg", date="2026-07-31", limit=10)
 
     sections = {section["label"]: section for section in data["sections"]}
     hot = next(item for item in sections["全部"]["rankings"] if item["label"] == "热播榜")
@@ -712,9 +712,9 @@ def test_today_rank_reuses_persistent_hongguo_cache_until_sources_change(tmp_pat
         [["红果短剧热播榜", "1", "缓存剧", "都市", "简介", "无", "无", "1w", "无", "100w", "无", "无", "无", "无", "无", ""]],
     )
     cache_dir = tmp_path / ".runtime" / "rank-cache"
-    first_service = TodayRankService(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir)
+    first_service = TodayRankService.from_files(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir)
     first = first_service.get_today_rank("hg", limit=10)
-    restarted = TodayRankService(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir)
+    restarted = TodayRankService.from_files(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir)
 
     def fail_list_snapshots(*_args, **_kwargs):
         raise AssertionError("unchanged Hongguo sources must load the persistent response cache")
@@ -730,7 +730,7 @@ def test_today_rank_reuses_persistent_hongguo_cache_until_sources_change(tmp_pat
         exports / "20260708/top10_rankings.csv",
         [["红果短剧热播榜", "1", "更新剧", "都市", "简介", "无", "无", "1w", "无", "100w", "无", "无", "无", "无", "无", ""]],
     )
-    changed = TodayRankService(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir).get_today_rank("hg", limit=10)
+    changed = TodayRankService.from_files(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir).get_today_rank("hg", limit=10)
 
     assert changed["current_entries"][0]["title"] == "更新剧"
     assert changed["cache_status"] == "generated"
@@ -751,9 +751,9 @@ def test_today_rank_reuses_persistent_douyin_cache_until_sources_change(
         },
     )
     cache_dir = tmp_path / ".runtime" / "rank-cache"
-    first_service = TodayRankService(root=tmp_path, cache_dir=cache_dir)
+    first_service = TodayRankService.from_files(root=tmp_path, cache_dir=cache_dir)
     first = first_service.get_today_rank("dy")
-    restarted = TodayRankService(root=tmp_path, cache_dir=cache_dir)
+    restarted = TodayRankService.from_files(root=tmp_path, cache_dir=cache_dir)
 
     def fail_list_snapshots(*_args, **_kwargs):
         raise AssertionError("unchanged Douyin sources must load the persistent cache")
@@ -772,7 +772,7 @@ def test_today_rank_reuses_persistent_douyin_cache_until_sources_change(
             "records": [dy_record(1, "更新剧", "cache-series")],
         },
     )
-    changed = TodayRankService(root=tmp_path, cache_dir=cache_dir).get_today_rank(
+    changed = TodayRankService.from_files(root=tmp_path, cache_dir=cache_dir).get_today_rank(
         "dy"
     )
 
@@ -789,7 +789,7 @@ def test_today_rank_force_refresh_rebuilds_unchanged_cached_response(tmp_path):
             "records": [dy_record(1, "强制刷新剧", "refresh-series")],
         },
     )
-    service = TodayRankService(root=tmp_path)
+    service = TodayRankService.from_files(root=tmp_path)
 
     first = service.get_today_rank("dy")
     refreshed = service.get_today_rank("dy", force_refresh=True)
@@ -809,7 +809,7 @@ def test_today_rank_memory_cache_ttl_starts_after_slow_generation(
             "records": [dy_record(1, "慢生成剧", "slow-series")],
         },
     )
-    service = TodayRankService(root=tmp_path)
+    service = TodayRankService.from_files(root=tmp_path)
     clock = {"now": 100.0}
     revision_calls = 0
     original_source_revision = service._source_revision
@@ -849,7 +849,7 @@ def test_today_rank_source_change_invalidates_all_platform_memory_keys(tmp_path)
             "records": [dy_record(1, "旧缓存剧", "cache-series")],
         },
     )
-    service = TodayRankService(root=tmp_path)
+    service = TodayRankService.from_files(root=tmp_path)
     service.get_today_rank("dy", limit=10)
     service.get_today_rank("dy", limit=5)
     write_json(
@@ -875,7 +875,7 @@ def test_today_rank_normalizes_and_validates_date_before_caching(tmp_path):
             "records": [dy_record(1, "日期剧", "date-series")],
         },
     )
-    service = TodayRankService(root=tmp_path)
+    service = TodayRankService.from_files(root=tmp_path)
 
     normalized = service.get_today_rank("dy", date=" 2026-07-08 ")
 
@@ -887,7 +887,7 @@ def test_today_rank_normalizes_and_validates_date_before_caching(tmp_path):
 def test_today_rank_cache_write_is_safe_for_concurrent_same_key(
     tmp_path, monkeypatch
 ):
-    service = TodayRankService(root=tmp_path)
+    service = TodayRankService.from_files(root=tmp_path)
     observed_temporary_paths = []
     observed_paths_lock = threading.Lock()
     original_replace = type(tmp_path).replace
@@ -929,7 +929,7 @@ def test_today_rank_hongguo_cache_is_scoped_by_date_and_limit(tmp_path):
                 for index, title in enumerate(titles, start=1)
             ],
         )
-    service = TodayRankService(root=tmp_path, hongguo_exports_root=exports, cache_dir=tmp_path / ".runtime" / "rank-cache")
+    service = TodayRankService.from_files(root=tmp_path, hongguo_exports_root=exports, cache_dir=tmp_path / ".runtime" / "rank-cache")
 
     latest_one = service.get_today_rank("hg", limit=1)
     history_two = service.get_today_rank("hg", date="2026-07-07", limit=2)
@@ -947,7 +947,7 @@ def test_today_rank_cache_hit_skips_raw_source_revision_scan(tmp_path, monkeypat
         exports / "20260708/top10_rankings.csv",
         [["红果短剧热播榜", "1", "进程缓存剧", "都市", "简介", "无", "无", "1w", "无", "100w", "无", "无", "无", "无", "无", ""]],
     )
-    service = TodayRankService(root=tmp_path, hongguo_exports_root=exports, cache_dir=tmp_path / ".runtime" / "rank-cache")
+    service = TodayRankService.from_files(root=tmp_path, hongguo_exports_root=exports, cache_dir=tmp_path / ".runtime" / "rank-cache")
     service.get_today_rank("hg", limit=10)
 
     def fail_revision():
@@ -969,10 +969,10 @@ def test_hongguo_cache_revision_ignores_unrelated_raw_response_files(tmp_path):
     unrelated = tmp_path / "raw" / "mitm_responses_20260708" / "unrelated.json"
     write_json(unrelated, {"series_id": "not-ranked", "title": "无关剧"})
     cache_dir = tmp_path / ".runtime" / "rank-cache"
-    TodayRankService(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir).get_today_rank("hg", limit=10)
+    TodayRankService.from_files(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir).get_today_rank("hg", limit=10)
     unrelated.write_text('{"series_id":"not-ranked","title":"已变化但仍无关"}', encoding="utf-8")
 
-    cached = TodayRankService(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir).get_today_rank("hg", limit=10)
+    cached = TodayRankService.from_files(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir).get_today_rank("hg", limit=10)
 
     assert cached["cache_status"] == "hit"
 
@@ -990,10 +990,10 @@ def test_hongguo_cache_revision_tracks_raw_metadata_for_sparse_exports(tmp_path)
     raw = tmp_path / "raw" / "mitm_responses_20260731" / "response.json"
     write_json(raw, {"series_id": "series-raw", "title": "初始剧名", "video_desc": "简介", "sub_title_list": [{"content": "玄幻"}]})
     cache_dir = tmp_path / ".runtime" / "rank-cache"
-    first = TodayRankService(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir).get_today_rank("hg", limit=10)
+    first = TodayRankService.from_files(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir).get_today_rank("hg", limit=10)
     write_json(raw, {"series_id": "series-raw", "title": "更新剧名", "video_desc": "简介", "sub_title_list": [{"content": "玄幻"}]})
 
-    changed = TodayRankService(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir).get_today_rank("hg", limit=10)
+    changed = TodayRankService.from_files(root=tmp_path, hongguo_exports_root=exports, cache_dir=cache_dir).get_today_rank("hg", limit=10)
 
     assert first["current_entries"][0]["title"] == "初始剧名"
     assert changed["current_entries"][0]["title"] == "更新剧名"
@@ -1026,7 +1026,7 @@ def test_hongguo_cache_revision_tracks_raw_cover_for_complete_exports(tmp_path):
         },
     )
     cache_dir = tmp_path / ".runtime" / "rank-cache"
-    first = TodayRankService(
+    first = TodayRankService.from_files(
         root=tmp_path,
         hongguo_exports_root=exports,
         cache_dir=cache_dir,
@@ -1040,7 +1040,7 @@ def test_hongguo_cache_revision_tracks_raw_cover_for_complete_exports(tmp_path):
         },
     )
 
-    changed = TodayRankService(
+    changed = TodayRankService.from_files(
         root=tmp_path,
         hongguo_exports_root=exports,
         cache_dir=cache_dir,
@@ -1075,7 +1075,7 @@ def test_hongguo_persistent_raw_index_skips_unchanged_file_reads(
         },
     )
     cache_dir = tmp_path / ".runtime" / "rank-cache"
-    first = TodayRankService(
+    first = TodayRankService.from_files(
         root=tmp_path,
         hongguo_exports_root=exports,
         cache_dir=cache_dir,
@@ -1088,7 +1088,7 @@ def test_hongguo_persistent_raw_index_skips_unchanged_file_reads(
         return original_read_text(path, *args, **kwargs)
 
     monkeypatch.setattr(type(tmp_path), "read_text", reject_unchanged_raw_read)
-    cached = TodayRankService(
+    cached = TodayRankService.from_files(
         root=tmp_path,
         hongguo_exports_root=exports,
         cache_dir=cache_dir,
@@ -1104,7 +1104,7 @@ def test_today_rank_date_filter_and_missing_previous(tmp_path):
         {"captured_at": "2026-07-02 10:00:00", "records": [dy_record(1, "A", "s1")]},
     )
 
-    data = TodayRankService(root=tmp_path).get_today_rank("dy", date="2026-07-02")
+    data = TodayRankService.from_files(root=tmp_path).get_today_rank("dy", date="2026-07-02")
 
     assert data["summary"]["previous_count"] == 0
     assert data["summary"]["new_count"] == 1
@@ -1123,7 +1123,7 @@ def test_today_rank_counts_uninterrupted_and_same_day_snapshots_once(tmp_path):
             {"captured_at": captured_at, "records": [dy_record(1, "连续剧", "series-a")]},
         )
 
-    data = TodayRankService(root=tmp_path).get_today_rank("dy")
+    data = TodayRankService.from_files(root=tmp_path).get_today_rank("dy")
     entry = data["current_entries"][0]
 
     assert entry["continuous_rank_days"] == 2
@@ -1143,7 +1143,7 @@ def test_today_rank_explicit_absence_resets_continuous_but_preserves_cumulative(
             {"captured_at": f"{date} 09:00:00", "records": records},
         )
 
-    data = TodayRankService(root=tmp_path).get_today_rank("dy")
+    data = TodayRankService.from_files(root=tmp_path).get_today_rank("dy")
     entry = data["current_entries"][0]
 
     assert entry["continuous_rank_days"] == 1
@@ -1166,8 +1166,8 @@ def test_today_rank_duration_counts_only_dates_present_in_rank_csv_files(tmp_pat
             {"captured_at": f"{date} 09:00:00", "records": records},
         )
 
-    current = TodayRankService(root=tmp_path).get_today_rank("dy")
-    historical = TodayRankService(root=tmp_path).get_today_rank("dy", date="2026-07-01")
+    current = TodayRankService.from_files(root=tmp_path).get_today_rank("dy")
+    historical = TodayRankService.from_files(root=tmp_path).get_today_rank("dy", date="2026-07-01")
 
     assert current["current_entries"][0]["continuous_rank_days"] == 1
     assert current["current_entries"][0]["cumulative_rank_days"] == 2
@@ -1183,7 +1183,7 @@ def test_today_rank_duration_uses_longest_recorded_streak_and_skips_weekends(tmp
             {"captured_at": f"{date} 09:00:00", "records": [dy_record(1, "连续剧", "series-a")]},
         )
 
-    entry = TodayRankService(root=tmp_path).get_today_rank("dy")["current_entries"][0]
+    entry = TodayRankService.from_files(root=tmp_path).get_today_rank("dy")["current_entries"][0]
 
     assert entry["continuous_rank_days"] == 3
     assert entry["cumulative_rank_days"] == 6
@@ -1197,7 +1197,7 @@ def test_today_rank_duration_keeps_a_friday_to_monday_streak(tmp_path):
             {"captured_at": f"{date} 09:00:00", "records": [dy_record(1, "周末不断榜", "series-a")]},
         )
 
-    entry = TodayRankService(root=tmp_path).get_today_rank("dy")["current_entries"][0]
+    entry = TodayRankService.from_files(root=tmp_path).get_today_rank("dy")["current_entries"][0]
 
     assert entry["continuous_rank_days"] == 6
     assert entry["cumulative_rank_days"] == 6
@@ -1205,7 +1205,7 @@ def test_today_rank_duration_keeps_a_friday_to_monday_streak(tmp_path):
 
 def test_today_rank_invalid_platform(tmp_path):
     with pytest.raises(ValueError):
-        TodayRankService(root=tmp_path).get_today_rank("xhs")
+        TodayRankService.from_files(root=tmp_path).get_today_rank("xhs")
 
 
 def test_webgui_registers_today_rank_route():

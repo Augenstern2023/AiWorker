@@ -19,7 +19,9 @@ import uuid
 from .schema import WriterActionError
 
 
-_ACTION_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled", "expired"})
+_ACTION_TERMINAL_STATUSES = frozenset(
+    {"succeeded", "failed", "cancelled", "expired", "rolled_back"}
+)
 _STEP_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled", "blocked"})
 
 
@@ -67,6 +69,7 @@ class WriterAgentStore:
             self._migrate_sessions(conn)
             self._create_action_tables(conn)
             self._migrate_actions(conn)
+            self._create_rollback_tables(conn)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30)
@@ -83,6 +86,7 @@ class WriterAgentStore:
             ("reports_json", "ALTER TABLE writer_agent_sessions ADD COLUMN reports_json TEXT NOT NULL DEFAULT '[]'"),
             ("project_id", "ALTER TABLE writer_agent_sessions ADD COLUMN project_id INTEGER"),
             ("context_revision", "ALTER TABLE writer_agent_sessions ADD COLUMN context_revision INTEGER NOT NULL DEFAULT 0"),
+            ("history_revision", "ALTER TABLE writer_agent_sessions ADD COLUMN history_revision INTEGER NOT NULL DEFAULT 0"),
         ):
             if name not in columns:
                 conn.execute(statement)
@@ -176,6 +180,56 @@ class WriterAgentStore:
                 "ALTER TABLE writer_agent_message_claims "
                 "ADD COLUMN claim_token TEXT"
             )
+        if "turn_checkpoint_id" not in self._columns(
+            conn, "writer_agent_actions"
+        ):
+            conn.execute(
+                "ALTER TABLE writer_agent_actions "
+                "ADD COLUMN turn_checkpoint_id TEXT"
+            )
+
+    @staticmethod
+    def _create_rollback_tables(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS writer_agent_turn_checkpoints ("
+            "id TEXT PRIMARY KEY, session_id INTEGER NOT NULL, "
+            "actor_user_id TEXT NOT NULL, user_message_id TEXT NOT NULL, "
+            "turn_sequence INTEGER NOT NULL, message_count_before INTEGER NOT NULL, "
+            "report_count_before INTEGER NOT NULL, "
+            "session_snapshot_json TEXT NOT NULL, "
+            "original_message_json TEXT NOT NULL, content_hash TEXT NOT NULL, "
+            "status TEXT NOT NULL, created_at REAL NOT NULL, "
+            "completed_at REAL, rolled_back_at REAL, "
+            "UNIQUE(session_id, user_message_id), "
+            "UNIQUE(session_id, turn_sequence))"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_writer_turns_session_sequence "
+            "ON writer_agent_turn_checkpoints(session_id, turn_sequence)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS writer_agent_action_undo ("
+            "action_id TEXT PRIMARY KEY, turn_checkpoint_id TEXT NOT NULL, "
+            "project_id INTEGER, preimage_json TEXT NOT NULL DEFAULT '{}', "
+            "workflow_preimage_json TEXT NOT NULL DEFAULT '{}', "
+            "postcondition_json TEXT NOT NULL DEFAULT '{}', "
+            "status TEXT NOT NULL, created_at REAL NOT NULL, "
+            "updated_at REAL NOT NULL, compensated_at REAL)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS writer_agent_rollbacks ("
+            "id TEXT PRIMARY KEY, session_id INTEGER NOT NULL, "
+            "actor_user_id TEXT NOT NULL, checkpoint_id TEXT NOT NULL, "
+            "mode TEXT NOT NULL, client_request_id TEXT NOT NULL, "
+            "expected_history_revision INTEGER NOT NULL, "
+            "stage TEXT NOT NULL, result_json TEXT, error_code TEXT, "
+            "error_message TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL, "
+            "completed_at REAL, UNIQUE(actor_user_id, client_request_id))"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_writer_rollbacks_session "
+            "ON writer_agent_rollbacks(session_id, created_at DESC)"
+        )
 
     def create(self, user_id: str, content: str, title: str = "", filename: str = "") -> dict[str, Any]:
         now = time.time()
@@ -214,7 +268,8 @@ class WriterAgentStore:
             )
             conn.execute(
                 "UPDATE writer_agent_sessions SET content=?, messages_json=?, "
-                "context_revision=context_revision+1, updated_at=? WHERE id=?",
+                "context_revision=context_revision+1, "
+                "history_revision=history_revision+1, updated_at=? WHERE id=?",
                 (combined, _json(messages), time.time(), session_id),
             )
         return self.get(session_id, user_id) or {}
@@ -238,6 +293,380 @@ class WriterAgentStore:
                 () if actor_user_id is None else (actor_user_id,),
             ).fetchall()
         return [self._row(row) for row in rows]
+
+    def begin_turn(
+        self,
+        session_id: int,
+        actor_user_id: str,
+        user_message_id: str,
+        *,
+        original_message: dict[str, Any],
+        content_hash: str,
+    ) -> dict[str, Any]:
+        """Persist the exact conversation boundary before a client turn."""
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            session = conn.execute(
+                "SELECT * FROM writer_agent_sessions WHERE id=? AND user_id=?",
+                (session_id, actor_user_id),
+            ).fetchone()
+            if session is None:
+                raise WriterActionError(
+                    "PROJECT_NOT_AVAILABLE", "创作会话不存在或无权访问"
+                )
+            existing = conn.execute(
+                "SELECT * FROM writer_agent_turn_checkpoints "
+                "WHERE session_id=? AND user_message_id=?",
+                (session_id, user_message_id),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["content_hash"]) != str(content_hash):
+                    raise WriterActionError(
+                        "IDEMPOTENCY_KEY_REUSED", "消息 ID 已用于不同内容"
+                    )
+                return self._turn_row(existing)
+            messages = _decode(session["messages_json"] or "[]", [])
+            reports = _decode(session["reports_json"] or "[]", [])
+            next_sequence = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(turn_sequence), 0) + 1 "
+                    "FROM writer_agent_turn_checkpoints WHERE session_id=?",
+                    (session_id,),
+                ).fetchone()[0]
+            )
+            checkpoint_id = f"turn-{uuid.uuid4().hex}"
+            now = time.time()
+            session_snapshot = {
+                "project_id": session["project_id"],
+                "context_revision": int(session["context_revision"] or 0),
+                "history_revision": int(session["history_revision"] or 0),
+                "report": _decode(session["report_json"] or "{}", {}),
+            }
+            conn.execute(
+                "INSERT INTO writer_agent_turn_checkpoints "
+                "(id,session_id,actor_user_id,user_message_id,turn_sequence,"
+                "message_count_before,report_count_before,session_snapshot_json,"
+                "original_message_json,content_hash,status,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    checkpoint_id,
+                    session_id,
+                    actor_user_id,
+                    user_message_id,
+                    next_sequence,
+                    len(messages),
+                    len(reports),
+                    _json(session_snapshot),
+                    _json(original_message),
+                    content_hash,
+                    "open",
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM writer_agent_turn_checkpoints WHERE id=?",
+                (checkpoint_id,),
+            ).fetchone()
+        return self._turn_row(row)
+
+    def complete_turn(self, checkpoint_id: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM writer_agent_turn_checkpoints WHERE id=?",
+                (checkpoint_id,),
+            ).fetchone()
+            if row is None:
+                raise WriterActionError(
+                    "TURN_CHECKPOINT_NOT_FOUND", "对话检查点不存在"
+                )
+            if row["status"] == "open":
+                conn.execute(
+                    "UPDATE writer_agent_turn_checkpoints SET status='completed', "
+                    "completed_at=? WHERE id=? AND status='open'",
+                    (time.time(), checkpoint_id),
+                )
+                row = conn.execute(
+                    "SELECT * FROM writer_agent_turn_checkpoints WHERE id=?",
+                    (checkpoint_id,),
+                ).fetchone()
+        return self._turn_row(row)
+
+    def require_turn(
+        self,
+        session_id: int,
+        user_message_id: str,
+        actor_user_id: str | None,
+    ) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM writer_agent_turn_checkpoints "
+                "WHERE session_id=? AND user_message_id=?"
+                if actor_user_id is None
+                else "SELECT * FROM writer_agent_turn_checkpoints "
+                "WHERE session_id=? AND user_message_id=? AND actor_user_id=?",
+                (session_id, user_message_id)
+                if actor_user_id is None
+                else (session_id, user_message_id, actor_user_id),
+            ).fetchone()
+        if row is None:
+            raise WriterActionError(
+                "TURN_CHECKPOINT_NOT_FOUND", "该消息没有可用的回档检查点"
+            )
+        return self._turn_row(row)
+
+    def list_turns_from(self, checkpoint_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            checkpoint = conn.execute(
+                "SELECT session_id,turn_sequence FROM "
+                "writer_agent_turn_checkpoints WHERE id=?",
+                (checkpoint_id,),
+            ).fetchone()
+            if checkpoint is None:
+                raise WriterActionError(
+                    "TURN_CHECKPOINT_NOT_FOUND", "对话检查点不存在"
+                )
+            rows = conn.execute(
+                "SELECT * FROM writer_agent_turn_checkpoints "
+                "WHERE session_id=? AND turn_sequence>=? ORDER BY turn_sequence",
+                (checkpoint["session_id"], checkpoint["turn_sequence"]),
+            ).fetchall()
+        return [self._turn_row(row) for row in rows]
+
+    def begin_rollback(
+        self,
+        session_id: int,
+        actor_user_id: str,
+        checkpoint_id: str,
+        *,
+        mode: str,
+        client_request_id: str,
+        expected_history_revision: int,
+    ) -> tuple[dict[str, Any], bool]:
+        if mode not in {"rollback", "resend"}:
+            raise WriterActionError(
+                "RESULT_VALIDATION_FAILED", "回档模式无效"
+            )
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT * FROM writer_agent_rollbacks "
+                "WHERE actor_user_id=? AND client_request_id=?",
+                (actor_user_id, client_request_id),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    int(existing["session_id"]) != int(session_id)
+                    or str(existing["checkpoint_id"]) != str(checkpoint_id)
+                    or str(existing["mode"]) != mode
+                ):
+                    raise WriterActionError(
+                        "IDEMPOTENCY_KEY_REUSED",
+                        "回档请求 ID 已用于不同操作",
+                    )
+                return self._rollback_row(existing), False
+            session = conn.execute(
+                "SELECT * FROM writer_agent_sessions WHERE id=? AND user_id=?",
+                (session_id, actor_user_id),
+            ).fetchone()
+            if session is None:
+                raise WriterActionError(
+                    "PROJECT_NOT_AVAILABLE", "创作会话不存在或无权访问"
+                )
+            checkpoint = conn.execute(
+                "SELECT * FROM writer_agent_turn_checkpoints "
+                "WHERE id=? AND session_id=? AND actor_user_id=?",
+                (checkpoint_id, session_id, actor_user_id),
+            ).fetchone()
+            if checkpoint is None:
+                raise WriterActionError(
+                    "TURN_CHECKPOINT_NOT_FOUND", "对话检查点不存在"
+                )
+            current_revision = int(session["history_revision"] or 0)
+            if current_revision != int(expected_history_revision):
+                raise WriterActionError(
+                    "HISTORY_REVISION_MISMATCH",
+                    "对话历史已变化，请刷新后重试",
+                    current_revision=current_revision,
+                )
+            rollback_id = f"rollback-{uuid.uuid4().hex}"
+            now = time.time()
+            conn.execute(
+                "INSERT INTO writer_agent_rollbacks "
+                "(id,session_id,actor_user_id,checkpoint_id,mode,"
+                "client_request_id,expected_history_revision,stage,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    rollback_id,
+                    session_id,
+                    actor_user_id,
+                    checkpoint_id,
+                    mode,
+                    client_request_id,
+                    expected_history_revision,
+                    "requested",
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM writer_agent_rollbacks WHERE id=?",
+                (rollback_id,),
+            ).fetchone()
+        return self._rollback_row(row), True
+
+    def advance_rollback(
+        self, rollback_id: str, stage: str, **updates: Any
+    ) -> dict[str, Any]:
+        allowed = {
+            "requested",
+            "jobs_settled",
+            "validated",
+            "creative_restored",
+            "workflow_restored",
+            "conversation_restored",
+            "completed",
+        }
+        if stage not in allowed:
+            raise ValueError("unknown rollback stage")
+        fields: dict[str, Any] = {"stage": stage, "updated_at": time.time()}
+        for key in ("result_json", "error_code", "error_message"):
+            if key in updates:
+                fields[key] = (
+                    _json(updates[key])
+                    if key == "result_json" and updates[key] is not None
+                    else updates[key]
+                )
+        if stage == "completed":
+            fields["completed_at"] = time.time()
+        assignments = ", ".join(f"{key}=?" for key in fields)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                f"UPDATE writer_agent_rollbacks SET {assignments} WHERE id=?",
+                (*fields.values(), rollback_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM writer_agent_rollbacks WHERE id=?",
+                (rollback_id,),
+            ).fetchone()
+        if row is None:
+            raise WriterActionError("TURN_CHECKPOINT_NOT_FOUND", "回档请求不存在")
+        return self._rollback_row(row)
+
+    def restore_conversation(self, rollback_id: str) -> dict[str, Any]:
+        """Restore session-visible state only after external stores are settled."""
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rollback = conn.execute(
+                "SELECT * FROM writer_agent_rollbacks WHERE id=?", (rollback_id,)
+            ).fetchone()
+            if rollback is None:
+                raise WriterActionError(
+                    "TURN_CHECKPOINT_NOT_FOUND", "回档请求不存在"
+                )
+            session_id = int(rollback["session_id"])
+            actor_user_id = str(rollback["actor_user_id"])
+            if rollback["stage"] == "completed":
+                pass
+            else:
+                checkpoint = conn.execute(
+                    "SELECT * FROM writer_agent_turn_checkpoints WHERE id=?",
+                    (rollback["checkpoint_id"],),
+                ).fetchone()
+                session = conn.execute(
+                    "SELECT * FROM writer_agent_sessions WHERE id=? AND user_id=?",
+                    (session_id, actor_user_id),
+                ).fetchone()
+                if checkpoint is None or session is None:
+                    raise WriterActionError(
+                        "TURN_CHECKPOINT_NOT_FOUND", "回档目标已不存在"
+                    )
+                snapshot = _decode(checkpoint["session_snapshot_json"], {})
+                messages = _decode(session["messages_json"] or "[]", [])[
+                    : int(checkpoint["message_count_before"])
+                ]
+                reports = _decode(session["reports_json"] or "[]", [])[
+                    : int(checkpoint["report_count_before"])
+                ]
+                latest_report = (
+                    reports[-1].get("report")
+                    if reports
+                    else snapshot.get("report") or {}
+                )
+                now = time.time()
+                conn.execute(
+                    "UPDATE writer_agent_sessions SET messages_json=?, "
+                    "report_json=?, reports_json=?, project_id=?, "
+                    "context_revision=?, history_revision=history_revision+1, "
+                    "updated_at=? WHERE id=?",
+                    (
+                        _json(messages),
+                        _json(latest_report),
+                        _json(reports),
+                        snapshot.get("project_id"),
+                        int(snapshot.get("context_revision") or 0),
+                        now,
+                        session_id,
+                    ),
+                )
+                conn.execute(
+                    "UPDATE writer_agent_actions SET status='rolled_back', "
+                    "phase='rolled_back', revision=revision+1, updated_at=?, "
+                    "finished_at=COALESCE(finished_at, ?) "
+                    "WHERE turn_checkpoint_id IN ("
+                    "SELECT id FROM writer_agent_turn_checkpoints "
+                    "WHERE session_id=? AND turn_sequence>=?) "
+                    "AND status<>'rolled_back'",
+                    (
+                        now,
+                        now,
+                        session_id,
+                        int(checkpoint["turn_sequence"]),
+                    ),
+                )
+                conn.execute(
+                    "UPDATE writer_agent_turn_checkpoints "
+                    "SET status=CASE WHEN id=? THEN 'rolled_back' "
+                    "ELSE 'superseded' END, rolled_back_at=? "
+                    "WHERE session_id=? AND turn_sequence>=?",
+                    (
+                        checkpoint["id"],
+                        now,
+                        session_id,
+                        int(checkpoint["turn_sequence"]),
+                    ),
+                )
+                result = {
+                    "session_id": session_id,
+                    "history_revision": int(session["history_revision"] or 0)
+                    + 1,
+                }
+                conn.execute(
+                    "UPDATE writer_agent_rollbacks SET stage='completed', "
+                    "result_json=?, updated_at=?, completed_at=? WHERE id=?",
+                    (_json(result), now, now, rollback_id),
+                )
+        return self.get(session_id, actor_user_id) or {}
+
+    @staticmethod
+    def _turn_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["session_snapshot"] = _decode(
+            item.pop("session_snapshot_json"), {}
+        )
+        item["original_message"] = _decode(
+            item.pop("original_message_json"), {}
+        )
+        return item
+
+    @staticmethod
+    def _rollback_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["result"] = _decode(item.pop("result_json"), None)
+        return item
 
     def save_turn(
         self,
@@ -338,7 +767,8 @@ class WriterAgentStore:
             if turn_messages:
                 conn.execute(
                     "UPDATE writer_agent_sessions SET messages_json=?, report_json=?, "
-                    "reports_json=?, updated_at=? WHERE id=?",
+                    "reports_json=?, history_revision=history_revision+1, "
+                    "updated_at=? WHERE id=?",
                     (
                         _json(persisted_messages),
                         _json(latest_report),
@@ -398,7 +828,8 @@ class WriterAgentStore:
                     "message_id": f"project-review:{review_id}",
                 })
                 conn.execute(
-                    "UPDATE writer_agent_sessions SET messages_json=?, updated_at=? WHERE id=?",
+                    "UPDATE writer_agent_sessions SET messages_json=?, "
+                    "history_revision=history_revision+1, updated_at=? WHERE id=?",
                     (_json(messages), time.time(), session_id),
                 )
         return self.get(session_id, user_id) or {}
@@ -542,7 +973,9 @@ class WriterAgentStore:
             if current != expected_context_revision:
                 raise WriterActionError("STALE_PROJECT_CONTEXT", "会话上下文已变化", current_revision=current)
             changed = conn.execute(
-                "UPDATE writer_agent_sessions SET project_id=?, context_revision=?, updated_at=? WHERE id=? AND context_revision=?",
+                "UPDATE writer_agent_sessions SET project_id=?, context_revision=?, "
+                "history_revision=history_revision+1, updated_at=? "
+                "WHERE id=? AND context_revision=?",
                 (project_id, current + 1, time.time(), session_id, current),
             ).rowcount
             if changed != 1:
@@ -558,6 +991,7 @@ class WriterAgentStore:
             item["reports"] = [{"id": "report-1", "created_at": item["updated_at"], "report": item["report"]}]
         item["project_id"] = item.get("project_id")
         item["context_revision"] = int(item.get("context_revision") or 0)
+        item["history_revision"] = int(item.get("history_revision") or 0)
         item["actions"] = self.list_session_actions(int(item["id"]))
         return item
 

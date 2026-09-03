@@ -20,6 +20,129 @@ from writer_agent.schema import WriterActionError
 from writer_agent.store import WriterAgentStore
 
 
+def test_turn_checkpoint_is_idempotent_and_captures_the_pre_message_boundary(
+    tmp_path: Path,
+) -> None:
+    """Would catch a model turn starting without a durable recovery boundary."""
+
+    store = WriterAgentStore(tmp_path / "writer-agent.db")
+    session = store.create("writer-1", "原始材料", "回档测试")
+
+    checkpoint = store.begin_turn(
+        session["id"],
+        "writer-1",
+        "message-1",
+        original_message={
+            "message": "重写第一幕",
+            "display_user_message": True,
+        },
+        content_hash="hash-1",
+    )
+    replay = store.begin_turn(
+        session["id"],
+        "writer-1",
+        "message-1",
+        original_message={
+            "message": "重写第一幕",
+            "display_user_message": True,
+        },
+        content_hash="hash-1",
+    )
+
+    assert checkpoint["message_count_before"] == 1
+    assert checkpoint["report_count_before"] == 0
+    assert checkpoint["status"] == "open"
+    assert replay["id"] == checkpoint["id"]
+    with pytest.raises(WriterActionError) as exc:
+        store.begin_turn(
+            session["id"],
+            "writer-1",
+            "message-1",
+            original_message={"message": "另一条内容"},
+            content_hash="hash-2",
+        )
+    assert exc.value.code == "IDEMPOTENCY_KEY_REUSED"
+
+
+def test_restore_conversation_returns_to_checkpoint_and_replays_once(
+    tmp_path: Path,
+) -> None:
+    """Would catch rollback hiding messages without restoring reports and binding."""
+
+    store = WriterAgentStore(tmp_path / "writer-agent.db")
+    session = store.create("writer-1", "原始材料", "回档测试")
+    checkpoint = store.begin_turn(
+        session["id"],
+        "writer-1",
+        "message-1",
+        original_message={"message": "第一轮", "display_user_message": True},
+        content_hash="hash-1",
+    )
+    first = store.save_turn(
+        session["id"],
+        "writer-1",
+        [
+            *session["messages"],
+            {"role": "user", "content": "第一轮", "message_id": "message-1"},
+            {"role": "assistant", "content": "第一轮答复"},
+        ],
+        {"summary": "第一份报告"},
+        client_message_id="message-1",
+    )
+    store.complete_turn(checkpoint["id"])
+    second_checkpoint = store.begin_turn(
+        session["id"],
+        "writer-1",
+        "message-2",
+        original_message={"message": "第二轮", "display_user_message": True},
+        content_hash="hash-2",
+    )
+    second = store.save_turn(
+        session["id"],
+        "writer-1",
+        [
+            *first["messages"],
+            {"role": "user", "content": "第二轮", "message_id": "message-2"},
+            {"role": "assistant", "content": "第二轮答复"},
+        ],
+        {"summary": "第二份报告"},
+        client_message_id="message-2",
+    )
+    store.complete_turn(second_checkpoint["id"])
+    rollback, created = store.begin_rollback(
+        session["id"],
+        "writer-1",
+        checkpoint["id"],
+        mode="rollback",
+        client_request_id="rollback-1",
+        expected_history_revision=second["history_revision"],
+    )
+
+    assert created is True
+    restored = store.restore_conversation(rollback["id"])
+    replay, replay_created = store.begin_rollback(
+        session["id"],
+        "writer-1",
+        checkpoint["id"],
+        mode="rollback",
+        client_request_id="rollback-1",
+        expected_history_revision=second["history_revision"],
+    )
+
+    assert [item["kind"] for item in restored["messages"]] == ["material"]
+    assert restored["reports"] == []
+    assert restored["report"] == {}
+    assert restored["history_revision"] == second["history_revision"] + 1
+    assert store.require_turn(
+        session["id"], "message-1", "writer-1"
+    )["status"] == "rolled_back"
+    assert store.require_turn(
+        session["id"], "message-2", "writer-1"
+    )["status"] == "superseded"
+    assert replay_created is False
+    assert replay["id"] == rollback["id"]
+
+
 def seed_action(
     store: WriterAgentStore, *, key: str, request_hash: str
 ) -> dict[str, Any]:

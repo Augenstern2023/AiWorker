@@ -26,7 +26,7 @@ def test_today_rank_response_marks_only_a_real_shanghai_business_date_snapshot(
         lambda now=None: "2026-09-02",
     )
 
-    service = TodayRankService(root=tmp_path)
+    service = TodayRankService.from_files(root=tmp_path)
     current = service.get_today_rank("dy")
     empty = service.get_today_rank("dy", date="2026-09-03")
 
@@ -44,7 +44,7 @@ def test_empty_today_rank_response_does_not_claim_a_snapshot(tmp_path, monkeypat
         lambda now=None: "2026-09-02",
     )
 
-    data = TodayRankService(root=tmp_path).get_today_rank(
+    data = TodayRankService.from_files(root=tmp_path).get_today_rank(
         "dy", date="2026-09-02"
     )
 
@@ -63,7 +63,7 @@ def test_today_rank_cached_response_recomputes_daily_status_after_midnight(
         "rank_business_date",
         lambda now=None: business_date["value"],
     )
-    service = TodayRankService(root=tmp_path)
+    service = TodayRankService.from_files(root=tmp_path)
 
     before_midnight = service.get_today_rank("dy")
     business_date["value"] = "2026-09-02"

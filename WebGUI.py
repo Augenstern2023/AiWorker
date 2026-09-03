@@ -475,7 +475,7 @@ class AppState:
 
 state = AppState()
 job_manager = JobManager(cwd=Path(__file__).resolve().parent)
-today_rank_service = TodayRankService(root=WORKSPACE_ROOT)
+today_rank_service = TodayRankService.from_environment(root=WORKSPACE_ROOT)
 
 # FastAPI App
 @asynccontextmanager

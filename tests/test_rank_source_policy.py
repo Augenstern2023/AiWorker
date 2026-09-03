@@ -16,6 +16,8 @@ from pathlib import Path
 from analysis.rank_models import RankSnapshot
 from analysis.rank_repository import RankRepository
 from analysis.today_rank_service import TodayRankService
+from analysis.weekly_report_service import WeeklyReportService
+from creative.topic_service import TopicService
 
 
 class StaticSnapshotSource:
@@ -72,6 +74,25 @@ def test_postgres_mode_ignores_matching_local_response_cache(tmp_path):
     response = service.get_today_rank("dy")
 
     assert response["current_entries"][0]["title"] == "数据库榜单"
+
+
+def test_default_weekly_and_topic_services_use_environment_factory(
+    tmp_path, monkeypatch
+):
+    weekly_rank_service = object()
+    topic_rank_service = object()
+    services = iter((weekly_rank_service, topic_rank_service))
+    monkeypatch.setattr(
+        TodayRankService,
+        "from_environment",
+        classmethod(lambda cls, **kwargs: next(services)),
+    )
+
+    weekly = WeeklyReportService(root=tmp_path)
+    topics = TopicService(root=str(tmp_path))
+
+    assert weekly.rank_service is weekly_rank_service
+    assert topics.rank_service is topic_rank_service
 
 
 def _snapshot(title: str) -> RankSnapshot:

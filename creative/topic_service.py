@@ -28,8 +28,14 @@ def _number(value: Any) -> float | None:
 
 
 class TopicService:
-    def __init__(self, root: str) -> None:
-        self.rank_service = TodayRankService(root=root)
+    def __init__(
+        self,
+        root: str,
+        rank_service: TodayRankService | None = None,
+    ) -> None:
+        self.rank_service = rank_service or TodayRankService.from_environment(
+            root=root
+        )
 
     def generate(
         self,

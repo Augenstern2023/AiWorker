@@ -14,6 +14,7 @@ import json
 import pytest
 
 import WebGUI
+from analysis.rank_repository import RankRepository
 from core.job import CrawlJob
 from runtime.job_state import JobState
 
@@ -66,6 +67,11 @@ class RankCreationRecordingManager:
             "workflow_task_id": None,
             "project_id": None,
         }
+
+
+def test_webgui_shared_rank_service_uses_postgres_repository():
+    assert isinstance(WebGUI.today_rank_service.snapshot_source, RankRepository)
+    assert WebGUI.today_rank_service.disk_response_cache_enabled is False
 
 
 @pytest.mark.asyncio

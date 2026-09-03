@@ -93,7 +93,7 @@ def test_builds_latest_complete_week_and_keeps_latest_snapshot_per_day(tmp_path)
         _write_snapshot(tmp_path, day, [_record(rank, "上升剧", "series-1", heat), _record(1, "稳定剧", "series-2", 90)])
     _write_snapshot(tmp_path, "2026-08-07", [_record(1, "上升剧", "series-1", 320), _record(2, "稳定剧", "series-2", 90)], suffix="180000")
 
-    report = WeeklyReportService(root=tmp_path).build_latest("dy", as_of=datetime(2026, 8, 10, 23, 59))
+    report = WeeklyReportService(root=tmp_path, rank_service=_file_rank_service(tmp_path)).build_latest("dy", as_of=datetime(2026, 8, 10, 23, 59))
 
     assert report["status"] == "ready"
     assert report["period"] == {"start": "2026-08-03", "end": "2026-08-09"}
@@ -150,7 +150,7 @@ def test_recommendation_chart_falls_back_to_a_complete_nonzero_metric(tmp_path):
         record["heat_text"] = str(heat)
         _write_snapshot(tmp_path, day, [record])
 
-    report = WeeklyReportService(root=tmp_path).build_latest("dy", as_of=datetime(2026, 8, 10, 23, 59))
+    report = WeeklyReportService(root=tmp_path, rank_service=_file_rank_service(tmp_path)).build_latest("dy", as_of=datetime(2026, 8, 10, 23, 59))
     series = report["recommendation_metrics"]["series"]
 
     assert series[0]["metric"] == "like_count"
@@ -172,7 +172,7 @@ def test_recommendation_chart_uses_one_metric_for_every_displayed_drama(tmp_path
             like_dramas.append(record)
         _write_snapshot(tmp_path, day, [heat_drama, *like_dramas])
 
-    report = WeeklyReportService(root=tmp_path).build_latest("dy", as_of=datetime(2026, 8, 10, 23, 59))
+    report = WeeklyReportService(root=tmp_path, rank_service=_file_rank_service(tmp_path)).build_latest("dy", as_of=datetime(2026, 8, 10, 23, 59))
     series = report["recommendation_metrics"]["series"]
 
     assert [item["title"] for item in series] == ["点赞剧甲", "点赞剧乙"]
@@ -183,7 +183,7 @@ def test_reports_insufficient_data_when_no_complete_week_exists(tmp_path):
     for day in ("2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06"):
         _write_snapshot(tmp_path, day, [_record(1, "剧目", "series-1", 100)])
 
-    report = WeeklyReportService(root=tmp_path).build_latest("dy", as_of=datetime(2026, 8, 10, 23, 59))
+    report = WeeklyReportService(root=tmp_path, rank_service=_file_rank_service(tmp_path)).build_latest("dy", as_of=datetime(2026, 8, 10, 23, 59))
 
     assert report == {"platform": "dy", "status": "insufficient_data"}
 
@@ -198,7 +198,7 @@ def test_exports_include_the_rule_based_comprehensive_trend_observation(tmp_path
     ):
         _write_snapshot(tmp_path, day, [_record(rank, "上升剧", "series-1", heat)])
 
-    report = WeeklyReportService(root=tmp_path).build_latest("dy", as_of=datetime(2026, 8, 10, 23, 59))
+    report = WeeklyReportService(root=tmp_path, rank_service=_file_rank_service(tmp_path)).build_latest("dy", as_of=datetime(2026, 8, 10, 23, 59))
     markdown = render_markdown(report)
     excel_path = tmp_path / "weekly_report.xlsx"
     write_excel(report, excel_path)
@@ -223,7 +223,7 @@ def test_tag_and_rank_movements_are_scoped_to_each_board(tmp_path):
         ]
         _write_snapshot(tmp_path, day, records)
 
-    report = WeeklyReportService(root=tmp_path).build_latest("dy", as_of=datetime(2026, 8, 10, 23, 59))
+    report = WeeklyReportService(root=tmp_path, rank_service=_file_rank_service(tmp_path)).build_latest("dy", as_of=datetime(2026, 8, 10, 23, 59))
 
     movements = report["movements"]
     assert any("榜单" in item["board"] and item["title"] == "同名剧" for item in movements["rank_up"])
@@ -238,7 +238,7 @@ def test_missing_board_on_a_snapshot_is_counted_as_a_board_level_drop(tmp_path):
             records.append({**_record(1, "下榜剧", "series-2", 90), "tab": "热榜"})
         _write_snapshot(tmp_path, day, records)
 
-    report = WeeklyReportService(root=tmp_path).build_latest("dy", as_of=datetime(2026, 8, 10, 23, 59))
+    report = WeeklyReportService(root=tmp_path, rank_service=_file_rank_service(tmp_path)).build_latest("dy", as_of=datetime(2026, 8, 10, 23, 59))
 
     assert any(item["title"] == "下榜剧" and "热榜" in item["board"] for item in report["movements"]["dropped_entries"])
 
@@ -246,7 +246,7 @@ def test_missing_board_on_a_snapshot_is_counted_as_a_board_level_drop(tmp_path):
 def test_historical_report_is_marked_stale_when_a_new_complete_week_exists(tmp_path):
     for day in ("2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07"):
         _write_snapshot(tmp_path, day, [_record(1, "旧周剧", "old", 100)])
-    service = WeeklyReportService(root=tmp_path, runtime_dir=tmp_path / ".runtime")
+    service = WeeklyReportService(root=tmp_path, runtime_dir=tmp_path / ".runtime", rank_service=_file_rank_service(tmp_path))
     service.generate_latest("dy", as_of=datetime(2026, 8, 10, 23, 59), with_llm=False)
     for day in ("2026-08-10", "2026-08-11", "2026-08-12", "2026-08-13", "2026-08-14"):
         _write_snapshot(tmp_path, day, [_record(1, "新周剧", "new", 100)])
@@ -266,7 +266,7 @@ def test_generates_every_available_complete_week_for_historical_backfill(tmp_pat
         for day in days:
             _write_snapshot(tmp_path, day, [_record(1, title, title, 100)])
 
-    service = WeeklyReportService(root=tmp_path, runtime_dir=tmp_path / ".runtime")
+    service = WeeklyReportService(root=tmp_path, runtime_dir=tmp_path / ".runtime", rank_service=_file_rank_service(tmp_path))
     reports = service.generate_all_available("dy", as_of=datetime(2026, 8, 10, 23, 59), with_llm=False)
 
     assert [report["report_id"] for report in reports] == ["dy-2026-08-03", "dy-2026-07-13"]
@@ -283,6 +283,7 @@ def test_list_reports_reuses_cache_until_source_or_analysis_script_changes(tmp_p
         root=tmp_path,
         runtime_dir=tmp_path / ".runtime",
         analysis_script_path=script,
+        rank_service=_file_rank_service(tmp_path),
     )
     calls = 0
     original = service._build_report
@@ -322,11 +323,13 @@ def test_cache_survives_service_restart(tmp_path, monkeypatch):
         root=tmp_path,
         runtime_dir=runtime_dir,
         analysis_script_path=script,
+        rank_service=_file_rank_service(tmp_path),
     ).list_reports("dy", as_of=datetime(2026, 8, 10, 23, 59))
     restarted = WeeklyReportService(
         root=tmp_path,
         runtime_dir=runtime_dir,
         analysis_script_path=script,
+        rank_service=_file_rank_service(tmp_path),
     )
 
     def fail_build(*_args, **_kwargs):
@@ -349,11 +352,13 @@ def test_cache_validation_does_not_load_raw_snapshot_contents(tmp_path, monkeypa
         root=tmp_path,
         runtime_dir=runtime_dir,
         analysis_script_path=script,
+        rank_service=_file_rank_service(tmp_path),
     ).list_reports("dy", as_of=datetime(2026, 8, 10, 23, 59))
     restarted = WeeklyReportService(
         root=tmp_path,
         runtime_dir=runtime_dir,
         analysis_script_path=script,
+        rank_service=_file_rank_service(tmp_path),
     )
 
     def fail_list_snapshots(*_args, **_kwargs):
@@ -375,6 +380,7 @@ def test_cached_report_exports_are_rebuilt_when_files_are_missing(tmp_path):
         root=tmp_path,
         runtime_dir=tmp_path / ".runtime",
         analysis_script_path=script,
+        rank_service=_file_rank_service(tmp_path),
     )
     first = service.list_reports("dy", as_of=datetime(2026, 8, 10, 23, 59))[0]
     markdown_path = Path(first["markdown_path"])
@@ -389,7 +395,7 @@ def test_cached_report_exports_are_rebuilt_when_files_are_missing(tmp_path):
 def test_with_llm_generation_does_not_reuse_rule_only_cache(tmp_path, monkeypatch):
     for day in ("2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07"):
         _write_snapshot(tmp_path, day, [_record(1, "智能分析剧", "llm-cache", 100)])
-    service = WeeklyReportService(root=tmp_path, runtime_dir=tmp_path / ".runtime")
+    service = WeeklyReportService(root=tmp_path, runtime_dir=tmp_path / ".runtime", rank_service=_file_rank_service(tmp_path))
     service.generate_all_available("dy", as_of=datetime(2026, 8, 10, 23, 59), with_llm=False)
     calls = 0
 
@@ -425,3 +431,7 @@ def _record(rank: int, title: str, series_id: str, heat: int) -> dict:
         "favorite_count": str(heat),
         "comment_count": str(heat // 2),
     }
+
+
+def _file_rank_service(root: Path) -> TodayRankService:
+    return TodayRankService.from_files(root=root)

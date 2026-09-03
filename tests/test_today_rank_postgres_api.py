@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.engine import make_url
 
 from analysis.rank_models import RankDatabaseUnavailable, RankSnapshot
@@ -53,7 +55,7 @@ def database(monkeypatch: pytest.MonkeyPatch):
         system_database.dispose()
 
 
-def test_today_rank_api_reads_postgres_when_local_rank_directory_is_empty(
+def test_today_rank_api_ignores_a_newer_local_rank_snapshot(
     tmp_path: Path,
     database: SystemDatabase,
 ):
@@ -85,6 +87,29 @@ def test_today_rank_api_reads_postgres_when_local_rank_directory_is_empty(
         source_ref="data/dy/jobs/central-job/rank/rank.json",
         source_checksum="e" * 64,
         parser_version=1,
+    )
+    local_path = (
+        tmp_path
+        / "data/dy/jobs/local-newer/rank/douyin_series_rank_20260903_100000.json"
+    )
+    local_path.parent.mkdir(parents=True)
+    local_path.write_text(
+        json.dumps(
+            {
+                "captured_at": "2026-09-03 10:00:00",
+                "records": [
+                    {
+                        "series_id": "local-1",
+                        "title": "本地较新榜单剧",
+                        "rank": 1,
+                        "rank_category": "短剧",
+                        "tab": "榜单",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
     )
     app = FastAPI()
     app.include_router(build_today_rank_router(root=tmp_path))
@@ -119,3 +144,82 @@ def test_today_rank_api_returns_503_when_postgres_source_is_unavailable(tmp_path
 
     assert response.status_code == 503
     assert response.json() == {"detail": "榜单数据库暂不可用"}
+
+
+def test_postgres_snapshots_derive_new_and_dropped_without_persisted_status(
+    tmp_path: Path,
+    database: SystemDatabase,
+):
+    repository = RankRepository(database)
+    for captured_at, checksum, records in (
+        (
+            datetime(2026, 9, 2, 10, 0),
+            "a" * 64,
+            [
+                {
+                    "id": "series-a",
+                    "title": "持续在榜剧",
+                    "rank": 1,
+                    "tab": "榜单",
+                },
+                {
+                    "id": "series-b",
+                    "title": "下榜剧",
+                    "rank": 2,
+                    "tab": "榜单",
+                },
+            ],
+        ),
+        (
+            datetime(2026, 9, 3, 10, 0),
+            "b" * 64,
+            [
+                {
+                    "id": "series-a",
+                    "title": "持续在榜剧",
+                    "rank": 1,
+                    "tab": "榜单",
+                },
+                {
+                    "id": "series-c",
+                    "title": "新上榜剧",
+                    "rank": 2,
+                    "tab": "榜单",
+                },
+            ],
+        ),
+    ):
+        repository.store_snapshot(
+            RankSnapshot(
+                platform="dy",
+                job_id=f"job-{captured_at:%Y%m%d}",
+                source_path=Path(f"database/{captured_at:%Y%m%d}.json"),
+                captured_at=captured_at,
+                records=records,
+                validation={"status": "passed", "has_warnings": False},
+            ),
+            source_kind="douyin_json",
+            source_ref=f"database/{captured_at:%Y%m%d}.json",
+            source_checksum=checksum,
+            parser_version=1,
+        )
+
+    app = FastAPI()
+    app.include_router(
+        build_today_rank_router(
+            root=tmp_path,
+            service=TodayRankService(root=tmp_path, snapshot_source=repository),
+        )
+    )
+    payload = TestClient(app).get("/api/rank/today?platform=dy").json()
+
+    assert payload["summary"]["new_count"] == 1
+    assert payload["summary"]["dropped_count"] == 1
+    assert payload["new_entries"][0]["title"] == "新上榜剧"
+    assert payload["dropped_entries"][0]["title"] == "下榜剧"
+
+    with database.connection() as connection:
+        persisted = connection.execute(
+            select(rank_entries.c.status).order_by(rank_entries.c.id)
+        ).scalars().all()
+    assert persisted == [None, None, None, None]

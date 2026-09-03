@@ -185,7 +185,9 @@ class WeeklyReportService:
         if not self.runtime_dir.is_absolute():
             self.runtime_dir = self.root / self.runtime_dir
         self.analysis_script_path = Path(analysis_script_path or __file__).resolve()
-        self.rank_service = rank_service or TodayRankService(root=self.root)
+        self.rank_service = rank_service or TodayRankService.from_environment(
+            root=self.root
+        )
         self.repository = WeeklyReportRepository(self.runtime_dir / "rag" / "weekly_reports.db")
         self.output_dir = self.root / "data" / "reports" / "weekly"
 

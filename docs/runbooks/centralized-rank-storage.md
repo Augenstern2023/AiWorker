@@ -27,7 +27,7 @@ uv run alembic heads
 
 ```powershell
 New-Item -ItemType Directory -Force E:\postgresql\backups | Out-Null
-pg_dump -h 127.0.0.1 -U aiworker_app -d aiworker -Fc -f E:\postgresql\backups\aiworker-before-rank-migration-20260902.dump
+pg_dump -h 127.0.0.1 -U aiworker_app -d aiworker_system -Fc -f E:\postgresql\backups\aiworker-before-rank-migration-20260902.dump
 Get-Item E:\postgresql\backups\aiworker-before-rank-migration-20260902.dump | Select-Object FullName, Length, LastWriteTime
 pg_restore -l E:\postgresql\backups\aiworker-before-rank-migration-20260902.dump | Select-Object -First 20
 ```
@@ -109,7 +109,7 @@ ORDER BY s.id;
 
 ## 6. 双机 API 一致性
 
-确保两台 Web 服务都已使用同一实现提交重启。当前服务端口为 `8899`，且榜单 API 受登录会话保护。以下命令通过交互式凭据分别创建会话，不把密码写入脚本或命令历史；随后检查最新日期，并按数据库统计选取一个真实历史日期：
+确保两台 Web 服务都已使用同一实现提交，并在部署后重启 WebGUI。只更新代码但不重启时，旧进程仍可能读取本地文件。当前服务端口为 `8899`，且榜单 API 受登录会话保护。以下命令通过交互式凭据分别创建会话，不把密码写入脚本或命令历史；随后检查最新日期，并按数据库统计选取一个真实历史日期：
 
 ```powershell
 $rankHosts = @('192.168.1.34', '192.168.1.100')
@@ -165,6 +165,22 @@ Get-RankDigest "http://192.168.1.100:${rankPort}/api/rank/today?platform=hg&limi
 
 预期：相同平台、相同日期与 limit 的两台机器摘要一致；接口不依赖 `192.168.1.100` 的本地榜单目录。
 
+### PostgreSQL-only 与当天缺失验收
+
+生产 WebGUI、周报、选题和榜单 Excel 导出均必须通过 `TodayRankService.from_environment()` 读取 PostgreSQL，不得在数据库无数据或不可用时回退到本地 JSON、CSV 或 `.runtime/rank-cache` 响应缓存。
+
+按以下顺序验收：
+
+1. 记录 PostgreSQL 当前最新快照日期和 API 摘要。
+2. 在其中一台机器的本地榜单目录新增一个日期更新的测试 JSON/CSV，但不执行入库同步。
+3. 使用 `refresh=true` 再次请求榜单 API。
+
+预期：第 3 步的日期、记录和摘要与第 1 步一致，本地新增文件不会改变生产 API 结果。验收后删除测试文件。
+
+当 PostgreSQL 中没有上海时区当天快照时，打开“最新日期”榜单应显示 warning Toast：标题为“今日榜单尚未入库”，内容为“红果/抖音今日榜单暂无 PostgreSQL 数据，请先抓取。”；提醒本身不得创建抓取任务，同平台同业务日只提示一次。显式选择历史日期时不显示该提醒。
+
+临时使用错误端口或停止测试数据库连接来验证故障路径时，`GET /api/rank/today` 应返回 HTTP 503 和“榜单数据库暂不可用”，不得展示本地榜单。生产数据库故障演练须在维护窗口进行，不得为验收直接中断正在使用的生产实例。
+
 ## 7. 新榜单和周报验收
 
 启动一份新的抖音或红果榜单任务。worker 的成功事件应包含集中同步的 `status`、`source_ref`、`record_count`；原始 JSON/CSV 与分析文件仍保留在 `192.168.1.34`。
@@ -179,6 +195,10 @@ LIMIT 10;
 预期：数据库新增快照，或同一 `source_ref` 内容变化时原快照被完整更新；随后 `192.168.1.100` 使用 `refresh=true` 能看到新日期。若集中同步失败，worker 应返回失败并发出 `central_sync_failed`，且不得删除源文件或输出数据库连接串。
 
 最后执行一次周报任务。预期：周报成功生成，来源 revision 取自 PostgreSQL；即使 `192.168.1.100` 没有本地榜单文件，也能读取集中榜单。
+
+`rank_entries.status` 表示来源提供的内容属性，例如“连载中/已完结”。抖音或红果来源未提供该属性时，`NULL` 是合法值。“新上榜/下榜/排名上升/排名下降”由相邻 PostgreSQL 快照在查询时按剧目和榜单分组动态计算，不写入 `status`，也不需要为历史记录回填该列。
+
+2026-09-03 红果 CSV 已生成但未进入 PostgreSQL 的补录属于独立数据操作，不包含在本次代码发布中。需要补录时应单独执行榜单迁移或对应 worker，并按第 4、5 节重新核对导入报告和数据库统计。
 
 ## 8. 回滚
 

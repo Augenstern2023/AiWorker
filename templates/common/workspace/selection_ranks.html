@@ -7,7 +7,7 @@
                             当前：<span x-text="todayRankData?.selected_snapshot?.captured_at || '-'"></span>
                             <span class="ms-2">上一期：<span x-text="todayRankData?.previous_snapshot?.captured_at || '暂无'"></span></span>
                         </span>
-                        <span x-show="!todayRankData?.selected_snapshot">默认展示本地最新榜单快照</span>
+                        <span x-show="!todayRankData?.selected_snapshot">默认展示 PostgreSQL 最新榜单快照</span>
                     </div>
                 </div>
                 <div class="d-flex gap-2">

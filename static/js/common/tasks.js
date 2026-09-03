@@ -213,6 +213,7 @@
                 todayRankCache: {},
                 todayRankInflight: {},
                 todayRankCacheVersion: {},
+                todayRankMissingNoticeKeys: {},
                 todayRankRequestId: 0,
                 todayRankLoading: false,
                 todayRankError: '',

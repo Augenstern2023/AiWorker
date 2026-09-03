@@ -1706,6 +1706,9 @@ def test_selection_rank_template_has_today_rank_page():
     assert "async stopCrawler" in html
     assert "todayRankDates" in html
     assert "todayRankPlatform" in html
+    assert "todayRankMissingNoticeKeys" in html
+    assert "默认展示 PostgreSQL 最新榜单快照" in html
+    assert "默认展示本地最新榜单快照" not in html
     assert "数据质量提示" not in html
     assert "validationText" not in html
     assert "排名变动剧目" in html

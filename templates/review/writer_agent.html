@@ -44,6 +44,13 @@
     .writer-agent-empty { max-width: 620px; min-height: 520px; margin: auto; display: flex; flex-direction: column; justify-content: center; }
     .writer-agent-message { max-width: min(760px, 100%); padding: 14px 16px; border-left: 3px solid var(--border); white-space: pre-wrap; }
     .writer-agent-message.is-user { margin-left: auto; border-left: 0; border-right: 3px solid var(--accent); }
+    .writer-turn-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 6px; margin-top: 10px; white-space: normal; }
+    .writer-turn-action { min-height: 30px; padding: 3px 8px; color: var(--muted); border-color: transparent; }
+    .writer-turn-action:hover, .writer-turn-action:focus-visible { color: var(--text); border-color: var(--border); }
+    .writer-turn-action:disabled { opacity: .45; }
+    .writer-turn-change-dialog { width: min(460px, calc(100vw - 28px)); padding: 0; color: var(--text); border: 1px solid var(--border); border-radius: 8px; background: var(--bg-page); box-shadow: 0 18px 52px rgba(0,0,0,.42); }
+    .writer-turn-change-dialog::backdrop { background: rgba(0,0,0,.58); }
+    .writer-turn-change-dialog-content { padding: 20px; }
     .writer-agent-thinking { border-left-color: var(--accent); }
     .writer-agent-thinking-dots::after { content: ""; display: inline-block; width: 1.2em; animation: writer-agent-thinking 1.2s steps(4, end) infinite; }
     .writer-agent-material-card { border: 1px solid var(--border); border-radius: 6px; background: rgba(255,255,255,.02); }
@@ -110,6 +117,16 @@
     </aside>
     </div>
 </div>
+<dialog id="writer-turn-change-dialog" class="writer-turn-change-dialog" aria-labelledby="writer-turn-change-title" aria-describedby="writer-turn-change-summary">
+    <div class="writer-turn-change-dialog-content">
+        <h5 id="writer-turn-change-title" class="mb-2">确认回档</h5>
+        <p id="writer-turn-change-summary" class="text-muted mb-0"></p>
+        <div class="d-flex justify-content-end gap-2 mt-4">
+            <button id="writer-turn-change-cancel" class="btn btn-outline-light btn-sm" type="button">取消</button>
+            <button id="writer-turn-change-confirm" class="btn btn-danger btn-sm" type="button">确认回档</button>
+        </div>
+    </div>
+</dialog>
 {% include "review/_writer_project_review.html" %}
 {% endblock %}
 {% block scripts %}<script src="/static/js/review/writer_project_review.js?v={{ asset_version }}-writer-project-review"></script><script src="/static/js/review/writer_agent.js?v={{ asset_version }}-writer-agent-project-review"></script>{% endblock %}

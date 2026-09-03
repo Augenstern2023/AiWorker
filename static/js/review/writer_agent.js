@@ -786,6 +786,11 @@
     const sendButton = document.getElementById('writer-agent-send');
     const reportsElement = document.getElementById('writer-agent-reports');
     const reportStatus = document.getElementById('writer-agent-report-status');
+    const turnChangeDialog = document.getElementById('writer-turn-change-dialog');
+    const turnChangeTitle = document.getElementById('writer-turn-change-title');
+    const turnChangeSummary = document.getElementById('writer-turn-change-summary');
+    const turnChangeCancel = document.getElementById('writer-turn-change-cancel');
+    const turnChangeConfirm = document.getElementById('writer-turn-change-confirm');
     let sessions = [];
     let activeSession = null;
     let isBusy = false;
@@ -794,6 +799,7 @@
     let thinkingTimer = null;
     let thinkingStartedAt = 0;
     let mountedProjectReviewSessionId = null;
+    let pendingTurnChange = null;
     const thinkingStages = [
         '正在阅读你提交的材料',
         '正在结合材料与对话上下文',
@@ -818,7 +824,7 @@
 
     async function readJson(response) {
         const payload = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(payload.detail || '请求失败');
+        if (!response.ok) throw new Error(payload.detail?.message || payload.detail || '请求失败');
         return payload;
     }
 
@@ -834,6 +840,9 @@
         refreshButton.disabled = value;
         newButton.disabled = value;
         messageInput.disabled = value;
+        document.querySelectorAll('.writer-turn-action').forEach((button) => {
+            button.disabled = value || button.dataset.available !== 'true';
+        });
     }
 
     function clearAttachment() { fileInput.value = ''; fileNameElement.textContent = ''; }
@@ -944,6 +953,99 @@
         article.append(card); return article;
     }
 
+    function closeTurnChangeDialog(restoreFocus = true) {
+        const trigger = pendingTurnChange?.trigger || null;
+        pendingTurnChange = null;
+        if (turnChangeDialog?.open) turnChangeDialog.close();
+        if (restoreFocus && trigger?.isConnected) trigger.focus();
+    }
+
+    async function performTurnChange() {
+        const change = pendingTurnChange;
+        if (!change || isBusy) return;
+        closeTurnChangeDialog(false);
+        try {
+            showError();
+            setBusy(true);
+            const updated = await readJson(await aiworkerApi.request(
+                `/api/writer-agent/sessions/${change.sessionId}/messages/${encodeURIComponent(change.messageId)}/${change.mode}`,
+                {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        client_request_id: writerRequestId(),
+                        expected_history_revision: Number(change.preview.history_revision),
+                    }),
+                }
+            ));
+            updateSession(updated.session || updated);
+            messageInput.focus();
+        } catch (error) {
+            showError(error.message);
+            if (change.trigger?.isConnected) change.trigger.focus();
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    async function previewTurnChange(message, mode, trigger) {
+        if (isBusy || !activeSession?.id || !message?.message_id) return;
+        try {
+            showError();
+            setBusy(true);
+            const preview = await readJson(await aiworkerApi.request(
+                `/api/writer-agent/sessions/${activeSession.id}/messages/${encodeURIComponent(message.message_id)}/rollback-preview`
+            ));
+            if (!preview.can_rollback) {
+                throw new Error((preview.blockers || []).join('；') || '当前无法回档');
+            }
+            pendingTurnChange = {
+                mode,
+                preview,
+                trigger,
+                sessionId: activeSession.id,
+                messageId: message.message_id,
+            };
+            const isResend = mode === 'resend';
+            if (turnChangeTitle) turnChangeTitle.textContent = isResend ? '确认重新发送' : '确认回档';
+            if (turnChangeSummary) {
+                const reports = Number(preview.reports_to_remove || 0);
+                turnChangeSummary.textContent = `将撤销 ${Number(preview.messages_to_remove || 0)} 条消息、${Number(preview.actions_to_rollback || 0)} 个动作、${Number(preview.project_changes_to_rollback || 0)} 项项目内容。${reports ? `同时撤销 ${reports} 份评审报告。` : ''}${isResend ? '撤销完成后将使用新的消息 ID 重新发送原文。' : ''}`;
+            }
+            if (turnChangeConfirm) turnChangeConfirm.textContent = isResend ? '确认重新发送' : '确认回档';
+            if (turnChangeDialog?.showModal) turnChangeDialog.showModal();
+            else if (window.confirm(turnChangeSummary?.textContent || '确认执行？')) await performTurnChange();
+        } catch (error) {
+            pendingTurnChange = null;
+            showError(error.message);
+            if (trigger?.isConnected) trigger.focus();
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    function renderTurnActions(article, message) {
+        if (message.role !== 'user' || !message.turn_controls) return;
+        const controls = message.turn_controls;
+        const actions = document.createElement('div');
+        actions.className = 'writer-turn-actions';
+        const addAction = (mode, label, icon, available) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'btn btn-outline-light btn-sm writer-turn-action';
+            button.dataset.available = String(Boolean(available));
+            button.disabled = isBusy || !available;
+            button.title = available ? label : (controls.blocked_reason || label);
+            button.setAttribute('aria-label', label);
+            button.innerHTML = `<i class="bi ${icon}" aria-hidden="true"></i><span>${mode === 'resend' ? '重新发送' : '回档'}</span>`;
+            button.addEventListener('click', () => previewTurnChange(message, mode, button));
+            actions.append(button);
+        };
+        addAction('resend', '重新发送这条消息', 'bi-send-repeat', controls.can_resend);
+        addAction('rollback', '回档到这条消息之前', 'bi-arrow-counterclockwise', controls.can_rollback);
+        article.append(actions);
+    }
+
     function renderConversation() {
         conversation.replaceChildren();
         const messages = activeSession?.messages || [];
@@ -962,6 +1064,7 @@
             addText(article, 'small text-muted mb-2', message.role === 'assistant' ? '编剧大师' : '你');
             addText(article, 'text-break text-wrap', message.content || '');
             if (message.role === 'assistant') renderStructuredReport(article, reportForMessage(message));
+            renderTurnActions(article, message);
             conversation.append(article);
         });
         if (pendingMessage) {
@@ -1155,6 +1258,12 @@
     }
 
     fileInput.addEventListener('change', () => { fileNameElement.textContent = fileInput.files?.[0]?.name || ''; });
+    turnChangeCancel?.addEventListener('click', () => closeTurnChangeDialog(true));
+    turnChangeConfirm?.addEventListener('click', performTurnChange);
+    turnChangeDialog?.addEventListener('cancel', (event) => {
+        event.preventDefault();
+        closeTurnChangeDialog(true);
+    });
     attachButton.addEventListener('click', () => fileInput.click());
     sendButton.addEventListener('click', sendMessage);
     messageInput.addEventListener('keydown', (event) => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); sendMessage(); } });

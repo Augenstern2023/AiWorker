@@ -150,6 +150,126 @@ def mount_writer_agent_controller_without_sessions(page: Page) -> None:
     page.add_script_tag(path=ROOT / "static/js/review/writer_agent.js")
 
 
+def mount_writer_agent_controller_with_rollback_history(page: Page) -> None:
+    page.set_content(
+        '<main id="writer-agent-workbench">'
+        '<div id="writer-agent-error" class="d-none"></div>'
+        '<div class="writer-agent-layout">'
+        '<aside><button id="writer-agent-new" type="button">新建会话</button>'
+        '<button id="writer-agent-refresh" type="button">刷新会话</button>'
+        '<div id="writer-agent-sessions"></div>'
+        '<section id="writer-agent-session-detail" class="d-none">'
+        '<div id="writer-agent-session-title"></div>'
+        '<div id="writer-agent-material-name"></div></section></aside>'
+        '<section><div id="writer-agent-project-context"></div>'
+        '<div id="writer-agent-empty"></div>'
+        '<div id="writer-agent-conversation" class="d-none"></div>'
+        '<textarea id="writer-agent-message"></textarea>'
+        '<input id="writer-agent-file" type="file">'
+        '<button id="writer-agent-attach" type="button">上传</button>'
+        '<span id="writer-agent-file-name"></span>'
+        '<button id="writer-agent-send" type="button">发送</button></section>'
+        '<aside><button id="writer-agent-toggle-reports" type="button"><i></i></button>'
+        '<span id="writer-agent-report-status"></span>'
+        '<div id="writer-agent-reports"></div></aside></div>'
+        '<dialog id="writer-turn-change-dialog" aria-labelledby="writer-turn-change-title">'
+        '<h2 id="writer-turn-change-title"></h2>'
+        '<p id="writer-turn-change-summary"></p>'
+        '<button id="writer-turn-change-cancel" type="button">取消</button>'
+        '<button id="writer-turn-change-confirm" type="button">确认</button>'
+        '</dialog>'
+        '<aside id="writer-project-review-drawer" hidden aria-hidden="true">'
+        '<button id="writer-project-review-close" type="button">关闭</button>'
+        '<div id="writer-project-review-content"></div></aside></main>'
+    )
+    page.add_script_tag(
+        content="""
+        window.__writerRollbackRequests = [];
+        window.__writerRollbackSession = {
+          id: 41, title: '历史回档', content: '原始材料', filename: '',
+          project_id: null, history_revision: 2, reports: [], actions: [],
+          messages: [
+            {kind: 'material', role: 'user', message_id: 'material-1',
+             material_name: '原始材料', material_length: 4,
+             material_preview: '原始材料'},
+            {role: 'user', content: '修改第一幕', message_id: 'message-1',
+             turn_controls: {can_rollback: true, can_resend: true, blocked_reason: ''}},
+            {role: 'assistant', content: '已完成修改'}
+          ]
+        };
+        window.aiworkerApi = {
+          async request(url, options = {}) {
+            window.__writerRollbackRequests.push({
+              url, method: options.method || 'GET',
+              body: JSON.parse(options.body || '{}')
+            });
+            let payload;
+            if (url === '/api/writer-agent/sessions' && !options.method) {
+              payload = {items: [window.__writerRollbackSession]};
+            } else if (url === '/api/writer-agent/sessions/41') {
+              payload = window.__writerRollbackSession;
+            } else if (url.endsWith('/rollback-preview')) {
+              payload = {
+                history_revision: 2, messages_to_remove: 3,
+                reports_to_remove: 0, actions_to_rollback: 1,
+                project_changes_to_rollback: 2, running_actions: 0,
+                can_rollback: true, blockers: []
+              };
+            } else if (url.endsWith('/rollback') || url.endsWith('/resend')) {
+              payload = {
+                ...window.__writerRollbackSession, history_revision: 3,
+                messages: [window.__writerRollbackSession.messages[0]]
+              };
+              window.__writerRollbackSession = payload;
+            } else {
+              throw new Error(`unexpected request: ${url}`);
+            }
+            return {ok: true, async json() { return payload; }};
+          }
+        };
+        """
+    )
+    page.add_script_tag(path=ROOT / "static/js/review/writer_project_review.js")
+    page.add_script_tag(path=ROOT / "static/js/review/writer_agent.js")
+    page.get_by_text("修改第一幕").wait_for()
+
+
+def test_message_rollback_controls_preview_before_mutating_history(
+    page: Page,
+) -> None:
+    """Would catch a history control that mutates immediately without impact review."""
+
+    mount_writer_agent_controller_with_rollback_history(page)
+
+    page.get_by_role("button", name="回档到这条消息之前").click()
+
+    page.get_by_text("将撤销 3 条消息、1 个动作、2 项项目内容。").wait_for()
+    requests = page.evaluate("window.__writerRollbackRequests")
+    assert requests[-1]["url"].endswith("/message-1/rollback-preview")
+    assert requests[-1]["method"] == "GET"
+    page.get_by_role("button", name="取消", exact=True).click()
+    assert not any(request["method"] == "POST" for request in requests)
+
+
+def test_message_resend_uses_server_endpoint_and_refreshes_the_whole_session(
+    page: Page,
+) -> None:
+    """Would catch resend appending a duplicate locally instead of server rollback."""
+
+    mount_writer_agent_controller_with_rollback_history(page)
+    page.get_by_role("button", name="重新发送这条消息").click()
+    page.get_by_role("button", name="确认重新发送").click()
+    page.wait_for_function(
+        "window.__writerRollbackRequests.some(item => item.url.endsWith('/resend') && item.method === 'POST')"
+    )
+
+    requests = page.evaluate("window.__writerRollbackRequests")
+    resend = next(request for request in requests if request["url"].endswith("/resend"))
+    assert resend["body"]["expected_history_revision"] == 2
+    assert resend["body"]["client_request_id"]
+    assert page.get_by_text("修改第一幕").count() == 0
+
+
 def test_create_original_project_starts_a_session_before_sending_message(
     page: Page,
 ) -> None:

@@ -228,19 +228,19 @@
         if (action.status === 'pending') {
             const confirm = document.createElement('button');
             confirm.type = 'button';
-            confirm.className = 'btn btn-primary btn-sm mt-3';
+            confirm.className = 'btn btn-primary btn-sm mt-3 writer-session-mutation';
             confirm.textContent = action.action_type === 'project.link' ? '确认关联' : '确认生成';
             confirm.addEventListener('click', () => decideWriterAction(action, 'confirm', card));
             const cancel = document.createElement('button');
             cancel.type = 'button';
-            cancel.className = 'btn btn-outline-light btn-sm mt-3 ms-2';
+            cancel.className = 'btn btn-outline-light btn-sm mt-3 ms-2 writer-session-mutation';
             cancel.textContent = '取消';
             cancel.addEventListener('click', () => decideWriterAction(action, 'cancel', card));
             card.append(confirm, cancel);
         } else if (['queued', 'running'].includes(action.status)) {
             const cancel = document.createElement('button');
             cancel.type = 'button';
-            cancel.className = 'btn btn-outline-light btn-sm mt-3';
+            cancel.className = 'btn btn-outline-light btn-sm mt-3 writer-session-mutation';
             cancel.textContent = action.phase === 'cancelling' ? '取消中' : '取消生成';
             cancel.disabled = action.phase === 'cancelling';
             cancel.addEventListener('click', () => decideWriterAction(action, 'cancel', card));
@@ -249,7 +249,7 @@
         if (action.status === 'failed' && action.retryable) {
             const retry = document.createElement('button');
             retry.type = 'button';
-            retry.className = 'btn btn-primary btn-sm mt-3';
+            retry.className = 'btn btn-primary btn-sm mt-3 writer-session-mutation';
             retry.textContent = action.result?.partial ? '仅重试失败项' : '重试';
             retry.addEventListener('click', () => retryWriterAction(action, retry));
             card.append(retry);
@@ -800,6 +800,7 @@
     let thinkingStartedAt = 0;
     let mountedProjectReviewSessionId = null;
     let pendingTurnChange = null;
+    const turnMutationRequestIds = new Map();
     const thinkingStages = [
         '正在阅读你提交的材料',
         '正在结合材料与对话上下文',
@@ -824,7 +825,12 @@
 
     async function readJson(response) {
         const payload = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(payload.detail?.message || payload.detail || '请求失败');
+        if (!response.ok) {
+            const error = new Error(payload.detail?.message || payload.detail || '请求失败');
+            error.code = payload.detail?.code || '';
+            error.responseReceived = true;
+            throw error;
+        }
         return payload;
     }
 
@@ -841,6 +847,12 @@
         newButton.disabled = value;
         messageInput.disabled = value;
         document.querySelectorAll('.writer-turn-action').forEach((button) => {
+            button.disabled = value || button.dataset.available !== 'true';
+        });
+        document.querySelectorAll('.writer-session-mutation').forEach((button) => {
+            if (!button.dataset.available) {
+                button.dataset.available = button.disabled ? 'false' : 'true';
+            }
             button.disabled = value || button.dataset.available !== 'true';
         });
     }
@@ -960,30 +972,57 @@
         if (restoreFocus && trigger?.isConnected) trigger.focus();
     }
 
+    function setTurnTriggerLoading(trigger, loading) {
+        if (!trigger) return;
+        if (loading) {
+            trigger.dataset.idleHtml = trigger.innerHTML;
+            trigger.setAttribute('aria-busy', 'true');
+            trigger.innerHTML = '<span>处理中…</span>';
+        } else {
+            trigger.removeAttribute('aria-busy');
+            if (trigger.dataset.idleHtml) trigger.innerHTML = trigger.dataset.idleHtml;
+            delete trigger.dataset.idleHtml;
+        }
+    }
+
     async function performTurnChange() {
         const change = pendingTurnChange;
         if (!change || isBusy) return;
         closeTurnChangeDialog(false);
+        const requestKey = `${change.sessionId}:${change.messageId}:${change.mode}`;
+        const clientRequestId = turnMutationRequestIds.get(requestKey) || writerRequestId();
+        turnMutationRequestIds.set(requestKey, clientRequestId);
         try {
             showError();
             setBusy(true);
+            setTurnTriggerLoading(change.trigger, true);
             const updated = await readJson(await aiworkerApi.request(
                 `/api/writer-agent/sessions/${change.sessionId}/messages/${encodeURIComponent(change.messageId)}/${change.mode}`,
                 {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
-                        client_request_id: writerRequestId(),
+                        client_request_id: clientRequestId,
                         expected_history_revision: Number(change.preview.history_revision),
                     }),
                 }
             ));
+            turnMutationRequestIds.delete(requestKey);
             updateSession(updated.session || updated);
             messageInput.focus();
         } catch (error) {
+            const retrySameRequest = !error.responseReceived || [
+                'ROLLBACK_PARTIAL_FAILURE',
+                'ROLLBACK_BUSY',
+                'ROLLBACK_STATE_CONFLICT',
+                'SESSION_MUTATION_BUSY',
+                'SESSION_MUTATION_LEASE_LOST',
+            ].includes(error.code);
+            if (!retrySameRequest) turnMutationRequestIds.delete(requestKey);
             showError(error.message);
             if (change.trigger?.isConnected) change.trigger.focus();
         } finally {
+            setTurnTriggerLoading(change.trigger, false);
             setBusy(false);
         }
     }

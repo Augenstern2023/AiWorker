@@ -730,6 +730,7 @@ def persist_proposed_actions(
     prompt_version: str = "creative-v1",
     client_message_id: str | None = None,
     turn_checkpoint_id: str | None = None,
+    mutation_token: str | None = None,
 ) -> list[dict[str, Any]]:
     if not proposed_actions:
         return []
@@ -784,6 +785,7 @@ def persist_proposed_actions(
             expected_context=project_context,
             source_snapshot_id=saved_snapshot["id"],
             turn_checkpoint_id=turn_checkpoint_id,
+            mutation_token=mutation_token,
         ))
     return saved_actions
 

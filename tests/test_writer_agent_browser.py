@@ -216,6 +216,28 @@ def mount_writer_agent_controller_with_rollback_history(page: Page) -> None:
                 can_rollback: true, blockers: []
               };
             } else if (url.endsWith('/rollback') || url.endsWith('/resend')) {
+              if (window.__rejectNextRollbackResponse) {
+                window.__rejectNextRollbackResponse = false;
+                const code = window.__rejectNextRollbackCode || 'ROLLBACK_PARTIAL_FAILURE';
+                const message = code === 'ROLLBACK_PARTIAL_FAILURE'
+                  ? '回档已部分完成，请使用相同请求重试'
+                  : '项目内容已从其他入口更新，不能覆盖';
+                return {ok: false, async json() {
+                  return {detail: {code, message}};
+                }};
+              }
+              if (window.__deferRollbackResponse) {
+                return await new Promise((resolve) => {
+                  window.__resolveRollbackResponse = () => resolve({
+                    ok: true,
+                    async json() {
+                      return {...window.__writerRollbackSession,
+                        history_revision: 3,
+                        messages: [window.__writerRollbackSession.messages[0]]};
+                    }
+                  });
+                });
+              }
               payload = {
                 ...window.__writerRollbackSession, history_revision: 3,
                 messages: [window.__writerRollbackSession.messages[0]]
@@ -268,6 +290,108 @@ def test_message_resend_uses_server_endpoint_and_refreshes_the_whole_session(
     assert resend["body"]["expected_history_revision"] == 2
     assert resend["body"]["client_request_id"]
     assert page.get_by_text("修改第一幕").count() == 0
+
+
+def test_message_rollback_retry_reuses_request_id_after_partial_failure(
+    page: Page,
+) -> None:
+    """Would catch a partial rollback retry starting a conflicting new operation."""
+
+    mount_writer_agent_controller_with_rollback_history(page)
+    page.evaluate("window.__rejectNextRollbackResponse = true")
+
+    for attempt in range(2):
+        page.get_by_role("button", name="回档到这条消息之前").click()
+        page.get_by_role("button", name="确认回档").click()
+        page.wait_for_function(
+            f"window.__writerRollbackRequests.filter(item => item.url.endsWith('/rollback') && item.method === 'POST').length === {attempt + 1}"
+        )
+        if attempt == 0:
+            page.get_by_text("回档已部分完成，请使用相同请求重试").wait_for()
+
+    requests = page.evaluate(
+        "window.__writerRollbackRequests.filter(item => item.url.endsWith('/rollback') && item.method === 'POST')"
+    )
+    assert len(requests) == 2
+    assert requests[0]["body"]["client_request_id"] == requests[1]["body"]["client_request_id"]
+
+
+def test_message_rollback_conflict_uses_new_request_id_for_fresh_preview(
+    page: Page,
+) -> None:
+    """Would catch a resolved conflict being trapped behind its old idempotency key."""
+
+    mount_writer_agent_controller_with_rollback_history(page)
+    page.evaluate(
+        """
+        window.__rejectNextRollbackResponse = true;
+        window.__rejectNextRollbackCode = 'ROLLBACK_CONFLICT';
+        """
+    )
+
+    for attempt in range(2):
+        page.get_by_role("button", name="回档到这条消息之前").click()
+        page.get_by_role("button", name="确认回档").click()
+        page.wait_for_function(
+            "window.__writerRollbackRequests.filter(item => "
+            "item.url.endsWith('/rollback') && item.method === 'POST').length "
+            f"=== {attempt + 1}"
+        )
+        if attempt == 0:
+            page.get_by_text("项目内容已从其他入口更新，不能覆盖").wait_for()
+
+    requests = page.evaluate(
+        "window.__writerRollbackRequests.filter(item => "
+        "item.url.endsWith('/rollback') && item.method === 'POST')"
+    )
+    assert requests[0]["body"]["client_request_id"] != requests[1]["body"][
+        "client_request_id"
+    ]
+
+
+def test_rollback_busy_state_disables_every_session_mutation_control(
+    page: Page,
+) -> None:
+    """Would catch action or review buttons starting side effects during rollback."""
+
+    mount_writer_agent_controller_with_rollback_history(page)
+    page.evaluate(
+        """
+        window.__writerRollbackSession = {
+          ...window.__writerRollbackSession,
+          actions: [
+            {id: 'action-1', status: 'pending', revision: 1,
+             action_type: 'creative.run_plan', title: '生成大纲', summary: '确认生成'},
+            {id: 'action-2', status: 'running', phase: 'cancelling', revision: 2,
+             action_type: 'creative.run_plan', title: '生成剧本', summary: '正在取消'}
+          ],
+          messages: [...window.__writerRollbackSession.messages,
+            {role: 'assistant', kind: 'project_review_offer', audit_scope: 'outline',
+             content: '确认完整项目审核'}]
+        };
+        window.writerAgentWorkbench.mount(window.__writerRollbackSession);
+        window.writerProjectReviewUI.renderMessage(
+          document.querySelector('#writer-agent-conversation'),
+          window.__writerRollbackSession.messages.at(-1),
+          {session: window.__writerRollbackSession}
+        );
+        window.__deferRollbackResponse = true;
+        """
+    )
+
+    page.get_by_role("button", name="回档到这条消息之前").click()
+    page.get_by_role("button", name="确认回档").click()
+    page.wait_for_function("Boolean(window.__resolveRollbackResponse)")
+
+    rollback_button = page.get_by_role("button", name="回档到这条消息之前")
+    assert rollback_button.get_attribute("aria-busy") == "true"
+    assert "处理中" in rollback_button.inner_text()
+    assert page.get_by_role("button", name="确认生成").is_disabled()
+    assert page.get_by_role("button", name="取消", exact=True).is_disabled()
+    assert page.get_by_role("button", name="查看本次加载内容").is_disabled()
+    page.evaluate("window.__resolveRollbackResponse()")
+    page.get_by_role("button", name="取消中").wait_for()
+    assert page.get_by_role("button", name="取消中").is_disabled()
 
 
 def test_create_original_project_starts_a_session_before_sending_message(

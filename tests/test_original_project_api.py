@@ -286,6 +286,15 @@ def test_project_delete_retries_cross_database_cleanup_from_durable_tombstone(
 ) -> None:
     project = create_original_project(client, "delete-saga")
     delete_workflow = client.workflow.delete_project_data
+    delete_creative = CreativeRepository.delete_project
+
+    def delete_creative_after_workflow_fence(repository, *args, **kwargs):
+        assert client.workflow.is_project_deleting(str(project["id"])) is True
+        return delete_creative(repository, *args, **kwargs)
+
+    monkeypatch.setattr(
+        CreativeRepository, "delete_project", delete_creative_after_workflow_fence
+    )
     monkeypatch.setattr(
         client.workflow, "delete_project_data", FailOnce(delete_workflow)
     )
@@ -302,6 +311,93 @@ def test_project_delete_retries_cross_database_cleanup_from_durable_tombstone(
 
     assert second.status_code == 200, second.text
     assert client.repository.get_pending_project_deletion(project["id"]) is None
+    assert client.workflow.is_project_deleting(str(project["id"])) is False
+
+
+def test_project_delete_recovers_from_workflow_marker_after_creative_tombstone_cleared(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crash between the two marker clears must remain retryable by its requester."""
+
+    project = create_original_project(client, "delete-marker-only-recovery")
+    complete_workflow = client.workflow.complete_project_deletion
+    monkeypatch.setattr(
+        client.workflow,
+        "complete_project_deletion",
+        FailOnce(complete_workflow),
+    )
+
+    with pytest.raises(RuntimeError, match="bootstrap failed"):
+        client.delete(f"/api/creative/projects/{project['id']}")
+
+    assert client.repository.get_project(project["id"]) is None
+    assert client.repository.get_pending_project_deletion(project["id"]) is None
+    pending = client.workflow.get_pending_project_deletion(str(project["id"]))
+    assert pending is not None
+    assert pending["requested_by"] == client.principal.user_id
+    assert pending["project_snapshot"]["name"] == project["name"]
+
+    denied = client.denied_client.delete(
+        f"/api/creative/projects/{project['id']}"
+    )
+
+    assert denied.status_code == 403, denied.text
+    assert client.workflow.is_project_deleting(str(project["id"])) is True
+
+    recovered = client.delete(f"/api/creative/projects/{project['id']}")
+
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json() == {"id": project["id"], "name": project["name"]}
+    assert client.workflow.is_project_deleting(str(project["id"])) is False
+
+
+def test_project_delete_does_not_adopt_an_active_writer_rollback_marker(
+    client: TestClient,
+) -> None:
+    """A normal DELETE must not take ownership of a pre-delete Writer fence."""
+
+    project = create_original_project(client, "delete-writer-marker-conflict")
+    project_id = str(project["id"])
+    client.workflow.begin_project_deletion(
+        project_id,
+        owner_token="writer-rollback:other-operation",
+        requested_by="another-writer",
+        project_snapshot={"id": project["id"], "name": project["name"]},
+    )
+
+    response = client.delete(f"/api/creative/projects/{project['id']}")
+
+    assert response.status_code == 409, response.text
+    assert client.repository.get_project(project["id"]) is not None
+    pending = client.workflow.get_pending_project_deletion(project_id)
+    assert pending is not None
+    assert pending["owner_token"] == "writer-rollback:other-operation"
+    client.workflow.complete_project_deletion(
+        project_id, owner_token="writer-rollback:other-operation"
+    )
+
+
+def test_project_delete_resumes_its_own_marker_before_creative_delete(
+    client: TestClient,
+) -> None:
+    """A crash after the Workflow fence but before Creative must be retryable."""
+
+    project = create_original_project(client, "delete-pre-creative-recovery")
+    project_id = str(project["id"])
+    owner_token = f"creative-delete:{project_id}:interrupted-request"
+    client.workflow.begin_project_deletion(
+        project_id,
+        owner_token=owner_token,
+        requested_by=client.principal.user_id,
+        project_snapshot={"id": project["id"], "name": project["name"]},
+    )
+
+    recovered = client.delete(f"/api/creative/projects/{project['id']}")
+
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json() == {"id": project["id"], "name": project["name"]}
+    assert client.repository.get_project(project["id"]) is None
+    assert client.workflow.is_project_deleting(project_id) is False
 
 
 def test_original_create_api_is_idempotent_and_bootstraps_empty_topic_tasks(

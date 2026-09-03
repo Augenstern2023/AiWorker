@@ -401,6 +401,7 @@ class CreativeApplicationService:
         *,
         expected_context: dict[str, Any] | None = None,
         episode_number: int | None = None,
+        operation_id: str | None = None,
     ) -> dict[str, Any]:
         self.assert_stage_write_access(project_id, stage, actor)
         if expected_context is not None:
@@ -419,16 +420,23 @@ class CreativeApplicationService:
             task_type=stage,
             role_code=role_code,
             actor=actor,
+            writer_operation_id=operation_id,
         )
         if task["status"] not in {"pool", "assigned", "in_progress", "returned"}:
             task = self.workflow_repository.create_next_task(
-                task["id"], stage, role_code, actor=actor
+                task["id"],
+                stage,
+                role_code,
+                actor=actor,
+                writer_operation_id=operation_id,
             )
         if task["status"] == "pool":
             if not self.workflow_repository.can_claim_task(task["id"], actor):
                 raise CreativeTaskOccupied("该创作阶段已由其他人员处理")
             try:
-                task = self.workflow_repository.claim_task(task["id"], actor)
+                task = self.workflow_repository.claim_task(
+                    task["id"], actor, writer_operation_id=operation_id
+                )
             except PermissionError as exc:
                 raise CreativeTaskOccupied(
                     "该创作阶段已由其他人员处理"
@@ -782,7 +790,12 @@ class CreativeApplicationService:
             if stage == "brief":
                 kwargs["difference_note"] = difference_note
             result = self.transitions.complete_creative_without_review(
-                workflow_task_id, stage, resource_id, actor, **kwargs
+                workflow_task_id,
+                stage,
+                resource_id,
+                actor,
+                writer_operation_id=operation_id,
+                **kwargs,
             )
             return self.repository.finalize_side_effect_operation(
                 operation_id=operation_id, owner_id=owner_id, result=result

@@ -496,18 +496,6 @@ def test_project_stage_task_creation_is_concurrency_safe(
     request.addfinalizer(cleanup_postgres)
     workers = 8
     barrier = Barrier(workers)
-    ensure_barrier = Barrier(workers)
-    original_ensure_workflow = WorkflowRepository._ensure_workflow
-
-    def synchronized_ensure_workflow(*args, **kwargs) -> None:
-        ensure_barrier.wait()
-        original_ensure_workflow(*args, **kwargs)
-
-    monkeypatch.setattr(
-        WorkflowRepository,
-        "_ensure_workflow",
-        staticmethod(synchronized_ensure_workflow),
-    )
 
     def ensure_once() -> str:
         barrier.wait()

@@ -97,7 +97,7 @@
         if ((manifest.upstream_mismatches || []).length) addText(notice, 'small mt-2', `发现 ${manifest.upstream_mismatches.length} 项上下游引用待核对`);
         host.append(notice);
         const actions = document.createElement('div'); actions.className = 'writer-project-review-actions';
-        const confirm = document.createElement('button'); confirm.type = 'button'; confirm.className = 'btn btn-primary'; confirm.textContent = '确认并开始完整审核';
+        const confirm = document.createElement('button'); confirm.type = 'button'; confirm.className = 'btn btn-primary writer-session-mutation'; confirm.textContent = '确认并开始完整审核';
         confirm.addEventListener('click', () => createReview(preview, confirm));
         actions.append(confirm); host.append(actions);
     }
@@ -166,7 +166,7 @@
         if (state === 'failed') {
             addText(host, 'writer-project-review-state is-error', review.error || '完整项目审核中断');
             const resumeAt = progress.current || progress.completed + 1 || 1;
-            const resume = document.createElement('button'); resume.type = 'button'; resume.className = 'btn btn-primary mt-3'; resume.textContent = `从第 ${resumeAt} 集继续`;
+            const resume = document.createElement('button'); resume.type = 'button'; resume.className = 'btn btn-primary mt-3 writer-session-mutation'; resume.textContent = `从第 ${resumeAt} 集继续`;
             resume.addEventListener('click', () => resumeReview(review, resume)); host.append(resume); return;
         }
         renderCurrentRequest(host, review);
@@ -226,7 +226,7 @@
         if (message.kind === 'project_review_offer') {
             if (session?.id) currentSession = session;
             const card = document.createElement('section'); card.className = 'writer-project-review-offer'; addText(card, 'fw-semibold', '完整项目审核'); addText(card, 'small text-muted mt-1', message.content || '请先确认当前项目的冻结内容。');
-            const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-outline-light btn-sm mt-3'; button.textContent = '查看本次加载内容'; button.addEventListener('click', () => previewReview(session, message.audit_scope, button)); card.append(button); article.append(card); return true;
+            const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-outline-light btn-sm mt-3 writer-session-mutation'; button.textContent = '查看本次加载内容'; button.addEventListener('click', () => previewReview(session, message.audit_scope, button)); card.append(button); article.append(card); return true;
         }
         if (message.kind === 'project_review') {
             const card = document.createElement('section'); card.className = 'writer-project-review-offer'; addText(card, 'fw-semibold', '完整项目审核'); const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-outline-light btn-sm mt-3'; button.textContent = '查看审核进度'; button.addEventListener('click', () => { openDrawer(button); refreshReview(session?.id, message.review_id); }); card.append(button); article.append(card); return true;

@@ -274,6 +274,71 @@ def test_writer_rollback_snapshot_rejects_an_external_project_change(tmp_path):
     assert repository.get_project(project["id"])["name"] == "其他页面的新修改"
 
 
+def test_writer_project_delete_rejects_external_review_added_after_action(
+    tmp_path,
+):
+    """Would catch rollback deleting reviews absent from its postcondition."""
+
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = ready_original_project(repository)
+    expected = repository.writer_project_deletion_fingerprint(project["id"])
+    review = repository.create_script_review(
+        source_type="project",
+        mode="collection",
+        project_id=project["id"],
+        episode_numbers=[],
+        source_fingerprint="external-review",
+        source_payload={"audit_scope": "project"},
+        created_by="reviewer-1",
+    )
+
+    with pytest.raises(ValueError, match="project deletion state changed"):
+        repository.delete_project(
+            project["id"],
+            requested_by="writer-1",
+            expected_writer_fingerprint=expected,
+        )
+
+    assert repository.get_project(project["id"]) is not None
+    assert repository.get_script_review(review["id"]) is not None
+
+
+def test_writer_project_external_use_detects_project_metadata_edits(tmp_path):
+    """Editing a newly created project's business fields prevents auto-deletion."""
+
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = ready_original_project(repository)
+    baseline = repository.writer_project_external_use_fingerprint(
+        project["id"], "writer-create-action"
+    )
+
+    repository.update_project(
+        project["id"], {"name": "其他页面改过的名称"}, expected_revision=0
+    )
+
+    assert repository.writer_project_external_use_fingerprint(
+        project["id"], "writer-create-action"
+    ) != baseline
+
+
+def test_writer_action_workflow_manifest_uses_owned_resource_tasks(tmp_path):
+    """Only workflow tasks referenced by the action's resources are Writer-owned."""
+
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = ready_original_project(repository)
+    repository.create_blueprints(
+        project["id"],
+        [{"content": {"title": "动作生成的 Brief"}}],
+        direction_type="original",
+        workflow_task_id="writer-owned-task",
+        operation_id="writer-create-action:brief.persist",
+    )
+
+    assert repository.writer_action_workflow_task_ids(
+        project["id"], "writer-create-action"
+    ) == {"writer-owned-task"}
+
+
 @pytest.mark.parametrize("status", ["pending", "ready", "failed"])
 def test_bootstrap_status_accepts_the_declared_values(tmp_path, status):
     repository = CreativeRepository(tmp_path / "creative.sqlite3")

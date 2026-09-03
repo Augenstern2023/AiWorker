@@ -64,6 +64,284 @@ def test_turn_checkpoint_is_idempotent_and_captures_the_pre_message_boundary(
     assert exc.value.code == "IDEMPOTENCY_KEY_REUSED"
 
 
+def test_session_mutation_lease_fences_concurrent_writers_and_can_be_released(
+    tmp_path: Path,
+) -> None:
+    """Would catch chat and rollback mutating one session at the same time."""
+
+    store = WriterAgentStore(tmp_path / "writer-agent-mutation-lease.db")
+    session = store.create("writer-1", "原始材料", "会话写租约")
+
+    lease = store.acquire_session_mutation(
+        session["id"],
+        "writer-1",
+        owner_token="message-owner",
+        mutation_kind="message",
+        lease_seconds=30,
+    )
+    assert lease["owner_token"] == "message-owner"
+    with pytest.raises(WriterActionError) as exc:
+        store.acquire_session_mutation(
+            session["id"],
+            "writer-1",
+            owner_token="rollback-owner",
+            mutation_kind="rollback",
+            lease_seconds=30,
+        )
+    assert exc.value.code == "SESSION_MUTATION_BUSY"
+
+    assert store.release_session_mutation(
+        session["id"], owner_token="message-owner"
+    ) is True
+    rollback_lease = store.acquire_session_mutation(
+        session["id"],
+        "writer-1",
+        owner_token="rollback-owner",
+        mutation_kind="rollback",
+        lease_seconds=30,
+    )
+    assert rollback_lease["mutation_kind"] == "rollback"
+
+
+def test_session_mutation_lease_can_be_fenced_before_external_side_effects(
+    tmp_path: Path,
+) -> None:
+    """Would catch cross-store compensation continuing after its lease was lost."""
+
+    store = WriterAgentStore(tmp_path / "writer-agent-mutation-fence.db")
+    session = store.create("writer-1", "原始材料", "会话写租约")
+    store.acquire_session_mutation(
+        session["id"], "writer-1", owner_token="rollback-owner",
+        mutation_kind="rollback", lease_seconds=30,
+    )
+
+    store.assert_session_mutation(
+        session["id"], owner_token="rollback-owner"
+    )
+    store.release_session_mutation(
+        session["id"], owner_token="rollback-owner"
+    )
+
+    with pytest.raises(WriterActionError) as exc:
+        store.assert_session_mutation(
+            session["id"], owner_token="rollback-owner"
+        )
+    assert exc.value.code == "SESSION_MUTATION_LEASE_LOST"
+
+
+def test_begin_rollback_requires_completed_checkpoint(tmp_path: Path) -> None:
+    """Would catch rollback truncating a turn while its model request is still open."""
+
+    store = WriterAgentStore(tmp_path / "writer-agent-open-turn.db")
+    session = store.create("writer-1", "原始材料", "未完成轮次")
+    checkpoint = store.begin_turn(
+        session["id"],
+        "writer-1",
+        "message-open",
+        original_message={"message": "仍在生成"},
+        content_hash="message-open",
+    )
+
+    with pytest.raises(WriterActionError) as exc:
+        store.begin_rollback(
+            session["id"],
+            "writer-1",
+            checkpoint["id"],
+            mode="rollback",
+            client_request_id="rollback-open",
+            expected_history_revision=session["history_revision"],
+        )
+
+    assert exc.value.code == "ROLLBACK_BUSY"
+
+
+def test_save_turn_rejects_checkpoint_invalidated_by_rollback(tmp_path: Path) -> None:
+    """Would catch a late model response recreating a turn after rollback."""
+
+    store = WriterAgentStore(tmp_path / "writer-agent-late-save.db")
+    session = store.create("writer-1", "原始材料", "迟到结果")
+    checkpoint = store.begin_turn(
+        session["id"],
+        "writer-1",
+        "message-late",
+        original_message={"message": "迟到结果"},
+        content_hash="message-late",
+    )
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            "UPDATE writer_agent_turn_checkpoints SET status='rolled_back' WHERE id=?",
+            (checkpoint["id"],),
+        )
+
+    with pytest.raises(WriterActionError) as exc:
+        store.save_turn(
+            session["id"],
+            "writer-1",
+            [
+                *session["messages"],
+                {"role": "user", "content": "迟到结果", "message_id": "message-late"},
+                {"role": "assistant", "content": "不应写入"},
+            ],
+            None,
+            client_message_id="message-late",
+            turn_checkpoint_id=checkpoint["id"],
+        )
+
+    assert exc.value.code == "TURN_CHECKPOINT_INVALID"
+    assert len(store.get(session["id"], "writer-1")["messages"]) == 1
+
+
+def test_rollback_stage_transition_requires_current_predecessor(tmp_path: Path) -> None:
+    """Would catch concurrent rollback workers moving a completed request backwards."""
+
+    store = WriterAgentStore(tmp_path / "writer-agent-rollback-stage.db")
+    session = store.create("writer-1", "原始材料", "阶段 CAS")
+    checkpoint = store.begin_turn(
+        session["id"],
+        "writer-1",
+        "message-stage",
+        original_message={"message": "阶段 CAS"},
+        content_hash="message-stage",
+    )
+    store.save_turn(
+        session["id"],
+        "writer-1",
+        [
+            *session["messages"],
+            {"role": "user", "content": "阶段 CAS", "message_id": "message-stage"},
+            {"role": "assistant", "content": "完成"},
+        ],
+        None,
+        client_message_id="message-stage",
+        turn_checkpoint_id=checkpoint["id"],
+    )
+    current = store.get(session["id"], "writer-1")
+    rollback, _ = store.begin_rollback(
+        session["id"],
+        "writer-1",
+        checkpoint["id"],
+        mode="rollback",
+        client_request_id="rollback-stage",
+        expected_history_revision=current["history_revision"],
+    )
+
+    advanced = store.advance_rollback(
+        rollback["id"], "jobs_settled", expected_stage="requested"
+    )
+    assert advanced["stage"] == "jobs_settled"
+    with pytest.raises(WriterActionError) as skipped:
+        store.advance_rollback(
+            rollback["id"],
+            "workflow_restored",
+            expected_stage="jobs_settled",
+        )
+    assert skipped.value.code == "ROLLBACK_STATE_CONFLICT"
+    with pytest.raises(WriterActionError) as exc:
+        store.advance_rollback(
+            rollback["id"], "completed", expected_stage="requested"
+        )
+    assert exc.value.code == "ROLLBACK_STATE_CONFLICT"
+
+
+def test_action_confirmation_records_decision_turn_without_reassigning_origin(
+    tmp_path: Path,
+) -> None:
+    """Would catch a confirmation message stealing an action from its proposal turn."""
+
+    store = WriterAgentStore(tmp_path / "writer-agent-action-turns.db")
+    session = store.create("writer-1", "原始材料", "动作归属")
+    proposal = store.begin_turn(
+        session["id"],
+        "writer-1",
+        "message-proposal",
+        original_message={"message": "生成大纲"},
+        content_hash="message-proposal",
+    )
+    store.complete_turn(proposal["id"])
+    confirmation = store.begin_turn(
+        session["id"],
+        "writer-1",
+        "message-confirmation",
+        original_message={"message": "确认生成"},
+        content_hash="message-confirmation",
+    )
+    action = store.create_action(
+        session_id=session["id"],
+        actor_user_id="writer-1",
+        action_type="creative.run_plan",
+        project_id=7,
+        idempotency_key="action-turn-ownership",
+        request_hash="action-turn-ownership",
+        payload={"target_stage": "outline"},
+        expected_context={"session_revision": 0},
+        source_snapshot_id=None,
+        turn_checkpoint_id=proposal["id"],
+    )
+
+    assigned = store.assign_action_turn(action["id"], confirmation["id"])
+
+    assert assigned["turn_checkpoint_id"] == proposal["id"]
+    assert assigned["decision_turn_checkpoint_id"] == confirmation["id"]
+    assert [item["id"] for item in store.list_actions_for_turns([confirmation["id"]])] == [
+        action["id"]
+    ]
+
+
+def test_incomplete_rollback_retry_rechecks_current_history_revision(
+    tmp_path: Path,
+) -> None:
+    """Would catch an old rollback request truncating state added after its first try."""
+
+    store = WriterAgentStore(tmp_path / "writer-agent-rollback-retry-revision.db")
+    session = store.create("writer-1", "原始材料", "回档重试版本")
+    checkpoint = store.begin_turn(
+        session["id"],
+        "writer-1",
+        "message-retry-revision",
+        original_message={"message": "第一轮"},
+        content_hash="message-retry-revision",
+    )
+    saved = store.save_turn(
+        session["id"],
+        "writer-1",
+        [
+            *session["messages"],
+            {
+                "role": "user",
+                "content": "第一轮",
+                "message_id": "message-retry-revision",
+            },
+            {"role": "assistant", "content": "完成"},
+        ],
+        None,
+        client_message_id="message-retry-revision",
+        turn_checkpoint_id=checkpoint["id"],
+    )
+    store.begin_rollback(
+        session["id"],
+        "writer-1",
+        checkpoint["id"],
+        mode="rollback",
+        client_request_id="rollback-retry-revision",
+        expected_history_revision=saved["history_revision"],
+    )
+    store.append_material(
+        session["id"], "writer-1", "外部新增材料", "new.md"
+    )
+
+    with pytest.raises(WriterActionError) as exc:
+        store.begin_rollback(
+            session["id"],
+            "writer-1",
+            checkpoint["id"],
+            mode="rollback",
+            client_request_id="rollback-retry-revision",
+            expected_history_revision=saved["history_revision"],
+        )
+
+    assert exc.value.code == "HISTORY_REVISION_MISMATCH"
+
+
 def test_restore_conversation_returns_to_checkpoint_and_replays_once(
     tmp_path: Path,
 ) -> None:
@@ -119,6 +397,15 @@ def test_restore_conversation_returns_to_checkpoint_and_replays_once(
     )
 
     assert created is True
+    store.advance_rollback(
+        rollback["id"], "jobs_settled", expected_stage="requested"
+    )
+    store.advance_rollback(
+        rollback["id"], "validated", expected_stage="jobs_settled"
+    )
+    store.advance_rollback(
+        rollback["id"], "workflow_restored", expected_stage="validated"
+    )
     restored = store.restore_conversation(rollback["id"])
     replay, replay_created = store.begin_rollback(
         session["id"],

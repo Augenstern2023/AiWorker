@@ -62,6 +62,7 @@ def test_system_schema_declares_all_shared_tables():
         "user_roles",
         "users",
         "workflow_instances",
+        "workflow_project_deletions",
         "workflow_project_member_events",
         "workflow_submissions",
         "workflow_task_events",
@@ -74,6 +75,17 @@ def test_system_schema_declares_all_shared_tables():
 
 def test_system_schema_keeps_existing_user_ids_as_text():
     assert isinstance(SYSTEM_METADATA.tables["users"].c.id.type, Text)
+
+
+def test_workflow_deletion_marker_persists_owner_and_recovery_snapshot():
+    marker = SYSTEM_METADATA.tables["workflow_project_deletions"]
+
+    assert {"owner_token", "requested_by", "project_snapshot_json"} <= {
+        column.name for column in marker.c
+    }
+    assert isinstance(marker.c.project_snapshot_json.type, JSONB)
+    member_events = SYSTEM_METADATA.tables["workflow_project_member_events"]
+    assert isinstance(member_events.c.writer_operation_id.type, Text)
 
 
 def test_runtime_schema_uses_timestamptz_and_jsonb_for_system_events():
@@ -170,6 +182,12 @@ def test_upgrade_head_creates_system_tables(postgres_url, monkeypatch):
         inspector = inspect(engine)
         assert inspector.has_table("users")
         assert inspector.has_table("workflow_tasks")
+        assert inspector.has_table("workflow_project_deletions")
+        marker_columns = {
+            column["name"]
+            for column in inspector.get_columns("workflow_project_deletions")
+        }
+        assert {"owner_token", "requested_by", "project_snapshot_json"} <= marker_columns
         assert inspector.has_table("audit_logs")
         assert inspector.has_table("llm_providers")
         assert inspector.has_table("llm_models")

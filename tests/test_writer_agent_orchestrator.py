@@ -98,6 +98,111 @@ def test_create_action_binds_idempotent_original_project(orchestrator_context) -
     assert session["project_id"] == first["project_id"]
 
 
+def test_create_action_persists_project_id_before_session_bind(
+    orchestrator_context, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Would catch a created project becoming unreachable when session binding fails."""
+
+    action = orchestrator_context.create_action(
+        "project.create_original",
+        payload={
+            "seed_text": "未来公司按照员工情绪发工资",
+            "name": "情绪公司", "genre": "都市奇幻", "target_platform": "hg",
+            "target_audience": "18-35岁", "target_episode_count": 20,
+            "episode_duration_seconds": 120, "cost_level": "low",
+            "content_boundaries": [], "reference_refs": [], "assumptions": [],
+        },
+    )
+
+    def fail_bind(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise WriterActionError(
+            "SESSION_MUTATION_LEASE_LOST", "会话写入租约已失效", retryable=True
+        )
+
+    monkeypatch.setattr(orchestrator_context.store, "bind_project", fail_bind)
+    observer = MagicMock()
+    orchestrator_context.orchestrator.new_project_observer = observer
+
+    with pytest.raises(WriterActionError) as exc:
+        orchestrator_context.orchestrator.execute_project_action(
+            action["id"], orchestrator_context.actor
+        )
+
+    assert exc.value.code == "SESSION_MUTATION_LEASE_LOST"
+    persisted = orchestrator_context.store.require_action(action["id"], "writer-1")
+    assert persisted["project_id"] == 17
+    assert persisted["result"] is None
+    observer.assert_called_once()
+    assert observer.call_args.args[0]["project_id"] == 17
+
+
+def test_create_action_retry_reuses_project_after_session_bind_failure(
+    orchestrator_context, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retrying the bind must not create an orphan second project."""
+
+    action = orchestrator_context.create_action(
+        "project.create_original",
+        payload={
+            "seed_text": "未来公司按照员工情绪发工资",
+            "name": "情绪公司", "genre": "都市奇幻", "target_platform": "hg",
+            "target_audience": "18-35岁", "target_episode_count": 20,
+            "episode_duration_seconds": 120, "cost_level": "low",
+            "content_boundaries": [], "reference_refs": [], "assumptions": [],
+        },
+    )
+    orchestrator_context.store.claim_pending_action(
+        action["id"], expected_revision=1
+    )
+    orchestrator_context.store.start_action(action["id"])
+    original_bind = orchestrator_context.store.bind_project
+    bind_attempts = 0
+
+    def fail_first_bind(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal bind_attempts
+        bind_attempts += 1
+        if bind_attempts == 1:
+            raise WriterActionError(
+                "SESSION_MUTATION_LEASE_LOST",
+                "会话写入租约已失效",
+                retryable=True,
+            )
+        return original_bind(*args, **kwargs)
+
+    monkeypatch.setattr(orchestrator_context.store, "bind_project", fail_first_bind)
+    orchestrator_context.creative_service.create_original_project.side_effect = [
+        {"id": 17, "name": "情绪公司", "creation_mode": "original"},
+        {"id": 18, "name": "重复项目", "creation_mode": "original"},
+    ]
+
+    with pytest.raises(WriterActionError):
+        orchestrator_context.orchestrator.execute_project_action(
+            action["id"], orchestrator_context.actor
+        )
+    failed = orchestrator_context.store.fail_action(
+        action["id"],
+        code="SESSION_MUTATION_LEASE_LOST",
+        message="会话写入租约已失效",
+        retryable=True,
+    )
+    retry = orchestrator_context.store.create_retry_action(
+        failed,
+        orchestrator_context.actor.user_id,
+        retry_request_id="retry-bind-only",
+    )
+    orchestrator_context.store.start_action(retry["id"])
+
+    result = orchestrator_context.orchestrator.execute_project_action(
+        retry["id"], orchestrator_context.actor
+    )
+
+    assert result["project_id"] == 17
+    assert orchestrator_context.store.get(
+        action["session_id"], orchestrator_context.actor.user_id
+    )["project_id"] == 17
+    assert orchestrator_context.creative_service.create_original_project.call_count == 1
+
+
 def test_link_action_rechecks_project_read_access(orchestrator_context) -> None:
     action = orchestrator_context.create_action(
         "project.link", payload={"project_id": 404}
@@ -156,6 +261,59 @@ def test_standalone_lock_materializes_and_executes_a_real_lock_step(
     ]
     assert result["resource_refs"][0]["resource_id"] == "101"
     orchestrator_context.creative_service.lock_resource.assert_called_once()
+    assert orchestrator_context.creative_service.ensure_stage_task.call_args.kwargs[
+        "operation_id"
+    ] == steps[0]["operation_id"]
+
+
+def test_lock_step_tags_direct_task_start_with_writer_operation_id(
+    orchestrator_context,
+) -> None:
+    """The direct assigned-to-start transition must be attributable to Writer."""
+
+    snapshot = orchestrator_context.store.save_source_snapshot(
+        {"snapshot_id": "snapshot-start-tag", "materials": []}
+    )
+    action = orchestrator_context.store.create_action(
+        session_id=orchestrator_context.session["id"],
+        actor_user_id=orchestrator_context.actor.user_id,
+        action_type="creative.lock",
+        project_id=17,
+        idempotency_key="start-tag-lock",
+        request_hash="start-tag-lock",
+        payload={
+            "target_stage": "brief",
+            "resource_id": "brief-1",
+            "assumptions": [],
+        },
+        expected_context={"project_revision": 0},
+        source_snapshot_id=snapshot["id"],
+    )
+    orchestrator_context.creative_service.ensure_stage_task.return_value = {
+        "id": "brief-task",
+        "status": "assigned",
+    }
+    orchestrator_context.creative_service.lock_resource.return_value = {
+        "resource_type": "brief",
+        "resource_id": "brief-1",
+        "status": "locked",
+    }
+    steps = orchestrator_context.orchestrator.prepare_action_plan(
+        action["id"], orchestrator_context.actor
+    )
+
+    orchestrator_context.orchestrator.execute_action_step(
+        action,
+        steps[0],
+        orchestrator_context.actor,
+        operation_id=steps[0]["operation_id"],
+    )
+
+    orchestrator_context.creative_service.workflow_repository.start_task.assert_called_once_with(
+        "brief-task",
+        orchestrator_context.actor,
+        writer_operation_id=steps[0]["operation_id"],
+    )
 
 
 @pytest.mark.parametrize("target_stage", ["beats", "script"])

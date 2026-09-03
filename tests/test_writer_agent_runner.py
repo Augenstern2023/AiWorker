@@ -277,6 +277,182 @@ def test_runner_captures_undo_before_action_and_finalizes_the_terminal_state(
     assert order == ["prepare", "execute", "finalize"]
 
 
+def test_runner_retries_undo_finalization_before_publishing_terminal_status(
+    runner_context,
+) -> None:
+    """Would catch a terminal action permanently retaining a prepared undo."""
+
+    checkpoint = runner_context.store.begin_turn(
+        runner_context.session["id"],
+        runner_context.actor.user_id,
+        "runner-finalization-retry",
+        original_message={"message": "关联项目"},
+        content_hash="runner-finalization-retry",
+    )
+    action = runner_context.store.create_action(
+        session_id=runner_context.session["id"],
+        actor_user_id=runner_context.actor.user_id,
+        action_type="project.link",
+        project_id=17,
+        idempotency_key="runner-finalization-retry",
+        request_hash="runner-finalization-retry",
+        payload={},
+        expected_context={"session_revision": 0},
+        source_snapshot_id=None,
+        turn_checkpoint_id=checkpoint["id"],
+    )
+    runner_context.store.claim_pending_action(action["id"], expected_revision=1)
+    runner_context.orchestrator.execute_project_action.return_value = {
+        "project_id": 17,
+        "name": "项目",
+        "open_url": "/planning/projects/17/brief",
+    }
+    rollback_service = MagicMock()
+    rollback_service.finalize_action_undo.side_effect = [
+        RuntimeError("temporary fingerprint failure"),
+        {"status": "applied"},
+    ]
+    runner_context.runner.rollback_service = rollback_service
+
+    runner_context.runner.run(action["id"], runner_context.actor)
+    pending_finalization = runner_context.store.require_action(
+        action["id"], runner_context.actor.user_id
+    )
+    runner_context.runner.run(action["id"], runner_context.actor)
+    completed = runner_context.store.require_action(
+        action["id"], runner_context.actor.user_id
+    )
+
+    assert pending_finalization["status"] == "running"
+    assert pending_finalization["phase"] == "finalizing_succeeded"
+    assert completed["status"] == "succeeded"
+    assert runner_context.orchestrator.execute_project_action.call_count == 1
+    assert rollback_service.finalize_action_undo.call_count == 2
+
+
+def test_restart_finalizes_running_action_before_failing_missing_principal(
+    runner_context,
+) -> None:
+    """Would catch restart publishing failure before its undo can be finalized."""
+
+    checkpoint = runner_context.store.begin_turn(
+        runner_context.session["id"],
+        runner_context.actor.user_id,
+        "runner-missing-principal",
+        original_message={"message": "关联项目"},
+        content_hash="runner-missing-principal",
+    )
+    action = runner_context.store.create_action(
+        session_id=runner_context.session["id"],
+        actor_user_id=runner_context.actor.user_id,
+        action_type="project.link",
+        project_id=17,
+        idempotency_key="runner-missing-principal",
+        request_hash="runner-missing-principal",
+        payload={},
+        expected_context={"session_revision": 0},
+        source_snapshot_id=None,
+        turn_checkpoint_id=checkpoint["id"],
+    )
+    runner_context.store.prepare_action_undo(
+        action["id"],
+        checkpoint["id"],
+        project_id=None,
+        preimage={"kind": "session_only"},
+        workflow_preimage={},
+    )
+    runner_context.store.claim_pending_action(action["id"], expected_revision=1)
+    runner_context.store.start_action(action["id"])
+    rollback_service = MagicMock()
+    runner = WriterActionRunner(
+        store=runner_context.store,
+        orchestrator=runner_context.orchestrator,
+        job_manager=runner_context.jobs,
+        principal_loader=lambda _user_id: None,
+        rollback_service=rollback_service,
+    )
+
+    runner.resume_active_actions()
+
+    failed = runner_context.store.require_action(
+        action["id"], runner_context.actor.user_id
+    )
+    assert failed["status"] == "failed"
+    assert failed["error_code"] == "PROJECT_ACCESS_DENIED"
+    rollback_service.finalize_action_undo.assert_called_once()
+
+
+def test_runner_fails_action_before_side_effect_when_undo_prepare_fails(
+    runner_context,
+) -> None:
+    """Would catch undo preparation errors leaving an action permanently running."""
+
+    checkpoint = runner_context.store.begin_turn(
+        runner_context.session["id"],
+        runner_context.actor.user_id,
+        "runner-undo-prepare-failure",
+        original_message={"message": "关联项目"},
+        content_hash="runner-undo-prepare-failure",
+    )
+    action = runner_context.store.create_action(
+        session_id=runner_context.session["id"],
+        actor_user_id=runner_context.actor.user_id,
+        action_type="project.link",
+        project_id=17,
+        idempotency_key="runner-undo-prepare-failure",
+        request_hash="runner-undo-prepare-failure",
+        payload={},
+        expected_context={"session_revision": 0},
+        source_snapshot_id=None,
+        turn_checkpoint_id=checkpoint["id"],
+    )
+    runner_context.store.claim_pending_action(action["id"], expected_revision=1)
+    rollback_service = MagicMock()
+    rollback_service.prepare_action_undo.side_effect = WriterActionError(
+        "ROLLBACK_PREPARE_FAILED", "无法建立动作撤销点", retryable=True
+    )
+    runner_context.runner.rollback_service = rollback_service
+
+    runner_context.runner.run(action["id"], runner_context.actor)
+
+    failed = runner_context.store.require_action(
+        action["id"], runner_context.actor.user_id
+    )
+    assert failed["status"] == "failed"
+    assert failed["error_code"] == "ROLLBACK_PREPARE_FAILED"
+    assert failed["retryable"] is True
+    runner_context.orchestrator.execute_project_action.assert_not_called()
+    rollback_service.finalize_action_undo.assert_not_called()
+
+
+def test_cancelling_never_started_action_does_not_finalize_missing_undo(
+    runner_context,
+) -> None:
+    """Would catch queued cancellation trying to finalize an undo that was never prepared."""
+
+    action = runner_context.store.create_action(
+        session_id=runner_context.session["id"],
+        actor_user_id=runner_context.actor.user_id,
+        action_type="project.link",
+        project_id=17,
+        idempotency_key="cancel-before-start",
+        request_hash="cancel-before-start",
+        payload={},
+        expected_context={"session_revision": 0},
+        source_snapshot_id=None,
+    )
+    queued = runner_context.store.claim_pending_action(
+        action["id"], expected_revision=1
+    )
+    rollback_service = MagicMock()
+    runner_context.runner.rollback_service = rollback_service
+
+    cancelled = runner_context.runner.cancel(queued["id"], runner_context.actor)
+
+    assert cancelled["status"] == "cancelled"
+    rollback_service.finalize_action_undo.assert_not_called()
+
+
 def test_runner_materializes_a_confirmed_plan_when_no_steps_exist(
     runner_context,
 ) -> None:
@@ -383,6 +559,55 @@ def test_project_creation_can_continue_to_outline_in_one_confirmed_action(
     assert completed["status"] == "succeeded"
     assert completed["project_id"] == 17
     assert runner_context.executed == ["outline.generate"]
+
+
+def test_project_creation_failure_after_create_keeps_real_error_and_undo(
+    runner_context,
+) -> None:
+    """Would catch a created project being mislabeled as an undo-prepare no-op."""
+
+    checkpoint = runner_context.store.begin_turn(
+        runner_context.session["id"],
+        runner_context.actor.user_id,
+        "create-then-bind-fails-message",
+        original_message={"message": "创建项目并生成大纲"},
+        content_hash="create-then-bind-fails-message",
+    )
+    action = runner_context.store.create_action(
+        session_id=runner_context.session["id"],
+        actor_user_id=runner_context.actor.user_id,
+        action_type="project.create_original",
+        project_id=None,
+        idempotency_key="create-then-bind-fails",
+        request_hash="create-then-bind-fails",
+        payload={"target_stage": "outline"},
+        expected_context={"session_revision": 0},
+        source_snapshot_id="snapshot-create-bind-fails",
+        turn_checkpoint_id=checkpoint["id"],
+    )
+    runner_context.store.claim_pending_action(action["id"], expected_revision=1)
+    rollback_service = MagicMock()
+    runner_context.runner.rollback_service = rollback_service
+
+    def create_then_fail(action_id: str, _actor: Principal) -> dict:
+        runner_context.store.attach_project_to_action(
+            action_id, 17, project_context={}
+        )
+        raise WriterActionError(
+            "SESSION_MUTATION_LEASE_LOST", "会话写入租约已失效", retryable=True
+        )
+
+    runner_context.orchestrator.execute_project_action.side_effect = create_then_fail
+
+    runner_context.runner.run(action["id"], runner_context.actor)
+
+    failed = runner_context.store.require_action(
+        action["id"], runner_context.actor.user_id
+    )
+    assert failed["status"] == "failed"
+    assert failed["project_id"] == 17
+    assert failed["error_code"] == "SESSION_MUTATION_LEASE_LOST"
+    rollback_service.finalize_action_undo.assert_called_once()
 
 
 def test_project_creation_retry_reuses_project_and_only_runs_copied_failures(
@@ -854,9 +1079,16 @@ class ConcreteCreativeService:
         return current
 
     def ensure_stage_task(
-        self, project_id, stage, actor, *, expected_context, episode_number=None
+        self,
+        project_id,
+        stage,
+        actor,
+        *,
+        expected_context,
+        episode_number=None,
+        operation_id=None,
     ):
-        del actor
+        del actor, operation_id
         self.assert_plan_context(project_id, expected_context, episode_number)
         return {"id": f"{stage}-task"}
 

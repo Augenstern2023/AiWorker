@@ -50,6 +50,27 @@ _WRITER_ROLLBACK_TECHNICAL_TABLES = (
     "creative_operation_results",
     "creative_generation_operations",
 )
+_WRITER_PROJECT_DELETION_TABLES = (
+    "creative_seeds",
+    "creative_blueprints",
+    "creative_characters",
+    "creative_relationships",
+    "creative_episodes",
+    "creative_operation_results",
+    "creative_generation_operations",
+    "creative_stage_exports",
+    "script_reviews",
+    "script_optimizations",
+    "script_optimization_drafts",
+    "creative_deliveries",
+)
+_WRITER_PROJECT_EXTERNAL_TABLES = (
+    "creative_stage_exports",
+    "script_reviews",
+    "script_optimizations",
+    "script_optimization_drafts",
+    "creative_deliveries",
+)
 
 
 class TopicDecisionConflict(ValueError):
@@ -2436,6 +2457,252 @@ class CreativeRepository:
     def writer_rollback_fingerprint(self, project_id: int) -> str:
         return str(self.export_writer_rollback_state(project_id)["fingerprint"])
 
+    def _writer_project_deletion_state_conn(
+        self, conn: sqlite3.Connection, project_id: int
+    ) -> dict[str, Any]:
+        project = conn.execute(
+            "SELECT * FROM creative_projects WHERE id=? AND deleted=0",
+            (project_id,),
+        ).fetchone()
+        if project is None:
+            raise ValueError("创作项目不存在")
+        tables: dict[str, list[dict[str, Any]]] = {
+            "creative_projects": [dict(project)]
+        }
+        for table in _WRITER_PROJECT_DELETION_TABLES:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if exists is None:
+                tables[table] = []
+                continue
+            tables[table] = [
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT * FROM {table} WHERE project_id=? ORDER BY rowid",
+                    (project_id,),
+                ).fetchall()
+            ]
+        payload = {"project_id": int(project_id), "tables": tables}
+        return {**payload, "fingerprint": canonical_request_hash(payload)}
+
+    def writer_project_deletion_fingerprint(self, project_id: int) -> str:
+        """Fingerprint every creative row that project deletion would remove."""
+
+        with self._connect() as conn:
+            state = self._writer_project_deletion_state_conn(conn, project_id)
+        return str(state["fingerprint"])
+
+    def _writer_project_external_use_state_conn(
+        self, conn: sqlite3.Connection, project_id: int, action_id: str
+    ) -> dict[str, Any]:
+        project = conn.execute(
+            "SELECT * FROM creative_projects WHERE id=? AND deleted=0",
+            (project_id,),
+        ).fetchone()
+        if project is None:
+            raise ValueError("创作项目不存在")
+        project_metadata = {
+            key: project[key]
+            for key in (
+                "topic_id",
+                "breakdown_id",
+                "name",
+                "genre",
+                "target_platform",
+                "target_audience",
+                "target_episode_count",
+                "episode_duration_seconds",
+                "creation_workflow_task_id",
+                "creation_request_id",
+                "created_by",
+                "creation_mode",
+                "bootstrap_status",
+            )
+        }
+        owned_refs = {
+            "brief_ids": set(),
+            "character_batches": set(),
+            "outline_batches": set(),
+            "episode_ids": set(),
+        }
+        owned_prefix = f"{action_id}:%"
+        for row in conn.execute(
+            "SELECT resource_ref_json FROM creative_operation_results "
+            "WHERE project_id=? AND operation_id LIKE ?",
+            (project_id, owned_prefix),
+        ).fetchall():
+            try:
+                ref = json.loads(row["resource_ref_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            resource_type = str(ref.get("resource_type") or "")
+            resource_ids = ref.get("resource_ids") or [ref.get("resource_id")]
+            if resource_type == "brief":
+                owned_refs["brief_ids"].update(
+                    int(value) for value in resource_ids if str(value or "").isdigit()
+                )
+            elif resource_type == "characters":
+                owned_refs["character_batches"].update(
+                    str(value).rsplit(":", 1)[-1]
+                    for value in resource_ids if value
+                )
+            elif resource_type == "outline":
+                owned_refs["outline_batches"].update(
+                    str(value).rsplit(":", 1)[-1]
+                    for value in resource_ids if value
+                )
+            elif resource_type in {"beats", "script", "episode"}:
+                owned_refs["episode_ids"].update(
+                    int(value) for value in resource_ids if str(value or "").isdigit()
+                )
+
+        def rows(table: str) -> list[dict[str, Any]]:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if exists is None:
+                return []
+            return [
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT * FROM {table} WHERE project_id=? ORDER BY rowid",
+                    (project_id,),
+                ).fetchall()
+            ]
+
+        unowned_resources = {
+            "creative_seeds": rows("creative_seeds"),
+            "creative_blueprints": [
+                row for row in rows("creative_blueprints")
+                if int(row["id"]) not in owned_refs["brief_ids"]
+            ],
+            "creative_characters": [
+                row for row in rows("creative_characters")
+                if str(row["batch_id"]) not in owned_refs["character_batches"]
+            ],
+            "creative_relationships": [
+                row for row in rows("creative_relationships")
+                if str(row["batch_id"]) not in owned_refs["character_batches"]
+            ],
+            "creative_episodes": [
+                row for row in rows("creative_episodes")
+                if (
+                    int(row["id"]) not in owned_refs["episode_ids"]
+                    and str(row["batch_id"]) not in owned_refs["outline_batches"]
+                )
+            ],
+        }
+        technical = {
+            table: [
+                row for row in rows(table)
+                if not str(row.get("operation_id") or "").startswith(
+                    f"{action_id}:"
+                )
+            ]
+            for table in (
+                "creative_operation_results",
+                "creative_generation_operations",
+            )
+        }
+        payload = {
+            "project_id": int(project_id),
+            "project_metadata": project_metadata,
+            "unowned_resources": unowned_resources,
+            "unowned_operations": technical,
+            "external_tables": {
+                table: rows(table) for table in _WRITER_PROJECT_EXTERNAL_TABLES
+            },
+        }
+        return {**payload, "fingerprint": canonical_request_hash(payload)}
+
+    def writer_project_external_use_fingerprint(
+        self, project_id: int, action_id: str
+    ) -> str:
+        """Fingerprint project rows not owned by one Writer create action."""
+
+        with self._connect() as conn:
+            state = self._writer_project_external_use_state_conn(
+                conn, project_id, action_id
+            )
+        return str(state["fingerprint"])
+
+    def writer_action_workflow_task_ids(
+        self, project_id: int, action_id: str
+    ) -> set[str]:
+        """Return workflow tasks referenced by one Writer action's durable rows."""
+
+        with self._connect() as conn:
+            project = conn.execute(
+                "SELECT workflow_task_id,creation_workflow_task_id "
+                "FROM creative_projects WHERE id=? AND deleted=0",
+                (project_id,),
+            ).fetchone()
+            if project is None:
+                raise ValueError("创作项目不存在")
+            task_ids = {
+                str(value)
+                for value in (
+                    project["workflow_task_id"],
+                    project["creation_workflow_task_id"],
+                )
+                if value
+            }
+            for row in conn.execute(
+                "SELECT resource_ref_json FROM creative_operation_results "
+                "WHERE project_id=? AND operation_id LIKE ?",
+                (project_id, f"{action_id}:%"),
+            ).fetchall():
+                try:
+                    ref = json.loads(row["resource_ref_json"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                resource_type = str(ref.get("resource_type") or "")
+                resource_ids = ref.get("resource_ids") or [ref.get("resource_id")]
+                values = [value for value in resource_ids if value is not None]
+                if not values:
+                    continue
+                if resource_type == "brief":
+                    placeholders = ",".join("?" for _ in values)
+                    query = (
+                        "SELECT workflow_task_id FROM creative_blueprints "
+                        f"WHERE project_id=? AND id IN ({placeholders})"
+                    )
+                    params = [project_id, *[int(value) for value in values]]
+                elif resource_type == "characters":
+                    batches = [str(value).rsplit(":", 1)[-1] for value in values]
+                    placeholders = ",".join("?" for _ in batches)
+                    query = (
+                        "SELECT workflow_task_id FROM creative_characters "
+                        f"WHERE project_id=? AND batch_id IN ({placeholders})"
+                    )
+                    params = [project_id, *batches]
+                elif resource_type == "outline":
+                    batches = [str(value).rsplit(":", 1)[-1] for value in values]
+                    placeholders = ",".join("?" for _ in batches)
+                    query = (
+                        "SELECT workflow_task_id FROM creative_episodes "
+                        f"WHERE project_id=? AND batch_id IN ({placeholders})"
+                    )
+                    params = [project_id, *batches]
+                elif resource_type in {"beats", "script", "episode"}:
+                    placeholders = ",".join("?" for _ in values)
+                    query = (
+                        "SELECT workflow_task_id FROM creative_episodes "
+                        f"WHERE project_id=? AND id IN ({placeholders})"
+                    )
+                    params = [project_id, *[int(value) for value in values]]
+                else:
+                    continue
+                task_ids.update(
+                    str(item["workflow_task_id"])
+                    for item in conn.execute(query, params).fetchall()
+                    if item["workflow_task_id"]
+                )
+        return task_ids
+
     @staticmethod
     def _writer_rollback_primary_key(
         conn: sqlite3.Connection, table: str
@@ -2572,12 +2839,32 @@ class CreativeRepository:
             )
 
     def delete_project(
-        self, project_id: int, *, requested_by: str = ""
+        self,
+        project_id: int,
+        *,
+        requested_by: str = "",
+        expected_writer_fingerprint: str | None = None,
+        expected_writer_external_fingerprint: str | None = None,
+        writer_action_id: str | None = None,
     ) -> dict[str, Any]:
         """Delete creative rows and leave a durable workflow-cleanup tombstone."""
 
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if expected_writer_fingerprint is not None:
+                current = self._writer_project_deletion_state_conn(
+                    conn, project_id
+                )
+                if current["fingerprint"] != expected_writer_fingerprint:
+                    raise ValueError("project deletion state changed")
+            if expected_writer_external_fingerprint is not None:
+                if not writer_action_id:
+                    raise ValueError("writer action id is required")
+                external = self._writer_project_external_use_state_conn(
+                    conn, project_id, writer_action_id
+                )
+                if external["fingerprint"] != expected_writer_external_fingerprint:
+                    raise ValueError("project has external use")
             project = conn.execute(
                 "SELECT id, name, topic_id FROM creative_projects WHERE id = ? AND deleted = 0",
                 (project_id,),

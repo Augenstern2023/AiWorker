@@ -72,6 +72,7 @@ _MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 _SUPPLEMENT_MARKER = re.compile(r"\n\n\[补充材料：(?P<name>[^\]]+)\]\n")
 _MESSAGE_CLAIM_LEASE_SECONDS = 30.0
 _MESSAGE_CLAIM_HEARTBEAT_SECONDS = 10.0
+_SESSION_MUTATION_LEASE_SECONDS = 120.0
 
 
 def _writer_message_timeout_seconds() -> float:
@@ -94,6 +95,7 @@ def _start_message_claim_heartbeat(
     user_id: str,
     message_id: str,
     claim_token: str,
+    mutation_token: str | None = None,
 ) -> threading.Event:
     """Renew a provider turn independently of the request event loop."""
 
@@ -109,6 +111,12 @@ def _start_message_claim_heartbeat(
                     message_id,
                     claim_token=claim_token,
                 )
+                if mutation_token is not None:
+                    renewed = renewed and store.renew_session_mutation(
+                        session_id,
+                        owner_token=mutation_token,
+                        lease_seconds=_SESSION_MUTATION_LEASE_SECONDS,
+                    )
             except (OSError, sqlite3.Error):
                 return
             if not renewed:
@@ -306,10 +314,19 @@ def build_writer_agent_router(
         else None
     )
     rollback_service = RollbackService(
-        store, authority_repository, workflow_repository
+        store,
+        authority_repository,
+        workflow_repository,
+        permission_service=permission_service,
+        action_runner=runner,
     )
     if runner is not None and hasattr(runner, "rollback_service"):
         runner.rollback_service = rollback_service
+        orchestrator = getattr(runner, "orchestrator", None)
+        if orchestrator is not None and hasattr(orchestrator, "new_project_observer"):
+            orchestrator.new_project_observer = (
+                rollback_service.capture_new_project_ownership
+            )
 
     def assert_access(principal: Principal) -> None:
         if not principal.is_system_admin and "script.review.generate" not in principal.permissions:
@@ -340,6 +357,10 @@ def build_writer_agent_router(
             "ROLLBACK_CONFLICT": 409,
             "ROLLBACK_PERMISSION_DENIED": 403,
             "ROLLBACK_PARTIAL_FAILURE": 500,
+            "ROLLBACK_STATE_CONFLICT": 409,
+            "SESSION_MUTATION_BUSY": 409,
+            "SESSION_MUTATION_LEASE_LOST": 409,
+            "TURN_CHECKPOINT_INVALID": 409,
         }.get(exc.code, 409)
         return HTTPException(
             status,
@@ -351,6 +372,66 @@ def build_writer_agent_router(
                 "conflicting_action_id": exc.conflicting_action_id,
             },
         )
+
+    async def session_mutation_lease(
+        session_id: int,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        """Serialize every side-effecting request for one Writer session."""
+
+        assert_access(principal)
+        path = request.url.path.rstrip("/")
+        mutation_kind = (
+            "rollback"
+            if path.endswith("/rollback")
+            else "resend"
+            if path.endswith("/resend")
+            else "message"
+            if path.endswith("/messages")
+            else "material"
+            if path.endswith("/materials/file")
+            else "project_review"
+            if "/project-reviews" in path
+            else "action"
+        )
+        owner_token = f"{mutation_kind}-{uuid4().hex}"
+        leased_session = store.get(session_id, session_user_id(principal))
+        if leased_session is None:
+            raise HTTPException(404, "创作会话不存在")
+        lease_user_id = str(leased_session["user_id"])
+        deadline = time.monotonic() + _writer_message_timeout_seconds()
+        while True:
+            try:
+                store.acquire_session_mutation(
+                    session_id,
+                    lease_user_id,
+                    owner_token=owner_token,
+                    mutation_kind=mutation_kind,
+                    lease_seconds=_SESSION_MUTATION_LEASE_SECONDS,
+                )
+                break
+            except WriterActionError as exc:
+                if (
+                    exc.code != "SESSION_MUTATION_BUSY"
+                    or mutation_kind != "message"
+                    or time.monotonic() >= deadline
+                ):
+                    raise action_error(exc) from exc
+                await asyncio.sleep(0.05)
+        heartbeat_stop, heartbeat_thread = store.start_session_mutation_heartbeat(
+            session_id,
+            owner_token=owner_token,
+            lease_seconds=_SESSION_MUTATION_LEASE_SECONDS,
+        )
+        try:
+            yield owner_token
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=1.0)
+            store.release_session_mutation(
+                session_id, owner_token=owner_token
+            )
 
     def require_action_service() -> ActionService:
         if resolved_action_service is None:
@@ -457,6 +538,7 @@ def build_writer_agent_router(
         session_id: int,
         request: Request,
         principal: Principal = Depends(current_principal),
+        mutation_token: str = Depends(session_mutation_lease),
     ) -> dict[str, Any]:
         assert_access(principal)
         try:
@@ -466,7 +548,11 @@ def build_writer_agent_router(
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         session = store.append_material(
-            session_id, owned_user_id(principal), content, name
+            session_id,
+            owned_user_id(principal),
+            content,
+            name,
+            mutation_token=mutation_token,
         )
         if not session:
             raise HTTPException(404, "创作会话不存在")
@@ -481,7 +567,12 @@ def build_writer_agent_router(
         return session
 
     @router.post("/sessions/{session_id}/messages")
-    async def chat(session_id: int, payload: ChatRequest, principal: Principal = Depends(current_principal)) -> dict[str, Any]:
+    async def chat(
+        session_id: int,
+        payload: ChatRequest,
+        principal: Principal = Depends(current_principal),
+        mutation_token: str = Depends(session_mutation_lease),
+    ) -> dict[str, Any]:
         assert_access(principal)
         session = store.get(session_id, owned_user_id(principal))
         if not session:
@@ -527,6 +618,7 @@ def build_writer_agent_router(
                         message_id,
                         original_message=payload.model_dump(mode="json"),
                         content_hash=turn_hash,
+                        mutation_token=mutation_token,
                     )
                 except WriterActionError as exc:
                     raise action_error(exc) from exc
@@ -538,6 +630,7 @@ def build_writer_agent_router(
             *,
             claim_token: str | None = None,
         ) -> dict[str, Any]:
+            turn = ensure_checkpoint()
             saved = store.save_turn(
                 session_id,
                 owned_user_id(principal),
@@ -545,8 +638,9 @@ def build_writer_agent_router(
                 report,
                 client_message_id=message_id,
                 claim_token=claim_token,
+                turn_checkpoint_id=turn["id"],
+                mutation_token=mutation_token,
             )
-            store.complete_turn(ensure_checkpoint()["id"])
             return store.get(session_id, owned_user_id(principal)) or saved
         if payload.link_project_id is not None:
             project_id = int(payload.link_project_id)
@@ -583,6 +677,7 @@ def build_writer_agent_router(
                 project_context=expected_context,
                 client_message_id=message_id,
                 turn_checkpoint_id=turn["id"],
+                mutation_token=mutation_token,
             )
             history.extend(
                 [
@@ -611,7 +706,7 @@ def build_writer_agent_router(
                 principal, str(linked_project_id)
             ):
                 raise HTTPException(403, "当前账号已无权读取关联项目")
-            ensure_checkpoint()
+            review_turn = ensure_checkpoint()
             history.extend([
                 {
                     "role": "user", "content": message,
@@ -621,6 +716,7 @@ def build_writer_agent_router(
                 {
                     "role": "assistant", "kind": "project_review_offer",
                     "audit_scope": long_review_scope,
+                    "turn_checkpoint_id": review_turn["id"],
                     "content": "已识别为完整项目审核，请先预检并确认当前项目快照。",
                 },
             ])
@@ -744,6 +840,7 @@ def build_writer_agent_router(
             principal.user_id,
             message_id,
             claim_token,
+            mutation_token,
         )
         try:
             raw = await asyncio.wait_for(
@@ -852,6 +949,7 @@ def build_writer_agent_router(
                     reference_refs=reference_refs,
                     client_message_id=message_id,
                     turn_checkpoint_id=turn["id"],
+                    mutation_token=mutation_token,
                 )
             except Exception:
                 heartbeat_stop.set()
@@ -912,7 +1010,7 @@ def build_writer_agent_router(
             return rollback_service.preview(
                 session_id,
                 message_id,
-                actor_user_id=owned_user_id(principal),
+                actor=principal,
             )
         except WriterActionError as exc:
             raise action_error(exc) from exc
@@ -925,6 +1023,7 @@ def build_writer_agent_router(
         message_id: str,
         payload: TurnRollbackRequest,
         principal: Principal = Depends(current_principal),
+        mutation_token: str = Depends(session_mutation_lease),
     ) -> dict[str, Any]:
         assert_access(principal)
         try:
@@ -935,6 +1034,7 @@ def build_writer_agent_router(
                 mode="rollback",
                 client_request_id=payload.client_request_id,
                 expected_history_revision=payload.expected_history_revision,
+                mutation_token=mutation_token,
             )
         except WriterActionError as exc:
             raise action_error(exc) from exc
@@ -945,6 +1045,7 @@ def build_writer_agent_router(
         message_id: str,
         payload: TurnRollbackRequest,
         principal: Principal = Depends(current_principal),
+        mutation_token: str = Depends(session_mutation_lease),
     ) -> dict[str, Any]:
         assert_access(principal)
         try:
@@ -958,11 +1059,22 @@ def build_writer_agent_router(
                 mode="resend",
                 client_request_id=payload.client_request_id,
                 expected_history_revision=payload.expected_history_revision,
+                mutation_token=mutation_token,
             )
             original = dict(checkpoint.get("original_message") or {})
-            new_message_id = "message-resend-" + hashlib.sha256(
+            candidate_message_id = "message-resend-" + hashlib.sha256(
                 f"{session_id}:{payload.client_request_id}".encode("utf-8")
             ).hexdigest()[:32]
+            rollback = store.record_resend_message_id(
+                owned_user_id(principal),
+                payload.client_request_id,
+                candidate_message_id,
+                mutation_token=mutation_token,
+            )
+            new_message_id = str(
+                (rollback.get("result") or {}).get("new_message_id")
+                or candidate_message_id
+            )
             original.update(
                 {
                     "message_id": new_message_id,
@@ -974,7 +1086,7 @@ def build_writer_agent_router(
             if isinstance(exc, WriterActionError):
                 raise action_error(exc) from exc
             raise HTTPException(422, "原始消息无法重新发送") from exc
-        return await chat(session_id, resend_payload, principal)
+        return await chat(session_id, resend_payload, principal, mutation_token)
 
     @router.post("/sessions/{session_id}/project-reviews/preview")
     async def preview_project_review(
@@ -995,12 +1107,14 @@ def build_writer_agent_router(
         session_id: int,
         payload: ProjectReviewCreateRequest,
         principal: Principal = Depends(current_principal),
+        mutation_token: str = Depends(session_mutation_lease),
     ) -> dict[str, Any]:
         assert_access(principal)
         try:
             return require_project_review_coordinator().create(
                 session_id, principal, payload.audit_scope,
                 payload.expected_fingerprint, payload.client_request_id,
+                mutation_token=mutation_token,
             )
         except ProjectReviewError as exc:
             raise project_review_error(exc) from exc
@@ -1025,11 +1139,12 @@ def build_writer_agent_router(
         session_id: int,
         review_id: int,
         principal: Principal = Depends(current_principal),
+        mutation_token: str = Depends(session_mutation_lease),
     ) -> dict[str, Any]:
         assert_access(principal)
         try:
             return require_project_review_coordinator().resume(
-                session_id, principal, review_id
+                session_id, principal, review_id, mutation_token=mutation_token
             )
         except ProjectReviewError as exc:
             raise project_review_error(exc) from exc
@@ -1086,6 +1201,7 @@ def build_writer_agent_router(
         action_id: str,
         payload: ActionDecisionRequest,
         principal: Principal = Depends(current_principal),
+        _mutation_token: str = Depends(session_mutation_lease),
     ) -> dict[str, Any]:
         assert_access(principal)
         try:
@@ -1110,6 +1226,7 @@ def build_writer_agent_router(
         action_id: str,
         payload: ActionRetryRequest,
         principal: Principal = Depends(current_principal),
+        _mutation_token: str = Depends(session_mutation_lease),
     ) -> dict[str, Any]:
         assert_access(principal)
         try:

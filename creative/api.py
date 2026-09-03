@@ -2712,7 +2712,15 @@ def build_creative_router(
     ):
         project = repository.get_project(project_id)
         pending_deletion = repository.get_pending_project_deletion(project_id)
-        if project is None and pending_deletion is None:
+        get_workflow_deletion = getattr(
+            workflow_repository, "get_pending_project_deletion", None
+        )
+        workflow_deletion = (
+            get_workflow_deletion(str(project_id))
+            if callable(get_workflow_deletion)
+            else None
+        )
+        if project is None and pending_deletion is None and workflow_deletion is None:
             raise HTTPException(404, "创作项目不存在")
         permission_service = getattr(
             request.app.state, "identity_permission_service", None
@@ -2722,29 +2730,80 @@ def build_creative_router(
         if project is not None:
             if not permission_service.can_delete_project(principal, str(project_id)):
                 raise HTTPException(403, "无权管理该项目")
-        elif not (
+        elif pending_deletion is not None and not (
             principal.is_system_admin
             or (
-                pending_deletion is not None
-                and pending_deletion.get("requested_by") == principal.user_id
+                pending_deletion.get("requested_by") == principal.user_id
                 and "project.delete" in principal.permissions
             )
         ):
             raise HTTPException(403, "无权继续该项目的删除清理")
+        elif (
+            pending_deletion is None
+            and workflow_deletion is not None
+            and not (
+                principal.is_system_admin
+                or (
+                    workflow_deletion.get("requested_by") == principal.user_id
+                    and "project.delete" in principal.permissions
+                )
+            )
+        ):
+            raise HTTPException(403, "无权继续该项目的删除清理")
+        if project is not None and workflow_deletion is not None:
+            existing_owner = str(workflow_deletion.get("owner_token") or "")
+            resumable_api_delete = existing_owner.startswith("creative-delete:") and (
+                principal.is_system_admin
+                or workflow_deletion.get("requested_by") == principal.user_id
+            )
+            if not resumable_api_delete:
+                raise HTTPException(409, "项目删除正在由另一个请求处理")
+        deletion_owner = (
+            str(workflow_deletion["owner_token"])
+            if workflow_deletion is not None
+            else f"creative-delete:{project_id}:{uuid.uuid4().hex}"
+        )
+        recovery_project = (
+            project
+            or ((pending_deletion or {}).get("project"))
+            or ((workflow_deletion or {}).get("project_snapshot"))
+            or {}
+        )
+        marker_snapshot = {
+            "id": project_id,
+            "name": str(recovery_project.get("name") or ""),
+        }
         try:
+            marker = workflow_repository.begin_project_deletion(
+                str(project_id),
+                owner_token=deletion_owner,
+                requested_by=principal.user_id,
+                project_snapshot=marker_snapshot,
+            )
+            if (
+                isinstance(marker, dict)
+                and marker.get("owner_token") not in {None, deletion_owner}
+            ):
+                raise HTTPException(409, "项目删除正在由另一个请求处理")
             if project is not None:
                 removed = repository.delete_project(
                     project_id, requested_by=principal.user_id
                 )
             else:
-                assert pending_deletion is not None
+                pending_snapshot = (
+                    pending_deletion["project"]
+                    if pending_deletion is not None
+                    else workflow_deletion["project_snapshot"]
+                )
                 removed = {
-                    **pending_deletion["project"],
+                    **pending_snapshot,
                     "delivery_paths": list(
-                        pending_deletion.get("delivery_paths") or []
+                        (pending_deletion or {}).get("delivery_paths") or []
                     ),
                 }
             workflow_repository.delete_project_data(str(project_id))
+        except HTTPException:
+            raise
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from exc
         except Exception as exc:
@@ -2755,6 +2814,9 @@ def build_creative_router(
             except OSError:
                 continue
         repository.complete_project_deletion(project_id)
+        workflow_repository.complete_project_deletion(
+            str(project_id), owner_token=deletion_owner
+        )
         audit_service = getattr(request.app.state, "audit_service", None)
         if isinstance(audit_service, AuditService):
             audit_service.record(

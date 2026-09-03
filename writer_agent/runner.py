@@ -113,8 +113,9 @@ class WriterActionRunner:
         actor: Principal,
         *,
         error_code: str | None = None,
+        finalize_undo: bool = True,
     ) -> None:
-        if self.rollback_service is not None:
+        if self.rollback_service is not None and finalize_undo:
             self.rollback_service.finalize_action_undo(action, actor)
         if self.audit_service is None:
             return
@@ -151,6 +152,89 @@ class WriterActionRunner:
             )
         except TypeError:
             return
+
+    def _complete_terminal(
+        self,
+        action_id: str,
+        actor: Principal | None,
+        *,
+        status: str,
+        result: dict[str, Any] | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        retryable: bool = False,
+        conflicting_action_id: str | None = None,
+    ) -> dict[str, Any]:
+        current = self.store.require_action(
+            action_id, actor.user_id if actor is not None else None
+        )
+        if (
+            self.rollback_service is None
+            or not current.get("turn_checkpoint_id")
+            or current.get("started_at") is None
+        ):
+            if status == "failed":
+                terminal = self.store.fail_action(
+                    action_id,
+                    code=str(error_code or "ACTION_FAILED"),
+                    message=str(error_message or "动作执行失败"),
+                    retryable=retryable,
+                    conflicting_action_id=conflicting_action_id,
+                    result=result,
+                )
+            else:
+                terminal = self.store.finish_action(
+                    action_id, status=status, result=result
+                )
+            if actor is not None:
+                self._audit_terminal(
+                    terminal,
+                    actor,
+                    error_code=error_code,
+                    finalize_undo=False,
+                )
+            return terminal
+
+        staged = self.store.prepare_action_finalization(
+            action_id,
+            status=status,
+            result=result,
+            error_code=error_code,
+            error_message=error_message,
+            retryable=retryable,
+            conflicting_action_id=conflicting_action_id,
+        )
+        try:
+            self.rollback_service.finalize_action_undo(staged, actor)
+        except Exception:
+            return staged
+        terminal = self.store.publish_action_finalization(action_id)
+        if actor is not None:
+            self._audit_terminal(
+                terminal,
+                actor,
+                error_code=error_code,
+                finalize_undo=False,
+            )
+        return terminal
+
+    def _resume_action_finalization(
+        self, action: dict[str, Any], actor: Principal
+    ) -> dict[str, Any]:
+        phase = str(action.get("phase") or "")
+        status = phase.removeprefix("finalizing_")
+        if status not in {"succeeded", "failed", "cancelled"}:
+            return action
+        return self._complete_terminal(
+            str(action["id"]),
+            actor,
+            status=status,
+            result=(dict(action.get("result") or {}) or None),
+            error_code=action.get("error_code"),
+            error_message=action.get("error_message"),
+            retryable=bool(action.get("retryable")),
+            conflicting_action_id=action.get("conflicting_action_id"),
+        )
 
     @staticmethod
     def _terminal_result(
@@ -363,8 +447,42 @@ class WriterActionRunner:
             raise WriterActionError("ACTION_STATE_INVALID", "动作当前状态不可执行")
 
         if self.rollback_service is not None:
-            current_actor = self._load_current_principal(action)
-            self.rollback_service.prepare_action_undo(action, current_actor)
+            try:
+                current_actor = self._load_current_principal(action)
+                self.rollback_service.prepare_action_undo(action, current_actor)
+            except WriterActionError as exc:
+                terminal = self.store.fail_action(
+                    action_id,
+                    code="ROLLBACK_PREPARE_FAILED",
+                    message=f"无法建立动作撤销点：{exc}",
+                    retryable=exc.retryable,
+                    conflicting_action_id=exc.conflicting_action_id,
+                )
+                self._audit_terminal(
+                    terminal,
+                    actor,
+                    error_code=exc.code,
+                    finalize_undo=False,
+                )
+                return
+            except Exception as exc:
+                terminal = self.store.fail_action(
+                    action_id,
+                    code="ROLLBACK_PREPARE_FAILED",
+                    message=f"无法建立动作撤销点：{exc}",
+                    retryable=True,
+                )
+                self._audit_terminal(
+                    terminal,
+                    actor,
+                    error_code="ROLLBACK_PREPARE_FAILED",
+                    finalize_undo=False,
+                )
+                return
+
+        if str(action.get("phase") or "").startswith("finalizing_"):
+            self._resume_action_finalization(action, actor)
+            return
 
         continued_project_action = bool(
             action["action_type"] == "project.create_original"
@@ -411,22 +529,25 @@ class WriterActionRunner:
                         action_id, current_actor
                     )
             except WriterActionError as exc:
-                terminal = self.store.fail_action(
+                self._complete_terminal(
                     action_id,
-                    code=exc.code,
-                    message=str(exc),
+                    actor,
+                    status="failed",
+                    error_code=exc.code,
+                    error_message=str(exc),
                     retryable=exc.retryable,
                     conflicting_action_id=exc.conflicting_action_id,
                 )
-                self._audit_terminal(terminal, actor, error_code=exc.code)
                 return
             if continue_to_stage:
                 action = self.store.require_action(action_id, actor.user_id)
             else:
-                terminal = self.store.finish_action(
-                    action_id, status="succeeded", result=result
+                self._complete_terminal(
+                    action_id,
+                    actor,
+                    status="succeeded",
+                    result=result,
                 )
-                self._audit_terminal(terminal, actor)
                 return
 
         if action["action_type"] in {"creative.run_plan", "creative.lock"} and not self.store.list_steps(
@@ -436,14 +557,15 @@ class WriterActionRunner:
                 current_actor = self._load_current_principal(action)
                 self.orchestrator.prepare_action_plan(action_id, current_actor)
             except WriterActionError as exc:
-                terminal = self.store.fail_action(
+                self._complete_terminal(
                     action_id,
-                    code=exc.code,
-                    message=str(exc),
+                    actor,
+                    status="failed",
+                    error_code=exc.code,
+                    error_message=str(exc),
                     retryable=exc.retryable,
                     conflicting_action_id=exc.conflicting_action_id,
                 )
-                self._audit_terminal(terminal, actor, error_code=exc.code)
                 return
 
         while True:
@@ -453,7 +575,6 @@ class WriterActionRunner:
             if action.get("phase") == "cancelling":
                 action = self.reconcile(action_id, actor)
                 if action["status"] == "cancelled":
-                    self._audit_terminal(action, actor)
                     return
                 self._poll_event.wait(0.2)
                 continue
@@ -570,35 +691,34 @@ class WriterActionRunner:
         succeeded = [step for step in steps if step["status"] == "succeeded"]
         if failed or blocked:
             first = failed[0] if failed else blocked[0]
-            terminal = self.store.fail_action(
+            self._complete_terminal(
                 action_id,
-                code=str(first.get("error_code") or "DEPENDENCY_FAILED"),
-                message=str(first.get("error_message") or "依赖步骤失败"),
+                actor,
+                status="failed",
+                error_code=str(first.get("error_code") or "DEPENDENCY_FAILED"),
+                error_message=str(first.get("error_message") or "依赖步骤失败"),
                 retryable=any(bool(item.get("retryable")) for item in failed),
                 conflicting_action_id=first.get("conflicting_action_id"),
                 result=self._terminal_result(
                     action, steps, partial=bool(succeeded)
                 ),
             )
-            self._audit_terminal(
-                terminal, actor, error_code=str(first.get("error_code") or "DEPENDENCY_FAILED")
-            )
         elif cancelled:
-            terminal = self.store.finish_action(
+            self._complete_terminal(
                 action_id,
+                actor,
                 status="cancelled",
                 result=self._terminal_result(
                     action, steps, partial=bool(succeeded)
                 ),
             )
-            self._audit_terminal(terminal, actor)
         else:
-            terminal = self.store.finish_action(
+            self._complete_terminal(
                 action_id,
+                actor,
                 status="succeeded",
                 result=self._terminal_result(action, steps, partial=False),
             )
-            self._audit_terminal(terminal, actor)
 
     def reconcile(self, action_id: str, actor: Principal) -> dict[str, Any]:
         self.store.require_action(action_id, actor.user_id)
@@ -609,9 +729,11 @@ class WriterActionRunner:
         if action.get("phase") == "cancelling" and not self.store.active_job_ids(
             action_id
         ) and not self.store.has_running_steps(action_id):
-            terminal = self.store.finish_action(action_id, status="cancelled")
-            self._audit_terminal(terminal, actor)
-            return terminal
+            return self._complete_terminal(
+                action_id,
+                actor,
+                status="cancelled",
+            )
         return action
 
     def retry_failed(
@@ -646,6 +768,8 @@ class WriterActionRunner:
         action = self.store.require_action(action_id, actor.user_id)
         if action["status"] not in {"queued", "running"}:
             raise WriterActionError("ACTION_STATE_INVALID", "动作当前状态不可取消")
+        if str(action.get("phase") or "").startswith("finalizing_"):
+            return self._resume_action_finalization(action, actor)
         if action.get("phase") != "cancelling":
             action = self.store.set_action_phase(
                 action["id"], phase="cancelling"
@@ -658,9 +782,11 @@ class WriterActionRunner:
                 continue
         if active_jobs or self.store.has_running_steps(action_id):
             return self.reconcile(action_id, actor)
-        terminal = self.store.finish_action(action["id"], status="cancelled")
-        self._audit_terminal(terminal, actor)
-        return terminal
+        return self._complete_terminal(
+            action["id"],
+            actor,
+            status="cancelled",
+        )
 
     def resume_active_actions(self) -> None:
         for action in self.store.list_active_actions():
@@ -668,9 +794,33 @@ class WriterActionRunner:
             if actor is not None:
                 self.enqueue(action["id"], actor)
             else:
-                self.store.fail_action(
+                if (
+                    self.rollback_service is None
+                    or not action.get("turn_checkpoint_id")
+                    or action.get("started_at") is None
+                ):
+                    self.store.fail_action(
+                        action["id"],
+                        code="PROJECT_ACCESS_DENIED",
+                        message="登录账户已停用或不再拥有项目创作权限",
+                        retryable=False,
+                    )
+                    continue
+                try:
+                    self.store.require_action_undo(str(action["id"]))
+                except WriterActionError:
+                    self.store.fail_action(
+                        action["id"],
+                        code="ROLLBACK_PREPARE_FAILED",
+                        message="账户停用前未开始项目副作用",
+                        retryable=False,
+                    )
+                    continue
+                self._complete_terminal(
                     action["id"],
-                    code="PROJECT_ACCESS_DENIED",
-                    message="登录账户已停用或不再拥有项目创作权限",
+                    None,
+                    status="failed",
+                    error_code="PROJECT_ACCESS_DENIED",
+                    error_message="登录账户已停用或不再拥有项目创作权限",
                     retryable=False,
                 )

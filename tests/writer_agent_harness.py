@@ -504,6 +504,8 @@ class WriterAgentE2EHarness:
             "fail_action",
             "fail_step",
             "finish_action",
+            "prepare_action_finalization",
+            "publish_action_finalization",
             "record_action_result",
         ):
             original = getattr(harness.store, method_name)

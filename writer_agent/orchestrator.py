@@ -50,6 +50,7 @@ class WriterProjectOrchestrator:
         self.permission_service = permission_service
         self.workflow_repository = workflow_repository
         self.can_read_reference = can_read_reference
+        self.new_project_observer: Callable[[dict[str, Any], Principal], Any] | None = None
 
     @staticmethod
     def project_url(
@@ -389,6 +390,7 @@ class WriterProjectOrchestrator:
                 actor,
                 expected_context=step.expected_context,
                 episode_number=step.episode_number,
+                operation_id=operation_id,
             )
             workflow_task_id = str(task["id"])
             if step.kind == "persist":
@@ -435,7 +437,9 @@ class WriterProjectOrchestrator:
                     raise ValueError("lock step requires resource_id")
                 if task.get("status") == "assigned":
                     self.creative_service.workflow_repository.start_task(
-                        workflow_task_id, actor
+                        workflow_task_id,
+                        actor,
+                        writer_operation_id=operation_id,
                     )
                 result = self.creative_service.lock_resource(
                     project_id=plan.project_id, stage=step.stage,
@@ -1005,15 +1009,33 @@ class WriterProjectOrchestrator:
                     raise WriterActionError(
                         "REFERENCE_UNAVAILABLE", "参考已失效或无权读取"
                     )
-            project = self.creative_service.create_original_project(
-                creation_payload, actor,
-                creation_request_id=(
-                    f"writer-session:{action['session_id']}:action:{action_id}"
-                ),
-                can_read_reference=lambda resource_type, resource_id:
-                    self.can_read_reference(actor, resource_type, resource_id),
-            )
-            project_id = int(project["id"])
+            existing_project_id = action.get("project_id")
+            if existing_project_id is not None:
+                if type(existing_project_id) is not int or existing_project_id < 1:
+                    raise WriterActionError(
+                        "RESULT_VALIDATION_FAILED", "原创项目 ID 缺失或无效"
+                    )
+                project_id = existing_project_id
+                project = self.creative_service.get_project(project_id)
+                if not project:
+                    raise WriterActionError(
+                        "PROJECT_NOT_AVAILABLE", "已创建的原创项目不存在"
+                    )
+            else:
+                project = self.creative_service.create_original_project(
+                    creation_payload, actor,
+                    creation_request_id=(
+                        f"writer-session:{action['session_id']}:action:{action_id}"
+                    ),
+                    can_read_reference=lambda resource_type, resource_id:
+                        self.can_read_reference(actor, resource_type, resource_id),
+                )
+                project_id = int(project["id"])
+                action = self.store.attach_project_to_action(
+                    action_id, project_id, project_context={}
+                )
+                if self.new_project_observer is not None:
+                    self.new_project_observer(action, actor)
         else:
             raise WriterActionError("ACTION_TYPE_INVALID", "该动作不是项目动作")
         session = self.store.get(int(action["session_id"]), actor.user_id)

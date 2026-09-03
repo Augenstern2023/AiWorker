@@ -128,7 +128,8 @@ def real_writer_context(tmp_path: Path) -> SimpleNamespace:
     repository = CreativeRepository(tmp_path / "creative.db")
     workflow = MagicMock()
     workflow.ensure_project_task.side_effect = (
-        lambda project_id, topic_id, *, task_type, role_code, actor: {
+        lambda project_id, topic_id, *, task_type, role_code, actor,
+        writer_operation_id=None: {
             "id": f"{task_type}-task",
             "task_type": task_type,
             "status": "in_progress",

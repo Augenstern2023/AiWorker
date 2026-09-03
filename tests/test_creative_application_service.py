@@ -147,6 +147,32 @@ def test_application_service_creates_first_original_brief_idempotently(
     creative_context.permission_service.can_create_project_content.assert_called()
 
 
+def test_writer_operation_id_reaches_workflow_task_setup(creative_context) -> None:
+    """Writer ownership must tag task creation and claim with its operation ID."""
+
+    project = creative_context.create_original_project()
+    creative_context.workflow.ensure_project_task.return_value["status"] = "pool"
+    creative_context.workflow.can_claim_task.return_value = True
+    creative_context.workflow.claim_task.return_value = {
+        **creative_context.workflow.ensure_project_task.return_value,
+        "status": "assigned",
+    }
+
+    creative_context.application_service.ensure_stage_task(
+        project["id"],
+        "brief",
+        creative_context.actor,
+        operation_id="writer-action:brief.persist",
+    )
+
+    assert creative_context.workflow.ensure_project_task.call_args.kwargs[
+        "writer_operation_id"
+    ] == "writer-action:brief.persist"
+    assert creative_context.workflow.claim_task.call_args.kwargs[
+        "writer_operation_id"
+    ] == "writer-action:brief.persist"
+
+
 def test_application_service_generation_job_contains_context(
     creative_context,
 ) -> None:
@@ -393,6 +419,29 @@ def test_lock_replay_and_changed_key_are_checked_before_transition(
             actor=creative_context.actor,
         )
     assert creative_context.transitions.complete_creative_without_review.call_count == 1
+
+
+def test_writer_operation_id_reaches_lock_transition(creative_context) -> None:
+    """A Writer lock event must remain attributable without relying on actor ID."""
+
+    project = creative_context.create_original_project()
+    creative_context.transitions.complete_creative_without_review.return_value = {
+        "resource": {"id": "brief-1", "status": "brief_locked"},
+        "task": {"id": "brief-task", "status": "completed"},
+    }
+
+    creative_context.application_service.lock_resource(
+        project_id=project["id"],
+        stage="brief",
+        resource_id="brief-1",
+        workflow_task_id="brief-task",
+        operation_id="writer-action:brief.lock",
+        actor=creative_context.actor,
+    )
+
+    assert creative_context.transitions.complete_creative_without_review.call_args.kwargs[
+        "writer_operation_id"
+    ] == "writer-action:brief.lock"
 
 
 def test_expired_lock_reservation_reconciles_after_side_effect_process_crash(

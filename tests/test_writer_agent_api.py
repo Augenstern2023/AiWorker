@@ -101,6 +101,20 @@ class SlowProvider(FakeProvider):
         return await super().complete_json(messages)
 
 
+class SecondCallBlockingProvider(FakeProvider):
+    def __init__(self) -> None:
+        self.calls = 0
+        self.second_started = threading.Event()
+        self.release_second = threading.Event()
+
+    async def complete_json(self, messages):
+        self.calls += 1
+        if self.calls == 2:
+            self.second_started.set()
+            assert self.release_second.wait(timeout=5)
+        return await super().complete_json(messages)
+
+
 class CapturingProvider(FakeProvider):
     def __init__(self) -> None:
         self.messages = []
@@ -156,6 +170,26 @@ class ConcurrentCreativeProvider(CreativeProvider):
         self.calls += 1
         self.barrier.wait(timeout=5)
         return await super().complete_json(messages)
+
+
+class ConcurrencyTrackingCreativeProvider(CreativeProvider):
+    def __init__(self) -> None:
+        self.calls = 0
+        self.active = 0
+        self.max_active = 0
+        self.lock = threading.Lock()
+
+    async def complete_json(self, messages):
+        with self.lock:
+            self.calls += 1
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            await asyncio.sleep(0.05)
+            return await super().complete_json(messages)
+        finally:
+            with self.lock:
+                self.active -= 1
 
 
 class SingleCallCreativeProvider(CreativeProvider):
@@ -347,6 +381,100 @@ def test_chat_rollback_preview_and_endpoint_restore_the_selected_boundary(
     assert rolled_back.json()["reports"] == []
 
 
+def test_active_message_holds_session_lease_against_rollback(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Would catch rollback invalidating a model turn that is still being generated."""
+
+    provider = SecondCallBlockingProvider()
+    monkeypatch.setattr(writer_agent_api, "create_provider", lambda: provider)
+    client = _client(tmp_path)
+    session = client.post(
+        "/api/writer-agent/sessions", json={"content": "初始材料"}
+    ).json()
+    first = client.post(
+        f"/api/writer-agent/sessions/{session['id']}/messages",
+        json={"message": "第一轮", "message_id": "lease-first"},
+    )
+    assert first.status_code == 200
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        second_future = pool.submit(
+            client.post,
+            f"/api/writer-agent/sessions/{session['id']}/messages",
+            json={"message": "第二轮", "message_id": "lease-second"},
+        )
+        assert provider.second_started.wait(timeout=5)
+        rollback = client.post(
+            f"/api/writer-agent/sessions/{session['id']}/messages/lease-first/rollback",
+            json={
+                "client_request_id": "rollback-during-message",
+                "expected_history_revision": first.json()["history_revision"],
+            },
+        )
+        provider.release_second.set()
+        second = second_future.result(timeout=5)
+
+    assert rollback.status_code == 409
+    assert rollback.json()["detail"]["code"] == "SESSION_MUTATION_BUSY"
+    assert second.status_code == 200
+    persisted_ids = {
+        item.get("message_id")
+        for item in second.json()["messages"]
+        if item.get("role") == "user"
+    }
+    assert {"lease-first", "lease-second"} <= persisted_ids
+
+
+def test_slow_non_message_mutation_renews_its_session_lease(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Would catch a long material/review operation losing its fixed lease."""
+
+    monkeypatch.setattr(writer_agent_api, "_SESSION_MUTATION_LEASE_SECONDS", 0.12)
+    store = WriterAgentStore(tmp_path / "writer-agent-heartbeat.db")
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = lambda: _principal()
+    app.include_router(writer_agent_api.build_writer_agent_router(tmp_path, store=store))
+    client = TestClient(app)
+    session = client.post(
+        "/api/writer-agent/sessions", json={"content": "初始材料"}
+    ).json()
+    first_started = threading.Event()
+    release_first = threading.Event()
+    original_append = store.append_material
+
+    def slow_first_append(*args, **kwargs):
+        if len(args) > 3 and args[3] == "slow.txt":
+            first_started.set()
+            assert release_first.wait(timeout=5)
+        return original_append(*args, **kwargs)
+
+    monkeypatch.setattr(store, "append_material", slow_first_append)
+    url = f"/api/writer-agent/sessions/{session['id']}/materials/file"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(
+            client.post,
+            url,
+            content="慢请求".encode(),
+            headers={"X-Writer-Filename": quote("slow.txt")},
+        )
+        assert first_started.wait(timeout=5)
+        time.sleep(0.2)
+        second = client.post(
+            url,
+            content="并发请求".encode(),
+            headers={"X-Writer-Filename": quote("second.txt")},
+        )
+        release_first.set()
+        first = first_future.result(timeout=5)
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert second.json()["detail"]["code"] == "SESSION_MUTATION_BUSY"
+
+
 def test_chat_resend_rolls_back_and_uses_a_new_message_id(
     tmp_path, monkeypatch
 ) -> None:
@@ -390,6 +518,10 @@ def test_chat_resend_rolls_back_and_uses_a_new_message_id(
     assert [item["content"] for item in user_messages] == ["请分析第一幕"]
     assert user_messages[0]["message_id"] != old_user_id
     assert provider.calls == 2
+    rollback = WriterAgentStore(
+        tmp_path / "writer_agent" / "writer_agent.db"
+    ).require_rollback_by_request("writer-1", "api-resend-1")
+    assert rollback["result"]["new_message_id"] == user_messages[0]["message_id"]
 
 
 class _ProjectReviewJobs:
@@ -413,6 +545,7 @@ def _project_review_api_context(
     principal: Principal | None = None,
     session_user_id: str = "writer-1",
     project_creator_id: str = "writer-1",
+    seed_review_offer: bool = True,
 ):
     repository = writer_agent_api.CreativeRepository(tmp_path / "creative.db")
     project = repository.create_original_project(
@@ -425,6 +558,42 @@ def _project_review_api_context(
     store = WriterAgentStore(tmp_path / "writer-agent-project-review.db")
     session = store.create(session_user_id, "继续创作", "完整审核会话")
     store.bind_project(session["id"], project["id"], expected_context_revision=0)
+    if seed_review_offer:
+        checkpoint = store.begin_turn(
+            session["id"],
+            session_user_id,
+            "seed-project-review-offer",
+            original_message={"message": "发起完整项目审核"},
+            content_hash="seed-project-review-offer",
+        )
+        current = store.get(session["id"], session_user_id)
+        store.save_turn(
+            session["id"],
+            session_user_id,
+            [
+                *current["messages"],
+                {
+                    "role": "user",
+                    "content": "发起完整项目审核",
+                    "message_id": "seed-project-review-offer",
+                },
+                *[
+                    {
+                        "role": "assistant",
+                        "kind": "project_review_offer",
+                        "audit_scope": scope,
+                        "turn_checkpoint_id": checkpoint["id"],
+                        "content": "请确认完整项目审核。",
+                    }
+                    for scope in ("outline", "script", "project")
+                ],
+            ],
+            None,
+            client_message_id="seed-project-review-offer",
+            turn_checkpoint_id=checkpoint["id"],
+        )
+        store.complete_turn(checkpoint["id"])
+        session = store.get(session["id"], session_user_id)
     permissions = MagicMock()
     permissions.can_read_project.return_value = True
     jobs = _ProjectReviewJobs()
@@ -441,6 +610,30 @@ def _project_review_api_context(
         job_manager=jobs,
     ))
     return TestClient(app), repository, store, session, permissions, jobs, current
+
+
+def test_project_review_create_requires_a_completed_offer_turn(tmp_path) -> None:
+    """Would catch a direct API call creating an untracked review and live job."""
+
+    client, repository, _store, session, _permissions, jobs, _current = (
+        _project_review_api_context(tmp_path, seed_review_offer=False)
+    )
+    base = f"/api/writer-agent/sessions/{session['id']}/project-reviews"
+    preview = client.post(f"{base}/preview", json={"audit_scope": "project"})
+
+    created = client.post(
+        base,
+        json={
+            "audit_scope": "project",
+            "expected_fingerprint": preview.json()["fingerprint"],
+            "client_request_id": "review-without-offer",
+        },
+    )
+
+    assert created.status_code == 409
+    assert "审核确认卡" in str(created.json()["detail"])
+    assert repository.list_script_reviews() == []
+    assert jobs.calls == []
 
 
 @pytest.mark.parametrize(("message", "expected"), [
@@ -594,6 +787,53 @@ def test_project_review_preview_create_is_idempotent_and_session_owner_can_read_
     exported = client.get(f"{base}/{review_id}/export")
     assert exported.status_code == 200
     assert "完整项目审核报告" in exported.text
+
+
+def test_turn_rollback_is_blocked_after_project_review_was_created(
+    tmp_path,
+) -> None:
+    """Would catch rollback hiding a review message while its job remains alive."""
+
+    client, _repository, _store, session, _permissions, _jobs, _current = (
+        _project_review_api_context(tmp_path)
+    )
+    offer = client.post(
+        f"/api/writer-agent/sessions/{session['id']}/messages",
+        json={"message": "审核完整项目", "message_id": "review-offer-turn"},
+    )
+    assert offer.status_code == 200
+    base = f"/api/writer-agent/sessions/{session['id']}/project-reviews"
+    review_preview = client.post(
+        f"{base}/preview", json={"audit_scope": "project"}
+    )
+    created = client.post(
+        base,
+        json={
+            "audit_scope": "project",
+            "expected_fingerprint": review_preview.json()["fingerprint"],
+            "client_request_id": "create-review-for-rollback",
+        },
+    )
+    assert created.status_code == 201
+
+    rollback_preview = client.get(
+        f"/api/writer-agent/sessions/{session['id']}/messages/"
+        "review-offer-turn/rollback-preview"
+    )
+    rollback = client.post(
+        f"/api/writer-agent/sessions/{session['id']}/messages/"
+        "review-offer-turn/rollback",
+        json={
+            "client_request_id": "rollback-review-offer",
+            "expected_history_revision": rollback_preview.json()["history_revision"],
+        },
+    )
+
+    assert rollback_preview.status_code == 200
+    assert rollback_preview.json()["can_rollback"] is False
+    assert "完整项目审核任务仍在运行" in rollback_preview.json()["blockers"]
+    assert rollback.status_code == 409
+    assert rollback.json()["detail"]["code"] == "ROLLBACK_BUSY"
 
 
 def test_project_review_requires_associated_readable_project_and_allows_readable_callers(
@@ -1023,15 +1263,12 @@ def test_concurrent_same_client_message_persists_one_turn_and_one_action(
     monkeypatch.setattr(writer_agent_api, "create_provider", lambda: provider)
     store = WriterAgentStore(tmp_path / "writer-agent.db")
     claim_calls = 0
-    both_claimed = threading.Event()
     original_claim = store.claim_client_message
 
     def record_claim(*args, **kwargs):
         nonlocal claim_calls
         result = original_claim(*args, **kwargs)
         claim_calls += 1
-        if claim_calls == 2:
-            both_claimed.set()
         return result
 
     monkeypatch.setattr(store, "claim_client_message", record_claim)
@@ -1063,11 +1300,12 @@ def test_concurrent_same_client_message_persists_one_turn_and_one_action(
                 "client_message_id": "same-concurrent-message",
             },
         )
-        assert both_claimed.wait(timeout=5)
         provider.release.set()
         responses = [first.result(timeout=5), second.result(timeout=5)]
 
-    assert [response.status_code for response in responses] == [200, 200]
+    assert [response.status_code for response in responses] == [200, 200], [
+        response.json() for response in responses
+    ]
     persisted = client.get(
         f"/api/writer-agent/sessions/{session['id']}"
     ).json()
@@ -1077,6 +1315,7 @@ def test_concurrent_same_client_message_persists_one_turn_and_one_action(
     ) == 1
     assert len(persisted["actions"]) == 1
     assert provider.calls == 1
+    assert claim_calls == 1
     assert responses[0].json() == responses[1].json()
 
 
@@ -1090,12 +1329,23 @@ def test_message_claim_heartbeat_prevents_takeover_during_slow_provider(
     )
     store = WriterAgentStore(tmp_path / "writer-agent-heartbeat.db")
     original_claim = store.claim_client_message
+    original_save_turn = store.save_turn
+    turn_saved = threading.Event()
+    release_save_turn = threading.Event()
 
     def short_claim(*args, **kwargs):
         kwargs["lease_seconds"] = 0.05
         return original_claim(*args, **kwargs)
 
     monkeypatch.setattr(store, "claim_client_message", short_claim)
+
+    def pause_after_save(*args, **kwargs):
+        result = original_save_turn(*args, **kwargs)
+        turn_saved.set()
+        assert release_save_turn.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(store, "save_turn", pause_after_save)
     app = FastAPI()
     app.dependency_overrides[current_principal] = lambda: _principal()
     app.include_router(writer_agent_api.build_writer_agent_router(tmp_path, store=store))
@@ -1117,7 +1367,10 @@ def test_message_claim_heartbeat_prevents_takeover_during_slow_provider(
         second = pool.submit(client.post, url, json=request)
         time.sleep(0.12)
         provider.release.set()
-        responses = [first.result(timeout=5), second.result(timeout=5)]
+        assert turn_saved.wait(timeout=5)
+        release_save_turn.set()
+        second_response = second.result(timeout=5)
+        responses = [first.result(timeout=5), second_response]
 
     assert [response.status_code for response in responses] == [200, 200]
     assert provider.calls == 1
@@ -1162,7 +1415,7 @@ def test_linked_chat_fails_closed_without_permission_service(
 def test_concurrent_distinct_messages_merge_without_losing_either_turn(
     tmp_path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = ConcurrentCreativeProvider()
+    provider = ConcurrencyTrackingCreativeProvider()
     monkeypatch.setattr(writer_agent_api, "create_provider", lambda: provider)
     client = _client(tmp_path)
     session = client.post(
@@ -1176,20 +1429,24 @@ def test_concurrent_distinct_messages_merge_without_losing_either_turn(
             lambda index: client.post(
                 url,
                 json={
-                    "message": f"生成大纲方案 {index}",
+                    "message": f"大纲方案 {index} 有哪些可能",
                     "client_message_id": f"concurrent-message-{index}",
                 },
             ),
             range(2),
         ))
 
-    assert [response.status_code for response in responses] == [200, 200]
+    assert [response.status_code for response in responses] == [200, 200], [
+        response.json() for response in responses
+    ]
     persisted = client.get(
         f"/api/writer-agent/sessions/{session['id']}"
     ).json()
     ids = {message.get("message_id") for message in persisted["messages"]}
     assert {"concurrent-message-0", "concurrent-message-1"} <= ids
     assert len(persisted["actions"]) == 2
+    assert provider.calls == 2
+    assert provider.max_active == 1
 
 
 def test_admin_can_read_action_but_cannot_mutate_another_users_action(tmp_path) -> None:

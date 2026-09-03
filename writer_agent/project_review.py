@@ -56,6 +56,8 @@ class ProjectReviewCoordinator:
     def create(
         self, session_id: int, principal: Any, audit_scope: str,
         expected_fingerprint: str, client_request_id: str,
+        *,
+        mutation_token: str | None = None,
     ) -> dict[str, Any]:
         session, project = self._session_project(session_id, principal)
         if not str(client_request_id).strip():
@@ -70,6 +72,31 @@ class ProjectReviewCoordinator:
                 extra=self._preview_payload(source),
             )
         source["writer_session_id"] = int(session_id)
+        review_turn = next(
+            (
+                message
+                for message in reversed(list(session.get("messages") or []))
+                if message.get("kind") == "project_review_offer"
+                and message.get("audit_scope") == audit_scope
+                and message.get("turn_checkpoint_id")
+            ),
+            None,
+        )
+        if review_turn is None:
+            raise ProjectReviewError(
+                409, "请先在当前会话生成完整项目审核确认卡"
+            )
+        checkpoint_id = str(review_turn["turn_checkpoint_id"])
+        checkpoints = self.store.list_turns_from(checkpoint_id)
+        if (
+            not checkpoints
+            or str(checkpoints[0].get("id") or "") != checkpoint_id
+            or str(checkpoints[0].get("status") or "") != "completed"
+        ):
+            raise ProjectReviewError(
+                409, "完整项目审核确认卡尚未完成，请刷新后重试"
+            )
+        source["writer_turn_checkpoint_id"] = checkpoint_id
         episode_numbers = sorted({
             int(number)
             for stage in dict(source.get("stages") or {}).values()
@@ -95,6 +122,7 @@ class ProjectReviewCoordinator:
         self.store.append_project_review_message_once(
             session_id, str(session["user_id"]), review_id=int(review["id"]),
             audit_scope=audit_scope,
+            mutation_token=mutation_token,
         )
         return {
             "review": self._public_review(review),
@@ -110,7 +138,15 @@ class ProjectReviewCoordinator:
         self._assert_review_readable(review, session, principal)
         return self._public_review(review)
 
-    def resume(self, session_id: int, principal: Any, review_id: int) -> dict[str, Any]:
+    def resume(
+        self,
+        session_id: int,
+        principal: Any,
+        review_id: int,
+        *,
+        mutation_token: str | None = None,
+    ) -> dict[str, Any]:
+        del mutation_token
         self._session_project(session_id, principal)
         review = self.get(session_id, principal, review_id)
         if review.get("status") != "failed":

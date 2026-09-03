@@ -457,6 +457,37 @@ workflow_instances = Table(
     Column("updated_at", Text, nullable=False, server_default=text("CURRENT_TIMESTAMP")),
 )
 
+workflow_project_deletions = Table(
+    "workflow_project_deletions",
+    SYSTEM_METADATA,
+    Column("project_id", Text, primary_key=True),
+    Column("owner_token", Text, nullable=False),
+    Column("requested_by", Text, nullable=False),
+    Column(
+        "project_snapshot_json",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    ),
+    Column("status", Text, nullable=False, server_default=text("'deleting'")),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    ),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    ),
+    CheckConstraint(
+        "status = 'deleting'",
+        name="ck_workflow_project_deletions_status",
+    ),
+)
+
 workflow_tasks = Table(
     "workflow_tasks",
     SYSTEM_METADATA,
@@ -595,6 +626,7 @@ workflow_project_member_events = Table(
     Column("actor_id", Text, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False),
     Column("before_json", JSONB),
     Column("after_json", JSONB),
+    Column("writer_operation_id", Text),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 

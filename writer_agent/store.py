@@ -12,6 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import threading
 import time
 from typing import Any
 import uuid
@@ -70,6 +71,7 @@ class WriterAgentStore:
             self._create_action_tables(conn)
             self._migrate_actions(conn)
             self._create_rollback_tables(conn)
+            self._create_session_mutation_table(conn)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30)
@@ -103,6 +105,7 @@ class WriterAgentStore:
             "result_json TEXT, error_code TEXT, error_message TEXT, retryable INTEGER NOT NULL DEFAULT 0, "
             "conflicting_action_id TEXT, "
             "job_id TEXT, decision_request_id TEXT, cancel_request_id TEXT, retry_of_action_id TEXT, root_action_id TEXT, "
+            "decision_turn_checkpoint_id TEXT, "
             "created_at REAL NOT NULL, updated_at REAL NOT NULL, started_at REAL, finished_at REAL, expires_at REAL, "
             "UNIQUE(actor_user_id, idempotency_key))"
         )
@@ -187,6 +190,13 @@ class WriterAgentStore:
                 "ALTER TABLE writer_agent_actions "
                 "ADD COLUMN turn_checkpoint_id TEXT"
             )
+        if "decision_turn_checkpoint_id" not in self._columns(
+            conn, "writer_agent_actions"
+        ):
+            conn.execute(
+                "ALTER TABLE writer_agent_actions "
+                "ADD COLUMN decision_turn_checkpoint_id TEXT"
+            )
 
     @staticmethod
     def _create_rollback_tables(conn: sqlite3.Connection) -> None:
@@ -231,6 +241,208 @@ class WriterAgentStore:
             "ON writer_agent_rollbacks(session_id, created_at DESC)"
         )
 
+    @staticmethod
+    def _create_session_mutation_table(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS writer_agent_session_mutations ("
+            "session_id INTEGER PRIMARY KEY, actor_user_id TEXT NOT NULL, "
+            "owner_token TEXT NOT NULL UNIQUE, mutation_kind TEXT NOT NULL, "
+            "lease_expires_at REAL NOT NULL, created_at REAL NOT NULL, "
+            "updated_at REAL NOT NULL)"
+        )
+
+    @staticmethod
+    def _session_mutation_row(row: sqlite3.Row) -> dict[str, Any]:
+        return dict(row)
+
+    def acquire_session_mutation(
+        self,
+        session_id: int,
+        actor_user_id: str,
+        *,
+        owner_token: str,
+        mutation_kind: str,
+        lease_seconds: float = 120.0,
+    ) -> dict[str, Any]:
+        """Acquire the durable single-writer lease for one Writer session."""
+
+        if not owner_token or not mutation_kind or lease_seconds <= 0:
+            raise ValueError("invalid session mutation lease")
+        now = time.time()
+        expires_at = now + float(lease_seconds)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            session = conn.execute(
+                "SELECT 1 FROM writer_agent_sessions WHERE id=? AND user_id=?",
+                (session_id, actor_user_id),
+            ).fetchone()
+            if session is None:
+                raise WriterActionError(
+                    "PROJECT_NOT_AVAILABLE", "创作会话不存在或无权访问"
+                )
+            current = conn.execute(
+                "SELECT * FROM writer_agent_session_mutations WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            if current is None:
+                conn.execute(
+                    "INSERT INTO writer_agent_session_mutations "
+                    "(session_id,actor_user_id,owner_token,mutation_kind,"
+                    "lease_expires_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                    (
+                        session_id,
+                        actor_user_id,
+                        owner_token,
+                        mutation_kind,
+                        expires_at,
+                        now,
+                        now,
+                    ),
+                )
+            elif str(current["owner_token"]) == owner_token:
+                conn.execute(
+                    "UPDATE writer_agent_session_mutations SET mutation_kind=?, "
+                    "lease_expires_at=?, updated_at=? WHERE session_id=? "
+                    "AND owner_token=?",
+                    (mutation_kind, expires_at, now, session_id, owner_token),
+                )
+            elif float(current["lease_expires_at"] or 0) <= now:
+                changed = conn.execute(
+                    "UPDATE writer_agent_session_mutations SET actor_user_id=?, "
+                    "owner_token=?, mutation_kind=?, lease_expires_at=?, "
+                    "created_at=?, updated_at=? WHERE session_id=? "
+                    "AND lease_expires_at<=?",
+                    (
+                        actor_user_id,
+                        owner_token,
+                        mutation_kind,
+                        expires_at,
+                        now,
+                        now,
+                        session_id,
+                        now,
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise WriterActionError(
+                        "SESSION_MUTATION_BUSY",
+                        "该创作会话正在处理其他操作，请稍后重试",
+                        retryable=True,
+                    )
+            else:
+                raise WriterActionError(
+                    "SESSION_MUTATION_BUSY",
+                    "该创作会话正在处理其他操作，请稍后重试",
+                    retryable=True,
+                )
+            row = conn.execute(
+                "SELECT * FROM writer_agent_session_mutations WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+        return self._session_mutation_row(row)
+
+    def renew_session_mutation(
+        self,
+        session_id: int,
+        *,
+        owner_token: str,
+        lease_seconds: float = 120.0,
+    ) -> bool:
+        if lease_seconds <= 0:
+            raise ValueError("invalid session mutation lease")
+        now = time.time()
+        with self._connect() as conn:
+            changed = conn.execute(
+                "UPDATE writer_agent_session_mutations SET lease_expires_at=?, "
+                "updated_at=? WHERE session_id=? AND owner_token=? "
+                "AND lease_expires_at>?",
+                (
+                    now + float(lease_seconds),
+                    now,
+                    session_id,
+                    owner_token,
+                    now,
+                ),
+            ).rowcount
+        return changed == 1
+
+    def start_session_mutation_heartbeat(
+        self,
+        session_id: int,
+        *,
+        owner_token: str,
+        lease_seconds: float = 120.0,
+    ) -> tuple[threading.Event, threading.Thread]:
+        """Keep a held mutation lease alive during slow cross-store work."""
+
+        if lease_seconds <= 0:
+            raise ValueError("invalid session mutation lease")
+        stop = threading.Event()
+        interval = max(float(lease_seconds) / 3, 0.01)
+
+        def renew() -> None:
+            while not stop.wait(interval):
+                try:
+                    if not self.renew_session_mutation(
+                        session_id,
+                        owner_token=owner_token,
+                        lease_seconds=lease_seconds,
+                    ):
+                        return
+                except (OSError, sqlite3.Error):
+                    return
+
+        thread = threading.Thread(
+            target=renew,
+            name=f"writer-session-mutation-{session_id}",
+            daemon=True,
+        )
+        thread.start()
+        return stop, thread
+
+    def assert_session_mutation(
+        self, session_id: int, *, owner_token: str
+    ) -> None:
+        """Fence a cross-store side effect against an expired or replaced lease."""
+
+        with self._connect() as conn:
+            self._require_session_mutation_conn(
+                conn, session_id, owner_token
+            )
+
+    def release_session_mutation(
+        self, session_id: int, *, owner_token: str
+    ) -> bool:
+        with self._connect() as conn:
+            changed = conn.execute(
+                "DELETE FROM writer_agent_session_mutations "
+                "WHERE session_id=? AND owner_token=?",
+                (session_id, owner_token),
+            ).rowcount
+        return changed == 1
+
+    @staticmethod
+    def _require_session_mutation_conn(
+        conn: sqlite3.Connection, session_id: int, owner_token: str | None
+    ) -> None:
+        if owner_token is None:
+            return
+        row = conn.execute(
+            "SELECT owner_token,lease_expires_at FROM "
+            "writer_agent_session_mutations WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        if (
+            row is None
+            or str(row["owner_token"]) != owner_token
+            or float(row["lease_expires_at"] or 0) <= time.time()
+        ):
+            raise WriterActionError(
+                "SESSION_MUTATION_LEASE_LOST",
+                "会话写入租约已失效，请刷新后重试",
+                retryable=True,
+            )
+
     def create(self, user_id: str, content: str, title: str = "", filename: str = "") -> dict[str, Any]:
         now = time.time()
         material_name = filename or title or "已粘贴创作材料"
@@ -250,9 +462,18 @@ class WriterAgentStore:
             )
         return self.get(int(cursor.lastrowid), user_id) or {}
 
-    def append_material(self, session_id: int, user_id: str | None, content: str, filename: str) -> dict[str, Any]:
+    def append_material(
+        self,
+        session_id: int,
+        user_id: str | None,
+        content: str,
+        filename: str,
+        *,
+        mutation_token: str | None = None,
+    ) -> dict[str, Any]:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._require_session_mutation_conn(conn, session_id, mutation_token)
             row = conn.execute(
                 "SELECT * FROM writer_agent_sessions WHERE id=?"
                 if user_id is None
@@ -302,11 +523,13 @@ class WriterAgentStore:
         *,
         original_message: dict[str, Any],
         content_hash: str,
+        mutation_token: str | None = None,
     ) -> dict[str, Any]:
         """Persist the exact conversation boundary before a client turn."""
 
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._require_session_mutation_conn(conn, session_id, mutation_token)
             session = conn.execute(
                 "SELECT * FROM writer_agent_sessions WHERE id=? AND user_id=?",
                 (session_id, actor_user_id),
@@ -443,6 +666,7 @@ class WriterAgentStore:
         mode: str,
         client_request_id: str,
         expected_history_revision: int,
+        mutation_token: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         if mode not in {"rollback", "resend"}:
             raise WriterActionError(
@@ -450,6 +674,7 @@ class WriterAgentStore:
             )
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._require_session_mutation_conn(conn, session_id, mutation_token)
             existing = conn.execute(
                 "SELECT * FROM writer_agent_rollbacks "
                 "WHERE actor_user_id=? AND client_request_id=?",
@@ -460,11 +685,30 @@ class WriterAgentStore:
                     int(existing["session_id"]) != int(session_id)
                     or str(existing["checkpoint_id"]) != str(checkpoint_id)
                     or str(existing["mode"]) != mode
+                    or int(existing["expected_history_revision"])
+                    != int(expected_history_revision)
                 ):
                     raise WriterActionError(
                         "IDEMPOTENCY_KEY_REUSED",
                         "回档请求 ID 已用于不同操作",
                     )
+                if str(existing["stage"]) != "completed":
+                    current_session = conn.execute(
+                        "SELECT history_revision FROM writer_agent_sessions "
+                        "WHERE id=? AND user_id=?",
+                        (session_id, actor_user_id),
+                    ).fetchone()
+                    current_revision = (
+                        int(current_session["history_revision"] or 0)
+                        if current_session is not None
+                        else -1
+                    )
+                    if current_revision != int(expected_history_revision):
+                        raise WriterActionError(
+                            "HISTORY_REVISION_MISMATCH",
+                            "对话历史已变化，请刷新后重试",
+                            current_revision=current_revision,
+                        )
                 return self._rollback_row(existing), False
             session = conn.execute(
                 "SELECT * FROM writer_agent_sessions WHERE id=? AND user_id=?",
@@ -482,6 +726,12 @@ class WriterAgentStore:
             if checkpoint is None:
                 raise WriterActionError(
                     "TURN_CHECKPOINT_NOT_FOUND", "对话检查点不存在"
+                )
+            if str(checkpoint["status"]) != "completed":
+                raise WriterActionError(
+                    "ROLLBACK_BUSY",
+                    "该轮对话已失效或尚未完成",
+                    retryable=str(checkpoint["status"]) == "open",
                 )
             current_revision = int(session["history_revision"] or 0)
             if current_revision != int(expected_history_revision):
@@ -516,10 +766,74 @@ class WriterAgentStore:
             ).fetchone()
         return self._rollback_row(row), True
 
-    def advance_rollback(
-        self, rollback_id: str, stage: str, **updates: Any
+    def require_rollback_by_request(
+        self, actor_user_id: str, client_request_id: str
     ) -> dict[str, Any]:
-        allowed = {
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM writer_agent_rollbacks "
+                "WHERE actor_user_id=? AND client_request_id=?",
+                (actor_user_id, client_request_id),
+            ).fetchone()
+        if row is None:
+            raise WriterActionError(
+                "TURN_CHECKPOINT_NOT_FOUND", "回档请求不存在"
+            )
+        return self._rollback_row(row)
+
+    def record_resend_message_id(
+        self,
+        actor_user_id: str,
+        client_request_id: str,
+        message_id: str,
+        *,
+        mutation_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Bind one resend audit to its replacement message exactly once."""
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM writer_agent_rollbacks "
+                "WHERE actor_user_id=? AND client_request_id=?",
+                (actor_user_id, client_request_id),
+            ).fetchone()
+            if row is None:
+                raise WriterActionError(
+                    "TURN_CHECKPOINT_NOT_FOUND", "回档请求不存在"
+                )
+            self._require_session_mutation_conn(
+                conn, int(row["session_id"]), mutation_token
+            )
+            if row["mode"] != "resend" or row["stage"] != "completed":
+                raise WriterActionError(
+                    "ROLLBACK_STATE_CONFLICT", "重新发送回档尚未完成"
+                )
+            result = _decode(row["result_json"], {})
+            if result.get("new_message_id"):
+                return self._rollback_row(row)
+            result["new_message_id"] = message_id
+            conn.execute(
+                "UPDATE writer_agent_rollbacks SET result_json=?, updated_at=? "
+                "WHERE id=? AND stage='completed'",
+                (_json(result), time.time(), row["id"]),
+            )
+            row = conn.execute(
+                "SELECT * FROM writer_agent_rollbacks WHERE id=?",
+                (row["id"],),
+            ).fetchone()
+        return self._rollback_row(row)
+
+    def advance_rollback(
+        self,
+        rollback_id: str,
+        stage: str,
+        *,
+        expected_stage: str | None = None,
+        mutation_token: str | None = None,
+        **updates: Any,
+    ) -> dict[str, Any]:
+        stage_order = (
             "requested",
             "jobs_settled",
             "validated",
@@ -527,8 +841,8 @@ class WriterAgentStore:
             "workflow_restored",
             "conversation_restored",
             "completed",
-        }
-        if stage not in allowed:
+        )
+        if stage not in stage_order:
             raise ValueError("unknown rollback stage")
         fields: dict[str, Any] = {"stage": stage, "updated_at": time.time()}
         for key in ("result_json", "error_code", "error_message"):
@@ -543,19 +857,62 @@ class WriterAgentStore:
         assignments = ", ".join(f"{key}=?" for key in fields)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM writer_agent_rollbacks WHERE id=?",
+                (rollback_id,),
+            ).fetchone()
+            if row is None:
+                raise WriterActionError(
+                    "TURN_CHECKPOINT_NOT_FOUND", "回档请求不存在"
+                )
+            self._require_session_mutation_conn(
+                conn, int(row["session_id"]), mutation_token
+            )
+            current_stage = str(row["stage"])
+            if expected_stage is not None and current_stage != expected_stage:
+                raise WriterActionError(
+                    "ROLLBACK_STATE_CONFLICT", "回档请求已由其他执行器推进"
+                )
+            legal_next = {
+                "requested": {"requested", "jobs_settled"},
+                "jobs_settled": {"jobs_settled", "validated"},
+                "validated": {
+                    "validated",
+                    "creative_restored",
+                    "workflow_restored",
+                },
+                "creative_restored": {
+                    "creative_restored",
+                    "workflow_restored",
+                },
+                "workflow_restored": {
+                    "workflow_restored",
+                    "conversation_restored",
+                },
+                "conversation_restored": {
+                    "conversation_restored",
+                    "completed",
+                },
+                "completed": {"completed"},
+            }
+            if stage not in legal_next[current_stage]:
+                raise WriterActionError(
+                    "ROLLBACK_STATE_CONFLICT", "回档阶段转换无效"
+                )
             conn.execute(
-                f"UPDATE writer_agent_rollbacks SET {assignments} WHERE id=?",
-                (*fields.values(), rollback_id),
+                f"UPDATE writer_agent_rollbacks SET {assignments} "
+                "WHERE id=? AND stage=?",
+                (*fields.values(), rollback_id, current_stage),
             )
             row = conn.execute(
                 "SELECT * FROM writer_agent_rollbacks WHERE id=?",
                 (rollback_id,),
             ).fetchone()
-        if row is None:
-            raise WriterActionError("TURN_CHECKPOINT_NOT_FOUND", "回档请求不存在")
         return self._rollback_row(row)
 
-    def restore_conversation(self, rollback_id: str) -> dict[str, Any]:
+    def restore_conversation(
+        self, rollback_id: str, *, mutation_token: str | None = None
+    ) -> dict[str, Any]:
         """Restore session-visible state only after external stores are settled."""
 
         with self._connect() as conn:
@@ -569,6 +926,9 @@ class WriterAgentStore:
                 )
             session_id = int(rollback["session_id"])
             actor_user_id = str(rollback["actor_user_id"])
+            self._require_session_mutation_conn(
+                conn, session_id, mutation_token
+            )
             if rollback["stage"] == "completed":
                 pass
             else:
@@ -583,6 +943,24 @@ class WriterAgentStore:
                 if checkpoint is None or session is None:
                     raise WriterActionError(
                         "TURN_CHECKPOINT_NOT_FOUND", "回档目标已不存在"
+                    )
+                if str(checkpoint["status"]) != "completed":
+                    raise WriterActionError(
+                        "ROLLBACK_STATE_CONFLICT",
+                        "回档目标已失效或尚未完成",
+                    )
+                if str(rollback["stage"]) != "workflow_restored":
+                    raise WriterActionError(
+                        "ROLLBACK_STATE_CONFLICT", "外部状态尚未完成补偿"
+                    )
+                current_revision = int(session["history_revision"] or 0)
+                if current_revision != int(
+                    rollback["expected_history_revision"]
+                ):
+                    raise WriterActionError(
+                        "HISTORY_REVISION_MISMATCH",
+                        "对话历史已变化，请刷新后重试",
+                        current_revision=current_revision,
                     )
                 snapshot = _decode(checkpoint["session_snapshot_json"], {})
                 messages = _decode(session["messages_json"] or "[]", [])[
@@ -677,6 +1055,8 @@ class WriterAgentStore:
         *,
         client_message_id: str | None = None,
         claim_token: str | None = None,
+        turn_checkpoint_id: str | None = None,
+        mutation_token: str | None = None,
     ) -> dict[str, Any]:
         """Atomically merge one client turn without replacing concurrent history."""
 
@@ -687,6 +1067,7 @@ class WriterAgentStore:
             message.setdefault("message_id", _message_id())
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._require_session_mutation_conn(conn, session_id, mutation_token)
             row = conn.execute(
                 "SELECT * FROM writer_agent_sessions WHERE id=?"
                 if user_id is None
@@ -777,6 +1158,34 @@ class WriterAgentStore:
                         session_id,
                     ),
                 )
+            if turn_checkpoint_id is not None:
+                checkpoint = conn.execute(
+                    "SELECT status FROM writer_agent_turn_checkpoints "
+                    "WHERE id=? AND session_id=? AND actor_user_id=? "
+                    "AND user_message_id=?",
+                    (
+                        turn_checkpoint_id,
+                        session_id,
+                        user_id,
+                        client_message_id,
+                    ),
+                ).fetchone()
+                if checkpoint is None:
+                    raise WriterActionError(
+                        "TURN_CHECKPOINT_NOT_FOUND", "对话检查点不存在"
+                    )
+                if checkpoint["status"] not in {"open", "completed"}:
+                    raise WriterActionError(
+                        "TURN_CHECKPOINT_INVALID",
+                        "该轮对话已被回档，不能保存迟到结果",
+                    )
+                if checkpoint["status"] == "open":
+                    conn.execute(
+                        "UPDATE writer_agent_turn_checkpoints "
+                        "SET status='completed', completed_at=? "
+                        "WHERE id=? AND status='open'",
+                        (time.time(), turn_checkpoint_id),
+                    )
             if claim_token is not None:
                 completed = conn.execute(
                     "UPDATE writer_agent_message_claims SET status='completed', "
@@ -803,11 +1212,13 @@ class WriterAgentStore:
         *,
         review_id: int,
         audit_scope: str,
+        mutation_token: str | None = None,
     ) -> dict[str, Any]:
         """Append the durable review-reference message exactly once."""
 
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._require_session_mutation_conn(conn, session_id, mutation_token)
             row = conn.execute(
                 "SELECT * FROM writer_agent_sessions WHERE id=? AND user_id=?",
                 (session_id, user_id),
@@ -1191,11 +1602,12 @@ class WriterAgentStore:
             raise WriterActionError("PROJECT_NOT_AVAILABLE", "动作不存在或无权访问")
         return row
 
-    def create_action(self, *, session_id: int, actor_user_id: str, action_type: str, project_id: Any, idempotency_key: str, request_hash: str, payload: dict[str, Any], expected_context: dict[str, Any], source_snapshot_id: str | None, expires_at: float | None = None, turn_checkpoint_id: str | None = None) -> dict[str, Any]:
+    def create_action(self, *, session_id: int, actor_user_id: str, action_type: str, project_id: Any, idempotency_key: str, request_hash: str, payload: dict[str, Any], expected_context: dict[str, Any], source_snapshot_id: str | None, expires_at: float | None = None, turn_checkpoint_id: str | None = None, mutation_token: str | None = None) -> dict[str, Any]:
         now = time.time()
         target_key = self._target_key(action_type, project_id, payload)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._require_session_mutation_conn(conn, session_id, mutation_token)
             session = conn.execute("SELECT id FROM writer_agent_sessions WHERE id=? AND user_id=?", (session_id, actor_user_id)).fetchone()
             if session is None:
                 raise WriterActionError("PROJECT_NOT_AVAILABLE", "创作会话不存在或无权访问")
@@ -1270,6 +1682,66 @@ class WriterAgentStore:
             ).fetchone()
         return self._undo_row(row)
 
+    def record_new_project_undo_ownership(
+        self,
+        action_id: str,
+        *,
+        project_id: int,
+        creative_external_fingerprint: str,
+        workflow_external_fingerprint: str,
+        workflow_external_state: dict[str, Any] | None = None,
+        session_id: int | None = None,
+        actor_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Bind a newly created project and its non-action baseline to the undo."""
+
+        ownership = {
+            "action_id": action_id,
+            "project_id": int(project_id),
+            "creative_external_fingerprint": creative_external_fingerprint,
+            "workflow_external_fingerprint": workflow_external_fingerprint,
+            "workflow_external_state": workflow_external_state,
+            "session_id": session_id,
+            "actor_user_id": actor_user_id,
+        }
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM writer_agent_action_undo WHERE action_id=?",
+                (action_id,),
+            ).fetchone()
+            if row is None:
+                raise WriterActionError(
+                    "TURN_ROLLBACK_UNSUPPORTED", "动作缺少撤销前镜像"
+                )
+            if str(row["status"] or "") != "prepared":
+                raise WriterActionError(
+                    "ROLLBACK_STATE_CONFLICT", "动作撤销记录已经完成"
+                )
+            preimage = _decode(row["preimage_json"], {})
+            if preimage.get("kind") != "new_project":
+                raise WriterActionError(
+                    "ROLLBACK_STATE_CONFLICT", "动作不是新建项目"
+                )
+            existing = preimage.get("ownership")
+            if existing is not None:
+                if existing != ownership:
+                    raise WriterActionError(
+                        "IDEMPOTENCY_KEY_REUSED", "新建项目已记录不同归属"
+                    )
+                return self._undo_row(row)
+            preimage["ownership"] = ownership
+            conn.execute(
+                "UPDATE writer_agent_action_undo SET project_id=?, "
+                "preimage_json=?, updated_at=? WHERE action_id=? AND status='prepared'",
+                (project_id, _json(preimage), time.time(), action_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM writer_agent_action_undo WHERE action_id=?",
+                (action_id,),
+            ).fetchone()
+        return self._undo_row(row)
+
     def finalize_action_undo(
         self,
         action_id: str,
@@ -1288,7 +1760,7 @@ class WriterAgentStore:
                 raise WriterActionError(
                     "TURN_ROLLBACK_UNSUPPORTED", "动作缺少撤销前镜像"
                 )
-            if row["status"] in {"applied", "compensated"}:
+            if row["status"] in {"applied", "creative_restored", "compensated"}:
                 if (
                     row["project_id"] != project_id
                     or row["postcondition_json"] != encoded
@@ -1330,8 +1802,9 @@ class WriterAgentStore:
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM writer_agent_actions WHERE turn_checkpoint_id "
+                f"IN ({placeholders}) OR decision_turn_checkpoint_id "
                 f"IN ({placeholders}) ORDER BY created_at,id",
-                checkpoint_ids,
+                [*checkpoint_ids, *checkpoint_ids],
             ).fetchall()
         return [self._action_row(row) for row in rows]
 
@@ -1352,6 +1825,36 @@ class WriterAgentStore:
             raise WriterActionError(
                 "TURN_ROLLBACK_UNSUPPORTED", "动作缺少撤销记录"
             )
+        return self._undo_row(row)
+
+    def mark_action_undo_creative_restored(
+        self, action_id: str
+    ) -> dict[str, Any]:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM writer_agent_action_undo WHERE action_id=?",
+                (action_id,),
+            ).fetchone()
+            if row is None:
+                raise WriterActionError(
+                    "TURN_ROLLBACK_UNSUPPORTED", "动作缺少撤销记录"
+                )
+            if row["status"] == "applied":
+                conn.execute(
+                    "UPDATE writer_agent_action_undo "
+                    "SET status='creative_restored', updated_at=? "
+                    "WHERE action_id=? AND status='applied'",
+                    (time.time(), action_id),
+                )
+                row = conn.execute(
+                    "SELECT * FROM writer_agent_action_undo WHERE action_id=?",
+                    (action_id,),
+                ).fetchone()
+            if row["status"] not in {"creative_restored", "compensated"}:
+                raise WriterActionError(
+                    "TURN_ROLLBACK_UNSUPPORTED", "动作创作状态尚不可恢复"
+                )
         return self._undo_row(row)
 
     @staticmethod
@@ -1381,19 +1884,28 @@ class WriterAgentStore:
     def assign_action_turn(
         self, action_id: str, turn_checkpoint_id: str
     ) -> dict[str, Any]:
-        """Attribute a naturally confirmed action to the confirming chat turn."""
+        """Record the confirming turn without changing the proposal owner turn."""
 
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = self._require_action_conn(conn, action_id)
-            if row["turn_checkpoint_id"] == turn_checkpoint_id:
+            if row["decision_turn_checkpoint_id"] == turn_checkpoint_id:
                 return self._action_row(row)
             if row["status"] != "pending":
                 raise WriterActionError(
                     "ACTION_NOT_PENDING", "动作已不在待确认状态"
                 )
+            checkpoint = conn.execute(
+                "SELECT 1 FROM writer_agent_turn_checkpoints "
+                "WHERE id=? AND session_id=?",
+                (turn_checkpoint_id, row["session_id"]),
+            ).fetchone()
+            if checkpoint is None:
+                raise WriterActionError(
+                    "TURN_CHECKPOINT_NOT_FOUND", "确认消息检查点不存在"
+                )
             conn.execute(
-                "UPDATE writer_agent_actions SET turn_checkpoint_id=?, "
+                "UPDATE writer_agent_actions SET decision_turn_checkpoint_id=?, "
                 "revision=revision+1, updated_at=? WHERE id=? AND status='pending'",
                 (turn_checkpoint_id, time.time(), action_id),
             )
@@ -1595,6 +2107,88 @@ class WriterAgentStore:
             if row["status"] not in {"queued", "running"}:
                 raise WriterActionError("ACTION_STATE_INVALID", "动作当前状态不允许失败", current_revision=int(row["revision"]))
             return self._transition_in_connection(conn, row, "failed", error_code=code, error_message=message, retryable=int(retryable), conflicting_action_id=conflicting_action_id, result_json=_json(result) if result is not None else row["result_json"], finished_at=time.time())
+
+    def prepare_action_finalization(
+        self,
+        action_id: str,
+        *,
+        status: str,
+        result: dict[str, Any] | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        retryable: bool = False,
+        conflicting_action_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist terminal intent while keeping the action restart-visible."""
+
+        if status not in {"succeeded", "failed", "cancelled"}:
+            raise ValueError("invalid action finalization status")
+        phase = f"finalizing_{status}"
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = self._require_action_conn(conn, action_id)
+            if row["status"] == status:
+                return self._action_row(row)
+            if row["status"] not in {"queued", "running"}:
+                raise WriterActionError(
+                    "ACTION_STATE_INVALID",
+                    "动作当前状态不允许完成",
+                    current_revision=int(row["revision"]),
+                )
+            if row["phase"] == phase:
+                return self._action_row(row)
+            fields = {
+                "phase": phase,
+                "result_json": (
+                    _json(result) if result is not None else row["result_json"]
+                ),
+                "error_code": error_code,
+                "error_message": error_message,
+                "retryable": int(retryable),
+                "conflicting_action_id": conflicting_action_id,
+                "revision": int(row["revision"]) + 1,
+                "updated_at": time.time(),
+            }
+            assignments = ", ".join(f"{key}=?" for key in fields)
+            changed = conn.execute(
+                f"UPDATE writer_agent_actions SET {assignments} "
+                "WHERE id=? AND status=? AND revision=?",
+                (
+                    *fields.values(),
+                    action_id,
+                    row["status"],
+                    int(row["revision"]),
+                ),
+            ).rowcount
+            if changed != 1:
+                raise WriterActionError(
+                    "ACTION_REVISION_MISMATCH",
+                    "动作版本已变化",
+                    current_revision=int(row["revision"]),
+                )
+            return self._action_row(self._require_action_conn(conn, action_id))
+
+    def publish_action_finalization(self, action_id: str) -> dict[str, Any]:
+        """Publish a prepared terminal intent after undo finalization succeeds."""
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = self._require_action_conn(conn, action_id)
+            phase = str(row["phase"] or "")
+            if not phase.startswith("finalizing_"):
+                if row["status"] in _ACTION_TERMINAL_STATUSES:
+                    return self._action_row(row)
+                raise WriterActionError(
+                    "ACTION_STATE_INVALID", "动作没有待发布的终态"
+                )
+            status = phase.removeprefix("finalizing_")
+            return self._transition_in_connection(
+                conn,
+                row,
+                status,
+                phase="",
+                finished_at=time.time(),
+            )
 
     def _transition_in_connection(self, conn: sqlite3.Connection, row: sqlite3.Row, status: str, **updates: Any) -> dict[str, Any]:
         fields = {"status": status, "revision": int(row["revision"]) + 1, "updated_at": time.time(), **updates}

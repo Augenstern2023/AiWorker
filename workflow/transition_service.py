@@ -56,6 +56,7 @@ class TransitionService:
         difference_note: str = "",
         expected_project_revision: int | None = None,
         expected_authority: dict[str, Any] | None = None,
+        writer_operation_id: str | None = None,
     ) -> dict[str, Any]:
         """Finish a creative task by locking its version instead of submitting it."""
         if self.creative_adapter is None:
@@ -93,6 +94,11 @@ class TransitionService:
                     "resource_type": resource_type,
                     "resource_id": resource_id,
                     "completion": "locked_without_review",
+                    **(
+                        {"writer_operation_id": writer_operation_id}
+                        if writer_operation_id
+                        else {}
+                    ),
                 },
                 event_type="creative.lock",
             )
@@ -120,7 +126,14 @@ class TransitionService:
                         actor.user_id,
                         "completed",
                         "in_progress",
-                        beats_progress,
+                        {
+                            **beats_progress,
+                            **(
+                                {"writer_operation_id": writer_operation_id}
+                                if writer_operation_id
+                                else {}
+                            ),
+                        },
                     )
                     task = self.repository._require_task(connection, task_id)
             else:
@@ -133,6 +146,7 @@ class TransitionService:
                         WORKFLOW_NODES[next_node][0],
                         actor=SYSTEM_ACTOR,
                         connection=connection,
+                        writer_operation_id=writer_operation_id,
                     )
             if resource_type in {"beats", "script"} and beats_progress and beats_progress["complete"]:
                 node = WORKFLOW_NODES[resource_type]
@@ -144,6 +158,7 @@ class TransitionService:
                         WORKFLOW_NODES[next_node][0],
                         actor=SYSTEM_ACTOR,
                         connection=connection,
+                        writer_operation_id=writer_operation_id,
                     )
         result = {"resource": completed["resource"], "task": task, "next_task": next_task}
         if beats_progress is not None:

@@ -39,6 +39,18 @@ SIDE_EFFECT_OPERATION_LEASE_SECONDS = 30.0
 GENERATION_OPERATION_LEASE_SECONDS = 30.0
 GENERATION_AUTHORITY_SCHEMA_VERSION = 2
 
+_WRITER_ROLLBACK_RESOURCE_TABLES = (
+    "creative_seeds",
+    "creative_blueprints",
+    "creative_characters",
+    "creative_relationships",
+    "creative_episodes",
+)
+_WRITER_ROLLBACK_TECHNICAL_TABLES = (
+    "creative_operation_results",
+    "creative_generation_operations",
+)
+
 
 class DuplicateTopicError(ValueError):
     """Raised when a title has already been collected into the topic store."""
@@ -2286,6 +2298,172 @@ class CreativeRepository:
             )
             if expected_revision is not None and cursor.rowcount != 1:
                 raise ValueError("project revision changed")
+        return self.get_project(project_id) or {}
+
+    @staticmethod
+    def _writer_rollback_table_rows(
+        conn: sqlite3.Connection, table: str, project_id: int
+    ) -> list[dict[str, Any]]:
+        status_filter = (
+            " AND status <> 'superseded'"
+            if table
+            in {
+                "creative_blueprints",
+                "creative_characters",
+                "creative_relationships",
+                "creative_episodes",
+            }
+            else ""
+        )
+        return [
+            dict(row)
+            for row in conn.execute(
+                f"SELECT * FROM {table} WHERE project_id=?{status_filter} "
+                "ORDER BY rowid",
+                (project_id,),
+            ).fetchall()
+        ]
+
+    def _export_writer_rollback_state_conn(
+        self, conn: sqlite3.Connection, project_id: int
+    ) -> dict[str, Any]:
+        project = conn.execute(
+            "SELECT * FROM creative_projects WHERE id=? AND deleted=0",
+            (project_id,),
+        ).fetchone()
+        if project is None:
+            raise ValueError("创作项目不存在")
+        tables = {
+            "creative_projects": [dict(project)],
+            **{
+                table: self._writer_rollback_table_rows(
+                    conn, table, project_id
+                )
+                for table in (
+                    *_WRITER_ROLLBACK_RESOURCE_TABLES,
+                    *_WRITER_ROLLBACK_TECHNICAL_TABLES,
+                )
+            },
+        }
+        payload = {"project_id": int(project_id), "tables": tables}
+        return {**payload, "fingerprint": canonical_request_hash(payload)}
+
+    def export_writer_rollback_state(
+        self, project_id: int
+    ) -> dict[str, Any]:
+        """Capture the project-local rows a Writer action is allowed to mutate."""
+
+        with self._connect() as conn:
+            return self._export_writer_rollback_state_conn(conn, project_id)
+
+    def writer_rollback_fingerprint(self, project_id: int) -> str:
+        return str(self.export_writer_rollback_state(project_id)["fingerprint"])
+
+    @staticmethod
+    def _writer_rollback_primary_key(
+        conn: sqlite3.Connection, table: str
+    ) -> str:
+        columns = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        primary = sorted(
+            ((int(row[5]), str(row[1])) for row in columns if int(row[5]) > 0),
+            key=lambda item: item[0],
+        )
+        if len(primary) != 1:
+            raise ValueError(f"unsupported rollback primary key: {table}")
+        return primary[0][1]
+
+    @staticmethod
+    def _restore_writer_rollback_rows(
+        conn: sqlite3.Connection, table: str, rows: list[dict[str, Any]]
+    ) -> None:
+        for row in rows:
+            columns = list(row)
+            assignments = ", ".join(f"{column}=?" for column in columns)
+            primary_key = CreativeRepository._writer_rollback_primary_key(
+                conn, table
+            )
+            updated = conn.execute(
+                f"UPDATE {table} SET {assignments} WHERE {primary_key}=?",
+                (*[row[column] for column in columns], row[primary_key]),
+            ).rowcount
+            if updated == 0:
+                placeholders = ",".join("?" for _ in columns)
+                conn.execute(
+                    f"INSERT INTO {table} ({','.join(columns)}) "
+                    f"VALUES ({placeholders})",
+                    [row[column] for column in columns],
+                )
+
+    def restore_writer_rollback_state(
+        self,
+        project_id: int,
+        preimage: dict[str, Any],
+        *,
+        expected_fingerprint: str,
+    ) -> dict[str, Any]:
+        """Restore one project iff it is still exactly at the action post-state."""
+
+        if int(preimage.get("project_id") or 0) != int(project_id):
+            raise ValueError("rollback snapshot belongs to another project")
+        tables = preimage.get("tables")
+        if not isinstance(tables, dict):
+            raise ValueError("rollback snapshot is invalid")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._export_writer_rollback_state_conn(conn, project_id)
+            if current["fingerprint"] == preimage.get("fingerprint"):
+                return self.get_project(project_id) or {}
+            if current["fingerprint"] != expected_fingerprint:
+                raise ValueError("project rollback state changed")
+
+            for table in _WRITER_ROLLBACK_TECHNICAL_TABLES:
+                conn.execute(f"DELETE FROM {table} WHERE project_id=?", (project_id,))
+                self._restore_writer_rollback_rows(
+                    conn, table, list(tables.get(table) or [])
+                )
+
+            for table in _WRITER_ROLLBACK_RESOURCE_TABLES:
+                rows = list(tables.get(table) or [])
+                primary_key = self._writer_rollback_primary_key(conn, table)
+                identifiers = [row[primary_key] for row in rows]
+                if table == "creative_seeds":
+                    if identifiers:
+                        placeholders = ",".join("?" for _ in identifiers)
+                        conn.execute(
+                            f"DELETE FROM {table} WHERE project_id=? "
+                            f"AND {primary_key} NOT IN ({placeholders})",
+                            (project_id, *identifiers),
+                        )
+                    else:
+                        conn.execute(
+                            f"DELETE FROM {table} WHERE project_id=?",
+                            (project_id,),
+                        )
+                elif identifiers:
+                    placeholders = ",".join("?" for _ in identifiers)
+                    conn.execute(
+                        f"UPDATE {table} SET status='superseded' "
+                        f"WHERE project_id=? AND {primary_key} "
+                        f"NOT IN ({placeholders})",
+                        (project_id, *identifiers),
+                    )
+                else:
+                    conn.execute(
+                        f"UPDATE {table} SET status='superseded' "
+                        "WHERE project_id=?",
+                        (project_id,),
+                    )
+                self._restore_writer_rollback_rows(conn, table, rows)
+
+            project_rows = list(tables.get("creative_projects") or [])
+            if len(project_rows) != 1:
+                raise ValueError("rollback project snapshot is invalid")
+            self._restore_writer_rollback_rows(
+                conn, "creative_projects", project_rows
+            )
+            restored = self._export_writer_rollback_state_conn(conn, project_id)
+            if restored["fingerprint"] != preimage.get("fingerprint"):
+                raise ValueError("project rollback verification failed")
         return self.get_project(project_id) or {}
 
     def get_pending_project_deletion(

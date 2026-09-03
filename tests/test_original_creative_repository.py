@@ -218,6 +218,62 @@ def test_original_blueprints_persist_direction_type_and_seed_source(tmp_path):
     assert blueprints[0]["source_refs"]["seed_id"] == seed["id"]
 
 
+def test_writer_rollback_snapshot_restores_project_and_supersedes_new_content(
+    tmp_path,
+):
+    """Would catch a conversation rollback that leaves generated Brief active."""
+
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = ready_original_project(repository)
+    before = repository.export_writer_rollback_state(project["id"])
+    blueprints = repository.create_blueprints(
+        project["id"],
+        [{"content": {"title": "回档后不应继续生效"}}],
+        direction_type="original",
+        source_refs={"seed_id": project["seed"]["id"]},
+        operation_id="writer-rollback-brief",
+    )
+    locked = repository.lock_brief(
+        blueprints[0]["id"], expected_revision=project["revision"]
+    )
+    after_fingerprint = repository.writer_rollback_fingerprint(project["id"])
+
+    restored = repository.restore_writer_rollback_state(
+        project["id"], before, expected_fingerprint=after_fingerprint
+    )
+
+    assert restored["locked_brief_id"] is None
+    assert restored["status"] == project["status"]
+    assert restored["revision"] == project["revision"]
+    assert repository.get_blueprint(locked["id"])["status"] == "superseded"
+    assert (
+        repository.writer_rollback_fingerprint(project["id"])
+        == before["fingerprint"]
+    )
+
+
+def test_writer_rollback_snapshot_rejects_an_external_project_change(tmp_path):
+    """Would catch rollback overwriting edits made after the action finished."""
+
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = ready_original_project(repository)
+    before = repository.export_writer_rollback_state(project["id"])
+    repository.update_project(
+        project["id"], {"name": "动作完成状态"}, expected_revision=0
+    )
+    action_fingerprint = repository.writer_rollback_fingerprint(project["id"])
+    repository.update_project(
+        project["id"], {"name": "其他页面的新修改"}, expected_revision=1
+    )
+
+    with pytest.raises(ValueError, match="project rollback state changed"):
+        repository.restore_writer_rollback_state(
+            project["id"], before, expected_fingerprint=action_fingerprint
+        )
+
+    assert repository.get_project(project["id"])["name"] == "其他页面的新修改"
+
+
 @pytest.mark.parametrize("status", ["pending", "ready", "failed"])
 def test_bootstrap_status_accepts_the_declared_values(tmp_path, status):
     repository = CreativeRepository(tmp_path / "creative.sqlite3")

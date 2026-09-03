@@ -1160,7 +1160,7 @@ class WriterAgentStore:
             raise WriterActionError("PROJECT_NOT_AVAILABLE", "动作不存在或无权访问")
         return row
 
-    def create_action(self, *, session_id: int, actor_user_id: str, action_type: str, project_id: Any, idempotency_key: str, request_hash: str, payload: dict[str, Any], expected_context: dict[str, Any], source_snapshot_id: str | None, expires_at: float | None = None) -> dict[str, Any]:
+    def create_action(self, *, session_id: int, actor_user_id: str, action_type: str, project_id: Any, idempotency_key: str, request_hash: str, payload: dict[str, Any], expected_context: dict[str, Any], source_snapshot_id: str | None, expires_at: float | None = None, turn_checkpoint_id: str | None = None) -> dict[str, Any]:
         now = time.time()
         target_key = self._target_key(action_type, project_id, payload)
         with self._connect() as conn:
@@ -1175,12 +1175,165 @@ class WriterAgentStore:
                 raise WriterActionError("IDEMPOTENCY_KEY_REUSED", "幂等键已用于不同动作")
             action_id = f"action-{uuid.uuid4().hex}"
             conn.execute(
-                "INSERT INTO writer_agent_actions (id,session_id,actor_user_id,action_type,status,revision,project_id,project_id_json,target_key,idempotency_key,request_hash,source_snapshot_id,expected_context_json,payload_json,created_at,updated_at,expires_at,root_action_id) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (action_id, session_id, actor_user_id, action_type, "pending", 1, project_id, _json(project_id), target_key, idempotency_key, request_hash, source_snapshot_id, _json(expected_context), _json(payload), now, now, expires_at, action_id),
+                "INSERT INTO writer_agent_actions (id,session_id,actor_user_id,action_type,status,revision,project_id,project_id_json,target_key,idempotency_key,request_hash,source_snapshot_id,expected_context_json,payload_json,created_at,updated_at,expires_at,root_action_id,turn_checkpoint_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (action_id, session_id, actor_user_id, action_type, "pending", 1, project_id, _json(project_id), target_key, idempotency_key, request_hash, source_snapshot_id, _json(expected_context), _json(payload), now, now, expires_at, action_id, turn_checkpoint_id),
             )
             row = self._require_action_conn(conn, action_id)
         return self._action_row(row)
+
+    def prepare_action_undo(
+        self,
+        action_id: str,
+        turn_checkpoint_id: str,
+        *,
+        project_id: int | None,
+        preimage: dict[str, Any],
+        workflow_preimage: dict[str, Any],
+    ) -> dict[str, Any]:
+        encoded_preimage = _json(preimage)
+        encoded_workflow = _json(workflow_preimage)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            action = self._require_action_conn(conn, action_id)
+            if str(action["turn_checkpoint_id"] or "") != turn_checkpoint_id:
+                raise WriterActionError(
+                    "TURN_ROLLBACK_UNSUPPORTED",
+                    "动作没有匹配的对话检查点",
+                )
+            existing = conn.execute(
+                "SELECT * FROM writer_agent_action_undo WHERE action_id=?",
+                (action_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["turn_checkpoint_id"] != turn_checkpoint_id
+                    or existing["project_id"] != project_id
+                    or existing["preimage_json"] != encoded_preimage
+                    or existing["workflow_preimage_json"] != encoded_workflow
+                ):
+                    raise WriterActionError(
+                        "IDEMPOTENCY_KEY_REUSED",
+                        "动作撤销记录已绑定到不同状态",
+                    )
+                return self._undo_row(existing)
+            now = time.time()
+            conn.execute(
+                "INSERT INTO writer_agent_action_undo "
+                "(action_id,turn_checkpoint_id,project_id,preimage_json,"
+                "workflow_preimage_json,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,'prepared',?,?)",
+                (
+                    action_id,
+                    turn_checkpoint_id,
+                    project_id,
+                    encoded_preimage,
+                    encoded_workflow,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM writer_agent_action_undo WHERE action_id=?",
+                (action_id,),
+            ).fetchone()
+        return self._undo_row(row)
+
+    def finalize_action_undo(
+        self,
+        action_id: str,
+        *,
+        project_id: int | None,
+        postcondition: dict[str, Any],
+    ) -> dict[str, Any]:
+        encoded = _json(postcondition)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM writer_agent_action_undo WHERE action_id=?",
+                (action_id,),
+            ).fetchone()
+            if row is None:
+                raise WriterActionError(
+                    "TURN_ROLLBACK_UNSUPPORTED", "动作缺少撤销前镜像"
+                )
+            if row["status"] in {"applied", "compensated"}:
+                if (
+                    row["project_id"] != project_id
+                    or row["postcondition_json"] != encoded
+                ):
+                    raise WriterActionError(
+                        "IDEMPOTENCY_KEY_REUSED", "动作已记录不同后置状态"
+                    )
+                return self._undo_row(row)
+            conn.execute(
+                "UPDATE writer_agent_action_undo SET project_id=?, "
+                "postcondition_json=?, status='applied', updated_at=? "
+                "WHERE action_id=? AND status='prepared'",
+                (project_id, encoded, time.time(), action_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM writer_agent_action_undo WHERE action_id=?",
+                (action_id,),
+            ).fetchone()
+        return self._undo_row(row)
+
+    def require_action_undo(self, action_id: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM writer_agent_action_undo WHERE action_id=?",
+                (action_id,),
+            ).fetchone()
+        if row is None:
+            raise WriterActionError(
+                "TURN_ROLLBACK_UNSUPPORTED", "动作缺少可验证的撤销记录"
+            )
+        return self._undo_row(row)
+
+    def list_actions_for_turns(
+        self, checkpoint_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        if not checkpoint_ids:
+            return []
+        placeholders = ",".join("?" for _ in checkpoint_ids)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM writer_agent_actions WHERE turn_checkpoint_id "
+                f"IN ({placeholders}) ORDER BY created_at,id",
+                checkpoint_ids,
+            ).fetchall()
+        return [self._action_row(row) for row in rows]
+
+    def mark_action_undo_compensated(self, action_id: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE writer_agent_action_undo SET status='compensated', "
+                "updated_at=?, compensated_at=? WHERE action_id=? "
+                "AND status<>'compensated'",
+                (time.time(), time.time(), action_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM writer_agent_action_undo WHERE action_id=?",
+                (action_id,),
+            ).fetchone()
+        if row is None:
+            raise WriterActionError(
+                "TURN_ROLLBACK_UNSUPPORTED", "动作缺少撤销记录"
+            )
+        return self._undo_row(row)
+
+    @staticmethod
+    def _undo_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["preimage"] = _decode(item.pop("preimage_json"), {})
+        item["workflow_preimage"] = _decode(
+            item.pop("workflow_preimage_json"), {}
+        )
+        item["postcondition"] = _decode(
+            item.pop("postcondition_json"), {}
+        )
+        return item
 
     def require_action(self, action_id: str, actor_user_id: str | None) -> dict[str, Any]:
         with self._connect() as conn:
@@ -2048,8 +2201,8 @@ class WriterAgentStore:
                 "(id,session_id,actor_user_id,action_type,status,revision,project_id,project_id_json,"
                 "target_key,idempotency_key,request_hash,source_snapshot_id,"
                 "expected_context_json,payload_json,retry_of_action_id,root_action_id,"
-                "result_json,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "result_json,created_at,updated_at,turn_checkpoint_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     action_id,
                     current["session_id"],
@@ -2070,6 +2223,7 @@ class WriterAgentStore:
                     current["result_json"],
                     now,
                     now,
+                    current["turn_checkpoint_id"],
                 ),
             )
             source_steps = conn.execute(

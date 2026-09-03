@@ -9,8 +9,9 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Connection, and_, func, or_, select, insert, update, delete, text
+from sqlalchemy import Connection, DateTime, and_, func, or_, select, insert, update, delete, text
 from datetime import date, datetime
+import hashlib
 import json
 import time
 import uuid
@@ -132,6 +133,305 @@ class WorkflowRepository:
                 delete(project_members).where(project_members.c.project_id == project_id)
             )
         return {"workflow_count": len(workflow_ids), "task_count": len(task_ids)}
+
+    @staticmethod
+    def _writer_rollback_json_value(value: Any) -> Any:
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()
+        if isinstance(value, dict):
+            return {
+                str(key): WorkflowRepository._writer_rollback_json_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [
+                WorkflowRepository._writer_rollback_json_value(item)
+                for item in value
+            ]
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return str(value)
+
+    @staticmethod
+    def _writer_rollback_rows(
+        connection: Connection, table: Any, condition: Any
+    ) -> list[dict[str, Any]]:
+        rows = [
+            {
+                key: WorkflowRepository._writer_rollback_json_value(value)
+                for key, value in dict(row).items()
+                if key not in {"created_at", "updated_at"}
+            }
+            for row in connection.execute(
+                select(table).where(condition)
+            ).mappings()
+        ]
+        primary_keys = [column.name for column in table.primary_key.columns]
+        return sorted(
+            rows,
+            key=lambda row: tuple(str(row.get(key) or "") for key in primary_keys),
+        )
+
+    def _export_writer_rollback_state_conn(
+        self, connection: Connection, project_id: str
+    ) -> dict[str, Any]:
+        instances = self._writer_rollback_rows(
+            connection,
+            workflow_instances,
+            and_(
+                workflow_instances.c.project_id == project_id,
+                workflow_instances.c.status != "rolled_back",
+            ),
+        )
+        tasks = self._writer_rollback_rows(
+            connection,
+            workflow_tasks,
+            and_(
+                workflow_tasks.c.project_id == project_id,
+                workflow_tasks.c.status != "cancelled",
+            ),
+        )
+        task_ids = [str(row["id"]) for row in tasks]
+        submissions = (
+            self._writer_rollback_rows(
+                connection,
+                workflow_submissions,
+                and_(
+                    workflow_submissions.c.task_id.in_(task_ids),
+                    workflow_submissions.c.status != "superseded",
+                ),
+            )
+            if task_ids
+            else []
+        )
+        jobs = (
+            self._writer_rollback_rows(
+                connection,
+                workflow_task_jobs,
+                workflow_task_jobs.c.task_id.in_(task_ids),
+            )
+            if task_ids
+            else []
+        )
+        members = self._writer_rollback_rows(
+            connection,
+            project_members,
+            and_(
+                project_members.c.project_id == project_id,
+                project_members.c.status != "inactive",
+            ),
+        )
+        payload = {
+            "project_id": str(project_id),
+            "tables": {
+                "workflow_instances": instances,
+                "workflow_tasks": tasks,
+                "workflow_submissions": submissions,
+                "workflow_task_jobs": jobs,
+                "project_members": members,
+            },
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return {**payload, "fingerprint": fingerprint}
+
+    def export_writer_rollback_state(
+        self, project_id: str
+    ) -> dict[str, Any]:
+        """Capture mutable workflow rows owned by one creative project."""
+
+        with self.identity_repository.connect() as connection:
+            return self._export_writer_rollback_state_conn(
+                connection, str(project_id)
+            )
+
+    def writer_rollback_fingerprint(self, project_id: str) -> str:
+        return str(self.export_writer_rollback_state(project_id)["fingerprint"])
+
+    @staticmethod
+    def _writer_rollback_database_row(
+        table: Any, row: dict[str, Any]
+    ) -> dict[str, Any]:
+        converted = dict(row)
+        for column in table.columns:
+            value = converted.get(column.name)
+            if (
+                value is not None
+                and isinstance(value, str)
+                and (
+                    isinstance(column.type, DateTime)
+                    or column.name.endswith("_at")
+                )
+            ):
+                try:
+                    converted[column.name] = datetime.fromisoformat(value)
+                except ValueError:
+                    pass
+        return converted
+
+    @staticmethod
+    def _restore_writer_rollback_rows(
+        connection: Connection, table: Any, rows: list[dict[str, Any]]
+    ) -> None:
+        primary_keys = list(table.primary_key.columns)
+        for source in rows:
+            row = WorkflowRepository._writer_rollback_database_row(table, source)
+            predicate = and_(
+                *[column == row[column.name] for column in primary_keys]
+            )
+            changed = connection.execute(
+                update(table).where(predicate).values(**row)
+            ).rowcount
+            if changed == 0:
+                connection.execute(insert(table).values(**row))
+
+    def restore_writer_rollback_state(
+        self,
+        project_id: str,
+        preimage: dict[str, Any],
+        *,
+        expected_fingerprint: str,
+        actor: Principal,
+    ) -> dict[str, Any]:
+        """Restore workflow rows only when the action post-state still matches."""
+
+        project_id = str(project_id)
+        if str(preimage.get("project_id") or "") != project_id:
+            raise ValueError("rollback snapshot belongs to another project")
+        tables = preimage.get("tables")
+        if not isinstance(tables, dict):
+            raise ValueError("rollback snapshot is invalid")
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.transaction() as connection:
+            current = self._export_writer_rollback_state_conn(
+                connection, project_id
+            )
+            if current["fingerprint"] == preimage.get("fingerprint"):
+                return current
+            if current["fingerprint"] != expected_fingerprint:
+                raise ValueError("workflow rollback state changed")
+
+            pre_tasks = list(tables.get("workflow_tasks") or [])
+            pre_task_ids = {str(row["id"]) for row in pre_tasks}
+            current_tasks = list(current["tables"]["workflow_tasks"])
+            current_task_ids = {str(row["id"]) for row in current_tasks}
+            all_task_ids = current_task_ids | pre_task_ids
+            previous_status = {
+                str(row["id"]): str(row.get("status") or "")
+                for row in current_tasks
+            }
+
+            if all_task_ids:
+                connection.execute(
+                    delete(workflow_task_jobs).where(
+                        workflow_task_jobs.c.task_id.in_(all_task_ids)
+                    )
+                )
+            extra_task_ids = current_task_ids - pre_task_ids
+            if extra_task_ids:
+                connection.execute(
+                    update(workflow_tasks)
+                    .where(workflow_tasks.c.id.in_(extra_task_ids))
+                    .values(status="cancelled", updated_at=func.now())
+                )
+            self._restore_writer_rollback_rows(
+                connection, workflow_tasks, pre_tasks
+            )
+            self._restore_writer_rollback_rows(
+                connection,
+                workflow_task_jobs,
+                list(tables.get("workflow_task_jobs") or []),
+            )
+
+            pre_submissions = list(tables.get("workflow_submissions") or [])
+            pre_submission_ids = {str(row["id"]) for row in pre_submissions}
+            if all_task_ids:
+                extra_submissions = {
+                    str(row["id"])
+                    for row in connection.execute(
+                        select(workflow_submissions.c.id).where(
+                            workflow_submissions.c.task_id.in_(all_task_ids)
+                        )
+                    ).mappings()
+                    if str(row["id"]) not in pre_submission_ids
+                }
+                if extra_submissions:
+                    connection.execute(
+                        update(workflow_submissions)
+                        .where(workflow_submissions.c.id.in_(extra_submissions))
+                        .values(status="superseded", updated_at=func.now())
+                    )
+            self._restore_writer_rollback_rows(
+                connection, workflow_submissions, pre_submissions
+            )
+
+            pre_instances = list(tables.get("workflow_instances") or [])
+            pre_instance_ids = {str(row["id"]) for row in pre_instances}
+            current_instance_ids = {
+                str(row["id"])
+                for row in current["tables"]["workflow_instances"]
+            }
+            extra_instance_ids = current_instance_ids - pre_instance_ids
+            if extra_instance_ids:
+                connection.execute(
+                    update(workflow_instances)
+                    .where(workflow_instances.c.id.in_(extra_instance_ids))
+                    .values(status="rolled_back")
+                )
+            self._restore_writer_rollback_rows(
+                connection, workflow_instances, pre_instances
+            )
+
+            pre_members = list(tables.get("project_members") or [])
+            pre_member_ids = {str(row["id"]) for row in pre_members}
+            current_member_ids = {
+                str(row["id"])
+                for row in current["tables"]["project_members"]
+            }
+            extra_member_ids = current_member_ids - pre_member_ids
+            if extra_member_ids:
+                connection.execute(
+                    update(project_members)
+                    .where(project_members.c.id.in_(extra_member_ids))
+                    .values(status="inactive")
+                )
+            self._restore_writer_rollback_rows(
+                connection, project_members, pre_members
+            )
+
+            for task_id in sorted(all_task_ids):
+                target_status = next(
+                    (
+                        str(row.get("status") or "")
+                        for row in pre_tasks
+                        if str(row["id"]) == task_id
+                    ),
+                    "cancelled",
+                )
+                connection.execute(
+                    insert(workflow_task_events).values(
+                        id=str(uuid.uuid4()),
+                        task_id=task_id,
+                        event_type="writer.rollback",
+                        actor_id=actor_id,
+                        from_status=previous_status.get(task_id),
+                        to_status=target_status,
+                        details_json={"project_id": project_id},
+                    )
+                )
+
+            restored = self._export_writer_rollback_state_conn(
+                connection, project_id
+            )
+            if restored["fingerprint"] != preimage.get("fingerprint"):
+                raise ValueError("workflow rollback verification failed")
+        return restored
 
     def create_task(
         self,

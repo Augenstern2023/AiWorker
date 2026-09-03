@@ -83,3 +83,65 @@ def test_next_original_task_preserves_null_topic(
         assert characters["project_id"] == brief["project_id"]
     finally:
         workflow_repository.delete_project_data(project_id)
+
+
+def test_writer_rollback_snapshot_restores_tasks_and_cancels_new_work(
+    workflow_repository: WorkflowRepository,
+) -> None:
+    """Would catch restored creative content leaving workflow tasks advanced."""
+
+    project_id = f"project-writer-rollback-{uuid.uuid4().hex}"
+    try:
+        original = workflow_repository.create_task(
+            workflow_id=f"project:{project_id}",
+            task_type="brief",
+            role_code="creative_planner",
+            project_id=project_id,
+            actor=SYSTEM_ACTOR,
+        )
+        before = workflow_repository.export_writer_rollback_state(project_id)
+        with workflow_repository.identity_repository.transaction() as connection:
+            connection.exec_driver_sql(
+                "UPDATE workflow_tasks SET status = %s WHERE id = %s",
+                ("in_progress", original["id"]),
+            )
+        created = workflow_repository.create_task(
+            workflow_id=f"project:{project_id}",
+            task_type="script",
+            role_code="screenwriter",
+            project_id=project_id,
+            actor=SYSTEM_ACTOR,
+        )
+        after_fingerprint = workflow_repository.writer_rollback_fingerprint(
+            project_id
+        )
+
+        workflow_repository.restore_writer_rollback_state(
+            project_id,
+            before,
+            expected_fingerprint=after_fingerprint,
+            actor=SYSTEM_ACTOR,
+        )
+
+        with workflow_repository.identity_repository.connect() as connection:
+            rows = {
+                row["id"]: row["status"]
+                for row in connection.exec_driver_sql(
+                    "SELECT id, status FROM workflow_tasks WHERE project_id = %s",
+                    (project_id,),
+                ).mappings()
+            }
+            rollback_events = connection.exec_driver_sql(
+                "SELECT COUNT(*) AS count FROM workflow_task_events "
+                "WHERE task_id = %s AND event_type = %s",
+                (original["id"], "writer.rollback"),
+            ).mappings().one()["count"]
+        assert rows[original["id"]] == "pool"
+        assert rows[created["id"]] == "cancelled"
+        assert rollback_events == 1
+        assert (
+            workflow_repository.writer_rollback_fingerprint(project_id)
+            == before["fingerprint"]
+        )
+    finally:
+        workflow_repository.delete_project_data(project_id)

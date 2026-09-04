@@ -648,8 +648,14 @@ def test_resolve_llm_settings_defaults_sub2api_to_chat_completions(monkeypatch):
     assert settings["reasoning_effort"] == "auto"
 
 
-def test_runtime_config_defaults_sub2api_to_chat_completions(monkeypatch):
-    """Would catch the legacy runtime config overriding the new provider default."""
+@pytest.mark.parametrize(
+    ("provider", "expected_wire_api"),
+    [("sub2api", "chat_completions"), ("openai", "responses")],
+)
+def test_runtime_config_uses_each_provider_wire_api_default(
+    monkeypatch, provider, expected_wire_api
+):
+    """Would catch a global runtime default overriding provider-specific protocols."""
 
     import importlib
 
@@ -660,14 +666,16 @@ def test_runtime_config_defaults_sub2api_to_chat_completions(monkeypatch):
         def effective_default():
             return None
 
-    monkeypatch.delenv("LLM_WIRE_API", raising=False)
-    runtime_config = importlib.reload(bilibili_config)
+    with monkeypatch.context() as environment:
+        environment.setenv("LLM_PROVIDER", provider)
+        environment.delenv("LLM_WIRE_API", raising=False)
+        runtime_config = importlib.reload(bilibili_config)
+        settings = resolve_llm_settings(
+            runtime_config, settings_repository=EmptySettingsRepository()
+        )
+    importlib.reload(bilibili_config)
 
-    settings = resolve_llm_settings(
-        runtime_config, settings_repository=EmptySettingsRepository()
-    )
-
-    assert settings["wire_api"] == "chat_completions"
+    assert settings["wire_api"] == expected_wire_api
 
 
 def test_configured_provider_ignores_legacy_secondary_route():

@@ -16,30 +16,48 @@ from pathlib import Path
 
 
 def build_worker_command(job_file: str | Path, platform: str = "", crawler_type: str = "") -> list[str]:
+    if platform == "analytics" and crawler_type == "weekly_report":
+        return [sys.executable, "-m", "agents.weekly_report_worker", "--job-file", str(job_file)]
     if platform == "data" and crawler_type == "file_operation":
-        return ["uv", "run", "python", "-m", "agents.data_file_operation_worker", "--job-file", str(job_file)]
+        return [sys.executable, "-m", "agents.data_file_operation_worker", "--job-file", str(job_file)]
     if platform == "creative" and crawler_type == "breakdown_generate":
-        return ["uv", "run", "python", "-m", "creative.breakdown_worker", "--job-file", str(job_file)]
+        return [sys.executable, "-m", "creative.breakdown_worker", "--job-file", str(job_file)]
     if platform == "creative" and crawler_type == "phase4_generate":
-        return ["uv", "run", "python", "-m", "creative.phase4_worker", "--job-file", str(job_file)]
+        return [sys.executable, "-m", "creative.phase4_worker", "--job-file", str(job_file)]
+    if platform == "creative" and crawler_type == "screenplay_review":
+        return [sys.executable, "-m", "screenplay_review.worker", "--job-file", str(job_file)]
+    if platform == "creative" and crawler_type == "project_review":
+        return [sys.executable, "-m", "project_review.worker", "--job-file", str(job_file)]
+    if platform == "creative" and crawler_type == "screenplay_optimization":
+        return [sys.executable, "-m", "screenplay_optimization.worker", "--job-file", str(job_file)]
     if platform == "hg" and crawler_type == "drama_analysis":
-        return ["uv", "run", "python", "-m", "agents.hongguo_drama_worker", "--job-file", str(job_file)]
+        return [sys.executable, "-m", "agents.hongguo_drama_worker", "--job-file", str(job_file)]
     if platform == "hg" and crawler_type == "drama_download":
-        return ["uv", "run", "python", "-m", "agents.hongguo_drama_download_worker", "--job-file", str(job_file)]
+        return [sys.executable, "-m", "agents.hongguo_drama_download_worker", "--job-file", str(job_file)]
     if platform == "hg" and crawler_type == "douyin_fallback_analysis":
-        return ["uv", "run", "python", "-m", "agents.douyin_drama_fallback_worker", "--job-file", str(job_file)]
+        return [sys.executable, "-m", "agents.douyin_drama_fallback_worker", "--job-file", str(job_file)]
     if platform == "hg":
-        return ["uv", "run", "python", "-m", "agents.hongguo_csv_worker", "--job-file", str(job_file)]
+        return [sys.executable, "-m", "agents.hongguo_csv_worker", "--job-file", str(job_file)]
     if platform == "dy" and crawler_type == "rank":
-        return ["uv", "run", "python", "-m", "agents.douyin_rank_worker", "--job-file", str(job_file)]
+        return [sys.executable, "-m", "agents.douyin_rank_worker", "--job-file", str(job_file)]
     if platform == "dy" and crawler_type == "drama_reviews":
-        return ["uv", "run", "python", "-m", "agents.douyin_review_worker", "--job-file", str(job_file)]
-    return ["uv", "run", "main.py", "--job-file", str(job_file)]
+        return [sys.executable, "-m", "agents.douyin_review_worker", "--job-file", str(job_file)]
+    return [sys.executable, "main.py", "--job-file", str(job_file)]
 
 
 def build_worker_env() -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
+    if env.get("AIWORKER_SYSTEM_DATABASE_URL", "").strip():
+        env["AIWORKER_LLM_DATABASE_CONFIG_ENABLED"] = "1"
+    node_options = env.get("NODE_OPTIONS", "")
+    filtered_node_options = [
+        option for option in node_options.split() if option != "--use-env-proxy"
+    ]
+    if filtered_node_options:
+        env["NODE_OPTIONS"] = " ".join(filtered_node_options)
+    else:
+        env.pop("NODE_OPTIONS", None)
     return env
 
 

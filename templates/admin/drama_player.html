@@ -1,0 +1,49 @@
+{% extends "layouts/base.html" %}
+
+{% block content %}
+<section class="drama-player-page">
+    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+        <div>
+            <h3 class="mb-1">已下载剧目播放</h3>
+            <div class="text-muted small">本地已下载的剧集视频</div>
+        </div>
+        <button class="btn btn-outline-light btn-sm" type="button" @click="fetchDramaPlayerLibrary()" :disabled="dramaPlayer.loading" title="刷新剧库">
+            <i class="bi bi-arrow-clockwise"></i><span class="visually-hidden">刷新剧库</span>
+        </button>
+    </div>
+
+    <div class="alert alert-danger" x-show="dramaPlayer.error" x-text="dramaPlayer.error"></div>
+    <div class="alert alert-info" x-show="!dramaPlayer.loading && !dramaPlayer.error && !dramaPlayer.dramas.length">暂无可播放的已下载剧目视频。</div>
+
+    <div class="drama-player-layout" x-show="dramaPlayer.dramas.length">
+        <aside class="drama-player-library" aria-label="已下载剧目">
+            <template x-for="drama in dramaPlayer.dramas" :key="drama.id">
+                <button class="drama-player-drama" type="button" @click="selectDramaPlayerDrama(drama)" :class="{'is-active': drama.id === dramaPlayer.selectedDramaId}">
+                    <span class="text-truncate" x-text="drama.title"></span>
+                    <small x-text="`${drama.episodes.length} 集`"></small>
+                </button>
+            </template>
+        </aside>
+        <div class="drama-player-content">
+            <video id="drama-player-video" class="drama-player-video" controls playsinline @timeupdate="rememberDramaPlayerProgress($event.target)" @ended="handleDramaPlayerEnded()" @error="handleDramaPlayerError()"></video>
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-3">
+                <div class="btn-group" aria-label="剧集切换">
+                    <button class="btn btn-outline-light btn-sm" type="button" @click="playDramaPlayerRelative(-1)" :disabled="!canPlayDramaPlayerRelative(-1)" title="上一集"><i class="bi bi-skip-backward"></i><span class="visually-hidden">上一集</span></button>
+                    <button class="btn btn-outline-light btn-sm" type="button" @click="playDramaPlayerRelative(1)" :disabled="!canPlayDramaPlayerRelative(1)" title="下一集"><i class="bi bi-skip-forward"></i><span class="visually-hidden">下一集</span></button>
+                </div>
+                <label class="form-check form-switch mb-0"><input class="form-check-input" type="checkbox" x-model="dramaPlayer.autoNext" @change="rememberDramaPlayerSettings()"><span class="ms-1">自动连播</span></label>
+                <select class="form-select form-select-sm drama-player-speed" x-model.number="dramaPlayer.speed" @change="setDramaPlayerSpeed()" aria-label="播放速度">
+                    <option value="0.75">0.75x</option><option value="1">1x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="2">2x</option><option value="3">3x</option>
+                </select>
+            </div>
+            <div class="drama-player-episodes mt-3" aria-label="剧集列表">
+                <template x-for="episode in selectedDramaPlayerEpisodes()" :key="episode.id">
+                    <button class="btn btn-sm" type="button" @click="playDramaPlayerEpisode(episode)" :class="episode.id === dramaPlayer.selectedEpisodeId ? 'btn-primary' : 'btn-outline-light'" x-text="episode.title"></button>
+                </template>
+            </div>
+            <div class="small text-danger mt-2" x-show="dramaPlayer.playbackError" x-text="dramaPlayer.playbackError"></div>
+        </div>
+    </div>
+</section>
+{% endblock %}
+{% block scripts %}<script src="/static/js/admin/drama-player.js?v={{ asset_version }}"></script>{% endblock %}

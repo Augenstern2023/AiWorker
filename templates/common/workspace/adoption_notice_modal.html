@@ -1,0 +1,10 @@
+<div class="modal fade" id="adoptionNoticeModal" tabindex="-1" aria-labelledby="adoptionNoticeModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+        <div class="modal-header">
+            <h5 class="modal-title" id="adoptionNoticeModalLabel"><i class="bi me-2" :class="adoptionNotice.success ? 'bi-check-circle' : 'bi-exclamation-triangle'"></i><span x-text="adoptionNotice.success ? '采纳成功' : '采纳失败'"></span></h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button>
+        </div>
+        <div class="modal-body"><div class="fw-semibold" x-text="adoptionNotice.title || '剧目'"></div><div class="mt-2" :class="adoptionNotice.success ? 'text-success' : 'text-danger'" x-text="adoptionNotice.message"></div></div>
+        <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button></div>
+    </div></div>
+</div>

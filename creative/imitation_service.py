@@ -24,6 +24,22 @@ def _flatten_text(value: Any) -> str:
     return str(value or "")
 
 
+def _normalize_risk_score(value: Any) -> float:
+    labels = {
+        "低": 20.0, "low": 20.0,
+        "中": 50.0, "medium": 50.0,
+        "高": 80.0, "high": 80.0,
+    }
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in labels:
+            return labels[normalized]
+    try:
+        return max(0.0, min(100.0, float(value or 0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _ngrams(value: Any, size: int = 4) -> set[str]:
     text = re.sub(r"\s+|[^0-9A-Za-z\u4e00-\u9fff]", "", _flatten_text(value)).casefold()
     if not text:
@@ -38,7 +54,7 @@ def assess_similarity_risk(source: dict[str, Any], blueprint: dict[str, Any]) ->
     target_grams = _ngrams({key: value for key, value in blueprint.items() if key not in {"risk_score", "risk_level"}})
     overlap = len(source_grams & target_grams) / max(1, min(len(source_grams), len(target_grams)))
     overlap_score = round(overlap * 100, 1)
-    model_score = max(0.0, min(100.0, float(blueprint.get("risk_score") or 0)))
+    model_score = _normalize_risk_score(blueprint.get("risk_score"))
     score = max(model_score, overlap_score)
     level = "high" if score >= 70 else "medium" if score >= 40 else "low"
     return {
@@ -52,15 +68,22 @@ def assess_similarity_risk(source: dict[str, Any], blueprint: dict[str, Any]) ->
 async def complete_with_one_repair(
     provider: Any,
     messages: list[dict[str, str]],
-    validator: Callable[[dict[str, Any]], Any],
+    validator: Callable[[Any], Any],
+    *,
+    max_attempts: int = 2,
 ) -> tuple[Any, dict[str, Any]]:
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
     last_error: Exception | None = None
-    for attempt in range(2):
+    for attempt in range(max_attempts):
         current = messages if attempt == 0 else repair_messages(messages, str(last_error or "unknown error"))
         try:
             payload = await provider.complete_json(current)
             return validator(payload), {
-                "provider": str(payload.get("provider") or getattr(provider, "provider_name", "")),
+                "provider": str(
+                    (payload.get("provider") if isinstance(payload, dict) else "")
+                    or getattr(provider, "provider_name", "")
+                ),
                 "repair_attempted": bool(attempt),
             }
         except Exception as exc:
@@ -75,15 +98,34 @@ def _validate_blueprints(payload: dict[str, Any], count: int) -> list[dict[str, 
     if not isinstance(items, list) or len(items) != count:
         raise ValueError(f"blueprints 必须包含 {count} 项")
     required = {
-        "title", "borrowed_elements", "different_elements", "protagonist", "core_conflict", "main_goal",
+        "title", "imitation_reason", "borrowed_elements", "different_elements", "protagonist", "core_conflict", "main_goal",
         "background", "worldview", "first_three_hooks", "highlights", "audience", "cost_level",
         "risk_score", "revision_suggestions", "priority",
     }
     normalized: list[dict[str, Any]] = []
+    text_fields = {
+        "title", "imitation_reason", "protagonist", "core_conflict", "main_goal", "background",
+        "worldview", "audience", "cost_level",
+    }
+    list_fields = {
+        "borrowed_elements", "different_elements", "first_three_hooks", "highlights",
+        "revision_suggestions", "risk_reasons",
+    }
     for item in items:
         if not isinstance(item, dict) or required - set(item):
             raise ValueError(f"仿制方向缺少字段：{sorted(required - set(item or {}))}")
-        normalized.append(dict(item))
+        normalized_item = dict(item)
+        for field in text_fields:
+            normalized_item[field] = _flatten_text(item.get(field)).strip()
+        for field in list_fields:
+            value = item.get(field)
+            values = value if isinstance(value, list) else [value]
+            normalized_item[field] = [
+                _flatten_text(entry).strip() for entry in values
+                if _flatten_text(entry).strip()
+            ]
+        normalized_item["risk_score"] = _normalize_risk_score(item.get("risk_score"))
+        normalized.append(normalized_item)
     return normalized
 
 

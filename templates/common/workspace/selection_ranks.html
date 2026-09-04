@@ -7,7 +7,7 @@
                             当前：<span x-text="todayRankData?.selected_snapshot?.captured_at || '-'"></span>
                             <span class="ms-2">上一期：<span x-text="todayRankData?.previous_snapshot?.captured_at || '暂无'"></span></span>
                         </span>
-                        <span x-show="!todayRankData?.selected_snapshot">默认展示本地最新榜单快照</span>
+                        <span x-show="!todayRankData?.selected_snapshot">默认展示 PostgreSQL 最新榜单快照</span>
                     </div>
                 </div>
                 <div class="d-flex gap-2">
@@ -19,39 +19,51 @@
                         <option value="dy">抖音</option>
                         <option value="hg">红果</option>
                     </select>
-                    <select class="form-select form-select-sm" style="width: 150px;" x-model="todayRankDate" @change="fetchTodayRank">
+                    <select class="form-select form-select-sm" style="width: 150px;" x-model="todayRankDate" @change="fetchTodayRank(false)">
                         <option value="">最新日期</option>
                         <template x-for="date in todayRankDates()" :key="date">
                             <option :value="date" x-text="date"></option>
                         </template>
                     </select>
-                    <button class="btn btn-outline-secondary btn-sm" @click="fetchTodayRank" :disabled="todayRankLoading">
-                        <i class="bi bi-arrow-clockwise me-1"></i>刷新
-                    </button>
+                    {% if principal.is_system_admin %}
+                        <template x-if="todayRankPlatform !== 'dy' || !hasTodayRankSnapshot()">
+                            <button class="btn btn-outline-secondary btn-sm" @click="refreshTodayRank(true)" :disabled="todayRankLoading || todayRankRefreshing">
+                                <i class="bi" :class="todayRankRefreshing ? 'bi-arrow-repeat' : 'bi-arrow-clockwise'"></i><span class="ms-1" x-text="todayRankPlatform === 'dy' ? (todayRankRefreshing ? '抓取中' : '更新并抓取') : '刷新榜单'"></span>
+                            </button>
+                        </template>
+                        <template x-if="todayRankPlatform === 'dy' && hasTodayRankSnapshot()">
+                            <span class="badge rounded-pill text-bg-success align-self-center px-3 py-2"><i class="bi bi-check-circle me-1"></i>今日已更新</span>
+                        </template>
+                    {% else %}
+                        <button class="btn btn-outline-secondary btn-sm" @click="refreshTodayRank(false)" :disabled="todayRankLoading || todayRankRefreshing">
+                            <i class="bi bi-arrow-clockwise"></i><span class="ms-1">刷新榜单</span>
+                        </button>
+                    {% endif %}
                 </div>
             </div>
 
             <div class="alert alert-danger" x-show="todayRankError" x-text="todayRankError"></div>
+            <div class="alert alert-info" x-show="todayRankRefreshMessage" x-text="todayRankRefreshMessage"></div>
             <div class="alert alert-secondary" x-show="!todayRankLoading && todayRankData?.message" x-text="todayRankData?.message"></div>
 
             <div class="row g-3 mb-3">
                 <div class="col-md-2">
-                    <div class="card metric-card"><div class="card-body"><div class="text-muted">今日榜单数</div><div class="metric-value" x-text="todayRankData?.summary?.current_count || 0"></div></div></div>
+                    <div class="card metric-card"><div class="card-body"><div class="text-muted">今日榜单数</div><div class="metric-value" x-text="todayRankSummary().current_count || 0"></div></div></div>
                 </div>
                 <div class="col-md-2">
-                    <div class="card metric-card"><div class="card-body"><div class="text-muted">上一期榜单数</div><div class="metric-value" x-text="todayRankData?.summary?.previous_count || 0"></div></div></div>
+                    <div class="card metric-card"><div class="card-body"><div class="text-muted">上一期榜单数</div><div class="metric-value" x-text="todayRankSummary().previous_count || 0"></div></div></div>
                 </div>
                 <div class="col-md-2">
-                    <div class="card metric-card"><div class="card-body"><div class="text-muted">共同在榜</div><div class="metric-value" x-text="todayRankData?.summary?.common_count || 0"></div></div></div>
+                    <div class="card metric-card"><div class="card-body"><div class="text-muted">共同在榜</div><div class="metric-value" x-text="todayRankSummary().common_count || 0"></div></div></div>
                 </div>
                 <div class="col-md-2">
-                    <div class="card metric-card"><div class="card-body"><div class="text-muted">新上榜</div><div class="metric-value" x-text="todayRankData?.summary?.new_count || 0"></div></div></div>
+                    <div class="card metric-card"><div class="card-body"><div class="text-muted">新上榜</div><div class="metric-value" x-text="todayRankSummary().new_count || 0"></div></div></div>
                 </div>
                 <div class="col-md-2">
-                    <div class="card metric-card"><div class="card-body"><div class="text-muted">下榜</div><div class="metric-value" x-text="todayRankData?.summary?.dropped_count || 0"></div></div></div>
+                    <div class="card metric-card"><div class="card-body"><div class="text-muted">下榜</div><div class="metric-value" x-text="todayRankSummary().dropped_count || 0"></div></div></div>
                 </div>
                 <div class="col-md-2">
-                    <div class="card metric-card"><div class="card-body"><div class="text-muted">排名变动剧目</div><div class="metric-value fs-5" x-text="`上升 ${todayRankData?.summary?.rank_up_count || 0} / 下降 ${todayRankData?.summary?.rank_down_count || 0}`"></div></div></div>
+                    <div class="card metric-card"><div class="card-body"><div class="text-muted">排名变动剧目</div><div class="metric-value fs-5" x-text="`上升 ${todayRankSummary().rank_up_count || 0} / 下降 ${todayRankSummary().rank_down_count || 0}`"></div></div></div>
                 </div>
             </div>
 
@@ -73,11 +85,27 @@
                             <span x-text="ranking.label"></span>
                         </a>
                     </template>
+                    <button type="button" class="btn btn-sm today-rank-route-link hongguo-rank-info-trigger" data-bs-toggle="modal" data-bs-target="#hongguoRankInfoModal" title="查看红果榜单说明" aria-label="查看红果榜单说明">
+                        <i class="bi bi-info-circle" aria-hidden="true"></i>
+                    </button>
                 </div>
             </div>
 
-            <div class="row g-3" x-show="todayRankPlatform !== 'hg'">
-                <template x-for="section in todayRankSections()" :key="section.key">
+            <div x-show="todayRankPlatform === 'dy'" class="mb-3">
+                <div class="today-rank-route-nav">
+                    <template x-for="section in douyinSections()" :key="section.key">
+                        <a href="#" class="btn btn-sm today-rank-route-link"
+                            :class="{active: section.key === todayRankSectionKey}"
+                            @click.prevent="setTodayRankRoute('dy', section.key)">
+                            <span x-text="section.label"></span>
+                        </a>
+                    </template>
+                </div>
+            </div>
+
+            <template x-if="todayRankPlatform === 'dy'">
+            <div class="row g-3">
+                <template x-for="section in selectedDouyinSection() ? [selectedDouyinSection()] : []" :key="section.key">
                     <div class="col-12">
                         <div class="d-flex align-items-center justify-content-between mt-2 mb-2">
                             <h5 class="mb-0" x-text="section.label"></h5>
@@ -92,7 +120,7 @@
                                             <span></span>
                                         </div>
                                         <div class="card-header border-top py-1 d-flex gap-1 flex-wrap">
-                                            <template x-for="tbl in rankingTables(ranking)" :key="tbl.key">
+                                            <template x-for="tbl in rankingTableTabs()" :key="tbl.key">
                                                 <button class="btn btn-sm border-0 rounded-1 small px-2 rank-filter-btn"
                                                     :class="getRankingActiveTable(ranking.key) === tbl.key ? 'bg-info bg-opacity-10 text-info' : 'text-muted'"
                                                     @click="setRankingActiveTable(ranking.key, tbl.key)">
@@ -104,8 +132,8 @@
                                             </template>
                                         </div>
                                         <div class="card-body p-0">
-                                            <template x-for="tbl in rankingTables(ranking)" :key="tbl.key">
-                                                <div x-show="getRankingActiveTable(ranking.key) === tbl.key" class="scroll-pane">
+                                            <template x-for="tbl in activeRankingTables(ranking)" :key="tbl.key">
+                                                <div class="scroll-pane">
                                                     <table class="table table-sm table-hover align-middle mb-0">
                                                         <thead>
                                                             <tr>
@@ -114,6 +142,7 @@
                                                                         <i x-show="column.icon" class="bi me-1" :class="column.icon"></i><span x-text="column.label"></span>
                                                                     </th>
                                                                 </template>
+                                                                <th class="rank-adopt-action">操作</th>
                                                             </tr>
                                                         </thead>
                                                         <tbody>
@@ -129,10 +158,15 @@
                                                                             <template x-if="column.kind === 'metric' || column.kind === 'text' || column.kind === 'rank_duration'"><span x-text="rankColumnValue(item, column, tbl)"></span></template>
                                                                         </td>
                                                                     </template>
+                                                                    <td class="rank-adopt-action">
+                                                                        <button type="button" class="btn btn-sm btn-outline-success" @click="adoptRankEntry(item)" :disabled="isRankAdoptionPending(item) || isRankTitleAdopted(item.title)">
+                                                                            <i class="bi" :class="isRankAdoptionPending(item) ? 'bi-arrow-repeat' : 'bi-bookmark-plus'"></i><span class="ms-1" x-text="isRankTitleAdopted(item.title) ? '已收录' : (isRankAdoptionPending(item) ? '收录中' : '收录')"></span>
+                                                                        </button>
+                                                                    </td>
                                                                 </tr>
                                                             </template>
                                                             <tr x-show="tbl.items.length === 0">
-                                                                <td :colspan="rankingTableColspan(tbl)" class="text-center text-muted py-3">暂无数据</td>
+                                                                <td :colspan="rankingTableColspan(tbl) + 1" class="text-center text-muted py-3">暂无数据</td>
                                                             </tr>
                                                         </tbody>
                                                     </table>
@@ -149,8 +183,10 @@
                     </div>
                 </template>
             </div>
+            </template>
 
-            <div class="row g-3" x-show="todayRankPlatform === 'hg'">
+            <template x-if="todayRankPlatform === 'hg'">
+            <div class="row g-3">
                 <template x-if="selectedHongguoRanking()">
                     <div class="col-12">
                         <div class="card today-rank-table">
@@ -159,7 +195,7 @@
                                 <span></span>
                             </div>
                             <div class="card-header border-top py-1 d-flex gap-1 flex-wrap">
-                                <template x-for="tbl in rankingTables(selectedHongguoRanking())" :key="tbl.key">
+                                <template x-for="tbl in rankingTableTabs()" :key="tbl.key">
                                     <button class="btn btn-sm border-0 rounded-1 small px-2 rank-filter-btn"
                                         :class="getRankingActiveTable(selectedHongguoRanking().key) === tbl.key ? 'bg-info bg-opacity-10 text-info' : 'text-muted'"
                                         @click="setRankingActiveTable(selectedHongguoRanking().key, tbl.key)">
@@ -171,8 +207,8 @@
                                 </template>
                             </div>
                             <div class="card-body p-0">
-                                <template x-for="tbl in rankingTables(selectedHongguoRanking())" :key="tbl.key">
-                                    <div x-show="getRankingActiveTable(selectedHongguoRanking().key) === tbl.key" class="scroll-pane">
+                                <template x-for="tbl in activeRankingTables(selectedHongguoRanking())" :key="tbl.key">
+                                    <div class="scroll-pane">
                                         <table class="table table-sm table-hover align-middle mb-0">
                                             <thead>
                                                 <tr>
@@ -181,25 +217,31 @@
                                                             <i x-show="column.icon" class="bi me-1" :class="column.icon"></i><span x-text="column.label"></span>
                                                         </th>
                                                     </template>
+                                                    <th class="rank-adopt-action">操作</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
                                                 <template x-for="item in tbl.items" :key="`${selectedHongguoRanking().key}-${tbl.key}-${item.record_id}-${item.rank}`">
                                                     <tr>
-                                                        <template x-for="column in tbl.columns" :key="`${selectedHongguoRanking().key}-${tbl.key}-${item.record_id}-${column.key}`">
-                                                            <td :class="rankColumnCellClass(column)" :title="rankColumnTooltip(item, column, tbl)">
+                                                            <template x-for="column in tbl.columns" :key="`${selectedHongguoRanking().key}-${tbl.key}-${item.record_id}-${column.key}`">
+                                                                <td :class="rankColumnCellClass(column)" :title="rankColumnTooltip(item, column, tbl)">
                                                                 <template x-if="column.kind === 'rank'"><span class="rank-number" :class="rankNumberClass(item.rank)" x-text="item.rank || '-'"></span></template>
                                                                 <template x-if="column.kind === 'title'"><div class="rank-drama-title" x-text="item.title || '-'"></div></template>
                                                                 <template x-if="column.kind === 'category'"><span class="badge bg-secondary bg-opacity-25 text-light" x-text="item.board_type || item.category_label || '-'"></span></template>
                                                                 <template x-if="column.kind === 'status'"><span class="status-pill" :class="entryStatusClass(item, tbl.key)" x-text="entryStatus(item, tbl.key)"></span></template>
                                                                 <template x-if="column.kind === 'rank_delta'"><span class="status-pill" :class="entryStatusClass(item, tbl.key)" x-text="formatRankDelta(item.rank_delta)"></span></template>
                                                                             <template x-if="column.kind === 'metric' || column.kind === 'text' || column.kind === 'rank_duration'"><span x-text="rankColumnValue(item, column, tbl)"></span></template>
+                                                                </td>
+                                                            </template>
+                                                            <td class="rank-adopt-action">
+                                                                <button type="button" class="btn btn-sm btn-outline-success" @click="adoptRankEntry(item)" :disabled="isRankAdoptionPending(item) || isRankTitleAdopted(item.title)">
+                                                                    <i class="bi" :class="isRankAdoptionPending(item) ? 'bi-arrow-repeat' : 'bi-bookmark-plus'"></i><span class="ms-1" x-text="isRankTitleAdopted(item.title) ? '已收录' : (isRankAdoptionPending(item) ? '收录中' : '收录')"></span>
+                                                                </button>
                                                             </td>
-                                                        </template>
-                                                    </tr>
+                                                        </tr>
                                                 </template>
                                                 <tr x-show="tbl.items.length === 0">
-                                                    <td :colspan="rankingTableColspan(tbl)" class="text-center text-muted py-3">暂无数据</td>
+                                                        <td :colspan="rankingTableColspan(tbl) + 1" class="text-center text-muted py-3">暂无数据</td>
                                                 </tr>
                                             </tbody>
                                         </table>
@@ -213,4 +255,5 @@
                     <div class="text-muted py-4">暂无数据</div>
                 </div>
             </div>
+            </template>
         </section>

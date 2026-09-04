@@ -13,10 +13,13 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from analysis.drama_repository import DramaRepository
 from analysis.metrics import MetricsService
+from analysis.today_rank_service import TodayRankService
+from analysis.weekly_report_service import WeeklyReportService
 from identity.dependencies import require_permission
 from identity.schema import Principal
 
@@ -27,11 +30,11 @@ class AnalyticsSyncRequest(BaseModel):
     rebuild: bool = False
 
 
-class AnalyticsSyncAllRequest(BaseModel):
-    platforms: list[str] = ["dy", "hg"]
-
-
-def build_analytics_router(root: str | Path = ".", runtime_dir: str | Path = ".runtime") -> APIRouter:
+def build_analytics_router(
+    root: str | Path = ".",
+    runtime_dir: str | Path = ".runtime",
+    rank_service: TodayRankService | None = None,
+) -> APIRouter:
     router = APIRouter(prefix="/api/analytics", tags=["analytics"])
     services: dict[str, Any] = {}
 
@@ -41,6 +44,18 @@ def build_analytics_router(root: str | Path = ".", runtime_dir: str | Path = ".r
             services["repository"] = repository
             services["metrics"] = MetricsService(repository)
         return services["repository"], services["metrics"]
+
+    def get_weekly_reports() -> WeeklyReportService:
+        if "weekly_reports" not in services:
+            central_rank_service = rank_service or TodayRankService.from_environment(
+                root=root
+            )
+            services["weekly_reports"] = WeeklyReportService(
+                root=root,
+                runtime_dir=runtime_dir,
+                rank_service=central_rank_service,
+            )
+        return services["weekly_reports"]
 
     @router.post("/sync")
     async def sync(
@@ -52,17 +67,6 @@ def build_analytics_router(root: str | Path = ".", runtime_dir: str | Path = ".r
         try:
             repository, _ = get_services()
             return repository.sync_job(payload.job_id, payload.platform, rebuild=payload.rebuild)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    @router.post("/sync-all")
-    async def sync_all(
-        payload: AnalyticsSyncAllRequest,
-        _: Principal = Depends(require_permission("*")),
-    ):
-        try:
-            repository, _ = get_services()
-            return repository.sync_all_jobs(payload.platforms)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -121,6 +125,43 @@ def build_analytics_router(root: str | Path = ".", runtime_dir: str | Path = ".r
     ):
         _, metrics = get_services()
         return {"items": metrics.sentiment(platform=platform)}
+
+    @router.get("/weekly-reports")
+    async def weekly_reports(
+        platform: str = "",
+        _: Principal = Depends(require_permission("analytics.read")),
+    ):
+        if platform and platform not in {"dy", "hg"}:
+            raise HTTPException(status_code=400, detail="platform must be dy or hg")
+        items = get_weekly_reports().list_reports(platform=platform)
+        return {"items": items}
+
+    @router.get("/weekly-reports/{report_id}")
+    async def weekly_report_detail(
+        report_id: str,
+        _: Principal = Depends(require_permission("analytics.read")),
+    ):
+        report = get_weekly_reports().get_report(report_id)
+        if report is None:
+            raise HTTPException(status_code=404, detail="weekly report not found")
+        return report
+
+    @router.get("/weekly-reports/{report_id}/export")
+    async def weekly_report_export(
+        report_id: str,
+        format: str = "markdown",
+        _: Principal = Depends(require_permission("analytics.read")),
+    ):
+        if format not in {"markdown", "excel"}:
+            raise HTTPException(status_code=400, detail="format must be markdown or excel")
+        report = get_weekly_reports().repository.get(report_id)
+        if report is None:
+            raise HTTPException(status_code=404, detail="weekly report not found")
+        path = Path(str(report["markdown_path"] if format == "markdown" else report["excel_path"])).resolve()
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="weekly report export not found")
+        media_type = "text/markdown; charset=utf-8" if format == "markdown" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        return FileResponse(path, media_type=media_type, filename=path.name)
 
     return router
 

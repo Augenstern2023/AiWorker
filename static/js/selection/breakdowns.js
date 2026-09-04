@@ -9,12 +9,16 @@ window.aiworkerModules.push(() => ({
                         const data = await res.json().catch(() => ({}));
                         if (!res.ok) {
                             this.topicLibrary.error = data.detail || '更新选题状态失败';
+                            if (status === 'adopted') this.showAdoptionNotice(false, topic.title, this.topicLibrary.error);
                             return;
                         }
                         Object.assign(topic, data);
+                        window.aiworkerUi?.invalidateCache('creative:topics:');
                         await this.fetchTopicLibrary();
+                        if (status === 'adopted') this.showAdoptionNotice(true, data.title || topic.title, '已收录至选题库。');
                     } catch (error) {
                         this.topicLibrary.error = error.message || '更新选题状态失败';
+                        if (status === 'adopted') this.showAdoptionNotice(false, topic.title, this.topicLibrary.error);
                     }
                 },
 
@@ -23,6 +27,10 @@ window.aiworkerModules.push(() => ({
                         topic,
                         'topic-library'
                     );
+                },
+
+                topicProjectEligible(topic) {
+                    return !!topic?.locked_breakdown_id;
                 },
 
                 async openTopicTranscriptPreview(topic) {
@@ -39,6 +47,11 @@ window.aiworkerModules.push(() => ({
                     } finally {
                         this.topicTranscriptPreview.loading = false;
                     }
+                },
+
+                downloadTopicTranscripts(topic) {
+                    if (!topic?.id) return;
+                    window.open(`/api/creative/topics/${topic.id}/transcripts/download`, '_blank', 'noopener');
                 },
 
                 selectedTopicTranscript() {
@@ -386,11 +399,11 @@ window.aiworkerModules.push(() => ({
                         fallbackReason: extra.fallback_reason || '', candidates: [], selectedCandidate: null,
                         selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], relatedVideos: [],
                         missingEpisodes: [], seriesRangeLabel: '', seriesWarnings: [], selectedEpisodes: [],
-                        allEpisodes: Boolean(extra.all_episodes), searching: false, episodesLoading: false,
+                        allEpisodes: Boolean(extra.all_episodes), episodesExpanded: true, searching: false, episodesLoading: false,
                         starting: false, error: '', jobId: job.job_id, jobStatus: job.status || 'running',
                         progress: job.progress || {}, progressMessage: job.message || '下载任务正在运行',
                         paused: Boolean(job.paused), finished: false, background: !showModal, showFiles: false,
-                        logs: [], logCount: Number(job.log_count || 0)
+                        logs: [], logCount: Number(job.log_count || 0), videoPreviewPath: '', videoPreviewUrl: '', videoPreviewError: ''
                     };
                     if (showModal) this.dramaDownloadModal.show();
                     this.scrollDramaDownloadToTop();
@@ -473,7 +486,7 @@ window.aiworkerModules.push(() => ({
                             return;
                         }
                     } catch (_) {}
-                    this.dramaDownload = {title: topic.title || '', topic, source: 'hongguo', fallbackReason: '', candidates: [], selectedCandidate: null, selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], relatedVideos: [], missingEpisodes: [], seriesRangeLabel: '', seriesWarnings: [], selectedEpisodes: [], allEpisodes: false, searching: true, episodesLoading: false, starting: false, error: '', jobId: '', jobStatus: '', progress: {}, progressMessage: '', paused: false, finished: false, background: false, showFiles: false};
+                    this.dramaDownload = {title: topic.title || '', topic, source: 'hongguo', fallbackReason: '', candidates: [], providers: [], captureCandidates: [], thirdPartyError: '', captureError: '', selectedCandidate: null, selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], relatedVideos: [], missingEpisodes: [], seriesRangeLabel: '', seriesWarnings: [], selectedEpisodes: [], allEpisodes: false, episodesExpanded: true, searching: true, episodesLoading: false, starting: false, error: '', jobId: '', jobStatus: '', progress: {}, progressMessage: '', paused: false, finished: false, background: false, showFiles: false, videoPreviewPath: '', videoPreviewUrl: '', videoPreviewError: ''};
                     this.dramaDownloadModal.show();
                     try {
                         const res = await aiworkerApi.request('/api/hongguo/drama/download/search', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title: this.dramaDownload.title})});
@@ -482,12 +495,12 @@ window.aiworkerModules.push(() => ({
                         this.dramaDownload.fallbackReason = data.fallback_reason || '';
                         if (!res.ok || data.status === 'error') throw new Error(data.message || '剧目检索失败');
                         this.dramaDownload.candidates = data.candidates || [];
-                        if (!this.dramaDownload.candidates.length) this.dramaDownload.error = this.dramaDownload.source === 'douyin_fallback' ? '红果和抖音都没有找到可用视频，请确认剧名后重试' : '没有找到剧名完全匹配的红果剧目，请确认剧名后重试';
+                        this.dramaDownload.providers = data.providers || [];
+                        this.dramaDownload.captureCandidates = data.capture_candidates || [];
+                        this.dramaDownload.thirdPartyError = data.third_party_error || '';
+                        this.dramaDownload.captureError = data.capture_error || '';
+                        if (!this.dramaDownload.candidates.length && !this.dramaDownload.captureCandidates.length) this.dramaDownload.error = this.dramaDownload.source === 'douyin_fallback' ? '红果和抖音都没有找到可用视频，请确认剧名后重试' : '没有找到剧名完全匹配的红果剧目，请确认剧名后重试';
                         this.dramaDownload.searching = false;
-                        // Hongguo has a book/episode flow, but Douyin fallback always
-                        // requires an explicit user choice to avoid downloading an
-                        // unrelated promotion or clip that happens to match the title.
-                        if (this.dramaDownload.candidates.length === 1 && this.dramaDownload.source !== 'douyin_fallback') await this.selectDramaDownloadCandidate(this.dramaDownload.candidates[0]);
                     } catch (e) {
                         this.dramaDownload.error = e.message || '剧目检索失败';
                     } finally {
@@ -505,6 +518,7 @@ window.aiworkerModules.push(() => ({
                     this.dramaDownload.selectedEpisodes = [];
                     this.dramaDownload.selectedAwemeIds = [];
                     this.dramaDownload.allEpisodes = false;
+                    this.dramaDownload.episodesExpanded = true;
                     this.dramaDownload.allDouyinCandidates = false;
                     if (this.dramaDownload.source === 'douyin_fallback') {
                         this.dramaDownload.episodesLoading = true;
@@ -535,10 +549,7 @@ window.aiworkerModules.push(() => ({
                     this.dramaDownload.episodesLoading = true;
                     this.dramaDownload.error = '';
                     try {
-                        const res = await aiworkerApi.request('/api/hongguo/drama/episodes', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({book_id: candidate.book_id, source_platform: candidate.source_platform || 'hg', title: this.dramaDownload.title || candidate.title || ''})});
-                        const data = await res.json();
-                        if (!res.ok || data.status === 'error') throw new Error(data.message || '读取剧集失败');
-                        this.dramaDownload.episodes = data.episodes || [];
+                        await this.refreshDramaDownloadEpisodes(candidate);
                     } catch (e) {
                         this.dramaDownload.error = e.message || '读取剧集失败';
                     } finally {
@@ -555,8 +566,56 @@ window.aiworkerModules.push(() => ({
                     return episode.download_status?.status === 'downloaded';
                 },
 
+                downloadedDramaEpisodeCount() {
+                    return this.dramaDownload.episodes.filter(
+                        episode => this.isDramaEpisodeDownloaded(episode)
+                    ).length;
+                },
+
+                async refreshDramaDownloadEpisodes(candidate = this.dramaDownload.selectedCandidate) {
+                    if (!candidate?.series_ref && !candidate?.book_id) return;
+                    const res = await aiworkerApi.request('/api/hongguo/drama/episodes', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({
+                            book_id: candidate.book_id || candidate.series_ref,
+                            series_ref: candidate.series_ref || candidate.book_id,
+                            source_platform: candidate.source_platform || candidate.provider_id || 'hongguo_capture',
+                            provider_id: candidate.provider_id || candidate.source_platform || 'hongguo_capture',
+                            title: this.dramaDownload.title || candidate.title || ''
+                        })
+                    });
+                    const data = await res.json();
+                    if (!res.ok || data.status === 'error') throw new Error(data.message || '读取剧集失败');
+                    this.dramaDownload.episodes = data.episodes || [];
+                    const downloadedCount = this.downloadedDramaEpisodeCount();
+                    this.dramaDownload.episodesExpanded = downloadedCount === 0 || !this.dramaDownload.finished;
+                },
+
+                openDramaDownloadEpisodes() {
+                    this.dramaDownload.episodesExpanded = true;
+                    this.$nextTick(() => {
+                        document.getElementById('dramaDownloadEpisodes')?.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+                    });
+                },
+
                 downloadableDramaEpisodes() {
                     return this.dramaDownload.episodes.filter(episode => !this.isDramaEpisodeDownloaded(episode));
+                },
+
+                isDramaDownloadCandidateSelected(candidate) {
+                    const selected = this.dramaDownload.selectedCandidate;
+                    if (!selected || !candidate) return false;
+                    const provider = candidate.provider_id || candidate.source_platform || 'hongguo_capture';
+                    const selectedProvider = selected.provider_id || selected.source_platform || 'hongguo_capture';
+                    return provider === selectedProvider
+                        && (candidate.series_ref || candidate.book_id) === (selected.series_ref || selected.book_id);
+                },
+
+                dramaDownloadProviderLabel(providerId) {
+                    const id = providerId || 'hongguo_capture';
+                    if (id === 'hongguo_capture') return '抓包来源';
+                    return this.dramaDownload.providers.find(item => item.provider_id === id)?.display_name || id;
                 },
 
                 dramaSelectedEpisodesForDownload() {
@@ -602,7 +661,7 @@ window.aiworkerModules.push(() => ({
                         const endpoint = isDouyinFallback ? '/api/hongguo/drama/douyin-fallback/jobs' : '/api/hongguo/drama/download/jobs';
                         const payload = isDouyinFallback
                             ? {topic_id: this.dramaDownload.topic.id, title: this.dramaDownload.title, aweme_ids: this.dramaDownload.selectedAwemeIds, fallback_reason: this.dramaDownload.fallbackReason || ''}
-                            : {topic_id: this.dramaDownload.topic.id, title: this.dramaDownload.title, book_id: this.dramaDownload.selectedCandidate.book_id, source_platform: this.dramaDownload.selectedCandidate.source_platform || 'hg', episodes: episodeNumbers, all_episodes: this.dramaDownload.allEpisodes && episodeNumbers.length === this.dramaDownload.episodes.length};
+                            : {topic_id: this.dramaDownload.topic.id, title: this.dramaDownload.title, book_id: this.dramaDownload.selectedCandidate.book_id || this.dramaDownload.selectedCandidate.series_ref, series_ref: this.dramaDownload.selectedCandidate.series_ref || this.dramaDownload.selectedCandidate.book_id, source_platform: this.dramaDownload.selectedCandidate.source_platform || this.dramaDownload.selectedCandidate.provider_id || 'hongguo_capture', provider_id: this.dramaDownload.selectedCandidate.provider_id || this.dramaDownload.selectedCandidate.source_platform || 'hongguo_capture', episodes: episodeNumbers, all_episodes: this.dramaDownload.allEpisodes && episodeNumbers.length === this.dramaDownload.episodes.length};
                         const res = await aiworkerApi.request(endpoint, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
                         const data = await res.json();
                         if (!res.ok || data.status === 'error') throw new Error(data.message || '创建下载任务失败');
@@ -633,12 +692,19 @@ window.aiworkerModules.push(() => ({
                     this.dramaDownload.progressMessage = job.message || this.dramaDownload.progressMessage;
                     if (job.status === 'succeeded') {
                         this.dramaDownload.background = false;
-                        if (!this.dramaDownload.finished) {
+                        const completedNow = !this.dramaDownload.finished;
+                        if (completedNow) {
                             alert(`${job.message || (this.dramaDownload.source === 'douyin_fallback' ? '抖音降级视频解析完成' : '剧集下载完成')}，文件已保存到数据管理。`);
                             this.fetchTopicLibrary();
                             this.fetchCreativeTopics();
                         }
                         this.dramaDownload.finished = true;
+                        if (completedNow && this.dramaDownload.source !== 'douyin_fallback' && this.dramaDownload.selectedCandidate) {
+                            this.dramaDownload.episodesExpanded = false;
+                            this.refreshDramaDownloadEpisodes().catch(error => {
+                                this.dramaDownload.error = error.message || '刷新已下载集数失败';
+                            });
+                        }
                     } else if (['failed', 'cancelled'].includes(job.status)) {
                         if (!this.dramaDownload.finished) alert(`剧集下载${job.status === 'cancelled' ? '已取消' : '失败'}：${job.message || ''}`);
                         this.dramaDownload.finished = true;
@@ -730,6 +796,32 @@ window.aiworkerModules.push(() => ({
 
                 dramaDownloadArtifactName(item) {
                     return String(item?.path || '').replace(/\\/g, '/').split('/').pop() || '未命名文件';
+                },
+
+                dramaDownloadArtifactEpisodeLabel(item) {
+                    const path = String(item?.path || '').replace(/\\/g, '/');
+                    const match = path.match(/(?:^|\/)episode[_-]?0*(\d+)(?:\/|$)/i);
+                    if (!match) return '';
+                    const episode = Number(match[1]);
+                    return episode > 0 ? `第 ${episode} 集` : '';
+                },
+
+                isDramaVideoArtifact(item) {
+                    return /\.(mp4|webm|m4v|mov|ogv)$/i.test(this.dramaDownloadArtifactName(item));
+                },
+
+                openDramaDownloadVideo(item) {
+                    if (!this.isDramaVideoArtifact(item) || !item?.path) return;
+                    this.dramaDownload.videoPreviewPath = item.path;
+                    this.dramaDownload.videoPreviewUrl = `/api/file/preview?path=${encodeURIComponent(item.path)}`;
+                    this.dramaDownload.videoPreviewError = '';
+                    this.$nextTick(() => document.getElementById('dramaDownloadVideo')?.play().catch(() => {}));
+                },
+
+                closeDramaDownloadVideo() {
+                    this.dramaDownload.videoPreviewPath = '';
+                    this.dramaDownload.videoPreviewUrl = '';
+                    this.dramaDownload.videoPreviewError = '';
                 },
 
                 async openDramaDownloadFiles() {
@@ -834,8 +926,7 @@ window.aiworkerModules.push(() => ({
                         const res = await aiworkerApi.request(`/api/creative/breakdowns/${record.id}/lock`, {method: 'POST'});
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.detail || '完成拆解失败');
-                        Object.assign(record, data);
-                        record.status = data.status || 'locked';
+                        this.syncBreakdownEditorRecord(data);
                         if (this.breakdownEditor.source === 'topic-library') await this.fetchTopicLibrary();
                         if (this.breakdownEditor.source === 'creative') await this.fetchCreativeTopics();
                         alert('拆解已完成并锁定，可以创建策划项目。');
@@ -855,31 +946,60 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async generateCreativeTopics() {
+                    const platform = this.creative.platform;
+                    const rankSource = this.creative.rankSource;
+                    const cacheKey = `creative:topics:hits:${platform}:${rankSource}`;
+                    const requestId = (this.creative.generationRequestId || 0) + 1;
+                    this.creative.generationRequestId = requestId;
+                    const isCurrentRequest = () => (
+                        this.creative.generationRequestId === requestId
+                        && this.creative.platform === platform
+                        && this.creative.rankSource === rankSource
+                    );
                     this.creative.loading = true;
                     this.creative.error = '';
                     try {
                         const res = await aiworkerApi.request('/api/creative/topics/generate', {
                             method: 'POST', headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({platform: this.creative.platform, limit: 10})
+                            body: JSON.stringify({
+                                platform,
+                                rank_source: rankSource,
+                                limit: 10
+                            })
                         });
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.detail || '生成选题失败');
-                        this.creative.items = data.items || [];
+                        const items = data.items || [];
+                        window.aiworkerUi?.writeCache(cacheKey, items, {ttlMs: 30000});
+                        if (isCurrentRequest()) this.creative.items = items;
                     } catch (e) {
-                        this.creative.error = e.message || '生成选题失败';
+                        if (isCurrentRequest()) {
+                            this.creative.error = e.message || '生成选题失败';
+                        }
                     } finally {
-                        this.creative.loading = false;
+                        if (isCurrentRequest()) this.creative.loading = false;
                     }
                 },
 
                 async updateCreativeTopic(topic, status) {
-                    const res = await aiworkerApi.request(`/api/creative/topics/${topic.id}`, {
-                        method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({status})
-                    });
-                    const data = await res.json();
-                    if (!res.ok) { alert(data.detail || '更新失败'); return; }
-                    Object.assign(topic, data);
-                    await this.fetchCreativeTopics();
+                    try {
+                        const res = await aiworkerApi.request(`/api/creative/topics/${topic.id}`, {
+                            method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({status})
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (!res.ok) {
+                            if (status === 'adopted') this.showAdoptionNotice(false, topic.title, data.detail || '采纳接口错误，请稍后重试。');
+                            else alert(data.detail || '更新失败');
+                            return;
+                        }
+                        Object.assign(topic, data);
+                        this.creative.items = this.creative.items.filter(item => item.id !== topic.id);
+                        if (status === 'adopted') this.showAdoptionNotice(true, data.title || topic.title, '已收录至选题库。');
+                        window.aiworkerUi?.invalidateCache('creative:topics:');
+                    } catch (error) {
+                        if (status === 'adopted') this.showAdoptionNotice(false, topic.title, error.message || '采纳接口错误，请稍后重试。');
+                        else alert(error.message || '更新失败');
+                    }
                 },
 
                 createCreativeBreakdown(topic) {

@@ -21,7 +21,6 @@ from identity.session_service import SessionService
 from identity.password_service import PasswordService
 from identity.permission_service import PermissionService
 from WebGUI import (
-    SYSTEM_DB_PATH,
     app as production_app,
     configure_cors,
     install_security_middleware,
@@ -31,8 +30,7 @@ from WebGUI import (
 from audit.service import AuditService
 
 
-def _secured_app(tmp_path: Path) -> tuple[FastAPI, SessionService]:
-    repository = IdentityRepository(tmp_path / "system.db")
+def _secured_app(repository: IdentityRepository) -> tuple[FastAPI, SessionService]:
     session_service = SessionService(repository, secure_cookie=False)
     app = FastAPI()
     seen_request_ids: list[str | None] = []
@@ -56,8 +54,15 @@ def _secured_app(tmp_path: Path) -> tuple[FastAPI, SessionService]:
     return app, session_service
 
 
-def test_request_id_is_available_before_logging_and_returned(tmp_path: Path):
-    app, _ = _secured_app(tmp_path)
+@pytest.fixture
+def secured_app(
+    isolated_system_database,
+) -> tuple[FastAPI, SessionService]:
+    return _secured_app(IdentityRepository(isolated_system_database))
+
+
+def test_request_id_is_available_before_logging_and_returned(secured_app):
+    app, _ = secured_app
 
     response = TestClient(app).post(
         "/api/public-write", headers={"X-Request-ID": "client-request-123"}
@@ -68,8 +73,8 @@ def test_request_id_is_available_before_logging_and_returned(tmp_path: Path):
     assert app.state.seen_request_ids == []
 
 
-def test_authenticated_write_requires_matching_csrf_token(tmp_path: Path):
-    app, _ = _secured_app(tmp_path)
+def test_authenticated_write_requires_matching_csrf_token(secured_app):
+    app, _ = secured_app
     client = TestClient(app)
     setup = client.post(
         "/api/auth/setup",
@@ -96,8 +101,8 @@ def test_authenticated_write_requires_matching_csrf_token(tmp_path: Path):
     assert accepted.status_code == 200
 
 
-def test_login_and_first_run_setup_are_csrf_exempt(tmp_path: Path):
-    app, _ = _secured_app(tmp_path)
+def test_login_and_first_run_setup_are_csrf_exempt(secured_app):
+    app, _ = secured_app
     client = TestClient(app)
 
     setup = client.post(
@@ -118,8 +123,8 @@ def test_login_and_first_run_setup_are_csrf_exempt(tmp_path: Path):
     assert login.status_code == 200
 
 
-def test_protected_api_rejects_anonymous_write_before_csrf(tmp_path: Path):
-    app, _ = _secured_app(tmp_path)
+def test_protected_api_rejects_anonymous_write_before_csrf(secured_app):
+    app, _ = secured_app
 
     response = TestClient(app).post("/api/public-write")
 
@@ -162,8 +167,7 @@ def test_cors_defaults_to_same_origin_and_uses_explicit_origin_list():
 def test_production_webgui_wires_shared_identity_security_and_routes():
     repository = production_app.state.identity_repository
 
-    assert repository.db_path == SYSTEM_DB_PATH
-    assert SYSTEM_DB_PATH.parts[-3:] == (".runtime", "system", "system.db")
+    assert repository.database.url.get_backend_name() == "postgresql"
     assert isinstance(production_app.state.identity_password_service, PasswordService)
     assert isinstance(production_app.state.identity_session_service, SessionService)
     assert isinstance(production_app.state.identity_permission_service, PermissionService)
@@ -220,6 +224,11 @@ def test_team_management_api_defers_to_route_level_permissions():
     assert _api_permission("GET", "/api/team/users") is None
     assert _api_permission("GET", "/api/team/roles") is None
     assert _api_permission("POST", "/api/team/users") is None
+
+
+def test_current_profile_api_relies_on_authenticated_session_not_page_permissions():
+    assert _api_permission("GET", "/api/profile") is None
+    assert _api_permission("PATCH", "/api/profile") is None
 
 
 @pytest.mark.parametrize(

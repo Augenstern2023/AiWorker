@@ -74,7 +74,11 @@ def test_build_sensevoice_command_includes_runtime_and_model_paths():
         ffmpeg_dir="D:/qwen/python/ffmpeg/bin",
     )
 
-    assert command[:2] == ["D:/qwen/python/python.exe", "tools/sensevoice_transcribe.py"]
+    assert command[:3] == [
+        "D:/qwen/python/python.exe",
+        "-I",
+        "tools/sensevoice_transcribe.py",
+    ]
     assert "--audio" in command
     assert "audio.wav" in command
     assert "--model-dir" in command
@@ -87,6 +91,25 @@ def test_build_sensevoice_env_prepends_ffmpeg_path():
 
     assert env["PATH"].startswith("D:/ffmpeg/bin")
     assert env["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_build_sensevoice_env_removes_parent_python_runtime_injection():
+    env = build_sensevoice_env(
+        {
+            "PATH": "old",
+            "PYTHONPATH": "C:/foreign/python311/site-packages",
+            "PYTHONHOME": "C:/foreign/python311",
+            "VIRTUAL_ENV": "C:/foreign/venv",
+            "PYTHONUSERBASE": "C:/foreign/user-site",
+        },
+        "D:/ffmpeg/bin",
+    )
+
+    assert "PYTHONPATH" not in env
+    assert "PYTHONHOME" not in env
+    assert "VIRTUAL_ENV" not in env
+    assert "PYTHONUSERBASE" not in env
+    assert env["PYTHONNOUSERSITE"] == "1"
 
 
 def test_parse_sensevoice_stdout_uses_last_json_line():

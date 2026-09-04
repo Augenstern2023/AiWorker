@@ -105,4 +105,3 @@ def _normalize_text(text: str) -> str:
 def _chunk_id(document: StandardDocument, index: int, text: str) -> str:
     value = f"{document.document_id}:{index}:{text[:80]}"
     return hashlib.sha1(value.encode("utf-8")).hexdigest()
-

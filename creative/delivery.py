@@ -15,23 +15,25 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 
 from audit.service import AuditService
 from identity.dependencies import (
-    current_principal,
     permission_service_for_request,
+    require_page_api,
 )
 from identity.schema import Principal
 from workflow.repository import WorkflowRepository
 
-from .api import _markdown_value, build_beats_markdown
+from .api import _markdown_value, build_beats_markdown, build_script_text
 from .lifecycle_service import (
     beats_resource_fingerprint,
+    script_resource_fingerprint,
     content_fingerprint as stage_content_fingerprint,
 )
 from .repository import CreativeRepository
@@ -43,14 +45,15 @@ STAGE_RESOURCE_TYPES = {
     "characters": "characters",
     "outline": "outline",
     "beats": "beats",
+    "script": "script",
 }
 
 
 class DeliveryCreateRequest(BaseModel):
     project_id: int = Field(gt=0)
-    stage: str = Field(pattern="^(brief|characters|outline|beats)$")
+    stage: str = Field(pattern="^(brief|characters|outline|beats|script)$")
     resource_id: str = Field(min_length=1)
-    format: str = Field(pattern="^(md|json)$")
+    format: str = Field(pattern="^(md|txt|json)$")
     workflow_task_id: str | None = None
 
 
@@ -114,6 +117,8 @@ class DeliveryService:
                 "stage_export_recorded_at": "REAL",
                 "workflow_completed_at": "REAL",
                 "audit_recorded_at": "REAL",
+                "resource_status": "TEXT NOT NULL DEFAULT ''",
+                "is_formal": "INTEGER NOT NULL DEFAULT 1",
             }
             for column, definition in additions.items():
                 if column not in columns:
@@ -121,8 +126,11 @@ class DeliveryService:
                         f"ALTER TABLE creative_deliveries ADD COLUMN {column} {definition}"
                     )
             connection.execute(
+                "DROP INDEX IF EXISTS uq_creative_delivery_request"
+            )
+            connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_creative_delivery_request "
-                "ON creative_deliveries(project_id, stage, submission_id, format)"
+                "ON creative_deliveries(project_id, stage, submission_id, format, is_formal)"
             )
             connection.execute(
                 "DROP INDEX IF EXISTS uq_creative_delivery_task"
@@ -138,25 +146,26 @@ class DeliveryService:
         actor: Principal,
         request: Request | None = None,
         workflow_task_id: str | None = None,
+        page_authorized: bool = False,
     ) -> dict[str, Any]:
-        if not actor.is_system_admin:
-            raise PermissionError("only system administrators may create deliveries")
+        if not actor.is_system_admin and not page_authorized:
+            raise PermissionError(
+                "delivery requires system administrator or page authorization"
+            )
         resource_type = STAGE_RESOURCE_TYPES.get(stage)
         if resource_type is None:
-            raise ValueError("stage must be brief, characters, outline, or beats")
-        if format not in {"md", "json"}:
-            raise ValueError("format must be md or json")
+            raise ValueError("stage must be brief, characters, outline, beats, or script")
+        if format not in {"md", "txt", "json"}:
+            raise ValueError("format must be md, txt or json")
         adapter = CreativeWorkflowAdapter(
             self.creative_repository, self.workflow_repository
         )
-        if adapter.domain_status(resource_type, resource_id) not in {
-            "locked", "brief_locked", "approved"
-        }:
-            raise ValueError("delivery requires a completed resource")
+        resource_status = adapter.domain_status(resource_type, resource_id)
+        is_formal = self._is_formal_resource(resource_status)
         snapshot = adapter.snapshot(resource_type, resource_id, reconcile=False)
         snapshot_project_id = self._snapshot_project_id(resource_type, snapshot)
         if snapshot_project_id != int(project_id):
-            raise ValueError("completed resource does not belong to the requested project")
+            raise ValueError("resource does not belong to the requested project")
         project = self.creative_repository.get_project(project_id)
         if project is None:
             raise KeyError(str(project_id))
@@ -169,8 +178,12 @@ class DeliveryService:
         )
         if stage == "beats":
             lifecycle_fingerprint = beats_resource_fingerprint(snapshot)
+        elif stage == "script":
+            lifecycle_fingerprint = script_resource_fingerprint(snapshot)
         source_key = f"direct:{stage}:{resource_id}"
-        existing = self._find_existing(project_id, stage, source_key, format)
+        existing = self._find_existing(
+            project_id, stage, source_key, format, is_formal=is_formal
+        )
         if existing is not None:
             if (
                 workflow_task_id
@@ -178,10 +191,15 @@ class DeliveryService:
                 and existing["workflow_task_id"] != workflow_task_id
             ):
                 raise ValueError("delivery already belongs to another workflow task")
-            return self._reconcile_delivery(existing)
-        task = self._resolve_delivery_task(project_id, workflow_task_id)
+            return self._reconcile_delivery(
+                existing, page_authorized=page_authorized
+            )
+        task = (
+            self._resolve_delivery_task(project_id, workflow_task_id)
+            if is_formal else None
+        )
         delivery_id = str(uuid.uuid4())
-        extension = "json" if format == "json" else "md"
+        extension = "json" if format == "json" else format
         path = (self.delivery_dir / f"{delivery_id}.{extension}").resolve()
         temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_bytes(content)
@@ -211,8 +229,9 @@ class DeliveryService:
                         id, project_id, stage, resource_type, resource_id,
                         resource_version, submission_id, submission_version,
                         format, content_fingerprint, actor_id, workflow_task_id,
-                        stage_content_fingerprint, path, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        stage_content_fingerprint, resource_status, is_formal,
+                        path, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         delivery_id,
@@ -226,8 +245,10 @@ class DeliveryService:
                         format,
                         fingerprint,
                         actor.user_id,
-                        task["id"],
+                        task["id"] if task else None,
                         lifecycle_fingerprint,
+                        resource_status,
+                        int(is_formal),
                         str(path),
                         created_at,
                     ),
@@ -235,26 +256,37 @@ class DeliveryService:
         except sqlite3.IntegrityError:
             path.unlink(missing_ok=True)
             existing = self._find_existing(
-                project_id, stage, source_key, format
+                project_id, stage, source_key, format, is_formal=is_formal
             )
             if existing is None:
                 raise
-            return self._reconcile_delivery(existing)
+            return self._reconcile_delivery(
+                existing, page_authorized=page_authorized
+            )
         except BaseException:
             path.unlink(missing_ok=True)
             raise
         record.update(
             {
-                "workflow_task_id": task["id"],
+                "workflow_task_id": task["id"] if task else None,
                 "stage_content_fingerprint": lifecycle_fingerprint,
+                "resource_status": resource_status,
+                "is_formal": is_formal,
                 "stage_export_recorded_at": None,
                 "workflow_completed_at": None,
                 "audit_recorded_at": None,
             }
         )
-        return self._reconcile_delivery(record, request=request)
+        return self._reconcile_delivery(
+            record, request=request, page_authorized=page_authorized
+        )
 
-    def list(self) -> list[dict[str, Any]]:
+    def list(
+        self,
+        *,
+        page_authorized: bool = False,
+        project_authorizer: Callable[[str], bool] | None = None,
+    ) -> list[dict[str, Any]]:
         with self.creative_repository._connect() as connection:
             rows = connection.execute(
                 """
@@ -264,52 +296,96 @@ class DeliveryService:
                 ORDER BY d.created_at DESC, d.id DESC
                 """
             ).fetchall()
+        records = [self._public_record(dict(row)) for row in rows]
+        if project_authorizer is not None:
+            records = [
+                record
+                for record in records
+                if project_authorizer(str(record["project_id"]))
+            ]
         return [
-            self._reconcile_delivery(self._public_record(dict(row)))
-            for row in rows
+            self._reconcile_delivery(
+                record, page_authorized=page_authorized
+            )
+            for record in records
         ]
 
-    def options(self) -> list[dict[str, Any]]:
+    def options(
+        self, *, project_authorizer: Callable[[str], bool] | None = None
+    ) -> list[dict[str, Any]]:
         options: list[dict[str, Any]] = []
-        for project in self.creative_repository.list_projects():
-            try:
-                task = self._resolve_delivery_task(int(project["id"]), None)
-            except (KeyError, ValueError):
+        for project_summary in self.creative_repository.list_projects():
+            if project_authorizer is not None and not project_authorizer(
+                str(project_summary["id"])
+            ):
                 continue
-            resources: list[tuple[str, str, int]] = []
-            if project.get("locked_brief_id"):
-                brief = self.creative_repository.get_blueprint(
-                    int(project["locked_brief_id"])
+            project = self.creative_repository.get_project(int(project_summary["id"]))
+            if project is None:
+                continue
+            resources: list[tuple[str, str, int, str]] = []
+            resources.extend(
+                ("brief", str(item["id"]), int(item["version"]), str(item["status"]))
+                for item in project.get("blueprints", [])
+            )
+            character_batches = {
+                str(item["batch_id"]): item
+                for item in project.get("characters", [])
+                if item.get("batch_id")
+            }
+            resources.extend(
+                (
+                    "characters", f"{project['id']}:{batch_id}",
+                    int(item["version"]), str(item["status"]),
                 )
-                if brief:
-                    resources.append(("brief", str(brief["id"]), int(brief["version"])))
-            if project.get("character_batch_id"):
-                batch = self.creative_repository.get_character_batch(
-                    int(project["id"]), str(project["character_batch_id"])
+                for batch_id, item in character_batches.items()
+            )
+            outline_batches = {
+                str(item["batch_id"]): item
+                for item in project.get("episodes", [])
+                if item.get("stage") == "outline" and item.get("batch_id")
+            }
+            resources.extend(
+                (
+                    "outline", f"{project['id']}:{batch_id}",
+                    int(item["version"]), str(item["status"]),
                 )
-                if batch["characters"]:
-                    resources.append(("characters", f"{project['id']}:{project['character_batch_id']}", int(batch["characters"][0]["version"])))
-            if project.get("outline_batch_id"):
-                batch = self.creative_repository.get_outline_batch(
-                    int(project["id"]), str(project["outline_batch_id"])
-                )
-                if batch["episodes"]:
-                    resources.append(("outline", f"{project['id']}:{project['outline_batch_id']}", int(batch["episodes"][0]["version"])))
+                for batch_id, item in outline_batches.items()
+            )
             for episode in project.get("episodes", []):
-                if episode.get("stage") == "beats" and episode.get("status") in {"locked", "approved"}:
-                    resources.append(("beats", str(episode["id"]), int(episode["version"])))
-            for stage, resource_id, version in resources:
+                if episode.get("stage") in {"beats", "script"}:
+                    resources.append((
+                        str(episode["stage"]), str(episode["id"]),
+                        int(episode["version"]), str(episode["status"]),
+                    ))
+            for stage, resource_id, version, resource_status in resources:
+                is_formal = self._is_formal_resource(resource_status)
+                workflow_task_id = None
+                if is_formal:
+                    try:
+                        workflow_task_id = self._resolve_delivery_task(
+                            int(project["id"]), None
+                        )["id"]
+                    except (KeyError, ValueError):
+                        pass
                 options.append({
                     "resource_id": resource_id,
                     "stage": stage,
                     "resource_version": version,
                     "project_id": str(project["id"]),
                     "project_name": project["name"],
-                    "workflow_task_id": task["id"],
+                    "resource_status": resource_status,
+                    "is_formal": is_formal,
+                    "workflow_task_id": workflow_task_id,
                 })
         return options
 
-    def get(self, delivery_id: str) -> dict[str, Any] | None:
+    def get(
+        self,
+        delivery_id: str,
+        *,
+        page_authorized: bool = False,
+        project_authorizer: Callable[[str], bool] | None = None,
+    ) -> dict[str, Any] | None:
         with self.creative_repository._connect() as connection:
             row = connection.execute(
                 """
@@ -320,14 +396,20 @@ class DeliveryService:
                 """,
                 (delivery_id,),
             ).fetchone()
-        return (
-            self._reconcile_delivery(self._public_record(dict(row)))
-            if row is not None
-            else None
+        if row is None:
+            return None
+        record = self._public_record(dict(row))
+        if project_authorizer is not None and not project_authorizer(
+            str(record["project_id"])
+        ):
+            raise PermissionError("delivery project is outside the actor scope")
+        return self._reconcile_delivery(
+            record, page_authorized=page_authorized
         )
 
     def _find_existing(
-        self, project_id: int, stage: str, submission_id: str, format: str
+        self, project_id: int, stage: str, submission_id: str, format: str,
+        *, is_formal: bool,
     ) -> dict[str, Any] | None:
         with self.creative_repository._connect() as connection:
             row = connection.execute(
@@ -336,9 +418,9 @@ class DeliveryService:
                 FROM creative_deliveries d
                 JOIN creative_projects p ON p.id = d.project_id
                 WHERE d.project_id = ? AND d.stage = ?
-                  AND d.submission_id = ? AND d.format = ?
+                  AND d.submission_id = ? AND d.format = ? AND d.is_formal = ?
                 """,
-                (project_id, stage, submission_id, format),
+                (project_id, stage, submission_id, format, int(is_formal)),
             ).fetchone()
         return self._public_record(dict(row)) if row is not None else None
 
@@ -348,26 +430,26 @@ class DeliveryService:
         with self.workflow_repository.identity_repository.connect() as connection:
             if workflow_task_id:
                 row = connection.execute(
-                    "SELECT * FROM workflow_tasks WHERE id = ?",
-                    (workflow_task_id,),
+                    text("SELECT * FROM workflow_tasks WHERE id = :workflow_task_id"),
+                    {"workflow_task_id": workflow_task_id},
                 ).fetchone()
                 rows = [row] if row is not None else []
             else:
                 rows = connection.execute(
-                    """
+                    text("""
                     SELECT * FROM workflow_tasks
-                    WHERE project_id = ? AND task_type = 'delivery'
+                    WHERE project_id = :project_id AND task_type = 'delivery'
                       AND role_code = 'system_admin'
                       AND status IN ('pool', 'assigned', 'in_progress')
                     ORDER BY created_at, id
-                    """,
-                    (str(project_id),),
+                    """),
+                    {"project_id": str(project_id)},
                 ).fetchall()
                 if not rows:
                     rows = connection.execute(
-                        """
+                        text("""
                         SELECT t.* FROM workflow_tasks AS t
-                        WHERE t.project_id = ? AND t.task_type = 'delivery'
+                        WHERE t.project_id = :project_id AND t.task_type = 'delivery'
                           AND t.role_code = 'system_admin'
                           AND t.status = 'completed'
                           AND EXISTS (
@@ -376,8 +458,8 @@ class DeliveryService:
                                 AND e.event_type = 'delivery.complete'
                           )
                         ORDER BY t.updated_at DESC, t.id DESC
-                        """,
-                        (str(project_id),),
+                        """),
+                        {"project_id": str(project_id)},
                     ).fetchall()
         if not rows:
             raise ValueError("an active terminal delivery workflow task is required")
@@ -395,21 +477,29 @@ class DeliveryService:
         if task["status"] == "completed":
             with self.workflow_repository.identity_repository.connect() as connection:
                 completed_by_delivery = connection.execute(
-                    "SELECT 1 FROM workflow_task_events "
-                    "WHERE task_id = ? AND event_type = 'delivery.complete' LIMIT 1",
-                    (task["id"],),
+                    text(
+                        "SELECT 1 FROM workflow_task_events "
+                        "WHERE task_id = :task_id "
+                        "AND event_type = 'delivery.complete' LIMIT 1"
+                    ),
+                    {"task_id": task["id"]},
                 ).fetchone()
             if completed_by_delivery is None:
                 raise ValueError("completed task was not consumed by delivery")
         return task
 
     def _reconcile_delivery(
-        self, record: dict[str, Any], *, request: Request | None = None
+        self,
+        record: dict[str, Any],
+        *,
+        request: Request | None = None,
+        page_authorized: bool = False,
     ) -> dict[str, Any]:
         path = Path(record["path"]).resolve()
         if path.parent != self.delivery_dir.resolve() or not path.is_file():
             raise FileNotFoundError(path)
-        if not record.get("workflow_task_id"):
+        is_formal = bool(record.get("is_formal"))
+        if is_formal and not record.get("workflow_task_id"):
             task = self._resolve_delivery_task(int(record["project_id"]), None)
             self._mark_reconciled(
                 record["id"], "workflow_task_id", task["id"]
@@ -430,12 +520,15 @@ class DeliveryService:
             )
             if record["stage"] == "beats":
                 fingerprint = beats_resource_fingerprint(snapshot)
+            elif record["stage"] == "script":
+                fingerprint = script_resource_fingerprint(snapshot)
             self._mark_reconciled(
                 record["id"], "stage_content_fingerprint", fingerprint
             )
             record["stage_content_fingerprint"] = fingerprint
-        self._record_stage_export(record)
-        self._complete_workflow_task(record)
+        if is_formal:
+            self._record_stage_export(record)
+            self._complete_workflow_task(record, page_authorized=page_authorized)
         self._record_audit(record, request=request)
         refreshed = self._get_unreconciled(record["id"])
         assert refreshed is not None
@@ -444,14 +537,14 @@ class DeliveryService:
     def _record_stage_export(self, record: dict[str, Any]) -> None:
         if record.get("stage_export_recorded_at") is not None:
             return
-        if record["stage"] == "beats":
+        if record["stage"] in {"beats", "script"}:
             fingerprint = record["stage_content_fingerprint"]
             if not self.creative_repository.has_stage_export(
-                int(record["project_id"]), "beats", fingerprint
+                int(record["project_id"]), record["stage"], fingerprint
             ):
                 self.creative_repository.record_stage_export(
                     int(record["project_id"]),
-                    "beats",
+                    record["stage"],
                     record["format"],
                     fingerprint,
                 )
@@ -459,7 +552,9 @@ class DeliveryService:
             record["id"], "stage_export_recorded_at", time.time()
         )
 
-    def _complete_workflow_task(self, record: dict[str, Any]) -> None:
+    def _complete_workflow_task(
+        self, record: dict[str, Any], *, page_authorized: bool = False
+    ) -> None:
         if record.get("workflow_completed_at") is not None:
             return
         repository = self.workflow_repository.identity_repository
@@ -479,9 +574,9 @@ class DeliveryService:
                 actor = self.workflow_repository._live_actor(
                     connection, record["actor_user_id"]
                 )
-                if not actor["is_system_admin"]:
+                if not actor["is_system_admin"] and not page_authorized:
                     raise PermissionError(
-                        "delivery actor is no longer a system administrator"
+                        "delivery actor no longer has page authorization"
                     )
                 self.workflow_repository.transition_task_in_transaction(
                     task["id"],
@@ -494,12 +589,18 @@ class DeliveryService:
                         "stage": record["stage"],
                         "submission_id": record["submission_id"],
                     },
+                    authorization_context=(
+                        {"permissions": {"*"}} if page_authorized else None
+                    ),
                 )
             else:
                 event = connection.execute(
-                    "SELECT 1 FROM workflow_task_events "
-                    "WHERE task_id = ? AND event_type = 'delivery.complete' LIMIT 1",
-                    (task["id"],),
+                    text(
+                        "SELECT 1 FROM workflow_task_events "
+                        "WHERE task_id = :task_id "
+                        "AND event_type = 'delivery.complete' LIMIT 1"
+                    ),
+                    {"task_id": task["id"]},
                 ).fetchone()
                 if event is None:
                     actor = self.workflow_repository._live_actor(
@@ -589,8 +690,18 @@ class DeliveryService:
             ).fetchone()
         return self._public_record(dict(row)) if row is not None else None
 
-    def download_path(self, delivery_id: str) -> Path:
-        record = self.get(delivery_id)
+    def download_path(
+        self,
+        delivery_id: str,
+        *,
+        page_authorized: bool = False,
+        project_authorizer: Callable[[str], bool] | None = None,
+    ) -> Path:
+        record = self.get(
+            delivery_id,
+            page_authorized=page_authorized,
+            project_authorizer=project_authorizer,
+        )
         if record is None:
             raise KeyError(delivery_id)
         path = Path(record["path"]).resolve()
@@ -603,7 +714,12 @@ class DeliveryService:
         record["project_id"] = str(record["project_id"])
         record["fingerprint"] = record.pop("content_fingerprint")
         record["actor_user_id"] = record.pop("actor_id")
+        record["is_formal"] = bool(record.get("is_formal"))
         return record
+
+    @staticmethod
+    def _is_formal_resource(resource_status: str) -> bool:
+        return resource_status in {"locked", "brief_locked", "approved"}
 
     @staticmethod
     def _snapshot_project_id(resource_type: str, snapshot: Any) -> int:
@@ -630,6 +746,8 @@ class DeliveryService:
             content: Any = snapshot.get("episodes") or []
         elif stage == "beats":
             content = [snapshot]
+        elif stage == "script":
+            content = snapshot
         elif stage == "characters":
             content = {
                 "batch_id": snapshot.get("batch_id"),
@@ -656,6 +774,13 @@ class DeliveryService:
     ) -> bytes:
         if format == "json":
             return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        if stage == "script" and format == "txt":
+            script = payload["content"]
+            return build_script_text(
+                project,
+                script.get("content") or {},
+                episode_number=int(script.get("episode_number") or 0),
+            ).encode("utf-8")
         if stage == "beats":
             markdown = build_beats_markdown(project, payload["content"])
         else:
@@ -669,10 +794,23 @@ class DeliveryService:
 def build_delivery_router(service: DeliveryService) -> APIRouter:
     router = APIRouter(prefix="/api/admin/deliveries", tags=["admin-deliveries"])
 
-    def admin(principal: Principal = Depends(current_principal)) -> Principal:
-        if not principal.is_system_admin:
-            raise HTTPException(403, "only system administrators may manage deliveries")
-        return principal
+    admin = require_page_api()
+
+    def can_access_project(
+        request: Request, principal: Principal, project_id: str
+    ) -> bool:
+        if principal.is_system_admin:
+            return True
+        permission_service = permission_service_for_request(request)
+        return permission_service.can_access_assigned_project(
+            principal, project_id
+        ) or permission_service.can_access_managed_project(principal, project_id)
+
+    def assert_project_access(
+        request: Request, principal: Principal, project_id: str
+    ) -> None:
+        if not can_access_project(request, principal, project_id):
+            raise HTTPException(403, "没有访问此项目交付成果的权限")
 
     def verify_csrf(request: Request) -> None:
         permission_service = permission_service_for_request(request)
@@ -683,14 +821,29 @@ def build_delivery_router(service: DeliveryService) -> APIRouter:
             raise HTTPException(403, "CSRF 校验失败")
 
     @router.get("")
-    def list_deliveries(principal: Principal = Depends(admin)):
-        del principal
-        return {"deliveries": service.list()}
+    def list_deliveries(
+        request: Request, principal: Principal = Depends(admin)
+    ):
+        return {
+            "deliveries": service.list(
+                page_authorized=not principal.is_system_admin,
+                project_authorizer=lambda project_id: can_access_project(
+                    request, principal, project_id
+                ),
+            )
+        }
 
     @router.get("/options")
-    def list_options(principal: Principal = Depends(admin)):
-        del principal
-        return {"options": service.options()}
+    def list_options(
+        request: Request, principal: Principal = Depends(admin)
+    ):
+        return {
+            "options": service.options(
+                project_authorizer=lambda project_id: can_access_project(
+                    request, principal, project_id
+                )
+            )
+        }
 
     @router.post("", status_code=201)
     def create_delivery(
@@ -699,6 +852,7 @@ def build_delivery_router(service: DeliveryService) -> APIRouter:
         principal: Principal = Depends(admin),
     ):
         verify_csrf(request)
+        assert_project_access(request, principal, str(payload.project_id))
         try:
             delivery = service.create(
                 project_id=payload.project_id,
@@ -708,6 +862,7 @@ def build_delivery_router(service: DeliveryService) -> APIRouter:
                 actor=principal,
                 request=request,
                 workflow_task_id=payload.workflow_task_id,
+                page_authorized=not principal.is_system_admin,
             )
         except KeyError as exc:
             raise HTTPException(404, "project or submission not found") from exc
@@ -719,16 +874,32 @@ def build_delivery_router(service: DeliveryService) -> APIRouter:
 
     @router.get("/{delivery_id}/download")
     def download_delivery(
-        delivery_id: str, principal: Principal = Depends(admin)
+        delivery_id: str,
+        request: Request,
+        principal: Principal = Depends(admin),
     ) -> FileResponse:
-        del principal
         try:
-            path = service.download_path(delivery_id)
+            page_authorized = not principal.is_system_admin
+            path = service.download_path(
+                delivery_id,
+                page_authorized=page_authorized,
+                project_authorizer=lambda project_id: can_access_project(
+                    request, principal, project_id
+                ),
+            )
         except KeyError as exc:
             raise HTTPException(404, "delivery not found") from exc
         except FileNotFoundError as exc:
             raise HTTPException(410, "delivery file is unavailable") from exc
-        record = service.get(delivery_id)
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        record = service.get(
+            delivery_id,
+            page_authorized=page_authorized,
+            project_authorizer=lambda project_id: can_access_project(
+                request, principal, project_id
+            ),
+        )
         assert record is not None
         media_type = (
             "application/json"

@@ -21,8 +21,8 @@ from workflow.repository import SYSTEM_ACTOR, WorkflowRepository
 from .repository import CreativeRepository
 
 
-RESOURCE_TYPES = frozenset({"breakdown", "brief", "characters", "outline", "beats"})
-APPROVAL_FREE_RESOURCE_TYPES = frozenset({"brief", "characters", "outline", "beats"})
+RESOURCE_TYPES = frozenset({"breakdown", "brief", "characters", "outline", "beats", "script"})
+APPROVAL_FREE_RESOURCE_TYPES = frozenset({"brief", "characters", "outline", "beats", "script"})
 IMMUTABLE_WORKFLOW_STATUSES = frozenset(
     {"submitted", "approved", "returned", "superseded"}
 )
@@ -105,8 +105,8 @@ class CreativeWorkflowAdapter:
                 "episodes": [self._episode_snapshot(item) for item in batch["episodes"]],
             }
         item = self._required(self.creative_repository.get_episode(int(resource_id)))
-        if item["stage"] != "beats":
-            raise ValueError("beats resource must reference a beats episode")
+        if item["stage"] != resource_type:
+            raise ValueError(f"{resource_type} resource must reference a matching episode")
         return self._episode_snapshot(item)
 
     def submit(
@@ -121,7 +121,7 @@ class CreativeWorkflowAdapter:
             raise KeyError(task_id)
         if task["task_type"] != resource_type:
             raise ValueError("workflow node does not match resource type")
-        if task["assignee_user_id"] != actor.user_id:
+        if not self._actor_can_edit_task(task, actor):
             raise PermissionError("only the task assignee may submit")
         draft = self._find_draft(task_id, resource_type, resource_id)
         if draft is None:
@@ -210,6 +210,7 @@ class CreativeWorkflowAdapter:
         self.assert_approvable(submission)
         now = time.time()
         superseded_resources: list[str] = []
+        project_revision: int | None = None
         with self.creative_repository._connect() as connection:
             self.set_domain_status(resource_type, resource_id, "approved", conn=connection)
             if resource_type == "breakdown":
@@ -234,10 +235,11 @@ class CreativeWorkflowAdapter:
                     (json.dumps(content, ensure_ascii=False), now, int(resource_id)),
                 )
                 project = connection.execute(
-                    "SELECT locked_brief_id FROM creative_projects WHERE id = ?",
+                    "SELECT locked_brief_id, revision FROM creative_projects WHERE id = ?",
                     (item["project_id"],),
                 ).fetchone()
                 old_id = project["locked_brief_id"] if project else None
+                expected_revision = int(project["revision"]) if project else -1
                 switching = not old_id or int(old_id) != int(resource_id)
                 if old_id and switching:
                     connection.execute(
@@ -246,43 +248,64 @@ class CreativeWorkflowAdapter:
                     )
                     superseded_resources.append(str(old_id))
                 if switching:
-                    connection.execute(
+                    cursor = connection.execute(
                         "UPDATE creative_projects SET locked_brief_id = ?, character_batch_id = NULL, "
-                        "outline_batch_id = NULL, status = 'brief_approved', updated_at = ? WHERE id = ?",
-                        (int(resource_id), now, item["project_id"]),
+                        "outline_batch_id = NULL, status = 'brief_approved', revision = revision + 1, "
+                        "updated_at = ? WHERE id = ? AND revision = ?",
+                        (int(resource_id), now, item["project_id"], expected_revision),
                     )
+                    if cursor.rowcount != 1:
+                        raise ValueError("project revision changed")
+                    project_revision = expected_revision + 1
+                else:
+                    project_revision = expected_revision
             elif resource_type == "characters":
                 project_id, batch_id = self._batch_key(resource_id)
                 project = connection.execute(
-                    "SELECT character_batch_id FROM creative_projects WHERE id = ?", (project_id,)
+                    "SELECT character_batch_id, revision FROM creative_projects WHERE id = ?",
+                    (project_id,),
                 ).fetchone()
                 old_batch = project["character_batch_id"] if project else None
+                expected_revision = int(project["revision"]) if project else -1
                 switching = not old_batch or old_batch != batch_id
                 if old_batch and switching:
                     self._set_batch_status(connection, "characters", project_id, old_batch, "superseded")
                     superseded_resources.append(f"{project_id}:{old_batch}")
                 if switching:
-                    connection.execute(
+                    cursor = connection.execute(
                         "UPDATE creative_projects SET character_batch_id = ?, outline_batch_id = NULL, "
-                        "status = 'characters_approved', updated_at = ? WHERE id = ?",
-                        (batch_id, now, project_id),
+                        "status = 'characters_approved', revision = revision + 1, updated_at = ? "
+                        "WHERE id = ? AND revision = ?",
+                        (batch_id, now, project_id, expected_revision),
                     )
+                    if cursor.rowcount != 1:
+                        raise ValueError("project revision changed")
+                    project_revision = expected_revision + 1
+                else:
+                    project_revision = expected_revision
             elif resource_type == "outline":
                 project_id, batch_id = self._batch_key(resource_id)
                 project = connection.execute(
-                    "SELECT outline_batch_id FROM creative_projects WHERE id = ?", (project_id,)
+                    "SELECT outline_batch_id, revision FROM creative_projects WHERE id = ?",
+                    (project_id,),
                 ).fetchone()
                 old_batch = project["outline_batch_id"] if project else None
+                expected_revision = int(project["revision"]) if project else -1
                 switching = not old_batch or old_batch != batch_id
                 if old_batch and switching:
                     self._set_batch_status(connection, "outline", project_id, old_batch, "superseded")
                     superseded_resources.append(f"{project_id}:{old_batch}")
                 if switching:
-                    connection.execute(
+                    cursor = connection.execute(
                         "UPDATE creative_projects SET outline_batch_id = ?, status = 'outline_approved', "
-                        "updated_at = ? WHERE id = ?",
-                        (batch_id, now, project_id),
+                        "revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?",
+                        (batch_id, now, project_id, expected_revision),
                     )
+                    if cursor.rowcount != 1:
+                        raise ValueError("project revision changed")
+                    project_revision = expected_revision + 1
+                else:
+                    project_revision = expected_revision
             elif resource_type == "beats":
                 episode = self._required(self.creative_repository.get_episode(int(resource_id)))
                 old_rows = connection.execute(
@@ -342,7 +365,11 @@ class CreativeWorkflowAdapter:
                 requested_submission["resource_id"],
                 actor,
             )
-        return submission
+        if project_revision is None:
+            return submission
+        result = dict(submission)
+        result["revision"] = project_revision
+        return result
 
     def on_returned(
         self,
@@ -383,6 +410,8 @@ class CreativeWorkflowAdapter:
         actor: Principal,
         *,
         difference_note: str = "",
+        expected_project_revision: int | None = None,
+        expected_authority: dict[str, Any] | None = None,
     ) -> dict:
         """Lock an assigned creative version without creating a submission."""
         if resource_type not in APPROVAL_FREE_RESOURCE_TYPES:
@@ -396,17 +425,56 @@ class CreativeWorkflowAdapter:
 
         if resource_type == "brief":
             resource = self.creative_repository.lock_brief(
-                int(resource_id), difference_note
+                int(resource_id),
+                difference_note,
+                expected_revision=expected_project_revision,
+                expected_authority=expected_authority,
             )
         elif resource_type == "characters":
             project_id, batch_id = self._batch_key(resource_id)
-            resource = self.creative_repository.lock_character_batch(project_id, batch_id)
+            resource = self.creative_repository.lock_character_batch(
+                project_id,
+                batch_id,
+                expected_revision=expected_project_revision,
+                expected_authority=expected_authority,
+            )
         elif resource_type == "outline":
             project_id, batch_id = self._batch_key(resource_id)
-            resource = self.creative_repository.lock_outline_batch(project_id, batch_id)
+            resource = self.creative_repository.lock_outline_batch(
+                project_id,
+                batch_id,
+                expected_revision=expected_project_revision,
+                expected_authority=expected_authority,
+            )
+        elif resource_type == "beats":
+            resource = self.creative_repository.lock_episode_beats(
+                int(resource_id),
+                expected_revision=expected_project_revision,
+                expected_authority=expected_authority,
+            )
         else:
-            resource = self.creative_repository.lock_episode_beats(int(resource_id))
+            resource = self.creative_repository.lock_episode_script(
+                int(resource_id),
+                expected_revision=expected_project_revision,
+                expected_authority=expected_authority,
+            )
         return {"resource": resource, "snapshot": snapshot}
+
+    def lock_beats_batch_without_review(
+        self, task_id: str, project_id: int, actor: Principal
+    ) -> dict[str, Any]:
+        """Validate every current Beats draft before one repository-level batch lock."""
+        drafts = self.creative_repository.batch_lockable_episode_beats(project_id)
+        snapshots: list[dict[str, Any]] = []
+        for draft in drafts:
+            resource_id = str(draft["id"])
+            self._assert_task(task_id, "beats", resource_id, actor)
+            self.assert_editable("beats", resource_id)
+            snapshot = self.snapshot("beats", resource_id)
+            self._assert_current_upstream("beats", resource_id, snapshot)
+            snapshots.append(snapshot)
+        resources = self.creative_repository.lock_current_episode_beats_batch(project_id)
+        return {"resources": resources, "snapshots": snapshots}
 
     def lock_submitted_without_review(
         self, resource_type: str, resource_id: str
@@ -422,7 +490,7 @@ class CreativeWorkflowAdapter:
         if resource_type == "outline":
             project_id, batch_id = self._batch_key(resource_id)
             return self.creative_repository.lock_outline_batch(project_id, batch_id)
-        return self.creative_repository.lock_episode_beats(int(resource_id))
+        return self.creative_repository.lock_episode_beats(int(resource_id)) if resource_type == "beats" else self.creative_repository.lock_episode_script(int(resource_id))
 
     def assert_task_for_creation(
         self,
@@ -439,7 +507,7 @@ class CreativeWorkflowAdapter:
             raise KeyError(task_id)
         if task["task_type"] != resource_type:
             raise ValueError("workflow node does not match resource type")
-        if task["assignee_user_id"] != actor.user_id:
+        if not self._actor_can_edit_task(task, actor):
             raise PermissionError("only the task assignee may create this resource")
         if project_id is not None and str(task["project_id"] or "") != str(project_id):
             raise ValueError("resource does not belong to the task project")
@@ -532,7 +600,7 @@ class CreativeWorkflowAdapter:
                     (resource_type, project_id) if batch["episodes"] else None
                 )
             item = self.creative_repository.get_episode(int(resource_id))
-            if not item or item["stage"] != "beats":
+            if not item or item["stage"] not in {"beats", "script"}:
                 return None
             return (
                 resource_type,
@@ -577,13 +645,13 @@ class CreativeWorkflowAdapter:
             ),
             *(
                 (
-                    "outline" if item["stage"] == "outline" else "beats",
+                    "outline" if item["stage"] == "outline" else item["stage"],
                     f"{project_id}:{item['batch_id']}"
                     if item["stage"] == "outline"
                     else str(item["id"]),
                 )
                 for item in project.get("episodes", [])
-                if item["stage"] in {"outline", "beats"}
+                if item["stage"] in {"outline", "beats", "script"}
             ),
         }
         for resource_type, resource_id in resources:
@@ -616,8 +684,8 @@ class CreativeWorkflowAdapter:
                 ).fetchone()
             else:
                 row = connection.execute(
-                    "SELECT workflow_task_id FROM creative_episodes WHERE id = ? AND stage = 'beats'",
-                    (int(resource_id),),
+                    "SELECT workflow_task_id FROM creative_episodes WHERE id = ? AND stage = ?",
+                    (int(resource_id), resource_type),
                 ).fetchone()
         task_id = str(row["workflow_task_id"] or "") if row else ""
         if not task_id:
@@ -651,12 +719,40 @@ class CreativeWorkflowAdapter:
                 ).fetchone()
             else:
                 row = connection.execute(
-                    "SELECT status FROM creative_episodes WHERE id = ? AND stage = 'beats'",
-                    (int(resource_id),),
+                    "SELECT status FROM creative_episodes WHERE id = ? AND stage = ?",
+                    (int(resource_id), resource_type),
                 ).fetchone()
         if row is None:
             raise KeyError(resource_id)
         return str(row["status"])
+
+    def locked_resource(self, resource_type: str, resource_id: str) -> dict:
+        """Return the persisted resource body for completion reconciliation."""
+        self._validate_type(resource_type)
+        if resource_type == "brief":
+            return self._required(
+                self.creative_repository.get_blueprint(int(resource_id))
+            )
+        if resource_type == "characters":
+            project_id, batch_id = self._batch_key(resource_id)
+            resource = self.creative_repository.get_character_batch(
+                project_id, batch_id
+            )
+            if not resource["characters"]:
+                raise KeyError(resource_id)
+            return resource
+        if resource_type == "outline":
+            project_id, batch_id = self._batch_key(resource_id)
+            resource = self.creative_repository.get_outline_batch(project_id, batch_id)
+            if not resource["episodes"]:
+                raise KeyError(resource_id)
+            return resource
+        resource = self._required(
+            self.creative_repository.get_episode(int(resource_id))
+        )
+        if resource["stage"] != resource_type:
+            raise ValueError("creative resource type mismatch")
+        return resource
 
     def beats_episode_progress(self, resource_id: str) -> dict[str, Any]:
         """Return current-outline coverage, treating this completion as accepted."""
@@ -690,6 +786,29 @@ class CreativeWorkflowAdapter:
             "remaining_episodes": sorted(required - approved),
             "complete": bool(required) and required <= approved,
         }
+
+    def script_episode_progress(self, resource_id: str) -> dict[str, Any]:
+        episode = self._required(self.creative_repository.get_episode(int(resource_id)))
+        if episode["stage"] != "script":
+            raise ValueError("script resource must reference a script episode")
+        project = self._required(self.creative_repository.get_project(int(episode["project_id"])))
+        required = {
+            int(item["episode_number"])
+            for item in project.get("episodes", [])
+            if item["stage"] == "beats" and item.get("status") in {"locked", "approved"}
+        }
+        complete = {
+            int(item["episode_number"])
+            for item in project.get("episodes", [])
+            if item["stage"] == "script" and item.get("status") in {"locked", "approved"}
+            and any(
+                beat["stage"] == "beats" and beat["id"] == (item.get("upstream_refs") or {}).get("beats_id")
+                and beat.get("status") in {"locked", "approved"}
+                for beat in project.get("episodes", [])
+            )
+        }
+        complete.add(int(episode["episode_number"]))
+        return {"required_episodes": sorted(required), "approved_episodes": sorted(complete), "remaining_episodes": sorted(required - complete), "complete": bool(required) and required <= complete}
 
     def set_domain_status(
         self,
@@ -728,8 +847,8 @@ class CreativeWorkflowAdapter:
             )
         else:
             conn.execute(
-                f"UPDATE creative_episodes SET status = ?, updated_at = ?{task_sql} WHERE id = ? AND stage = 'beats'",
-                (status, now, workflow_task_id, int(resource_id)),
+                f"UPDATE creative_episodes SET status = ?, updated_at = ?{task_sql} WHERE id = ? AND stage = ?",
+                (status, now, workflow_task_id, int(resource_id), resource_type),
             )
 
     def _assert_task(
@@ -740,7 +859,7 @@ class CreativeWorkflowAdapter:
             raise KeyError(task_id)
         if task["task_type"] != resource_type:
             raise ValueError("workflow node does not match resource type")
-        if task["assignee_user_id"] != actor.user_id:
+        if not self._actor_can_edit_task(task, actor):
             raise PermissionError("only the task assignee may submit")
         snapshot = self.snapshot(resource_type, resource_id)
         if resource_type == "breakdown":
@@ -749,6 +868,17 @@ class CreativeWorkflowAdapter:
         elif str(task["project_id"] or "") != str(snapshot["project_id"]):
             raise ValueError("resource does not belong to the task project")
         return task
+
+    def _actor_can_edit_task(self, task: dict, actor: Principal) -> bool:
+        if actor.is_system_admin or task.get("assignee_user_id") == actor.user_id:
+            return True
+        project_id = task.get("project_id")
+        return bool(
+            project_id is not None
+            and self.workflow_repository.is_active_project_member(
+                str(project_id), actor
+            )
+        )
 
     def _assert_brief_risk(self, resource_type: str, resource_id: str) -> None:
         if resource_type != "brief":
@@ -767,7 +897,7 @@ class CreativeWorkflowAdapter:
         resource_id: str,
         snapshot: dict | list,
     ) -> None:
-        if resource_type not in {"characters", "outline", "beats"}:
+        if resource_type not in {"characters", "outline", "beats", "script"}:
             return
         if not isinstance(snapshot, dict):
             raise ValueError("creative upstream snapshot is invalid")
@@ -795,7 +925,7 @@ class CreativeWorkflowAdapter:
             raise ValueError("current completed Brief upstream is required")
         if any(str(ref.get("brief_id") or "") != str(brief_id) for ref in refs):
             raise ValueError("creative resource references a stale Brief upstream")
-        if resource_type in {"outline", "beats"}:
+        if resource_type in {"outline", "beats", "script"}:
             character_batch_id = project.get("character_batch_id")
             if not character_batch_id or not self._character_batch_is_approved(
                 project_id, character_batch_id
@@ -807,7 +937,7 @@ class CreativeWorkflowAdapter:
                 for ref in refs
             ):
                 raise ValueError("creative resource references a stale character upstream")
-        if resource_type == "beats":
+        if resource_type in {"beats", "script"}:
             outline_batch_id = project.get("outline_batch_id")
             if not outline_batch_id or not self._outline_batch_is_approved(
                 project_id, outline_batch_id
@@ -818,7 +948,15 @@ class CreativeWorkflowAdapter:
                 for ref in refs
             ):
                 raise ValueError("creative resource references a stale outline upstream")
-
+            if not self.creative_repository.episode_generation_refs_match(
+                project,
+                resource_type,
+                int(snapshot["episode_number"]),
+                refs[0],
+            ):
+                raise ValueError(
+                    "creative resource authority is incomplete or stale"
+                )
     def _brief_is_approved(self, brief_id: int) -> bool:
         item = self.creative_repository.get_blueprint(brief_id)
         return bool(item and item["status"] in {"approved", "brief_locked"})
@@ -900,24 +1038,29 @@ class CreativeWorkflowAdapter:
             return self._clone_character_batch(resource_id, workflow_task_id, connection, now)
         if resource_type == "outline":
             return self._clone_outline_batch(resource_id, workflow_task_id, connection, now)
+        if resource_type not in {"beats", "script"}:
+            raise ValueError("unsupported episode resource type")
         source = connection.execute(
-            "SELECT * FROM creative_episodes WHERE id = ? AND stage = 'beats'", (int(resource_id),)
+            "SELECT * FROM creative_episodes WHERE id = ? AND stage = ?",
+            (int(resource_id), resource_type),
         ).fetchone()
+        if source is None:
+            raise KeyError(resource_id)
         existing = connection.execute(
-            "SELECT id FROM creative_episodes WHERE parent_version_id = ? AND stage = 'beats' AND status = 'draft' ORDER BY id DESC LIMIT 1",
-            (int(resource_id),),
+            "SELECT id FROM creative_episodes WHERE parent_version_id = ? AND stage = ? AND status = 'draft' ORDER BY id DESC LIMIT 1",
+            (int(resource_id), resource_type),
         ).fetchone()
         if existing:
             return str(existing["id"])
         version = connection.execute(
-            "SELECT COALESCE(MAX(version), 0) + 1 FROM creative_episodes WHERE project_id = ? AND stage = 'beats' AND episode_number = ?",
-            (source["project_id"], source["episode_number"]),
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM creative_episodes WHERE project_id = ? AND stage = ? AND episode_number = ?",
+            (source["project_id"], resource_type, source["episode_number"]),
         ).fetchone()[0]
         cursor = connection.execute(
             "INSERT INTO creative_episodes (project_id, stage, episode_number, batch_id, version, parent_version_id, "
             "status, content_json, upstream_refs_json, generation_meta_json, workflow_task_id, created_at, updated_at) "
-            "VALUES (?, 'beats', ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)",
-            (source["project_id"], source["episode_number"], uuid.uuid4().hex, version, int(resource_id),
+            "VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)",
+            (source["project_id"], resource_type, source["episode_number"], uuid.uuid4().hex, version, int(resource_id),
              source["content_json"], source["upstream_refs_json"], source["generation_meta_json"], workflow_task_id, now, now),
         )
         return str(cursor.lastrowid)

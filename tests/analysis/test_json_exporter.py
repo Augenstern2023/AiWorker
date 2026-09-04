@@ -43,4 +43,3 @@ def test_export_json_writes_stable_fields(tmp_path):
     assert data["transcript_source"] == "subtitle"
     assert data["transcript"] == "正文"
     assert data["summary"] == ""
-

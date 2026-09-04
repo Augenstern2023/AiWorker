@@ -53,8 +53,7 @@ def test_topic_service_reweights_when_growth_is_unavailable(tmp_path):
                 "current_entries": [{"title": "测试短剧", "rank": 1, "category": "逆袭"}],
             }
 
-    service = TopicService(str(tmp_path))
-    service.rank_service = FakeRankService()
+    service = TopicService(str(tmp_path), rank_service=FakeRankService())
     topic = service.generate("dy", limit=1)[0]
 
     assert topic["confidence"] == "medium"
@@ -72,8 +71,7 @@ def test_topic_service_uses_subject_as_genre_not_rank_board():
                 "current_entries": [{"title": "测试短剧", "rank": 1, "category_label": "短剧", "tab": "热榜", "subject": "复仇 / 逆袭"}],
             }
 
-    service = TopicService(".")
-    service.rank_service = FakeRankService()
+    service = TopicService(".", rank_service=FakeRankService())
 
     topic = service.generate("dy", limit=1)[0]
     assert topic["category"] == "复仇 / 逆袭"

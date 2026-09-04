@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 UserStatus = Literal["active", "disabled"]
+Gender = Literal["unspecified", "male", "female"]
 DataScope = Literal["task", "project", "managed_projects", "all"]
 DATA_SCOPE_ORDER = {"task": 1, "project": 2, "managed_projects": 3, "all": 4}
 
@@ -45,12 +46,24 @@ class UserCreateRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=128)
     password: str = Field(min_length=1)
     role_ids: list[str] = Field(default_factory=list)
+    email: str | None = Field(default=None, max_length=254)
+    phone: str | None = Field(default=None, max_length=32)
+    gender: Gender = "unspecified"
 
 
 class UserUpdateRequest(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=128)
     status: UserStatus | None = None
     role_ids: list[str] | None = None
+    email: str | None = Field(default=None, max_length=254)
+    phone: str | None = Field(default=None, max_length=32)
+    gender: Gender | None = None
+
+
+class UserProfileUpdateRequest(BaseModel):
+    email: str | None = Field(default=None, max_length=254)
+    phone: str | None = Field(default=None, max_length=32)
+    gender: Gender | None = None
 
 
 class UserResponse(BaseModel):
@@ -61,6 +74,11 @@ class UserResponse(BaseModel):
     display_name: str
     status: UserStatus
     role_codes: list[str] = Field(default_factory=list)
+    departments: list[dict[str, object]] = Field(default_factory=list)
+    primary_department: dict[str, object] | None = None
+    email: str | None = None
+    phone: str | None = None
+    gender: Gender
     last_login_at: str | None = None
     created_at: str
 
@@ -92,3 +110,4 @@ class RoleResponse(BaseModel):
     is_enabled: bool
     permissions: list[RolePermissionRequest] = Field(default_factory=list)
     claimable_task_types: list[str] = Field(default_factory=list)
+    page_routes: list[str] = Field(default_factory=list)

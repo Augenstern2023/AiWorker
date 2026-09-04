@@ -8,4 +8,3 @@
 #
 
 """RAG indexing and query subsystem."""
-

@@ -1,0 +1,27 @@
+{% extends "layouts/base.html" %}
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-3">
+    <div><h3 class="mb-1">导航配置</h3><div class="small text-muted">调整导航显示、顺序与账号页面访问范围</div></div>
+    <button class="btn btn-outline-secondary btn-sm" id="navigation-refresh" type="button" title="刷新导航" aria-label="刷新导航"><i class="bi bi-arrow-clockwise" aria-hidden="true"></i></button>
+</div>
+<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>名称</th><th>图标</th><th>路径</th><th>权限</th><th>排序</th><th>启用</th><th>账号授权</th></tr></thead><tbody id="navigation-list"><tr><td colspan="7" class="text-center text-muted py-4">正在加载导航...</td></tr></tbody></table></div>
+
+<div class="modal fade" id="navigation-accounts-modal" tabindex="-1" aria-labelledby="navigation-accounts-title" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <form class="modal-content" id="navigation-accounts-form">
+            <div class="modal-header">
+                <div><h5 class="modal-title" id="navigation-accounts-title">账号授权</h5><div class="small text-muted" id="navigation-accounts-route"></div></div>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <label class="visually-hidden" for="navigation-account-search">搜索账号</label>
+                <div class="input-group input-group-sm mb-3"><span class="input-group-text"><i class="bi bi-search" aria-hidden="true"></i></span><input class="form-control" id="navigation-account-search" type="search" placeholder="搜索账号、姓名或角色" autocomplete="off"></div>
+                <div class="alert alert-danger d-none" id="navigation-accounts-error" role="alert"></div>
+                <div class="table-responsive"><table class="table table-sm align-middle mb-0"><thead><tr><th>账号</th><th>角色</th><th>状态</th><th>账号例外</th></tr></thead><tbody id="navigation-account-list"></tbody></table></div>
+            </div>
+            <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" id="navigation-accounts-save" type="submit"><i class="bi bi-save me-1" aria-hidden="true"></i>保存授权</button></div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}<script src="/static/js/admin/navigation.js?v={{ asset_version }}&account_access=2"></script>{% endblock %}

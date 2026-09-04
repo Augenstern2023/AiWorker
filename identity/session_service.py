@@ -13,12 +13,18 @@ import base64
 import hashlib
 import hmac
 import secrets
-import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Request
+from sqlalchemy import Connection, and_, insert, select, text, update
+
+from system_database.schema import roles as roles_table
+from system_database.schema import role_permissions as role_permissions_table
+from system_database.schema import sessions as sessions_table
+from system_database.schema import user_roles as user_roles_table
+from system_database.schema import users as users_table
 
 from .repository import IdentityRepository
 from .schema import DATA_SCOPE_ORDER, Principal
@@ -54,12 +60,14 @@ class SessionService:
         user_id: str,
         request: Request,
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> tuple[str, str]:
         with self.repository.connection_scope(connection) as active_connection:
             user = active_connection.execute(
-                "SELECT status, is_deleted FROM users WHERE id = ?", (user_id,)
-            ).fetchone()
+                select(users_table.c.status, users_table.c.is_deleted).where(
+                    users_table.c.id == user_id
+                )
+            ).mappings().first()
             if user is None or user["status"] != "active" or user["is_deleted"]:
                 raise ValueError("用户不可登录")
 
@@ -67,22 +75,16 @@ class SessionService:
             csrf_token = self._csrf_for_token(raw_token)
             now = datetime.now(timezone.utc)
             active_connection.execute(
-                """
-                INSERT INTO sessions
-                    (id, user_id, token_hash, csrf_token_hash, expires_at,
-                     last_seen_at, user_agent, ip_address)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(uuid.uuid4()),
-                    user_id,
-                    self._hash_token(raw_token),
-                    self._hash_token(csrf_token),
-                    (now + self.session_ttl).isoformat(),
-                    now.isoformat(),
-                    request.headers.get("user-agent"),
-                    request.client.host if request.client else None,
-                ),
+                insert(sessions_table).values(
+                    id=str(uuid.uuid4()),
+                    user_id=user_id,
+                    token_hash=self._hash_token(raw_token),
+                    csrf_token_hash=self._hash_token(csrf_token),
+                    expires_at=now + self.session_ttl,
+                    last_seen_at=now,
+                    user_agent=request.headers.get("user-agent"),
+                    ip_address=request.client.host if request.client else None,
+                )
             )
         return raw_token, csrf_token
 
@@ -90,55 +92,78 @@ class SessionService:
         self,
         raw_token: str | None,
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> SessionContext | None:
         if not raw_token:
             return None
         token_hash = self._hash_token(raw_token)
         with self.repository.connection_scope(connection) as active_connection:
             row = active_connection.execute(
-                """
-                SELECT s.id AS session_id, s.user_id, s.csrf_token_hash,
-                       s.expires_at, s.revoked_at, u.username, u.display_name,
-                       u.status, u.is_deleted
-                FROM sessions AS s
-                JOIN users AS u ON u.id = s.user_id
-                WHERE s.token_hash = ?
-                """,
-                (token_hash,),
-            ).fetchone()
+                select(
+                    sessions_table.c.id.label("session_id"),
+                    sessions_table.c.user_id,
+                    sessions_table.c.csrf_token_hash,
+                    sessions_table.c.expires_at,
+                    sessions_table.c.revoked_at,
+                    users_table.c.username,
+                    users_table.c.display_name,
+                    users_table.c.status,
+                    users_table.c.is_deleted,
+                )
+                .select_from(
+                    sessions_table.join(
+                        users_table, users_table.c.id == sessions_table.c.user_id
+                    )
+                )
+                .where(sessions_table.c.token_hash == token_hash)
+            ).mappings().first()
             if row is None or row["revoked_at"] is not None:
                 return None
 
             if row["status"] != "active" or row["is_deleted"]:
                 active_connection.execute(
-                    "UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP "
-                    "WHERE user_id = ? AND revoked_at IS NULL",
-                    (row["user_id"],),
+                    update(sessions_table)
+                    .where(
+                        sessions_table.c.user_id == row["user_id"],
+                        sessions_table.c.revoked_at.is_(None),
+                    )
+                    .values(revoked_at=text("CURRENT_TIMESTAMP"))
                 )
                 return None
 
             if self._parse_datetime(row["expires_at"]) <= datetime.now(timezone.utc):
                 active_connection.execute(
-                    "UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (row["session_id"],),
+                    update(sessions_table)
+                    .where(sessions_table.c.id == row["session_id"])
+                    .values(revoked_at=text("CURRENT_TIMESTAMP"))
                 )
                 return None
 
             role_rows = active_connection.execute(
-                """
-                SELECT r.code, rp.permission_code, rp.data_scope
-                FROM user_roles AS ur
-                JOIN roles AS r ON r.id = ur.role_id AND r.is_enabled = 1
-                LEFT JOIN role_permissions AS rp ON rp.role_id = r.id
-                WHERE ur.user_id = ?
-                ORDER BY r.code, rp.permission_code
-                """,
-                (row["user_id"],),
-            ).fetchall()
+                select(
+                    roles_table.c.code,
+                    role_permissions_table.c.permission_code,
+                    role_permissions_table.c.data_scope,
+                )
+                .select_from(
+                    user_roles_table.join(
+                        roles_table,
+                        and_(
+                            roles_table.c.id == user_roles_table.c.role_id,
+                            roles_table.c.is_enabled == 1,
+                        ),
+                    ).outerjoin(
+                        role_permissions_table,
+                        role_permissions_table.c.role_id == roles_table.c.id,
+                    )
+                )
+                .where(user_roles_table.c.user_id == row["user_id"])
+                .order_by(roles_table.c.code, role_permissions_table.c.permission_code)
+            ).mappings().all()
             active_connection.execute(
-                "UPDATE sessions SET last_seen_at = ? WHERE id = ?",
-                (datetime.now(timezone.utc).isoformat(), row["session_id"]),
+                update(sessions_table)
+                .where(sessions_table.c.id == row["session_id"])
+                .values(last_seen_at=datetime.now(timezone.utc))
             )
 
         role_codes = tuple(sorted({role["code"] for role in role_rows}))
@@ -181,26 +206,32 @@ class SessionService:
         self,
         raw_token: str,
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> None:
         with self.repository.connection_scope(connection) as active_connection:
             active_connection.execute(
-                "UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP "
-                "WHERE token_hash = ? AND revoked_at IS NULL",
-                (self._hash_token(raw_token),),
+                update(sessions_table)
+                .where(
+                    sessions_table.c.token_hash == self._hash_token(raw_token),
+                    sessions_table.c.revoked_at.is_(None),
+                )
+                .values(revoked_at=text("CURRENT_TIMESTAMP"))
             )
 
     def revoke_user_sessions(
         self,
         user_id: str,
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> None:
         with self.repository.connection_scope(connection) as active_connection:
             active_connection.execute(
-                "UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP "
-                "WHERE user_id = ? AND revoked_at IS NULL",
-                (user_id,),
+                update(sessions_table)
+                .where(
+                    sessions_table.c.user_id == user_id,
+                    sessions_table.c.revoked_at.is_(None),
+                )
+                .values(revoked_at=text("CURRENT_TIMESTAMP"))
             )
 
     @staticmethod
@@ -214,8 +245,8 @@ class SessionService:
         return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
     @staticmethod
-    def _parse_datetime(value: str) -> datetime:
-        parsed = datetime.fromisoformat(value.replace(" ", "T"))
+    def _parse_datetime(value: str | datetime) -> datetime:
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace(" ", "T"))
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)

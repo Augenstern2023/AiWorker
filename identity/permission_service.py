@@ -9,7 +9,16 @@
 
 from __future__ import annotations
 
-import sqlite3
+from sqlalchemy import Connection, and_, select
+
+from system_database.schema import (
+    project_members,
+    role_permissions,
+    roles,
+    user_roles,
+    users,
+    workflow_tasks,
+)
 
 from .permission_catalog import PERMISSION_DEPENDENCIES
 from .repository import IdentityRepository
@@ -42,29 +51,41 @@ class PermissionService:
         user_id: str,
         session_id: str,
         *,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> Principal | None:
         with self.repository.connection_scope(connection) as active_connection:
             user = active_connection.execute(
-                """
-                SELECT id, username, display_name, status, is_deleted
-                FROM users WHERE id = ?
-                """,
-                (user_id,),
-            ).fetchone()
+                select(
+                    users.c.id,
+                    users.c.username,
+                    users.c.display_name,
+                    users.c.status,
+                    users.c.is_deleted,
+                ).where(users.c.id == user_id)
+            ).mappings().first()
             if user is None or user["status"] != "active" or user["is_deleted"]:
                 return None
             rows = active_connection.execute(
-                """
-                SELECT r.code, rp.permission_code, rp.data_scope
-                FROM user_roles AS ur
-                JOIN roles AS r ON r.id = ur.role_id AND r.is_enabled = 1
-                LEFT JOIN role_permissions AS rp ON rp.role_id = r.id
-                WHERE ur.user_id = ?
-                ORDER BY r.code, rp.permission_code
-                """,
-                (user_id,),
-            ).fetchall()
+                select(
+                    roles.c.code,
+                    role_permissions.c.permission_code,
+                    role_permissions.c.data_scope,
+                )
+                .select_from(
+                    user_roles.join(
+                        roles,
+                        and_(
+                            roles.c.id == user_roles.c.role_id,
+                            roles.c.is_enabled == 1,
+                        ),
+                    ).outerjoin(
+                        role_permissions,
+                        role_permissions.c.role_id == roles.c.id,
+                    )
+                )
+                .where(user_roles.c.user_id == user_id)
+                .order_by(roles.c.code, role_permissions.c.permission_code)
+            ).mappings().all()
 
         role_codes = tuple(sorted({row["code"] for row in rows}))
         grants = [
@@ -107,9 +128,10 @@ class PermissionService:
     def can_access_task(self, principal: Principal, task_id: str) -> bool:
         with self.repository.connect() as connection:
             task = connection.execute(
-                "SELECT assignee_id, project_id FROM workflow_tasks WHERE id = ?",
-                (task_id,),
-            ).fetchone()
+                select(workflow_tasks.c.assignee_id, workflow_tasks.c.project_id).where(
+                    workflow_tasks.c.id == task_id
+                )
+            ).mappings().first()
         if task is None:
             return False
         if principal.data_scope == "all":
@@ -134,13 +156,23 @@ class PermissionService:
             return False
         with self.repository.connect() as connection:
             row = connection.execute(
-                """
-                SELECT 1 FROM project_members
-                WHERE project_id = ? AND user_id = ? AND status = 'active'
-                """,
-                (project_id, principal.user_id),
-            ).fetchone()
+                select(project_members.c.id).where(
+                    project_members.c.project_id == project_id,
+                    project_members.c.user_id == principal.user_id,
+                    project_members.c.status == "active",
+                )
+            ).mappings().first()
         return row is not None
+
+    def can_read_project(self, principal: Principal, project_id: str) -> bool:
+        """Allow portfolio read access without granting assigned-project mutations."""
+        if principal.data_scope == "all" or "project_owner" in principal.role_codes:
+            return True
+        if "project.read.established" in principal.permissions:
+            return True
+        return self.can_access_assigned_project(
+            principal, project_id
+        ) or self.can_access_managed_project(principal, project_id)
 
     def can_access_managed_project(
         self, principal: Principal, project_id: str
@@ -151,13 +183,30 @@ class PermissionService:
             return False
         with self.repository.connect() as connection:
             rows = connection.execute(
-                """
-                SELECT project_role FROM project_members
-                WHERE project_id = ? AND user_id = ? AND status = 'active'
-                """,
-                (project_id, principal.user_id),
-            ).fetchall()
+                select(project_members.c.project_role).where(
+                    project_members.c.project_id == project_id,
+                    project_members.c.user_id == principal.user_id,
+                    project_members.c.status == "active",
+                )
+            ).mappings().all()
         return any(row["project_role"] in _MANAGED_PROJECT_ROLES for row in rows)
+
+    def can_create_project_content(
+        self, principal: Principal, project_id: str, *, active_member: bool
+    ) -> bool:
+        return active_member or self.can_access_managed_project(principal, project_id)
+
+    def can_govern_project(self, principal: Principal, project_id: str) -> bool:
+        return principal.is_system_admin or (
+            "project.member.manage" in principal.permissions
+            and self.can_access_managed_project(principal, project_id)
+        )
+
+    def can_delete_project(self, principal: Principal, project_id: str) -> bool:
+        return principal.is_system_admin or (
+            "project.delete" in principal.permissions
+            and self.can_access_managed_project(principal, project_id)
+        )
 
     @staticmethod
     def can_access_all(principal: Principal) -> bool:

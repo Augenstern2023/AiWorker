@@ -60,7 +60,7 @@ class AsyncFileWriter:
                 # 在CSV中添加项目名称列
                 item_with_project = item.copy()
                 item_with_project["project_name"] = project_name
-                
+
                 file_exists = os.path.exists(file_path)
                 async with aiofiles.open(file_path, 'a', newline='', encoding='utf-8-sig') as f:
                     writer = csv.DictWriter(f, fieldnames=item_with_project.keys())
@@ -122,7 +122,7 @@ class AsyncFileWriter:
                     return
 
                 comments_data = json.loads(content)
-                
+
                 # Handle new dict format or old list format
                 all_comments = []
                 if isinstance(comments_data, dict):

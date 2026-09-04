@@ -89,4 +89,3 @@ def _fallback_answer(question: str, results: list[RetrievalResult]) -> str:
         snippet = result.chunk.text.replace("\n", " ")[:160]
         lines.append(f"{index}. {title}：{snippet}")
     return "\n".join(lines)
-

@@ -10,14 +10,19 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import logging
 import os
 import re
-from dataclasses import dataclass
-from datetime import datetime
+import tempfile
+import time
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
+
+from analysis.rank_models import RankSnapshot, RankSnapshotSource
 
 
 SUPPORTED_PLATFORMS = {"dy", "hg"}
@@ -26,9 +31,43 @@ RANK_PATTERNS = {
     "hg": "data/hg/jobs/*/rank/hongguo*.json",
 }
 DEFAULT_HONGGUO_EXPORTS_ROOT = Path(os.environ.get("HONGGUO_EXPORTS_DIR", r"E:\hg\exports"))
+DEFAULT_HONGGUO_RAW_ROOT = Path(os.environ.get("HONGGUO_RAW_DIR", r"E:\hg\raw"))
 HONGGUO_SECTION_ORDER = ["全部", "真人剧", "漫剧", "AI剧"]
 HONGGUO_RANKING_ORDER = ["热播榜", "推荐榜", "必看榜", "热搜榜", "收藏榜", "新剧榜", "预约榜", "高分臻果榜"]
+DOUYIN_RANKING_ORDER = ["榜单", "热榜"]
+RANK_SOURCE_CHECK_INTERVAL_SECONDS = 5.0
+RANK_BUSINESS_TIMEZONE = ZoneInfo("Asia/Shanghai")
 logger = logging.getLogger("aiworker.web.today_rank")
+HONGGUO_CSV_SECTION_BY_SELECTED = {
+    "all": "红果",
+    "human": "真人剧",
+    "comic_series_rank": "漫剧",
+    "ai_playlet": "AI剧",
+}
+HONGGUO_CSV_RANKING_BY_SUB = {
+    "ranklist_hot_sc": "推荐榜",
+    "ranklist_hot_play_sc": "热播榜",
+    "ranklist_prestige": "高分臻果榜",
+    "ranklist_subscribe": "预约榜",
+    "ranklist_new_rank_sc": "新剧榜",
+    "ranklist_hot_search_sc": "热搜榜",
+    "ranklist_must_watch": "必看榜",
+    "ranklist_followed": "收藏榜",
+    "human_hot_play": "热播榜",
+    "human_new_rank": "新剧榜",
+    "human_hot_search": "热搜榜",
+    "human_must_watch": "必看榜",
+    "human_followed": "收藏榜",
+    "comic_series_hot_play": "热播榜",
+    "comic_series_new_rank": "新剧榜",
+    "comic_series_hot_search": "热搜榜",
+    "comic_series_hot_rank": "热门榜",
+    "ai_playlet_hot_play": "热播榜",
+    "ai_playlet_new_rank": "新剧榜",
+    "ai_playlet_hot_search": "热搜榜",
+    "ai_playlet_must_watch": "必看榜",
+    "ai_playlet_followed": "收藏榜",
+}
 
 RANK_COMMON_COLUMNS = (
     {"key": "rank", "label": "排名", "kind": "rank", "width": 55},
@@ -59,28 +98,69 @@ RANK_CHANGE_COLUMNS = (
 )
 
 
-@dataclass(frozen=True)
-class RankSnapshot:
-    platform: str
-    job_id: str
-    source_path: Path
-    captured_at: datetime
-    records: list[dict[str, Any]]
-    validation: dict[str, Any]
-
-    def to_dict(self, root: Path) -> dict[str, Any]:
-        return {
-            "platform": self.platform,
-            "job_id": self.job_id,
-            "source_path": _relative_path(self.source_path, root),
-            "captured_at": self.captured_at.strftime("%Y-%m-%d %H:%M:%S"),
-            "date": self.captured_at.date().isoformat(),
-            "record_count": len(self.records),
-        }
+def _paths_revision(paths: set[Path]) -> str:
+    metadata: list[tuple[str, int, int]] = []
+    for path in sorted(paths, key=lambda item: str(item)):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        metadata.append((str(path.resolve()), stat.st_size, stat.st_mtime_ns))
+    return hashlib.sha256(
+        json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
 
 
-class TodayRankService:
-    def __init__(self, root: str | Path = ".", hongguo_exports_root: str | Path | None = None) -> None:
+def _write_json_atomically(path: Path, payload: dict[str, Any], label: str) -> None:
+    temporary: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        )
+        temporary = Path(handle.name)
+        with handle:
+            json.dump(payload, handle, ensure_ascii=False)
+        temporary.replace(path)
+    except OSError as exc:
+        logger.warning("%s：path=%s error=%s", label, path, exc)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _hongguo_raw_root_for_exports(exports_root: Path) -> Path:
+    if exports_root == DEFAULT_HONGGUO_EXPORTS_ROOT:
+        return DEFAULT_HONGGUO_RAW_ROOT
+    return exports_root.parent / "raw"
+
+
+def rank_business_date(now: datetime | None = None) -> str:
+    current = now or datetime.now(RANK_BUSINESS_TIMEZONE)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=RANK_BUSINESS_TIMEZONE)
+    else:
+        current = current.astimezone(RANK_BUSINESS_TIMEZONE)
+    return current.date().isoformat()
+
+
+class _LegacyRankEngine:
+    def __init__(
+        self,
+        root: str | Path = ".",
+        hongguo_exports_root: str | Path | None = None,
+        cache_dir: str | Path | None = None,
+    ) -> None:
         self.root = Path(root).resolve()
         if hongguo_exports_root is not None:
             self.hongguo_exports_root = Path(hongguo_exports_root)
@@ -88,39 +168,293 @@ class TodayRankService:
             self.hongguo_exports_root = DEFAULT_HONGGUO_EXPORTS_ROOT
         else:
             self.hongguo_exports_root = self.root / "exports"
+        self.hongguo_raw_root = _hongguo_raw_root_for_exports(self.hongguo_exports_root)
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else self.root / ".runtime" / "rank-cache"
+        if not self.cache_dir.is_absolute():
+            self.cache_dir = self.root / self.cache_dir
+        self._response_cache: dict[tuple[str, str, int], dict[str, Any]] = {}
+        self._source_revisions: dict[str, str] = {}
+        self._source_revision_checked_at: dict[str, float] = {}
+        self._hongguo_raw_index: dict[str, dict[str, Any]] | None = None
+        self._hongguo_raw_index_dirty = False
+        self.disk_response_cache_enabled = True
 
-    def get_today_rank(self, platform: str, date: str = "", limit: int = 10) -> dict[str, Any]:
+    def get_today_rank(
+        self,
+        platform: str,
+        date: str = "",
+        limit: int = 10,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
         platform = platform.strip().lower()
         if platform not in SUPPORTED_PLATFORMS:
             raise ValueError("platform must be dy or hg")
+        date = date.strip()
+        if date:
+            try:
+                parsed_date = datetime.strptime(date, "%Y-%m-%d").date()
+            except ValueError as exc:
+                raise ValueError("date must be YYYY-MM-DD") from exc
+            if parsed_date.isoformat() != date:
+                raise ValueError("date must be YYYY-MM-DD")
+
+        memory_key = (platform, date, limit)
+        memory_cached = self._response_cache.get(memory_key)
+        checked_at = self._source_revision_checked_at.get(platform, 0.0)
+        if (
+            not force_refresh
+            and memory_cached is not None
+            and time.monotonic() - checked_at
+            < RANK_SOURCE_CHECK_INTERVAL_SECONDS
+        ):
+            return self._with_daily_status(
+                {**memory_cached, "cache_status": "hit"}
+            )
+
+        cache_revision = self._source_revision(platform)
+        previous_revision = self._source_revisions.get(platform)
+        if force_refresh or (
+            previous_revision is not None
+            and previous_revision != cache_revision
+        ):
+            self._invalidate_memory_cache(platform)
+        self._source_revisions[platform] = cache_revision
+        if not force_refresh:
+            cached = self._read_response_cache(
+                platform, cache_revision, date, limit
+            )
+            if cached is not None:
+                self._response_cache[memory_key] = cached
+                self._source_revision_checked_at[platform] = time.monotonic()
+                return self._with_daily_status(
+                    {**cached, "cache_status": "hit"}
+                )
 
         snapshots = self.list_snapshots(platform)
         available_dates = _available_dates(snapshots)
         selected = self._select_snapshot(snapshots, date)
         if selected is None:
-            return self._empty_response(platform, date, available_dates)
+            response = self._empty_response(platform, date, available_dates)
+        else:
+            previous = self._previous_snapshot(snapshots, selected)
+            selected = _annotate_rank_durations(selected, snapshots)
+            previous = (
+                _annotate_rank_durations(previous, snapshots)
+                if previous
+                else None
+            )
+            comparison = self._compare(selected, previous, limit=limit)
+            response = {
+                "platform": platform,
+                "date": selected.captured_at.date().isoformat(),
+                "available_dates": available_dates,
+                "selected_snapshot": selected.to_dict(self.root),
+                "previous_snapshot": (
+                    previous.to_dict(self.root) if previous else None
+                ),
+                "validation": selected.validation,
+                "records_with_warnings": [
+                    record
+                    for record in selected.records
+                    if record.get("validation_warnings")
+                ][:20],
+                **comparison,
+            }
 
-        previous = self._previous_snapshot(snapshots, selected)
-        selected = _annotate_rank_durations(selected, snapshots)
-        previous = _annotate_rank_durations(previous, snapshots) if previous else None
-        comparison = self._compare(selected, previous, limit=limit)
+        response["cache_status"] = (
+            "refreshed" if force_refresh else "generated"
+        )
+        self._write_response_cache(
+            platform, cache_revision, date, limit, response
+        )
+        self._response_cache[memory_key] = response
+        self._source_revision_checked_at[platform] = time.monotonic()
+        return self._with_daily_status(response)
+
+    def daily_status(self, platform: str) -> dict[str, Any]:
+        platform = platform.strip().lower()
+        if platform not in SUPPORTED_PLATFORMS:
+            raise ValueError("platform must be dy or hg")
+        available_dates = _available_dates(self.list_snapshots(platform))
+        business_date = rank_business_date()
         return {
-            "platform": platform,
-            "date": selected.captured_at.date().isoformat(),
-            "available_dates": available_dates,
-            "selected_snapshot": selected.to_dict(self.root),
-            "previous_snapshot": previous.to_dict(self.root) if previous else None,
-            "validation": selected.validation,
-            "records_with_warnings": [record for record in selected.records if record.get("validation_warnings")][:20],
-            **comparison,
+            "business_date": business_date,
+            "has_today_snapshot": business_date in available_dates,
         }
+
+    @staticmethod
+    def _with_daily_status(response: dict[str, Any]) -> dict[str, Any]:
+        business_date = rank_business_date()
+        available_dates = {
+            str(item) for item in response.get("available_dates") or [] if item
+        }
+        selected_snapshot = response.get("selected_snapshot")
+        selected_date = (
+            str(selected_snapshot.get("date") or "")
+            if isinstance(selected_snapshot, dict)
+            else ""
+        )
+        return {
+            **response,
+            "business_date": business_date,
+            "has_today_snapshot": (
+                business_date in available_dates or selected_date == business_date
+            ),
+        }
+
+    def _invalidate_memory_cache(self, platform: str) -> None:
+        self._response_cache = {
+            key: response
+            for key, response in self._response_cache.items()
+            if key[0] != platform
+        }
+
+    def _source_revision(self, platform: str) -> str:
+        if platform == "hg":
+            return self._hongguo_source_revision()
+        paths: set[Path] = set(self.root.glob(RANK_PATTERNS[platform]))
+        paths.update(self.root.glob(f"data/{platform}/jobs/*/analysis/*.json"))
+        return _paths_revision(paths)
+
+    def _hongguo_source_revision(self) -> str:
+        paths: set[Path] = set(self.root.glob(RANK_PATTERNS["hg"]))
+        paths.update(self.root.glob("data/hg/jobs/*/analysis/*.json"))
+        export_paths = sorted(self.hongguo_exports_root.glob("*/top10_rankings.csv"))
+        paths.update(export_paths)
+        observed_raw_paths: set[str] = set()
+        for export_path in export_paths:
+            series_ids = _hongguo_csv_raw_series_ids(export_path)
+            if not series_ids:
+                continue
+            captured_at = _parse_datetime_from_export_path(export_path)
+            if captured_at is None:
+                continue
+            paths.update(
+                self._hongguo_relevant_raw_paths(
+                    self.hongguo_raw_root
+                    / f"mitm_responses_{captured_at:%Y%m%d}",
+                    series_ids,
+                    observed_raw_paths,
+                )
+            )
+        raw_index = self._load_hongguo_raw_index()
+        for stale_path in set(raw_index).difference(observed_raw_paths):
+            raw_index.pop(stale_path, None)
+            self._hongguo_raw_index_dirty = True
+        if self._hongguo_raw_index_dirty:
+            self._write_hongguo_raw_index()
+        return _paths_revision(paths)
+
+    def _hongguo_raw_index_path(self) -> Path:
+        return self.cache_dir / "hongguo-raw-source-index.json"
+
+    def _load_hongguo_raw_index(self) -> dict[str, dict[str, Any]]:
+        if self._hongguo_raw_index is not None:
+            return self._hongguo_raw_index
+        try:
+            payload = json.loads(
+                self._hongguo_raw_index_path().read_text(encoding="utf-8")
+            )
+            files = payload.get("files") if payload.get("version") == 1 else None
+            self._hongguo_raw_index = files if isinstance(files, dict) else {}
+        except (OSError, json.JSONDecodeError, AttributeError):
+            self._hongguo_raw_index = {}
+        return self._hongguo_raw_index
+
+    def _write_hongguo_raw_index(self) -> None:
+        _write_json_atomically(
+            self._hongguo_raw_index_path(),
+            {"version": 1, "files": self._load_hongguo_raw_index()},
+            "红果原始响应索引写入失败",
+        )
+        self._hongguo_raw_index_dirty = False
+
+    def _hongguo_relevant_raw_paths(
+        self,
+        folder: Path,
+        ranked_series_ids: set[str],
+        observed_paths: set[str],
+    ) -> set[Path]:
+        relevant: set[Path] = set()
+        if not folder.exists() or not ranked_series_ids:
+            return relevant
+        index = self._load_hongguo_raw_index()
+        for path in folder.glob("*.json"):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            key = str(path.resolve())
+            observed_paths.add(key)
+            cached = index.get(key, {})
+            if (
+                cached.get("size") == stat.st_size
+                and cached.get("mtime_ns") == stat.st_mtime_ns
+                and isinstance(cached.get("series_ids"), list)
+            ):
+                raw_series_ids = {
+                    str(item) for item in cached["series_ids"] if str(item)
+                }
+            else:
+                raw_series_ids = _hongguo_raw_file_series_ids(path)
+                index[key] = {
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                    "series_ids": sorted(raw_series_ids),
+                }
+                self._hongguo_raw_index_dirty = True
+            if raw_series_ids.intersection(ranked_series_ids):
+                relevant.add(path)
+        return relevant
+
+    def _response_cache_path(
+        self, platform: str, date: str, limit: int
+    ) -> Path:
+        date_key = date.strip() or "latest"
+        prefix = "hongguo" if platform == "hg" else "douyin"
+        return self.cache_dir / f"{prefix}-{date_key}-limit-{limit}.json"
+
+    def _read_response_cache(
+        self,
+        platform: str,
+        revision: str,
+        date: str,
+        limit: int,
+    ) -> dict[str, Any] | None:
+        if not self.disk_response_cache_enabled:
+            return None
+        path = self._response_cache_path(platform, date, limit)
+        try:
+            cached = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if cached.get("source_revision") != revision or not isinstance(cached.get("response"), dict):
+            return None
+        return cached["response"]
+
+    def _write_response_cache(
+        self,
+        platform: str,
+        revision: str,
+        date: str,
+        limit: int,
+        response: dict[str, Any],
+    ) -> None:
+        if not self.disk_response_cache_enabled:
+            return
+        path = self._response_cache_path(platform, date, limit)
+        _write_json_atomically(
+            path,
+            {"source_revision": revision, "response": response},
+            "榜单响应缓存写入失败",
+        )
 
     def list_snapshots(self, platform: str) -> list[RankSnapshot]:
         if platform == "hg":
-            csv_snapshots = self._list_hongguo_csv_snapshots()
-            if csv_snapshots:
-                return csv_snapshots
-            return self._list_hongguo_import_snapshots()
+            return self._merge_hongguo_snapshots(
+                self._list_hongguo_import_snapshots(),
+                self._list_hongguo_csv_snapshots(),
+            )
 
         pattern = RANK_PATTERNS[platform]
         snapshots: list[RankSnapshot] = []
@@ -129,6 +463,24 @@ class TodayRankService:
             if snapshot:
                 snapshots.append(snapshot)
         return sorted(snapshots, key=lambda item: (item.captured_at, str(item.source_path)))
+
+    @staticmethod
+    def _merge_hongguo_snapshots(
+        imported_snapshots: list[RankSnapshot],
+        csv_snapshots: list[RankSnapshot],
+    ) -> list[RankSnapshot]:
+        """Keep one snapshot per day, with the external CSV export as the authority."""
+        by_date: dict[date, RankSnapshot] = {}
+        for snapshot in imported_snapshots:
+            date = snapshot.captured_at.date()
+            previous = by_date.get(date)
+            if previous is None or snapshot.captured_at >= previous.captured_at:
+                by_date[date] = snapshot
+        for snapshot in csv_snapshots:
+            # CSV exports are the current operational source and supersede imports
+            # for the same calendar day, regardless of their capture time.
+            by_date[snapshot.captured_at.date()] = snapshot
+        return sorted(by_date.values(), key=lambda item: (item.captured_at, str(item.source_path)))
 
     def _list_hongguo_import_snapshots(self) -> list[RankSnapshot]:
         snapshots: list[RankSnapshot] = []
@@ -147,7 +499,10 @@ class TodayRankService:
             snapshot = self._load_hongguo_csv_snapshot(path)
             if snapshot:
                 snapshots.append(snapshot)
-        return sorted(snapshots, key=lambda item: (item.captured_at, str(item.source_path)))
+        return _enrich_hongguo_csv_snapshots(
+            sorted(snapshots, key=lambda item: (item.captured_at, str(item.source_path))),
+            self.hongguo_raw_root,
+        )
 
     def _load_hongguo_csv_snapshot(self, path: Path) -> RankSnapshot | None:
         try:
@@ -164,6 +519,7 @@ class TodayRankService:
             for index, row in enumerate(rows)
             if (record := _normalize_hongguo_csv_record(row, path, self.root, job_id, captured_at, index)) is not None
         ]
+        _assign_missing_hongguo_csv_ranks(normalized)
         _suppress_hongguo_csv_unavailable_metrics(normalized)
         validation = _validate_records(normalized)
         snapshot = RankSnapshot(
@@ -208,6 +564,7 @@ class TodayRankService:
                 )
                 is not None
             ]
+            _assign_missing_hongguo_csv_ranks(normalized)
         else:
             normalized = [
                 record
@@ -397,7 +754,49 @@ class TodayRankService:
         comparison = self._compare_records(current_records, previous_records, limit=limit)
         if selected.platform == "hg":
             comparison["sections"] = self._hongguo_sections(current_records, previous_records, limit=limit)
+        elif selected.platform == "dy":
+            comparison["sections"] = self._douyin_sections(current_records, previous_records, limit=limit)
         return comparison
+
+    def _douyin_sections(
+        self,
+        current_records: list[dict[str, Any]],
+        previous_records: list[dict[str, Any]],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        current_groups = _douyin_rank_groups(current_records)
+        previous_groups = _douyin_rank_groups(previous_records)
+        ranking_names = _ordered_values(set(current_groups) | set(previous_groups), DOUYIN_RANKING_ORDER)
+        sections: list[dict[str, Any]] = []
+        for ranking_name in ranking_names:
+            current = current_groups.get(ranking_name, [])
+            previous = previous_groups.get(ranking_name, [])
+            comparison = self._compare_records(current, previous, limit=limit)
+            ranking = {
+                "key": ranking_name,
+                "label": ranking_name,
+                "section": ranking_name,
+                "summary": comparison["summary"],
+                "validation": _validate_records(current),
+                "columns": comparison["columns"],
+                "current_entries": comparison["current_entries"],
+                "new_entries": comparison["new_entries"],
+                "dropped_entries": comparison["dropped_entries"],
+                "rank_up": comparison["rank_up"],
+                "rank_down": comparison["rank_down"],
+                "heat_growth_top": comparison["heat_growth_top"],
+                "like_growth_top": comparison["like_growth_top"],
+            }
+            sections.append(
+                {
+                    "key": ranking_name,
+                    "label": ranking_name,
+                    "summary": comparison["summary"],
+                    "validation": _validate_records(current),
+                    "rankings": [ranking],
+                }
+            )
+        return sections
 
     def _hongguo_sections(
         self,
@@ -490,6 +889,82 @@ class TodayRankService:
             "like_growth_top": [],
             "message": "No rank snapshots found" if not available_dates else "No rank snapshot found for selected date",
         }
+
+
+class TodayRankService(_LegacyRankEngine):
+    def __init__(
+        self,
+        root: str | Path = ".",
+        hongguo_exports_root: str | Path | None = None,
+        cache_dir: str | Path | None = None,
+        snapshot_source: RankSnapshotSource | None = None,
+        *,
+        disk_response_cache_enabled: bool = False,
+    ) -> None:
+        super().__init__(
+            root=root,
+            hongguo_exports_root=hongguo_exports_root,
+            cache_dir=cache_dir,
+        )
+        self.disk_response_cache_enabled = disk_response_cache_enabled
+        if snapshot_source is None:
+            from analysis.rank_repository import RankRepository
+            from system_database import SystemDatabase, SystemDatabaseSettings
+
+            database = SystemDatabase(SystemDatabaseSettings.from_environment())
+            snapshot_source = RankRepository(database)
+            self._owned_database = database
+        self.snapshot_source = snapshot_source
+
+    @classmethod
+    def from_files(
+        cls,
+        root: str | Path = ".",
+        hongguo_exports_root: str | Path | None = None,
+        cache_dir: str | Path | None = None,
+    ) -> "TodayRankService":
+        from analysis.rank_file_source import RankFileSource
+
+        source = RankFileSource(
+            root=root,
+            hongguo_exports_root=hongguo_exports_root,
+            cache_dir=cache_dir,
+        )
+        return cls(
+            root=root,
+            hongguo_exports_root=hongguo_exports_root,
+            cache_dir=cache_dir,
+            snapshot_source=source,
+            disk_response_cache_enabled=True,
+        )
+
+    @classmethod
+    def from_environment(
+        cls,
+        root: str | Path = ".",
+        cache_dir: str | Path | None = None,
+    ) -> "TodayRankService":
+        from analysis.rank_repository import RankRepository
+        from system_database import SystemDatabase, SystemDatabaseSettings
+
+        database = SystemDatabase(SystemDatabaseSettings.from_environment())
+        service = cls(
+            root=root,
+            cache_dir=cache_dir,
+            snapshot_source=RankRepository(database),
+            disk_response_cache_enabled=False,
+        )
+        service._owned_database = database
+        return service
+
+    def _source_revision(self, platform: str) -> str:
+        return self.snapshot_source.revision(platform)
+
+    def source_revision(self, platform: str) -> str:
+        return self.snapshot_source.revision(platform)
+
+    def list_snapshots(self, platform: str) -> list[RankSnapshot]:
+        return self.snapshot_source.list_snapshots(platform)
 
 
 def _normalize_douyin_record(
@@ -637,14 +1112,19 @@ def _normalize_hongguo_csv_record(
     captured_at: datetime,
     index: int,
 ) -> dict[str, Any] | None:
-    rank = int(_parse_number(_first_text(record.get("排名"), record.get("rank")))) or index + 1
+    rank = int(_parse_number(_first_text(record.get("排名"), record.get("rank"))) or 0)
     title = _first_text(record.get("剧名"), record.get("title"), record.get("play_name"))
+    series_id = _first_text(record.get("series_id"), record.get("短剧ID"), record.get("book_id"), record.get("id"))
     ranking_type = _first_text(record.get("榜单类型"), record.get("ranking_type"), record.get("rank_type"))
+    if not ranking_type:
+        ranking_type = _hongguo_csv_ranking_type_from_flow(record)
+    if not title:
+        title = series_id
     if not title or not ranking_type:
         return None
 
     board_section, board_type, normalized_ranking_type = _parse_hongguo_csv_ranking_type(ranking_type)
-    identity = f"{board_section}|{board_type}|{title}"
+    identity = f"{board_section}|{board_type}|{series_id or title}"
     tags_text = _first_text(record.get("标签"), record.get("tags"), record.get("category"))
     heat = _parse_csv_optional_number(_first_text(record.get("热度"), record.get("heat")))
     like_count = _parse_csv_optional_number(_first_text(record.get("点赞"), record.get("like_count")))
@@ -659,6 +1139,7 @@ def _normalize_hongguo_csv_record(
     return {
         "id": identity,
         "record_id": identity,
+        "series_id": series_id,
         "platform": "hg",
         "job_id": job_id,
         "source_path": _relative_path(path, root),
@@ -710,6 +1191,285 @@ def _parse_hongguo_csv_ranking_type(value: Any) -> tuple[str, str, str]:
     board_type = board_type or normalized or "未分类"
     rank_list = f"{section}{board_type}" if section != "全部" else f"全部{board_type}"
     return section, board_type, rank_list
+
+
+def _hongguo_csv_ranking_type_from_flow(record: dict[str, Any]) -> str:
+    selected = _clean_text(record.get("selected_items"))
+    sub_selected = _clean_text(record.get("sub_selected_items"))
+    section_prefix = HONGGUO_CSV_SECTION_BY_SELECTED.get(selected, "")
+    board_type = HONGGUO_CSV_RANKING_BY_SUB.get(sub_selected)
+    if not board_type and selected in {"human", "comic_series_rank", "ai_playlet"}:
+        board_type = "推荐榜"
+    if not board_type:
+        return ""
+    if section_prefix == "红果":
+        return board_type if board_type == "高分臻果榜" else f"红果{board_type}"
+    return f"{section_prefix}{board_type}"
+
+
+def _assign_missing_hongguo_csv_ranks(records: list[dict[str, Any]]) -> None:
+    counters: dict[str, int] = {}
+    for record in records:
+        group = _clean_text(record.get("rank_list") or record.get("group"))
+        if not group:
+            continue
+        counters[group] = counters.get(group, 0) + 1
+        if not int(record.get("rank") or 0):
+            record["rank"] = counters[group]
+
+
+def _hongguo_csv_raw_series_ids(path: Path) -> set[str]:
+    series_ids: set[str] = set()
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as file:
+            rows = csv.DictReader(file)
+            for row in rows:
+                series_id = _first_text(
+                    row.get("series_id"),
+                    row.get("短剧ID"),
+                    row.get("book_id"),
+                    row.get("id"),
+                )
+                if series_id:
+                    series_ids.add(series_id)
+    except OSError:
+        return set()
+    return series_ids
+
+
+def _hongguo_raw_file_series_ids(path: Path) -> set[str]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig", errors="ignore"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    series_ids: set[str] = set()
+    for item in _walk_json_objects(payload):
+        series_id = _first_text(
+            item.get("series_id"),
+            item.get("recommend_group_id"),
+            item.get("book_id"),
+            item.get("id"),
+        )
+        if series_id:
+            series_ids.add(series_id)
+    return series_ids
+
+
+def _enrich_hongguo_csv_snapshots(snapshots: list[RankSnapshot], raw_root: Path | None = None) -> list[RankSnapshot]:
+    metadata_by_series: dict[str, dict[str, Any]] = {}
+    for snapshot in snapshots:
+        for record in snapshot.records:
+            series_id = _clean_text(record.get("series_id"))
+            title = _clean_text(record.get("title"))
+            if series_id and title and title != series_id:
+                metadata_by_series.setdefault(series_id, record)
+
+    if raw_root:
+        for series_id, metadata in _hongguo_raw_metadata_by_series(snapshots, raw_root, metadata_by_series).items():
+            existing = metadata_by_series.get(series_id)
+            if existing:
+                metadata_by_series[series_id] = _merge_hongguo_metadata(existing, metadata)
+            else:
+                metadata_by_series[series_id] = metadata
+
+    if not metadata_by_series:
+        return snapshots
+
+    enriched: list[RankSnapshot] = []
+    for snapshot in snapshots:
+        records: list[dict[str, Any]] = []
+        changed = False
+        for record in snapshot.records:
+            series_id = _clean_text(record.get("series_id"))
+            metadata = metadata_by_series.get(series_id)
+            if not metadata:
+                records.append(record)
+                continue
+            item = dict(record)
+            for key in ("title", "subject", "topic_tags", "selling_points", "description", "hot_comment", "cover_url"):
+                if _has_display_value(item.get(key)):
+                    continue
+                value = metadata.get(key)
+                if _has_display_value(value):
+                    item[key] = value
+                    changed = True
+            if item.get("title") == series_id and _clean_text(metadata.get("title")):
+                item["title"] = metadata["title"]
+                changed = True
+            records.append(item)
+        if changed:
+            enriched.append(
+                RankSnapshot(
+                    platform=snapshot.platform,
+                    job_id=snapshot.job_id,
+                    source_path=snapshot.source_path,
+                    captured_at=snapshot.captured_at,
+                    records=records,
+                    validation=_validate_records(records),
+                )
+            )
+        else:
+            enriched.append(snapshot)
+    return enriched
+
+
+def _hongguo_raw_metadata_by_series(
+    snapshots: list[RankSnapshot],
+    raw_root: Path,
+    existing_metadata: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    if not raw_root.exists():
+        return {}
+
+    ids_by_date: dict[str, set[str]] = {}
+    for snapshot in snapshots:
+        date_key = snapshot.captured_at.strftime("%Y%m%d")
+        for record in snapshot.records:
+            series_id = _clean_text(record.get("series_id"))
+            if not series_id or not _needs_hongguo_csv_metadata(record, existing_metadata.get(series_id)):
+                continue
+            ids_by_date.setdefault(date_key, set()).add(series_id)
+
+    metadata: dict[str, dict[str, Any]] = {}
+    for date_key, series_ids in ids_by_date.items():
+        folder = raw_root / f"mitm_responses_{date_key}"
+        metadata.update(_load_hongguo_raw_metadata_folder(folder, series_ids))
+    return metadata
+
+
+def _needs_hongguo_csv_metadata(record: dict[str, Any], known_metadata: dict[str, Any] | None = None) -> bool:
+    series_id = _clean_text(record.get("series_id"))
+    if not series_id:
+        return False
+    if _clean_text(record.get("title")) == series_id and not _has_display_value((known_metadata or {}).get("title")):
+        return True
+    for key in ("subject", "topic_tags", "selling_points", "description", "hot_comment", "cover_url"):
+        if _has_display_value(record.get(key)):
+            continue
+        if not _has_display_value((known_metadata or {}).get(key)):
+            return True
+    return False
+
+
+def _load_hongguo_raw_metadata_folder(folder: Path, series_ids: set[str]) -> dict[str, dict[str, Any]]:
+    if not folder.exists() or not series_ids:
+        return {}
+
+    metadata: dict[str, dict[str, Any]] = {}
+    remaining = set(series_ids)
+    for path in sorted(folder.glob("*.json")):
+        try:
+            text = path.read_text(encoding="utf-8-sig", errors="ignore")
+        except OSError as exc:
+            logger.warning("红果原始响应读取失败：source=%s error=%s", path, exc)
+            continue
+        if not any(series_id in text for series_id in remaining):
+            continue
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            logger.warning("红果原始响应解析失败：source=%s error=%s", path, exc)
+            continue
+        for item in _walk_json_objects(payload):
+            record = _hongguo_raw_item_metadata(item)
+            series_id = _clean_text(record.get("series_id")) if record else ""
+            if not series_id or series_id not in remaining:
+                continue
+            existing = metadata.get(series_id)
+            metadata[series_id] = _merge_hongguo_metadata(existing, record) if existing else record
+    return metadata
+
+
+def _walk_json_objects(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_json_objects(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_json_objects(child)
+
+
+def _hongguo_raw_item_metadata(item: dict[str, Any]) -> dict[str, Any] | None:
+    series_id = _first_text(item.get("series_id"), item.get("recommend_group_id"), item.get("book_id"), item.get("id"))
+    title = _first_text(item.get("title"), item.get("play_name"), item.get("book_name"), item.get("name"))
+    if not series_id or not title:
+        return None
+
+    tags = _hongguo_raw_tags(item)
+    description = _first_text(item.get("video_desc"), item.get("desc"), item.get("description"), item.get("abstract"))
+    return {
+        "__quality": _hongguo_raw_metadata_quality(item, title, description, tags),
+        "series_id": series_id,
+        "title": title,
+        "subject": " / ".join(tags),
+        "topic_tags": tags,
+        "selling_points": [description] if description else [],
+        "description": description,
+        "cover_url": _first_text(item.get("cover"), item.get("cover_url"), item.get("horiz_cover")),
+    }
+
+
+def _hongguo_raw_metadata_quality(item: dict[str, Any], title: str, description: str, tags: list[str]) -> int:
+    score = 0
+    if _has_display_value(description):
+        score += 4
+    if tags:
+        score += 3
+    if any(_has_display_value(item.get(key)) for key in ("rec_text_item", "play_cnt", "score", "sub_title")):
+        score += 2
+    if len(title) <= 60:
+        score += 2
+    elif not description and len(title) > 80:
+        score -= 4
+    return score
+
+
+def _hongguo_raw_tags(item: dict[str, Any]) -> list[str]:
+    tags: list[str] = []
+    for entry in item.get("sub_title_list") if isinstance(item.get("sub_title_list"), list) else []:
+        if isinstance(entry, dict):
+            text = _clean_text(entry.get("content") or entry.get("name"))
+        else:
+            text = _clean_text(entry)
+        if text and text not in tags:
+            tags.append(text)
+
+    sub_title = _clean_text(item.get("sub_title"))
+    if sub_title:
+        for part in _split_hongguo_tags(sub_title):
+            if part and not re.search(r"全\d+集", part) and part not in tags:
+                tags.append(part)
+
+    category_schema = item.get("category_schema")
+    if isinstance(category_schema, str) and category_schema.strip().startswith("["):
+        try:
+            category_schema = json.loads(category_schema)
+        except json.JSONDecodeError:
+            category_schema = []
+    if isinstance(category_schema, list):
+        for entry in category_schema:
+            if not isinstance(entry, dict):
+                continue
+            text = _clean_text(entry.get("name"))
+            if text and text not in tags:
+                tags.append(text)
+    return tags
+
+
+def _merge_hongguo_metadata(base: dict[str, Any] | None, update: dict[str, Any]) -> dict[str, Any]:
+    result = dict(base or {})
+    base_quality = int(result.get("__quality") or 0)
+    update_quality = int(update.get("__quality") or 0)
+    for key, value in update.items():
+        if key == "title" and "__quality" in result and update_quality > base_quality and _has_display_value(value):
+            result[key] = value
+            continue
+        if _has_display_value(result.get(key)):
+            continue
+        if _has_display_value(value):
+            result[key] = value
+    return result
 
 
 def _suppress_hongguo_csv_unavailable_metrics(records: list[dict[str, Any]]) -> None:
@@ -765,6 +1525,18 @@ def _rank_history_identity(record: dict[str, Any]) -> str:
     return _clean_text(record.get("id") or record.get("record_id")) or _normalize_title(record.get("title"))
 
 
+def _recorded_rank_dates_are_continuous(previous: Any, current: Any) -> bool:
+    """Treat a gap as continuous only when every skipped calendar day is a weekend."""
+    if current <= previous:
+        return False
+    date = previous + timedelta(days=1)
+    while date < current:
+        if date.weekday() < 5:
+            return False
+        date += timedelta(days=1)
+    return True
+
+
 def _annotate_rank_durations(snapshot: RankSnapshot, snapshots: list[RankSnapshot]) -> RankSnapshot:
     eligible = [item for item in snapshots if item.captured_at <= snapshot.captured_at]
     daily_groups: dict[Any, dict[str, set[str]]] = {}
@@ -788,17 +1560,16 @@ def _annotate_rank_durations(snapshot: RankSnapshot, snapshots: list[RankSnapsho
             if identity in groups.get(group, set())
         )
         cumulative_days = len(appearance_dates)
-        continuous_start = target_date
-        for date in sorted(daily_groups, reverse=True):
-            if date > target_date:
-                continue
-            identities = daily_groups[date].get(group)
-            if identities is None:
-                continue
-            if identity not in identities:
-                break
-            continuous_start = date
-        continuous_days = (target_date - continuous_start).days + 1 if identity else 0
+        continuous_days = 0
+        current_streak = 0
+        previous_date = None
+        for date in appearance_dates:
+            if previous_date is not None and _recorded_rank_dates_are_continuous(previous_date, date):
+                current_streak += 1
+            else:
+                current_streak = 1
+            continuous_days = max(continuous_days, current_streak)
+            previous_date = date
         item["continuous_rank_days"] = continuous_days
         item["cumulative_rank_days"] = cumulative_days
         item["rank_duration"] = (
@@ -825,6 +1596,14 @@ def _hongguo_rank_groups(records: list[dict[str, Any]]) -> dict[str, list[dict[s
         board_type = _clean_text(record.get("board_type")) or _clean_text(record.get("category_label")) or "未分类"
         grouped.setdefault(f"{section}|{board_type}", []).append(record)
     return grouped
+
+
+def _douyin_rank_groups(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        ranking_name = _clean_text(record.get("tab")) or "榜单"
+        grouped.setdefault(ranking_name, []).append(record)
+    return {ranking_name: list(_record_map(items).values()) for ranking_name, items in grouped.items()}
 
 
 def _ordered_values(values: set[str], preferred_order: list[str]) -> list[str]:
@@ -1265,9 +2044,10 @@ def _parse_datetime_from_filename(path: Path) -> datetime | None:
 
 def _parse_datetime_from_export_path(path: Path) -> datetime | None:
     for part in reversed(path.parts):
-        if re.fullmatch(r"\d{8}", part):
+        match = re.search(r"(?<!\d)(\d{8})(?!\d)", part)
+        if match:
             try:
-                return datetime.strptime(part + " 00:00:00", "%Y%m%d %H:%M:%S")
+                return datetime.strptime(match.group(1) + " 00:00:00", "%Y%m%d %H:%M:%S")
             except ValueError:
                 return None
     return None

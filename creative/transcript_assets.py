@@ -180,6 +180,28 @@ def find_transcript_bundle(root: str | Path, title: str, platform: str = "") -> 
     return {**bundle, "title": str(title or bundle["title"]), "platform": str(platform or "")}
 
 
+def render_transcript_bundle_text(title: str, episodes: list[dict[str, Any]]) -> str:
+    lines = [f"# {str(title or '').strip()} 字幕转写", ""]
+    for item in sorted(episodes, key=lambda episode: int(episode.get("episode_number") or 0)):
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        lines.extend([
+            f"## 第 {int(item.get('episode_number') or 0)} 集",
+            "",
+            text,
+            "",
+        ])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def transcript_bundle_filename(title: str, episodes: list[dict[str, Any]]) -> str:
+    safe_title = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", str(title or "")).strip(" .") or "剧目"
+    numbers = sorted({int(item.get("episode_number") or 0) for item in episodes if int(item.get("episode_number") or 0) > 0})
+    episode_range = f"第{numbers[0]}集" if len(numbers) == 1 else f"第{numbers[0]}集-第{numbers[-1]}集"
+    return f"{safe_title}_转写_{episode_range}.txt"
+
+
 def index_downloaded_video_assets(root: str | Path) -> dict[str, list[dict[str, Any]]]:
     workspace = Path(root).resolve()
     data_root = workspace / "data"

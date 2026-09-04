@@ -10,10 +10,12 @@
 from __future__ import annotations
 
 import json
-import sqlite3
+import re
 import uuid
 from collections.abc import Mapping
 from typing import Any
+
+from sqlalchemy import Connection
 
 from fastapi import Request
 
@@ -31,6 +33,10 @@ _SENSITIVE_KEY_PARTS = (
     "cookie",
     "activation_code",
     "api_key",
+)
+_SENSITIVE_TEXT_VALUE = re.compile(
+    r"\b(password|token|secret|cookie|activation_code|api_key)\b(\s*[:=]\s*)([^\s,;]+)",
+    re.IGNORECASE,
 )
 
 
@@ -55,7 +61,7 @@ class AuditService:
         result: str,
         request: Request | None = None,
         project_id: str | None = None,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> str:
         event_id = str(uuid.uuid4())
         request_id, ip_address, user_agent = self._request_metadata(request)
@@ -63,6 +69,9 @@ class AuditService:
             {
                 "id": event_id,
                 "actor_user_id": actor.user_id if actor is not None else None,
+                "actor_display_name_snapshot": (
+                    actor.display_name if actor is not None else None
+                ),
                 "actor_role_snapshot_json": json.dumps(
                     list(actor.role_codes) if actor is not None else [],
                     ensure_ascii=False,
@@ -84,11 +93,29 @@ class AuditService:
         )
         return event_id
 
+    def filter_options(
+        self,
+        *,
+        project_id: str | None = None,
+        target_type: str | None = None,
+        project_ids: set[str] | None = None,
+    ) -> dict[str, list[dict[str, str]]]:
+        return self.repository.filter_options(
+            project_id=project_id,
+            target_type=target_type,
+            project_ids=project_ids,
+        )
+
     def get(self, event_id: str) -> dict[str, Any] | None:
         return self.repository.get(event_id)
 
     def query(self, **filters: Any) -> list[dict[str, Any]]:
         return self.repository.query(**filters)
+
+    def count(self, **filters: Any) -> int:
+        filters.pop("limit", None)
+        filters.pop("offset", None)
+        return self.repository.count(**filters)
 
     @staticmethod
     def _request_metadata(
@@ -155,4 +182,6 @@ class AuditService:
             return redacted
         if isinstance(value, (list, tuple, set, frozenset)):
             return [cls._redact(item) for item in value]
+        if isinstance(value, str):
+            return _SENSITIVE_TEXT_VALUE.sub(r"\1\2[REDACTED]", value)
         return value

@@ -131,6 +131,7 @@ def build_sensevoice_command(
 ) -> List[str]:
     command = [
         python_path,
+        "-I",
         script_path,
         "--audio",
         audio_path,
@@ -145,9 +146,17 @@ def build_sensevoice_command(
 
 
 def build_sensevoice_env(env: Dict[str, str], ffmpeg_dir: str = "") -> Dict[str, str]:
+    for variable in (
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONUSERBASE",
+        "VIRTUAL_ENV",
+    ):
+        env.pop(variable, None)
     if ffmpeg_dir:
         env["PATH"] = ffmpeg_dir + os.pathsep + env.get("PATH", "")
     env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONNOUSERSITE"] = "1"
     return env
 
 

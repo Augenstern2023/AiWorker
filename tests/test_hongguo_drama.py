@@ -23,13 +23,295 @@ from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 
+legacy_remote_contract = pytest.mark.skip(
+    reason="旧远程红果接口契约已由本地抓包测试取代"
+)
+
 import WebGUI
 from agents import hongguo_drama
+from agents.drama_providers import (
+    DownloadResult,
+    DramaCandidate,
+    DramaEpisode,
+    PlayableMedia,
+    ProviderFailure,
+    ProviderSearchReport,
+    ProviderSearchStatus,
+)
 from agents.hongguo_drama import HongguoDramaClient, HongguoDramaError, HongguoPaidContentError, load_settings, public_settings, save_settings
-from agents import douyin_drama_fallback_worker, hongguo_drama_download_worker, hongguo_drama_worker
+from agents import douyin_drama_fallback_worker, hongguo_drama_download_worker, hongguo_drama_worker, hongguo_third_party_downloader
 from core.job import CrawlJob
 from runtime.worker_launcher import build_worker_command
 from workflow import SYSTEM_ACTOR
+
+
+def test_refresh_third_party_providers_probes_every_source_without_candidates(
+    tmp_path, monkeypatch
+):
+    candidate = DramaCandidate("hg", "book-1", "不应返回的候选")
+
+    class FakeRegistry:
+        providers = (object(), object())
+
+        def search_all(self, title):
+            assert title == "接口连通测试"
+            return ProviderSearchReport(
+                candidates=(candidate,),
+                providers=(
+                    ProviderSearchStatus(
+                        "hg", "红果源", "available", 12, candidates=(candidate,)
+                    ),
+                    ProviderSearchStatus(
+                        "hm",
+                        "HM 源",
+                        "error",
+                        18,
+                        error_code="provider_unavailable",
+                        error="来源接口连接失败",
+                    ),
+                ),
+            )
+
+    monkeypatch.setattr(
+        hongguo_drama,
+        "build_third_party_registry",
+        lambda settings, timeout=20: FakeRegistry(),
+    )
+    client = HongguoDramaClient(
+        {
+            "capture_root": str(tmp_path),
+            "capture_service_url": "http://127.0.0.1:8776",
+            "wait_timeout_seconds": 600,
+        }
+    )
+
+    result = client.refresh_third_party_providers()
+
+    assert result["provider_count"] == 2
+    assert result["available_count"] == 1
+    assert result["providers"] == [
+        {
+            "provider_id": "hg",
+            "display_name": "红果源",
+            "status": "available",
+            "elapsed_ms": 12,
+            "error_code": "",
+            "error": "",
+        },
+        {
+            "provider_id": "hm",
+            "display_name": "HM 源",
+            "status": "error",
+            "elapsed_ms": 18,
+            "error_code": "provider_unavailable",
+            "error": "来源接口连接失败",
+        },
+    ]
+    assert "candidates" not in json.dumps(result, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_drama_interface_test_reports_three_successful_checks(
+    tmp_path, monkeypatch
+):
+    class FakeClient:
+        def __init__(self, settings):
+            self.settings = {
+                "capture_root": str(tmp_path),
+                "capture_service_url": "http://127.0.0.1:8776",
+                "wait_timeout_seconds": 600,
+                "activation_code": "secret-code",
+            }
+
+        def refresh_interfaces(self):
+            return {"raw_file_count": 2, "series_count": 1}
+
+        def refresh_third_party_providers(self):
+            return {
+                "provider_count": 2,
+                "available_count": 2,
+                "providers": [
+                    {
+                        "provider_id": "hg",
+                        "display_name": "红果源",
+                        "status": "available",
+                        "elapsed_ms": 8,
+                        "error_code": "",
+                        "error": "",
+                    },
+                    {
+                        "provider_id": "hm",
+                        "display_name": "HM 源",
+                        "status": "available",
+                        "elapsed_ms": 9,
+                        "error_code": "",
+                        "error": "",
+                    },
+                ],
+            }
+
+    class HealthyCaptureClient:
+        def __init__(self, base_url):
+            assert base_url == "http://127.0.0.1:8776"
+
+        def health(self):
+            return {"status": "ok"}
+
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI, "HongguoDramaClient", FakeClient)
+    monkeypatch.setattr(WebGUI, "HongguoVideoCaptureClient", HealthyCaptureClient)
+
+    response = await WebGUI.test_hongguo_drama_interface(
+        WebGUI.HongguoDramaSettingsRequest(
+            config_url="https://secret.example.test/?code=secret-code"
+        )
+    )
+
+    assert response["status"] == "success"
+    assert [item["id"] for item in response["checks"]] == [
+        "capture_directory",
+        "capture_service",
+        "third_party",
+    ]
+    assert all(item["status"] == "success" for item in response["checks"])
+    assert response["capture_service_status"] == "ok"
+    assert response["third_party"]["available_count"] == 2
+    serialized = json.dumps(response, ensure_ascii=False)
+    assert "secret-code" not in serialized
+    assert "secret.example" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_drama_interface_test_keeps_other_checks_when_capture_service_fails(
+    tmp_path, monkeypatch
+):
+    calls: list[str] = []
+
+    class FakeClient:
+        def __init__(self, settings):
+            self.settings = {
+                "capture_root": str(tmp_path),
+                "capture_service_url": "http://127.0.0.1:8776",
+                "wait_timeout_seconds": 600,
+                "activation_code": "",
+            }
+
+        def refresh_interfaces(self):
+            calls.append("directory")
+            return {"raw_file_count": 1, "series_count": 1}
+
+        def refresh_third_party_providers(self):
+            calls.append("third_party")
+            return {
+                "provider_count": 2,
+                "available_count": 1,
+                "providers": [
+                    {
+                        "provider_id": "hg",
+                        "display_name": "红果源",
+                        "status": "available",
+                        "elapsed_ms": 5,
+                        "error_code": "",
+                        "error": "",
+                    },
+                    {
+                        "provider_id": "hm",
+                        "display_name": "HM 源",
+                        "status": "error",
+                        "elapsed_ms": 7,
+                        "error_code": "provider_unavailable",
+                        "error": "来源接口连接失败",
+                    },
+                ],
+            }
+
+    class FailedCaptureClient:
+        def __init__(self, base_url):
+            pass
+
+        def health(self):
+            calls.append("service")
+            raise RuntimeError("https://secret.example.test/?code=secret-code")
+
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI, "HongguoDramaClient", FakeClient)
+    monkeypatch.setattr(WebGUI, "HongguoVideoCaptureClient", FailedCaptureClient)
+
+    response = await WebGUI.test_hongguo_drama_interface(
+        WebGUI.HongguoDramaSettingsRequest()
+    )
+
+    assert response["status"] == "partial"
+    assert calls == ["directory", "service", "third_party"]
+    assert [item["status"] for item in response["checks"]] == [
+        "success",
+        "error",
+        "partial",
+    ]
+    assert response["capture_service_status"] == "error"
+    assert "HM 源" in response["checks"][2]["message"]
+    serialized = json.dumps(response, ensure_ascii=False)
+    assert "secret-code" not in serialized
+    assert "secret.example" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_drama_interface_test_returns_200_when_all_completed_checks_fail(
+    tmp_path, monkeypatch
+):
+    class FailedClient:
+        def __init__(self, settings):
+            self.settings = {
+                "capture_root": str(tmp_path),
+                "capture_service_url": "http://127.0.0.1:8776",
+                "wait_timeout_seconds": 600,
+                "activation_code": "",
+            }
+
+        def refresh_interfaces(self):
+            raise HongguoDramaError("D:\\secret\\capture 不存在")
+
+        def refresh_third_party_providers(self):
+            raise HongguoDramaError(
+                "https://secret.example.test/?code=secret-code"
+            )
+
+    class FailedCaptureClient:
+        def __init__(self, base_url):
+            pass
+
+        def health(self):
+            return {"status": "starting"}
+
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI, "HongguoDramaClient", FailedClient)
+    monkeypatch.setattr(WebGUI, "HongguoVideoCaptureClient", FailedCaptureClient)
+
+    response = await WebGUI.test_hongguo_drama_interface(
+        WebGUI.HongguoDramaSettingsRequest()
+    )
+
+    assert isinstance(response, dict)
+    assert response["status"] == "error"
+    assert all(item["status"] == "error" for item in response["checks"])
+    serialized = json.dumps(response, ensure_ascii=False)
+    assert "secret-code" not in serialized
+    assert "secret.example" not in serialized
+    assert "D:\\secret" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_drama_interface_test_returns_400_only_for_invalid_settings(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+
+    response = await WebGUI.test_hongguo_drama_interface(
+        WebGUI.HongguoDramaSettingsRequest(capture_root="relative/path")
+    )
+
+    assert response.status_code == 400
+    assert json.loads(response.body)["status"] == "error"
 
 
 def test_paid_content_policy_requires_explicit_provider_signal():
@@ -38,6 +320,256 @@ def test_paid_content_policy_requires_explicit_provider_signal():
     assert paid_content_reason({"desc": "VIP会员短剧完整版"}) == ""
     assert paid_content_reason({"is_paid_content": True}) == "接口标记 is_paid_content"
     assert paid_content_reason({"series_paid_info": {"price": 199}}) == "接口标记 series_paid_info.price=199"
+
+
+def test_hongguo_client_routes_remote_search_and_episodes_to_selected_provider(
+    tmp_path, monkeypatch
+):
+    candidate = DramaCandidate(
+        provider_id="hm",
+        series_ref="hm-book-1",
+        title="目标短剧",
+        episode_count=12,
+    )
+    episode = DramaEpisode(
+        provider_id="hm",
+        series_ref="hm-book-1",
+        episode_ref="hm-video-1",
+        episode=1,
+        title="第一集",
+    )
+
+    class FakeProvider:
+        def episodes(self, series_ref):
+            assert series_ref == "hm-book-1"
+            return [episode]
+
+    class FakeRegistry:
+        def search_exact_all(self, title):
+            assert title == "目标短剧"
+            return ProviderSearchReport(
+                candidates=(candidate,),
+                providers=(
+                    ProviderSearchStatus(
+                        provider_id="hm",
+                        display_name="HM 源",
+                        status="available",
+                        elapsed_ms=5,
+                        candidates=(candidate,),
+                    ),
+                ),
+            )
+
+        def get(self, provider_id):
+            assert provider_id == "hm"
+            return FakeProvider()
+
+    monkeypatch.setattr(
+        hongguo_drama,
+        "build_third_party_registry",
+        lambda settings, timeout=20: FakeRegistry(),
+    )
+    client = HongguoDramaClient(
+        {
+            "config_url": "https://config.example.test",
+            "activation_code": "secret",
+            "capture_root": str(tmp_path),
+            "capture_service_url": "http://127.0.0.1:8776",
+            "wait_timeout_seconds": 600,
+        }
+    )
+
+    matches = client.search_exact_all_sources("目标短剧")
+    episodes = client.episodes("hm-book-1", "hm")
+
+    assert matches == [candidate.public_dict()]
+    assert episodes == [episode.public_dict()]
+    assert client.search_provider_groups("目标短剧")["providers"][0][
+        "provider_id"
+    ] == "hm"
+
+
+def test_hongguo_suggest_queries_providers_and_deduplicates_normalized_titles(
+    tmp_path, monkeypatch
+):
+    third_party = DramaCandidate(
+        provider_id="hm", series_ref="hm-1", title="目标 短剧"
+    )
+    duplicate = DramaCandidate(
+        provider_id="hg", series_ref="hg-1", title="目标短剧"
+    )
+    capture_only = DramaCandidate(
+        provider_id="hongguo_capture", series_ref="capture-2", title="目标短剧续篇"
+    )
+
+    class FakeRegistry:
+        def search_all(self, title):
+            assert title == "目标"
+            return ProviderSearchReport(
+                candidates=(third_party, duplicate), providers=()
+            )
+
+    class FakeCatalog:
+        def suggest(self, title, limit):
+            assert (title, limit) == ("目标", 8)
+            return [duplicate, capture_only]
+
+    monkeypatch.setattr(
+        hongguo_drama,
+        "build_third_party_registry",
+        lambda settings, timeout=20: FakeRegistry(),
+    )
+    client = HongguoDramaClient(
+        {
+            "capture_root": str(tmp_path),
+            "capture_service_url": "http://127.0.0.1:8776",
+            "wait_timeout_seconds": 600,
+        }
+    )
+    client.catalog = FakeCatalog()
+
+    suggestions = client.suggest_all("目标", 8)
+
+    assert [(item["provider_id"], item["title"]) for item in suggestions] == [
+        ("hm", "目标 短剧"),
+        ("hongguo_capture", "目标短剧续篇"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_download_search_api_returns_provider_groups_and_flat_candidates(
+    tmp_path, monkeypatch
+):
+    class FakeClient:
+        def __init__(self, settings):
+            pass
+
+        def search_provider_groups(self, title):
+            assert title == "目标短剧"
+            candidate = {
+                "provider_id": "hm",
+                "source_platform": "hm",
+                "series_ref": "hm-book-1",
+                "book_id": "hm-book-1",
+                "title": title,
+                "cover": "",
+                "summary": "",
+                "episode_count": 12,
+            }
+            return {
+                "candidates": [candidate],
+                "providers": [
+                    {
+                        "provider_id": "hm",
+                        "display_name": "HM 源",
+                        "status": "available",
+                        "elapsed_ms": 8,
+                        "candidates": [candidate],
+                        "error_code": "",
+                        "error": "",
+                    },
+                    {
+                        "provider_id": "hg",
+                        "display_name": "红果源",
+                        "status": "error",
+                        "elapsed_ms": 12,
+                        "candidates": [],
+                        "error_code": "provider_unavailable",
+                        "error": "来源暂时不可用",
+                    },
+                ],
+                "capture_candidates": [],
+                "capture_error": "",
+            }
+
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI, "HongguoDramaClient", FakeClient)
+
+    response = await WebGUI.search_hongguo_drama_for_download(
+        WebGUI.HongguoDramaSearchRequest(title="目标短剧")
+    )
+
+    assert response["status"] == "success"
+    assert response["source"] == "hongguo_providers"
+    assert response["candidates"][0]["provider_id"] == "hm"
+    assert response["providers"][1]["error_code"] == "provider_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_suggest_api_returns_provider_suggestions_without_douyin_fallback(
+    tmp_path, monkeypatch
+):
+    class FakeClient:
+        def __init__(self, settings):
+            pass
+
+        def suggest_all(self, title, limit):
+            assert (title, limit) == ("目标", 8)
+            return [
+                {
+                    "provider_id": "hm",
+                    "source_platform": "hm",
+                    "series_ref": "hm-1",
+                    "book_id": "hm-1",
+                    "title": "目标短剧",
+                }
+            ]
+
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI, "HongguoDramaClient", FakeClient)
+
+    response = await WebGUI.suggest_hongguo_drama(
+        WebGUI.HongguoDramaSearchRequest(title="目标")
+    )
+
+    assert response["source"] == "hongguo_providers"
+    assert response["candidates"][0]["provider_id"] == "hm"
+
+
+@pytest.mark.asyncio
+async def test_episodes_api_accepts_provider_identity_fields(tmp_path, monkeypatch):
+    calls = []
+
+    class FakeClient:
+        def __init__(self, settings):
+            pass
+
+        def episodes(self, series_ref, provider_id):
+            calls.append((series_ref, provider_id))
+            return [
+                {
+                    "provider_id": provider_id,
+                    "source_platform": provider_id,
+                    "series_ref": series_ref,
+                    "book_id": series_ref,
+                    "episode_ref": "hm-video-1",
+                    "video_id": "hm-video-1",
+                    "episode": 1,
+                    "title": "第一集",
+                    "is_paid": False,
+                    "paid_reason": "",
+                }
+            ]
+
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI, "HongguoDramaClient", FakeClient)
+    monkeypatch.setattr(
+        WebGUI, "downloaded_hongguo_episode_statuses", lambda title: {}
+    )
+
+    response = await WebGUI.get_hongguo_drama_episodes(
+        WebGUI.HongguoDramaEpisodesRequest(
+            book_id="",
+            source_platform="",
+            series_ref="hm-book-1",
+            provider_id="hm",
+            title="目标短剧",
+        )
+    )
+
+    assert response["status"] == "success"
+    assert response["episodes"][0]["provider_id"] == "hm"
+    assert calls == [("hm-book-1", "hm")]
 
 
 def test_douyin_search_normalization_expands_mix_items_and_preserves_order():
@@ -179,7 +711,7 @@ def test_douyin_review_worker_command_is_specialized():
 
     command = build_worker_command("job.json", platform="dy", crawler_type="drama_reviews")
 
-    assert command[4:6] == ["agents.douyin_review_worker", "--job-file"]
+    assert command[2:4] == ["agents.douyin_review_worker", "--job-file"]
 
 
 def test_douyin_review_jobs_can_run_for_different_dramas_at_once():
@@ -210,6 +742,7 @@ def test_douyin_fallback_uses_local_playwright_browser_when_runtime_path_is_over
     assert local_playwright_chromium_executable() == executable
 
 
+@legacy_remote_contract
 def test_hongguo_drama_settings_hide_activation_code(tmp_path):
     save_settings(tmp_path, config_url="https://config.example.test", activation_code="secret-code")
 
@@ -222,6 +755,45 @@ def test_hongguo_drama_settings_hide_activation_code(tmp_path):
     }
 
 
+@legacy_remote_contract
+@pytest.mark.asyncio
+async def test_hongguo_interface_test_validates_authenticated_search(
+    tmp_path, monkeypatch
+):
+    calls = []
+
+    class FakeClient:
+        def __init__(self, settings):
+            calls.append(("settings", settings))
+
+        def refresh_interfaces(self):
+            calls.append(("refresh",))
+            return {
+                "search": "https://api.example.test/search",
+                "book": "https://api.example.test/book",
+                "play": "https://api.example.test/play",
+            }
+
+        def search(self, title, page=1, source_platform="hg"):
+            calls.append(("search", title, page, source_platform))
+            return []
+
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI, "HongguoDramaClient", FakeClient)
+
+    response = await WebGUI.test_hongguo_drama_interface(
+        WebGUI.HongguoDramaSettingsRequest(
+            config_url="https://config.example.test",
+            activation_code="valid-code",
+        )
+    )
+
+    assert response["status"] == "success"
+    assert response["message"] == "配置中心和红果接口鉴权可用"
+    assert calls[-1] == ("search", "接口连通测试", 1, "hg")
+
+
+@legacy_remote_contract
 def test_hongguo_drama_client_uses_dynamic_interface_config(monkeypatch):
     client = HongguoDramaClient({"config_url": "https://config.example.test", "activation_code": ""})
     calls = []
@@ -252,6 +824,7 @@ def test_hongguo_drama_client_uses_dynamic_interface_config(monkeypatch):
     assert calls[1] == ("https://api.example.test/search", {"name": "测试短剧", "page": 1, "platform": "hg"})
 
 
+@legacy_remote_contract
 def test_hongguo_download_search_checks_all_remote_sources_before_fallback(
     monkeypatch,
 ):
@@ -290,6 +863,7 @@ def test_hongguo_download_search_checks_all_remote_sources_before_fallback(
     assert [params["platform"] for _, params in calls[1:]] == list(sources)
 
 
+@legacy_remote_contract
 def test_hongguo_request_keeps_config_platform_and_appends_selected_source():
     client = HongguoDramaClient({"config_url": "", "activation_code": "code-1"})
 
@@ -306,6 +880,7 @@ def test_hongguo_request_keeps_config_platform_and_appends_selected_source():
     assert ("code", "code-1") in pairs
 
 
+@legacy_remote_contract
 def test_hongguo_download_uses_the_selected_source_for_episodes_and_playback(
     monkeypatch,
 ):
@@ -391,6 +966,7 @@ def test_hongguo_drama_download_resumes_from_partial_file_and_reports_bytes(tmp_
     assert progress[-1] == (6, 6)
 
 
+@legacy_remote_contract
 def test_hongguo_drama_exact_search_filters_related_titles(monkeypatch):
     client = HongguoDramaClient({"config_url": "https://config.example.test", "activation_code": ""})
     def fake_search(title, page=1):
@@ -407,6 +983,7 @@ def test_hongguo_drama_exact_search_filters_related_titles(monkeypatch):
     assert [item["book_id"] for item in matches] == ["exact", "same"]
 
 
+@legacy_remote_contract
 def test_hongguo_drama_client_rejects_out_of_range_episode_data(monkeypatch):
     client = HongguoDramaClient({"config_url": "https://config.example.test", "activation_code": ""})
     client.interfaces = {"search": "search", "book": "book", "play": "play"}
@@ -416,6 +993,7 @@ def test_hongguo_drama_client_rejects_out_of_range_episode_data(monkeypatch):
         client.episodes("book-1")
 
 
+@legacy_remote_contract
 def test_hongguo_client_marks_paid_episode_and_rejects_paid_play_url(monkeypatch):
     client = HongguoDramaClient({"config_url": "", "activation_code": ""})
     client.interfaces = {"search": "search", "book": "book", "play": "play"}
@@ -433,6 +1011,7 @@ def test_hongguo_client_marks_paid_episode_and_rejects_paid_play_url(monkeypatch
         client.play_url("video-paid")
 
 
+@legacy_remote_contract
 def test_hongguo_drama_client_keeps_configured_query_parameters():
     client = HongguoDramaClient({"config_url": "", "activation_code": "secret-code"})
 
@@ -467,6 +1046,222 @@ def test_hongguo_download_worker_is_selected_for_download_jobs():
     assert command[-3:] == ["agents.hongguo_drama_download_worker", "--job-file", ".runtime/jobs/drama.json"]
 
 
+def test_download_worker_uses_only_the_selected_third_party_provider(
+    tmp_path, monkeypatch
+):
+    actions = []
+
+    class FakeProvider:
+        provider_id = "hm"
+
+        def resolve_playable(self, series_ref, episode_ref):
+            actions.append(("resolve", series_ref, episode_ref))
+            return PlayableMedia(
+                provider_id="hm",
+                series_ref=series_ref,
+                episode_ref=episode_ref,
+                url="https://video.example.test/1.mp4",
+            )
+
+        def download_episode(self, media, target, **kwargs):
+            actions.append(("download", media.provider_id, media.episode_ref))
+            Path(target).write_bytes(b"third-party-video")
+            return DownloadResult(
+                provider_id="hm",
+                path=Path(target),
+                bytes=17,
+                metadata={
+                    "series_ref": media.series_ref,
+                    "episode_ref": media.episode_ref,
+                },
+            )
+
+    class FakeClient:
+        def __init__(self, settings):
+            pass
+
+        def refresh_interfaces(self):
+            raise AssertionError("第三方任务不应校验抓包目录")
+
+        def episodes(self, series_ref, provider_id):
+            actions.append(("episodes", provider_id, series_ref))
+            return [
+                {
+                    "episode": 1,
+                    "video_id": "hm-video-1",
+                    "episode_ref": "hm-video-1",
+                    "title": "第一集",
+                    "is_paid": False,
+                    "paid_reason": "",
+                }
+            ]
+
+        def provider(self, provider_id):
+            actions.append(("provider", provider_id))
+            return FakeProvider()
+
+    class UnexpectedCaptureClient:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("第三方任务不得调用 8776")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(hongguo_drama_download_worker, "HongguoDramaClient", FakeClient)
+    monkeypatch.setattr(hongguo_drama_download_worker, "load_settings", lambda: {})
+    monkeypatch.setattr(
+        hongguo_drama_download_worker,
+        "HongguoVideoCaptureClient",
+        UnexpectedCaptureClient,
+    )
+    monkeypatch.setattr(hongguo_drama_download_worker, "emit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        hongguo_third_party_downloader,
+        "validate_downloaded_mp4",
+        lambda _path: None,
+    )
+    job = CrawlJob(
+        job_id="third-party-download",
+        platform="hg",
+        crawler_type="drama_download",
+        extra={
+            "title": "目标短剧",
+            "book_id": "hm-book-1",
+            "series_ref": "hm-book-1",
+            "episodes": [1],
+            "source_platform": "hm",
+            "provider_id": "hm",
+        },
+    )
+
+    hongguo_drama_download_worker.run(job)
+
+    assert actions == [
+        ("episodes", "hm", "hm-book-1"),
+        ("provider", "hm"),
+        ("resolve", "hm-book-1", "hm-video-1"),
+        ("download", "hm", "hm-video-1"),
+    ]
+    root = (
+        tmp_path
+        / "data"
+        / "hg"
+        / "jobs"
+        / "third-party-download"
+        / "dramas"
+        / "目标短剧"
+    )
+    source = json.loads((root / "episode_01" / "source.json").read_text("utf-8"))
+    manifest = json.loads((root / "manifest.json").read_text("utf-8"))
+    assert source["source_platform"] == "hm"
+    assert manifest["items"][0]["status"] == "succeeded"
+    assert "https://" not in json.dumps({"source": source, "manifest": manifest})
+
+
+def test_analysis_worker_uses_selected_third_party_provider_before_asr(
+    tmp_path, monkeypatch
+):
+    actions = []
+
+    class FakeProvider:
+        provider_id = "hm"
+
+        def resolve_playable(self, series_ref, episode_ref):
+            actions.append(("resolve", series_ref, episode_ref))
+            return PlayableMedia(
+                provider_id="hm",
+                series_ref=series_ref,
+                episode_ref=episode_ref,
+                url="https://video.example.test/1.mp4",
+            )
+
+        def download_episode(self, media, target, **kwargs):
+            actions.append(("download", media.provider_id, media.episode_ref))
+            Path(target).write_bytes(b"third-party-video")
+            return DownloadResult("hm", Path(target), 17, {})
+
+    class FakeClient:
+        def __init__(self, settings):
+            pass
+
+        def refresh_interfaces(self):
+            raise AssertionError("第三方任务不应校验抓包目录")
+
+        def episodes(self, series_ref, provider_id):
+            actions.append(("episodes", provider_id, series_ref))
+            return [
+                {
+                    "episode": 1,
+                    "video_id": "hm-video-1",
+                    "episode_ref": "hm-video-1",
+                    "title": "第一集",
+                    "subtitle_url": "",
+                    "is_paid": False,
+                    "paid_reason": "",
+                }
+            ]
+
+        def provider(self, provider_id):
+            return FakeProvider()
+
+        def fetch_subtitle_text(self, subtitle_url):
+            return ""
+
+    class FakeASR:
+        async def transcribe(self, audio_path):
+            actions.append(("asr", Path(audio_path).name))
+            return {"source": "asr", "text": "第三方视频转写", "segments": []}
+
+    async def fake_convert(video_path, audio_path, ffmpeg_path):
+        actions.append(("audio", Path(video_path).name))
+        Path(audio_path).write_bytes(b"wav")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(hongguo_drama_worker, "HongguoDramaClient", FakeClient)
+    monkeypatch.setattr(hongguo_drama_worker, "load_settings", lambda: {})
+    monkeypatch.setattr(hongguo_drama_worker, "convert_audio_to_wav", fake_convert)
+    monkeypatch.setattr(hongguo_drama_worker, "create_asr_provider", lambda: FakeASR())
+    monkeypatch.setattr(hongguo_drama_worker, "emit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        hongguo_third_party_downloader,
+        "validate_downloaded_mp4",
+        lambda _path: None,
+    )
+    job = CrawlJob(
+        job_id="third-party-analysis",
+        platform="hg",
+        crawler_type="drama_analysis",
+        extra={
+            "title": "目标短剧",
+            "book_id": "hm-book-1",
+            "episode": 1,
+            "source_platform": "hm",
+            "provider_id": "hm",
+        },
+    )
+
+    hongguo_drama_worker.run(job)
+
+    assert actions == [
+        ("episodes", "hm", "hm-book-1"),
+        ("resolve", "hm-book-1", "hm-video-1"),
+        ("download", "hm", "hm-video-1"),
+        ("audio", "video.mp4"),
+        ("asr", "audio.wav"),
+    ]
+    script = (
+        tmp_path
+        / "data"
+        / "hg"
+        / "jobs"
+        / "third-party-analysis"
+        / "dramas"
+        / "目标短剧"
+        / "episode_01"
+        / "script.md"
+    ).read_text("utf-8")
+    assert "第三方视频转写" in script
+
+
+@legacy_remote_contract
 def test_drama_worker_retries_download_and_writes_media_and_script(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     attempts = []
@@ -665,6 +1460,7 @@ def test_douyin_fallback_worker_downloads_multiple_items_and_skips_paid(tmp_path
     assert any(item[2].get("downloaded_bytes") == 10 for item in progress_events)
 
 
+@legacy_remote_contract
 def test_hongguo_download_worker_supports_selected_episodes(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     events = []
@@ -711,6 +1507,7 @@ def test_hongguo_download_worker_supports_selected_episodes(tmp_path, monkeypatc
     assert any("正在下载" in item[1] and 0 < item[2]["percent"] < 100 for item in progress_events)
 
 
+@legacy_remote_contract
 def test_hongguo_download_worker_skips_paid_episode_and_continues(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
@@ -753,6 +1550,7 @@ def test_hongguo_download_worker_skips_paid_episode_and_continues(tmp_path, monk
     assert (root / "episode_02" / "video.mp4").exists()
 
 
+@legacy_remote_contract
 def test_hongguo_download_worker_skips_when_refreshed_url_becomes_paid(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
@@ -955,13 +1753,61 @@ async def test_download_status_reports_a_local_douyin_full_drama(tmp_path, monke
     }
 
 
+@legacy_remote_contract
+@pytest.mark.asyncio
+async def test_drama_search_api_returns_only_exact_matches_from_all_configured_sources(
+    tmp_path, monkeypatch
+):
+    class FakeClient:
+        def __init__(self, settings):
+            pass
+
+        def search(self, title):
+            return [{"book_id": "partial-1", "title": f"{title} 番外"}]
+
+        def search_exact_all_sources(self, title):
+            return [
+                {
+                    "book_id": "exact-1",
+                    "title": title,
+                    "source_platform": "hm",
+                    "raw": {"provider_only": True},
+                }
+            ]
+
+    class UnexpectedFallbackClient:
+        async def search(self, title):
+            raise AssertionError("精确匹配存在时不应调用抖音降级")
+
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI, "HongguoDramaClient", FakeClient)
+    monkeypatch.setattr(WebGUI, "DouyinDramaFallbackClient", UnexpectedFallbackClient)
+
+    response = await WebGUI.search_hongguo_drama(
+        WebGUI.HongguoDramaSearchRequest(title="测试短剧")
+    )
+
+    assert response == {
+        "status": "success",
+        "source": "hongguo",
+        "candidates": [
+            {
+                "book_id": "exact-1",
+                "title": "测试短剧",
+                "source_platform": "hm",
+            }
+        ],
+    }
+
+
+@legacy_remote_contract
 @pytest.mark.asyncio
 async def test_drama_search_api_hides_raw_provider_record(tmp_path, monkeypatch):
     class FakeClient:
         def __init__(self, settings):
             pass
 
-        def search(self, title):
+        def search_exact_all_sources(self, title):
             return [{"book_id": "book-1", "title": title, "raw": {"provider_only": True}}]
 
     class UnexpectedFallbackClient:
@@ -1176,13 +2022,14 @@ async def test_review_capture_status_returns_failed_job_without_gateway_error(mo
     }
 
 
+@legacy_remote_contract
 @pytest.mark.asyncio
 async def test_drama_search_falls_back_to_douyin_after_hongguo_empty(tmp_path, monkeypatch):
     class EmptyHongguoClient:
         def __init__(self, settings):
             pass
 
-        def search(self, title):
+        def search_exact_all_sources(self, title):
             return []
 
     class FakeFallbackClient:
@@ -1196,17 +2043,18 @@ async def test_drama_search_falls_back_to_douyin_after_hongguo_empty(tmp_path, m
     response = await WebGUI.search_hongguo_drama(WebGUI.HongguoDramaSearchRequest(title="测试短剧"))
 
     assert response["source"] == "douyin_fallback"
-    assert response["fallback_reason"] == "红果未找到匹配剧目"
+    assert response["fallback_reason"] == "七个剧目源均未返回剧名完全匹配结果"
     assert response["candidates"][0]["aweme_id"] == "aweme-1"
 
 
+@legacy_remote_contract
 @pytest.mark.asyncio
 async def test_drama_search_falls_back_to_douyin_after_hongguo_error(tmp_path, monkeypatch):
     class BrokenHongguoClient:
         def __init__(self, settings):
             pass
 
-        def search(self, title):
+        def search_exact_all_sources(self, title):
             raise HongguoDramaError("请求接口失败: HTTP 401")
 
     class FakeFallbackClient:
@@ -1223,6 +2071,7 @@ async def test_drama_search_falls_back_to_douyin_after_hongguo_error(tmp_path, m
     assert "HTTP 401" in response["fallback_reason"]
 
 
+@legacy_remote_contract
 @pytest.mark.asyncio
 async def test_download_search_calls_douyin_when_no_exact_hongguo_match(tmp_path, monkeypatch):
     class HongguoClient:
@@ -1247,6 +2096,31 @@ async def test_download_search_calls_douyin_when_no_exact_hongguo_match(tmp_path
     assert response["candidates"][0]["aweme_id"] == "aweme-9"
 
 
+@legacy_remote_contract
+@pytest.mark.asyncio
+async def test_download_search_reuses_a_recent_title_result(tmp_path, monkeypatch):
+    calls = []
+
+    class HongguoClient:
+        def __init__(self, settings):
+            pass
+
+        def search_exact_all_sources(self, title):
+            calls.append(title)
+            return [{"book_id": "book-9", "title": title, "source_platform": "redguo"}]
+
+    monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(WebGUI, "HongguoDramaClient", HongguoClient)
+    monkeypatch.setattr(WebGUI, "_drama_download_search_cache", {})
+
+    first = await WebGUI.search_hongguo_drama_for_download(WebGUI.HongguoDramaSearchRequest(title="测试短剧"))
+    second = await WebGUI.search_hongguo_drama_for_download(WebGUI.HongguoDramaSearchRequest(title="测试短剧"))
+
+    assert calls == ["测试短剧"]
+    assert second == first
+
+
+@legacy_remote_contract
 @pytest.mark.asyncio
 async def test_download_search_waits_for_all_sources_before_douyin_fallback(
     tmp_path, monkeypatch
@@ -1275,6 +2149,7 @@ async def test_download_search_waits_for_all_sources_before_douyin_fallback(
     ]
 
 
+@legacy_remote_contract
 @pytest.mark.asyncio
 async def test_download_search_does_not_call_douyin_when_exact_hongguo_match_exists(tmp_path, monkeypatch):
     class HongguoClient:
@@ -1298,6 +2173,7 @@ async def test_download_search_does_not_call_douyin_when_exact_hongguo_match_exi
     assert response["candidates"] == [{"book_id": "book-9", "title": "测试短剧"}]
 
 
+@legacy_remote_contract
 @pytest.mark.asyncio
 async def test_download_search_reports_douyin_fallback_when_douyin_is_unavailable(tmp_path, monkeypatch):
     class EmptyHongguoClient:
@@ -1321,6 +2197,7 @@ async def test_download_search_reports_douyin_fallback_when_douyin_is_unavailabl
     assert response.body and b'"source":"douyin_fallback"' in response.body
 
 
+@legacy_remote_contract
 @pytest.mark.asyncio
 async def test_download_search_returns_json_when_douyin_browser_startup_crashes(tmp_path, monkeypatch):
     class EmptyHongguoClient:
@@ -1366,9 +2243,10 @@ async def test_douyin_fallback_job_accepts_ordered_multiple_aweme_ids(monkeypatc
     monkeypatch.setattr(WebGUI.job_manager, "create_job", fake_create)
     monkeypatch.setattr(WebGUI, "_public_created_job", lambda state: state.to_dict())
     monkeypatch.setattr(
-        WebGUI, "_job_task_context", lambda *args, **kwargs: ("task-source", None)
+        WebGUI,
+        "_resolve_download_topic",
+        lambda **kwargs: {"id": 17, "title": kwargs["title"], "status": "adopted"},
     )
-    monkeypatch.setattr(WebGUI.workflow_repository, "link_task_job", lambda *args: None)
     monkeypatch.setattr(WebGUI, "_record_job_audit", lambda *args, **kwargs: None)
 
     response = await WebGUI.create_douyin_fallback_drama_job(
@@ -1382,20 +2260,23 @@ async def test_douyin_fallback_job_accepts_ordered_multiple_aweme_ids(monkeypatc
     )
 
     assert response["status"] == "success"
+    assert response["topic"]["id"] == 17
     assert captured["job"].extra["aweme_ids"] == ["aweme-2", "aweme-1"]
     assert captured["job"].extra["aweme_id"] == "aweme-2"
+    assert captured["ownership"]["workflow_task_id"] is None
+    assert captured["ownership"]["project_id"] is None
 
 
+@legacy_remote_contract
 @pytest.mark.asyncio
-async def test_drama_suggest_returns_hongguo_candidates_without_douyin_fallback(tmp_path, monkeypatch):
+async def test_drama_suggest_returns_exact_hongguo_candidates_without_douyin_fallback(tmp_path, monkeypatch):
     class FakeClient:
         def __init__(self, settings):
             pass
 
-        def search(self, title):
+        def search_exact_all_sources(self, title):
             return [
                 {"book_id": "book-1", "title": title, "raw": {"secret": True}},
-                {"book_id": "book-2", "title": "另一个剧"},
             ]
 
     class UnexpectedFallbackClient:
@@ -1411,10 +2292,10 @@ async def test_drama_suggest_returns_hongguo_candidates_without_douyin_fallback(
     assert response["source"] == "hongguo"
     assert response["candidates"] == [
         {"book_id": "book-1", "title": "测试"},
-        {"book_id": "book-2", "title": "另一个剧"},
     ]
 
 
+@legacy_remote_contract
 @pytest.mark.asyncio
 async def test_drama_interface_test_uses_unsaved_form_settings(tmp_path, monkeypatch):
     class FakeClient:
@@ -1425,6 +2306,12 @@ async def test_drama_interface_test_uses_unsaved_form_settings(tmp_path, monkeyp
             assert self.settings["config_url"] == "https://temporary.example.test/config"
             assert self.settings["activation_code"] == "temporary-code"
             return {"search": "https://example.test/search", "book": "https://example.test/book", "play": "https://example.test/play"}
+
+        def search(self, title, page=1, source_platform="hg"):
+            assert title == "接口连通测试"
+            assert page == 1
+            assert source_platform == "hg"
+            return []
 
     monkeypatch.setattr(WebGUI, "WORKSPACE_ROOT", tmp_path)
     monkeypatch.setattr(WebGUI, "HongguoDramaClient", FakeClient)

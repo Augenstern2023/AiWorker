@@ -1,13 +1,19 @@
 (async function () {
     'use strict';
 
-    const form = document.getElementById('delivery-create-form');
-    const submissionSelect = document.getElementById('delivery-submission');
-    const formatSelect = document.getElementById('delivery-format');
-    const history = document.getElementById('delivery-history');
-    if (!form || !submissionSelect || !formatSelect || !history) return;
+    const resources = document.getElementById('generated-resource-list');
+    const search = document.getElementById('generated-resource-search');
+    const stageFilter = document.getElementById('generated-resource-stage-filter');
+    const statusFilter = document.getElementById('generated-resource-status-filter');
+    const generatedAfter = document.getElementById('generated-resource-generated-after');
+    const generatedBefore = document.getElementById('generated-resource-generated-before');
+    const count = document.getElementById('generated-resource-count');
+    const resetFilters = document.getElementById('reset-generated-resource-filters');
+    if (!resources || !search || !stageFilter || !statusFilter || !generatedAfter || !generatedBefore || !count || !resetFilters) return;
 
-    const stageLabels = {brief: 'Brief', characters: '人物关系', outline: '分集大纲', beats: 'Beats'};
+    const stageLabels = {brief: 'Brief', characters: '人物关系', outline: '分集大纲', beats: 'Beats', script: '场次剧本'};
+    const resourceStatusLabels = {draft: '草稿', locked: '已锁定', brief_locked: '已锁定', approved: '已锁定', submitted: '已提交', returned: '已退回'};
+    let generatedResources = [];
 
     function statusMessage(message) {
         const row = document.createElement('tr');
@@ -16,93 +22,143 @@
         cell.className = 'text-center text-muted py-4';
         cell.textContent = message;
         row.appendChild(cell);
-        history.replaceChildren(row);
+        resources.replaceChildren(row);
     }
 
-    async function loadOptions() {
-        const response = await window.aiworkerApi.request('/api/admin/deliveries/options');
-        if (!response.ok) throw new Error('已完成版本加载失败');
-        const {options} = await response.json();
-        submissionSelect.replaceChildren();
-        const empty = document.createElement('option');
-        empty.value = '';
-        empty.textContent = options.length ? '请选择版本' : '暂无已完成版本';
-        submissionSelect.appendChild(empty);
-        for (const item of options) {
-            const option = document.createElement('option');
-            option.value = item.resource_id;
-            option.dataset.projectId = item.project_id;
-            option.dataset.stage = item.stage;
-            option.dataset.workflowTaskId = item.workflow_task_id;
-            option.textContent = `${item.project_name} / ${stageLabels[item.stage] || item.stage} / v${item.resource_version}`;
-            submissionSelect.appendChild(option);
+    function formatsFor(resource) {
+        return resource.stage === 'script'
+            ? [['txt', 'TXT'], ['json', 'JSON']]
+            : [['md', 'Markdown'], ['txt', 'TXT'], ['json', 'JSON']];
+    }
+
+    function downloadUrl(resource, format) {
+        const params = new URLSearchParams({
+            stage: resource.stage,
+            resource_id: resource.resource_id,
+            format,
+        });
+        return `/api/creative/projects/${resource.project_id}/generated-content/download?${params.toString()}`;
+    }
+
+    function formatGeneratedAt(timestamp) {
+        const value = Number(timestamp || 0);
+        if (!value) return '-';
+        return new Intl.DateTimeFormat('zh-CN', {
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+        }).format(new Date(value * 1000));
+    }
+
+    function isWithinGeneratedDateRange(resource) {
+        const timestamp = Number(resource.generated_at || 0) * 1000;
+        if (!timestamp) return !generatedAfter.value && !generatedBefore.value;
+        const after = generatedAfter.value ? new Date(`${generatedAfter.value}T00:00:00`).getTime() : -Infinity;
+        const before = generatedBefore.value ? new Date(`${generatedBefore.value}T23:59:59.999`).getTime() : Infinity;
+        return timestamp >= after && timestamp <= before;
+    }
+
+    function resourceRow(resource) {
+        const row = document.createElement('tr');
+        const values = [
+            resource.project_name,
+            stageLabels[resource.stage] || resource.stage,
+            `v${resource.resource_version}`,
+            resourceStatusLabels[resource.resource_status] || resource.resource_status || '-',
+            formatGeneratedAt(resource.generated_at),
+        ];
+        for (const value of values) {
+            const cell = document.createElement('td');
+            cell.textContent = value;
+            row.appendChild(cell);
         }
+
+        const formatCell = document.createElement('td');
+        const format = document.createElement('select');
+        format.className = 'form-select form-select-sm';
+        format.setAttribute('aria-label', `${resource.project_name} ${stageLabels[resource.stage] || resource.stage} 下载格式`);
+        for (const [value, label] of formatsFor(resource)) {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = label;
+            format.appendChild(option);
+        }
+        formatCell.appendChild(format);
+        row.appendChild(formatCell);
+
+        const action = document.createElement('td');
+        const link = document.createElement('a');
+        link.className = 'btn btn-outline-primary btn-sm';
+        link.title = '下载';
+        link.innerHTML = '<i class="bi bi-download"></i>';
+        link.href = downloadUrl(resource, format.value);
+        format.addEventListener('change', () => {
+            link.href = downloadUrl(resource, format.value);
+        });
+        action.appendChild(link);
+        row.appendChild(action);
+        return row;
     }
 
-    async function loadHistory() {
-        const response = await window.aiworkerApi.request('/api/admin/deliveries');
-        if (!response.ok) throw new Error('交付记录加载失败');
-        const {deliveries} = await response.json();
-        if (!deliveries.length) {
-            statusMessage('暂无交付记录');
+    function applyFilters() {
+        const query = search.value.trim().toLocaleLowerCase();
+        const filtered = generatedResources.filter((resource) => {
+            if (stageFilter.value && resource.stage !== stageFilter.value) return false;
+            if (statusFilter.value) {
+                const matchesLocked = statusFilter.value === 'locked'
+                    && ['locked', 'brief_locked', 'approved'].includes(resource.resource_status);
+                if (!matchesLocked && resource.resource_status !== statusFilter.value) return false;
+            }
+            if (!isWithinGeneratedDateRange(resource)) return false;
+            if (!query) return true;
+            const searchable = [
+                resource.project_name,
+                resource.stage,
+                stageLabels[resource.stage],
+                resource.resource_status,
+                resourceStatusLabels[resource.resource_status],
+                `v${resource.resource_version}`,
+                formatGeneratedAt(resource.generated_at),
+            ].filter(Boolean).join(' ').toLocaleLowerCase();
+            return searchable.includes(query);
+        });
+        count.textContent = `显示 ${filtered.length} / ${generatedResources.length} 条成果`;
+        if (!filtered.length) {
+            statusMessage('没有符合条件的成果');
             return;
         }
-        history.replaceChildren(...deliveries.map((delivery) => {
-            const row = document.createElement('tr');
-            const values = [
-                new Date(delivery.created_at * 1000).toLocaleString(),
-                delivery.project_name,
-                stageLabels[delivery.stage] || delivery.stage,
-                `资源 v${delivery.resource_version} / 快照 v${delivery.submission_version}`,
-                delivery.format.toUpperCase(),
-                delivery.fingerprint.slice(0, 12),
-            ];
-            for (const value of values) {
-                const cell = document.createElement('td');
-                cell.textContent = value;
-                row.appendChild(cell);
-            }
-            const action = document.createElement('td');
-            const link = document.createElement('a');
-            link.className = 'btn btn-outline-primary btn-sm';
-            link.href = `/api/admin/deliveries/${delivery.id}/download`;
-            link.title = '下载';
-            link.innerHTML = '<i class="bi bi-download"></i>';
-            action.appendChild(link);
-            row.appendChild(action);
-            return row;
-        }));
+        resources.replaceChildren(...filtered.map(resourceRow));
     }
 
     async function refresh() {
         try {
-            await Promise.all([loadOptions(), loadHistory()]);
+            const response = await window.aiworkerApi.request('/api/creative/generated-resources');
+            if (!response.ok) throw new Error('已生成成果加载失败');
+            const payload = await response.json();
+            generatedResources = payload.resources || [];
+            if (!generatedResources.length) {
+                count.textContent = '显示 0 / 0 条成果';
+                statusMessage('暂无已生成成果');
+                return;
+            }
+            applyFilters();
         } catch (error) {
-            statusMessage(error.message || '成果交付加载失败');
+            count.textContent = '';
+            statusMessage(error.message || '已生成成果加载失败');
         }
     }
 
-    form.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        const option = submissionSelect.selectedOptions[0];
-        if (!option?.value) return;
-        const response = await window.aiworkerApi.request('/api/admin/deliveries', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                resource_id: option.value,
-                project_id: Number(option.dataset.projectId),
-                stage: option.dataset.stage,
-                format: formatSelect.value,
-                workflow_task_id: option.dataset.workflowTaskId,
-            }),
-        });
-        if (!response.ok) {
-            const body = await response.json().catch(() => ({}));
-            statusMessage(body.detail || '交付生成失败');
-            return;
-        }
-        await refresh();
+    search.addEventListener('input', applyFilters);
+    stageFilter.addEventListener('change', applyFilters);
+    statusFilter.addEventListener('change', applyFilters);
+    generatedAfter.addEventListener('change', applyFilters);
+    generatedBefore.addEventListener('change', applyFilters);
+    resetFilters.addEventListener('click', () => {
+        search.value = '';
+        stageFilter.value = '';
+        statusFilter.value = '';
+        generatedAfter.value = '';
+        generatedBefore.value = '';
+        applyFilters();
     });
     document.getElementById('refresh-deliveries')?.addEventListener('click', refresh);
     await refresh();

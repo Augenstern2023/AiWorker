@@ -1,4 +1,4 @@
 {% extends "layouts/base.html" %}
 
 {% block content %}{% include "common/workspace/admin_analytics.html" %}{% endblock %}
-{% block scripts %}<script src="/static/js/admin/workspace.js"></script>{% endblock %}
+{% block scripts %}<script src="/static/js/echarts.min.js?v={{ asset_version }}"></script><script src="/static/js/admin/workspace.js?v={{ asset_version }}"></script>{% endblock %}

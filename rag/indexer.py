@@ -98,4 +98,3 @@ class RagIndexer:
         if not self.status_path.exists():
             return {"jobs": {}, "recent_errors": []}
         return json.loads(self.status_path.read_text(encoding="utf-8") or "{}")
-

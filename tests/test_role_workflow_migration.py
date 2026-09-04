@@ -15,18 +15,98 @@ from pathlib import Path
 import pytest
 
 from creative.repository import CreativeRepository
-from identity.repository import IdentityRepository
 from scripts.migrate_role_workflow import migrate
 
 
 def _seed_legacy_root(root: Path) -> tuple[str, int]:
     runtime = root / ".runtime"
-    identity = IdentityRepository(runtime / "system" / "system.db")
-    identity.seed_defaults()
-    admin_role = identity.get_role_by_code("system_admin")
-    assert admin_role is not None
-    admin = identity.create_user("bootstrap", "Bootstrap", "hash")
-    identity.replace_user_roles(admin["id"], [admin_role["id"]])
+    system_db = runtime / "system" / "system.db"
+    system_db.parent.mkdir(parents=True, exist_ok=True)
+    admin_id = "legacy-admin"
+    with sqlite3.connect(system_db) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE users (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'active',
+                is_deleted INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE roles (
+                id TEXT PRIMARY KEY,
+                code TEXT NOT NULL,
+                is_enabled INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE user_roles (
+                user_id TEXT NOT NULL,
+                role_id TEXT NOT NULL,
+                PRIMARY KEY (user_id, role_id)
+            );
+            CREATE TABLE workflow_instances (
+                id TEXT PRIMARY KEY,
+                workflow_type TEXT NOT NULL,
+                resource_type TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                project_id TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_by TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE workflow_tasks (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                task_type TEXT NOT NULL,
+                role_code TEXT NOT NULL,
+                topic_id INTEGER,
+                project_id TEXT,
+                assignee_id TEXT,
+                assigned_by TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE workflow_submissions (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                resource_type TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                content_snapshot_json TEXT NOT NULL,
+                content_fingerprint TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                submitted_by TEXT,
+                submitted_at REAL,
+                reviewed_by TEXT,
+                reviewed_at REAL,
+                review_comment TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE TABLE approval_records (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT,
+                task_id TEXT,
+                version_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                reviewer_id TEXT,
+                comment TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO users (id) VALUES (?)",
+            (admin_id,),
+        )
+        connection.execute(
+            "INSERT INTO roles (id, code) VALUES ('role:system_admin', 'system_admin')"
+        )
+        connection.execute(
+            "INSERT INTO user_roles (user_id, role_id) VALUES (?, 'role:system_admin')",
+            (admin_id,),
+        )
 
     creative = CreativeRepository(runtime / "creative" / "creative.db")
     with creative._connect() as connection:
@@ -157,7 +237,7 @@ def _seed_legacy_root(root: Path) -> tuple[str, int]:
             ),
         ).lastrowid
     assert draft_breakdown_id and beats_id
-    return admin["id"], int(project_id)
+    return admin_id, int(project_id)
 
 
 def _table_count(db_path: Path, table: str) -> int:

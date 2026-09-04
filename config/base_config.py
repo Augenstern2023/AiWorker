@@ -135,12 +135,16 @@ RAG_EMBEDDING_API_KEY = ""
 RAG_EMBEDDING_MODEL = "text-embedding-3-small"
 RAG_LLM_BASE_URL = ""
 RAG_LLM_API_KEY = ""
-RAG_LLM_MODEL = "MiniMax-M3"
+# 留空时复用全局 LLM 配置，避免 RAG 文本生成落到另一套模型。
+RAG_LLM_MODEL = ""
 RAG_LLM_PROVIDER = ""
 RAG_LLM_ENV_KEY = ""
 RAG_LLM_WIRE_API = ""
 RAG_LLM_REASONING_EFFORT = ""
 RAG_VECTOR_STORE_DIR = ".runtime/rag/chroma"
+
+# 分集大纲需要在跨批次生成时维持较强的连续性推理。
+CREATIVE_OUTLINE_REASONING_EFFORT = "high"
 
 from .bilibili_config import *
 from .xhs_config import *

@@ -11,120 +11,51 @@ from __future__ import annotations
 import re
 import threading
 from collections import OrderedDict
-from copy import deepcopy
+from collections.abc import Mapping, Sequence
 from typing import Any
 
+from identity.permission_catalog import (
+    DEFAULT_ROLE_PAGE_ROUTES,
+    NAVIGATION_CATALOG,
+    PERMISSIONS,
+)
 from identity.schema import Principal
+from web.page_access_service import PageAccessService
+from web.page_routes import PAGE_ROUTES
 
 
-NAVIGATION_CATALOG = (
-    {
-        "label": "选品工作台",
-        "icon": "bi-funnel",
-        "permission": "page.selection",
-        "route": "/selection/dashboard",
-        "items": (
-            {"label": "工作概览", "route": "/selection/dashboard"},
-            {"label": "今日榜单", "route": "/selection/ranks"},
-            {"label": "今日爆款", "route": "/selection/hits"},
-            {"label": "选题库", "route": "/selection/topics"},
-            {"label": "剧目检索下载", "route": "/selection/dramas"},
-        ),
-    },
-    {
-        "label": "创意策划",
-        "icon": "bi-lightbulb",
-        "permission": "page.planning",
-        "route": "/planning/projects",
-        "items": (
-            {"label": "策划项目", "route": "/planning/projects"},
-        ),
-    },
-    {
-        "label": "编剧工作台",
-        "icon": "bi-pencil-square",
-        "permission": "page.writing",
-        "route": "/writing/projects",
-        "items": (
-            {"label": "编剧项目", "route": "/writing/projects"},
-        ),
-    },
-    {
-        "label": "项目管理",
-        "icon": "bi-kanban",
-        "permission": "page.review",
-        "route": "/review/projects",
-        "items": (
-            {"label": "负责项目", "route": "/review/projects"},
-            {"label": "数据管理", "route": "/admin/data", "permission": "page.data_management"},
-        ),
-    },
-    {
-        "label": "团队管理",
-        "icon": "bi-people",
-        "permission": "page.team_management",
-        "route": "/review/users",
-        "hide_for_system_admin": True,
-        "items": (
-            {"label": "团队账号", "route": "/review/users"},
-            {"label": "角色授权", "route": "/review/roles"},
-        ),
-    },
-    {
-        "label": "系统管理",
-        "icon": "bi-gear",
-        "permission": "*",
-        "route": "/admin/users",
-        "items": (
-            {"label": "用户管理", "route": "/admin/users", "permission": "*"},
-            {"label": "角色权限", "route": "/admin/roles", "permission": "*"},
-            {"label": "系统配置", "route": "/admin/config", "permission": "*"},
-            {"label": "系统后台", "route": "/admin/jobs", "permission": "*"},
-            {
-                "label": "成果交付",
-                "route": "/admin/deliveries",
-                "permission": "*",
-            },
-            {"label": "审计日志", "route": "/admin/audit", "permission": "*"},
-        ),
-    },
-)
+class _CatalogPageAccessRepository:
+    """Provide deny-by-default page access when no persistent service is wired."""
 
-PAGE_ROUTES = (
-    ("/selection/dashboard", "page.selection", "工作概览"),
-    ("/selection/ranks", "page.selection", "今日榜单"),
-    ("/selection/hits", "page.selection", "今日爆款"),
-    ("/selection/topics", "page.selection", "选题库"),
-    ("/selection/dramas", "page.selection", "剧目检索下载"),
-    ("/planning/projects", "page.planning", "策划项目"),
-    ("/planning/projects/{project_id}/brief", "page.planning", "创作任务书"),
-    ("/planning/projects/{project_id}/characters", "page.planning", "人物关系"),
-    ("/writing/projects", "page.writing", "编剧项目"),
-    ("/writing/projects/{project_id}/outlines", "page.writing", "全剧大纲"),
-    (
-        "/writing/projects/{project_id}/episodes/{episode_number}/beats",
-        "page.writing",
-        "单集节拍",
-    ),
-    ("/review/projects", "page.review", "负责项目"),
-    ("/review/users", "page.team_management", "团队账号"),
-    ("/review/roles", "page.team_management", "角色授权"),
-    ("/review/projects/{project_id}/members", "page.review", "项目成员"),
-    ("/review/projects/{project_id}/versions", "page.review", "项目版本"),
-    ("/admin/users", "*", "用户管理"),
-    ("/admin/roles", "*", "角色权限"),
-    ("/admin/config", "*", "系统配置"),
-    ("/admin/data", "page.data_management", "数据管理"),
-    ("/admin/jobs", "*", "机器任务"),
-    ("/admin/deliveries", "*", "成果交付"),
-    ("/admin/audit", "*", "审计日志"),
-)
+    def __init__(self, catalog: Sequence[Mapping[str, Any]]) -> None:
+        self._catalog = tuple(dict(item) for item in catalog)
+
+    def list_items(self) -> list[dict[str, Any]]:
+        return [dict(item) for item in self._catalog]
+
+    def list_page_access_user_ids(self, route: str) -> set[str]:
+        return set()
+
+    def list_role_page_access_routes(self, role_codes: tuple[str, ...]) -> set[str]:
+        return set().union(
+            *(DEFAULT_ROLE_PAGE_ROUTES.get(role_code, frozenset()) for role_code in role_codes)
+        ) if role_codes else set()
 
 
 class NavigationService:
     """Build navigation and landing choices from effective page grants."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        catalog: Sequence[Mapping[str, Any]] = NAVIGATION_CATALOG,
+        *,
+        page_access_service: PageAccessService | None = None,
+    ) -> None:
+        self._registered_routes = frozenset(route for route, _, _ in PAGE_ROUTES)
+        self._catalog = self._validate_catalog(catalog, self._registered_routes)
+        self.page_access_service = page_access_service or PageAccessService(
+            _CatalogPageAccessRepository(self._catalog)
+        )
         self._route_patterns = tuple(
             (self._compile_route(route), permission)
             for route, permission, _ in PAGE_ROUTES
@@ -133,30 +64,97 @@ class NavigationService:
         self._last_routes_lock = threading.Lock()
 
     def items_for(self, principal: Principal) -> list[dict[str, Any]]:
-        visible_groups = []
-        for group in NAVIGATION_CATALOG:
-            if principal.is_system_admin and group.get("hide_for_system_admin"):
+        visible_groups: list[dict[str, Any]] = []
+        children_by_parent: dict[str, list[dict[str, Any]]] = {}
+        roots: list[dict[str, Any]] = []
+        catalog = self._validate_catalog(
+            self.page_access_service.repository.list_items(),
+            self._registered_routes,
+        )
+        for item in catalog:
+            if not item["is_enabled"]:
                 continue
-            items = [
-                deepcopy(item)
-                for item in group["items"]
-                if principal.is_system_admin
-                or item.get("permission", group["permission"])
-                in principal.permissions
-            ]
+            parent_id = item.get("parent_id")
+            if parent_id is None:
+                roots.append(item)
+            else:
+                children_by_parent.setdefault(parent_id, []).append(item)
+
+        for group in roots:
+            if (
+                "system_admin" in principal.role_codes
+                and group["hide_for_system_admin"]
+            ):
+                continue
+            items = []
+            for item in children_by_parent.get(group["id"], []):
+                if self.can_open(principal, item["route"]):
+                    items.append({"label": item["label"], "route": item["route"]})
+            if not items and self.can_open(principal, group["route"]):
+                items.append({"label": group["label"], "route": group["route"]})
             if not items:
                 continue
-            visible_group = deepcopy(group)
-            visible_group["items"] = tuple(items)
-            visible_group["route"] = items[0]["route"]
-            visible_groups.append(visible_group)
+            visible_groups.append(
+                {
+                    "label": group["label"],
+                    "icon": group["icon"],
+                    "route": items[0]["route"],
+                    "items": tuple(items),
+                }
+            )
         return visible_groups
 
+    @staticmethod
+    def _validate_catalog(
+        catalog: Sequence[Mapping[str, Any]], registered_routes: frozenset[str]
+    ) -> tuple[dict[str, Any], ...]:
+        configured: list[dict[str, Any]] = []
+        identifiers: set[str] = set()
+        for raw_item in catalog:
+            item = dict(raw_item)
+            identifier = item.get("id")
+            if not isinstance(identifier, str) or not identifier:
+                raise ValueError("navigation item id is required")
+            if identifier in identifiers:
+                raise ValueError(f"duplicate navigation item id: {identifier}")
+            identifiers.add(identifier)
+            permission = item.get("required_permission")
+            if permission not in PERMISSIONS:
+                raise ValueError(f"unknown permission: {permission}")
+            if not isinstance(item.get("label"), str) or not item["label"]:
+                raise ValueError("navigation item label is required")
+            if not isinstance(item.get("route"), str) or not item["route"].startswith(
+                "/"
+            ):
+                raise ValueError("navigation item route must be an internal path")
+            if item["route"] not in registered_routes:
+                raise ValueError(f"unknown page route: {item['route']}")
+            item.setdefault("parent_id", None)
+            item.setdefault("icon", "")
+            item.setdefault("sort_order", 0)
+            item.setdefault("is_enabled", True)
+            item.setdefault("hide_for_system_admin", False)
+            configured.append(item)
+        for item in configured:
+            parent_id = item["parent_id"]
+            if parent_id is not None and parent_id not in identifiers:
+                raise ValueError(f"unknown navigation parent: {parent_id}")
+        return tuple(
+            sorted(
+                configured,
+                key=lambda item: (
+                    item["parent_id"] is not None,
+                    item["parent_id"] or "",
+                    item["sort_order"],
+                    item["id"],
+                ),
+            )
+        )
+
     def can_open(self, principal: Principal, route: str) -> bool:
-        permission = self.permission_for(route)
-        if permission is None:
-            return route == "/tasks"
-        return principal.is_system_admin or permission in principal.permissions
+        return self.page_access_service.can_open_page(
+            principal, route.split("?", 1)[0]
+        )
 
     def permission_for(self, route: str) -> str | None:
         path = route.split("?", 1)[0]
@@ -166,8 +164,7 @@ class NavigationService:
         return None
 
     def default_route(self, principal: Principal) -> str:
-        items = self.items_for(principal)
-        return items[0]["route"] if items else "/tasks"
+        return "/profile"
 
     def remember_route(self, principal: Principal, route: str) -> None:
         if not self.can_open(principal, route):

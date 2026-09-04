@@ -267,17 +267,19 @@ def test_project_member_add_remove_and_last_owner_guard(
         writer_membership["id"],
     ]
 
-    with pytest.raises(ValueError, match="owner"):
-        repository.remove_project_member(
-            "project-1", owner_membership["id"], admin_user
-        )
+    repository.remove_project_member(
+        "project-1", owner_membership["id"], admin_user
+    )
+    owner_membership = repository.add_project_member(
+        "project-1", owner_user.user_id, "project_owner", admin_user
+    )
 
     manager = repository.add_project_member(
-        "project-1", admin_user.user_id, "manager", admin_user
+        "project-1", writer_user.user_id, "manager", admin_user
     )
     with pytest.raises(ValueError, match="owner"):
         repository.remove_project_member(
-            "project-1", owner_membership["id"], admin_user
+            "project-1", owner_membership["id"], writer_user
         )
     second_owner = repository.add_project_member(
         "project-1", admin_user.user_id, "project_owner", admin_user

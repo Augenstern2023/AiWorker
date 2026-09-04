@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 from fastapi import FastAPI, Request
@@ -30,8 +29,8 @@ from workflow.repository import WorkflowRepository
 
 
 @pytest.fixture
-def repository(tmp_path: Path) -> IdentityRepository:
-    repository = IdentityRepository(tmp_path / "system.db")
+def repository(isolated_system_database) -> IdentityRepository:
+    repository = IdentityRepository(isolated_system_database)
     repository.seed_defaults()
     return repository
 
@@ -128,6 +127,28 @@ def test_audit_redacts_secrets_and_records_request_metadata(
     assert event["request_id"] == "request-123"
     assert event["ip_address"] == "127.0.0.1"
     assert event["user_agent"] == "audit-test"
+
+
+def test_audit_redacts_sensitive_key_value_text_inside_error_summaries(
+    audit_service: AuditService, admin: Principal
+):
+    event_id = audit_service.record(
+        actor=admin,
+        action="schedule.run.failed",
+        target_type="schedule",
+        target_id="run:1",
+        before=None,
+        after={"error_summary": "request failed: token=top-secret password: keep-out"},
+        reason=None,
+        result="failure",
+    )
+
+    event = audit_service.get(event_id)
+
+    assert event is not None
+    assert "top-secret" not in event["after_summary"]["error_summary"]
+    assert "keep-out" not in event["after_summary"]["error_summary"]
+    assert "[REDACTED]" in event["after_summary"]["error_summary"]
 
 
 def test_audit_summaries_are_bounded_and_queries_are_filterable(
@@ -272,8 +293,8 @@ def test_admin_audit_api_requires_permission_and_applies_filters(
     assert client.get("/api/admin/audit").status_code == 401
     # The fixture user has a placeholder hash, so set a real password before login.
     with repository.connect() as connection:
-        connection.execute(
-            "UPDATE users SET password_hash = ? WHERE id = ?",
+        connection.exec_driver_sql(
+            "UPDATE users SET password_hash = %s WHERE id = %s",
             (PasswordService().hash("Admin-Strong-123!"), admin.user_id),
         )
     login = client.post(
@@ -288,6 +309,7 @@ def test_admin_audit_api_requires_permission_and_applies_filters(
     )
     assert response.status_code == 200
     assert [event["action"] for event in response.json()] == ["user.update"]
+    assert response.headers["X-Total-Count"] == "1"
 
 
 def test_logout_and_password_changes_are_audited(repository: IdentityRepository):
@@ -332,25 +354,6 @@ def test_logout_and_password_changes_are_audited(repository: IdentityRepository)
     assert logged_out.status_code == 204
     assert len(audit_service.query(action="auth.password.change")) == 1
     assert len(audit_service.query(action="auth.logout")) == 1
-
-
-def test_legacy_resource_id_is_backfilled_as_target_id(
-    repository: IdentityRepository,
-):
-    with repository.connect() as connection:
-        connection.execute(
-            """
-            INSERT INTO audit_logs (
-                id, action, resource_type, resource_id, details_json
-            ) VALUES ('legacy-event', 'legacy.update', 'legacy_resource', 'legacy-42', '{}')
-            """
-        )
-
-    event = AuditService(repository).get("legacy-event")
-
-    assert event is not None
-    assert event["target_type"] == "legacy_resource"
-    assert event["target_id"] == "legacy-42"
 
 
 def test_audit_read_permission_is_seeded_and_assignable(
@@ -416,6 +419,9 @@ def test_project_audit_reader_is_limited_to_managed_project(
 ):
     role = repository.get_role_by_code("project_owner")
     assert role is not None
+    repository.replace_role_permissions(
+        role["id"], [("audit.read.project", "managed_projects")]
+    )
     user = repository.create_user("audit-owner", "Audit Owner", "hash")
     repository.replace_user_roles(user["id"], [role["id"]])
     owner = PermissionService(repository, SessionService(repository)).principal_for_user(

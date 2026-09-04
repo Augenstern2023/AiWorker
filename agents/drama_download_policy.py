@@ -72,4 +72,3 @@ def paid_content_reason(payload: Any) -> str:
         return ""
 
     return walk(payload)
-

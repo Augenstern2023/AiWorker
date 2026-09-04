@@ -90,19 +90,27 @@ class WorkflowStateMachine:
         permissions = set(_actor_value(actor, "permissions") or ())
         is_admin = "system_admin" in role_codes or "*" in permissions
         can_manage_task = bool(_actor_value(actor, "can_manage_task"))
+        can_edit_project_task = bool(
+            _actor_value(actor, "can_edit_project_task")
+        )
         if requirement == "matching_role":
             claimable_task_types = set(
                 _actor_value(actor, "claimable_task_types") or ()
             )
             if (
                 not is_admin
+                and not can_edit_project_task
                 and task.get("role_code") not in role_codes
                 and task.get("task_type") not in claimable_task_types
             ):
                 raise PermissionError("actor cannot claim this task type")
             return
         if requirement == "assignee":
-            if not is_admin and actor_id != task.get("assignee_user_id"):
+            if (
+                not is_admin
+                and not can_edit_project_task
+                and actor_id != task.get("assignee_user_id")
+            ):
                 raise PermissionError("only the task assignee may perform this action")
             return
         if requirement == "system_admin" and not is_admin:

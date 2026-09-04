@@ -2,25 +2,36 @@
 
 {% block content %}
 <div class="d-flex align-items-center justify-content-between mb-3">
-  <div><h3 class="mb-1">成果交付</h3><div class="small text-muted">从已完成版本生成 Markdown 或 JSON 交付快照</div></div>
+  <div><h3 class="mb-1">已生成成果</h3><div class="small text-muted">查看并下载项目中已经生成的内容</div></div>
   <button class="btn btn-outline-secondary btn-sm" id="refresh-deliveries" title="刷新"><i class="bi bi-arrow-clockwise"></i></button>
 </div>
-<form id="delivery-create-form" class="row g-2 align-items-end mb-4">
-  <div class="col-12 col-lg-7">
-    <label class="form-label" for="delivery-submission">已完成版本</label>
-    <select class="form-select" id="delivery-submission" required><option value="">正在加载...</option></select>
+<div class="row g-2 align-items-end mb-3">
+  <div class="col-12 col-lg-4">
+    <label class="visually-hidden" for="generated-resource-search">检索成果</label>
+    <div class="input-group"><span class="input-group-text"><i class="bi bi-search"></i></span><input class="form-control" id="generated-resource-search" type="search" placeholder="检索项目、阶段或状态"></div>
   </div>
-  <div class="col-7 col-lg-3">
-    <label class="form-label" for="delivery-format">格式</label>
-    <select class="form-select" id="delivery-format"><option value="md">Markdown</option><option value="json">JSON</option></select>
+  <div class="col-6 col-lg-2">
+    <label class="visually-hidden" for="generated-resource-stage-filter">阶段筛选</label>
+    <select class="form-select" id="generated-resource-stage-filter"><option value="">全部阶段</option><option value="brief">Brief</option><option value="characters">人物关系</option><option value="outline">分集大纲</option><option value="beats">Beats</option><option value="script">场次剧本</option></select>
   </div>
-  <div class="col-5 col-lg-2 d-grid"><button class="btn btn-primary" type="submit"><i class="bi bi-box-arrow-down me-1"></i>生成</button></div>
-</form>
+  <div class="col-6 col-lg-2">
+    <label class="visually-hidden" for="generated-resource-status-filter">状态筛选</label>
+    <select class="form-select" id="generated-resource-status-filter"><option value="">全部状态</option><option value="locked">已锁定</option><option value="draft">草稿</option><option value="submitted">已提交</option><option value="returned">已退回</option></select>
+  </div>
+  <div class="col-12 col-lg-3">
+    <div class="row g-2">
+      <div class="col-6"><label class="visually-hidden" for="generated-resource-generated-after">生成开始日期</label><input class="form-control" id="generated-resource-generated-after" type="date" aria-label="生成开始日期"></div>
+      <div class="col-6"><label class="visually-hidden" for="generated-resource-generated-before">生成结束日期</label><input class="form-control" id="generated-resource-generated-before" type="date" aria-label="生成结束日期"></div>
+    </div>
+  </div>
+  <div class="col-1 d-grid"><button class="btn btn-outline-secondary" id="reset-generated-resource-filters" type="button" title="重置筛选"><i class="bi bi-x-lg"></i></button></div>
+</div>
+<div class="small text-muted mb-2" id="generated-resource-count" aria-live="polite"></div>
 <div class="table-responsive">
   <table class="table table-sm align-middle">
-    <thead><tr><th>时间</th><th>项目</th><th>阶段</th><th>版本</th><th>格式</th><th>指纹</th><th></th></tr></thead>
-    <tbody id="delivery-history"><tr><td colspan="7" class="text-center text-muted py-4">正在加载交付记录...</td></tr></tbody>
+    <thead><tr><th>项目</th><th>阶段</th><th>版本</th><th>状态</th><th>生成时间</th><th>格式</th><th></th></tr></thead>
+    <tbody id="generated-resource-list"><tr id="deliveries-skeleton" aria-hidden="true"><td colspan="7"><div class="ui-skeleton" style="height:20px;width:60%;margin:8px 0;"></div><div class="ui-skeleton" style="height:14px;width:40%;"></div></td></tr></tbody>
   </table>
 </div>
 {% endblock %}
-{% block scripts %}<script src="/static/js/admin/deliveries.js"></script>{% endblock %}
+{% block scripts %}<script src="/static/js/admin/deliveries.js?generated_resources=4"></script>{% endblock %}

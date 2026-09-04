@@ -24,6 +24,7 @@
           <h1>登录工作台</h1>
           <p>输入账号信息继续访问。</p>
         </div>
+        <p id="register-notice" class="auth-notice" role="status" hidden></p>
         <form id="login-form" class="auth-form">
           <div>
             <label class="form-label" for="username">用户名</label>
@@ -43,11 +44,18 @@
           <button class="btn btn-primary auth-submit" type="submit">
             <span>登录</span><i class="bi bi-arrow-right" aria-hidden="true"></i>
           </button>
+          <p class="auth-switch">还没有账号？<a href="/register">注册账号</a></p>
         </form>
       </div>
     </section>
   </main>
   <script>
+    if (new URLSearchParams(window.location.search).get('registered') === '1') {
+      const notice = document.getElementById('register-notice');
+      notice.textContent = '注册申请已提交，请等待管理员激活。';
+      notice.hidden = false;
+    }
+
     document.getElementById('login-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const button = event.currentTarget.querySelector('button[type="submit"]');

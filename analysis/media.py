@@ -71,4 +71,3 @@ async def save_bytes(file_path: pathlib.Path, content: bytes) -> pathlib.Path:
     async with aiofiles.open(file_path, "wb") as file:
         await file.write(content)
     return file_path
-

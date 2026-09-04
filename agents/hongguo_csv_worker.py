@@ -20,6 +20,8 @@ from typing import Any
 
 from core.events import emit_event
 from core.job import CrawlJob
+from agents.rank_zentao_delivery import deliver_rank_update
+from analysis.rank_importer import sync_rank_source
 
 
 DEFAULT_EXPORTS_ROOT = Path(os.environ.get("HONGGUO_EXPORTS_DIR", r"E:\hg\exports"))
@@ -115,6 +117,75 @@ def run_job(job: CrawlJob, exports_root: str | Path = DEFAULT_EXPORTS_ROOT) -> i
                 "source_path": str(csv_path),
                 "records": len(rows),
             },
+        )
+        try:
+            sync_result = sync_rank_source(
+                "hg",
+                csv_path,
+                project_root=Path.cwd(),
+                hongguo_exports_root=exports_root,
+            )
+            emit_event(
+                "log",
+                job_id=job.job_id,
+                worker_id=worker_id,
+                platform="hg",
+                level="info",
+                message="红果榜单已同步到集中数据库",
+                payload={
+                    "status": sync_result.status,
+                    "source_ref": sync_result.source_ref,
+                    "record_count": sync_result.record_count,
+                },
+            )
+        except Exception as exc:
+            emit_event(
+                "job_failed",
+                job_id=job.job_id,
+                worker_id=worker_id,
+                platform="hg",
+                level="error",
+                message="红果榜单已生成，但集中数据库同步失败",
+                payload={
+                    "sync_status": "central_sync_failed",
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return 1
+
+    latest_path = selected_paths[-1]
+    try:
+        delivery = (
+            deliver_rank_update(
+                "hg",
+                latest_path,
+                report_date=datetime.strptime(snapshot_date(latest_path), "%Y%m%d").date().isoformat(),
+            )
+            if os.environ.get("ZENTAO_RANK_EVENT_PUSH", "0").strip() == "1"
+            else {"status": "skipped", "reason": "excel-reconciliation-task", "part_key": "hongguo-rank"}
+        )
+        emit_event(
+            "log",
+            job_id=job.job_id,
+            worker_id=worker_id,
+            platform="hg",
+            level="info",
+            message=f"红果榜单禅道推送：{delivery.get('status', 'unknown')}",
+            payload={
+                "part_key": delivery.get("part_key", "hongguo-rank"),
+                "status": delivery.get("status", "unknown"),
+                "reason": delivery.get("reason", ""),
+            },
+        )
+    except Exception as exc:
+        emit_event(
+            "log",
+            job_id=job.job_id,
+            worker_id=worker_id,
+            platform="hg",
+            level="warning",
+            message=f"红果榜单已更新，但禅道推送失败: {exc}",
+            payload={"error_type": type(exc).__name__},
         )
 
     emit_event(

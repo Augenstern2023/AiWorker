@@ -9,8 +9,12 @@
 
 from __future__ import annotations
 
-import sqlite3
 from typing import Any, Callable
+
+from sqlalchemy import Connection, select, text, update
+from sqlalchemy.exc import IntegrityError
+
+from system_database.schema import sessions as sessions_table, users as users_table
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
@@ -97,21 +101,27 @@ def build_team_management_router(
 
     def creator_summary(
         user_id: str | None,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, str] | None:
         if not user_id:
             return None
         if connection is not None:
             row = connection.execute(
-                "SELECT id, username, display_name FROM users WHERE id = ?",
-                (user_id,),
-            ).fetchone()
+                select(
+                    users_table.c.id,
+                    users_table.c.username,
+                    users_table.c.display_name,
+                ).where(users_table.c.id == user_id)
+            ).mappings().first()
         else:
             with repository.connect() as owned_connection:
                 row = owned_connection.execute(
-                    "SELECT id, username, display_name FROM users WHERE id = ?",
-                    (user_id,),
-                ).fetchone()
+                    select(
+                        users_table.c.id,
+                        users_table.c.username,
+                        users_table.c.display_name,
+                    ).where(users_table.c.id == user_id)
+                ).mappings().first()
         return dict(row) if row is not None else {"id": user_id, "display_name": "已删除账号"}
 
     def user_payload(user: dict[str, Any], principal: Principal) -> dict[str, Any]:
@@ -133,7 +143,7 @@ def build_team_management_router(
 
     def role_is_assignable(
         role: dict[str, Any],
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> bool:
         if not role.get("is_enabled") or role.get("is_deleted"):
             return False
@@ -149,7 +159,7 @@ def build_team_management_router(
     def role_payload(
         role: dict[str, Any],
         principal: Principal,
-        connection: sqlite3.Connection | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         owns = role.get("created_by_user_id") == principal.user_id
         can_manage = principal.is_system_admin or (owns and not role["is_system"])
@@ -227,7 +237,7 @@ def build_team_management_router(
         target_id: str,
         before: Any,
         after: Any,
-        connection: sqlite3.Connection,
+        connection: Connection,
     ) -> None:
         audit_service.record(
             actor=principal,
@@ -281,7 +291,7 @@ def build_team_management_router(
                     result,
                     connection,
                 )
-        except sqlite3.IntegrityError as exc:
+        except IntegrityError as exc:
             raise HTTPException(409, "用户名已存在") from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -372,14 +382,20 @@ def build_team_management_router(
             raise HTTPException(422, str(exc)) from exc
         with repository.transaction() as connection:
             connection.execute(
-                "UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP "
-                "WHERE id = ?",
-                (password_hash, user_id),
+                update(users_table)
+                .where(users_table.c.id == user_id)
+                .values(
+                    password_hash=password_hash,
+                    updated_at=text("CURRENT_TIMESTAMP"),
+                )
             )
             connection.execute(
-                "UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP "
-                "WHERE user_id = ? AND revoked_at IS NULL",
-                (user_id,),
+                update(sessions_table)
+                .where(
+                    sessions_table.c.user_id == user_id,
+                    sessions_table.c.revoked_at.is_(None),
+                )
+                .values(revoked_at=text("CURRENT_TIMESTAMP"))
             )
             audit(
                 request,
@@ -477,7 +493,7 @@ def build_team_management_router(
                     result,
                     connection,
                 )
-        except sqlite3.IntegrityError as exc:
+        except IntegrityError as exc:
             raise HTTPException(409, "角色编码已存在") from exc
         return result
 
@@ -604,7 +620,7 @@ def build_team_management_router(
                     result,
                     connection,
                 )
-        except sqlite3.IntegrityError as exc:
+        except IntegrityError as exc:
             raise HTTPException(409, "角色编码已存在") from exc
         return result
 

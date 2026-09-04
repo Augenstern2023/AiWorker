@@ -1,0 +1,78 @@
+{% extends "layouts/base.html" %}
+
+{% block styles %}<link href="/static/css/profile.css?v={{ asset_version }}" rel="stylesheet">{% endblock %}
+
+{% block content %}
+<section class="profile-shell" aria-labelledby="profile-page-title">
+    <header class="profile-header">
+        <div>
+            <div class="profile-eyebrow"><i class="bi bi-person-vcard" aria-hidden="true"></i>账号设置</div>
+            <h1 class="profile-title" id="profile-page-title">个人信息</h1>
+            <p class="profile-subtitle">维护联系方式，账号权限与组织归属由系统管理员统一管理。</p>
+        </div>
+        <button class="btn btn-outline-secondary btn-sm profile-refresh" id="profile-refresh" type="button" title="刷新资料" aria-label="刷新资料">
+            <i class="bi bi-arrow-clockwise" aria-hidden="true"></i>
+        </button>
+    </header>
+
+    <div class="profile-grid">
+        <section class="profile-panel profile-account-panel" aria-labelledby="profile-account-title">
+            <div class="profile-panel-heading">
+                <div>
+                    <h2 id="profile-account-title">账号概览</h2>
+                    <p>以下信息由账号、角色和组织配置决定。</p>
+                </div>
+            </div>
+            <dl class="profile-summary" id="profile-summary">
+                <dt>正在加载</dt><dd>-</dd>
+            </dl>
+        </section>
+
+        <section class="profile-panel profile-contact-panel" aria-labelledby="profile-contact-title">
+            <div class="profile-panel-heading">
+                <div>
+                    <h2 id="profile-contact-title">联系方式</h2>
+                    <p>更新后将立即应用于当前账号。</p>
+                </div>
+            </div>
+            <form id="profile-form" novalidate>
+                <div class="mb-3">
+                    <label class="form-label" for="profile-email">邮箱</label>
+                    <input class="form-control" id="profile-email" type="email" autocomplete="email" placeholder="name@example.com">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label" for="profile-phone">手机号</label>
+                    <input class="form-control" id="profile-phone" inputmode="numeric" maxlength="11" autocomplete="tel" placeholder="11 位中国大陆手机号">
+                </div>
+                <div class="mb-4">
+                    <label class="form-label" for="profile-gender">性别</label>
+                    <select class="form-select" id="profile-gender">
+                        <option value="unspecified">未填写</option>
+                        <option value="male">男</option>
+                        <option value="female">女</option>
+                    </select>
+                </div>
+                <div class="d-flex align-items-center gap-3">
+                    <button class="btn btn-primary profile-submit" id="profile-submit" type="submit">
+                        <span class="spinner-border spinner-border-sm d-none" id="profile-saving" aria-hidden="true"></span>
+                        <i class="bi bi-check2-circle" id="profile-save-icon" aria-hidden="true"></i>
+                        <span id="profile-submit-label">保存修改</span>
+                    </button>
+                    <span class="form-text">手机号仅支持中国大陆 11 位号码。</span>
+                </div>
+            </form>
+        </section>
+    </div>
+</section>
+
+<div class="toast-container position-fixed top-0 end-0 p-3 profile-toast-container">
+    <div class="toast align-items-center border-0 profile-toast" id="profile-feedback" role="status" aria-live="polite" aria-atomic="true">
+        <div class="d-flex">
+            <div class="toast-body d-flex align-items-center gap-2"><i class="bi bi-check-circle-fill" id="profile-feedback-icon" aria-hidden="true"></i><span id="profile-feedback-message"></span></div>
+            <button class="btn-close btn-close-white me-2 m-auto" type="button" data-bs-dismiss="toast" aria-label="关闭"></button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}<script src="/static/js/profile.js?v={{ asset_version }}"></script>{% endblock %}

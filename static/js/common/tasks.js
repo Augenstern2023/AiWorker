@@ -1,10 +1,3 @@
-function localDateString(date = new Date()) {
-            const year = date.getFullYear();
-            const month = String(date.getMonth() + 1).padStart(2, '0');
-            const day = String(date.getDate()).padStart(2, '0');
-            return `${year}-${month}-${day}`;
-        }
-
         function creativePlatformPreference() {
             try {
                 return window.localStorage.getItem('aiworker.selection.hits.platform') === 'hg' ? 'hg' : 'dy';
@@ -13,9 +6,33 @@ function localDateString(date = new Date()) {
             }
         }
 
+        function creativeRankSourceOptionsForPlatform(platform) {
+            return platform === 'hg'
+                ? ['全部', '真人剧', '漫剧', 'AI剧']
+                : ['榜单', '热榜'];
+        }
+
+        function creativeRankSourcePreference(platform) {
+            const normalizedPlatform = platform === 'hg' ? 'hg' : 'dy';
+            const options = creativeRankSourceOptionsForPlatform(normalizedPlatform);
+            try {
+                const stored = window.localStorage.getItem(`aiworker.selection.hits.rank-source.${normalizedPlatform}`);
+                return options.includes(stored) ? stored : options[0];
+            } catch (_) {
+                return options[0];
+            }
+        }
+
         function appData() {
             const workspace = {
                 page: document.body.dataset.workspacePage || '',
+                JOB_POLL_INTERVAL_MS: 5000,
+                pageNeedsJobPolling() {
+                    return this.page === 'admin-jobs'
+                        || ['selection-hits', 'selection-topics', 'selection-dramas'].includes(this.page)
+                        || this.page.startsWith('planning-')
+                        || this.page.startsWith('writing-');
+                },
                 workflowTasks: [],
                 workflowTaskError: '',
                 workflowTaskWindow: {
@@ -28,8 +45,10 @@ function localDateString(date = new Date()) {
                 },
                 planningAssignment: {
                     topic: null,
-                    candidates: [],
-                    assigneeUserId: '',
+                    plannerCandidates: [],
+                    writerCandidates: [],
+                    plannerMemberIds: [],
+                    writerMemberIds: [],
                     name: '',
                     targetPlatform: '',
                     targetEpisodeCount: 20,
@@ -49,8 +68,10 @@ function localDateString(date = new Date()) {
                 files: [],
                 filteredFiles: [],
                 selectedFilePaths: [],
-                filePage: {total: 0, currentCursor: null, nextCursor: null, cursorHistory: [], loading: false, searchTimer: null, selectionMode: 'explicit', selectionFilter: 'all', selectionQuery: '', excludedPaths: [], operation: null},
+                filePage: {total: 0, currentCursor: null, nextCursor: null, cursorHistory: [], loading: false, searchTimer: null, requestSequence: 0, selectionMode: 'explicit', selectionFilter: 'all', selectionQuery: '', excludedPaths: [], operation: null, error: '', appliedQuery: ''},
+                dramaPlayer: {dramas: [], selectedDramaId: '', selectedEpisodeId: '', loading: false, error: '', playbackError: '', autoNext: true, speed: 1, lastSavedAt: 0},
                 batchDeleteMode: false,
+                batchDownloadMode: false,
                 filePreviewModal: null,
                 previewFile: {status: 'idle', file: null, kind: '', url: '', content: '', message: ''},
                 topicTranscriptPreviewModal: null,
@@ -74,19 +95,19 @@ function localDateString(date = new Date()) {
                 qrcodeLoggingIn: false,
                 audioModal: null,
                 dramaDownloadModal: null,
-                assignment: { topic: null, role: '', candidates: [], selectedUserId: '', saving: false, error: '' },
                 audioAnalysis: {status: 'idle'},
                 dramaAnalysis: {
                     title: '',
                     platform: 'hg',
+                    topic: null,
                     candidates: [],
+                    providers: [],
+                    captureCandidates: [],
+                    thirdPartyError: '',
+                    captureError: '',
                     selected: null,
                     episodes: [],
                     episode: 0,
-                    suggestions: [],
-                    suggestionLoading: false,
-                    suggestionTimer: null,
-                    suggestionRequestId: 0,
                     searchSource: '',
                     fallbackReason: '',
                     selectedAwemeIds: [],
@@ -96,17 +117,59 @@ function localDateString(date = new Date()) {
                     seriesRangeLabel: '',
                     seriesWarnings: [],
                     seriesLoading: false,
+                    searchRequestId: 0,
+                    seriesRequestId: 0,
                     loading: false,
+                    loadingMessage: '正在检索剧目来源…',
                     error: '',
                     jobId: '',
                     notifiedStatus: '',
+                    videoPreviewPath: '',
+                    videoPreviewUrl: '',
+                    videoPreviewError: '',
+                    interfaceTesting: false,
                     interfaceTest: null,
-                    settings: {config_url: '', has_activation_code: false},
-                    activationCode: ''
+                    settings: {
+                        config_url: '',
+                        activation_code: '',
+                        has_activation_code: false,
+                        capture_root: 'E:\\hg\\raw\\video_urls',
+                        capture_service_url: 'http://127.0.0.1:8776',
+                        wait_timeout_seconds: 600
+                    }
                 },
-                creative: {platform: creativePlatformPreference(), items: [], loading: false, error: '', breakdown: null},
+                llmSettings: {
+                    loading: false,
+                    saving: false,
+                    syncing: false,
+                    testing: false,
+                    modelSaving: false,
+                    defaultSavingId: '',
+                    error: '',
+                    notice: '',
+                    presets: {},
+                    providers: [],
+                    defaultModelId: '',
+                    selectedProviderId: '',
+                    editor: {
+                        id: '', name: '', preset: 'custom', base_url: '',
+                        wire_api: 'chat_completions', api_key: '',
+                        has_api_key: false, is_enabled: true,
+                        clear_api_key: false, credential_status: 'missing'
+                    },
+                    modelDraft: {model_id: '', display_name: ''},
+                    modelEditor: null,
+                    test: {model_id: '', result: null}
+                },
+                creative: {
+                    platform: creativePlatformPreference(),
+                    rankSource: creativeRankSourcePreference(creativePlatformPreference()),
+                    items: [], loading: false, error: '', breakdown: null
+                },
                 topicLibrary: {platform: '', lifecycleStatus: '', category: '', minScore: '', hasLocked: '', items: [], loading: false, error: '', breakdown: null},
-                generatedContentPreview: {topic: null, project: null, stage: '', versions: [], selectedResourceId: '', snapshot: null, loading: false, error: ''},
+                adoptionNotice: {success: true, title: '', message: ''},
+                adoptionNoticeModal: null,
+                generatedContentPreview: {topic: null, project: null, stage: '', versions: [], selectedVersion: 0, selectedResourceId: '', snapshot: null, loading: false, error: ''},
                 breakdownEditor: {source: '', title: '', record: null, content: {}, fieldGuide: [], saving: false, error: ''},
                 breakdownGeneration: {topic: null, source: '', jobId: '', status: '', message: '', progress: {}, coverage: [], requiresTranscription: false, notifiedStatus: '', error: '', startedAt: 0, elapsedSeconds: 0},
                 breakdownGenerationJobs: {},
@@ -116,34 +179,50 @@ function localDateString(date = new Date()) {
                 creativeWorkspace: {
                     projects: [], eligibleTopics: [], lockedBreakdowns: [], project: null, loading: false, error: '', step: 'blueprints',
                     create: {topic_id: '', breakdown_id: '', name: '', target_platform: '', target_episode_count: 20, creation_request_id: ''},
-                    directionCount: 3, selectedBlueprintId: null, selectedEpisode: 1,
+                    originalCreate: {seed_text: '', name: '', genre: '', target_platform: '', target_audience: '', target_episode_count: 20, episode_duration_seconds: 120, cost_level: '', content_boundaries: [], reference_refs: [], creation_request_id: '', saving: false, error: ''},
+                    directionCount: 3, selectedSeedId: null, preservedBlueprintIds: [], variantInstruction: '', selectedBlueprintId: null, selectedCharacterBriefId: null, selectedOutlineBriefId: null, selectedOutlineCharacterBatchId: null, selectedEpisode: 1,
                     jobId: '', jobMessage: '', jobProgress: {}, jobStatus: '', paused: false, notifiedStatus: '',
                     jobLogs: [], jobLogCount: 0, showJobLogs: false,
                     jobStartedAt: 0, jobElapsedSeconds: 0,
-                    startingAction: '', activeAction: '',
+                    startingAction: '', activeAction: '', activeEpisode: 0, activeSeriesGeneration: false, activeBatchId: '',
+                    outlineEpisodeUpdates: {episodeNumber: 0, records: []},
+                    outlineFieldRewrite: {
+                        projectId: 0, batchId: '', episodeId: 0, episodeNumber: 0,
+                        fieldKey: '', fieldLabel: '', sourceStatus: '', sourceText: '',
+                        sourceFingerprint: '', instruction: '', candidateText: '',
+                        loading: false, applying: false, error: '', requestSequence: 0
+                    },
+                    outlineOverviewExpanded: true, outlineOverviewDraft: {},
+                    outlineOverviewErrors: {}, outlineOverviewSaving: false, outlineOverviewSaveSequence: 0,
                     saveState: {}, notice: '', noticeType: 'success', noticeTimer: null
                 },
-                dramaDownload: {title: '', topic: null, source: 'hongguo', fallbackReason: '', candidates: [], selectedCandidate: null, selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], relatedVideos: [], missingEpisodes: [], seriesRangeLabel: '', seriesWarnings: [], selectedEpisodes: [], allEpisodes: false, searching: false, episodesLoading: false, starting: false, error: '', jobId: '', jobStatus: '', progress: {}, progressMessage: '', paused: false, finished: false, background: false, showFiles: false, logs: [], logCount: 0},
+                dramaDownload: {title: '', topic: null, source: 'hongguo', fallbackReason: '', candidates: [], providers: [], captureCandidates: [], thirdPartyError: '', captureError: '', selectedCandidate: null, selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], relatedVideos: [], missingEpisodes: [], seriesRangeLabel: '', seriesWarnings: [], selectedEpisodes: [], allEpisodes: false, episodesExpanded: true, searching: false, episodesLoading: false, starting: false, error: '', jobId: '', jobStatus: '', progress: {}, progressMessage: '', paused: false, finished: false, background: false, showFiles: false, logs: [], logCount: 0, videoPreviewPath: '', videoPreviewUrl: '', videoPreviewError: ''},
                 dramaReviews: {topic: null, title: '', platform: 'hg', limit: 100, allReviews: false, format: 'csv', jobId: '', status: '', reviewCount: 0, sourceTotal: 0, items: [], loading: false, polling: false, error: ''},
                 dramaReviewJobs: {},
-                analyticsOverview: {},
-                analyticsTags: {categories: [], selling_points: [], hooks: [], plot_tags: []},
-                analyticsTrends: {points: []},
-                analyticsSentiment: [],
-                analyticsDramas: [],
                 analyticsPlatform: '',
-                analyticsDate: localDateString(),
-                analyticsLoading: false,
                 analyticsError: '',
-                analyticsSyncResult: null,
+                weeklyReports: [],
+                weeklyReport: null,
+                weeklyReportLoading: false,
+                weeklyReportError: '',
                 todayRankPlatform: 'dy',
                 todayRankDate: '',
-                todayRankSectionKey: '',
+                todayRankSectionKey: '榜单',
                 todayRankRankingKey: '',
                 todayRankData: null,
+                todayRankCache: {},
+                todayRankInflight: {},
+                todayRankCacheVersion: {},
+                todayRankMissingNoticeKeys: {},
+                todayRankRequestId: 0,
                 todayRankLoading: false,
                 todayRankError: '',
+                todayRankRefreshing: false,
+                todayRankRefreshJobId: '',
+                todayRankRefreshMessage: '',
                 rankingActiveTables: {},
+                rankAdoptingRecordIds: {},
+                rankAdoptedTitleKeys: {},
                 modalMode: 'crawl',
                 modalFile: '',
                 modalProjects: [],
@@ -178,6 +257,12 @@ function localDateString(date = new Date()) {
                     return element ? bootstrap.Modal.getOrCreateInstance(element) : null;
                 },
 
+                showAdoptionNotice(success, title, message) {
+                    this.adoptionNotice = {success: Boolean(success), title: title || '', message: message || ''};
+                    this.adoptionNoticeModal = this.modal('adoptionNoticeModal');
+                    this.adoptionNoticeModal?.show();
+                },
+
                 async init() {
                     this.projectModal = this.modal('projectModal');
                     this.audioModal = this.modal('audioModal');
@@ -200,8 +285,12 @@ function localDateString(date = new Date()) {
                     this.transcriptRequiredModal = this.modal('transcriptRequiredModal');
                     this.breakdownGenerationProgressModal = this.modal('breakdownGenerationProgressModal');
                     this.creativeGenerationProgressModal = this.modal('creativeGenerationProgressModal');
+                    document.getElementById('creativeGenerationProgressModal')?.addEventListener('hide.bs.modal', () => {
+                        document.activeElement?.blur();
+                    });
                     this.workflowTaskModal = this.modal('workflowTaskModal');
                     this.planningAssignmentModal = this.modal('planningAssignmentModal');
+                    this.adoptionNoticeModal = this.modal('adoptionNoticeModal');
 
                     if (['tasks', 'review-tasks'].includes(this.page)) {
                         await this.fetchWorkflowTasks();
@@ -211,7 +300,7 @@ function localDateString(date = new Date()) {
                         );
                     }
 
-                    await this.fetchJobs();
+                    if (this.pageNeedsJobPolling()) await this.fetchJobs();
                     if (this.page === 'selection-ranks') {
                         this.parseTodayRankHash(false);
                         window.addEventListener('hashchange', () => this.parseTodayRankHash(true));
@@ -221,7 +310,7 @@ function localDateString(date = new Date()) {
                         await this.fetchCreativeTopics();
                         await this.fetchTopicLibrary();
                     } else if (this.page === 'selection-hits') {
-                        await this.fetchCreativeTopics();
+                        await this.generateCreativeTopics();
                     } else if (this.page === 'selection-topics') {
                         if (typeof this.fetchTopicLibrary !== 'function') {
                             throw new Error('选题模块加载失败，请刷新页面后重试');
@@ -240,7 +329,26 @@ function localDateString(date = new Date()) {
                             this.creativeWorkspace.create.topic_id = Number(topicId);
                             await this.syncCreativeProjectSource();
                         }
-                        const episode = window.location.pathname.match(/\/episodes\/(\d+)\/beats/)?.[1];
+                        if (this.page === 'planning-brief') {
+                            const params = new URLSearchParams(window.location.search);
+                            if (params.get('generate_original') === '1') {
+                                params.delete('generate_original');
+                                const query = params.toString();
+                                window.history.replaceState(
+                                    window.history.state,
+                                    '',
+                                    `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`
+                                );
+                                const project = this.creativeWorkspace.project;
+                                if (
+                                    project?.creation_mode === 'original'
+                                    && !(project.blueprints || []).length
+                                ) {
+                                    await this.generateProjectBlueprints();
+                                }
+                            }
+                        }
+                        const episode = window.location.pathname.match(/\/episodes\/(\d+)\/(?:beats|scripts)/)?.[1];
                         if (episode) this.creativeWorkspace.selectedEpisode = Number(episode);
                         if (
                             this.page === 'planning-brief'
@@ -253,10 +361,12 @@ function localDateString(date = new Date()) {
                         await this.loadConfig();
                         await this.fetchConfigForm();
                         await this.fetchBackups();
+                        await this.fetchLLMSettings();
                         await this.fetchDramaSettings();
                     }
                     if (this.page === 'admin-data') await this.fetchFiles();
-                    if (this.page === 'admin-analytics') await this.refreshAnalyticsDashboard(false);
+                    if (this.page === 'admin-drama-player') await this.fetchDramaPlayerLibrary();
+                    if (this.page === 'admin-analytics') await this.refreshAnalyticsDashboard();
                     if (this.page === 'admin-jobs') {
                         await this.loadConfig();
                         await this.fetchQrcodeStatus();
@@ -265,9 +375,20 @@ function localDateString(date = new Date()) {
                     }
                     this.initTooltips();
                     if (this.page === 'admin-jobs') setInterval(() => this.fetchLogs(), 1000);
-                    setInterval(() => this.fetchJobs(), 2000);
+                    if (this.pageNeedsJobPolling()) setInterval(() => this.fetchJobs(), this.JOB_POLL_INTERVAL_MS);
                     if (this.tickCreativeGenerationElapsed) setInterval(() => this.tickCreativeGenerationElapsed(), 1000);
                     if (this.tickBreakdownGenerationElapsed) setInterval(() => this.tickBreakdownGenerationElapsed(), 1000);
+                    this.initBeforeUnload();
+                },
+
+                initBeforeUnload() {
+                    window.addEventListener('beforeunload', (e) => {
+                        const unsaved = Object.values(this.creativeWorkspace?.saveState || {}).filter(v => v === 'saving').length;
+                        if (unsaved > 0) {
+                            e.preventDefault();
+                            e.returnValue = '有未保存的编辑内容，确定离开吗？';
+                        }
+                    });
                 },
 
                 initTooltips() {
@@ -587,6 +708,9 @@ function localDateString(date = new Date()) {
                     try {
                         const res = await aiworkerApi.request('/api/jobs');
                         const data = await res.json();
+                        if (res.ok === false) {
+                            throw new Error(data.detail || data.message || '读取任务列表失败');
+                        }
                         this.jobs = data.jobs || [];
                         this.isRunning = this.jobs.some(job => this.isJobRunning(job));
                         if (!this.selectedJobId && this.jobs.length > 0) {
@@ -603,8 +727,7 @@ function localDateString(date = new Date()) {
                         if (this.syncCreativeJobProgress) await this.syncCreativeJobProgress();
                         this.syncBreakdownGenerationProgress?.();
                     } catch (e) {
-                        this.jobs = [];
-                        this.isRunning = false;
+                        this.isRunning = this.jobs.some(job => this.isJobRunning(job));
                     }
                 },
 

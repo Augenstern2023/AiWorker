@@ -1,8 +1,8 @@
 <section class="data-section">
-            <div class="d-flex align-items-center justify-content-between mb-3">
-                <h3 class="mb-0">数据管理</h3>
+            <div class="d-flex align-items-center justify-content-between flex-wrap gap-3 mb-3">
+                <h3 class="mb-0 flex-shrink-0">数据管理</h3>
                 <div class="d-flex gap-2 flex-wrap">
-                    {% if can_manage_data %}<button class="btn btn-outline-danger btn-sm" x-show="!batchDeleteMode" @click="startBatchDelete">
+                    {% if can_manage_data %}<button class="btn btn-outline-danger btn-sm" x-show="!batchDeleteMode && !batchDownloadMode" @click="startBatchDelete">
                         <i class="bi bi-trash me-1"></i>批量删除
                     </button>
                     <button class="btn btn-outline-secondary btn-sm" x-show="batchDeleteMode" @click="cancelBatchDelete" title="退出批量删除">
@@ -11,11 +11,16 @@
                     <button class="btn btn-outline-danger btn-sm" x-show="batchDeleteMode && selectedFileCount() > 0" @click="deleteSelectedFiles" :title="`删除已选 ${selectedFileCount()} 个文件`">
                         <i class="bi bi-trash me-1"></i><span x-text="`删除 (${selectedFileCount()})`"></span>
                     </button>{% endif %}
-                    {% if can_preview_data %}
-                    <button class="btn btn-outline-primary btn-sm" x-show="selectedFileCount() > 0" @click="downloadSelectedFiles" :title="`下载已选 ${selectedFileCount()} 个文件`">
+                    {% if can_preview_data %}<button class="btn btn-outline-primary btn-sm" x-show="!batchDeleteMode && !batchDownloadMode" @click="startBatchDownload">
+                        <i class="bi bi-file-earmark-zip me-1"></i>批量下载
+                    </button>
+                    <button class="btn btn-outline-secondary btn-sm" x-show="batchDownloadMode" @click="cancelBatchDownload" title="退出批量下载">
+                        <i class="bi bi-x-lg"></i><span class="visually-hidden">退出批量下载</span>
+                    </button>
+                    <button class="btn btn-outline-primary btn-sm" x-show="batchDownloadMode && selectedFileCount() > 0" @click="downloadSelectedFiles" :title="`下载已选 ${selectedFileCount()} 个文件`">
                         <i class="bi bi-file-earmark-zip me-1"></i><span x-text="`下载 (${selectedFileCount()})`"></span>
                     </button>{% endif %}
-                    <input class="form-control form-control-sm" style="width: 260px;" x-model="fileSearch" @input="applyFileSearch" placeholder="搜索文件名或路径">
+                    <input class="form-control form-control-sm" id="file-search-input" type="search" style="width: 260px;" x-model="fileSearch" @input="applyFileSearch" :aria-busy="filePage.loading" aria-label="搜索文件名或路径" aria-describedby="file-search-status" placeholder="搜索文件名或路径">
                     <select class="form-select form-select-sm" style="width: 150px;" x-model="fileFilter" @change="fetchFiles({reset: true})">
                         <option value="all">全部</option>
                         <option value="内容数据">内容数据</option>
@@ -31,10 +36,25 @@
                         <option value="Comments">评论</option>
                         <option value="Contents">内容</option>
                     </select>
-                    <button class="btn btn-outline-light btn-sm" @click="fetchFiles({reset: true})">刷新</button>
+                    <button class="btn btn-outline-light btn-sm" @click="fetchFiles({reset: true})" :disabled="filePage.loading">刷新</button>
                 </div>
             </div>
-            {% if can_manage_data or can_preview_data %}<div class="d-flex justify-content-end" x-show="filteredFiles.length">
+            <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                <div class="small" id="file-search-status" :class="filePage.error ? 'text-danger' : 'text-muted'" role="status" aria-live="polite" aria-atomic="true">
+                    <span class="spinner-border spinner-border-sm me-1" x-show="filePage.loading" aria-hidden="true"></span><span x-text="fileSearchStatus()"></span>
+                </div>
+                <button class="btn btn-outline-danger btn-sm" id="retry-file-search" type="button" x-show="filePage.error" @click="fetchFiles({reset: true})"><i class="bi bi-arrow-clockwise me-1" aria-hidden="true"></i>重试</button>
+            </div>
+            <div x-show="batchDownloadMode && filePage.operation?.operation === 'archive'" x-cloak>
+                <div class="alert alert-info d-flex align-items-center justify-content-between mb-3">
+                    <span x-text="`批量下载：${filePage.operation?.status || '运行中'} (${filePage.operation?.progress?.completed || 0}/${filePage.operation?.progress?.total || 0}，成功 ${filePage.operation?.progress?.succeeded || 0}，失败 ${filePage.operation?.progress?.failed || 0})`"></span>
+                    <div class="d-flex align-items-center gap-2">
+                        <button class="btn btn-sm btn-outline-primary" x-show="filePage.operation?.status === 'succeeded'" @click="downloadFileOperation"><i class="bi bi-download"></i><span class="visually-hidden">下载压缩包</span></button>
+                        <button class="btn btn-sm btn-outline-secondary" @click="cancelBatchDownload" title="收起批量下载状态"><i class="bi bi-x-lg"></i><span class="visually-hidden">收起</span></button>
+                    </div>
+                </div>
+            </div>
+            {% if can_manage_data or can_preview_data %}<div class="text-end" x-show="filteredFiles.length && (batchDeleteMode || batchDownloadMode || selectedFileCount() > 0)">
                 <label class="form-check small"><input class="form-check-input me-1" type="checkbox" :checked="filePage.selectionMode === 'all_matching'" @change="toggleAllMatchingFiles($event.target.checked)">全选当前结果 <span x-text="`(${filePage.total})`"></span></label>
             </div>{% endif %}
             <template x-for="group in groupedFiles()" :key="group.drama_name">
@@ -51,7 +71,7 @@
                                     <tbody>
                                         <template x-for="file in typeGroup.files" :key="file.path">
                                             <tr>
-                                                {% if can_manage_data or can_preview_data %}<td style="width: 44px;"><input class="form-check-input" type="checkbox" :checked="isFileSelected(file.path)" x-effect="$el.checked = isFileSelected(file.path)" @change="toggleFileSelection(file.path, $event.target.checked)" :aria-label="`选择 ${file.name}`"></td>{% endif %}
+                                                {% if can_manage_data or can_preview_data %}<td style="width: 44px;" x-show="batchDeleteMode || batchDownloadMode || selectedFileCount() > 0"><input class="form-check-input" type="checkbox" :checked="isFileSelected(file.path)" x-effect="$el.checked = isFileSelected(file.path)" @change="toggleFileSelection(file.path, $event.target.checked)" :aria-label="`选择 ${file.name}`"></td>{% endif %}
                                                 <td><div class="fw-semibold"><span x-text="file.name"></span><span class="badge bg-secondary ms-2" x-show="file.episode_label" x-text="file.episode_label"></span></div><small class="text-muted" x-text="file.path"></small></td>
                                                 <td style="width: 110px;" x-text="formatSize(file.size)"></td>
                                                 <td style="width: 180px;" x-text="formatDate(file.modified)"></td>
@@ -80,9 +100,5 @@
                     <button class="btn btn-outline-secondary btn-sm" type="button" @click="nextFilePage" :disabled="!filePage.nextCursor || filePage.loading"><i class="bi bi-chevron-right"></i><span class="visually-hidden">下一页</span></button>
                 </div>
             </div>
-            <div class="alert alert-info d-flex align-items-center justify-content-between" x-show="filePage.operation">
-                <span x-text="`批量${filePage.operation?.operation === 'archive' ? '下载' : '删除'}：${filePage.operation?.status || '运行中'} (${filePage.operation?.progress?.completed || 0}/${filePage.operation?.progress?.total || 0}，成功 ${filePage.operation?.progress?.succeeded || 0}，失败 ${filePage.operation?.progress?.failed || 0})`"></span>
-                <button class="btn btn-sm btn-outline-primary" x-show="filePage.operation?.operation === 'archive' && filePage.operation?.status === 'succeeded'" @click="downloadFileOperation"><i class="bi bi-download"></i><span class="visually-hidden">下载压缩包</span></button>
-            </div>
-            <div x-show="filteredFiles.length === 0" class="text-center text-muted py-5">暂无文件</div>
+            <div x-show="!filePage.loading && !filePage.error && filteredFiles.length === 0" class="text-center text-muted py-5" x-text="filePage.appliedQuery ? '未找到匹配文件' : '暂无文件'"></div>
         </section>

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -119,6 +120,112 @@ def _seed_resources(creative: CreativeRepository) -> dict[str, tuple[str, dict]]
         ),
         "beats": (str(beats["id"]), creative.get_episode(beats["id"])),
     }
+
+
+@pytest.mark.parametrize("resource_type", ["brief", "characters", "outline"])
+def test_reviewed_authority_switch_increments_and_exposes_project_revision(
+    tmp_path: Path, resource_type: str
+) -> None:
+    creative = CreativeRepository(tmp_path / "creative.db")
+    resources = _seed_resources(creative)
+    project_id = int(resources["brief"][1]["project_id"])
+    if resource_type == "brief":
+        alternative = creative.create_blueprints(
+            project_id,
+            [{"content": {"title": "评审通过的新方向"}, "risk_level": "low"}],
+        )[0]
+        resource_id = str(alternative["id"])
+        expected_pointer = int(alternative["id"])
+        pointer_name = "locked_brief_id"
+    elif resource_type == "characters":
+        alternative = creative.create_character_batch(
+            project_id, [{"name": "新主角", "desire": "赢得自由"}], []
+        )
+        resource_id = f"{project_id}:{alternative['batch_id']}"
+        expected_pointer = alternative["batch_id"]
+        pointer_name = "character_batch_id"
+    else:
+        alternative = creative.create_outline_batch(
+            project_id,
+            [{"episode": 1, "summary": "评审通过的新开局"}],
+            "新成长线",
+        )
+        resource_id = f"{project_id}:{alternative['batch_id']}"
+        expected_pointer = alternative["batch_id"]
+        pointer_name = "outline_batch_id"
+
+    submission = {
+        "id": f"approved-{resource_type}",
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+        "content_snapshot": {},
+        "reviewed_at": 1000,
+    }
+    workflow = SimpleNamespace(
+        list_approved_submissions=lambda requested_type: [submission],
+        supersede_resource_approvals=lambda *_args, **_kwargs: None,
+    )
+    adapter = CreativeWorkflowAdapter(creative, workflow)
+    submission["content_snapshot"] = adapter.snapshot(
+        resource_type, resource_id, reconcile=False
+    )
+    revision_before = creative.get_project(project_id)["revision"]
+
+    approved = adapter.on_approved(submission, SYSTEM_ACTOR)
+
+    switched = creative.get_project(project_id)
+    assert switched[pointer_name] == expected_pointer
+    assert switched["revision"] == revision_before + 1
+    assert approved["revision"] == switched["revision"]
+
+    replayed = adapter.on_approved(submission, SYSTEM_ACTOR)
+    assert creative.get_project(project_id)["revision"] == switched["revision"]
+    assert replayed["revision"] == switched["revision"]
+
+
+def test_system_admin_can_create_a_resource_assigned_to_another_user(tmp_path: Path) -> None:
+    task = {
+        "id": "task-1", "task_type": "brief", "assignee_user_id": "writer-1",
+        "project_id": "7", "topic_id": None, "status": "assigned",
+    }
+    adapter = CreativeWorkflowAdapter(
+        CreativeRepository(tmp_path / "creative.db"), SimpleNamespace(get_task=lambda task_id: task)
+    )
+    admin = Principal(
+        user_id="admin-1", username="admin", display_name="管理员",
+        role_codes=("system_admin",), permissions=frozenset({"*"}),
+        data_scope="all", session_id="session-admin",
+    )
+
+    checked = adapter.assert_task_for_creation("task-1", "brief", admin, project_id=7)
+
+    assert checked["assignee_user_id"] == "writer-1"
+
+
+def test_system_admin_can_lock_a_brief_assigned_to_another_user(tmp_path: Path) -> None:
+    creative = CreativeRepository(tmp_path / "creative.db")
+    resource_id, brief = _seed_resources(creative)["brief"]
+    _make_resource_draft(creative, "brief", resource_id)
+    task = {
+        "id": "task-1", "task_type": "brief", "assignee_user_id": "writer-1",
+        "project_id": str(brief["project_id"]), "topic_id": None, "status": "assigned",
+    }
+    adapter = CreativeWorkflowAdapter(
+        creative,
+        SimpleNamespace(
+            get_task=lambda task_id: task,
+            get_latest_resource_submission=lambda resource_type, resource_id: None,
+        ),
+    )
+    admin = Principal(
+        user_id="admin-1", username="admin", display_name="管理员",
+        role_codes=("system_admin",), permissions=frozenset({"*"}),
+        data_scope="all", session_id="session-admin",
+    )
+
+    adapter.lock_without_review("task-1", "brief", resource_id, admin)
+
+    assert adapter.domain_status("brief", resource_id) == "brief_locked"
 
 
 def _make_resource_draft(
@@ -279,6 +386,19 @@ def test_creative_completion_locks_each_later_stage_without_an_approval(
     assert result["task"]["status"] == "completed"
     assert result["next_task"]["task_type"] == expected_next
     assert workflow.list_task_submissions(task["id"]) == []
+
+
+def test_scene_script_completion_uses_script_episode_progress() -> None:
+    source = (Path(__file__).resolve().parents[1] / "workflow/transition_service.py").read_text(
+        encoding="utf-8"
+    )
+    completion = source.split("def complete_creative_without_review", 1)[1].split(
+        "def migrate_pending_creative_approvals", 1
+    )[0]
+
+    assert 'if resource_type == "beats"' in completion
+    assert "self.creative_adapter.beats_episode_progress(resource_id)" in completion
+    assert "self.creative_adapter.script_episode_progress(resource_id)" in completion
 
 
 def test_pending_brief_approval_is_migrated_to_a_locked_version(environment) -> None:

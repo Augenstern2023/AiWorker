@@ -1,9 +1,11 @@
+{% include "common/workspace/adoption_notice_modal.html" %}
+
 <div class="modal fade" id="topicTranscriptPreviewModal" tabindex="-1" aria-labelledby="topicTranscriptPreviewModalLabel" aria-hidden="true">
         <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
             <div class="modal-content">
                 <div class="modal-header">
                     <div>
-                        <h5 class="modal-title" id="topicTranscriptPreviewModalLabel"><i class="bi bi-file-earmark-text me-2"></i>剧目转写预览</h5>
+                        <h5 class="modal-title" id="topicTranscriptPreviewModalLabel"><i class="bi bi-file-earmark-text me-2"></i>剧目字幕转写预览</h5>
                         <div class="small text-muted mt-1"><span x-text="topicTranscriptPreview.topic?.title || ''"></span><span x-show="topicTranscriptPreview.episodes.length" x-text="` · 共 ${topicTranscriptPreview.episodes.length} 集`"></span></div>
 </div>
 
@@ -31,7 +33,7 @@
                         <pre class="file-preview-text topic-transcript-text" x-text="selectedTopicTranscript()?.text || ''"></pre>
                     </div>
                 </div>
-                <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button></div>
+                <div class="modal-footer"><button type="button" class="btn btn-outline-secondary me-auto" @click="downloadTopicTranscripts(topicTranscriptPreview.topic)" :disabled="!topicTranscriptPreview.episodes.length"><i class="bi bi-download me-1"></i>下载 TXT</button><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button></div>
             </div>
         </div>
     </div>
@@ -174,22 +176,29 @@
                                 <div class="list-group-item bg-transparent text-light border-secondary d-flex align-items-center gap-3">
                                     <i class="bi bi-file-earmark flex-shrink-0"></i>
                                     <div class="flex-grow-1 min-w-0">
-                                        <div class="fw-semibold text-break" x-text="dramaDownloadArtifactName(item)"></div>
+                                        <div class="fw-semibold text-break"><span class="badge bg-primary me-2" x-show="dramaDownloadArtifactEpisodeLabel(item)" x-text="dramaDownloadArtifactEpisodeLabel(item)"></span><span x-text="dramaDownloadArtifactName(item)"></span></div>
                                         <div class="small text-muted text-break" x-text="item.path"></div>
                                     </div>
+                                    <button type="button" class="btn btn-sm btn-outline-success flex-shrink-0" x-show="isDramaVideoArtifact(item)" @click="openDramaDownloadVideo(item)" title="播放视频" aria-label="播放视频"><i class="bi bi-play-fill"></i></button>
                                     <button type="button" class="btn btn-sm btn-outline-primary flex-shrink-0" @click="downloadFile(item.path)" title="下载文件" aria-label="下载文件"><i class="bi bi-download"></i></button>
                                 </div>
                             </template>
                         </div>
+                        <div class="mt-3" x-show="dramaDownload.videoPreviewUrl">
+                            <div class="d-flex align-items-center justify-content-between gap-2 mb-2"><span class="small fw-semibold text-break" x-text="dramaDownloadArtifactName({path: dramaDownload.videoPreviewPath})"></span><button type="button" class="btn btn-sm btn-outline-secondary" @click="closeDramaDownloadVideo" title="关闭播放" aria-label="关闭播放"><i class="bi bi-x-lg"></i></button></div>
+                            <video id="dramaDownloadVideo" class="w-100" :src="dramaDownload.videoPreviewUrl" controls preload="metadata" @error="dramaDownload.videoPreviewError = '浏览器无法播放该视频编码，请下载后查看。'"></video>
+                            <div class="alert alert-warning py-2 mt-2 mb-0" x-show="dramaDownload.videoPreviewError" x-text="dramaDownload.videoPreviewError"></div>
+                        </div>
                     </div>
-                    <div x-show="!dramaDownload.searching && !dramaDownload.jobId && dramaDownload.candidates.length">
+                    <div x-show="!dramaDownload.searching && !dramaDownload.jobId && (dramaDownload.candidates.length || dramaDownload.captureCandidates.length || dramaDownload.providers.length || dramaDownload.thirdPartyError || dramaDownload.captureError)">
                         <label class="form-label" x-text="dramaDownload.source === 'douyin_fallback' ? '确认抖音视频' : '确认剧目'"></label>
                         <div x-show="dramaDownload.source !== 'douyin_fallback'">
-                            <template x-for="candidate in dramaDownload.candidates" :key="`${candidate.source_platform || dramaDownload.source}:${candidate.book_id || candidate.aweme_id}`">
-                                <button type="button" class="list-group-item list-group-item-action bg-transparent text-light border-secondary mb-2" :class="{active: dramaDownload.selectedCandidate?.book_id === candidate.book_id && (dramaDownload.selectedCandidate?.source_platform || 'hg') === (candidate.source_platform || 'hg')}" @click="selectDramaDownloadCandidate(candidate)">
-                                    <div class="fw-semibold text-start" x-text="candidate.title"></div><div class="small text-muted text-start" x-text="`${candidate.episode_count || '-'} 集 · ${candidate.summary || '暂无简介'}`"></div><div class="small text-info text-start" x-text="candidate.source_platform || 'hg'"></div>
-                                </button>
+                            <div class="alert alert-warning py-2" x-show="dramaDownload.thirdPartyError" role="status"><span class="fw-semibold">第三方来源暂不可用：</span><span x-text="dramaDownload.thirdPartyError"></span></div>
+                            <div class="alert alert-warning py-2" x-show="dramaDownload.captureError" role="status"><span class="fw-semibold">抓包目录暂不可用：</span><span x-text="dramaDownload.captureError"></span></div>
+                            <template x-for="provider in dramaDownload.providers" :key="provider.provider_id">
+                                <section class="mb-3" :aria-label="`${provider.display_name || provider.provider_id} 搜索结果`"><div class="d-flex align-items-center gap-2 mb-2 flex-wrap"><span class="fw-semibold" x-text="provider.display_name || provider.provider_id"></span><span class="badge" :class="provider.status === 'error' ? 'bg-warning text-dark' : 'bg-info text-dark'" x-text="provider.status === 'error' ? '来源异常' : `${provider.candidates?.length || 0} 个结果`"></span></div><div class="alert alert-warning py-2" x-show="provider.status === 'error'" x-text="provider.error || '该来源检索失败'" role="status"></div><div class="list-group" x-show="provider.candidates?.length"><template x-for="candidate in provider.candidates" :key="`${candidate.provider_id}:${candidate.series_ref || candidate.book_id}`"><button type="button" class="list-group-item list-group-item-action bg-transparent text-light border-secondary mb-2" :class="{active: isDramaDownloadCandidateSelected(candidate)}" @click="selectDramaDownloadCandidate(candidate)" :disabled="dramaDownload.episodesLoading || dramaDownload.starting"><div class="fw-semibold text-start text-break"><span x-text="candidate.title"></span><span class="badge bg-info text-dark ms-2" x-text="dramaDownloadProviderLabel(candidate.provider_id)"></span></div><div class="small text-muted text-start text-break" x-text="`${candidate.episode_count || '-'} 集 · ${candidate.summary || '暂无简介'}`"></div></button></template></div></section>
                             </template>
+                            <section x-show="dramaDownload.captureCandidates.length" aria-label="抓包来源搜索结果"><div class="d-flex align-items-center gap-2 mb-2 flex-wrap"><span class="fw-semibold">抓包来源</span><span class="badge bg-secondary" x-text="`${dramaDownload.captureCandidates.length} 个结果`"></span></div><div class="list-group"><template x-for="candidate in dramaDownload.captureCandidates" :key="`${candidate.provider_id || candidate.source_platform || 'hongguo_capture'}:${candidate.series_ref || candidate.book_id}`"><button type="button" class="list-group-item list-group-item-action bg-transparent text-light border-secondary mb-2" :class="{active: isDramaDownloadCandidateSelected(candidate)}" @click="selectDramaDownloadCandidate(candidate)" :disabled="dramaDownload.episodesLoading || dramaDownload.starting"><div class="fw-semibold text-start text-break"><span x-text="candidate.title"></span><span class="badge bg-secondary ms-2">抓包来源</span></div><div class="small text-muted text-start text-break" x-text="`${candidate.episode_count || '-'} 集 · ${candidate.summary || '暂无简介'}`"></div></button></template></div></section>
                         </div>
                         <div x-show="dramaDownload.source === 'douyin_fallback'">
                             <div class="small text-muted mb-2">先确认一个属于该剧的种子视频，系统再解析合集与同作者连续剧集。</div>
@@ -208,11 +217,10 @@
                     </div>
                     <div class="mt-3" x-show="dramaDownload.episodesLoading"><div class="d-flex align-items-center gap-2"><span class="spinner-border spinner-border-sm"></span><span x-text="dramaDownload.source === 'douyin_fallback' ? '正在解析合集与同作者剧集…' : '正在读取集数…'"></span></div></div>
                     <div x-show="dramaDownload.source !== 'douyin_fallback' && dramaDownload.selectedCandidate && dramaDownload.episodes.length" class="mt-3">
-                        <div class="d-flex justify-content-between align-items-center mb-2"><label class="form-label mb-0">选择集数</label><label class="form-check small"><input class="form-check-input me-1" type="checkbox" x-model="dramaDownload.allEpisodes" @change="toggleAllDramaEpisodes">全剧下载</label></div>
-                        <div class="row row-cols-2 row-cols-md-4 g-2">
-                            <template x-for="episode in dramaDownload.episodes" :key="episode.episode">
-                                <label class="form-check border rounded p-2" :class="isDramaEpisodeDownloaded(episode) ? 'border-success opacity-75' : 'border-secondary'"><template x-if="!isDramaEpisodeDownloaded(episode)"><input class="form-check-input ms-0 me-1" type="checkbox" :value="episode.episode" x-model="dramaDownload.selectedEpisodes" :disabled="dramaDownload.allEpisodes"></template><template x-if="isDramaEpisodeDownloaded(episode)"><i class="bi bi-check-circle-fill text-success me-1" title="已下载"></i></template><span x-text="`${episode.episode}. ${episode.title}`"></span><span class="badge bg-success ms-1" x-show="episode.download_status?.status === 'downloaded'">已下载</span></label>
-                            </template>
+                        <div x-show="dramaDownload.finished && !dramaDownload.episodesExpanded && downloadedDramaEpisodeCount() > 0"><div class="border border-success p-3 d-flex align-items-center justify-content-between gap-3"><div><div class="fw-semibold"><i class="bi bi-check-circle-fill text-success me-2"></i>已有剧集下载完成</div><div class="small text-muted mt-1" x-text="`已下载 ${downloadedDramaEpisodeCount()} / ${dramaDownload.episodes.length} 集`"></div></div><button type="button" class="btn btn-outline-primary" @click="openDramaDownloadEpisodes"><i class="bi bi-download me-1"></i>继续下载</button></div></div>
+                        <div id="dramaDownloadEpisodes" x-show="!dramaDownload.finished || dramaDownload.episodesExpanded || downloadedDramaEpisodeCount() === 0"><div class="d-flex justify-content-between align-items-center mb-2"><label class="form-label mb-0">选择集数</label><label class="form-check small"><input class="form-check-input me-1" type="checkbox" x-model="dramaDownload.allEpisodes" @change="toggleAllDramaEpisodes">全剧下载</label></div>
+                        <div class="row row-cols-2 row-cols-md-4 g-2"><template x-for="episode in dramaDownload.episodes" :key="episode.episode"><label class="form-check border rounded p-2" :class="isDramaEpisodeDownloaded(episode) ? 'border-success opacity-75' : 'border-secondary'"><template x-if="!isDramaEpisodeDownloaded(episode)"><input class="form-check-input ms-0 me-1" type="checkbox" :value="episode.episode" x-model="dramaDownload.selectedEpisodes" :disabled="dramaDownload.allEpisodes"></template><template x-if="isDramaEpisodeDownloaded(episode)"><i class="bi bi-check-circle-fill text-success me-1" title="已下载"></i></template><span x-text="`${episode.episode}. ${episode.title}`"></span><span class="badge bg-success ms-1" x-show="episode.download_status?.status === 'downloaded'">已下载</span></label></template>
+                        </div>
                         </div>
                     </div>
                     <div x-show="dramaDownload.source === 'douyin_fallback' && !dramaDownload.episodesLoading && dramaDownload.episodes.length" class="mt-3">
@@ -270,39 +278,10 @@
         </div>
     </div>
 
-    <div class="modal fade" id="assignmentModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title"><i class="bi bi-person-plus me-2"></i>人员分配</h5>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="mb-3"><span class="text-muted">剧目：</span><strong x-text="assignment.topic?.title"></strong></div>
-                    <div class="mb-3"><span class="text-muted">分配角色：</span><strong x-text="assignment.role === 'creative_planner' ? '创意策划' : '编剧'"></strong></div>
-                    <div class="alert alert-danger py-2" x-show="assignment.error" x-text="assignment.error"></div>
-                    <label class="form-label">选择用户</label>
-                    <select class="form-select" x-model="assignment.selectedUserId">
-                        <option value="">-- 请选择 --</option>
-                        <template x-for="user in assignment.candidates" :key="user.id">
-                            <option :value="user.id" x-text="user.display_name || user.username"></option>
-                        </template>
-                    </select>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
-                    <button type="button" class="btn btn-primary" @click="submitAssignment" :disabled="!assignment.selectedUserId || assignment.saving">
-                        <span x-show="assignment.saving" class="spinner-border spinner-border-sm me-1"></span>分配任务
-                    </button>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <div class="modal fade" id="generatedContentPreviewModal" tabindex="-1" aria-labelledby="generatedContentPreviewModalLabel" aria-hidden="true">
         <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable"><div class="modal-content">
             <div class="modal-header"><div><h5 class="modal-title" id="generatedContentPreviewModalLabel"><i class="bi bi-file-earmark-richtext me-2"></i>已生成内容预览</h5><div class="small text-muted mt-1" x-text="generatedContentPreview.project?.name || generatedContentPreview.topic?.title || ''"></div></div><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button></div>
-            <div class="modal-body"><div x-show="generatedContentPreview.loading" class="py-5 text-center"><span class="spinner-border"></span><div class="small text-muted mt-2">正在读取已生成内容</div></div><div x-show="generatedContentPreview.error" class="alert alert-danger" x-text="generatedContentPreview.error"></div><div x-show="!generatedContentPreview.loading && generatedContentPreview.versions.length" class="mb-3"><label class="form-label small">历史版本</label><select class="form-select form-select-sm" x-model="generatedContentPreview.selectedResourceId" @change="loadGeneratedContentVersion(generatedContentPreview.selectedResourceId)"><template x-for="item in generatedContentPreview.versions" :key="item.resource_id"><option :value="item.resource_id" x-text="item.label"></option></template></select></div><div id="generatedContentPreviewBody" x-show="!generatedContentPreview.loading && generatedContentPreview.snapshot"></div></div>
-            <div class="modal-footer"><div class="btn-group btn-group-sm me-auto" x-show="generatedContentPreview.selectedResourceId"><button type="button" class="btn btn-outline-secondary" @click="downloadGeneratedContent('md')"><i class="bi bi-download me-1"></i>下载 Markdown</button><button type="button" class="btn btn-outline-secondary" @click="downloadGeneratedContent('json')"><i class="bi bi-download me-1"></i>下载 JSON</button></div><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button></div>
+            <div class="modal-body"><div x-show="generatedContentPreview.loading" class="py-5 text-center"><span class="spinner-border"></span><div class="small text-muted mt-2">正在读取已生成内容</div></div><div x-show="generatedContentPreview.error" class="alert alert-danger" x-text="generatedContentPreview.error"></div><div x-show="!generatedContentPreview.loading && generatedContentPreview.versions.length" class="d-flex flex-wrap gap-2 mb-3"><div x-show="generatedContentPreview.stage === 'script' && generatedContentPreviewVersionOptions().length > 1"><label class="form-label small">版本</label><select class="form-select form-select-sm" x-model.number="generatedContentPreview.selectedVersion" @change="filterGeneratedContentPreviewByVersion()"><option :value="0">全部版本</option><template x-for="version in generatedContentPreviewVersionOptions()" :key="version"><option :value="version" x-text="`v${version}`"></option></template></select></div><div class="flex-grow-1"><label class="form-label small">历史版本</label><select class="form-select form-select-sm" x-model="generatedContentPreview.selectedResourceId" @change="loadGeneratedContentVersion(generatedContentPreview.selectedResourceId)"><template x-for="item in filteredGeneratedContentVersions()" :key="item.resource_id"><option :value="item.resource_id" x-text="item.label"></option></template></select></div></div><div id="generatedContentPreviewBody" x-show="!generatedContentPreview.loading && generatedContentPreview.snapshot"></div></div>
+            <div class="modal-footer"><div class="btn-group btn-group-sm me-auto" x-show="generatedContentPreview.selectedResourceId"><button type="button" class="btn btn-outline-secondary" @click="downloadGeneratedContent(generatedContentPreview.stage === 'script' ? 'txt' : 'md')"><i class="bi bi-download me-1"></i><span x-text="generatedContentPreview.stage === 'script' ? '下载 TXT' : '下载 Markdown'"></span></button><button type="button" class="btn btn-outline-secondary" @click="downloadGeneratedContent('json')"><i class="bi bi-download me-1"></i>下载 JSON</button></div><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button></div>
         </div></div>
     </div>

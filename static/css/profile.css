@@ -1,0 +1,160 @@
+.profile-shell {
+    width: min(1120px, 100%);
+    margin: 0 auto;
+    padding: 0.5rem 0 2.5rem;
+}
+
+.profile-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px solid #384052;
+}
+
+.profile-eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin-bottom: 0.4rem;
+    color: var(--bs-primary);
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+.profile-title {
+    margin: 0;
+    font-size: 1.55rem;
+    font-weight: 650;
+}
+
+.profile-subtitle,
+.profile-panel-heading p {
+    margin: 0.35rem 0 0;
+    color: #aeb8cd;
+    font-size: 0.9rem;
+}
+
+.profile-refresh {
+    flex: 0 0 auto;
+}
+
+.profile-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(340px, 0.86fr);
+    gap: 0;
+    margin-top: 1.25rem;
+    border: 1px solid #30384c;
+    border-radius: 0.45rem;
+    background: #171a24;
+}
+
+.profile-panel {
+    min-width: 0;
+    padding: 1.5rem;
+}
+
+.profile-contact-panel {
+    border-left: 1px solid #30384c;
+}
+
+.profile-panel-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1.4rem;
+}
+
+.profile-panel-heading h2 {
+    margin: 0;
+    color: #f4f7fb;
+    font-size: 1rem;
+    font-weight: 650;
+}
+
+.profile-summary {
+    display: grid;
+    grid-template-columns: minmax(7rem, 0.45fr) minmax(0, 1fr);
+    gap: 0;
+    margin: 0;
+}
+
+.profile-summary dt,
+.profile-summary dd {
+    margin: 0;
+    padding: 0.72rem 0;
+    border-top: 1px solid #2b3244;
+    overflow-wrap: anywhere;
+}
+
+.profile-summary dt {
+    color: #aeb8cd;
+    font-size: 0.88rem;
+    font-weight: 500;
+}
+
+.profile-summary dd {
+    color: #f4f7fb;
+    font-weight: 600;
+}
+
+.profile-contact-panel .form-label {
+    margin-bottom: 0.42rem;
+    font-size: 0.88rem;
+    font-weight: 600;
+    color: #dce4f0;
+}
+
+.profile-contact-panel .form-control,
+.profile-contact-panel .form-select {
+    min-height: 2.6rem;
+}
+
+.profile-contact-panel .form-text {
+    color: #aeb8cd;
+}
+
+.profile-submit {
+    min-width: 7.7rem;
+}
+
+.profile-toast-container {
+    z-index: 2100;
+}
+
+@media (max-width: 820px) {
+    .profile-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .profile-contact-panel {
+        border-top: 1px solid #30384c;
+        border-left: 0;
+    }
+}
+
+@media (max-width: 576px) {
+    .profile-shell {
+        padding-top: 0;
+    }
+
+    .profile-panel {
+        padding: 1.1rem;
+    }
+
+    .profile-summary {
+        grid-template-columns: 1fr;
+    }
+
+    .profile-summary dt {
+        padding-bottom: 0.2rem;
+        border-top: 1px solid #2b3244;
+    }
+
+    .profile-summary dd {
+        padding-top: 0.2rem;
+        border-top: 0;
+    }
+}

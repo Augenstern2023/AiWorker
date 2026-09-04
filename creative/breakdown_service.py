@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
 from creative.hit_breakdown import breakdown_field_guide
@@ -34,6 +35,74 @@ def _path_key(value: Any) -> str:
 
 def _excerpt_key(value: Any) -> str:
     return re.sub(r"\s+", "", str(value or ""))
+
+
+def _evidence_text(value: Any) -> str:
+    return re.sub(
+        r"[^0-9a-z\u4e00-\u9fff]",
+        "",
+        str(value or "").casefold(),
+    )
+
+
+def _sentence_candidates(value: Any) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    sentences = [
+        match.group(0).strip()
+        for match in re.finditer(r"[^。！？!?；;\r\n]+[。！？!?；;]?", text)
+        if match.group(0).strip()
+    ]
+    candidates: list[str] = []
+    for start in range(len(sentences)):
+        for size in range(1, min(3, len(sentences) - start) + 1):
+            candidates.append("".join(sentences[start:start + size]))
+    return candidates or [text]
+
+
+def _bigram_coverage(query: str, candidate: str) -> float:
+    if len(query) < 2:
+        return float(query == candidate)
+    query_grams = {query[index:index + 2] for index in range(len(query) - 1)}
+    candidate_grams = {
+        candidate[index:index + 2] for index in range(len(candidate) - 1)
+    }
+    return len(query_grams & candidate_grams) / max(1, len(query_grams))
+
+
+def _matching_transcript_sentence(excerpt: str, transcript: Any) -> str | None:
+    query = _evidence_text(excerpt)
+    if len(query) < 4:
+        return None
+    best: tuple[float, float, int, str] | None = None
+    for candidate in _sentence_candidates(transcript):
+        candidate_key = _evidence_text(candidate)
+        if not candidate_key:
+            continue
+        matcher = SequenceMatcher(None, query, candidate_key, autojunk=False)
+        ratio = matcher.ratio()
+        coverage = _bigram_coverage(query, candidate_key)
+        longest_match = max(block.size for block in matcher.get_matching_blocks())
+        score = (max(ratio, coverage), ratio, longest_match, candidate)
+        if best is None or score[:3] > best[:3]:
+            best = score
+    if best is None:
+        return None
+    similarity, ratio, longest_match, sentence = best
+    required_match = 3 if len(query) < 8 else max(4, min(8, len(query) // 3))
+    if longest_match < required_match:
+        return None
+    if ratio < 0.48 and similarity < 0.45:
+        return None
+    return sentence
+
+
+def _mark_as_transcript_inference(value: Any) -> str:
+    text = str(value or "").strip()
+    if any(marker in text for marker in ("推断", "待验证", "未知", "证据不足")):
+        return text
+    return f"{text}（基于现有转写推断）"
 
 
 def _episode_sources(bundle: dict[str, Any]) -> dict[tuple[int, str], dict[str, Any]]:
@@ -75,10 +144,11 @@ def _validate_sources(
     value: Any,
     content: dict[str, Any],
     source_index: dict[tuple[int, str], dict[str, Any]],
-) -> dict[str, list[dict[str, Any]]]:
+) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
     if not isinstance(value, dict):
         raise ValueError("field_sources 必须是对象")
     normalized: dict[str, list[dict[str, Any]]] = {}
+    evidence_gaps: list[str] = []
     for field in _TEXT_FIELDS | _ARRAY_FIELDS:
         items = value.get(field)
         if field == "title":
@@ -90,6 +160,12 @@ def _validate_sources(
             normalized[field] = []
             continue
         if field == "risk_notes" and isinstance(items, list) and not items:
+            normalized[field] = []
+            continue
+        if field == "target_audience" and (
+            not isinstance(items, list) or not items
+        ):
+            content[field] = _mark_as_transcript_inference(content[field])
             normalized[field] = []
             continue
         if not isinstance(items, list) or (content.get(field) and not items):
@@ -108,13 +184,23 @@ def _validate_sources(
             if episode is None:
                 raise ValueError(f"field_sources.{field} 引用了输入范围外的集数或路径")
             if not excerpt or _excerpt_key(excerpt) not in _excerpt_key(episode.get("text")):
-                raise ValueError(f"field_sources.{field} 的 excerpt 不是对应转写原文")
+                matched_excerpt = _matching_transcript_sentence(
+                    excerpt,
+                    episode.get("text"),
+                )
+                if matched_excerpt is None:
+                    evidence_gaps.append(
+                        f"{field} 的第 {episode_number} 集证据无法与转写原文可靠匹配，"
+                        "已移除，需人工核验。"
+                    )
+                    continue
+                excerpt = matched_excerpt
             normalized[field].append({
                 "episode_number": episode_number,
                 "source_path": source_path,
                 "excerpt": excerpt,
             })
-    return normalized
+    return normalized, evidence_gaps
 
 
 def _validate_breakdown_payload(
@@ -125,11 +211,21 @@ def _validate_breakdown_payload(
     if not isinstance(payload, dict):
         raise ValueError("LLM 响应必须是对象")
     content = _validate_content(payload.get("content"), expected_title)
-    sources = _validate_sources(payload.get("field_sources"), content, source_index)
+    sources, evidence_gaps = _validate_sources(
+        payload.get("field_sources"),
+        content,
+        source_index,
+    )
     risks = payload.get("risks")
     if not isinstance(risks, list) or any(not isinstance(item, str) for item in risks):
         raise ValueError("risks 必须是字符串数组")
-    return content, sources, [item.strip() for item in risks if item.strip()]
+    normalized_risks = [item.strip() for item in risks if item.strip()]
+    for gap in evidence_gaps:
+        if gap not in content["risk_notes"]:
+            content["risk_notes"].append(gap)
+        if gap not in normalized_risks:
+            normalized_risks.append(gap)
+    return content, sources, normalized_risks
 
 
 async def generate_breakdown(

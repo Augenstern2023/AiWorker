@@ -10,59 +10,62 @@
                             <div class="position-relative mb-3">
                                 <div class="input-group">
                                     <select class="form-select" style="max-width: 140px" x-model="dramaAnalysis.platform" @change="changeDramaSearchPlatform" aria-label="检索平台"><option value="hg">红果</option><option value="dy">抖音</option></select>
-                                    <input class="form-control" x-model="dramaAnalysis.title" @input="onDramaTitleInput" @keydown.enter="searchDrama" autocomplete="off" :placeholder="dramaAnalysis.platform === 'dy' ? '输入剧名，检索抖音视频' : '输入剧名，自动联想红果剧目'">
+                                    <input class="form-control" x-model="dramaAnalysis.title" @keydown.enter="searchDrama" autocomplete="off" :placeholder="dramaAnalysis.platform === 'dy' ? '输入剧名，检索抖音视频' : '输入完整剧名，优先检索第三方剧目来源'">
                                     <button class="btn btn-primary" @click="searchDrama" :disabled="dramaAnalysis.loading || !dramaAnalysis.title.trim()">
                                         <i class="bi bi-search me-1"></i>搜索
                                     </button>
                                 </div>
-                                <div class="list-group position-absolute w-100 shadow" style="top: calc(100% + 2px); z-index: 20;" x-show="dramaAnalysis.suggestionLoading || dramaAnalysis.suggestions.length" @click.outside="dramaAnalysis.suggestions = []">
-                                    <div class="list-group-item bg-dark text-muted border-secondary py-2" x-show="dramaAnalysis.suggestionLoading">
-                                        <i class="bi bi-search me-1"></i>正在联想剧目…
-                                    </div>
-                                    <template x-for="suggestion in dramaAnalysis.suggestions" :key="suggestion.book_id">
-                                        <button type="button" class="list-group-item list-group-item-action bg-dark text-light border-secondary text-start" @click="chooseDramaSuggestion(suggestion)">
-                                            <span class="fw-semibold" x-text="suggestion.title || '未命名剧目'"></span>
-                                            <span class="small text-muted ms-2" x-text="`${suggestion.episode_count || '-'} 集 · ${suggestion.summary || '暂无简介'}`"></span>
-                                        </button>
-                                    </template>
-                                </div>
                             </div>
-                            <div class="alert alert-danger" x-show="dramaAnalysis.error" x-text="dramaAnalysis.error"></div>
-                            <div class="alert alert-warning" x-show="isDouyinDramaSearch()">
-                                <div class="fw-semibold" x-text="dramaAnalysis.searchSource === 'douyin_fallback' ? '红果检索已降级至抖音' : '抖音检索结果'"></div>
+                            <div class="alert alert-info py-2" x-show="dramaAnalysis.platform === 'hg'" x-cloak role="status">优先检索第三方剧目来源，同时检索已抓包红果剧目；请手动确认来源后再读取集数。</div>
+                            <div class="alert alert-danger" x-show="dramaAnalysis.error" x-cloak x-text="dramaAnalysis.error"></div>
+                            <div class="alert alert-warning py-2" x-show="dramaAnalysis.thirdPartyError" x-cloak role="status"><span class="fw-semibold">第三方来源暂不可用：</span><span x-text="dramaAnalysis.thirdPartyError"></span></div>
+                            <div class="alert alert-warning py-2" x-show="dramaAnalysis.captureError" x-cloak role="status"><span class="fw-semibold">抓包目录暂不可用：</span><span x-text="dramaAnalysis.captureError"></span></div>
+                            <div class="alert alert-warning" x-show="isDouyinDramaSearch()" x-cloak>
+                                <div class="fw-semibold">抖音检索结果</div>
                                 <div class="small" x-text="dramaAnalysis.fallbackReason"></div>
                                 <div class="small mt-1">请手动确认视频。候选可能是推广或片段，并非完整剧集。</div>
                             </div>
-                            <div class="list-group mb-3" x-show="dramaAnalysis.candidates.length">
-                                <template x-for="candidate in dramaAnalysis.candidates" :key="candidate.book_id || candidate.aweme_id">
-                                    <button type="button" class="list-group-item list-group-item-action bg-transparent text-light border-secondary" :class="{active: (candidate.book_id && dramaAnalysis.selected?.book_id === candidate.book_id) || (candidate.aweme_id && dramaAnalysis.selected?.aweme_id === candidate.aweme_id)}" @click="selectDramaCandidate(candidate)" :disabled="dramaAnalysis.loading">
-                                        <div class="d-flex gap-3 align-items-center">
-                                            <img x-show="candidate.cover" :src="candidate.cover" alt="" style="width: 42px; height: 56px; object-fit: cover;">
-                                            <div class="text-start">
-                                                <div class="fw-semibold" x-text="candidate.title || '未命名剧目'"></div>
-                                                <div class="small text-muted" x-show="!isDouyinDramaSearch()" x-text="`${candidate.episode_count || '-'} 集 · ${candidate.summary || '暂无简介'}`"></div>
-                                                <div class="small text-muted" x-show="isDouyinDramaSearch()" x-text="`${candidate.author || '未知作者'} · 时长 ${formatDramaDuration(candidate.duration)} · 点赞 ${candidate.like_count || 0} · 评论 ${candidate.comment_count || 0}`"></div>
-                                            </div>
+                            <div x-show.important="dramaAnalysis.loading" x-cloak class="d-flex align-items-center gap-2 py-3" role="status" aria-live="polite"><span class="spinner-border spinner-border-sm"></span><span x-text="dramaAnalysis.loadingMessage"></span></div>
+                            <div x-show="!isDouyinDramaSearch() && !dramaAnalysis.loading && (dramaAnalysis.providers.length || dramaAnalysis.captureCandidates.length)" x-cloak class="mb-3">
+                                <template x-for="provider in dramaAnalysis.providers" :key="provider.provider_id">
+                                    <section class="mb-3" :aria-label="`${provider.display_name || provider.provider_id} 搜索结果`">
+                                        <div class="d-flex align-items-center gap-2 mb-2 flex-wrap"><span class="fw-semibold" x-text="provider.display_name || provider.provider_id"></span><span class="badge" :class="provider.status === 'error' ? 'bg-warning text-dark' : 'bg-info text-dark'" x-text="provider.status === 'error' ? '来源异常' : `${provider.candidates?.length || 0} 个结果`"></span><span class="small text-muted" x-show="provider.elapsed_ms" x-text="`${provider.elapsed_ms} ms`"></span></div>
+                                        <div class="alert alert-warning py-2 mb-2" x-show="provider.status === 'error'" x-text="provider.error || '该来源检索失败'" role="status"></div>
+                                        <div class="list-group" x-show="provider.candidates?.length">
+                                            <template x-for="candidate in provider.candidates" :key="`${candidate.provider_id}:${candidate.series_ref || candidate.book_id}`">
+                                                <button type="button" class="list-group-item list-group-item-action bg-transparent text-light border-secondary" :class="{active: isDramaCandidateSelected(candidate)}" @click="selectDramaCandidate(candidate)" :disabled="dramaAnalysis.loading || dramaAnalysis.seriesLoading">
+                                                    <div class="d-flex gap-3 align-items-center"><img x-show="candidate.cover" :src="candidate.cover" alt="" style="width: 42px; height: 56px; object-fit: cover;"><div class="text-start flex-grow-1 min-w-0"><div class="fw-semibold text-break"><span x-text="candidate.title || '未命名剧目'"></span><span class="badge bg-info text-dark ms-2" x-text="dramaProviderLabel(candidate.provider_id)"></span></div><div class="small text-muted text-break" x-text="`${candidate.episode_count || '-'} 集 · ${candidate.summary || '暂无简介'}`"></div></div></div>
+                                                </button>
+                                            </template>
                                         </div>
-                                    </button>
+                                    </section>
                                 </template>
+                                <section x-show="dramaAnalysis.captureCandidates.length" aria-label="抓包来源搜索结果">
+                                    <div class="d-flex align-items-center gap-2 mb-2 flex-wrap"><span class="fw-semibold">抓包来源</span><span class="badge bg-secondary" x-text="`${dramaAnalysis.captureCandidates.length} 个结果`"></span></div>
+                                    <div class="list-group"><template x-for="candidate in dramaAnalysis.captureCandidates" :key="`${candidate.provider_id || candidate.source_platform || 'hongguo_capture'}:${candidate.series_ref || candidate.book_id}`"><button type="button" class="list-group-item list-group-item-action bg-transparent text-light border-secondary" :class="{active: isDramaCandidateSelected(candidate)}" @click="selectDramaCandidate(candidate)" :disabled="dramaAnalysis.loading || dramaAnalysis.seriesLoading"><div class="d-flex gap-3 align-items-center"><img x-show="candidate.cover" :src="candidate.cover" alt="" style="width: 42px; height: 56px; object-fit: cover;"><div class="text-start flex-grow-1 min-w-0"><div class="fw-semibold text-break"><span x-text="candidate.title || '未命名剧目'"></span><span class="badge bg-secondary ms-2">抓包来源</span></div><div class="small text-muted text-break" x-text="`${candidate.episode_count || '-'} 集 · ${candidate.summary || '暂无简介'}`"></div></div></div></button></template></div>
+                                </section>
                             </div>
-                            <div x-show="dramaAnalysis.selected" class="border border-secondary p-3">
-                                <div class="fw-semibold mb-3" x-text="dramaAnalysis.selected?.title"></div>
+                            <div class="list-group mb-3" x-show="isDouyinDramaSearch() && dramaAnalysis.candidates.length" x-cloak>
+                                <template x-for="candidate in dramaAnalysis.candidates" :key="`${candidate.source_platform || 'douyin'}:${candidate.aweme_id}`"><button type="button" class="list-group-item list-group-item-action bg-transparent text-light border-secondary" :class="{active: isDramaCandidateSelected(candidate)}" @click="selectDramaCandidate(candidate)" :disabled="dramaAnalysis.loading || dramaAnalysis.seriesLoading"><div class="d-flex gap-3 align-items-center"><img x-show="candidate.cover" :src="candidate.cover" alt="" style="width: 42px; height: 56px; object-fit: cover;"><div class="text-start"><div class="fw-semibold" x-text="candidate.title || '未命名剧目'"></div><div class="small text-muted" x-text="`${candidate.author || '未知作者'} · 时长 ${formatDramaDuration(candidate.duration)} · 点赞 ${candidate.like_count || 0} · 评论 ${candidate.comment_count || 0}`"></div></div></div></button></template>
+                            </div>
+                            <div x-show="dramaAnalysis.selected" x-cloak class="border border-secondary p-3">
+                                <div class="fw-semibold mb-1" x-text="dramaAnalysis.selected?.title"></div>
+                                <div class="small text-info mb-3" x-show="!isDouyinDramaSearch()" x-text="`当前来源：${dramaProviderLabel(dramaAnalysis.selected?.provider_id || dramaAnalysis.selected?.source_platform)}`"></div>
                                 <div x-show="!isDouyinDramaSearch()" class="row g-3 align-items-end">
                                     <div class="col-md-8">
                                         <label class="form-label">集数</label>
-                                        <select class="form-select" x-model.number="dramaAnalysis.episode">
+                                        <select class="form-select" x-model.number="dramaAnalysis.episode" :disabled="dramaAnalysis.seriesLoading">
                                             <template x-for="episode in dramaAnalysis.episodes" :key="episode.episode">
-                                                <option :value="episode.episode" x-text="`${episode.episode}. ${episode.title}`"></option>
+                                                <option :value="episode.episode" :disabled="isDramaEpisodePaid(episode)" x-text="`${episode.episode}. ${episode.title} · ${dramaEpisodeStatusLabel(episode)}`"></option>
                                             </template>
                                         </select>
                                     </div>
                                     <div class="col-md-4 d-grid">
-                                        <button class="btn btn-success" @click="startDramaAnalysis" :disabled="dramaAnalysis.loading || !dramaAnalysis.episode">
+                                        <button class="btn btn-success" @click="startDramaAnalysis" :disabled="dramaAnalysis.loading || dramaAnalysis.seriesLoading || !dramaAnalysis.episode || isDramaEpisodePaid(selectedDramaEpisode())">
                                             <i class="bi bi-download me-1"></i>下载剧集
                                         </button>
                                     </div>
+                                    <div class="col-12 small text-muted" aria-live="polite" x-show="selectedDramaEpisode()" x-text="(dramaAnalysis.selected?.provider_id || dramaAnalysis.selected?.source_platform) === 'hongguo_capture' && selectedDramaEpisode()?.capture_status === 'waiting_capture' ? `创建任务后，请在红果 App 播放第 ${dramaAnalysis.episode} 集。` : dramaEpisodeStatusLabel(selectedDramaEpisode())"></div>
                                 </div>
                                 <div x-show="isDouyinDramaSearch()">
                                     <div class="alert alert-warning py-2">
@@ -76,24 +79,39 @@
                             </div>
                         </div>
                     </div>
-                    <div class="card" x-show="dramaAnalysis.jobId">
+                    <div class="card" x-show="dramaAnalysis.jobId" x-cloak>
                         <div class="card-header">下载产物</div>
                         <div class="card-body">
-                            <div class="mb-2">任务：<span x-text="dramaAnalysis.jobId"></span></div>
+                            <div class="d-flex gap-2 flex-wrap align-items-center mb-2"><span>任务：<span class="text-break" x-text="dramaAnalysis.jobId"></span></span><span class="badge bg-secondary" x-text="dramaJobStatusLabel(dramaCurrentJob()?.status)"></span></div>
+                            <div class="alert py-2" role="status" aria-live="polite" x-show="dramaCurrentJob()" :class="dramaCurrentJob()?.status === 'failed' ? 'alert-danger' : 'alert-info'">
+                                <span x-text="dramaCurrentJob()?.message || '任务已创建，请在红果 App 播放所选剧集。'"></span>
+                                <span x-show="dramaCurrentJob()?.progress?.waiting_seconds" x-text="`（剩余 ${dramaCurrentJob()?.progress?.waiting_seconds} 秒）`"></span>
+                            </div>
                             <div class="d-flex gap-2 flex-wrap">
                                 <template x-for="item in dramaJobArtifacts()" :key="item.path">
-                                    <button class="btn btn-sm btn-outline-light" @click="downloadFile(item.path)" x-text="item.path.replace(/\\/g, '/').split('/').pop()"></button>
+                                    <div>
+                                        <button type="button" class="btn btn-sm btn-outline-success" x-show="isDramaAnalysisVideoArtifact(item)" @click="openDramaAnalysisVideo(item)" :aria-label="`播放 ${dramaAnalysisArtifactName(item)}`" title="在线播放"><i class="bi bi-play-fill me-1"></i><span x-text="dramaAnalysisArtifactName(item)"></span></button>
+                                        <button type="button" class="btn btn-sm btn-outline-light" x-show="!isDramaAnalysisVideoArtifact(item)" @click="downloadFile(item.path)" :aria-label="`下载 ${dramaAnalysisArtifactName(item)}`" title="下载文件" x-text="dramaAnalysisArtifactName(item)"></button>
+                                    </div>
                                 </template>
+                            </div>
+                            <div class="mt-3" x-show="dramaAnalysis.videoPreviewUrl" x-cloak>
+                                <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                                    <span class="small fw-semibold text-break" x-text="dramaAnalysisArtifactName({path: dramaAnalysis.videoPreviewPath})"></span>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary flex-shrink-0" @click="closeDramaAnalysisVideo" title="关闭播放" aria-label="关闭播放"><i class="bi bi-x-lg"></i></button>
+                                </div>
+                                <video id="dramaAnalysisVideo" class="w-100" style="max-height: 70vh; background: #000;" :src="dramaAnalysis.videoPreviewUrl" controls playsinline preload="metadata" @error="dramaAnalysis.videoPreviewError = '浏览器无法播放该视频，请检查文件编码或重新下载。'"></video>
+                                <div class="alert alert-warning py-2 mt-2 mb-0" role="alert" x-show="dramaAnalysis.videoPreviewError" x-text="dramaAnalysis.videoPreviewError"></div>
                             </div>
                         </div>
                     </div>
                     <div class="card mt-3">
                         <div class="card-header d-flex align-items-center justify-content-between"><span><i class="bi bi-chat-square-text me-2"></i>剧评检索下载</span><span class="badge bg-secondary" x-text="dramaReviewStatusLabel()"></span></div>
                         <div class="card-body">
-                            <div class="row g-2 align-items-end"><div class="col-md-7"><label class="form-label">剧名</label><input class="form-control" x-model.trim="dramaReviews.title" placeholder="输入需要检索的剧名"></div><div class="col-md-3"><label class="form-label">数量限制</label><input class="form-control" type="number" min="1" max="10000" step="1" x-model.number="dramaReviews.limit"></div><div class="col-md-2 d-grid"><button type="button" class="btn btn-outline-primary" @click="startDramaReviewCapture" :disabled="dramaReviews.loading || dramaReviews.polling"><span x-show="dramaReviews.loading" class="spinner-border spinner-border-sm me-1"></span><i x-show="!dramaReviews.loading" class="bi bi-search me-1"></i>检索</button></div></div>
-                            <div class="alert alert-danger mt-3 mb-0" x-show="dramaReviews.error" x-text="dramaReviews.error"></div>
-                            <div class="d-flex align-items-center justify-content-between mt-3" x-show="dramaReviews.jobId"><span class="small text-muted" x-text="`已获取 ${dramaReviews.reviewCount} / ${dramaReviews.sourceTotal || '-'} 条剧评`"></span><button type="button" class="btn btn-sm btn-outline-secondary" x-show="dramaReviews.status === 'completed'" @click="downloadDramaReviews"><i class="bi bi-download me-1"></i>下载 CSV</button></div>
-                            <div class="table-responsive mt-2" x-show="dramaReviews.items.length"><table class="table table-sm table-hover mb-0"><thead><tr><th>用户</th><th>剧评</th><th>时间</th><th>点赞</th></tr></thead><tbody><template x-for="review in dramaReviews.items" :key="review.comment_id"><tr><td x-text="review.author || '-' "></td><td class="text-break" x-text="review.content || '-' "></td><td class="text-nowrap" x-text="review.created_at || '-' "></td><td x-text="review.like_count || 0"></td></tr></template></tbody></table></div>
+                            <div class="row g-2 align-items-end"><div class="col-md-7"><label class="form-label">剧名</label><input class="form-control" x-model.trim="dramaReviews.title" placeholder="输入需要检索的剧名"></div><div class="col-md-3"><label class="form-label">数量限制</label><input class="form-control" type="number" min="1" max="10000" step="1" x-model.number="dramaReviews.limit"></div><div class="col-md-2 d-grid"><button type="button" class="btn btn-outline-primary" @click="startDramaReviewCapture" :disabled="dramaReviews.loading || dramaReviews.polling"><span x-show="dramaReviews.loading" x-cloak class="spinner-border spinner-border-sm me-1"></span><i x-show="!dramaReviews.loading" x-cloak class="bi bi-search me-1"></i>检索</button></div></div>
+                            <div class="alert alert-danger mt-3 mb-0" x-show="dramaReviews.error" x-cloak x-text="dramaReviews.error"></div>
+                            <div class="d-flex align-items-center justify-content-between mt-3" x-show.important="dramaReviews.jobId" x-cloak><span class="small text-muted" x-text="`已获取 ${dramaReviews.reviewCount} / ${dramaReviews.sourceTotal || '-'} 条剧评`"></span><button type="button" class="btn btn-sm btn-outline-secondary" x-show="dramaReviews.status === 'completed'" @click="downloadDramaReviews"><i class="bi bi-download me-1"></i>下载 CSV</button></div>
+                            <div class="table-responsive mt-2" x-show="dramaReviews.items.length" x-cloak><table class="table table-sm table-hover mb-0"><thead><tr><th>用户</th><th>剧评</th><th>时间</th><th>点赞</th></tr></thead><tbody><template x-for="review in dramaReviews.items" :key="review.comment_id"><tr><td x-text="review.author || '-' "></td><td class="text-break" x-text="review.content || '-' "></td><td class="text-nowrap" x-text="review.created_at || '-' "></td><td x-text="review.like_count || 0"></td></tr></template></tbody></table></div>
                         </div>
                     </div>
                 </div>

@@ -10,6 +10,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from playwright.sync_api import sync_playwright
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -173,6 +175,132 @@ def test_planning_projects_use_real_stage_routes():
     assert 'href="/planning/projects/{{ project_id }}/characters"' in brief
 
 
+def test_project_brief_uses_multiline_controls_for_generated_long_text():
+    blueprint = _read("templates/common/workspace/project_blueprints.html")
+
+    fields = (
+        ("creativeWorkspace.project.target_audience", 16),
+        ("selectedProjectBlueprint().content.protagonist", 24),
+        ("selectedProjectBlueprint().content.background", 24),
+        ("selectedProjectBlueprint().content.audience", 24),
+    )
+    for field, characters_per_line in fields:
+        assert re.search(
+            rf'<textarea[^>]+:rows="textareaRows\({re.escape(field)}, {characters_per_line}\)"[^>]+'
+            rf'x-model="{re.escape(field)}"',
+            blueprint,
+        )
+        assert f'<input class="form-control form-control-sm" x-model="{field}"' not in blueprint
+
+
+def test_project_brief_long_text_controls_wrap_without_clipping():
+    blueprint = _read("templates/common/workspace/project_blueprints.html")
+    workspace_css = _read("static/css/workspaces.css")
+    bootstrap_css = _read("static/css/bootstrap.min.css")
+    markup = blueprint.replace(
+        '<template x-if="selectedProjectBlueprint()"><div class="border-top pt-3">',
+        '<div class="border-top pt-3">',
+    ).replace("</div></template>", "</div>").replace(
+        '<template x-if="creativeWorkspace.project?.creation_mode !== \'original\'"><div class="imitation-brief-workspace">',
+        '<div class="imitation-brief-workspace">',
+    ).replace("</div>\n</template>\n</div>\n", "</div>\n</div>\n")
+    fields = (
+        ("creativeWorkspace.project.target_audience", 16),
+        ("selectedProjectBlueprint().content.protagonist", 24),
+        ("selectedProjectBlueprint().content.background", 24),
+        ("selectedProjectBlueprint().content.audience", 24),
+    )
+    value = "女性向短剧观众，偏好情感成长、家庭关系与高密度剧情冲突。" * 3
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1600, "height": 900})
+        page.set_content(f"<style>{bootstrap_css}{workspace_css}</style>{markup}")
+        for field, characters_per_line in fields:
+            control = page.locator(f'textarea[x-model="{field}"]')
+            rows = max(2, (len(value) + characters_per_line - 1) // characters_per_line)
+            control.evaluate("(element, rows) => element.rows = rows", rows)
+            control.fill(value)
+            assert control.evaluate(
+                "element => element.scrollHeight <= element.clientHeight + 1"
+            )
+        page.screenshot(path=str(ROOT / ".runtime/qa/brief-long-text-controls.png"))
+        browser.close()
+
+
+def test_project_beats_uses_multiline_controls_for_long_content():
+    beats = _read("templates/common/workspace/project_beats.html")
+
+    fields = (
+        ("beat.scene", "beat.scene"),
+        ("listText(beat.characters)", "beat.characters"),
+        ("beat.goal", "beat.goal"),
+        ("beat.obstacle", "beat.obstacle"),
+        ("beat.emotion_change", "beat.emotion_change"),
+        ("beat.state_change", "beat.state_change"),
+        ("beat.cost", "beat.cost"),
+        ("beat.opposition_tactic", "beat.opposition_tactic"),
+        ("beat.turn", "beat.turn"),
+        ("beat.hook", "beat.hook"),
+    )
+    for row_source, field in fields:
+        assert re.search(
+            rf'<textarea[^>]+:rows="textareaRows\({re.escape(row_source)}, 10\)"[^>]+',
+            beats,
+        )
+        assert field in beats
+        assert f'<input class="form-control form-control-sm" x-model="{field}"' not in beats
+
+
+def test_project_beats_exposes_story_change_cost_and_continuity_ledger():
+    beats = _read("templates/common/workspace/project_beats.html")
+
+    for label, field in (
+        ("局面变化", "beat.state_change"),
+        ("代价", "beat.cost"),
+        ("对抗策略", "beat.opposition_tactic"),
+    ):
+        assert label in beats
+        assert field in beats
+    assert "连续性变更" in beats
+    assert "连续性账本" in beats
+
+
+def test_project_beats_long_text_controls_wrap_without_clipping():
+    beats = _read("templates/common/workspace/project_beats.html")
+    workspace_css = _read("static/css/workspaces.css")
+    bootstrap_css = _read("static/css/bootstrap.min.css")
+    markup = re.sub(
+        r'<template x-if="selectedProjectBeats\(\)">\s*<div>',
+        "<div>",
+        beats,
+    )
+    markup = re.sub(
+        r'<template x-for="beat in selectedProjectBeats\(\)\.content\.beats" '
+        r':key="beat\.order">\s*<tr>',
+        "<tr>",
+        markup,
+    ).replace("</tr></template>", "</tr>").replace("</div></template>", "</div>")
+    value = "主角在高压环境中做出艰难选择，关系与目标同时受到阻力。" * 3
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 2048, "height": 900})
+        page.set_content(f"<style>{bootstrap_css}{workspace_css}</style>{markup}")
+        controls = page.locator("tbody textarea")
+        assert controls.count() == 10
+        rows = max(2, (len(value) + 9) // 10)
+        for index in range(controls.count()):
+            control = controls.nth(index)
+            control.evaluate("(element, rows) => element.rows = rows", rows)
+            control.fill(value)
+            assert control.evaluate(
+                "element => element.scrollHeight <= element.clientHeight + 1"
+            )
+        page.screenshot(path=str(ROOT / ".runtime/qa/beats-long-text-controls.png"))
+        browser.close()
+
+
 def test_writing_outlines_link_each_episode_to_beats_route():
     outlines = _read("templates/common/workspace/project_outlines.html")
     creative = _read("static/js/common/creative.js")
@@ -200,8 +328,11 @@ def test_selection_drama_page_cannot_edit_admin_credentials():
     ):
         assert forbidden not in selection
         assert forbidden not in selection_script
-    assert "配置中心地址" in admin
-    assert "activationCode" in admin
+    assert "红果剧目来源与抓包设置" in admin
+    assert "capture_root" in admin_script
+    assert "wait_timeout_seconds" in admin_script
+    assert "activation_code" in admin_script
+    assert "saveDramaSettings" in admin_script
     assert "saveDramaSettings" in admin_script
     assert "testDramaInterface" in admin_script
 
@@ -214,17 +345,26 @@ def test_admin_identity_pages_expose_complete_management_flows():
 
     assert 'id="user-editor-modal"' in users_html
     assert 'id="user-role-select"' in users_html
-    assert "/api/admin/users/${user.id}/reset-password" in users_js
+    assert "${usersApi}/${user.id}/reset-password" in users_js
     assert "method: 'PATCH'" in users_js
     assert "role_ids" in users_js
     assert "toggleUserStatus" in users_js
 
     assert 'id="role-editor-modal"' in roles_html
     assert 'id="permission-editor"' in roles_html
+    assert 'id="role-pages-modal"' in roles_html
     assert "/api/admin/permissions" in roles_js
-    assert "/api/admin/roles/${role.id}/clone" in roles_js
+    assert "${rolesApi}/${role.id}/clone" in roles_js
+    assert "${rolesApi}/${roleId}/pages" in roles_js
+    assert "openRolePages" in roles_js
     assert "permissions" in roles_js
     assert "toggleRoleStatus" in roles_js
+
+
+def test_password_reset_prompt_explains_password_rules():
+    users_js = _read("static/js/admin/users.js")
+
+    assert "密码需为 10 至 128 个字符，并包含字母、数字和特殊字符" in users_js
 
 
 def test_user_list_displays_role_names_instead_of_role_codes():
@@ -246,7 +386,7 @@ def test_selection_topics_includes_planning_assignment_modal():
     assert 'common/workspace/planning_assignment_modal.html' in topics
 
 
-def test_review_projects_lists_assigned_planning_projects_only():
+def test_review_projects_lists_managed_projects_only():
     page = _read("templates/review/projects.html")
     script = _read("static/js/review/projects.js")
 
@@ -254,22 +394,30 @@ def test_review_projects_lists_assigned_planning_projects_only():
     assert "待决策选题" not in page
     assert "workflow-bootstrap-topics" not in page
     assert "/api/creative/projects" in script
-    assert "/api/workflow/tasks" in script
+    assert "task.assignee_user_id" not in script
     assert "/api/creative/topics/workflow-candidates" not in script
     assert "/workflow`" not in script
 
 
-def test_admin_delivery_page_uses_approved_delivery_registry():
+def test_review_project_name_opens_its_creative_brief():
+    script = _read("static/js/review/projects.js")
+
+    assert "project-name-button" in script
+    assert "`/planning/projects/${project.id}/brief`" in script
+    assert "`/review/projects/${project.id}/members`" in script
+
+
+def test_admin_delivery_page_lists_generated_resources_without_delivery_registry():
     html = _read("templates/admin/deliveries.html")
     source = _read("static/js/admin/deliveries.js")
 
-    assert 'id="delivery-create-form"' in html
-    assert 'id="delivery-submission"' in html
-    assert 'id="delivery-history"' in html
-    assert "/api/admin/deliveries" in source
-    assert "/download`" in source
-    assert "method: 'POST'" in source
-    assert "/api/creative/projects/" not in html
+    assert 'id="generated-resource-list"' in html
+    assert 'id="delivery-create-form"' not in html
+    assert 'id="delivery-history"' not in html
+    assert "/api/admin/deliveries" not in source
+    assert "method: 'POST'" not in source
+    assert "/api/creative/generated-resources" in source
+    assert "generated-content/download" in source
 
 
 def test_admin_delivery_initializer_does_not_require_creative_workspace_module():
@@ -278,7 +426,7 @@ def test_admin_delivery_initializer_does_not_require_creative_workspace_module()
     assert "this.page === 'admin-deliveries'" not in tasks
 
 
-def test_base_layout_globally_surfaces_permission_denials_without_rejection():
+def test_base_layout_globally_surfaces_permission_denials_before_rejection():
     base = _read("templates/layouts/base.html")
     session = _read("static/js/common/session.js")
     api = _read("static/js/common/api.js")
@@ -291,7 +439,7 @@ def test_base_layout_globally_surfaces_permission_denials_without_rejection():
         "return response", 1
     )[0]
     assert "window.dispatchEvent" in forbidden_branch
-    assert "throw" not in forbidden_branch
+    assert "throw error" in forbidden_branch
 
 
 def test_selection_drama_page_only_references_loaded_methods():

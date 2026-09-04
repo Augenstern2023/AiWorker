@@ -2,17 +2,28 @@
 
 {% block content %}
 {% set team_mode = request.url.path.startswith('/review/') %}
-<div class="d-flex align-items-center justify-content-between mb-3"><div><h3 class="mb-1">{{ '团队账号' if team_mode else '用户管理' }}</h3><div class="small text-muted">{{ '管理自己创建的普通账号及角色绑定' if team_mode else '管理本地账号、状态与角色分配' }}</div></div><button class="btn btn-primary btn-sm" id="create-user"><i class="bi bi-person-plus me-1"></i>新建用户</button></div>
+<div class="d-flex align-items-center justify-content-between mb-3"><div><h3 class="mb-1">{{ '团队账号' if team_mode else '用户管理' }}</h3><div class="small text-muted">{{ '管理自己创建的普通账号及角色绑定' if team_mode else '管理本地账号、资料、状态与角色分配' }}</div></div><button class="btn btn-primary btn-sm" id="create-user"><i class="bi bi-person-plus me-1"></i>新建用户</button></div>
 <div class="alert alert-danger d-none" id="user-error" role="alert"></div>
-<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>用户名</th><th>显示名称</th><th>角色</th><th>状态</th><th>最近登录</th><th>操作</th></tr></thead><tbody id="user-list"><tr><td colspan="6" class="text-center text-muted py-4">正在加载用户...</td></tr></tbody></table></div>
+{% if not team_mode %}
+<form class="row g-2 align-items-end mb-3" id="user-filters">
+    <div class="col-lg-3"><label class="form-label form-label-sm" for="user-filter-username">用户名</label><input class="form-control form-control-sm" id="user-filter-username" name="username" placeholder="按用户名检索"></div>
+    <div class="col-lg-2"><label class="form-label form-label-sm" for="user-filter-role">角色</label><select class="form-select form-select-sm" id="user-filter-role" name="role_code"><option value="">全部角色</option></select></div>
+    <div class="col-lg-2"><label class="form-label form-label-sm" for="user-filter-department">部门</label><select class="form-select form-select-sm" id="user-filter-department" name="department_id"><option value="">全部部门</option></select></div>
+    <div class="col-lg-2"><label class="form-label form-label-sm" for="user-filter-gender">性别</label><select class="form-select form-select-sm" id="user-filter-gender" name="gender"><option value="">全部性别</option><option value="unspecified">未填写</option><option value="male">男</option><option value="female">女</option></select></div>
+    <div class="col-lg-1"><label class="form-label form-label-sm" for="user-filter-status">状态</label><select class="form-select form-select-sm" id="user-filter-status" name="status"><option value="">全部</option><option value="active">启用</option><option value="disabled">停用</option></select></div>
+    <div class="col-lg-2 d-flex gap-2"><button class="btn btn-primary btn-sm" type="submit">筛选</button><button class="btn btn-outline-secondary btn-sm" id="export-users-csv" type="button"><i class="bi bi-download"></i> CSV</button><button class="btn btn-outline-secondary btn-sm" id="export-users-xlsx" type="button"><i class="bi bi-download"></i> XLSX</button></div>
+</form>
+{% endif %}
+<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>{% if team_mode %}<th>用户名</th><th>显示名称</th><th>角色</th><th>状态</th><th>最近登录</th>{% else %}<th>用户名</th><th>部门</th><th>邮箱</th><th>手机号</th><th>性别</th><th>角色</th><th>创建时间</th><th>状态</th>{% endif %}<th>操作</th></tr></thead><tbody id="user-list"><tr id="user-list-skeleton" aria-hidden="true"><td colspan="9"><div class="ui-skeleton" style="height:20px;width:60%;margin:8px 0;"></div><div class="ui-skeleton" style="height:14px;width:40%;"></div></td></tr></tbody></table></div>
 
 <div class="modal fade" id="user-editor-modal" tabindex="-1" aria-labelledby="user-editor-title" aria-hidden="true"><div class="modal-dialog modal-dialog-centered"><form class="modal-content" id="user-editor-form"><div class="modal-header"><h5 class="modal-title" id="user-editor-title">新建用户</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button></div><div class="modal-body">
     <input type="hidden" id="user-id">
     <div class="mb-3"><label class="form-label" for="user-username">用户名</label><input class="form-control" id="user-username" autocomplete="off" required></div>
     <div class="mb-3"><label class="form-label" for="user-display-name">显示名称</label><input class="form-control" id="user-display-name" required></div>
+    {% if not team_mode %}<div class="row g-3 mb-3"><div class="col-md-6"><label class="form-label" for="user-email">邮箱</label><input class="form-control" id="user-email" type="email" autocomplete="email"></div><div class="col-md-6"><label class="form-label" for="user-phone">手机号</label><input class="form-control" id="user-phone" inputmode="numeric" maxlength="11"></div><div class="col-md-6"><label class="form-label" for="user-gender">性别</label><select class="form-select" id="user-gender"><option value="unspecified">未填写</option><option value="male">男</option><option value="female">女</option></select></div></div>{% endif %}
     <div class="mb-3" id="user-password-field"><label class="form-label" for="user-password">初始密码</label><input class="form-control" id="user-password" type="password" autocomplete="new-password" minlength="1"></div>
     <div><label class="form-label" for="user-role-select">角色，可多选</label><select class="form-select" id="user-role-select" multiple size="6"></select></div>
     <div class="alert alert-danger d-none mt-3 mb-0" id="user-form-error" role="alert"></div>
 </div><div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button><button class="btn btn-primary" id="save-user" type="submit"><i class="bi bi-save me-1"></i>保存</button></div></form></div></div>
 {% endblock %}
-{% block scripts %}<script src="/static/js/admin/users.js?v={{ asset_version }}"></script>{% endblock %}
+{% block scripts %}<script src="/static/js/admin/users.js?v={{ asset_version }}&user_directory=1"></script>{% endblock %}

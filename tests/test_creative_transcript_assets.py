@@ -111,3 +111,24 @@ def test_latest_non_empty_asset_wins_per_episode(tmp_path: Path):
 
     assert len(bundle["episodes"]) == 1
     assert bundle["episodes"][0]["text"] == "新转写"
+
+
+def test_render_transcript_bundle_text_exports_ordered_subtitle_transcripts():
+    content = transcript_assets.render_transcript_bundle_text("字幕下载短剧", [
+        {"episode_number": 2, "text": "第二集字幕正文。"},
+        {"episode_number": 1, "text": "第一集字幕正文。"},
+    ])
+
+    assert content.startswith("# 字幕下载短剧 字幕转写\n")
+    assert content.index("## 第 1 集") < content.index("## 第 2 集")
+    assert "第一集字幕正文。" in content
+    assert "第二集字幕正文。" in content
+
+
+def test_transcript_bundle_filename_uses_title_transcript_and_episode_range():
+    filename = transcript_assets.transcript_bundle_filename("顾先生，搭个收集集", [
+        {"episode_number": 10},
+        {"episode_number": 8},
+    ])
+
+    assert filename == "顾先生，搭个收集集_转写_第8集-第10集.txt"

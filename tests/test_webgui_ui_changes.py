@@ -18,6 +18,8 @@
 
 import json
 import os
+import shutil
+import subprocess
 import time
 import zipfile
 from pathlib import Path
@@ -59,6 +61,28 @@ def test_webgui_registers_rag_routes():
     assert "/api/rag/query" in paths
 
 
+def test_webgui_shares_creative_application_dependencies():
+    paths = {route.path for route in WebGUI.app.routes}
+
+    assert "/api/creative/projects/{project_id}/blueprints" in paths
+    assert WebGUI.creative_application_service.repository is WebGUI.creative_repository
+    assert (
+        WebGUI.creative_application_service.workflow_adapter
+        is WebGUI.creative_workflow_adapter
+    )
+    assert (
+        WebGUI.workflow_transition_service.creative_adapter
+        is WebGUI.creative_workflow_adapter
+    )
+
+
+def test_creative_generation_routes_use_only_public_application_service_api():
+    source = _source("creative/api.py")
+
+    assert "._snapshot_extra(" not in source
+    assert "start_generation_compat(" in source
+
+
 def test_webgui_registers_analytics_routes():
     paths = {route.path for route in WebGUI.app.routes}
 
@@ -66,7 +90,7 @@ def test_webgui_registers_analytics_routes():
     assert "/api/analytics/overview" in paths
     assert "/api/analytics/dramas" in paths
     assert "/api/analytics/assets" in paths
-    assert "/api/analytics/sync-all" in paths
+    assert "/api/analytics/sync-all" not in paths
 
 
 def test_webgui_registers_today_rank_route():
@@ -74,6 +98,73 @@ def test_webgui_registers_today_rank_route():
 
     assert "/api/rank/today" in paths
     assert "/favicon.ico" in paths
+
+
+def test_user_list_normalizes_datetime_values_with_short_timezone_suffix():
+    source = _source("static/js/admin/users.js")
+
+    assert r"/(?:Z|[+-]\d\d(?::?\d\d)?)$/" in source
+
+
+def test_douyin_today_rank_uses_switchable_rank_and_heat_boards():
+    script = _source("static/js/selection/ranks.js")
+    template = _source("templates/common/workspace/selection_ranks.html")
+
+    assert "douyinSections()" in script
+    assert "selectedDouyinSection()" in script
+    assert "this.todayRankSectionKey = parts[2] || '榜单'" in script
+    assert "todayRankPlatform === 'dy'" in template
+    assert "setTodayRankRoute('dy', section.key)" in template
+
+
+def test_hongguo_today_rank_opens_explanations_from_an_info_icon():
+    template = _source("templates/common/workspace/selection_ranks.html")
+    page = _source("templates/selection/ranks.html")
+    modal = _source("templates/common/workspace/hongguo_rank_info_modal.html")
+    styles = _source("static/css/workspaces.css")
+
+    assert 'x-show="todayRankPlatform === \'hg\'"' in template
+    assert 'data-bs-target="#hongguoRankInfoModal"' in template
+    assert 'aria-label="查看红果榜单说明"' in template
+    assert 'bi-info-circle' in template
+    assert "推荐榜:观看/互动量及个人兴趣排名" not in template
+    assert 'hongguo_rank_info_modal.html' in page
+    assert 'id="hongguoRankInfoModal"' in modal
+    assert "榜单说明" in modal
+    assert "推荐榜:观看/互动量及个人兴趣排名" in modal
+    assert "热播榜:全局观看/互动综合热度排名" in modal
+    assert "臻果榜:根据红果已开分真人剧评分排序" in modal
+    assert "预约榜:基于红果预约/预告片播放等综合期待值排序" in modal
+    assert "新剧榜:上架3天内剧集热度值排名" in modal
+    assert "热搜榜:与前一日搜索热度值排序" in modal
+    assert "必看榜:按2025年后上线的剧集" in modal
+    assert "收藏榜:以实时累计收藏人数排名" in modal
+    assert "更新说明" in modal
+    assert "数据源于红果抓包每个工作日不定期更新" in modal
+    assert ".hongguo-rank-info-modal .modal-title" in styles
+    assert "color: #f7f9ff;" in styles
+
+
+def test_today_rank_supports_adoption_actions_and_shared_result_modal():
+    rank_template = _source("templates/common/workspace/selection_ranks.html")
+    rank_script = _source("static/js/selection/ranks.js")
+    workspace = _source("static/js/common/tasks.js")
+    breakdowns = _source("static/js/selection/breakdowns.js")
+    modal = _source("templates/common/workspace/adoption_notice_modal.html")
+    styles = _source("static/css/workspaces.css")
+
+    assert rank_template.count('class="rank-adopt-action"') == 4
+    assert rank_template.count('@click="adoptRankEntry(item)"') == 2
+    assert rank_template.count('rankingTableColspan(tbl) + 1') == 2
+    assert "/api/creative/topics/adopt-from-rank" in rank_script
+    assert "rankAdoptionFailureMessage" in rank_script
+    assert "收录接口尚未生效，请刷新页面或重启 Web 服务。" in rank_script
+    assert "adoptionNotice" in workspace
+    assert "showAdoptionNotice" in workspace
+    assert "showAdoptionNotice" in breakdowns
+    assert "采纳成功" in modal
+    assert "采纳失败" in modal
+    assert ".today-rank-table .rank-adopt-action" in styles
 
 
 def test_webgui_registers_creative_phase3_routes_and_page():
@@ -85,6 +176,469 @@ def test_webgui_registers_creative_phase3_routes_and_page():
     assert "今日爆款" in html
     assert "generateCreativeTopics" in html
     assert '@change="changeCreativePlatform"' in html
+
+
+def test_webgui_registers_script_review_page_and_api():
+    paths = {route.path for route in WebGUI.app.routes}
+    html = _workspace_source()
+
+    assert "/review/scripts" in paths
+    assert "/api/script-reviews" in paths
+    assert "/api/script-reviews/{review_id}/confirm" in paths
+    assert "剧本审核" in html
+
+
+def test_webgui_registers_independent_writer_agent_workbench():
+    paths = {route.path for route in WebGUI.app.routes}
+    template = _source("templates/review/writer_agent.html")
+    review_template = _source("templates/review/_writer_project_review.html")
+    script = _source("static/js/review/writer_agent.js")
+
+    assert "/review/writer-agent" in paths
+    assert "/api/writer-agent/sessions" in paths
+    assert "/api/writer-agent/sessions/{session_id}/export" in paths
+    assert "/api/writer-agent/sessions/{session_id}/reports/{report_id}/export" in paths
+    assert "/api/writer-agent/sessions/{session_id}/actions/{action_id}" in paths
+    assert (
+        "/api/writer-agent/sessions/{session_id}/actions/{action_id}/decision"
+        in paths
+    )
+    assert (
+        "/api/writer-agent/sessions/{session_id}/actions/{action_id}/retry" in paths
+    )
+    assert "/api/writer-agent/sessions/{session_id}/project-reviews/preview" in paths
+    assert "/api/writer-agent/sessions/{session_id}/project-reviews/{review_id}" in paths
+    assert "/api/writer-agent/sessions/{session_id}/project-reviews/{review_id}/resume" in paths
+    assert "/api/writer-agent/sessions/{session_id}/project-reviews/{review_id}/export" in paths
+    assert WebGUI.app.state.writer_action_service is not None
+    assert "编剧大师" in template
+    assert "对话评审、原创立项与项目创作" in template
+    assert "writer-agent-project-context" in template
+    assert "创建原创项目" in template
+    assert "关联已有项目" in template
+    assert "writer-agent-file" in template
+    assert ".docx,.pdf" in template
+    assert "/api/writer-agent/sessions/file" in script
+    assert "renderReport" in script
+    assert "writerAgentWorkbench" in script
+    assert "/actions/${action.id}/decision" in script
+    assert "writerProjectReviewUI" in script
+    assert '{% include "review/_writer_project_review.html" %}' in template
+    assert "writer-project-review-drawer" in review_template
+    assert "writer_project_review.js" in template
+
+
+def test_writer_agent_uses_three_panel_chat_and_report_history_layout():
+    template = _source("templates/review/writer_agent.html")
+    script = _source("static/js/review/writer_agent.js")
+
+    assert "writer-agent-layout" in template
+    assert "writer-agent-session-detail" in template
+    assert "writer-agent-reports" in template
+    assert "writer-agent-project-progress" in template
+    assert "writer-agent-inspector" in template
+    assert "writer-agent-composer" in template
+    assert "renderWriterProjectProgress" in script
+    assert "renderReportFiles" in script
+    assert "/reports/${reportId}/export" in script
+
+
+def test_writer_agent_does_not_start_an_automatic_review_after_material_upload():
+    script = _source("static/js/review/writer_agent.js")
+
+    assert "请对这份材料做一次全面的短剧/漫剧编剧评审" not in script
+    assert "请结合刚刚提交的补充材料继续评审" not in script
+
+
+def test_writer_agent_can_expand_and_hide_the_review_reports_panel():
+    template = _source("templates/review/writer_agent.html")
+    script = _source("static/js/review/writer_agent.js")
+
+    assert "writer-agent-toggle-reports" in template
+    assert "writer-agent-layout.reports-hidden" in template
+    assert "toggleReportsPanel" in script
+    assert "reports-hidden" in script
+
+
+def test_writer_agent_shows_an_immediate_thinking_state_while_waiting_for_a_reply():
+    template = _source("templates/review/writer_agent.html")
+    script = _source("static/js/review/writer_agent.js")
+
+    assert "writer-agent-thinking" in template
+    assert "beginThinking" in script
+    assert "正在梳理结构与人物关系" in script
+    assert "pendingMessage" in script
+
+
+def test_script_review_page_renders_episode_and_cross_episode_findings():
+    script = _source("static/js/review/scripts.js")
+
+    assert "review.report.episode_reviews" in script
+    assert "review.report.cross_episode_findings" in script
+
+
+def test_script_review_uses_a_dropdown_for_single_episode_selection():
+    script = _source("static/js/review/scripts.js")
+
+    assert "mode.value === 'single'" in script
+    assert "document.createElement('select')" in script
+    assert "episodes.querySelector('select')" in script
+
+
+def test_script_review_deduplicates_core_and_episode_findings():
+    script = _source("static/js/review/scripts.js")
+
+    assert "coreFindingKeys" in script
+    assert "episodeFindings" in script
+
+
+def test_script_review_groups_report_content_with_clear_headings():
+    script = _source("static/js/review/scripts.js")
+
+    assert "修改建议" in script
+    assert "剧情概要" in script
+    assert "跨集问题" in script
+
+
+def test_script_review_renders_a_partial_report_after_an_interrupted_run():
+    script = _source("static/js/review/scripts.js")
+
+    assert "阶段性报告" in script
+    assert "completed_episode_count" in script
+    assert "跨集汇总尚未完成" in script
+
+
+def test_script_review_history_offers_a_delete_action_for_finished_records():
+    script = _source("static/js/review/scripts.js")
+
+    assert "/api/script-reviews/${reviewId}" in script
+    assert "删除审核记录" in script
+    assert "bi-trash" in script
+
+
+def test_script_review_labels_cancelled_reviews_as_cancelled_not_running():
+    script = _source("static/js/review/scripts.js")
+
+    assert "cancelled: '已取消'" in script
+
+
+def test_blueprint_table_shows_why_each_imitation_direction_was_generated():
+    blueprint_template = _source("templates/common/workspace/project_blueprints.html")
+    creative_script = _source("static/js/common/creative.js")
+
+    assert "仿制原因" in blueprint_template
+    assert "imitationReason(item.content)" in blueprint_template
+    assert "imitationReason(selectedProjectBlueprint().content)" in blueprint_template
+    assert "imitationReason(content)" in creative_script
+
+
+def test_character_workspace_can_choose_among_locked_brief_directions():
+    template = _source("templates/common/workspace/project_characters.html")
+    script = _source("static/js/common/creative.js")
+
+    assert "创作方向（锁定 Brief）" in template
+    assert "availableLockedBriefs()" in template
+    assert "selectCharacterBrief" in template
+    assert "/briefs/${briefId}/select" in script
+
+
+def test_locking_a_brief_saves_edited_project_episode_count_first():
+    script = _source("static/js/common/creative.js")
+    method = script.split("async completeProjectBrief()", 1)[1].split("async createBlankCharacterBatch", 1)[0]
+
+    assert method.index("await this.saveCreativeProjectSettings()") < method.index("completeCreativeResource('brief'")
+
+
+def test_outline_workspace_can_choose_locked_brief_and_character_versions():
+    template = _source("templates/common/workspace/project_outlines.html")
+    script = _source("static/js/common/creative.js")
+
+    assert "创作方向（锁定 Brief）" in template
+    assert "人物关系版本（已锁定）" in template
+    assert "availableLockedCharacterBatches()" in template
+    assert "selectOutlineCharacterBatch" in template
+    assert "/character-batches/${batchId}/select" in script
+
+
+def test_outline_workspace_explains_when_current_direction_has_no_locked_character_batch():
+    template = _source("templates/common/workspace/project_outlines.html")
+
+    assert "暂无与当前创作方向匹配的已锁定人物关系" in template
+    assert "前往人物关系" in template
+
+
+def test_script_review_can_start_and_review_optimization_drafts():
+    script = _source("static/js/review/scripts.js")
+
+    assert "/optimizations" in script
+    assert "生成优化草稿" in script
+    assert "script-optimization-drafts" in script
+    assert "编辑草稿" in script
+
+
+def test_script_review_project_selector_only_lists_projects_with_locked_outlines():
+    script = _source("static/js/review/scripts.js")
+
+    assert "filter((item) => item.outline_batch_id)" in script
+
+
+def test_script_review_multi_episode_picker_has_a_select_all_control():
+    script = _source("static/js/review/scripts.js")
+
+    assert "script-review-select-all-episodes" in script
+    assert "toggleAllReviewEpisodes" in script
+    assert "取消全选" in script
+
+
+def test_partial_outline_checkpoints_do_not_mark_the_generation_job_complete():
+    script = _source("static/js/common/creative.js")
+    method = script.split("creativeProjectHasJobResult(project, action, jobId)", 1)[1].split(
+        "finishCreativeGeneration", 1
+    )[0]
+
+    assert "generatedForJob.length >= Number(project.target_episode_count || 0)" in method
+
+
+def test_partial_outline_checkpoints_cannot_be_locked_from_the_workspace():
+    template = _source("templates/common/workspace/project_outlines.html")
+
+    assert "currentProjectOutlines().length === Number(creativeWorkspace.project.target_episode_count || 0)" in template
+
+
+def test_workspace_downloads_the_current_generated_resource_instead_of_legacy_export():
+    creative = _source("static/js/common/creative.js")
+    outlines = _source("templates/common/workspace/project_outlines.html")
+    blueprints = _source("templates/common/workspace/project_blueprints.html")
+    characters = _source("templates/common/workspace/project_characters.html")
+    beats = _source("templates/common/workspace/project_beats.html")
+
+    assert "creativeGeneratedDownloadUrl(stage, format = 'md')" in creative
+    assert "generated-content/download?${params.toString()}" in creative
+    assert "/export?stage=" not in creative
+    assert "creativeGeneratedDownloadUrl('outline', 'md')" in outlines
+    assert "creativeGeneratedDownloadUrl('brief', 'md')" in blueprints
+    assert "creativeGeneratedDownloadUrl('characters', 'md')" in characters
+    assert "creativeGeneratedDownloadUrl('beats', 'md')" in beats
+
+
+def test_writing_workspaces_offer_resumable_full_series_beats_and_script_generation():
+    creative = _source("static/js/common/creative.js")
+    beats = _source("templates/common/workspace/project_beats.html")
+    scripts = _source("templates/common/workspace/project_scripts.html")
+
+    assert "async generateProjectBeatsSeries()" in creative
+    assert "/beats/generate-series" in creative
+    assert "async generateProjectScriptsSeries()" in creative
+    assert "/scripts/generate-series" in creative
+    assert "canGenerateProjectScriptsSeries()" in creative
+    assert "series_generation" in creative
+    assert "generateProjectBeatsSeries" in beats
+    assert "generateProjectScriptsSeries" in scripts
+    assert "继续全剧生成" in creative
+
+
+def test_beats_workspace_uses_an_episode_selector_to_review_series_drafts():
+    creative = _source("static/js/common/creative.js")
+    beats = _source("templates/common/workspace/project_beats.html")
+
+    assert "projectBeatEpisodeLabel(episodeNumber)" in creative
+    assert "projectBeatEpisodeLabel(episodeNumber)" in beats
+    assert '<select class="form-select form-select-sm"' in beats
+
+
+def test_beats_workspace_labels_single_episode_generation_as_regeneration_when_present():
+    creative = _source("static/js/common/creative.js")
+    beats = _source("templates/common/workspace/project_beats.html")
+
+    assert "projectBeatGenerationActionLabel()" in creative
+    assert "重新生成 Beats" in creative
+    assert "projectBeatGenerationActionLabel()" in beats
+
+
+def test_beats_workspace_offers_a_confirmed_batch_lock_for_full_current_drafts():
+    creative = _source("static/js/common/creative.js")
+    beats = _source("templates/common/workspace/project_beats.html")
+
+    assert "async completeProjectBeatsBatch()" in creative
+    assert "/beats/lock" in creative
+    assert "批量完成并锁定" in beats
+    assert "canBatchLockProjectBeats()" in creative
+
+
+def test_review_findings_render_outline_anchors_with_writer_facing_labels():
+    review_script = _source("static/js/review/scripts.js")
+
+    assert "function outlineAnchorText(anchor)" in review_script
+    assert "结尾悬念" in review_script
+    assert "关联节拍" in review_script
+    assert "field=" not in review_script
+
+
+def test_structure_optimization_explains_when_no_finding_requires_beats_changes():
+    review_script = _source("static/js/review/scripts.js")
+
+    assert "当前没有需要调整 Beats 的问题" in review_script
+    assert "可选择" in review_script
+    assert "start.disabled = selectableCount === 0" in review_script
+
+
+def test_script_review_uses_text_file_upload_instead_of_a_paste_editor():
+    template = _source("templates/review/scripts.html")
+    review_script = _source("static/js/review/scripts.js")
+
+    assert 'id="script-review-file"' in template
+    assert ".markdown" in template
+    assert 'id="script-review-text"' not in template
+    assert "/api/script-reviews/file" in review_script
+    assert "X-Script-Filename" in review_script
+    assert "粘贴文本" not in review_script
+
+
+def test_review_report_offers_a_markdown_export():
+    review_script = _source("static/js/review/scripts.js")
+
+    assert "downloadReviewReport(review.id)" in review_script
+    assert "/export" in review_script
+    assert "下载审核报告" in review_script
+
+
+def test_beats_workspace_edits_continuity_updates_as_structured_fields_not_json():
+    creative = _source("static/js/common/creative.js")
+    beats = _source("templates/common/workspace/project_beats.html")
+
+    assert "addContinuityUpdate(beat)" in creative
+    assert "removeContinuityUpdate(beat, updateIndex)" in creative
+    assert "continuityUpdatesText(beat)" not in beats
+    assert "连续性变更" in beats
+    assert "知情人" in beats
+    assert "textareaRows(update.event, 24)" in beats
+
+
+def test_outline_workspace_exposes_continue_generation_for_a_saved_partial_batch():
+    script = _source("static/js/common/creative.js")
+    template = _source("templates/common/workspace/project_outlines.html")
+
+    assert "hasResumableProjectOutlines()" in script
+    assert "outlineGenerationActionLabel()" in script
+    assert "outlineGenerationActionLabel()" in template
+
+
+def test_outline_workspace_calls_generation_a_regeneration_after_a_locked_current_outline():
+    script = _source("static/js/common/creative.js")
+    method = script.split("outlineGenerationActionLabel()", 1)[1].split(
+        "currentOutlineBatchStatus() {", 1
+    )[0]
+
+    assert "重新生成" in method
+    assert "['locked', 'approved']" in method
+
+
+def test_outline_workspace_does_not_resume_a_draft_from_an_old_direction_or_character_batch():
+    script = _source("static/js/common/creative.js")
+    function_start = script.index("latestOutlineBatchId()")
+    function_end = script.index("currentProjectOutlines()", function_start)
+    function = script[function_start:function_end]
+
+    assert "item.upstream_refs?.brief_id" in function
+    assert "item.upstream_refs?.character_batch_id" in function
+
+
+def test_breakdown_lock_refreshes_the_reactive_editor_record():
+    script = _source("static/js/selection/breakdowns.js")
+    method = script.split("async submitBreakdownEditor()", 1)[1].split(
+        "async saveTopicLibraryBreakdown", 1
+    )[0]
+
+    assert "this.syncBreakdownEditorRecord(data);" in method
+
+
+def test_script_review_polls_optimization_tasks_until_drafts_are_ready():
+    script = _source("static/js/review/scripts.js")
+
+    assert "scheduleOptimizationHistory" in script
+    assert "['queued', 'running'].includes(optimization.status)" in script
+
+
+def test_script_review_shows_a_progress_modal_while_the_review_runs():
+    template = _source("templates/review/scripts.html")
+    script = _source("static/js/review/scripts.js")
+
+    assert 'id="scriptReviewProgressModal"' in template
+    assert 'data-bs-backdrop="static"' in template
+    assert "reviewProgressModal" in script
+    assert "showReviewProgress" in script
+    assert "updateReviewProgress" in script
+    assert "hideReviewProgress" in script
+
+
+def test_script_review_shows_a_progress_modal_while_generating_optimization_drafts():
+    template = _source("templates/review/scripts.html")
+    script = _source("static/js/review/scripts.js")
+
+    assert 'id="scriptOptimizationProgressModal"' in template
+    assert 'id="script-optimization-progress-view-drafts"' in template
+    assert "showOptimizationProgress" in script
+    assert "updateOptimizationProgress" in script
+    assert "showOptimizationProgressError" in script
+
+
+def test_writing_pages_load_optimization_draft_comparison():
+    template = _source("templates/writing/scripts.html")
+    assert "optimization_draft.js" in template
+    assert 'id="script-page-back-link"' in template
+    assert "optimization_draft.js?v={{ asset_version }}-return-review" in template
+    assert "optimization_draft.js" in _source("templates/writing/beats.html")
+    script = _source("static/js/writing/optimization_draft.js")
+    assert "/optimization-drafts" in script
+    assert "AI 优化草稿" in script
+    assert "renderScriptPreview" in script
+    assert "renderBeatsPreview" in script
+    assert "当前版本" in script
+    assert "renderScriptEditor" in script
+    assert "applyOptimizationDraft" in script
+    assert "window.location.assign(reviewPageUrl())" in script
+    assert "下载草稿" in script
+    assert "renderDraftComparison" in script
+    assert "waitForScriptWorkspace" in script
+    assert "返回审核" in script
+    assert "script-page-back-link" in script
+    assert "review_id=${reviewId}" in script
+    assert "computeLineDiff" in script
+    assert "line.scope" in script
+    assert "uniqueLinePositions" in script
+    assert "diff-removed" in script
+    assert "diff-added" in script
+    assert ".optimization-diff-line.diff-removed" in _source("static/css/workspaces.css")
+    assert ".optimization-diff-line.diff-added" in _source("static/css/workspaces.css")
+
+    review_script = _source("static/js/review/scripts.js")
+    assert "review_id" in review_script
+    assert "openReview(returnReviewId)" in review_script
+    assert "&review_id=${review.id}" in review_script
+
+
+def test_my_projects_support_editing_and_permanent_deletion():
+    template = _source("templates/common/workspace/my_tasks.html")
+    script = _source("static/js/common/my_tasks.js")
+
+    assert 'id="project-edit-modal"' in template
+    assert 'id="project-delete-modal"' in template
+    assert "bi-pencil" in script
+    assert "bi-trash" in script
+    assert "method: 'PATCH'" in script
+    assert "method: 'DELETE'" in script
+    assert "删除后将同时清除" in template
+
+
+def test_new_brief_version_keeps_project_name_readonly_but_allows_setting_edits():
+    template = _source("templates/common/workspace/project_blueprints.html")
+
+    assert 'x-model="creativeWorkspace.project.name" :disabled="true"' in template
+    assert 'x-model="creativeWorkspace.project.genre" :disabled="!creativeResourceEditable(selectedProjectBlueprint())"' in template
+    assert 'x-model="creativeWorkspace.project.target_platform" :disabled="!creativeResourceEditable(selectedProjectBlueprint())"' in template
+    assert 'x-model="creativeWorkspace.project.target_audience" :disabled="!creativeResourceEditable(selectedProjectBlueprint())"' in template
+    assert 'x-model.number="creativeWorkspace.project.target_episode_count" :disabled="!creativeResourceEditable(selectedProjectBlueprint())"' in template
+    assert 'x-model.number="creativeWorkspace.project.episode_duration_seconds" :disabled="!creativeResourceEditable(selectedProjectBlueprint())"' in template
 
 
 def test_webgui_does_not_register_a_standalone_breakdown_page():
@@ -107,7 +661,7 @@ def test_webgui_registers_phase4_routes_and_flat_project_workspace():
     assert "/api/jobs/{job_id}/retry" in paths
     assert "创作项目" in html
     assert "currentTab" not in html
-    assert "/planning/projects" in _source("web/navigation_service.py")
+    assert "/planning/projects" in _source("web/page_routes.py")
     assert "fetchCreativeProjects" in html
     assert "generateProjectBlueprints" in html
     assert "completeProjectBrief" in html
@@ -159,38 +713,38 @@ def test_selection_adoption_download_and_breakdown_do_not_send_workflow_tasks():
     assert "topic_id: this.dramaDownload.topic.id" in download
 
 
-def test_drama_material_jobs_send_exact_source_topic_and_task():
+def test_drama_material_jobs_auto_adopt_without_workflow_task():
     script = _source("static/js/selection/dramas.js")
     method = script.split("async startDramaAnalysis", 1)[1].split(
         "dramaJobArtifacts", 1
     )[0]
+    template = _source("templates/common/workspace/selection_dramas.html")
+    creative = _source("static/js/common/creative.js")
 
-    assert "resolveSourcePackageWorkflowTask" in method
-    assert "topic_id: task.topic_id" in method
-    assert "workflow_task_id: task.id" in method
-    resolver = _source("static/js/common/creative.js").split(
-        "async resolveSourcePackageWorkflowTask", 1
-    )[1]
-    assert "/api/creative/topics?limit=500" not in resolver
-    assert "/api/creative/topics/${task.topic_id}" in resolver
-    assert "Promise.all" in resolver
+    assert "resolveSourcePackageWorkflowTask" not in method
+    assert "/api/workflow/tasks/" not in method
+    assert "workflow_task_id" not in method
+    assert "topic_id: task.topic_id" not in method
+    assert "正在采纳选题并创建下载任务" in method
+    assert "this.dramaAnalysis.topic = data.topic" in method
+    assert 'x-text="dramaAnalysis.loadingMessage"' in template
+    assert 'aria-live="polite"' in template
+    assert "resolveSourcePackageWorkflowTask" not in creative
 
 
-def test_project_table_uses_name_navigation_without_redundant_action_column():
+def test_project_table_shares_original_mode_source_and_open_action():
     section = _source("templates/common/workspace/project_list.html")
     html = section + _source("static/css/workspaces.css")
-    project_table = section.split('<table class="table table-sm align-middle mb-4">', 1)[1].split("</table>", 1)[0]
+    project_table = section.split('<table class="table table-sm align-middle mb-4 project-list-table">', 1)[1].split("</table>", 1)[0]
 
-    assert ">操作</th>" not in project_table
-    assert 'title="打开项目"' not in project_table
-    assert "bi-arrow-right" not in project_table
+    assert "创作模式" in project_table
+    assert "创作来源" in project_table
+    assert "更新时间/操作" in project_table
     assert 'class="project-name-button"' in project_table
     assert ':href="`/planning/projects/${project.id}/brief`"' in project_table
-    assert '@click.stop="selectCreativeProject(project.id)"' not in project_table
-    assert ':aria-current="creativeWorkspace.project?.id === project.id ? \'page\' : null"' not in project_table
     assert ".creative-project-row.table-active" in html
     assert ".project-name-button:focus-visible" in html
-    assert 'colspan="5"' in project_table
+    assert 'colspan="6"' in project_table
 
 
 def test_creative_project_creation_supports_selecting_a_locked_breakdown_version():
@@ -213,7 +767,8 @@ def test_draft_breakdowns_are_visible_but_not_project_eligible():
     assert "更新拆解" in html
     assert "继续拆解" not in _source("templates/common/workspace/selection_topics.html")
     breakdowns = _source("static/js/selection/breakdowns.js")
-    assert "Boolean(topic?.locked_breakdown_id)" in breakdowns
+    assert "topicProjectEligible(topic)" in breakdowns
+    assert "return !!topic?.locked_breakdown_id;" in breakdowns
     assert "aiworkerApi.request('/api/creative/topics?status=adopted&limit=500')" in html
     assert ':disabled="!topic.locked_breakdown_id"' in html
     assert 'x-text="creativeTopicOptionLabel(topic)"' in html
@@ -226,10 +781,29 @@ def test_today_hits_only_load_unadopted_recommendations_and_adoption_moves_them_
 
     assert "&status=pending_review" in topics.split("async fetchCreativeTopics", 1)[1].split("async fetchTopicLibrary", 1)[0]
     assert "new URLSearchParams({status: 'adopted', all: 'true'})" in topics
-    assert "await this.fetchCreativeTopics();" in breakdowns.split("async updateCreativeTopic", 1)[1].split("createCreativeBreakdown", 1)[0]
+    update_topic = breakdowns.split("async updateCreativeTopic", 1)[1].split("createCreativeBreakdown", 1)[0]
+    assert "this.creative.items = this.creative.items.filter" in update_topic
+    assert "await this.fetchCreativeTopics();" not in update_topic
     assert "updateCreativeTopic(topic, 'adopted')" in section
     assert "createCreativeBreakdown(topic)" not in section
     assert "topic.status === 'adopted'" not in section
+
+
+def test_topic_library_offers_filtered_csv_and_excel_exports():
+    topics = _source("static/js/selection/topics.js")
+    section = _source("templates/common/workspace/selection_topics.html")
+
+    assert "topicLibraryExportParams(format)" in topics
+    assert "async fetchTopicLibrary" in topics
+    assert "params.set('platform', this.topicLibrary.platform)" in topics
+    assert "params.set('lifecycle_status', this.topicLibrary.lifecycleStatus)" in topics
+    assert "params.set('category', this.topicLibrary.category.trim())" in topics
+    assert "params.set('min_score', this.topicLibrary.minScore)" in topics
+    assert "params.set('has_locked_breakdown', this.topicLibrary.hasLocked)" in topics
+    assert "`/api/creative/topics/export?${params.toString()}`" in topics
+    assert '@click="exportTopicLibrary(\'csv\')"' in section
+    assert '@click="exportTopicLibrary(\'excel\')"' in section
+    assert "导出选题库" in section
 
 
 def test_today_hits_restores_the_last_selected_platform_after_refresh():
@@ -241,6 +815,86 @@ def test_today_hits_restores_the_last_selected_platform_after_refresh():
     assert "creativePlatformPreference()" in tasks
     assert "rememberCreativePlatform()" in topics
     assert "@change=\"changeCreativePlatform\"" in section
+
+
+def test_today_hits_switches_generation_and_display_by_rank_source():
+    tasks = _source("static/js/common/tasks.js")
+    topics = _source("static/js/selection/topics.js")
+    breakdowns = _source("static/js/selection/breakdowns.js")
+    section = _source("templates/common/workspace/selection_hits.html")
+
+    assert "creativeRankSourcePreference" in tasks
+    assert "rankSource: creativeRankSourcePreference" in tasks
+    assert "['榜单', '热榜']" in tasks
+    assert "['全部', '真人剧', '漫剧', 'AI剧']" in tasks
+    assert "changeCreativeRankSource" in topics
+    assert "rank_source=${encodeURIComponent(this.creative.rankSource)}" in topics
+    assert "const rankSource = this.creative.rankSource" in breakdowns
+    assert "rank_source: rankSource" in breakdowns
+    assert "creative:topics:hits:${this.creative.platform}:${this.creative.rankSource}" in topics
+    assert "window.aiworkerUi?.writeCache(cacheKey, items" in topics
+    assert 'aria-label="榜单来源"' in section
+    assert "creativeRankSourceOptions()" in section
+    assert "榜单来源" in section
+    assert "topic.rank_source || topic.rank_type || '-'" in section
+    assert "topic.platform" not in section
+
+
+def test_today_hits_restores_the_saved_rank_source_for_the_selected_platform():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the browser module")
+
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const values = new Map([
+  ['aiworker.selection.hits.rank-source.hg', '漫剧'],
+]);
+global.window = {
+  aiworkerModules: [],
+  addEventListener: () => {},
+  localStorage: {
+    getItem: (key) => values.get(key) || null,
+    setItem: (key, value) => values.set(key, String(value)),
+  },
+};
+vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'), {
+  filename: process.argv[1],
+});
+const component = window.aiworkerModules[0]();
+const state = Object.assign({}, component, {
+  creative: {platform: 'hg', rankSource: '榜单'},
+  generateCreativeTopics: async () => {},
+});
+(async () => {
+  await state.changeCreativePlatform();
+  if (state.creative.rankSource !== '漫剧') {
+    throw new Error(`expected saved hg source, got ${state.creative.rankSource}`);
+  }
+})().catch((error) => {
+  console.error(error.stack || error);
+  process.exit(1);
+});
+'''
+    result = subprocess.run(
+        [node, "-e", script, "static/js/selection/topics.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_today_hits_initial_load_generates_the_latest_top_ten():
+    tasks = _source("static/js/common/tasks.js")
+    hits_init = tasks.split("} else if (this.page === 'selection-hits') {", 1)[1].split(
+        "} else if (this.page === 'selection-topics')", 1
+    )[0]
+
+    assert "await this.generateCreativeTopics();" in hits_init
+    assert "await this.fetchCreativeTopics();" not in hits_init
 
 
 def test_topic_library_shows_full_lifecycle_and_breakdown_version_column():
@@ -314,32 +968,313 @@ def test_closing_a_completed_review_modal_syncs_its_row_action_state():
     assert "['completed', 'failed'].includes(state.status)" in creative
 
 
-def test_topic_library_assigns_each_pending_stage_to_its_workflow_role():
+def test_topic_library_unifies_project_creation_and_open_actions():
     topics = _source("static/js/selection/topics.js")
     table = _source("templates/common/workspace/selection_topics.html")
-    task_modal = _source("templates/common/workspace/workflow_task_modal.html")
 
-    assert "workflowAssignmentForStage(topic)" in topics
-    assert "pending_character_relationships" in topics
-    assert "task_type: 'characters'" in topics
-    assert "role_code: 'creative_planner'" in topics
-    assert "pending_episode_outlines" in topics
-    assert "task_type: 'outline'" in topics
-    assert "pending_beats" in topics
-    assert "task_type: 'beats'" in topics
-    assert "role_code: 'screenwriter'" in topics
-    assert '@click="openStageWorkflowAssignment(topic)"' in table
-    assert ":title=\"workflowAssignmentForStage(topic)?.role_label" in table
-    assert "stageWorkflowAssignmentLabel" in task_modal
+    assert "openCreateProject(topic)" in topics
+    assert "submitCreateProject" in topics
+    assert "openTopicProject(topic)" in topics
+    assert "loadProjectMemberCandidates" not in topics
+    assert "planner_member_ids" not in topics
+    assert "writer_member_ids" not in topics
+    assert "openStageWorkflowAssignment(topic)" not in topics
+    assert "workflowAssignmentForStage" not in topics
+    assert '@click="openCreateProject(topic)"' in table
+    assert '@click="openTopicProject(topic)"' in table
+    assert "分配创意策划" not in table
 
 
-def test_planning_assignment_refreshes_the_topic_library_after_success():
+def test_create_project_refreshes_the_topic_library_after_success():
     topics = _source("static/js/selection/topics.js")
-    submit_method = topics.split("async submitPlanningAssignment()", 1)[1].split(
-        "openManagedPlanningProject()", 1
+    submit_method = topics.split("async submitCreateProject()", 1)[1].split(
+        "openCreatedProject()", 1
     )[0]
 
     assert "await this.fetchTopicLibrary();" in submit_method
+    assert "planner_member_ids" not in submit_method
+    assert "writer_member_ids" not in submit_method
+
+
+def test_saving_a_scene_script_refreshes_topic_library_state():
+    creative = _source("static/js/common/creative.js")
+    save_method = creative.split("async saveProjectEpisode(item)", 1)[1].split(
+        "async saveCreativeItem", 1
+    )[0]
+
+    assert "item.stage === 'script'" in save_method
+    assert "await this.refreshCreativeTopicLibrary();" in save_method
+    assert "await this.fetchTopicLibrary();" in creative.split(
+        "async refreshCreativeTopicLibrary()", 1
+    )[1].split("async", 1)[0]
+
+
+def test_completed_scene_script_generation_refreshes_topic_library_state():
+    creative = _source("static/js/common/creative.js")
+    reconcile_method = creative.split("reconcileCreativeGenerationState(project)", 1)[1].split(
+        "async syncCreativeJobProgress", 1
+    )[0]
+
+    assert "action === 'script'" in reconcile_method
+    assert "await this.refreshCreativeTopicLibrary();" in reconcile_method
+
+
+def test_scene_script_preview_and_download_use_delivery_formats():
+    topics = _source("static/js/selection/topics.js")
+    modal = _source("templates/common/workspace/selection_modals.html")
+
+    assert "buildScriptPreview" in topics
+    assert "format = 'txt'" in topics
+    assert "generatedContentPreview.stage === 'script' ? 'txt' : 'md'" in modal
+
+
+def test_topic_scene_script_preview_filters_history_by_version():
+    topics = _source("static/js/selection/topics.js")
+    modal = _source("templates/common/workspace/selection_modals.html")
+
+    assert "generatedContentPreviewVersionOptions()" in topics
+    assert "filteredGeneratedContentVersions()" in topics
+    assert "filterGeneratedContentPreviewByVersion()" in topics
+    assert 'x-model.number="generatedContentPreview.selectedVersion"' in modal
+    assert "全部版本" in modal
+
+
+def test_delivery_page_lists_existing_resources_without_delivery_actions():
+    page = _source("templates/admin/deliveries.html")
+    deliveries = _source("static/js/admin/deliveries.js")
+    creative_api = _source("creative/api.py")
+
+    assert "已生成成果" in page
+    assert 'id="generated-resource-list"' in page
+    assert "正式交付" not in page
+    assert "草稿预览" not in deliveries
+    assert "resource_status" in deliveries
+    assert "/api/creative/generated-resources" in deliveries
+    assert "generated-content/download" in deliveries
+    assert "generated_resources=4" in page
+    assert 'id="generated-resource-search"' in page
+    assert 'id="generated-resource-stage-filter"' in page
+    assert 'id="generated-resource-status-filter"' in page
+    assert 'id="generated-resource-generated-after"' in page
+    assert 'id="generated-resource-generated-before"' in page
+    assert "生成时间" in page
+    assert "applyFilters" in deliveries
+    assert "generated_at" in deliveries
+    assert "formatGeneratedAt" in deliveries
+    assert '"generated_at": float(item.get("created_at") or 0)' in creative_api
+
+
+def test_outline_page_exposes_beats_and_script_update_records_per_episode():
+    page = _source("templates/writing/outlines.html")
+    outline = _source("templates/common/workspace/project_outlines.html")
+    creative = _source("static/js/common/creative.js")
+
+    assert 'id="outlineEpisodeUpdatesModal"' in page
+    assert "projectEpisodeUpdateRecords" in creative
+    assert "hasProjectEpisodeUpdates" in creative
+    assert "openOutlineEpisodeUpdates" in creative
+    assert "projectEpisodeUpdateSummary" in outline
+    assert "Beats 更新" in creative
+    assert "查看 Beats 与剧本更新记录" in outline
+
+
+def test_scene_script_workspace_distinguishes_merged_and_single_episode_downloads():
+    scripts = _source("templates/common/workspace/project_scripts.html")
+
+    assert "mergedScriptDownloadUrl()" in scripts
+    assert "剧本下载" in scripts
+    assert "本集下载" in scripts
+
+
+def test_scene_script_page_uses_the_writing_workspace_layout():
+    page = _source("templates/writing/scripts.html")
+
+    assert '{% extends "layouts/base.html" %}' in page
+    assert 'src="/static/js/common/creative.js?v={{ asset_version }}"' in page
+    assert 'src="/static/js/writing/scripts.js?v={{ asset_version }}"' in page
+
+
+def test_locked_characters_offer_a_direct_link_to_episode_outlines():
+    characters = _source("templates/common/workspace/project_characters.html")
+
+    assert "/writing/projects/${creativeWorkspace.project.id}/outlines" in characters
+    assert "进入全剧大纲" in characters
+
+
+def test_creative_generation_claims_an_available_stage_task_automatically():
+    creative = _source("static/js/common/creative.js")
+    resolver = creative.split("async resolveCreativeWorkflowTask", 1)[1].split(
+        "async resolveSelectionTopicByTitle", 1
+    )[0]
+
+    assert "item.status === 'pool'" in resolver
+    assert "/api/workflow/tasks/${task.id}/claim" in resolver
+
+
+def test_creative_generation_bootstraps_a_task_for_legacy_projects():
+    creative = _source("static/js/common/creative.js")
+    api = _source("creative/api.py")
+
+    assert "/workflow-tasks/${resourceType}/ensure" in creative
+    assert '"/projects/{project_id}/workflow-tasks/{resource_type}/ensure"' in api
+
+
+def test_writing_workspace_refreshes_topics_only_when_the_page_provides_a_library():
+    creative = _source("static/js/common/creative.js")
+
+    assert "async refreshCreativeTopicLibrary()" in creative
+    assert "typeof this.fetchTopicLibrary === 'function'" in creative
+    assert "await this.refreshCreativeTopicLibrary();" in creative
+
+
+def test_creative_progress_modal_blurs_the_close_button_before_it_is_hidden():
+    tasks = _source("static/js/common/tasks.js")
+
+    assert "document.getElementById('creativeGenerationProgressModal')?.addEventListener('hide.bs.modal'" in tasks
+    assert "document.activeElement?.blur();" in tasks
+
+
+def test_scene_script_workspace_links_back_to_its_source_beats():
+    page = _source("templates/writing/scripts.html")
+
+    assert 'href="/writing/projects/{{ project_id }}/episodes/{{ episode_number }}/beats"' in page
+    assert "返回 Beats" in page
+
+
+def test_beats_workspace_links_back_to_episode_outlines():
+    page = _source("templates/writing/beats.html")
+
+    assert 'href="/writing/projects/{{ project_id }}/outlines"' in page
+    assert "返回全剧大纲" in page
+
+
+def test_outlines_workspace_links_back_to_characters():
+    page = _source("templates/writing/outlines.html")
+
+    assert 'href="/planning/projects/{{ project_id }}/characters"' in page
+    assert "返回人物关系" in page
+
+
+def test_outline_rows_show_a_link_when_the_episode_script_exists():
+    creative = _source("static/js/common/creative.js")
+    outlines = _source("templates/common/workspace/project_outlines.html")
+
+    assert "projectEpisodeScript(episodeNumber)" in creative
+    assert "projectEpisodeScriptLabel(episodeNumber)" in creative
+    assert "projectEpisodeScript(item.episode_number)" in outlines
+    assert "projectEpisodeScriptLabel(item.episode_number)" in outlines
+    assert "/scripts`" in outlines
+
+
+def test_locked_outlines_hide_edit_actions():
+    outlines = _source("templates/common/workspace/project_outlines.html")
+
+    assert 'x-show="currentProjectOutlines().length && creativeResourceEditable(currentProjectOutlines()[0])"' in outlines
+    assert 'x-show="creativeResourceEditable(item)" @click="saveProjectEpisode(item)"' in outlines
+
+
+def test_outline_workspace_offers_merged_scene_script_download():
+    outlines = _source("templates/common/workspace/project_outlines.html")
+    creative = _source("static/js/common/creative.js")
+
+    assert "剧本下载" in outlines
+    assert "mergedScriptDownloadUrl()" in outlines
+    assert "projectHasGeneratedScripts()" in outlines
+    assert "/scripts/download`" in creative
+
+
+def test_beats_workspace_uses_a_labeled_scene_script_action():
+    beats = _source("templates/common/workspace/project_beats.html")
+
+    assert "场次剧本" in beats
+    assert "生成场次剧本" not in beats
+    assert "bi-file-earmark-richtext" in beats
+
+
+def test_episode_workspace_reads_the_episode_number_from_beats_and_scripts_urls():
+    tasks = _source("static/js/common/tasks.js")
+
+    assert r"/\/episodes\/(\d+)\/(?:beats|scripts)" in tasks
+
+
+def test_scene_script_actions_stop_before_navigation_without_locked_beats():
+    creative = _source("static/js/common/creative.js")
+    beats = _source("templates/common/workspace/project_beats.html")
+
+    assert "currentEpisodeHasLockedBeats()" in creative
+    assert "openProjectScriptWorkspace()" in creative
+    assert "请先生成并完成当前集 Beats，再生成场次剧本" in creative
+    assert '@click="openProjectScriptWorkspace"' in beats
+
+
+def test_scene_script_workspace_hides_scripts_tied_to_superseded_beats():
+    creative = _source("static/js/common/creative.js")
+    scripts = _source("templates/common/workspace/project_scripts.html")
+
+    assert "return this.projectEpisodeScript(this.creativeWorkspace.selectedEpisode);" in creative
+    assert "scriptWorkspaceEmptyMessage()" in creative
+    assert "当前仅有基于 Beats v${olderScriptBeatsVersion || '未知'} 的旧场次剧本；当前 Beats 为 v${currentBeats.version}" in creative
+    assert 'x-text="scriptWorkspaceEmptyMessage()"' in scripts
+
+
+def test_scene_script_workspace_calls_generation_a_regeneration_when_locked_beats_changed():
+    creative = _source("static/js/common/creative.js")
+    scripts = _source("templates/common/workspace/project_scripts.html")
+
+    assert "projectScriptGenerationActionLabel()" in creative
+    assert "重新生成场次剧本" in creative
+    assert 'x-text="creativeActionRunning(\'script\') ? \'生成中\' : projectScriptGenerationActionLabel()"' in scripts
+
+
+def test_scene_script_workspace_records_versions_without_a_lock_action():
+    creative = _source("static/js/common/creative.js")
+    scripts = _source("templates/common/workspace/project_scripts.html")
+
+    assert "完成并锁定" not in scripts
+    assert "completeProjectScript" not in scripts
+    assert "completeProjectScript" not in creative
+    assert "生成版本" in scripts
+
+
+def test_saving_a_scene_script_reloads_its_new_version():
+    creative = _source("static/js/common/creative.js")
+    save_method = creative.split("async saveProjectEpisode(item)", 1)[1].split(
+        "async saveCreativeItem", 1
+    )[0]
+
+    assert "await this.selectCreativeProject(this.creativeWorkspace.project.id);" in save_method
+
+
+def test_script_series_generation_does_not_offer_resume_for_an_old_beats_version():
+    creative = _source("static/js/common/creative.js")
+    scripts = _source("templates/common/workspace/project_scripts.html")
+
+    assert "isCompatibleProjectSeriesEpisode(stage, item)" in creative
+    assert "refs.beats_id" in creative
+    assert "全剧生成中" in scripts
+
+
+def test_continuity_ledger_renders_known_status_codes_in_chinese():
+    creative = _source("static/js/common/creative.js")
+    beats = _source("templates/common/workspace/project_beats.html")
+
+    assert "continuityStatusLabel(status)" in creative
+    assert "blocked: '受阻'" in creative
+    assert "active: '有效'" in creative
+    assert "status: this.continuityStatusLabel(item.status)" in creative
+    assert 'x-text="item.status"' in beats
+
+
+def test_scene_script_lifecycle_badges_have_readable_backgrounds():
+    styles = _source("static/css/workspaces.css")
+
+    for status in (
+        "pending-script",
+        "script-in-progress",
+        "script-generated",
+        "script-exported",
+    ):
+        assert f".lifecycle-{status}" in styles
 
 
 def test_topic_library_adoption_handles_non_json_server_errors():
@@ -415,6 +1350,13 @@ def test_blueprint_editor_exposes_generated_direction_audience():
     assert "人物卡已保存" in html
     assert "creative-save-toast" in html
     assert "creative-save-status" in html
+
+
+def test_blueprint_editor_uses_a_dropdown_to_choose_the_current_direction():
+    html = _workspace_source()
+
+    assert 'x-model.number="creativeWorkspace.selectedBlueprintId"' in html
+    assert 'x-for="item in latestProjectBlueprints()"' in html
     assert "creativeItemSaveLabel" in html
 
 
@@ -463,13 +1405,17 @@ def test_creative_generation_opens_progress_modal_with_retry_controls():
 
 def test_downloaded_topic_action_opens_episode_transcript_preview():
     html = _workspace_source()
+    transcripts = _source("static/js/selection/breakdowns.js")
 
-    assert 'x-show="Number(topic.downloaded_episode_count || 0) > 0"' in html
+    assert 'x-show="Number(topic.transcript_episode_count || 0) > 0"' in html
     assert '@click="openTopicTranscriptPreview(topic)"' in html
-    assert 'title="预览剧目转写"' in html
+    assert 'title="预览字幕转写"' in html
+    assert '@click="downloadTopicTranscripts(topic)"' in html
+    assert 'title="下载字幕转写"' in html
     assert 'id="topicTranscriptPreviewModal"' in html
     assert "this.modal('topicTranscriptPreviewModal')" in html
     assert "/api/creative/topics/${topic.id}/transcripts" in html
+    assert "/api/creative/topics/${topic.id}/transcripts/download" in transcripts
     assert "selectedTopicTranscript()" in html
     assert "上一集" in html
     assert "下一集" in html
@@ -478,11 +1424,21 @@ def test_downloaded_topic_action_opens_episode_transcript_preview():
 def test_next_stage_generation_is_not_blocked_by_a_stale_previous_action():
     html = _workspace_source()
 
-    assert "creativeActionDisabled(action)" in html
+    assert "creativeActionDisabled(action, options = {})" in html
     assert "this.creativeWorkspace.activeAction === action && this.creativeJobRunning()" in html
     assert ':disabled="creativeActionDisabled(\'outlines\')"' in html
     assert ':disabled="creativeActionDisabled(\'characters\')"' in html
     assert ':disabled="creativeActionDisabled(\'blueprints\')"' in html
+
+
+def test_episode_generation_controls_only_block_the_active_episode():
+    creative = _source("static/js/common/creative.js")
+    tasks = _source("static/js/common/tasks.js")
+
+    assert "activeEpisode: 0" in tasks
+    assert "this.creativeWorkspace.activeEpisode = ['beats', 'script'].includes(action)" in creative
+    assert "['beats', 'script'].includes(action)" in creative
+    assert "this.creativeWorkspace.activeEpisode" in creative
 
 
 def test_saved_creative_results_reconcile_a_stale_running_indicator():
@@ -606,6 +1562,22 @@ def test_creative_generation_task_log_opens_inside_the_progress_modal():
     assert "/tasks?job_id=" not in progress
 
 
+def test_creative_generation_progress_shows_current_batch_and_slow_request_warning():
+    modal = _source("templates/common/workspace/creative_progress_modal.html")
+    script = _source("static/js/common/creative.js")
+
+    assert "creativeBatchProgressText()" in modal
+    assert "creativeBatchSlow()" in modal
+    assert "模型响应较慢，任务仍在运行" in modal
+    assert "系统会继续等待，已保存的检查点不会丢失" in modal
+    assert "creativeBatchElapsedSeconds()" in script
+    assert "creativeWorkspace.jobProgress?.batch_in_flight" in script
+    assert "creativeWorkspace.jobProgress?.batch_started_at" in script
+    assert ">= 720" in script
+    assert "batch_start" in script and "batch_end" in script
+    assert "reasoning_effort" in script
+
+
 def test_drama_download_fallback_candidates_use_stable_unique_alpine_keys():
     modal = _source("templates/common/workspace/selection_modals.html")
 
@@ -619,6 +1591,63 @@ def test_download_modal_blurs_focused_controls_before_bootstrap_hides_it():
 
     assert "dramaDownloadModal')?.addEventListener('hide.bs.modal'" in script
     assert "document.activeElement?.blur()" in script
+
+
+def test_download_modal_plays_completed_video_artifacts_inline():
+    modal = _source("templates/common/workspace/selection_modals.html")
+    script = _source("static/js/selection/breakdowns.js")
+
+    assert "isDramaVideoArtifact(item)" in modal
+    assert '@click="openDramaDownloadVideo(item)"' in modal
+    assert "dramaDownload.videoPreviewUrl" in modal
+    assert "isDramaVideoArtifact(item)" in script
+    assert "openDramaDownloadVideo(item)" in script
+    assert "/api/file/preview?path=" in script
+
+
+def test_download_artifacts_identify_their_episode_numbers():
+    modal = _source("templates/common/workspace/selection_modals.html")
+    script = _source("static/js/selection/breakdowns.js")
+
+    assert "dramaDownloadArtifactEpisodeLabel(item)" in modal
+    assert "dramaDownloadArtifactEpisodeLabel(item)" in script
+    assert "episode_" in script
+    assert "第 ${episode} 集" in script
+
+
+def test_download_modal_collapses_episode_grid_when_some_episodes_are_already_downloaded():
+    modal = _source("templates/common/workspace/selection_modals.html")
+    script = _source("static/js/selection/breakdowns.js")
+
+    assert "dramaDownload.episodesExpanded" in modal
+    assert "继续下载" in modal
+    assert "openDramaDownloadEpisodes" in modal
+    assert "episodesExpanded" in script
+    assert "openDramaDownloadEpisodes()" in script
+    assert "isDramaEpisodeDownloaded(episode)" in modal
+    assert "已下载" in modal
+    assert "downloadedDramaEpisodeCount() > 0" in modal
+    assert "downloadedDramaEpisodeCount() === 0" in modal
+    assert "dramaDownload.finished && !dramaDownload.episodesExpanded" in modal
+    assert "!dramaDownload.finished || dramaDownload.episodesExpanded" in modal
+    assert "refreshDramaDownloadEpisodes" in script
+    assert "if (this.downloadedDramaEpisodeCount() > 0) this.dramaDownload.finished = true;" not in script
+
+
+def test_download_completed_summary_visibility_is_not_overridden_by_bootstrap_display_utility():
+    modal = _source("templates/common/workspace/selection_modals.html")
+
+    summary_condition = (
+        'x-show="dramaDownload.finished && !dramaDownload.episodesExpanded '
+        '&& downloadedDramaEpisodeCount() > 0"'
+    )
+    assert f'<div {summary_condition}>' in modal
+    assert '<div class="border border-success p-3 d-flex align-items-center justify-content-between gap-3">' in modal
+    unsafe_summary = (
+        'class="border border-success p-3 d-flex align-items-center justify-content-between gap-3" '
+        f'{summary_condition}'
+    )
+    assert unsafe_summary not in modal
 
 
 def test_webgui_python_source_contains_no_mojibake_text():
@@ -678,6 +1707,9 @@ def test_selection_rank_template_has_today_rank_page():
     assert "async stopCrawler" in html
     assert "todayRankDates" in html
     assert "todayRankPlatform" in html
+    assert "todayRankMissingNoticeKeys" in html
+    assert "默认展示 PostgreSQL 最新榜单快照" in html
+    assert "默认展示本地最新榜单快照" not in html
     assert "数据质量提示" not in html
     assert "validationText" not in html
     assert "排名变动剧目" in html
@@ -735,6 +1767,32 @@ def test_today_rank_duration_column_is_after_hot_comment_and_formats_both_day_co
     assert "formatRankDuration" in html
     assert "连续在榜" in html
     assert "累计在榜" in html
+
+
+def test_today_rank_update_is_admin_only_while_other_users_only_refresh_snapshot():
+    script = _source("static/js/selection/ranks.js")
+    template = WebGUI.templates.env.get_template(
+        "common/workspace/selection_ranks.html"
+    )
+    admin_html = template.render(principal=SimpleNamespace(is_system_admin=True))
+    user_html = template.render(principal=SimpleNamespace(is_system_admin=False))
+
+    assert "async refreshTodayRank(canUpdateRank = false)" in script
+    assert "if (!canUpdateRank)" in script
+    assert "await this.fetchTodayRank(true)" in script
+    assert "'/api/jobs'" in script
+    assert "platform: 'dy'" in script
+    assert "crawler_type: 'rank'" in script
+    assert "pollTodayRankRefresh" in script
+    assert "更新并抓取" in admin_html
+    assert "hasTodayRankSnapshot()" in admin_html
+    assert "今日已更新" in admin_html
+    assert "refreshTodayRank(true)" in admin_html
+    assert "refreshTodayRank(false)" not in admin_html
+    assert "刷新榜单" in user_html
+    assert "refreshTodayRank(false)" in user_html
+    assert "更新并抓取" not in user_html
+    assert "refreshTodayRank(true)" not in user_html
 
 
 def test_removed_assets_and_rag_pages_are_not_in_sidebar():
@@ -801,6 +1859,28 @@ def test_hongguo_drama_routes_replace_legacy_proxy_routes():
     assert "/api/hongguo/drama/douyin-fallback/jobs" in paths
     assert "剧目检索下载" in html
     drama_page = _source("templates/common/workspace/selection_dramas.html")
+    admin_page = _source("templates/admin/config.html")
+    admin_actions = _source("static/js/admin/workspace.js")
+    drama_actions = _source("static/js/selection/dramas.js")
+    assert "红果剧目来源与抓包设置" in admin_page
+    assert "capture_root" in admin_actions
+    assert "capture_service_url" in admin_actions
+    assert "wait_timeout_seconds" in admin_actions
+    assert "检查来源与服务" in admin_page
+    assert "检查中…" in admin_page
+    assert 'aria-live="polite"' in admin_page
+    assert "dramaAnalysis.interfaceTesting" in admin_page
+    assert all(label in admin_page for label in ("正常", "部分异常", "异常"))
+    assert all(style in admin_page for style in ("alert-success", "alert-warning", "alert-danger"))
+    assert "checks" in admin_actions
+    assert "配置中心地址" in admin_page
+    assert "activationCode" in admin_actions
+    assert "activation_code" in admin_actions
+    assert "config_url" in admin_actions
+    assert "/api/hongguo/drama/settings" in admin_actions
+    assert "dramaReviewStatusLabel" in drama_actions
+    assert "captureStatusLabel" in drama_actions
+    assert "优先检索第三方剧目来源" in drama_page
     review_actions = _source("static/js/common/creative.js")
     assert "剧评检索下载" in drama_page
     assert "startDramaReviewCapture" in drama_page
@@ -820,13 +1900,43 @@ def test_hongguo_drama_routes_replace_legacy_proxy_routes():
     assert "async parseDramaDownloadResponse(response)" in html
     assert "await response.text()" in html
     assert "全剧下载" in html
+
+
+def test_hongguo_provider_ui_requires_manual_source_selection():
+    drama_page = _source("templates/common/workspace/selection_dramas.html")
+    download_modal = _source("templates/common/workspace/selection_modals.html")
+    drama_actions = _source("static/js/selection/dramas.js")
+    breakdown_actions = _source("static/js/selection/breakdowns.js")
+
+    assert "dramaAnalysis.providers" in drama_page
+    assert "candidate.provider_id" in drama_page
+    assert "data.providers || []" in drama_actions
+    assert "provider_id: candidate.provider_id" in drama_actions
+    assert "series_ref: candidate.series_ref" in drama_actions
+    assert "data.providers || []" in breakdown_actions
+    assert "this.dramaDownload.candidates.length === 1" not in breakdown_actions
+    assert "dramaDownload.providers.length || dramaDownload.thirdPartyError || dramaDownload.captureError" in download_modal
+
+
+def test_hongguo_settings_ui_preserves_third_party_and_capture_fields():
+    page = _source("templates/admin/config.html")
+    actions = _source("static/js/admin/workspace.js")
+    html = _workspace_source()
+    drama_page = _source("templates/common/workspace/selection_dramas.html")
+
+    assert "第三方剧目来源" in page
+    assert "抓包下载" in page
+    assert 'id="hongguo-config-url"' in page
+    assert 'id="hongguo-activation-code"' in page
+    assert "config_url: this.dramaAnalysis.settings.config_url" in actions
+    assert "...(activationCode ? {activation_code: activationCode} : {})" in actions
     assert "后台下载" in html
     assert "breakdownEditor.record?.status !== 'draft'" in html
     assert "episodesLoading" in html
     assert 'x-show="dramaDownload.searching"' in html
-    assert "onDramaTitleInput" in html
-    assert "chooseDramaSuggestion" in html
-    assert "自动联想红果剧目" in html
+    assert "检索并选择剧集" in drama_page
+    assert "onDramaTitleInput" not in drama_page
+    assert "chooseDramaSuggestion" not in drama_page
     assert "topic-evidence-drawer" not in html
     assert "查看来源证据" not in html
     assert "topic.rank_type" in html
@@ -835,7 +1945,8 @@ def test_hongguo_drama_routes_replace_legacy_proxy_routes():
     assert "data-bs-toggle=\"tooltip\"" in html
     assert "置信度" not in html
     assert "可仿制/成本" not in html
-    assert "红果检索已降级至抖音" in html
+    assert 'x-show="isDouyinDramaSearch()"' in drama_page
+    assert 'x-text="dramaAnalysis.fallbackReason"' in drama_page
     assert "批量下载抖音视频并解析" in html
     assert "selectedAwemeIds" in html
     assert "toggleAllDouyinDownloadCandidates" in html
@@ -851,6 +1962,14 @@ def test_hongguo_drama_routes_replace_legacy_proxy_routes():
     assert "dramaDownload.background" in html
     assert "isDramaEpisodeDownloaded" in html
     assert "episode.download_status?.status === 'downloaded'" in html
+
+
+def test_drama_search_keeps_cross_source_candidates_distinct_and_review_input_independent():
+    drama_page = _source("templates/common/workspace/selection_dramas.html")
+    drama_script = _source("static/js/selection/dramas.js")
+
+    assert ':key="`${candidate.provider_id}:${candidate.series_ref || candidate.book_id}`"' in drama_page
+    assert "this.dramaReviews.title = title;" not in drama_script
 
 
 def test_job_logs_require_authentication_before_falling_back(tmp_path, monkeypatch):
@@ -1074,6 +2193,18 @@ def test_data_management_template_supports_multi_file_download():
     assert "/api/files/operations" in html
     assert '@click="downloadSelectedFiles"' in html
     assert "bi bi-file-earmark-zip" in html
+
+
+def test_batch_download_status_is_hidden_until_batch_download_is_started():
+    template = _source("templates/common/workspace/admin_data.html")
+    script = _source("static/js/admin/workspace.js")
+
+    status_condition = "batchDownloadMode && filePage.operation?.operation === 'archive'"
+    assert f'<div x-show="{status_condition}" x-cloak>' in template
+    status_tag = template.split(status_condition, 1)[0].rsplit("<div", 1)[-1]
+    assert "d-flex" not in status_tag
+    assert "this.filePage.operation = {operation: 'archive'" in script
+    assert "this.filePage.operation = null" in script
 
 
 def test_data_management_file_checkboxes_follow_the_selected_path_array():
@@ -1324,3 +2455,177 @@ async def test_config_form_rejects_search_without_keywords(tmp_path, monkeypatch
     response = await WebGUI.save_config_form(payload)
 
     assert response.status_code == 400
+
+
+def test_workspace_shell_has_live_region_and_toast_container():
+    base = _source("templates/layouts/base.html")
+    assert 'id="ui-live-region"' in base and 'aria-live="polite"' in base
+    assert 'id="ui-toast-region"' in base
+    assert "ui-state.js" in base
+
+
+def test_workspace_shell_has_accessible_mobile_drawer_controls():
+    base = _source("templates/layouts/base.html")
+    assert 'id="sidebar-toggle"' in base
+    assert 'aria-controls="workspace-sidebar"' in base
+    assert 'aria-expanded' in base
+    assert 'id="sidebar-backdrop"' in base
+    assert "Escape" in base
+
+
+def test_workspace_shell_has_unified_context_bar_block():
+    base = _source("templates/layouts/base.html")
+    assert "{% block page_header %}{% endblock %}" in base
+
+
+def test_api_layer_exposes_structured_errors_and_request_ids():
+    api = _source("static/js/common/api.js")
+    assert "class ApiError" in api
+    assert "X-Request-ID" in api
+    assert "isAbortError" in api
+    assert "window.location.assign('/login')" in api
+    assert "aiworker:permission-denied" in api
+    assert "throw error" in api
+
+
+def test_ui_state_module_exposes_the_shared_api():
+    ui = _source("static/js/common/ui-state.js")
+    for fn in ("requestKey", "cancelRequest", "readCache", "writeCache",
+               "invalidateCache", "announce", "showToast", "setButtonLoading"):
+        assert fn in ui
+
+
+def test_jobs_polling_is_scoped_to_pages_that_consume_job_state():
+    tasks = _source("static/js/common/tasks.js")
+    assert "pageNeedsJobPolling()" in tasks
+    assert "if (this.pageNeedsJobPolling())" in tasks
+
+
+def test_dashboard_no_longer_uses_limit_500():
+    dashboard = _source("static/js/selection/dashboard.js")
+    assert "limit=500" not in dashboard
+    assert "limit=50" in dashboard
+    assert "requestKey" in dashboard
+
+
+def test_dashboard_uses_independent_requests():
+    dashboard = _source("static/js/selection/dashboard.js")
+    assert "overviewKey" in dashboard
+    assert "analyticsKey" in dashboard
+    assert "isAbortError" in dashboard
+
+
+def test_dashboard_template_has_skeleton():
+    html = _source("templates/selection/dashboard.html")
+    assert "ui-skeleton" in html
+    assert "aria-live" in html
+    assert "page_header" in html
+
+
+def test_my_tasks_uses_set_button_loading():
+    script = _source("static/js/common/my_tasks.js")
+    assert "setButtonLoading" in script
+    assert "invalidateCache" in script
+    assert "showToast" in script
+
+
+def test_my_tasks_template_has_skeleton_and_aria_busy():
+    html = _source("templates/common/workspace/my_tasks.html")
+    assert "ui-skeleton" in html
+    assert "aria-busy" in html
+    assert 'id="my-tasks-skeleton"' in html
+
+
+def test_selection_hits_uses_request_key_and_cache():
+    topics = _source("static/js/selection/topics.js")
+    assert "requestKey" in topics
+    assert "readCache" in topics
+    assert "writeCache" in topics
+
+
+def test_breakdowns_invalidates_creative_topics_cache():
+    breakdowns = _source("static/js/selection/breakdowns.js")
+    assert "invalidateCache('creative:topics:')" in breakdowns
+
+
+def test_selection_hits_template_has_skeleton():
+    html = _source("templates/common/workspace/selection_hits.html")
+    assert "ui-skeleton" in html
+    assert "aria-live" in html
+
+
+def test_selection_topics_template_has_skeleton():
+    html = _source("templates/common/workspace/selection_topics.html")
+    assert "ui-skeleton" in html
+
+
+def test_creative_uses_show_toast_and_request_key():
+    script = _source("static/js/common/creative.js")
+    assert "showToast" in script
+    assert "requestKey" in script
+
+
+def test_creative_has_beforeunload_protection():
+    script = _source("static/js/common/tasks.js")
+    assert "beforeunload" in script
+    assert "returnValue" in script
+
+
+def test_planning_pages_use_page_header_block():
+    for name in ("planning/brief.html", "planning/characters.html",
+                 "writing/outlines.html", "writing/beats.html", "writing/scripts.html"):
+        html = _source(f"templates/{name}")
+        assert "{% block page_header %}" in html, f"{name} missing page_header block"
+
+
+def test_editable_templates_show_lock_info():
+    for name in ("project_blueprints.html", "project_characters.html"):
+        html = _source(f"templates/common/workspace/{name}")
+        assert "bi-lock" in html
+
+
+def test_review_scripts_template_has_skeleton():
+    html = _source("templates/review/scripts.html")
+    assert "ui-skeleton" in html
+
+
+def test_review_projects_template_has_skeleton():
+    html = _source("templates/review/projects.html")
+    assert "ui-skeleton" in html
+
+
+def test_admin_users_uses_set_button_loading():
+    script = _source("static/js/admin/users.js")
+    assert "setButtonLoading" in script
+
+
+def test_admin_users_template_has_skeleton():
+    html = _source("templates/admin/users.html")
+    assert "ui-skeleton" in html
+
+
+def test_admin_audit_uses_set_button_loading():
+    script = _source("static/js/admin/audit.js")
+    assert "setButtonLoading" in script
+
+
+def test_admin_audit_template_has_skeleton():
+    html = _source("templates/admin/audit.html")
+    assert "ui-skeleton" in html
+
+
+def test_admin_pages_have_skeleton():
+    for name in ("admin/roles.html", "admin/deliveries.html"):
+        html = _source(f"templates/{name}")
+        assert "ui-skeleton" in html, f"{name} missing skeleton"
+
+
+def test_admin_jobs_uses_page_header_block():
+    html = _source("templates/admin/jobs.html")
+    assert "{% block page_header %}" in html
+
+
+def test_workspace_css_has_admin_table_styles():
+    css = _source("static/css/workspaces.css")
+    assert "admin-table thead th" in css
+    assert "ui-pagination" in css

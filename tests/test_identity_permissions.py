@@ -9,13 +9,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from identity.api import build_identity_router
+from identity.permission_catalog import PERMISSIONS
 from identity.dependencies import assigned_project_scope, require_permission
 from identity.password_service import PasswordService
 from identity.permission_service import PermissionService
@@ -27,8 +26,8 @@ HASH = PasswordService().hash("Writer-Strong-123!")
 
 
 @pytest.fixture
-def repository(tmp_path: Path) -> IdentityRepository:
-    repository = IdentityRepository(tmp_path / "system.db")
+def repository(isolated_system_database) -> IdentityRepository:
+    repository = IdentityRepository(isolated_system_database)
     repository.seed_defaults()
     return repository
 
@@ -63,6 +62,11 @@ def test_role_permission_dependencies_are_transitive(
         "page.writing",
     } <= principal.permissions
     assert principal.data_scope == "project"
+
+
+def test_permission_catalog_provides_chinese_labels():
+    assert PERMISSIONS["beats.edit"] == "编辑单集节拍"
+    assert PERMISSIONS["analytics.read"] == "查看数据分析"
 
 
 def test_multiple_roles_union_permissions_and_choose_maximum_scope(
@@ -162,11 +166,11 @@ def test_assigned_project_scope_queries_current_membership(
     assert client.get("/projects/client-claimed-project").status_code == 403
 
     with repository.connect() as connection:
-        connection.execute(
+        connection.exec_driver_sql(
             """
             INSERT INTO project_members
                 (id, project_id, user_id, project_role, status)
-            VALUES ('membership-1', 'assigned-project', ?, 'writer', 'active')
+                VALUES ('membership-1', 'assigned-project', %s, 'writer', 'active')
             """,
             (user["id"],),
         )

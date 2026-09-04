@@ -1,0 +1,86 @@
+{% extends "layouts/base.html" %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-start gap-3 border-bottom pb-3 mb-4">
+    <div>
+        <h3 class="mb-1">剧本审核</h3>
+        <div class="small text-muted">AI 建议须经人工确认后生效</div>
+    </div>
+    <button id="script-review-refresh" class="btn btn-outline-light btn-sm" type="button" title="刷新审核记录" aria-label="刷新审核记录"><i class="bi bi-arrow-clockwise" aria-hidden="true"></i></button>
+</div>
+
+<div id="script-review-error" class="alert alert-danger d-none" role="alert"></div>
+<section class="mb-4" aria-label="发起剧本审核">
+    <div class="row g-3 align-items-end">
+        <div class="col-md-3"><label for="script-review-source" class="form-label small">来源</label><select id="script-review-source" class="form-select form-select-sm"><option value="project">创作项目</option><option value="text">上传剧本文件</option></select></div>
+        <div class="col-md-3"><label for="script-review-mode" class="form-label small">审核方式</label><select id="script-review-mode" class="form-select form-select-sm"><option value="single">单集</option><option value="multiple">多集</option><option value="collection">合集</option></select></div>
+        <div id="script-review-project-wrap" class="col-md-4"><label for="script-review-project" class="form-label small">项目</label><select id="script-review-project" class="form-select form-select-sm"></select></div>
+        <div class="col-md-2"><button id="script-review-submit" class="btn btn-primary btn-sm w-100" type="button"><i class="bi bi-magic me-1" aria-hidden="true"></i>开始审核</button></div>
+    </div>
+    <div id="script-review-episodes" class="d-flex flex-wrap gap-2 mt-3"></div>
+    <div id="script-review-file-wrap" class="mt-3 d-none"><label for="script-review-file" class="form-label small">剧本文件</label><input id="script-review-file" class="form-control" type="file" accept=".txt,.text,.md,.markdown,.mdown,.fountain,.fd,.rst,text/plain,text/markdown"></div>
+</section>
+
+<section id="script-review-result" class="d-none border-top pt-4 mb-4" aria-live="polite"></section>
+<section aria-label="审核历史">
+    <h5 class="mb-3">审核历史</h5>
+    <div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>来源</th><th>范围</th><th>AI 建议</th><th>人工结论</th><th>状态</th><th>时间</th><th class="text-end">操作</th></tr></thead><tbody id="script-review-history"><tr id="script-review-skeleton" aria-hidden="true"><td colspan="7"><div class="ui-skeleton" style="height:18px;width:80%;margin:6px 0;"></div><div class="ui-skeleton" style="height:14px;width:50%;"></div></td></tr></tbody></table></div>
+</section>
+
+<div class="modal fade" id="scriptReviewProgressModal" tabindex="-1" data-bs-backdrop="static" aria-labelledby="scriptReviewProgressModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <h5 class="modal-title" id="scriptReviewProgressModalLabel"><i class="bi bi-stars me-2" aria-hidden="true"></i>剧本审核进度</h5>
+                    <div id="script-review-progress-scope" class="small text-muted"></div>
+                </div>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <div id="script-review-progress-status" class="alert alert-info py-2">正在创建审核任务</div>
+                <div class="d-flex justify-content-between gap-3 small mb-1"><span>审核进度</span><strong id="script-review-progress-value" class="text-nowrap">正在启动</strong></div>
+                <div class="progress" role="progressbar" aria-label="剧本审核进度">
+                    <div id="script-review-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" style="width: 100%"></div>
+                </div>
+                <div id="script-review-progress-elapsed" class="small text-muted mt-2">已等待 0 秒</div>
+                <div id="script-review-progress-error" class="alert alert-danger py-2 mt-3 mb-0 d-none" role="alert"></div>
+                <div class="small text-muted mt-3"><i class="bi bi-info-circle me-1" aria-hidden="true"></i>关闭弹窗不会中断审核任务。</div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">后台运行</button>
+                <button id="script-review-progress-view-report" type="button" class="btn btn-primary d-none">查看报告</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="scriptOptimizationProgressModal" tabindex="-1" data-bs-backdrop="static" aria-labelledby="scriptOptimizationProgressModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <h5 class="modal-title" id="scriptOptimizationProgressModalLabel"><i class="bi bi-stars me-2" aria-hidden="true"></i>AI 优化草稿生成进度</h5>
+                    <div id="script-optimization-progress-scope" class="small text-muted"></div>
+                </div>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <div id="script-optimization-progress-status" class="alert alert-info py-2">正在创建优化草稿任务</div>
+                <div class="d-flex justify-content-between gap-3 small mb-1"><span>生成进度</span><strong id="script-optimization-progress-value" class="text-nowrap">正在启动</strong></div>
+                <div class="progress" role="progressbar" aria-label="AI 优化草稿生成进度">
+                    <div id="script-optimization-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" style="width: 100%"></div>
+                </div>
+                <div id="script-optimization-progress-elapsed" class="small text-muted mt-2">已等待 0 秒</div>
+                <div id="script-optimization-progress-error" class="alert alert-danger py-2 mt-3 mb-0 d-none" role="alert"></div>
+                <div class="small text-muted mt-3"><i class="bi bi-info-circle me-1" aria-hidden="true"></i>关闭弹窗不会中断草稿生成任务。</div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">后台运行</button>
+                <button id="script-optimization-progress-view-drafts" type="button" class="btn btn-primary d-none">查看草稿</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}<script src="/static/js/review/scripts.js?v={{ asset_version }}-review-and-optimization-progress"></script>{% endblock %}

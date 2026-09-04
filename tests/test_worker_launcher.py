@@ -18,13 +18,14 @@
 
 """Tests for worker command generation."""
 
+import sys
+
 from runtime.worker_launcher import build_worker_command, build_worker_env
 
 
 def test_build_worker_command():
     assert build_worker_command(".runtime/jobs/job.json") == [
-        "uv",
-        "run",
+        sys.executable,
         "main.py",
         "--job-file",
         ".runtime/jobs/job.json",
@@ -33,9 +34,7 @@ def test_build_worker_command():
 
 def test_build_hongguo_worker_command():
     assert build_worker_command(".runtime/jobs/hg.json", platform="hg") == [
-        "uv",
-        "run",
-        "python",
+        sys.executable,
         "-m",
         "agents.hongguo_csv_worker",
         "--job-file",
@@ -45,9 +44,7 @@ def test_build_hongguo_worker_command():
 
 def test_build_douyin_rank_worker_command():
     assert build_worker_command(".runtime/jobs/dy-rank.json", platform="dy", crawler_type="rank") == [
-        "uv",
-        "run",
-        "python",
+        sys.executable,
         "-m",
         "agents.douyin_rank_worker",
         "--job-file",
@@ -61,9 +58,7 @@ def test_build_creative_phase4_worker_command():
         platform="creative",
         crawler_type="phase4_generate",
     ) == [
-        "uv",
-        "run",
-        "python",
+        sys.executable,
         "-m",
         "creative.phase4_worker",
         "--job-file",
@@ -77,13 +72,53 @@ def test_build_creative_breakdown_worker_command():
         platform="creative",
         crawler_type="breakdown_generate",
     ) == [
-        "uv",
-        "run",
-        "python",
+        sys.executable,
         "-m",
         "creative.breakdown_worker",
         "--job-file",
         ".runtime/jobs/breakdown.json",
+    ]
+
+
+def test_build_creative_screenplay_review_worker_command():
+    assert build_worker_command(
+        ".runtime/jobs/script-review.json",
+        platform="creative",
+        crawler_type="screenplay_review",
+    ) == [
+        sys.executable,
+        "-m",
+        "screenplay_review.worker",
+        "--job-file",
+        ".runtime/jobs/script-review.json",
+    ]
+
+
+def test_build_creative_project_review_worker_command():
+    assert build_worker_command(
+        ".runtime/jobs/project-review.json",
+        platform="creative",
+        crawler_type="project_review",
+    ) == [
+        sys.executable,
+        "-m",
+        "project_review.worker",
+        "--job-file",
+        ".runtime/jobs/project-review.json",
+    ]
+
+
+def test_build_creative_screenplay_optimization_worker_command():
+    assert build_worker_command(
+        ".runtime/jobs/script-optimization.json",
+        platform="creative",
+        crawler_type="screenplay_optimization",
+    ) == [
+        sys.executable,
+        "-m",
+        "screenplay_optimization.worker",
+        "--job-file",
+        ".runtime/jobs/script-optimization.json",
     ]
 
 
@@ -93,9 +128,7 @@ def test_build_data_file_operation_worker_command():
         platform="data",
         crawler_type="file_operation",
     ) == [
-        "uv",
-        "run",
-        "python",
+        sys.executable,
         "-m",
         "agents.data_file_operation_worker",
         "--job-file",
@@ -105,3 +138,22 @@ def test_build_data_file_operation_worker_command():
 
 def test_build_worker_env_sets_utf8():
     assert build_worker_env()["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_build_worker_env_enables_database_llm_settings(monkeypatch):
+    """Would catch child workers continuing to use stale process environment defaults."""
+
+    monkeypatch.setenv(
+        "AIWORKER_SYSTEM_DATABASE_URL",
+        "postgresql+psycopg://app:secret@127.0.0.1:5432/aiworker_test",
+    )
+
+    assert build_worker_env()["AIWORKER_LLM_DATABASE_CONFIG_ENABLED"] == "1"
+
+
+def test_build_worker_env_removes_playwright_incompatible_node_proxy_option(monkeypatch):
+    monkeypatch.setenv("NODE_OPTIONS", "--max-old-space-size=4096 --use-env-proxy")
+
+    environment = build_worker_env()
+
+    assert environment["NODE_OPTIONS"] == "--max-old-space-size=4096"

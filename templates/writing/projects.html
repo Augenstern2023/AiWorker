@@ -1,7 +1,8 @@
 {% extends "layouts/base.html" %}
 
 {% block content %}
-<div class="d-flex align-items-center justify-content-between mb-3"><div><h3 class="mb-1">编剧项目</h3><div class="small text-muted">查看已分配且前置版本已完成的项目</div></div><button class="btn btn-outline-secondary btn-sm" @click="fetchCreativeProjects()"><i class="bi bi-arrow-clockwise"></i></button></div>
-<table class="table table-sm align-middle"><thead><tr><th>项目</th><th>来源选题</th><th>目标集数</th><th>当前阶段</th><th>操作</th></tr></thead><tbody><template x-for="project in creativeWorkspace.projects" :key="project.id"><tr><td x-text="project.name"></td><td x-text="project.topic_title"></td><td x-text="project.target_episode_count"></td><td x-text="creativeProjectStatusLabel(project.status)"></td><td><a class="btn btn-sm btn-outline-light" :href="`/writing/projects/${project.id}/outlines`">打开大纲</a></td></tr></template><tr x-show="!creativeWorkspace.projects.length"><td colspan="5" class="text-center text-muted py-4">暂无已分配项目</td></tr></tbody></table>
+<div class="d-flex align-items-center justify-content-between mb-3"><div><h3 class="mb-1">编剧项目</h3><div class="small text-muted">我参与编剧的创作项目，创建后自动陈列</div></div><button class="btn btn-outline-secondary btn-sm" @click="fetchCreativeProjects()"><i class="bi bi-arrow-clockwise"></i></button></div>
+{% set show_topic_creation = false %}
+{% include "common/workspace/project_list.html" %}
 {% endblock %}
-{% block scripts %}<script src="/static/js/common/creative.js"></script>{% endblock %}
+{% block scripts %}<script src="/static/js/common/creative.js?v={{ asset_version }}"></script>{% endblock %}

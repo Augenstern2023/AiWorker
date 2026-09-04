@@ -1,0 +1,132 @@
+{% extends "layouts/base.html" %}
+
+{% block styles %}
+<style>
+    .writer-agent-layout { display: grid; grid-template-columns: minmax(210px, 250px) minmax(0, 1fr) minmax(270px, 320px); min-height: calc(100vh - 118px); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+    .writer-agent-layout.reports-hidden { grid-template-columns: minmax(210px, 250px) minmax(0, 1fr); }
+    .writer-agent-layout.reports-hidden .writer-agent-reports { display: none; }
+    .writer-agent-sidebar, .writer-agent-reports { padding: 18px; }
+    .writer-agent-sidebar { border-right: 1px solid var(--border); }
+    .writer-agent-reports { min-width: 0; border-left: 1px solid var(--border); }
+    .writer-agent-inspector { position: sticky; top: 18px; max-height: calc(100vh - 36px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+    .writer-project-progress-card { padding-bottom: 18px; border-bottom: 1px solid var(--border); }
+    .writer-project-progress-title { color: var(--text); }
+    .writer-project-progress-name { overflow-wrap: anywhere; }
+    .writer-project-progress-meta { display: flex; flex-wrap: wrap; gap: 6px; }
+    .writer-project-progress-chip { padding: 3px 7px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: .75rem; line-height: 1.25; }
+    .writer-project-progress-overall { height: 4px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.08); }
+    .writer-project-progress-overall > span { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width .2s ease; }
+    .writer-project-stage-list { display: grid; gap: 2px; margin-top: 14px; }
+    .writer-project-stage { position: relative; display: grid; grid-template-columns: 14px minmax(0, 1fr); column-gap: 9px; padding: 7px 0; }
+    .writer-project-stage::before { content: ""; width: 9px; height: 9px; margin-top: 5px; border: 2px solid rgba(255,255,255,.28); border-radius: 50%; background: var(--bg-page); }
+    .writer-project-stage:not(:last-child)::after { content: ""; position: absolute; top: 21px; bottom: -7px; left: 4px; width: 1px; background: var(--border); }
+    .writer-project-stage.is-complete::before { border-color: var(--success, #39b980); background: var(--success, #39b980); }
+    .writer-project-stage.is-current::before { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(59,149,246,.16); }
+    .writer-project-stage-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-width: 0; }
+    .writer-project-stage-value { max-width: 62%; color: var(--muted); font-size: .75rem; text-align: right; overflow-wrap: anywhere; }
+    .writer-project-progress-state { min-height: 150px; display: flex; flex-direction: column; justify-content: center; color: var(--muted); }
+    .writer-agent-report-history { padding-top: 18px; }
+    @media (prefers-reduced-motion: reduce) { .writer-project-progress-overall > span { transition: none; } }
+    .writer-agent-session-detail { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+    .writer-agent-session { width: 100%; padding: 10px 8px; color: var(--text); text-align: left; background: transparent; border: 1px solid transparent; border-radius: 4px; }
+    .writer-agent-session:hover, .writer-agent-session.is-active { background: rgba(59, 149, 246, .12); border-color: rgba(59, 149, 246, .45); }
+    .writer-agent-chat { min-width: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+    #writer-agent-project-context { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px clamp(18px, 4vw, 68px); border-bottom: 1px solid var(--border); background: rgba(255,255,255,.02); }
+    .writer-project-summary { width: 100%; display: flex; align-items: center; min-width: 0; }
+    .writer-project-picker { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 8px; padding-top: 4px; }
+    .writer-action-card, .writer-creative-card { max-width: min(760px, 100%); padding: 16px; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; background: rgba(255,255,255,.025); overflow-wrap: anywhere; }
+    .writer-action-card h3 { margin: 0 0 6px; font-size: 1rem; }
+    .writer-action-card.status-succeeded { border-left-color: var(--success, #39b980); }
+    .writer-action-card.status-failed { border-left-color: var(--danger, #e15d68); }
+    .writer-card-result { border-left-color: var(--success, #39b980); }
+    .writer-card-conflict { border-left-color: var(--danger, #e15d68); }
+    .writer-agent-messages { padding: 28px clamp(18px, 4vw, 68px); }
+    .writer-agent-empty { max-width: 620px; min-height: 520px; margin: auto; display: flex; flex-direction: column; justify-content: center; }
+    .writer-agent-message { max-width: min(760px, 100%); padding: 14px 16px; border-left: 3px solid var(--border); white-space: pre-wrap; }
+    .writer-agent-message.is-user { margin-left: auto; border-left: 0; border-right: 3px solid var(--accent); }
+    .writer-turn-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 6px; margin-top: 10px; white-space: normal; }
+    .writer-turn-action { min-height: 30px; padding: 3px 8px; color: var(--muted); border-color: transparent; }
+    .writer-turn-action:hover, .writer-turn-action:focus-visible { color: var(--text); border-color: var(--border); }
+    .writer-turn-action:disabled { opacity: .45; }
+    .writer-turn-change-dialog { width: min(460px, calc(100vw - 28px)); padding: 0; color: var(--text); border: 1px solid var(--border); border-radius: 8px; background: var(--bg-page); box-shadow: 0 18px 52px rgba(0,0,0,.42); }
+    .writer-turn-change-dialog::backdrop { background: rgba(0,0,0,.58); }
+    .writer-turn-change-dialog-content { padding: 20px; }
+    .writer-agent-thinking { border-left-color: var(--accent); }
+    .writer-agent-thinking-dots::after { content: ""; display: inline-block; width: 1.2em; animation: writer-agent-thinking 1.2s steps(4, end) infinite; }
+    .writer-agent-material-card { border: 1px solid var(--border); border-radius: 6px; background: rgba(255,255,255,.02); }
+    .writer-agent-composer { padding: 16px clamp(18px, 4vw, 68px) 22px; border-top: 1px solid var(--border); background: var(--bg-page); }
+    .writer-agent-composer-box { max-width: 860px; margin: 0 auto; border: 1px solid var(--border); border-radius: 8px; background: #151722; }
+    .writer-agent-composer textarea { min-height: 88px; resize: none; border: 0; box-shadow: none !important; }
+    .writer-agent-report-file { border-bottom: 1px solid var(--border); padding: 13px 0; }
+    .writer-agent-report-file:first-child { border-top: 1px solid var(--border); }
+    .writer-agent-report-preview { display: -webkit-box; overflow: hidden; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+    @keyframes writer-agent-thinking { 0% { content: ""; } 25% { content: "."; } 50% { content: ".."; } 75%, 100% { content: "..."; } }
+    @media (max-width: 1100px) { .writer-agent-layout { grid-template-columns: 210px minmax(0, 1fr); } .writer-agent-reports { grid-column: 1 / -1; max-height: none; border-top: 1px solid var(--border); border-left: 0; } .writer-agent-inspector { position: static; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; max-height: none; overflow: visible; } .writer-agent-report-history { padding-top: 0; } .writer-agent-layout.reports-hidden .writer-agent-reports { display: none; } }
+    @media (max-width: 760px) { .writer-agent-layout { display: block; min-height: 0; } .writer-agent-sidebar, .writer-agent-reports { max-height: none; border: 0; border-bottom: 1px solid var(--border); } .writer-agent-inspector { display: block; } .writer-agent-report-history { padding-top: 18px; } .writer-agent-layout.reports-hidden .writer-agent-reports { display: none; } .writer-agent-chat { min-height: 640px; } .writer-project-summary { flex-wrap: wrap; gap: 6px; } .writer-project-summary .btn { margin-left: 0 !important; } #writer-agent-project-context, .writer-agent-messages, .writer-agent-composer { padding-left: 14px; padding-right: 14px; } }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="writer-agent-workbench">
+    <header class="d-flex justify-content-between align-items-start gap-3 mb-3">
+        <div><h3 class="mb-1">编剧大师</h3><div class="small text-muted">对话评审、原创立项与项目创作</div></div>
+        <div class="d-flex gap-2">
+            <button id="writer-agent-toggle-reports" class="btn btn-outline-light btn-sm" type="button" title="隐藏项目面板" aria-label="隐藏项目面板" aria-pressed="true"><i class="bi bi-layout-sidebar-inset-reverse" aria-hidden="true"></i></button>
+            <button id="writer-agent-refresh" class="btn btn-outline-light btn-sm" type="button" title="刷新会话" aria-label="刷新会话"><i class="bi bi-arrow-clockwise" aria-hidden="true"></i></button>
+        </div>
+    </header>
+    <div id="writer-agent-error" class="alert alert-danger d-none mb-3" role="alert"></div>
+
+    <div class="writer-agent-layout">
+    <aside class="writer-agent-sidebar" aria-label="创作会话">
+        <div class="d-flex justify-content-between align-items-center pb-3"><h5 class="mb-0">创作会话</h5><button id="writer-agent-new" class="btn btn-outline-light btn-sm" type="button" title="新建会话" aria-label="新建会话"><i class="bi bi-plus-lg" aria-hidden="true"></i></button></div>
+        <div id="writer-agent-sessions"><div class="small text-muted py-3">正在读取会话...</div></div>
+        <section id="writer-agent-session-detail" class="writer-agent-session-detail d-none mt-3 py-3">
+            <div class="small text-muted mb-1">当前会话</div><div id="writer-agent-session-title" class="fw-semibold text-break"></div><div id="writer-agent-material-name" class="small text-muted mt-2"></div>
+        </section>
+    </aside>
+
+    <main class="writer-agent-chat" aria-label="编剧对话">
+        <section id="writer-agent-project-context" aria-label="当前创作项目">
+            <button id="writer-agent-create-project" class="btn btn-primary btn-sm" type="button">创建原创项目</button>
+            <button id="writer-agent-link-project" class="btn btn-outline-light btn-sm" type="button">关联已有项目</button>
+            <div id="writer-agent-project-picker" hidden></div>
+        </section>
+        <div id="writer-agent-messages" class="writer-agent-messages" aria-live="polite">
+            <section id="writer-agent-empty" class="writer-agent-empty"><h4>和编剧大师聊聊</h4><p class="text-muted mb-0">粘贴剧本、大纲或角色设定，也可以上传文本文件开始诊断。</p></section>
+            <div id="writer-agent-conversation" class="d-grid gap-4 d-none"></div>
+        </div>
+        <section id="writer-agent-composer" class="writer-agent-composer" aria-label="消息输入">
+            <div class="writer-agent-composer-box">
+                <textarea id="writer-agent-message" class="form-control" rows="3" placeholder="粘贴创作材料，或继续和编剧大师讨论剧情"></textarea>
+                <div class="d-flex align-items-center gap-2 px-2 pb-2"><input id="writer-agent-file" class="d-none" type="file" accept=".txt,.text,.md,.markdown,.mdown,.fountain,.fd,.rst,.docx,.pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf"><button id="writer-agent-attach" class="btn btn-outline-light btn-sm" type="button" title="上传文本、Word 或 PDF 文件" aria-label="上传文本、Word 或 PDF 文件"><i class="bi bi-paperclip" aria-hidden="true"></i></button><span id="writer-agent-file-name" class="small text-muted text-truncate flex-grow-1"></span><button id="writer-agent-send" class="btn btn-primary btn-sm" type="button" title="发送" aria-label="发送"><i class="bi bi-send" aria-hidden="true"></i></button></div>
+            </div>
+        </section>
+    </main>
+
+    <aside class="writer-agent-reports" aria-label="项目进度与评审报告">
+        <div class="writer-agent-inspector">
+            <section id="writer-agent-project-progress" class="writer-project-progress-card">
+                <div class="writer-project-progress-state"><h5 class="writer-project-progress-title mb-2">项目进度</h5><span class="small">关联或创建项目后，这里会显示创作阶段与分章进度。</span></div>
+            </section>
+            <section class="writer-agent-report-history" aria-label="评审报告文件">
+                <div class="d-flex justify-content-between align-items-center pb-3"><h5 class="mb-0">评审报告</h5><span id="writer-agent-report-status" class="small text-muted">等待材料</span></div>
+                <div id="writer-agent-reports" class="small text-muted">每轮有效评审会在这里生成可下载的 Markdown 报告。</div>
+            </section>
+        </div>
+    </aside>
+    </div>
+</div>
+<dialog id="writer-turn-change-dialog" class="writer-turn-change-dialog" aria-labelledby="writer-turn-change-title" aria-describedby="writer-turn-change-summary">
+    <div class="writer-turn-change-dialog-content">
+        <h5 id="writer-turn-change-title" class="mb-2">确认回档</h5>
+        <p id="writer-turn-change-summary" class="text-muted mb-0"></p>
+        <div class="d-flex justify-content-end gap-2 mt-4">
+            <button id="writer-turn-change-cancel" class="btn btn-outline-light btn-sm" type="button">取消</button>
+            <button id="writer-turn-change-confirm" class="btn btn-danger btn-sm" type="button">确认回档</button>
+        </div>
+    </div>
+</dialog>
+{% include "review/_writer_project_review.html" %}
+{% endblock %}
+{% block scripts %}<script src="/static/js/review/writer_project_review.js?v={{ asset_version }}-writer-project-review"></script><script src="/static/js/review/writer_agent.js?v={{ asset_version }}-writer-agent-project-review"></script>{% endblock %}

@@ -5,33 +5,33 @@
 # Repository: https://github.com/NanmiCoder/MediaCrawler
 # GitHub: https://github.com/NanmiCoder
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
-#
 
 from __future__ import annotations
 
 import json
 import re
-import unicodedata
 from collections.abc import Callable
 from pathlib import Path
+from threading import RLock
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
+from urllib.parse import urlparse
 
 import httpx
 
-from agents.drama_download_policy import paid_content_reason
-
-
-DEFAULT_CONFIG_URL = "https://mizhi.kissm.top/pc/con.php"
-DOWNLOAD_SEARCH_SOURCES = (
-    "hg",
-    "hgmj",
-    "hgzh",
-    "redguo",
-    "hm",
-    "huolong",
-    "xingyadongli",
+from agents.hongguo_capture import HongguoCaptureCatalog, normalize_title
+from agents.drama_providers import ProviderFailure
+from agents.drama_providers.third_party import (
+    DEFAULT_CONFIG_URL,
+    LEGACY_CONFIG_URL,
+    build_third_party_registry,
 )
+
+
+DEFAULT_CAPTURE_ROOT = r"E:\hg\raw\video_urls"
+DEFAULT_CAPTURE_SERVICE_URL = "http://127.0.0.1:8776"
+DEFAULT_WAIT_TIMEOUT_SECONDS = 600
+_catalogs: dict[str, HongguoCaptureCatalog] = {}
+_catalogs_lock = RLock()
 
 
 class HongguoDramaError(RuntimeError):
@@ -47,8 +47,7 @@ def text_value(value: Any) -> str:
 
 
 def normalize_drama_title(value: Any) -> str:
-    text = unicodedata.normalize("NFKC", text_value(value)).casefold()
-    return "".join(char for char in text if char.isalnum() or "\u4e00" <= char <= "\u9fff")
+    return normalize_title(value)
 
 
 def safe_filename(value: Any, max_len: int = 80) -> str:
@@ -61,304 +60,310 @@ def settings_path(runtime_dir: str | Path = ".runtime") -> Path:
     return Path(runtime_dir) / "hongguo_drama_settings.json"
 
 
-def load_settings(runtime_dir: str | Path = ".runtime") -> dict[str, str]:
-    settings = {"config_url": DEFAULT_CONFIG_URL, "activation_code": ""}
+def _validated_settings(
+    capture_root: str,
+    wait_timeout_seconds: int,
+    capture_service_url: str = DEFAULT_CAPTURE_SERVICE_URL,
+    config_url: str = DEFAULT_CONFIG_URL,
+    activation_code: str = "",
+) -> dict[str, Any]:
+    root = Path(capture_root).expanduser()
+    if not root.is_absolute():
+        raise ValueError("抓包根目录必须是绝对路径")
+    timeout = int(wait_timeout_seconds)
+    if not 60 <= timeout <= 3600:
+        raise ValueError("等待时长必须为 60 到 3600 秒")
+    service_url = text_value(capture_service_url).rstrip("/")
+    parsed_service_url = urlparse(service_url)
+    if parsed_service_url.scheme not in {"http", "https"} or not parsed_service_url.netloc:
+        raise ValueError("视频抓包服务地址必须是有效的 HTTP 地址")
+    remote_config_url = text_value(config_url) or DEFAULT_CONFIG_URL
+    if remote_config_url.rstrip("/") == LEGACY_CONFIG_URL.rstrip("/"):
+        remote_config_url = DEFAULT_CONFIG_URL
+    parsed_config_url = urlparse(remote_config_url)
+    if parsed_config_url.scheme not in {"http", "https"} or not parsed_config_url.netloc:
+        raise ValueError("第三方配置中心地址必须是有效的 HTTP 地址")
+    return {
+        "config_url": remote_config_url,
+        "activation_code": text_value(activation_code),
+        "capture_root": str(root.resolve()),
+        "capture_service_url": service_url,
+        "wait_timeout_seconds": timeout,
+    }
+
+
+def load_settings(runtime_dir: str | Path = ".runtime") -> dict[str, Any]:
+    defaults: dict[str, Any] = {
+        "config_url": DEFAULT_CONFIG_URL,
+        "activation_code": "",
+        "capture_root": DEFAULT_CAPTURE_ROOT,
+        "capture_service_url": DEFAULT_CAPTURE_SERVICE_URL,
+        "wait_timeout_seconds": DEFAULT_WAIT_TIMEOUT_SECONDS,
+    }
     path = settings_path(runtime_dir)
     if not path.exists():
-        return settings
+        return defaults
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return settings
-    if isinstance(payload, dict):
-        settings["config_url"] = text_value(payload.get("config_url")) or settings["config_url"]
-        settings["activation_code"] = text_value(payload.get("activation_code"))
-    return settings
+        return defaults
+    if not isinstance(payload, dict):
+        return defaults
+    try:
+        return _validated_settings(
+            text_value(payload.get("capture_root")) or DEFAULT_CAPTURE_ROOT,
+            int(payload.get("wait_timeout_seconds") or DEFAULT_WAIT_TIMEOUT_SECONDS),
+            text_value(payload.get("capture_service_url"))
+            or DEFAULT_CAPTURE_SERVICE_URL,
+            text_value(payload.get("config_url")) or DEFAULT_CONFIG_URL,
+            text_value(payload.get("activation_code")),
+        )
+    except (TypeError, ValueError):
+        return defaults
 
 
 def save_settings(
     runtime_dir: str | Path = ".runtime",
+    capture_root: str | None = None,
+    capture_service_url: str | None = None,
+    wait_timeout_seconds: int | None = None,
     config_url: str | None = None,
     activation_code: str | None = None,
-) -> dict[str, str]:
-    settings = load_settings(runtime_dir)
-    if config_url is not None:
-        settings["config_url"] = text_value(config_url) or DEFAULT_CONFIG_URL
-    if activation_code is not None:
-        settings["activation_code"] = text_value(activation_code)
+) -> dict[str, Any]:
+    current = load_settings(runtime_dir)
+    settings = _validated_settings(
+        str(current["capture_root"])
+        if capture_root is None
+        else text_value(capture_root),
+        int(current["wait_timeout_seconds"])
+        if wait_timeout_seconds is None
+        else int(wait_timeout_seconds),
+        str(current.get("capture_service_url") or DEFAULT_CAPTURE_SERVICE_URL)
+        if capture_service_url is None
+        else text_value(capture_service_url),
+        str(current.get("config_url") or DEFAULT_CONFIG_URL)
+        if config_url is None
+        else text_value(config_url),
+        str(current.get("activation_code") or "")
+        if activation_code is None
+        else text_value(activation_code),
+    )
     path = settings_path(runtime_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
     return settings
 
 
-def public_settings(settings: dict[str, str]) -> dict[str, Any]:
+def public_settings(settings: dict[str, Any]) -> dict[str, Any]:
     return {
-        "config_url": settings.get("config_url") or DEFAULT_CONFIG_URL,
-        "has_activation_code": bool(settings.get("activation_code")),
+        "config_url": text_value(settings.get("config_url")) or DEFAULT_CONFIG_URL,
+        "has_activation_code": bool(text_value(settings.get("activation_code"))),
+        "capture_root": text_value(settings.get("capture_root")) or DEFAULT_CAPTURE_ROOT,
+        "capture_service_url": text_value(settings.get("capture_service_url"))
+        or DEFAULT_CAPTURE_SERVICE_URL,
+        "wait_timeout_seconds": int(
+            settings.get("wait_timeout_seconds") or DEFAULT_WAIT_TIMEOUT_SECONDS
+        ),
     }
 
 
-def _data_list(payload: Any) -> list[dict[str, Any]]:
-    if not isinstance(payload, dict):
-        return []
-    data = payload.get("data")
-    if isinstance(data, list):
-        return [item for item in data if isinstance(item, dict)]
-    if isinstance(data, dict):
-        for key in ("list", "items", "records"):
-            value = data.get(key)
-            if isinstance(value, list):
-                return [item for item in value if isinstance(item, dict)]
-    return []
-
-
-def _find_platform_config(payload: Any) -> dict[str, Any]:
-    platforms = _find_platform_configs(payload)
-    candidate = platforms.get("hg")
-    if candidate is not None:
-        return candidate
-    raise HongguoDramaError("配置中心未提供红果 hg 接口配置")
-
-
-def _find_platform_configs(payload: Any) -> dict[str, dict[str, Any]]:
-    if not isinstance(payload, dict):
-        raise HongguoDramaError("配置中心返回格式无效")
-    containers = [payload]
-    data = payload.get("data")
-    if isinstance(data, dict):
-        containers.append(data)
-    for container in containers:
-        platforms = container.get("platforms")
-        if isinstance(platforms, dict):
-            return {
-                text_value(key).lower(): value
-                for key, value in platforms.items()
-                if isinstance(value, dict) and text_value(key)
-            }
-        if isinstance(platforms, list):
-            result: dict[str, dict[str, Any]] = {}
-            for candidate in platforms:
-                if not isinstance(candidate, dict):
-                    continue
-                key = text_value(
-                    candidate.get("platform")
-                    or candidate.get("key")
-                    or candidate.get("name")
-                    or candidate.get("value")
-                ).lower()
-                if key:
-                    result[key] = candidate
-            if result:
-                return result
-    raise HongguoDramaError("配置中心未提供剧目接口配置")
-
-
 class HongguoDramaClient:
-    def __init__(self, settings: dict[str, str], timeout: float = 20.0) -> None:
-        self.settings = settings
+    """Compatibility facade routing capture and third-party providers."""
+
+    def __init__(self, settings: dict[str, Any], timeout: float = 20.0) -> None:
+        self.settings = _validated_settings(
+            text_value(settings.get("capture_root"))
+            if "capture_root" in settings
+            else DEFAULT_CAPTURE_ROOT,
+            int(settings.get("wait_timeout_seconds") or DEFAULT_WAIT_TIMEOUT_SECONDS),
+            text_value(settings.get("capture_service_url"))
+            or DEFAULT_CAPTURE_SERVICE_URL,
+            text_value(settings.get("config_url")) or DEFAULT_CONFIG_URL,
+            text_value(settings.get("activation_code")),
+        )
         self.timeout = timeout
-        self.interfaces: dict[str, str] = {}
-        self.platform_interfaces: dict[str, dict[str, Any]] = {}
-        self.default_source_platform = "hg"
+        self.default_source_platform = "hongguo_capture"
+        self._third_party_registry = None
+        catalog_key = self.settings["capture_root"]
+        with _catalogs_lock:
+            catalog = _catalogs.get(catalog_key)
+            if catalog is None:
+                catalog = HongguoCaptureCatalog(catalog_key)
+                _catalogs[catalog_key] = catalog
+            self.catalog = catalog
 
-    def _params(self, **params: Any) -> dict[str, Any]:
-        result = {key: value for key, value in params.items() if value not in (None, "")}
-        if self.settings.get("activation_code"):
-            result["code"] = self.settings["activation_code"]
-        return result
-
-    def _request_url(self, url: str, **params: Any) -> str:
-        parsed = urlsplit(url)
-        query = list(parse_qsl(parsed.query, keep_blank_values=True))
-        existing_keys = {key for key, _ in query}
-        for key, value in self._params(**params).items():
-            if key == "platform" or key not in existing_keys:
-                query.append((key, str(value)))
-                existing_keys.add(key)
-        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
-
-    def _json(self, url: str, **params: Any) -> dict[str, Any]:
+    def refresh_interfaces(self) -> dict[str, Any]:
         try:
-            with httpx.Client(timeout=self.timeout, follow_redirects=True) as client:
-                response = client.get(self._request_url(url, **params))
-                response.raise_for_status()
-                payload = response.json()
-        except httpx.HTTPStatusError as exc:
-            detail = ""
+            self.catalog.validate_root()
+            return self.catalog.stats()
+        except (OSError, ValueError) as exc:
+            raise HongguoDramaError(str(exc)) from exc
+
+    def _registry(self):
+        if self._third_party_registry is None:
             try:
-                error_payload = exc.response.json()
-                if isinstance(error_payload, dict):
-                    detail = text_value(error_payload.get("message") or error_payload.get("msg"))
-            except ValueError:
-                pass
-            suffix = f"（{detail}）" if detail else ""
-            raise HongguoDramaError(f"请求接口失败: HTTP {exc.response.status_code}{suffix}") from exc
-        except (httpx.HTTPError, ValueError) as exc:
-            raise HongguoDramaError("请求接口失败，请检查网络或接口设置") from exc
-        if not isinstance(payload, dict):
-            raise HongguoDramaError("接口未返回 JSON 对象")
-        return payload
+                self._third_party_registry = build_third_party_registry(
+                    self.settings, timeout=self.timeout
+                )
+            except ProviderFailure as exc:
+                raise HongguoDramaError(exc.safe_message) from exc
+        return self._third_party_registry
 
-    def refresh_interfaces(self) -> dict[str, str]:
-        payload = self._json(self.settings.get("config_url") or DEFAULT_CONFIG_URL)
-        platforms = _find_platform_configs(payload)
-        self.platform_interfaces = {
-            source: {
-                "search": text_value(platform.get("searchUrl")),
-                "book": text_value(platform.get("bookUrl")),
-                "play": text_value(platform.get("playUrl")),
-                "play_requires_book_id": bool(platform.get("playRequiresBookId")),
+    def refresh_third_party_providers(self) -> dict[str, Any]:
+        self._third_party_registry = None
+        registry = self._registry()
+        report = registry.search_all("接口连通测试")
+        providers = [
+            {
+                "provider_id": status.provider_id,
+                "display_name": status.display_name,
+                "status": status.status,
+                "elapsed_ms": status.elapsed_ms,
+                "error_code": status.error_code,
+                "error": status.error,
             }
-            for source, platform in platforms.items()
-            if source in DOWNLOAD_SEARCH_SOURCES
+            for status in report.providers
+        ]
+        return {
+            "provider_count": len(providers),
+            "available_count": sum(
+                provider["status"] == "available" for provider in providers
+            ),
+            "providers": providers,
         }
-        platform = self.platform_interfaces.get("hg")
-        if platform is None:
-            raise HongguoDramaError("配置中心未提供红果 hg 接口配置")
-        interfaces = {
-            "search": str(platform["search"]),
-            "book": str(platform["book"]),
-            "play": str(platform["play"]),
-        }
-        missing = [name for name, value in interfaces.items() if not value]
-        if missing:
-            raise HongguoDramaError(f"红果接口配置缺少: {', '.join(missing)}")
-        self.interfaces = interfaces
-        return interfaces
 
-    def _interface(self, name: str) -> str:
-        if not self.interfaces:
-            self.refresh_interfaces()
-        return self.interfaces[name]
-
-    def _platform_interface(self, source_platform: str, name: str) -> str:
-        source = text_value(source_platform).lower() or self.default_source_platform
-        if source == "hg" and self.interfaces.get(name):
-            return self.interfaces[name]
-        if not self.platform_interfaces:
-            self.refresh_interfaces()
-        interface = self.platform_interfaces.get(source, {}).get(name)
-        if not interface:
-            raise HongguoDramaError(f"配置中心未提供 {source} 的 {name} 接口")
-        return str(interface)
+    def provider(self, source_platform: str):
+        source = text_value(source_platform).lower()
+        if not source or source == "hongguo_capture":
+            raise HongguoDramaError("抓包来源不提供第三方播放接口")
+        try:
+            return self._registry().get(source)
+        except ProviderFailure as exc:
+            raise HongguoDramaError(exc.safe_message) from exc
 
     def search(
-        self, title: str, page: int = 1, source_platform: str = "hg"
+        self, title: str, page: int = 1, source_platform: str = "hongguo_capture"
     ) -> list[dict[str, Any]]:
         query = text_value(title)
         if not query:
             raise HongguoDramaError("请输入剧名")
         source = text_value(source_platform).lower() or self.default_source_platform
-        payload = self._json(
-            self._platform_interface(source, "search"),
-            name=query,
-            page=max(1, int(page)),
-            platform=source,
-        )
-        candidates = []
-        for item in _data_list(payload):
-            book_id = text_value(item.get("book_id") or item.get("bookId") or item.get("id"))
-            if not book_id:
-                continue
-            candidates.append(
-                {
-                    "book_id": book_id,
-                    "title": text_value(item.get("name") or item.get("title") or item.get("book_name")),
-                    "cover": text_value(item.get("cover") or item.get("cover_url") or item.get("image")),
-                    "summary": text_value(item.get("desc") or item.get("description") or item.get("intro")),
-                    "episode_count": item.get("episode_count") or item.get("total") or item.get("total_episode") or "",
-                    "source_platform": source,
-                    "raw": item,
-                }
-            )
-        return candidates
-
-    def search_exact_all_sources(self, title: str) -> list[dict[str, Any]]:
-        """Search every configured source once before allowing a Douyin fallback."""
-        query = normalize_drama_title(title)
-        if not query:
-            raise HongguoDramaError("请输入剧名")
-        self.refresh_interfaces()
-        matches: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
-        errors: list[str] = []
-        for source in DOWNLOAD_SEARCH_SOURCES:
-            if not self.platform_interfaces.get(source, {}).get("search"):
-                continue
+        if source != "hongguo_capture":
             try:
-                candidates = self.search(title, page=1, source_platform=source)
-            except HongguoDramaError as exc:
-                errors.append(f"{source}: {exc}")
-                continue
-            for candidate in candidates:
-                if normalize_drama_title(candidate.get("title")) != query:
-                    continue
-                key = (source, str(candidate.get("book_id") or ""))
-                if key in seen or not key[1]:
-                    continue
-                seen.add(key)
-                matches.append(candidate)
-        if not matches and errors and len(errors) == len(DOWNLOAD_SEARCH_SOURCES):
-            raise HongguoDramaError("；".join(errors))
-        return matches
+                return [
+                    item.public_dict()
+                    for item in self.provider(source).search(query, page=page)
+                ]
+            except ProviderFailure as exc:
+                raise HongguoDramaError(exc.safe_message) from exc
+        try:
+            return [item.public_dict() for item in self.catalog.search_exact(query)]
+        except (OSError, ValueError) as exc:
+            raise HongguoDramaError(str(exc)) from exc
 
     def search_exact(self, title: str) -> list[dict[str, Any]]:
-        """Return only exact normalized title matches for episode downloads."""
-        query = normalize_drama_title(title)
+        return self.search(title)
+
+    def search_for_download(self, title: str) -> list[dict[str, Any]]:
+        query = text_value(title)
         if not query:
             raise HongguoDramaError("请输入剧名")
-        candidates: list[dict[str, Any]] = []
-        page_signatures: set[tuple[str, ...]] = set()
-        for page in range(1, 6):
-            page_candidates = self.search(title, page=page)
-            if not page_candidates:
-                break
-            signature = tuple(str(item.get("book_id") or "") for item in page_candidates)
-            if signature in page_signatures:
-                break
-            page_signatures.add(signature)
-            candidates.extend(page_candidates)
-        matches: list[dict[str, Any]] = []
-        seen: set[str] = set()
+        try:
+            return [
+                item.public_dict()
+                for item in self.catalog.search_compatible(query, 8)
+            ]
+        except (OSError, ValueError) as exc:
+            raise HongguoDramaError(str(exc)) from exc
+
+    def search_exact_all_sources(self, title: str) -> list[dict[str, Any]]:
+        try:
+            report = self._registry().search_exact_all(title)
+        except ProviderFailure as exc:
+            raise HongguoDramaError(exc.safe_message) from exc
+        return [item.public_dict() for item in report.candidates]
+
+    def search_provider_groups(self, title: str) -> dict[str, Any]:
+        result: dict[str, Any]
+        try:
+            report = self._registry().search_exact_all(title)
+            result = report.public_dict()
+            result["third_party_error"] = ""
+        except (HongguoDramaError, ProviderFailure) as exc:
+            result = {
+                "candidates": [],
+                "providers": [],
+                "third_party_error": str(exc),
+            }
+        try:
+            result["capture_candidates"] = [
+                item.public_dict()
+                for item in self.catalog.search_compatible(title, 8)
+            ]
+            result["capture_error"] = ""
+        except (OSError, ValueError) as exc:
+            result["capture_candidates"] = []
+            result["capture_error"] = str(exc)
+        return result
+
+    def suggest(self, title: str, limit: int = 8) -> list[dict[str, Any]]:
+        try:
+            return [item.public_dict() for item in self.catalog.suggest(title, limit)]
+        except (OSError, ValueError) as exc:
+            raise HongguoDramaError(str(exc)) from exc
+
+    def suggest_all(self, title: str, limit: int = 8) -> list[dict[str, Any]]:
+        query = text_value(title)
+        if not query:
+            return []
+        capped_limit = max(1, min(8, int(limit)))
+        candidates: list[Any] = []
+        third_party_error: Exception | None = None
+        try:
+            candidates.extend(self._registry().search_all(query).candidates)
+        except (HongguoDramaError, ProviderFailure) as exc:
+            third_party_error = exc
+        try:
+            candidates.extend(self.catalog.suggest(query, capped_limit))
+        except (OSError, ValueError) as exc:
+            if not candidates:
+                message = str(third_party_error or exc)
+                raise HongguoDramaError(message) from exc
+
+        suggestions: list[dict[str, Any]] = []
+        seen_titles: set[str] = set()
         for candidate in candidates:
-            if normalize_drama_title(candidate.get("title")) != query:
+            title_key = normalize_title(getattr(candidate, "title", ""))
+            if not title_key or title_key in seen_titles:
                 continue
-            book_id = str(candidate.get("book_id") or "")
-            if book_id and book_id not in seen:
-                matches.append(candidate)
-                seen.add(book_id)
-        return matches
+            seen_titles.add(title_key)
+            suggestions.append(candidate.public_dict())
+            if len(suggestions) >= capped_limit:
+                break
+        return suggestions
 
     def episodes(
-        self, book_id: str, source_platform: str = ""
+        self, book_id: str, source_platform: str = "hongguo_capture"
     ) -> list[dict[str, Any]]:
-        value = text_value(book_id)
-        if not value:
-            raise HongguoDramaError("缺少 book_id")
-        payload = self._json(
-            self._platform_interface(source_platform, "book"), book_id=value
-        )
-        episodes = []
-        for index, item in enumerate(_data_list(payload), start=1):
-            video_id = text_value(item.get("video_id") or item.get("videoId") or item.get("id"))
-            if not video_id:
-                continue
-            paid_reason = paid_content_reason(item)
-            episodes.append(
-                {
-                    "episode": index,
-                    "video_id": video_id,
-                    "title": text_value(item.get("title") or item.get("name") or item.get("episode_name")) or f"第 {index} 集",
-                    "subtitle_url": text_value(item.get("subtitle_url") or item.get("caption_url") or item.get("srt_url") or item.get("vtt_url")),
-                    "is_paid": bool(paid_reason),
-                    "paid_reason": paid_reason,
-                    "raw": item,
-                }
-            )
-        if not episodes:
-            raise HongguoDramaError("未找到可播放剧集")
-        return episodes
+        series_id = text_value(book_id)
+        if not series_id:
+            raise HongguoDramaError("缺少 series_id")
+        source = text_value(source_platform).lower() or self.default_source_platform
+        if source != "hongguo_capture":
+            try:
+                return [
+                    item.public_dict()
+                    for item in self.provider(source).episodes(series_id)
+                ]
+            except ProviderFailure as exc:
+                raise HongguoDramaError(exc.safe_message) from exc
+        try:
+            rows = self.catalog.episodes(series_id)
+        except (OSError, ValueError) as exc:
+            raise HongguoDramaError(str(exc)) from exc
+        if not rows:
+            raise HongguoDramaError("抓包目录中未找到该剧目的剧集信息")
+        return [row.public_dict() for row in rows]
 
     def play_url(
         self,
@@ -367,20 +372,16 @@ class HongguoDramaClient:
         source_platform: str = "",
     ) -> str:
         source = text_value(source_platform).lower() or self.default_source_platform
-        params: dict[str, Any] = {"video_id": text_value(video_id)}
-        if self.platform_interfaces.get(source, {}).get("play_requires_book_id"):
-            params["book_id"] = text_value(book_id)
-        payload = self._json(self._platform_interface(source, "play"), **params)
-        paid_reason = paid_content_reason(payload)
-        if paid_reason:
-            raise HongguoPaidContentError(paid_reason)
-        if str(payload.get("code", "")) not in {"200", "0"}:
-            raise HongguoDramaError(text_value(payload.get("msg") or payload.get("message")) or "播放接口返回失败")
-        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
-        url = text_value(data.get("video_url") or data.get("url"))
-        if not url.startswith(("http://", "https://")):
-            raise HongguoDramaError("播放接口未返回有效视频地址")
-        return url
+        if source == "hongguo_capture":
+            raise HongguoDramaError("播放地址必须从外部抓包数据获取")
+        try:
+            return self.provider(source).resolve_playable(
+                text_value(book_id), text_value(video_id)
+            ).url
+        except ProviderFailure as exc:
+            if exc.code == "paid_content":
+                raise HongguoPaidContentError(exc.safe_message) from exc
+            raise HongguoDramaError(exc.safe_message) from exc
 
     def download_video(
         self,
@@ -395,7 +396,9 @@ class HongguoDramaClient:
         resumed_bytes = temp_path.stat().st_size if temp_path.exists() else 0
         headers = {"Range": f"bytes={resumed_bytes}-"} if resumed_bytes else {}
         try:
-            with httpx.Client(timeout=httpx.Timeout(60.0, read=120.0), follow_redirects=True) as client:
+            with httpx.Client(
+                timeout=httpx.Timeout(60.0, read=120.0), follow_redirects=True
+            ) as client:
                 with client.stream("GET", video_url, headers=headers) as response:
                     response.raise_for_status()
                     content_length = int(response.headers.get("content-length") or 0)
@@ -404,20 +407,16 @@ class HongguoDramaClient:
                         if not content_range.startswith(f"bytes {resumed_bytes}-"):
                             raise HongguoDramaError("下载服务返回了无效的续传范围")
                         total_bytes = int(content_range.rsplit("/", 1)[-1]) if "/" in content_range else 0
-                        written = resumed_bytes
-                        mode = "ab"
+                        written, mode = resumed_bytes, "ab"
                     else:
-                        # Some sources ignore Range requests. Restarting from a clean
-                        # partial file avoids producing a corrupted video.
                         if resumed_bytes:
                             temp_path.unlink(missing_ok=True)
-                        total_bytes = content_length
-                        written = 0
-                        mode = "wb"
+                        total_bytes, written, mode = content_length, 0, "wb"
                     if total_bytes and total_bytes > max_bytes:
                         raise HongguoDramaError("视频超过大小限制")
                     if on_progress:
                         on_progress(written, total_bytes)
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
                     with temp_path.open(mode) as output:
                         for chunk in response.iter_bytes():
                             if wait_if_paused:
@@ -439,12 +438,11 @@ class HongguoDramaClient:
         if not subtitle_url.startswith(("http://", "https://")):
             return ""
         try:
-            with httpx.Client(timeout=self.timeout, follow_redirects=True) as client:
-                response = client.get(subtitle_url)
-                response.raise_for_status()
-                content = response.text
+            response = httpx.get(subtitle_url, timeout=self.timeout, follow_redirects=True)
+            response.raise_for_status()
         except httpx.HTTPError:
             return ""
+        content = response.text
         try:
             payload = json.loads(content)
         except json.JSONDecodeError:
@@ -452,15 +450,20 @@ class HongguoDramaClient:
         if isinstance(payload, dict):
             body = payload.get("body") or payload.get("segments") or payload.get("data") or []
             if isinstance(body, list):
-                lines = [text_value(item.get("content") or item.get("text")) for item in body if isinstance(item, dict)]
+                lines = [
+                    text_value(item.get("content") or item.get("text"))
+                    for item in body
+                    if isinstance(item, dict)
+                ]
                 return "\n".join(line for line in lines if line)
-        lines = []
-        for line in content.splitlines():
-            value = line.strip()
-            if not value or value.upper() == "WEBVTT" or "-->" in value or value.isdigit():
-                continue
-            lines.append(value)
-        return "\n".join(lines)
+        return "\n".join(
+            line.strip()
+            for line in content.splitlines()
+            if line.strip()
+            and line.strip().upper() != "WEBVTT"
+            and "-->" not in line
+            and not line.strip().isdigit()
+        )
 
 
 def media_extension(video_url: str) -> str:

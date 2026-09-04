@@ -192,7 +192,7 @@ class BilibiliCrawler(AbstractCrawler):
             # 设置当前关键词对应的项目列表
             projects = config.PROJECT_KEYWORD_MAP.get(keyword, [])
             project_var.set(projects)
-            
+
             utils.logger.info(f"[BilibiliCrawler.search_by_keywords] Current search keyword: {keyword}, Projects: {projects}")
             page = 1
             while (page - start_page + 1) * bili_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
@@ -252,7 +252,7 @@ class BilibiliCrawler(AbstractCrawler):
             # 设置当前关键词对应的项目列表
             projects = config.PROJECT_KEYWORD_MAP.get(keyword, [])
             project_var.set(projects)
-            
+
             utils.logger.info(f"[BilibiliCrawler.search_by_keywords_in_time_range] Current search keyword: {keyword}, Projects: {projects}")
             total_notes_crawled_for_keyword = 0
 

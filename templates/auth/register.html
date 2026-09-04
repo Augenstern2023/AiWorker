@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>注册 - AiWorker</title>
+  <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+  <link href="/static/css/bootstrap-icons.css" rel="stylesheet">
+  <link href="/static/css/auth.css" rel="stylesheet">
+</head>
+<body class="auth-page">
+  <main class="auth-shell">
+    <section class="auth-brand" aria-label="AiWorker">
+      <div class="auth-brand-mark"><i class="bi bi-robot" aria-hidden="true"></i></div>
+      <div>
+        <div class="auth-product-name">AiWorker</div>
+        <p class="auth-product-subtitle">壹凡短剧选品平台</p>
+      </div>
+    </section>
+    <section class="auth-panel">
+      <div class="auth-form-wrap">
+        <div class="auth-heading">
+          <span class="auth-kicker">本地账号</span>
+          <h1>注册</h1>
+          <p>提交申请后由管理员激活账号。</p>
+        </div>
+        <form id="register-form" class="auth-form">
+          <div>
+            <label class="form-label" for="username">用户名</label>
+            <div class="auth-input-wrap">
+              <i class="bi bi-person" aria-hidden="true"></i>
+              <input class="form-control" id="username" name="username" autocomplete="username" required autofocus>
+            </div>
+          </div>
+          <div>
+            <label class="form-label" for="display-name">显示名称</label>
+            <div class="auth-input-wrap">
+              <i class="bi bi-person-badge" aria-hidden="true"></i>
+              <input class="form-control" id="display-name" name="display_name" autocomplete="name" required>
+            </div>
+          </div>
+          <div>
+            <label class="form-label" for="email">邮箱 <span class="auth-optional">选填</span></label>
+            <div class="auth-input-wrap">
+              <i class="bi bi-envelope" aria-hidden="true"></i>
+              <input class="form-control" id="email" name="email" type="email" autocomplete="email">
+            </div>
+          </div>
+          <div>
+            <label class="form-label" for="phone">手机号 <span class="auth-optional">选填</span></label>
+            <div class="auth-input-wrap">
+              <i class="bi bi-phone" aria-hidden="true"></i>
+              <input class="form-control" id="phone" name="phone" type="tel" autocomplete="tel">
+            </div>
+          </div>
+          <div>
+            <label class="form-label" for="gender">性别 <span class="auth-optional">选填</span></label>
+            <div class="auth-input-wrap">
+              <i class="bi bi-person-vcard" aria-hidden="true"></i>
+              <select class="form-select" id="gender" name="gender" autocomplete="sex">
+                <option value="unspecified">未填写</option>
+                <option value="male">男</option>
+                <option value="female">女</option>
+              </select>
+            </div>
+          </div>
+          <fieldset class="auth-role-fieldset">
+            <legend class="form-label">角色</legend>
+            <div class="auth-role-options">
+              <label class="auth-role-option"><input type="checkbox" name="role_codes" value="selection_operator">选品运营</label>
+              <label class="auth-role-option"><input type="checkbox" name="role_codes" value="creative_planner">创意策划</label>
+              <label class="auth-role-option"><input type="checkbox" name="role_codes" value="screenwriter">编剧</label>
+              <label class="auth-role-option"><input type="checkbox" name="role_codes" value="project_owner">项目负责人</label>
+            </div>
+          </fieldset>
+          <div>
+            <label class="form-label" for="password">密码</label>
+            <div class="auth-input-wrap">
+              <i class="bi bi-lock" aria-hidden="true"></i>
+              <input class="form-control" id="password" name="password" type="password" autocomplete="new-password" required minlength="10">
+            </div>
+          </div>
+          <div>
+            <label class="form-label" for="confirm-password">确认密码</label>
+            <div class="auth-input-wrap">
+              <i class="bi bi-shield-lock" aria-hidden="true"></i>
+              <input class="form-control" id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" required minlength="10">
+            </div>
+          </div>
+          <p id="error" class="auth-error" role="alert" aria-live="polite"></p>
+          <button class="btn btn-primary auth-submit" type="submit">
+            <span>注册</span><i class="bi bi-arrow-right" aria-hidden="true"></i>
+          </button>
+          <p class="auth-switch">已有账号？<a href="/login">返回登录</a></p>
+        </form>
+      </div>
+    </section>
+  </main>
+  <script>
+    document.getElementById('register-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const button = form.querySelector('button[type="submit"]');
+      const error = document.getElementById('error');
+      const password = form.elements.password.value;
+      const confirmPassword = form.elements.confirm_password.value;
+      const roleCodes = new FormData(form).getAll('role_codes');
+      error.textContent = '';
+      if (!roleCodes.length) {
+        error.textContent = '请至少选择一个角色';
+        return;
+      }
+      if (password !== confirmPassword) {
+        error.textContent = '两次输入的密码不一致';
+        return;
+      }
+      button.disabled = true;
+      const values = new FormData(form);
+      try {
+        const response = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            username: values.get('username'),
+            display_name: values.get('display_name'),
+            password: values.get('password'),
+            role_codes: roleCodes,
+            email: values.get('email'),
+            phone: values.get('phone'),
+            gender: values.get('gender'),
+          }),
+        });
+        const result = await response.json();
+        if (response.ok) window.location.assign('/login?registered=1');
+        else error.textContent = result.detail || '注册失败';
+      } catch (_) {
+        error.textContent = '暂时无法连接服务，请稍后重试';
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

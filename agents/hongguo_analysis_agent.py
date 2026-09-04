@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import config
 from analysis.llm import LLMError, create_llm_provider_from_config
 
 
@@ -83,9 +84,12 @@ def markdown_table(headers: list[str], rows: list[list[Any]]) -> list[str]:
 
 async def call_llm_json(payload: dict[str, Any], overview: bool = False) -> tuple[dict[str, Any], str]:
     try:
-        provider = create_llm_provider_from_config()
+        provider = create_llm_provider_from_config(config)
         prompt = json.dumps(payload, ensure_ascii=False)
-        result = await provider.generate_json(prompt)
+        result = await provider.complete_json([
+            {"role": "system", "content": "你是短剧数据分析助手。只输出合法 JSON，不要输出 Markdown。"},
+            {"role": "user", "content": prompt},
+        ])
         return result if isinstance(result, dict) else {}, ""
     except (LLMError, Exception) as exc:
         return {}, str(exc)

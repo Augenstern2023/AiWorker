@@ -94,28 +94,55 @@ class LLMSecretCipher:
         if key_path.exists():
             return cls._read_key_after_concurrent_write(key_path)
 
-        generated = (
-            runtime_key_path.read_bytes().strip()
-            if key_path != runtime_key_path and runtime_key_path.exists()
+        legacy_key_paths: list[Path] = []
+        if common_git_dir is not None and common_git_dir.name == ".git":
+            legacy_key_paths.append(
+                common_git_dir.parent / ".runtime" / "llm_config.key"
+            )
+        if runtime_key_path not in legacy_key_paths:
+            legacy_key_paths.append(runtime_key_path)
+        existing_key_path = next(
+            (candidate for candidate in legacy_key_paths if candidate.exists()),
+            None,
+        )
+        key = (
+            cls._read_key_material_after_concurrent_write(existing_key_path)
+            if existing_key_path is not None
             else Fernet.generate_key()
         )
+        return cls._publish_key(key_path, key)
+
+    @classmethod
+    def _publish_key(cls, key_path: Path, key: bytes) -> "LLMSecretCipher":
+        cipher = cls(key)
+        temporary_path = key_path.parent / (
+            f".{key_path.name}.{uuid.uuid4().hex}.tmp"
+        )
+        descriptor: int | None = None
         try:
             descriptor = os.open(
-                key_path,
+                temporary_path,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL,
                 0o600,
             )
-        except FileExistsError:
-            return cls._read_key_after_concurrent_write(key_path)
-        with os.fdopen(descriptor, "wb") as key_file:
-            key_file.write(generated + b"\n")
-            key_file.flush()
-            os.fsync(key_file.fileno())
-        try:
-            os.chmod(key_path, 0o600)
-        except OSError:
-            pass
-        return cls(generated)
+            with os.fdopen(descriptor, "wb") as key_file:
+                descriptor = None
+                key_file.write(key + b"\n")
+                key_file.flush()
+                os.fsync(key_file.fileno())
+            try:
+                os.chmod(temporary_path, 0o600)
+            except OSError:
+                pass
+            try:
+                os.link(temporary_path, key_path)
+            except FileExistsError:
+                return cls._read_key_after_concurrent_write(key_path)
+            return cipher
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            temporary_path.unlink(missing_ok=True)
 
     @staticmethod
     def _find_git_common_dir(start: Path) -> Path | None:
@@ -144,20 +171,21 @@ class LLMSecretCipher:
                 if not common_dir.is_absolute():
                     common_dir = git_dir / common_dir
                 return common_dir.resolve()
-            except OSError:
+            except (OSError, UnicodeError, RuntimeError):
                 return None
         return None
 
     @classmethod
-    def _read_key_after_concurrent_write(
+    def _read_key_material_after_concurrent_write(
         cls, key_path: Path
-    ) -> "LLMSecretCipher":
+    ) -> bytes:
         last_error: Exception | None = None
         for attempt in range(50):
             try:
                 stored_key = key_path.read_bytes().strip()
                 if stored_key:
-                    return cls(stored_key)
+                    cls(stored_key)
+                    return stored_key
             except (OSError, LLMSecretError) as exc:
                 last_error = exc
             if attempt < 49:
@@ -165,6 +193,12 @@ class LLMSecretCipher:
         raise LLMSecretError(
             "LLM encryption key file is empty or invalid"
         ) from last_error
+
+    @classmethod
+    def _read_key_after_concurrent_write(
+        cls, key_path: Path
+    ) -> "LLMSecretCipher":
+        return cls(cls._read_key_material_after_concurrent_write(key_path))
 
     def encrypt(self, plaintext: str) -> str:
         value = str(plaintext or "")

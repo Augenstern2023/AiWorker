@@ -36,8 +36,9 @@ uv run --project D:\Crawler\AiWorker pytest tests/analysis/test_llm_settings.py 
 - [ ] **步骤 3：实现最少代码**
 
 在 `LLMSecretCipher` 内增加只负责路径解析的私有类方法：读取 `.git` 目录或 gitdir
-指针、解析 `commondir`，返回 `<common-dir>/aiworker/llm_config.key`。复用现有原子创建
-与并发读取逻辑；共享文件不存在时优先迁移当前 runtime 密钥。
+指针、解析 `commondir`，返回 `<common-dir>/aiworker/llm_config.key`。共享文件不存在
+时优先迁移主工作区 runtime 密钥，验证候选 Fernet key 后通过同目录临时文件、
+`fsync` 和原子硬链接发布；并发输家读取已发布密钥。
 
 - [ ] **步骤 4：验证绿灯和回归**
 
@@ -82,4 +83,3 @@ git commit -m "fix(llm): share encryption key across worktrees"
 - [ ] **步骤 4：完成前验证**
 
 运行相关测试、`pre-commit run --files` 和 `git diff --check`，确认无失败后再报告完成。
-

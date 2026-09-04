@@ -17,9 +17,11 @@ worktree 启动 WebGUI 会生成不同主密钥，导致同一数据库中的凭
 2. Git common dir 下的 `aiworker/llm_config.key`：同一仓库所有 worktree 共用。
 3. `<runtime_dir>/llm_config.key`：非 Git 部署继续使用现有行为。
 
-首次在 Git 仓库内升级时，如果共享密钥尚不存在而当前 runtime 密钥存在，则把当前
-密钥原子迁移到 Git common dir；否则在共享位置原子生成新密钥。并发启动仍使用
-`O_EXCL` 和已有的短暂重试读取逻辑。
+首次在 Git 仓库内升级时，如果共享密钥尚不存在，则优先迁移主工作区的 runtime
+密钥，即使首次启动来自 linked worktree；主工作区没有旧密钥时才采用当前 worktree
+的旧密钥或生成新密钥。候选旧密钥会在发布前验证。新文件先在目标目录完整写入并
+`fsync`，再通过硬链接以“不覆盖”的方式原子发布；失败只留下可清理的临时文件，
+不会留下空的最终密钥。并发启动时只有一个候选能发布成功，其他进程读取胜出的密钥。
 
 Git common dir 通过主工作区 `.git` 目录或 linked worktree `.git` 指针及其
 `commondir` 文件解析，不调用外部 Git 命令。解析失败时安全回退到 runtime 路径。
@@ -37,4 +39,3 @@ Git common dir 通过主工作区 `.git` 目录或 linked worktree `.git` 指针
 - 非 Git runtime 的现有持久化测试继续通过。
 - 当前数据库凭据状态恢复为 `configured`，服务重启后仍可解密。
 - WebGUI 继续监听 `0.0.0.0:8899` 且首页返回 HTTP 200。
-

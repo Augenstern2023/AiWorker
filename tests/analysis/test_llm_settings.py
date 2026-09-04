@@ -221,7 +221,7 @@ def test_provider_presets_include_editable_openai_compatible_defaults():
     assert module.PROVIDER_PRESETS["deepseek"]["base_url"] == "https://api.deepseek.com"
     assert module.PROVIDER_PRESETS["deepseek"]["wire_api"] == "chat_completions"
     assert module.PROVIDER_PRESETS["minimax"]["base_url"] == "https://api.minimax.io/v1"
-    assert module.PROVIDER_PRESETS["sub2api"]["wire_api"] == "responses"
+    assert module.PROVIDER_PRESETS["sub2api"]["wire_api"] == "chat_completions"
 
 
 def test_public_provider_never_contains_ciphertext_or_api_key():

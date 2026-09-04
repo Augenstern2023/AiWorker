@@ -629,7 +629,7 @@ def test_build_responses_request_body_sets_reasoning_effort():
     assert body["text"]["format"]["type"] == "json_object"
 
 
-def test_resolve_llm_settings_defaults_to_sub2api_gpt_5p6_sol(monkeypatch):
+def test_resolve_llm_settings_defaults_sub2api_to_chat_completions(monkeypatch):
     class DummyConfig:
         LLM_PROVIDER = "sub2api"
         LLM_BASE_URL = ""
@@ -644,8 +644,30 @@ def test_resolve_llm_settings_defaults_to_sub2api_gpt_5p6_sol(monkeypatch):
     assert settings["base_url"] == ""
     assert settings["api_key"] == "secret"
     assert settings["model"] == "gpt-5.6-sol"
-    assert settings["wire_api"] == "responses"
+    assert settings["wire_api"] == "chat_completions"
     assert settings["reasoning_effort"] == "auto"
+
+
+def test_runtime_config_defaults_sub2api_to_chat_completions(monkeypatch):
+    """Would catch the legacy runtime config overriding the new provider default."""
+
+    import importlib
+
+    from config import bilibili_config
+
+    class EmptySettingsRepository:
+        @staticmethod
+        def effective_default():
+            return None
+
+    monkeypatch.delenv("LLM_WIRE_API", raising=False)
+    runtime_config = importlib.reload(bilibili_config)
+
+    settings = resolve_llm_settings(
+        runtime_config, settings_repository=EmptySettingsRepository()
+    )
+
+    assert settings["wire_api"] == "chat_completions"
 
 
 def test_configured_provider_ignores_legacy_secondary_route():

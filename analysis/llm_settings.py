@@ -43,7 +43,7 @@ PROVIDER_PRESETS: dict[str, dict[str, str]] = {
     "sub2api": {
         "label": "Sub2API",
         "base_url": "",
-        "wire_api": "responses",
+        "wire_api": "chat_completions",
     },
     "custom": {
         "label": "自定义",

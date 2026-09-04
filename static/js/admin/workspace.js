@@ -49,12 +49,40 @@ window.aiworkerModules.push(() => ({
 
                 async refreshAnalyticsDashboard({notify = false} = {}) {
                     this.analyticsError = '';
-                    const refreshed = await this.fetchWeeklyReports({notify});
+                    const refreshed = this.analyticsReportMode === 'monthly'
+                        ? await this.fetchMonthlyReports({notify})
+                        : await this.fetchWeeklyReports({notify});
                     if (!refreshed) return;
                     this.$nextTick(() => {
                         this.renderAnalyticsCharts();
                         setTimeout(() => this.resizeAnalyticsCharts(), 80);
                     });
+                },
+
+                async setAnalyticsReportMode(mode) {
+                    const normalized = mode === 'monthly' ? 'monthly' : 'weekly';
+                    if (this.analyticsReportMode === normalized) return;
+                    this.analyticsReportMode = normalized;
+                    try {
+                        window.sessionStorage.setItem('aiworker-analytics-report-mode', normalized);
+                    } catch (_) {}
+                    await this.refreshAnalyticsDashboard();
+                },
+
+                activeAnalyticsReport() {
+                    return this.analyticsReportMode === 'monthly' ? this.monthlyReport : this.weeklyReport;
+                },
+
+                activeAnalyticsReports() {
+                    return this.analyticsReportMode === 'monthly' ? this.monthlyReports : this.weeklyReports;
+                },
+
+                analyticsReportLoading() {
+                    return this.analyticsReportMode === 'monthly' ? this.monthlyReportLoading : this.weeklyReportLoading;
+                },
+
+                analyticsReportError() {
+                    return this.analyticsReportMode === 'monthly' ? this.monthlyReportError : this.weeklyReportError;
                 },
 
                 async fetchWeeklyReports({notify = false} = {}) {
@@ -100,6 +128,49 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
+                async fetchMonthlyReports({notify = false} = {}) {
+                    this.monthlyReportLoading = true;
+                    this.monthlyReportError = '';
+                    this.analyticsError = '';
+                    try {
+                        const params = new URLSearchParams();
+                        if (this.analyticsPlatform) params.set('platform', this.analyticsPlatform);
+                        const res = await aiworkerApi.request(`/api/analytics/monthly-reports?${params.toString()}`);
+                        let data = {};
+                        try {
+                            data = await res.json();
+                        } catch (_) {}
+                        if (!res.ok) throw new Error(data.detail || data.message || `加载月度报告失败（HTTP ${res.status || '-'}）`);
+                        this.monthlyReports = data.items || [];
+                        const selected = this.monthlyReport?.report_id;
+                        const report = this.monthlyReports.find(item => item.report_id === selected) || this.monthlyReports[0] || null;
+                        this.monthlyReport = report;
+                        if (notify) {
+                            const generatedCount = this.monthlyReports.filter(item => item.cache_status === 'generated').length;
+                            const period = report?.period?.start && report?.period?.end
+                                ? `${report.period.start} 至 ${report.period.end}`
+                                : '';
+                            const message = generatedCount
+                                ? `已生成 ${generatedCount} 份月报${period ? `，最新周期：${period}` : ''}`
+                                : this.monthlyReports.length
+                                    ? `当前月报已是最新${period ? `，最新周期：${period}` : ''}`
+                                    : '暂无月度数据，请确认本月工作日榜单快照是否存在。';
+                            this.showWeeklyReportRefreshToast('success', '月报已更新', message);
+                        }
+                        return true;
+                    } catch (e) {
+                        this.monthlyReports = [];
+                        this.monthlyReport = null;
+                        const message = e.message || '加载月度报告失败';
+                        this.monthlyReportError = message;
+                        this.analyticsError = message;
+                        if (notify) this.showWeeklyReportRefreshToast('danger', '月报更新失败', message);
+                        return false;
+                    } finally {
+                        this.monthlyReportLoading = false;
+                    }
+                },
+
                 showWeeklyReportRefreshToast(kind, title, message) {
                     if (window.aiworkerUi?.showToast) {
                         window.aiworkerUi.showToast({kind, title, message});
@@ -121,10 +192,41 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
+                async selectMonthlyReport(reportId) {
+                    if (!reportId) return;
+                    try {
+                        const res = await aiworkerApi.request(`/api/analytics/monthly-reports/${encodeURIComponent(reportId)}`);
+                        const data = await res.json();
+                        if (!res.ok) throw new Error(data.detail || '加载月报详情失败');
+                        this.monthlyReport = data;
+                        this.$nextTick(() => this.renderAnalyticsCharts());
+                    } catch (e) {
+                        this.monthlyReportError = e.message || '加载月报详情失败';
+                    }
+                },
+
+                selectAnalyticsReport(reportId) {
+                    return this.analyticsReportMode === 'monthly'
+                        ? this.selectMonthlyReport(reportId)
+                        : this.selectWeeklyReport(reportId);
+                },
+
                 weeklyReportExport(format) {
                     const reportId = this.weeklyReport?.report_id;
                     if (!reportId) return;
                     window.open(`/api/analytics/weekly-reports/${encodeURIComponent(reportId)}/export?format=${encodeURIComponent(format)}`, '_blank', 'noopener');
+                },
+
+                monthlyReportExport(format) {
+                    const reportId = this.monthlyReport?.report_id;
+                    if (!reportId) return;
+                    window.open(`/api/analytics/monthly-reports/${encodeURIComponent(reportId)}/export?format=${encodeURIComponent(format)}`, '_blank', 'noopener');
+                },
+
+                analyticsReportExport(format) {
+                    return this.analyticsReportMode === 'monthly'
+                        ? this.monthlyReportExport(format)
+                        : this.weeklyReportExport(format);
                 },
 
                 renderAnalyticsCharts() {
@@ -177,10 +279,17 @@ window.aiworkerModules.push(() => ({
                 },
 
                 analyticsCategoryRows() {
+                    if (this.analyticsReportMode === 'monthly') return this.monthlyReport?.tags?.theme_tags || [];
                     return this.weeklyReport?.tags?.theme_tags || [];
                 },
 
                 analyticsTrendData() {
+                    if (this.analyticsReportMode === 'monthly') {
+                        return {
+                            points: this.monthlyReport?.recommendation_metrics?.points || [],
+                            series: this.monthlyReport?.recommendation_metrics?.series || [],
+                        };
+                    }
                     return {
                         points: this.weeklyReport?.recommendation_metrics?.points || [],
                         series: this.weeklyReport?.recommendation_metrics?.series || [],
@@ -212,7 +321,9 @@ window.aiworkerModules.push(() => ({
                                     const item = trend.series[point.seriesIndex];
                                     if (!item) return '';
                                     const raw = item.values[point.dataIndex];
-                                    return `${point.marker}${item.title} · ${item.metric_label}：${this.formatAnalyticsMetric(raw)}（周均 ${this.formatAnalyticsMetric(item.weekly_average)}，指数 ${point.value}）`;
+                                    const average = item.period_average ?? item.weekly_average;
+                                    const averageLabel = this.analyticsReportMode === 'monthly' ? '月均' : '周均';
+                                    return `${point.marker}${item.title} · ${item.metric_label}：${raw == null ? '-' : this.formatAnalyticsMetric(raw)}（${averageLabel} ${this.formatAnalyticsMetric(average)}，指数 ${point.value ?? '-'}）`;
                                 }).filter(Boolean);
                                 return [date, ...rows].join('<br/>');
                             },
@@ -220,7 +331,7 @@ window.aiworkerModules.push(() => ({
                         legend: {top: 0, type: 'scroll', textStyle: {color: '#dbe4ee'}},
                         grid: {left: 16, right: 24, top: 50, bottom: 48, containLabel: true},
                         xAxis: {type: 'category', boundaryGap: false, data: points, axisLabel: {color: '#9aa4b2', hideOverlap: true}},
-                        yAxis: {type: 'value', name: '周均=100', nameTextStyle: {color: '#9aa4b2'}, axisLabel: {color: '#9aa4b2'}},
+                        yAxis: {type: 'value', name: this.analyticsReportMode === 'monthly' ? '月均=100' : '周均=100', nameTextStyle: {color: '#9aa4b2'}, axisLabel: {color: '#9aa4b2'}},
                         series: trend.series.map((item, index) => ({
                             name: `${item.title} · ${item.metric_label}`,
                             type: 'line',

@@ -11,12 +11,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from creative.repository import CreativeRepository
 from identity.dependencies import current_principal
 from identity.schema import Principal
+from runtime.job_manager import JobNotFoundError
 from screenplay_review.api import build_script_review_router
 
 
@@ -304,3 +306,67 @@ def test_cancelled_job_updates_its_review_history_status(tmp_path) -> None:
     assert current.status_code == 200
     assert current.json()["status"] == "cancelled"
     assert "已取消" in current.json()["error"]
+
+
+@pytest.mark.parametrize("review_status", ["queued", "running"])
+def test_missing_job_cancels_active_review_history(tmp_path, review_status: str) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    review = repository.create_script_review(
+        source_type="text",
+        mode="single",
+        project_id=None,
+        episode_numbers=[1],
+        source_fingerprint="review-fingerprint",
+        source_payload={"episode_numbers": [1]},
+        created_by="writer-1",
+    )
+    repository.set_script_review_job(review["id"], "missing-review-job")
+    if review_status == "running":
+        repository.start_script_review(review["id"])
+
+    class MissingJobManager(FakeJobManager):
+        def get_job(self, job_id: str) -> dict:
+            assert job_id == "missing-review-job"
+            raise JobNotFoundError(job_id)
+
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = _principal
+    app.include_router(build_script_review_router(repository, MissingJobManager()))
+    client = TestClient(app)
+
+    current = client.get(f"/api/script-reviews/{review['id']}")
+
+    assert current.status_code == 200
+    assert current.json()["status"] == "cancelled"
+    assert current.json()["error"] == "审核任务已不存在"
+    assert repository.get_script_review(review["id"])["status"] == "cancelled"
+
+
+def test_delete_refreshes_missing_job_before_checking_active_status(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    review = repository.create_script_review(
+        source_type="text",
+        mode="single",
+        project_id=None,
+        episode_numbers=[1],
+        source_fingerprint="review-fingerprint",
+        source_payload={"episode_numbers": [1]},
+        created_by="writer-1",
+    )
+    repository.set_script_review_job(review["id"], "missing-review-job")
+
+    class MissingJobManager(FakeJobManager):
+        def get_job(self, job_id: str) -> dict:
+            assert job_id == "missing-review-job"
+            raise JobNotFoundError(job_id)
+
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = _principal
+    app.include_router(build_script_review_router(repository, MissingJobManager()))
+    client = TestClient(app)
+
+    deleted = client.delete(f"/api/script-reviews/{review['id']}")
+
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True, "id": review["id"]}
+    assert repository.get_script_review(review["id"]) is None

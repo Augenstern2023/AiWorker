@@ -100,14 +100,14 @@ window.aiworkerModules.push(() => ({
                     this.topicLibrary.loading = true;
                     this.topicLibrary.error = '';
                     try {
-                        const cacheKey = `creative:topics:library:${this.topicLibrary.platform}:${this.topicLibrary.lifecycleStatus}:${this.topicLibrary.category}:${this.topicLibrary.minScore}:${this.topicLibrary.hasLocked}`;
+                        const cacheKey = `creative:topics:library:adopted-archived:${this.topicLibrary.platform}:${this.topicLibrary.lifecycleStatus}:${this.topicLibrary.category}:${this.topicLibrary.minScore}:${this.topicLibrary.hasLocked}`;
                         const cached = window.aiworkerUi?.readCache(cacheKey);
                         if (cached && !cached.stale) {
                             this.topicLibrary.items = cached.value;
                             this.topicLibrary.loading = false;
                             return;
                         }
-                        const params = new URLSearchParams({status: 'adopted', all: 'true'});
+                        const params = new URLSearchParams({status: 'adopted,archived', all: 'true'});
                         if (this.topicLibrary.platform) params.set('platform', this.topicLibrary.platform);
                         if (this.topicLibrary.lifecycleStatus) params.set('lifecycle_status', this.topicLibrary.lifecycleStatus);
                         if (this.topicLibrary.category.trim()) params.set('category', this.topicLibrary.category.trim());

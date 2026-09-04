@@ -201,10 +201,21 @@
                 dramaReviewJobs: {},
                 analyticsPlatform: '',
                 analyticsError: '',
+                analyticsReportMode: (() => {
+                    try {
+                        return window.sessionStorage.getItem('aiworker-analytics-report-mode') === 'monthly' ? 'monthly' : 'weekly';
+                    } catch (_) {
+                        return 'weekly';
+                    }
+                })(),
                 weeklyReports: [],
                 weeklyReport: null,
                 weeklyReportLoading: false,
                 weeklyReportError: '',
+                monthlyReports: [],
+                monthlyReport: null,
+                monthlyReportLoading: false,
+                monthlyReportError: '',
                 todayRankPlatform: 'dy',
                 todayRankDate: '',
                 todayRankSectionKey: '榜单',

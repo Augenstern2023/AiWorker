@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -186,6 +186,53 @@ def test_reports_insufficient_data_when_no_complete_week_exists(tmp_path):
     report = WeeklyReportService(root=tmp_path, rank_service=_file_rank_service(tmp_path)).build_latest("dy", as_of=datetime(2026, 8, 10, 23, 59))
 
     assert report == {"platform": "dy", "status": "insufficient_data"}
+
+
+def test_weekly_report_accepts_timezone_aware_database_snapshots(tmp_path):
+    snapshots = [
+        RankSnapshot(
+            platform="dy",
+            job_id=f"aware-{offset}",
+            source_path=Path(f"central/{day}.json"),
+            captured_at=datetime.fromisoformat(f"{day}T10:00:00+08:00"),
+            records=[_record(6 - offset, "时区剧目", "aware-series", offset * 100)],
+            validation={"status": "passed"},
+        )
+        for offset, day in enumerate(
+            ("2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07"),
+            start=1,
+        )
+    ]
+
+    class AwareSource:
+        def list_snapshots(self, platform: str):
+            return snapshots
+
+        def revision(self, platform: str):
+            return "aware-revision"
+
+    service = WeeklyReportService(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        rank_service=TodayRankService(root=tmp_path, snapshot_source=AwareSource()),
+    )
+
+    reports = service.list_reports(platform="dy", as_of=datetime(2026, 8, 10, 23, 59))
+
+    assert reports[0]["report_id"] == "dy-2026-08-03"
+
+
+def test_weekly_report_accepts_timezone_aware_as_of_with_naive_snapshots(tmp_path):
+    for day in ("2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07"):
+        _write_snapshot(tmp_path, day, [_record(1, "时区剧目", "naive-series", 100)])
+    service = WeeklyReportService(root=tmp_path, rank_service=_file_rank_service(tmp_path))
+
+    report = service.build_latest(
+        "dy",
+        as_of=datetime(2026, 8, 10, 23, 59, tzinfo=timezone.utc),
+    )
+
+    assert report["status"] == "ready"
 
 
 def test_exports_include_the_rule_based_comprehensive_trend_observation(tmp_path):

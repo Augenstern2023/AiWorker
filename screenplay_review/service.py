@@ -339,17 +339,23 @@ def _assert_upstream_refs(item: dict[str, Any], project: dict[str, Any], label: 
 
 def _assert_outline_ref(item: dict[str, Any], outline: dict[str, Any], label: str) -> None:
     refs = item.get("upstream_refs") or {}
-    expected = (
+    expected_identity = (
         int(outline.get("id") or 0),
         int(outline.get("version") or 0),
-        _content_fingerprint(outline.get("content") or {}),
     )
-    actual = (
+    actual_identity = (
         int(refs.get("outline_id") or 0),
         int(refs.get("outline_version") or 0),
-        str(refs.get("outline_content_fingerprint") or ""),
     )
-    if actual != expected:
+    content = outline.get("content") or {}
+    authority_content = dict(content)
+    authority_content.pop("series_overview", None)
+    saved_fingerprint = str(refs.get("outline_content_fingerprint") or "")
+    valid_fingerprints = {
+        _content_fingerprint(authority_content),
+        _content_fingerprint(content),
+    }
+    if actual_identity != expected_identity or saved_fingerprint not in valid_fingerprints:
         raise ValueError(f"{label}引用的分集大纲版本已过期，请重新生成")
 
 

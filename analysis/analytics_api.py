@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from analysis.drama_repository import DramaRepository
 from analysis.metrics import MetricsService
+from analysis.monthly_report_service import MonthlyReportService
 from analysis.today_rank_service import TodayRankService
 from analysis.weekly_report_service import WeeklyReportService
 from identity.dependencies import require_permission
@@ -38,6 +39,13 @@ def build_analytics_router(
     router = APIRouter(prefix="/api/analytics", tags=["analytics"])
     services: dict[str, Any] = {}
 
+    def get_rank_service() -> TodayRankService:
+        if "rank_service" not in services:
+            services["rank_service"] = rank_service or TodayRankService.from_environment(
+                root=root
+            )
+        return services["rank_service"]
+
     def get_services() -> tuple[DramaRepository, MetricsService]:
         if not services:
             repository = DramaRepository(db_path=Path(runtime_dir) / "rag" / "analytics.db", root=root)
@@ -47,15 +55,22 @@ def build_analytics_router(
 
     def get_weekly_reports() -> WeeklyReportService:
         if "weekly_reports" not in services:
-            central_rank_service = rank_service or TodayRankService.from_environment(
-                root=root
-            )
             services["weekly_reports"] = WeeklyReportService(
                 root=root,
                 runtime_dir=runtime_dir,
-                rank_service=central_rank_service,
+                rank_service=get_rank_service(),
             )
         return services["weekly_reports"]
+
+    def get_monthly_reports() -> MonthlyReportService:
+        if "monthly_reports" not in services:
+            services["monthly_reports"] = MonthlyReportService(
+                root=root,
+                runtime_dir=runtime_dir,
+                rank_service=get_rank_service(),
+                weekly_service=get_weekly_reports(),
+            )
+        return services["monthly_reports"]
 
     @router.post("/sync")
     async def sync(
@@ -161,6 +176,52 @@ def build_analytics_router(
         if not path.is_file():
             raise HTTPException(status_code=404, detail="weekly report export not found")
         media_type = "text/markdown; charset=utf-8" if format == "markdown" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        return FileResponse(path, media_type=media_type, filename=path.name)
+
+    @router.get("/monthly-reports")
+    async def monthly_reports(
+        platform: str = "",
+        _: Principal = Depends(require_permission("analytics.read")),
+    ):
+        if platform and platform not in {"dy", "hg"}:
+            raise HTTPException(status_code=400, detail="platform must be dy or hg")
+        return {"items": get_monthly_reports().list_reports(platform=platform)}
+
+    @router.get("/monthly-reports/{report_id}")
+    async def monthly_report_detail(
+        report_id: str,
+        _: Principal = Depends(require_permission("analytics.read")),
+    ):
+        report = get_monthly_reports().get_report(report_id)
+        if report is None:
+            raise HTTPException(status_code=404, detail="monthly report not found")
+        return report
+
+    @router.get("/monthly-reports/{report_id}/export")
+    async def monthly_report_export(
+        report_id: str,
+        format: str = "markdown",
+        _: Principal = Depends(require_permission("analytics.read")),
+    ):
+        if format not in {"markdown", "excel"}:
+            raise HTTPException(status_code=400, detail="format must be markdown or excel")
+        report = get_monthly_reports().repository.get(report_id)
+        if report is None:
+            raise HTTPException(status_code=404, detail="monthly report not found")
+        path = Path(
+            str(
+                report["markdown_path"]
+                if format == "markdown"
+                else report["excel_path"]
+            )
+        ).resolve()
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="monthly report export not found")
+        media_type = (
+            "text/markdown; charset=utf-8"
+            if format == "markdown"
+            else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
         return FileResponse(path, media_type=media_type, filename=path.name)
 
     return router

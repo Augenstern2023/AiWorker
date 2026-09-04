@@ -125,6 +125,39 @@ def topic_payload(client: TestClient) -> dict:
     return response.json()["items"][0]
 
 
+def test_archived_topic_can_be_kept_restored_and_deleted_only_when_archived(tmp_path: Path):
+    client, repository, _ = build_client(tmp_path)
+    topic = seed_topic(repository, "归档选题")
+    topic_id = topic["id"]
+
+    assert client.patch(
+        f"/api/creative/topics/{topic_id}", json={"status": "adopted"}
+    ).status_code == 200
+    assert client.delete(f"/api/creative/topics/{topic_id}").status_code == 409
+
+    archived = client.patch(
+        f"/api/creative/topics/{topic_id}", json={"status": "archived"}
+    )
+    library = client.get(
+        "/api/creative/topics", params={"status": "adopted,archived", "limit": 500}
+    )
+    assert archived.status_code == 200
+    assert [item["id"] for item in library.json()["items"]] == [topic_id]
+
+    restored = client.patch(
+        f"/api/creative/topics/{topic_id}", json={"status": "adopted"}
+    )
+    assert restored.status_code == 200
+    assert restored.json()["status"] == "adopted"
+
+    client.patch(f"/api/creative/topics/{topic_id}", json={"status": "archived"})
+    deleted = client.delete(f"/api/creative/topics/{topic_id}")
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True, "id": topic_id}
+    assert client.get(f"/api/creative/topics/{topic_id}").status_code == 404
+    assert client.get("/api/creative/topics?limit=500").json()["items"] == []
+
+
 def test_topic_lifecycle_follows_the_complete_creation_flow(tmp_path: Path):
     client, repository, manager = build_client(tmp_path)
     topic = seed_topic(repository)

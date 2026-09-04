@@ -1519,6 +1519,7 @@ def create_asr_provider():
         return SenseVoiceASRProvider(
             python_path=getattr(config, "SENSEVOICE_PYTHON", ""),
             model_dir=getattr(config, "SENSEVOICE_MODEL_DIR", ""),
+            vad_model_dir=getattr(config, "SENSEVOICE_VAD_MODEL_DIR", "fsmn-vad"),
             ffmpeg_dir=getattr(config, "SENSEVOICE_FFMPEG_DIR", ""),
             device=getattr(config, "SENSEVOICE_DEVICE", "cuda:0"),
             script_path=getattr(config, "SENSEVOICE_SCRIPT_PATH", default_sensevoice_script_path()),

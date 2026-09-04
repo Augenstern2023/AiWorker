@@ -1990,6 +1990,34 @@ def build_creative_router(
             )
         return lifecycle_service.enrich_topic(topic_id)
 
+    @router.delete("/topics/{topic_id}")
+    async def delete_topic(
+        topic_id: int,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        try:
+            topic = repository.delete_topic(topic_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if topic is None:
+            raise HTTPException(404, "topic not found")
+        audit_service = getattr(request.app.state, "audit_service", None)
+        if isinstance(audit_service, AuditService):
+            audit_service.record(
+                actor=principal,
+                action="selection.topic_delete",
+                target_type="topic",
+                target_id=str(topic_id),
+                project_id=None,
+                before=topic,
+                after=None,
+                reason=None,
+                result="success",
+                request=request,
+            )
+        return {"deleted": True, "id": topic_id}
+
 
     @router.post("/breakdowns")
     async def create_breakdown(

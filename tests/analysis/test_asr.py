@@ -70,6 +70,7 @@ def test_build_sensevoice_command_includes_runtime_and_model_paths():
         script_path="tools/sensevoice_transcribe.py",
         audio_path="audio.wav",
         model_dir="D:/models/SenseVoiceSmall",
+        vad_model_dir="D:/models/fsmn-vad",
         device="cuda:0",
         ffmpeg_dir="D:/qwen/python/ffmpeg/bin",
     )
@@ -83,6 +84,8 @@ def test_build_sensevoice_command_includes_runtime_and_model_paths():
     assert "audio.wav" in command
     assert "--model-dir" in command
     assert "D:/models/SenseVoiceSmall" in command
+    assert "--vad-model-dir" in command
+    assert "D:/models/fsmn-vad" in command
     assert "--ffmpeg-dir" in command
 
 

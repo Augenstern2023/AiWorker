@@ -55,6 +55,138 @@ def test_secret_cipher_reuses_generated_key_across_process_instances(
     assert second.decrypt(ciphertext) == "shared-secret"
 
 
+def test_secret_cipher_uses_git_common_key_across_linked_worktrees(
+    tmp_path, monkeypatch
+):
+    """Would catch each linked worktree generating an incompatible Fernet key."""
+
+    monkeypatch.delenv("AIWORKER_LLM_CONFIG_KEY", raising=False)
+    module = _settings_module()
+    repository_root = tmp_path / "repository"
+    common_git_dir = repository_root / ".git"
+    linked_root = repository_root / ".worktrees" / "feature"
+    linked_git_dir = common_git_dir / "worktrees" / "feature"
+    common_git_dir.mkdir(parents=True)
+    linked_root.mkdir(parents=True)
+    linked_git_dir.mkdir(parents=True)
+    (linked_root / ".git").write_text(
+        f"gitdir: {linked_git_dir}\n", encoding="utf-8"
+    )
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+
+    main_cipher = module.LLMSecretCipher.from_environment(
+        repository_root / ".runtime"
+    )
+    ciphertext = main_cipher.encrypt("shared-secret")
+    linked_cipher = module.LLMSecretCipher.from_environment(
+        linked_root / ".runtime"
+    )
+
+    assert linked_cipher.decrypt(ciphertext) == "shared-secret"
+    assert (common_git_dir / "aiworker" / "llm_config.key").is_file()
+
+
+def test_linked_worktree_first_migrates_the_main_worktree_runtime_key(
+    tmp_path, monkeypatch
+):
+    """Would catch linked-first startup replacing the key used by saved credentials."""
+
+    monkeypatch.delenv("AIWORKER_LLM_CONFIG_KEY", raising=False)
+    module = _settings_module()
+    repository_root = tmp_path / "repository"
+    common_git_dir = repository_root / ".git"
+    main_runtime_dir = repository_root / ".runtime"
+    linked_root = repository_root / ".worktrees" / "feature"
+    linked_git_dir = common_git_dir / "worktrees" / "feature"
+    main_runtime_dir.mkdir(parents=True)
+    linked_root.mkdir(parents=True)
+    linked_git_dir.mkdir(parents=True)
+    (linked_root / ".git").write_text(
+        f"gitdir: {linked_git_dir}\n", encoding="utf-8"
+    )
+    (linked_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    existing_key = Fernet.generate_key()
+    (main_runtime_dir / "llm_config.key").write_bytes(existing_key + b"\n")
+    ciphertext = module.LLMSecretCipher(existing_key).encrypt("saved-secret")
+
+    linked_cipher = module.LLMSecretCipher.from_environment(
+        linked_root / ".runtime"
+    )
+
+    assert linked_cipher.decrypt(ciphertext) == "saved-secret"
+    assert (
+        common_git_dir / "aiworker" / "llm_config.key"
+    ).read_bytes().strip() == existing_key
+
+
+def test_secret_cipher_migrates_existing_runtime_key_to_git_common_dir(
+    tmp_path, monkeypatch
+):
+    """Would catch an upgrade replacing the key that protects saved credentials."""
+
+    monkeypatch.delenv("AIWORKER_LLM_CONFIG_KEY", raising=False)
+    module = _settings_module()
+    repository_root = tmp_path / "repository"
+    common_git_dir = repository_root / ".git"
+    runtime_dir = repository_root / ".runtime"
+    common_git_dir.mkdir(parents=True)
+    runtime_dir.mkdir(parents=True)
+    existing_key = Fernet.generate_key()
+    (runtime_dir / "llm_config.key").write_bytes(existing_key + b"\n")
+    ciphertext = module.LLMSecretCipher(existing_key).encrypt("saved-secret")
+
+    migrated = module.LLMSecretCipher.from_environment(runtime_dir)
+
+    assert migrated.decrypt(ciphertext) == "saved-secret"
+    assert (
+        common_git_dir / "aiworker" / "llm_config.key"
+    ).read_bytes().strip() == existing_key
+
+
+def test_secret_cipher_does_not_publish_an_invalid_legacy_key(
+    tmp_path, monkeypatch
+):
+    """Would catch a corrupt runtime key poisoning the shared key location."""
+
+    monkeypatch.delenv("AIWORKER_LLM_CONFIG_KEY", raising=False)
+    module = _settings_module()
+    repository_root = tmp_path / "repository"
+    common_git_dir = repository_root / ".git"
+    runtime_dir = repository_root / ".runtime"
+    common_git_dir.mkdir(parents=True)
+    runtime_dir.mkdir(parents=True)
+    (runtime_dir / "llm_config.key").write_text("invalid", encoding="ascii")
+    shared_key_path = common_git_dir / "aiworker" / "llm_config.key"
+
+    with pytest.raises(module.LLMSecretError):
+        module.LLMSecretCipher.from_environment(runtime_dir)
+
+    assert not shared_key_path.exists()
+
+
+def test_secret_cipher_publication_failure_leaves_no_partial_shared_key(
+    tmp_path, monkeypatch
+):
+    """Would catch a failed atomic publish leaving an unreadable final key file."""
+
+    monkeypatch.delenv("AIWORKER_LLM_CONFIG_KEY", raising=False)
+    module = _settings_module()
+    repository_root = tmp_path / "repository"
+    common_git_dir = repository_root / ".git"
+    common_git_dir.mkdir(parents=True)
+    shared_key_dir = common_git_dir / "aiworker"
+
+    def fail_publish(_source, _destination):
+        raise OSError("simulated publication failure")
+
+    monkeypatch.setattr(module.os, "link", fail_publish)
+
+    with pytest.raises(OSError, match="simulated publication failure"):
+        module.LLMSecretCipher.from_environment(repository_root / ".runtime")
+
+    assert list(shared_key_dir.iterdir()) == []
+
+
 def test_secret_cipher_waits_for_a_concurrent_key_writer(tmp_path, monkeypatch):
     """Would catch a second startup reading the key file before its writer flushes."""
 

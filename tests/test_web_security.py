@@ -9,15 +9,11 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
-from alembic import command
-from alembic.config import Config
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
-from sqlalchemy.engine import make_url
 
 from identity.api import build_identity_router
 from identity.repository import IdentityRepository
@@ -32,8 +28,6 @@ from WebGUI import (
     _api_permission,
 )
 from audit.service import AuditService
-from system_database import SystemDatabase, SystemDatabaseSettings
-from system_database.schema import SYSTEM_METADATA
 
 
 def _secured_app(repository: IdentityRepository) -> tuple[FastAPI, SessionService]:
@@ -62,25 +56,9 @@ def _secured_app(repository: IdentityRepository) -> tuple[FastAPI, SessionServic
 
 @pytest.fixture
 def secured_app(
-    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+    isolated_system_database,
 ) -> tuple[FastAPI, SessionService]:
-    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
-    if not postgres_url:
-        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required")
-    if make_url(postgres_url).database == "aiworker_system":
-        raise ValueError("tests must not run against the production system database")
-    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
-    command.upgrade(Config("alembic.ini"), "head")
-    database = SystemDatabase(SystemDatabaseSettings(postgres_url))
-    table_names = ", ".join(
-        f'"{name}"' for name in sorted(SYSTEM_METADATA.tables)
-    )
-    with database.transaction() as connection:
-        connection.exec_driver_sql(
-            f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE"
-        )
-    request.addfinalizer(database.dispose)
-    return _secured_app(IdentityRepository(database))
+    return _secured_app(IdentityRepository(isolated_system_database))
 
 
 def test_request_id_is_available_before_logging_and_returned(secured_app):

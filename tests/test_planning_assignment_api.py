@@ -392,11 +392,6 @@ def test_page_grant_replaces_project_create_permission_for_bound_endpoints(
     creative.update_topic(topic["id"], "adopted")
     breakdown = creative.create_breakdown(topic["id"], {"title": topic["title"]}, {}, [])
     creative.lock_breakdown(breakdown["id"])
-    with creative._connect() as connection:
-        connection.execute(
-            "UPDATE creative_breakdowns SET status = 'approved' WHERE id = ?",
-            (breakdown["id"],),
-        )
     app = FastAPI()
     app.state.identity_permission_service = permissions
     app.state.page_access_service = _AllowPageApi()
@@ -795,11 +790,6 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
     creative.update_topic(topic["id"], "adopted")
     breakdown = creative.create_breakdown(topic["id"], {"title": topic["title"]}, {}, [])
     creative.lock_breakdown(breakdown["id"])
-    with creative._connect() as connection:
-        connection.execute(
-            "UPDATE creative_breakdowns SET status = 'approved' WHERE id = ?",
-            (breakdown["id"],),
-        )
 
     foreign_task = workflow.create_task(
         f"foreign-brief-{uuid.uuid4().hex}",

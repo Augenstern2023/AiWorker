@@ -9,8 +9,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -24,8 +22,8 @@ from identity.session_service import SessionService
 
 
 @pytest.fixture
-def repository(tmp_path: Path) -> IdentityRepository:
-    repository = IdentityRepository(tmp_path / "system.db")
+def repository(isolated_system_database) -> IdentityRepository:
+    repository = IdentityRepository(isolated_system_database)
     repository.seed_defaults()
     return repository
 
@@ -355,10 +353,10 @@ def test_rejected_admin_patch_leaves_profile_roles_and_sessions_unchanged(
     with repository.connect() as connection:
         session_ids_before = [
             row["id"]
-            for row in connection.execute(
-                "SELECT id FROM sessions WHERE user_id = ? ORDER BY id",
+            for row in connection.exec_driver_sql(
+                "SELECT id FROM sessions WHERE user_id = %s ORDER BY id",
                 (admin["id"],),
-            )
+            ).mappings()
         ]
 
     response = client.patch(
@@ -376,10 +374,10 @@ def test_rejected_admin_patch_leaves_profile_roles_and_sessions_unchanged(
     with repository.connect() as connection:
         sessions_after = [
             dict(row)
-            for row in connection.execute(
-                "SELECT id, revoked_at FROM sessions WHERE user_id = ? ORDER BY id",
+            for row in connection.exec_driver_sql(
+                "SELECT id, revoked_at FROM sessions WHERE user_id = %s ORDER BY id",
                 (admin["id"],),
-            )
+            ).mappings()
         ]
     assert [session["id"] for session in sessions_after] == session_ids_before
     assert all(session["revoked_at"] is None for session in sessions_after)

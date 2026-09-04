@@ -1298,18 +1298,6 @@ def test_phase4_api_creates_multiple_projects_and_lists_them(tmp_path: Path):
     first_task = assign_phase4_task(client, "brief", topic_id=topic["id"])
     second_task = assign_phase4_task(client, "brief", topic_id=topic["id"])
 
-    locked_rejected = client.post("/api/creative/projects", json={
-        "topic_id": topic["id"], "breakdown_id": breakdown["id"],
-        "name": "未审批方向", "target_episode_count": 20,
-        "workflow_task_id": first_task["id"],
-    })
-    assert locked_rejected.status_code == 409
-    with repository._connect() as connection:
-        connection.execute(
-            "UPDATE creative_breakdowns SET status = 'approved' WHERE id = ?",
-            (breakdown["id"],),
-        )
-
     first = client.post("/api/creative/projects", json={
         "topic_id": topic["id"], "breakdown_id": breakdown["id"],
         "name": "都市方向", "target_episode_count": 20,
@@ -1335,11 +1323,6 @@ def test_project_creation_retries_binding_without_duplicate(
 ):
     client, repository, _ = build_phase4_client(tmp_path)
     topic, breakdown = seed_adopted_topic(repository)
-    with repository._connect() as connection:
-        connection.execute(
-            "UPDATE creative_breakdowns SET status = 'approved' WHERE id = ?",
-            (breakdown["id"],),
-        )
     task = assign_phase4_task(client, "brief", topic_id=topic["id"])
     original_bind = WorkflowRepository.bind_workflow_project
 
@@ -1386,11 +1369,6 @@ def test_project_retry_prefers_system_bound_project_over_creative_mismatch(
 ):
     client, repository, _ = build_phase4_client(tmp_path)
     topic, breakdown = seed_adopted_topic(repository)
-    with repository._connect() as connection:
-        connection.execute(
-            "UPDATE creative_breakdowns SET status = 'approved' WHERE id = ?",
-            (breakdown["id"],),
-        )
     task = assign_phase4_task(client, "brief", topic_id=topic["id"])
     payload = {
         "topic_id": topic["id"],

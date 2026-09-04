@@ -36,7 +36,6 @@ def build_audit_router(audit_service: AuditService) -> APIRouter:
     def project_scope_for(principal: Principal) -> set[str] | None:
         if (
             principal.is_system_admin
-            or "project_owner" in principal.role_codes
             or "audit.read" in principal.permissions
         ):
             return None

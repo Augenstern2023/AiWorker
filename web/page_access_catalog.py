@@ -374,6 +374,10 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
         ("GET", "/api/logs"),
     ),
     "/admin/deliveries": (
+        ("GET", "/api/admin/deliveries"),
+        ("POST", "/api/admin/deliveries"),
+        ("GET", "/api/admin/deliveries/options"),
+        ("GET", "/api/admin/deliveries/{delivery_id}/download"),
         ("GET", "/api/creative/generated-resources"),
         ("GET", "/api/creative/projects/{project_id}/generated-content/download"),
     ),

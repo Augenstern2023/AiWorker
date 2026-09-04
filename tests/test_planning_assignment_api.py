@@ -370,7 +370,7 @@ def test_screenwriter_creates_project_with_team_and_pool_tasks_idempotently(
         database.dispose()
 
 
-def test_project_creation_endpoints_reject_user_without_project_create(
+def test_page_grant_replaces_project_create_permission_for_bound_endpoints(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> None:
     runtime = tmp_path / ".runtime"
@@ -399,6 +399,7 @@ def test_project_creation_endpoints_reject_user_without_project_create(
     app.dependency_overrides[current_principal] = lambda: principal
     app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
     client = TestClient(app)
+    created_project_ids: list[str] = []
     try:
         candidates = client.get(
             "/api/creative/projects/member-candidates",
@@ -425,12 +426,17 @@ def test_project_creation_endpoints_reject_user_without_project_create(
             },
         )
         assert candidates.status_code == 403
-        assert created.status_code == 403
-        assert direct_created.status_code == 403
+        assert created.status_code == 200, created.text
+        created_project_ids.append(str(created.json()["project"]["id"]))
+        assert direct_created.status_code == 200, direct_created.text
+        created_project_ids.append(str(direct_created.json()["id"]))
         html = _render_topic_table(principal)
-        assert '@click="openCreateProject(topic)"' not in html
+        assert '@click="openCreateProject(topic)"' in html
         assert '@click="openTopicProject(topic)"' in html
     finally:
+        workflow = WorkflowRepository(identity)
+        for project_id in dict.fromkeys(created_project_ids):
+            workflow.delete_project_data(project_id)
         identity.soft_delete_user(user["id"])
         database.dispose()
 
@@ -784,11 +790,6 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
     creative.update_topic(topic["id"], "adopted")
     breakdown = creative.create_breakdown(topic["id"], {"title": topic["title"]}, {}, [])
     creative.lock_breakdown(breakdown["id"])
-    with creative._connect() as connection:
-        connection.execute(
-            "UPDATE creative_breakdowns SET status = 'approved' WHERE id = ?",
-            (breakdown["id"],),
-        )
 
     foreign_task = workflow.create_task(
         f"foreign-brief-{uuid.uuid4().hex}",

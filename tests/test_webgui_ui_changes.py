@@ -845,7 +845,8 @@ def test_today_hits_switches_generation_and_display_by_rank_source():
     assert "['全部', '真人剧', '漫剧', 'AI剧']" in tasks
     assert "changeCreativeRankSource" in topics
     assert "rank_source=${encodeURIComponent(this.creative.rankSource)}" in topics
-    assert "rank_source: this.creative.rankSource" in breakdowns
+    assert "const rankSource = this.creative.rankSource" in breakdowns
+    assert "rank_source: rankSource" in breakdowns
     assert "creative:topics:hits:${this.creative.platform}:${this.creative.rankSource}" in topics
     assert "window.aiworkerUi?.writeCache(cacheKey, items" in topics
     assert 'aria-label="榜单来源"' in section
@@ -1439,7 +1440,7 @@ def test_downloaded_topic_action_opens_episode_transcript_preview():
 def test_next_stage_generation_is_not_blocked_by_a_stale_previous_action():
     html = _workspace_source()
 
-    assert "creativeActionDisabled(action)" in html
+    assert "creativeActionDisabled(action, options = {})" in html
     assert "this.creativeWorkspace.activeAction === action && this.creativeJobRunning()" in html
     assert ':disabled="creativeActionDisabled(\'outlines\')"' in html
     assert ':disabled="creativeActionDisabled(\'characters\')"' in html
@@ -1960,7 +1961,8 @@ def test_hongguo_settings_ui_preserves_third_party_and_capture_fields():
     assert "data-bs-toggle=\"tooltip\"" in html
     assert "置信度" not in html
     assert "可仿制/成本" not in html
-    assert "红果检索已降级至抖音" in drama_page
+    assert 'x-show="isDouyinDramaSearch()"' in drama_page
+    assert 'x-text="dramaAnalysis.fallbackReason"' in drama_page
     assert "批量下载抖音视频并解析" in html
     assert "selectedAwemeIds" in html
     assert "toggleAllDouyinDownloadCandidates" in html

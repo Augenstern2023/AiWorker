@@ -275,9 +275,13 @@ class AuditRepository:
                 )
             )
         if created_from is not None:
-            conditions.append(audit_logs.c.created_at >= created_from)
+            conditions.append(
+                audit_logs.c.created_at >= _datetime_filter_value(created_from)
+            )
         if created_to is not None:
-            conditions.append(audit_logs.c.created_at < created_to)
+            conditions.append(
+                audit_logs.c.created_at < _datetime_filter_value(created_to)
+            )
         return and_(*conditions) if conditions else True
 
     @staticmethod
@@ -316,3 +320,7 @@ def _json_value(value: Any, default: Any) -> Any:
     if isinstance(value, (dict, list)):
         return value
     return json.loads(value)
+
+
+def _datetime_filter_value(value: datetime | str) -> datetime:
+    return datetime.fromisoformat(value) if isinstance(value, str) else value

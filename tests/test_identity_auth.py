@@ -12,8 +12,6 @@ from __future__ import annotations
 import hashlib
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
@@ -25,8 +23,8 @@ from identity.session_service import SessionService
 
 
 @pytest.fixture
-def repository(tmp_path: Path) -> IdentityRepository:
-    repository = IdentityRepository(tmp_path / "system.db")
+def repository(isolated_system_database) -> IdentityRepository:
+    repository = IdentityRepository(isolated_system_database)
     repository.seed_defaults()
     return repository
 
@@ -51,16 +49,16 @@ def create_user(
     assert role is not None
     user_id = f"user:{username}"
     with repository.connect() as connection:
-        connection.execute(
+        connection.exec_driver_sql(
             """
             INSERT INTO users
                 (id, username, normalized_username, display_name, password_hash)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
             """,
             (user_id, username, username.casefold(), username.title(), password_hash),
         )
-        connection.execute(
-            "INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)",
+        connection.exec_driver_sql(
+            "INSERT INTO user_roles (user_id, role_id) VALUES (%s, %s)",
             (user_id, role["id"]),
         )
     return {"id": user_id, "username": username}
@@ -128,7 +126,9 @@ def test_session_stores_only_hashes_and_request_metadata(
     ).json()
 
     with repository.connect() as connection:
-        session = dict(connection.execute("SELECT * FROM sessions").fetchone())
+        session = dict(
+            connection.exec_driver_sql("SELECT * FROM sessions").mappings().fetchone()
+        )
     assert session["token_hash"] == hashlib.sha256(raw_token.encode()).hexdigest()
     assert session["csrf_token_hash"] == hashlib.sha256(csrf_token.encode()).hexdigest()
     assert raw_token not in session.values()
@@ -171,7 +171,7 @@ def test_first_setup_creates_system_admin_and_disables_setup(client: TestClient)
 
     assert response.status_code == 201
     assert response.json()["user"]["role_codes"] == ["system_admin"]
-    assert response.json()["landing_route"] == "/tasks"
+    assert response.json()["landing_route"] == "/profile"
     assert response.json()["csrf_token"]
     assert "aiworker_session=" in response.headers["set-cookie"]
     assert "HttpOnly" in response.headers["set-cookie"]
@@ -191,7 +191,7 @@ def test_setup_restores_disabled_system_admin_role(
     repository: IdentityRepository,
 ):
     with repository.connect() as connection:
-        connection.execute(
+        connection.exec_driver_sql(
             "UPDATE roles SET is_enabled = 0 WHERE code = 'system_admin'"
         )
     app = FastAPI()
@@ -236,10 +236,10 @@ def test_setup_does_not_reenable_role_with_existing_bound_admin(
     )
     assert first_setup.status_code == 201
     with repository.connect() as connection:
-        connection.execute(
+        connection.exec_driver_sql(
             "UPDATE roles SET is_enabled = 0 WHERE code = 'system_admin'"
         )
-        user_count_before = connection.execute(
+        user_count_before = connection.exec_driver_sql(
             "SELECT COUNT(*) FROM users"
         ).fetchone()[0]
 
@@ -255,7 +255,7 @@ def test_setup_does_not_reenable_role_with_existing_bound_admin(
     assert repeated_setup.status_code == 409
     assert repository.get_role_by_code("system_admin")["is_enabled"] is False
     with repository.connect() as connection:
-        user_count_after = connection.execute(
+        user_count_after = connection.exec_driver_sql(
             "SELECT COUNT(*) FROM users"
         ).fetchone()[0]
     assert user_count_after == user_count_before
@@ -325,7 +325,7 @@ def test_login_has_uniform_errors_and_returns_permission_landing_route(
     assert missing.status_code == invalid.status_code == 401
     assert missing.json() == invalid.json() == {"detail": "用户名或密码错误"}
     assert login.status_code == 200
-    assert login.json()["landing_route"] == "/writing/projects"
+    assert login.json()["landing_route"] == "/profile"
     assert login.json()["user"]["role_codes"] == ["screenwriter"]
     assert login.json()["csrf_token"]
 
@@ -372,10 +372,10 @@ def test_disabled_user_sessions_are_revoked(
     assert disabled_login.status_code == 401
     assert disabled_login.json() == {"detail": "用户名或密码错误"}
     with repository.connect() as connection:
-        revoked_at = connection.execute(
-            "SELECT revoked_at FROM sessions WHERE user_id = ?",
+        revoked_at = connection.exec_driver_sql(
+            "SELECT revoked_at FROM sessions WHERE user_id = %s",
             (login.json()["user"]["id"],),
-        ).fetchone()["revoked_at"]
+        ).mappings().fetchone()["revoked_at"]
     assert revoked_at is not None
 
 
@@ -386,7 +386,7 @@ def test_expired_session_is_rejected(client: TestClient, repository: IdentityRep
     )
     assert login.status_code == 200
     with repository.connect() as connection:
-        connection.execute(
+        connection.exec_driver_sql(
             "UPDATE sessions SET expires_at = '2000-01-01T00:00:00+00:00'"
         )
 

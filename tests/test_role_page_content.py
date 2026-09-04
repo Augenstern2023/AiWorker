@@ -270,15 +270,17 @@ def test_project_beats_long_text_controls_wrap_without_clipping():
     beats = _read("templates/common/workspace/project_beats.html")
     workspace_css = _read("static/css/workspaces.css")
     bootstrap_css = _read("static/css/bootstrap.min.css")
-    markup = (
-        beats.replace('<template x-if="selectedProjectBeats()"><div>', "<div>")
-        .replace(
-            '<template x-for="beat in selectedProjectBeats().content.beats" :key="beat.order"><tr>',
-            "<tr>",
-        )
-        .replace("</tr></template>", "</tr>")
-        .replace("</div></template>", "</div>")
+    markup = re.sub(
+        r'<template x-if="selectedProjectBeats\(\)">\s*<div>',
+        "<div>",
+        beats,
     )
+    markup = re.sub(
+        r'<template x-for="beat in selectedProjectBeats\(\)\.content\.beats" '
+        r':key="beat\.order">\s*<tr>',
+        "<tr>",
+        markup,
+    ).replace("</tr></template>", "</tr>").replace("</div></template>", "</div>")
     value = "主角在高压环境中做出艰难选择，关系与目标同时受到阻力。" * 3
 
     with sync_playwright() as playwright:
@@ -343,7 +345,7 @@ def test_admin_identity_pages_expose_complete_management_flows():
 
     assert 'id="user-editor-modal"' in users_html
     assert 'id="user-role-select"' in users_html
-    assert "/api/admin/users/${user.id}/reset-password" in users_js
+    assert "${usersApi}/${user.id}/reset-password" in users_js
     assert "method: 'PATCH'" in users_js
     assert "role_ids" in users_js
     assert "toggleUserStatus" in users_js
@@ -352,7 +354,7 @@ def test_admin_identity_pages_expose_complete_management_flows():
     assert 'id="permission-editor"' in roles_html
     assert 'id="role-pages-modal"' in roles_html
     assert "/api/admin/permissions" in roles_js
-    assert "/api/admin/roles/${role.id}/clone" in roles_js
+    assert "${rolesApi}/${role.id}/clone" in roles_js
     assert "${rolesApi}/${roleId}/pages" in roles_js
     assert "openRolePages" in roles_js
     assert "permissions" in roles_js
@@ -424,7 +426,7 @@ def test_admin_delivery_initializer_does_not_require_creative_workspace_module()
     assert "this.page === 'admin-deliveries'" not in tasks
 
 
-def test_base_layout_globally_surfaces_permission_denials_without_rejection():
+def test_base_layout_globally_surfaces_permission_denials_before_rejection():
     base = _read("templates/layouts/base.html")
     session = _read("static/js/common/session.js")
     api = _read("static/js/common/api.js")
@@ -437,7 +439,7 @@ def test_base_layout_globally_surfaces_permission_denials_without_rejection():
         "return response", 1
     )[0]
     assert "window.dispatchEvent" in forbidden_branch
-    assert "throw" not in forbidden_branch
+    assert "throw error" in forbidden_branch
 
 
 def test_selection_drama_page_only_references_loaded_methods():

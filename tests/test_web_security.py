@@ -30,8 +30,7 @@ from WebGUI import (
 from audit.service import AuditService
 
 
-def _secured_app(tmp_path: Path) -> tuple[FastAPI, SessionService]:
-    repository = IdentityRepository(tmp_path / "system.db")
+def _secured_app(repository: IdentityRepository) -> tuple[FastAPI, SessionService]:
     session_service = SessionService(repository, secure_cookie=False)
     app = FastAPI()
     seen_request_ids: list[str | None] = []
@@ -55,8 +54,15 @@ def _secured_app(tmp_path: Path) -> tuple[FastAPI, SessionService]:
     return app, session_service
 
 
-def test_request_id_is_available_before_logging_and_returned(tmp_path: Path):
-    app, _ = _secured_app(tmp_path)
+@pytest.fixture
+def secured_app(
+    isolated_system_database,
+) -> tuple[FastAPI, SessionService]:
+    return _secured_app(IdentityRepository(isolated_system_database))
+
+
+def test_request_id_is_available_before_logging_and_returned(secured_app):
+    app, _ = secured_app
 
     response = TestClient(app).post(
         "/api/public-write", headers={"X-Request-ID": "client-request-123"}
@@ -67,8 +73,8 @@ def test_request_id_is_available_before_logging_and_returned(tmp_path: Path):
     assert app.state.seen_request_ids == []
 
 
-def test_authenticated_write_requires_matching_csrf_token(tmp_path: Path):
-    app, _ = _secured_app(tmp_path)
+def test_authenticated_write_requires_matching_csrf_token(secured_app):
+    app, _ = secured_app
     client = TestClient(app)
     setup = client.post(
         "/api/auth/setup",
@@ -95,8 +101,8 @@ def test_authenticated_write_requires_matching_csrf_token(tmp_path: Path):
     assert accepted.status_code == 200
 
 
-def test_login_and_first_run_setup_are_csrf_exempt(tmp_path: Path):
-    app, _ = _secured_app(tmp_path)
+def test_login_and_first_run_setup_are_csrf_exempt(secured_app):
+    app, _ = secured_app
     client = TestClient(app)
 
     setup = client.post(
@@ -117,8 +123,8 @@ def test_login_and_first_run_setup_are_csrf_exempt(tmp_path: Path):
     assert login.status_code == 200
 
 
-def test_protected_api_rejects_anonymous_write_before_csrf(tmp_path: Path):
-    app, _ = _secured_app(tmp_path)
+def test_protected_api_rejects_anonymous_write_before_csrf(secured_app):
+    app, _ = secured_app
 
     response = TestClient(app).post("/api/public-write")
 

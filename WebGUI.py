@@ -76,6 +76,7 @@ from analysis.today_rank_api import register_today_rank_routes
 from analysis.today_rank_service import TodayRankService
 from creative.api import register_creative_routes
 from creative.application_service import CreativeApplicationService
+from creative.delivery import DeliveryService, build_delivery_router
 from creative.market_reference_service import MarketReferenceService
 from creative.original_project_service import OriginalProjectService
 from creative.project_creator_migration import migrate_project_creator_memberships
@@ -570,6 +571,12 @@ creative_application_service = CreativeApplicationService(
     workflow_adapter=creative_workflow_adapter,
     permission_service=identity_permission_service,
 )
+delivery_service = DeliveryService(
+    root=WORKSPACE_ROOT,
+    creative_repository=creative_repository,
+    workflow_repository=workflow_repository,
+    audit_service=audit_service,
+)
 writer_agent_store = WriterAgentStore(
     WORKSPACE_ROOT / ".runtime" / "writer_agent" / "writer_agent.db"
 )
@@ -640,6 +647,7 @@ app.state.workflow_repository = workflow_repository
 app.state.workflow_transition_service = workflow_transition_service
 app.state.creative_repository = creative_repository
 app.state.creative_application_service = creative_application_service
+app.state.delivery_service = delivery_service
 app.state.writer_action_runner = writer_action_runner
 app.state.writer_action_service = writer_action_service
 templates = Jinja2Templates(directory=str(WORKSPACE_ROOT / "templates"))
@@ -690,6 +698,7 @@ app.include_router(
     )
 )
 app.include_router(build_audit_router(audit_service))
+app.include_router(build_delivery_router(delivery_service))
 app.include_router(
     build_llm_settings_router(llm_settings_service, audit_service)
 )

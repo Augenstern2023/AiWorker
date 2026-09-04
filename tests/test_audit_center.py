@@ -11,18 +11,25 @@ from __future__ import annotations
 
 from datetime import datetime
 from io import BytesIO
-from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
+import pytest
 
 from audit.api import build_audit_router
 from audit.service import AuditService
 from identity.dependencies import current_principal
 from identity.repository import IdentityRepository
 from identity.schema import Principal
+
+
+@pytest.fixture
+def repository(isolated_system_database) -> IdentityRepository:
+    repository = IdentityRepository(isolated_system_database)
+    repository.seed_defaults()
+    return repository
 
 
 def _principal(user: dict[str, str], session_id: str) -> Principal:
@@ -38,10 +45,8 @@ def _principal(user: dict[str, str], session_id: str) -> Principal:
 
 
 def test_audit_query_filters_actor_project_action_result_and_exclusive_time(
-    tmp_path: Path,
+    repository: IdentityRepository,
 ):
-    repository = IdentityRepository(tmp_path / "system.db")
-    repository.seed_defaults()
     admin = _principal(
         repository.create_user("admin", "Original Admin", "hash"), "admin-session"
     )
@@ -84,16 +89,16 @@ def test_audit_query_filters_actor_project_action_result_and_exclusive_time(
         result="success",
     )
     with repository.connect() as connection:
-        connection.executemany(
-            "UPDATE audit_logs SET created_at = ? WHERE id = ?",
+        connection.exec_driver_sql(
+            "UPDATE audit_logs SET created_at = %s WHERE id = %s",
             [
                 ("2026-07-01 12:00:00", matching_id),
                 ("2026-07-01 12:00:00", other_actor_id),
                 ("2026-07-02 00:00:00", boundary_id),
             ],
         )
-        connection.execute(
-            "UPDATE users SET display_name = ? WHERE id = ?",
+        connection.exec_driver_sql(
+            "UPDATE users SET display_name = %s WHERE id = %s",
             ("Renamed Admin", admin.user_id),
         )
 
@@ -153,9 +158,9 @@ def test_audit_api_accepts_datetime_local_time_filters():
     assert audit_service.filters["created_to"] == datetime(2026, 7, 30, 9, 52)
 
 
-def test_audit_export_uses_filtered_snapshot_data_and_records_export(tmp_path: Path):
-    repository = IdentityRepository(tmp_path / "system.db")
-    repository.seed_defaults()
+def test_audit_export_uses_filtered_snapshot_data_and_records_export(
+    repository: IdentityRepository,
+):
     admin = _principal(
         repository.create_user("admin", "Audit Admin", "hash"), "admin-session"
     )
@@ -203,9 +208,9 @@ def test_audit_export_uses_filtered_snapshot_data_and_records_export(tmp_path: P
     assert len(audit_service.query(action="audit.export")) == 2
 
 
-def test_audit_api_returns_one_event_for_the_details_drawer(tmp_path: Path):
-    repository = IdentityRepository(tmp_path / "system.db")
-    repository.seed_defaults()
+def test_audit_api_returns_one_event_for_the_details_drawer(
+    repository: IdentityRepository,
+):
     admin = _principal(
         repository.create_user("admin", "Audit Admin", "hash"), "admin-session"
     )

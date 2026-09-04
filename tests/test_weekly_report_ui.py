@@ -109,4 +109,4 @@ def test_analytics_dashboard_does_not_start_global_job_polling():
     root = Path(__file__).resolve().parents[1]
     tasks = (root / "static/js/common/tasks.js").read_text(encoding="utf-8")
 
-    assert "if (this.page !== 'admin-analytics') setInterval(() => this.fetchJobs(), 2000);" in tasks
+    assert "if (this.pageNeedsJobPolling()) setInterval(() => this.fetchJobs(), this.JOB_POLL_INTERVAL_MS);" in tasks

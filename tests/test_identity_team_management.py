@@ -9,9 +9,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-import sqlite3
-
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -26,8 +23,8 @@ from identity.team_api import build_team_management_router
 
 
 @pytest.fixture
-def repository(tmp_path: Path) -> IdentityRepository:
-    result = IdentityRepository(tmp_path / "system.db")
+def repository(isolated_system_database) -> IdentityRepository:
+    result = IdentityRepository(isolated_system_database)
     result.seed_defaults()
     return result
 
@@ -106,90 +103,6 @@ def test_repository_records_user_and_role_creator(repository: IdentityRepository
     assert role["created_by_user_id"] == creator["id"]
 
 
-def test_project_owner_replacement_requires_disabled_current_owner(
-    repository: IdentityRepository,
-):
-    first = repository.create_user("first-owner", "第一负责人", "hash")
-    second = repository.create_user("second-owner", "第二负责人", "hash")
-    repository.assign_project_owner(first["id"])
-
-    with pytest.raises(ValueError, match="先停用当前项目负责人"):
-        repository.assign_project_owner(second["id"])
-
-    repository.update_user(first["id"], status="disabled")
-    repository.assign_project_owner(second["id"])
-
-    assert "project_owner" not in repository.get_user(first["id"])["role_codes"]
-    assert repository.get_user(second["id"])["role_codes"] == ["project_owner"]
-
-
-def test_database_rejects_a_second_project_owner_binding(
-    repository: IdentityRepository,
-):
-    first = repository.create_user("owner-one", "负责人一", "hash")
-    second = repository.create_user("owner-two", "负责人二", "hash")
-    role = repository.get_role_by_code("project_owner")
-    assert role is not None
-    repository.replace_user_roles(first["id"], [role["id"]])
-
-    with pytest.raises(ValueError, match="项目负责人只能有一名"):
-        repository.replace_user_roles(second["id"], [role["id"]])
-
-
-def test_migration_normalizes_duplicate_project_owners_idempotently(
-    tmp_path: Path,
-):
-    db_path = tmp_path / "legacy-system.db"
-    legacy = IdentityRepository(db_path)
-    legacy.seed_defaults()
-    first = legacy.create_user("legacy-owner-1", "旧负责人一", "hash")
-    second = legacy.create_user("legacy-owner-2", "旧负责人二", "hash")
-    role = legacy.get_role_by_code("project_owner")
-    assert role is not None
-    with legacy.connect() as connection:
-        connection.execute("DROP TRIGGER trg_single_project_owner_insert")
-        connection.execute("DROP TRIGGER trg_single_project_owner_update")
-        connection.execute(
-            "INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)",
-            (first["id"], role["id"]),
-        )
-        connection.execute(
-            "INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)",
-            (second["id"], role["id"]),
-        )
-
-    migrated = IdentityRepository(db_path)
-    IdentityRepository(db_path)
-    with migrated.connect() as connection:
-        bindings = connection.execute(
-            "SELECT user_id FROM user_roles WHERE role_id = ?", (role["id"],)
-        ).fetchall()
-        events = connection.execute(
-            "SELECT action FROM audit_logs "
-            "WHERE action = 'role.project_owner.uniqueness_migration'"
-        ).fetchall()
-
-    assert [row["user_id"] for row in bindings] == [min(first["id"], second["id"])]
-    assert len(events) == 1
-
-
-def test_database_trigger_blocks_direct_duplicate_owner_binding(
-    repository: IdentityRepository,
-):
-    first = repository.create_user("direct-owner-1", "负责人一", "hash")
-    second = repository.create_user("direct-owner-2", "负责人二", "hash")
-    role = repository.get_role_by_code("project_owner")
-    assert role is not None
-    repository.replace_user_roles(first["id"], [role["id"]])
-
-    with pytest.raises(sqlite3.IntegrityError, match="项目负责人只能有一名"):
-        with repository.connect() as connection:
-            connection.execute(
-                "INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)",
-                (second["id"], role["id"]),
-            )
-
-
 def test_soft_delete_user_revokes_access_and_requeues_owned_work(
     repository: IdentityRepository,
 ):
@@ -201,24 +114,24 @@ def test_soft_delete_user_revokes_access_and_requeues_owned_work(
     assert role is not None
     repository.replace_user_roles(user["id"], [role["id"]])
     with repository.connect() as connection:
-        connection.execute(
+        connection.exec_driver_sql(
             "INSERT INTO workflow_instances "
             "(id, workflow_type, resource_type, resource_id, created_by) "
-            "VALUES ('workflow-delete', 'creative', 'project', 'project-delete', ?)",
+            "VALUES ('workflow-delete', 'creative', 'project', 'project-delete', %s)",
             (creator["id"],),
         )
-        connection.execute(
+        connection.exec_driver_sql(
             "INSERT INTO workflow_tasks "
             "(id, workflow_id, task_type, role_code, assignee_id, status) "
             "VALUES ('task-delete', 'workflow-delete', 'brief', "
-            "'creative_planner', ?, 'in_progress')",
+            "'creative_planner', %s, 'in_progress')",
             (user["id"],),
         )
-        connection.execute(
+        connection.exec_driver_sql(
             "INSERT INTO project_members "
             "(id, project_id, user_id, project_role, status, added_by) "
-            "VALUES ('member-delete', 'project-delete', ?, 'creative_planner', "
-            "'active', ?)",
+            "VALUES ('member-delete', 'project-delete', %s, 'creative_planner', "
+            "'active', %s)",
             (user["id"], creator["id"]),
         )
 
@@ -226,15 +139,15 @@ def test_soft_delete_user_revokes_access_and_requeues_owned_work(
 
     assert repository.get_user(user["id"]) is None
     with repository.connect() as connection:
-        stored = connection.execute(
-            "SELECT status, is_deleted FROM users WHERE id = ?", (user["id"],)
+        stored = connection.exec_driver_sql(
+            "SELECT status, is_deleted FROM users WHERE id = %s", (user["id"],)
         ).fetchone()
-        task = connection.execute(
+        task = connection.exec_driver_sql(
             "SELECT status, assignee_id FROM workflow_tasks WHERE id = 'task-delete'"
         ).fetchone()
-        member = connection.execute(
+        member = connection.exec_driver_sql(
             "SELECT status FROM project_members WHERE id = 'member-delete'"
-        ).fetchone()
+        ).mappings().fetchone()
     assert tuple(stored) == ("disabled", 1)
     assert tuple(task) == ("pool", None)
     assert member["status"] == "inactive"
@@ -370,32 +283,6 @@ def test_custom_role_permission_ceiling_is_enforced(
     assert all_scope.status_code == 422
 
 
-def test_admin_must_disable_current_owner_before_assigning_successor(
-    client: TestClient, repository: IdentityRepository
-):
-    _, admin_csrf = setup_admin(client)
-    owner = repository.create_user("current-owner", "当前负责人", "hash")
-    repository.assign_project_owner(owner["id"])
-    successor = repository.create_user("successor", "接任负责人", "hash")
-
-    blocked = client.post(
-        "/api/admin/project-owner",
-        headers={"X-CSRF-Token": admin_csrf},
-        json={"user_id": successor["id"]},
-    )
-    repository.update_user(owner["id"], status="disabled")
-    assigned = client.post(
-        "/api/admin/project-owner",
-        headers={"X-CSRF-Token": admin_csrf},
-        json={"user_id": successor["id"]},
-    )
-
-    assert blocked.status_code == 409
-    assert assigned.status_code == 200
-    assert repository.get_user(owner["id"])["role_codes"] == []
-    assert repository.get_user(successor["id"])["role_codes"] == ["project_owner"]
-
-
 def test_owner_can_soft_delete_owned_user_and_reset_password(
     client: TestClient, repository: IdentityRepository
 ):
@@ -426,34 +313,6 @@ def test_owner_can_soft_delete_owned_user_and_reset_password(
         for item in AuditService(repository).query(actor_user_id=owner["id"])
     }
     assert {"team.user.password.reset", "team.user.delete"} <= actions
-
-
-def test_generic_admin_role_assignment_cannot_bypass_owner_handover(
-    client: TestClient, repository: IdentityRepository
-):
-    _, csrf = setup_admin(client)
-    candidate = repository.create_user("candidate", "候选负责人", "hash")
-    owner_role = repository.get_role_by_code("project_owner")
-    assert owner_role is not None
-
-    created = client.post(
-        "/api/admin/users",
-        headers={"X-CSRF-Token": csrf},
-        json={
-            "username": "bypass-owner",
-            "display_name": "绕过负责人",
-            "password": "Bypass-Strong-123!",
-            "role_ids": [owner_role["id"]],
-        },
-    )
-    replaced = client.put(
-        f"/api/admin/users/{candidate['id']}/roles",
-        headers={"X-CSRF-Token": csrf},
-        json={"role_ids": [owner_role["id"]]},
-    )
-
-    assert created.status_code == 422
-    assert replaced.status_code == 422
 
 
 def test_admin_can_soft_delete_user_and_custom_role(

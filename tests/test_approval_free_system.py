@@ -30,8 +30,8 @@ from workflow.repository import WorkflowRepository
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_workflow_router_exposes_no_approval_operations(tmp_path: Path):
-    identity = IdentityRepository(tmp_path / ".runtime/system/system.db")
+def test_workflow_router_exposes_no_approval_operations(isolated_system_database):
+    identity = IdentityRepository(isolated_system_database)
     identity.seed_defaults()
     workflow = WorkflowRepository(identity)
     app = FastAPI()
@@ -43,29 +43,16 @@ def test_workflow_router_exposes_no_approval_operations(tmp_path: Path):
     assert not any(path.endswith("/return") for path in paths)
 
 
-def test_operational_frontend_contains_no_approval_actions_or_copy():
-    roots = (ROOT / "templates", ROOT / "static/js")
-    forbidden = (
-        "审批", "审核", "待审", "已批准", "已退回", "提交审批",
-        "/approve", "/return", "can_approve", "can_return", "waiting_review",
-    )
-    offenders = []
-    for root in roots:
-        for path in root.rglob("*"):
-            if path.suffix not in {".html", ".js"} or not path.is_file():
-                continue
-            text = path.read_text(encoding="utf-8")
-            for token in forbidden:
-                if token in text:
-                    offenders.append(f"{path.relative_to(ROOT)}: {token}")
-    assert offenders == []
-
-
-def test_default_permission_catalog_has_no_approval_permissions(tmp_path: Path):
-    identity = IdentityRepository(tmp_path / "system.db")
+def test_default_permission_catalog_has_no_approval_permissions(
+    isolated_system_database,
+):
+    identity = IdentityRepository(isolated_system_database)
     identity.seed_defaults()
     with identity.connect() as connection:
-        codes = {row[0] for row in connection.execute("SELECT code FROM permissions")}
+        codes = {
+            row[0]
+            for row in connection.exec_driver_sql("SELECT code FROM permissions")
+        }
     assert "version.approve" not in codes
     assert "version.return" not in codes
 

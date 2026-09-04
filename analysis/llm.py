@@ -350,7 +350,7 @@ def provider_defaults(provider: str) -> Dict[str, str]:
             "base_url": "",
             "env_key": "SUB2API_KEY",
             "model": "gpt-5.6-sol",
-            "wire_api": "responses",
+            "wire_api": "chat_completions",
             "reasoning_effort": "auto",
         }
     return {
@@ -358,7 +358,7 @@ def provider_defaults(provider: str) -> Dict[str, str]:
         "base_url": "",
         "env_key": "LLM_API_KEY",
         "model": "MiniMax-M3",
-        "wire_api": "chat_completions",
+        "wire_api": "responses" if provider == "openai" else "chat_completions",
         "reasoning_effort": "",
     }
 

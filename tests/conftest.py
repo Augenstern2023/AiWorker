@@ -20,9 +20,19 @@
 Pytest configuration and shared fixtures
 """
 
-import pytest
+import os
 import sys
+import uuid
 from pathlib import Path
+from typing import Iterator
+
+import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import create_engine
+from sqlalchemy.engine import make_url
+
+from system_database import SystemDatabase, SystemDatabaseSettings
 
 # Add project root to Python path
 project_root = Path(__file__).parent.parent
@@ -30,7 +40,7 @@ sys.path.insert(0, str(project_root))
 
 
 def pytest_ignore_collect(collection_path: Path, config) -> bool:
-    """Ignore tests for the human-approval workflow retired in d710f50."""
+    """Ignore suites whose human-approval workflow contracts were retired."""
     del config
     return collection_path.name in {
         "test_creative_workflow_integration.py",
@@ -52,6 +62,40 @@ def pytest_ignore_collect(collection_path: Path, config) -> bool:
 def project_root_path():
     """Return project root path"""
     return project_root
+
+
+@pytest.fixture
+def isolated_system_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[SystemDatabase]:
+    """Create an isolated PostgreSQL schema for a system-repository test."""
+    configured_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not configured_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required")
+    base_url = make_url(configured_url)
+    if base_url.database == "aiworker_system":
+        raise ValueError("tests must not run against the production system database")
+
+    schema_name = f"test_{uuid.uuid4().hex}"
+    admin_engine = create_engine(base_url)
+    with admin_engine.begin() as connection:
+        connection.exec_driver_sql(f'CREATE SCHEMA "{schema_name}"')
+
+    isolated_url = base_url.update_query_dict(
+        {"options": f"-csearch_path={schema_name}"}
+    ).render_as_string(hide_password=False)
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", isolated_url)
+    database: SystemDatabase | None = None
+    try:
+        command.upgrade(Config(str(project_root / "alembic.ini")), "head")
+        database = SystemDatabase(SystemDatabaseSettings(isolated_url))
+        yield database
+    finally:
+        if database is not None:
+            database.dispose()
+        with admin_engine.begin() as connection:
+            connection.exec_driver_sql(f'DROP SCHEMA "{schema_name}" CASCADE')
+        admin_engine.dispose()
 
 
 @pytest.fixture

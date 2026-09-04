@@ -3599,13 +3599,13 @@ class CreativeRepository:
         project = self.get_project(int(current["project_id"]))
         if not project:
             raise ValueError("创作项目不存在")
+        self._assert_expected_revision(project, expected_revision)
         locked_brief_id = int(project.get("locked_brief_id") or 0)
         if locked_brief_id:
             if expected_revision is None:
                 raise ValueError("锁定 Brief 新版本时必须提供项目修订号")
             if int(current.get("parent_version_id") or 0) != locked_brief_id:
                 raise ValueError("只能锁定当前 Brief 的直接后继草稿")
-        self._assert_expected_revision(project, expected_revision)
         if current["status"] == "brief_locked":
             return self._resource_with_project_revision(current, int(current["project_id"]))
         note = difference_note.strip() or str(current.get("difference_note") or "").strip()

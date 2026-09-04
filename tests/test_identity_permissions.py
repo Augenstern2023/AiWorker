@@ -9,8 +9,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
@@ -28,8 +26,8 @@ HASH = PasswordService().hash("Writer-Strong-123!")
 
 
 @pytest.fixture
-def repository(tmp_path: Path) -> IdentityRepository:
-    repository = IdentityRepository(tmp_path / "system.db")
+def repository(isolated_system_database) -> IdentityRepository:
+    repository = IdentityRepository(isolated_system_database)
     repository.seed_defaults()
     return repository
 
@@ -168,11 +166,11 @@ def test_assigned_project_scope_queries_current_membership(
     assert client.get("/projects/client-claimed-project").status_code == 403
 
     with repository.connect() as connection:
-        connection.execute(
+        connection.exec_driver_sql(
             """
             INSERT INTO project_members
                 (id, project_id, user_id, project_role, status)
-            VALUES ('membership-1', 'assigned-project', ?, 'writer', 'active')
+                VALUES ('membership-1', 'assigned-project', %s, 'writer', 'active')
             """,
             (user["id"],),
         )

@@ -141,6 +141,26 @@ def test_delivery_page_grant_includes_generated_resource_list_and_download() -> 
     ) is True
 
 
+@pytest.mark.parametrize(
+    ("method", "path"),
+    (
+        ("GET", "/api/admin/deliveries"),
+        ("POST", "/api/admin/deliveries"),
+        ("GET", "/api/admin/deliveries/options"),
+        ("GET", "/api/admin/deliveries/delivery-1/download"),
+    ),
+)
+def test_delivery_page_role_grant_authorizes_delivery_router_apis(
+    method: str, path: str
+) -> None:
+    repository = FakeNavigationRepository()
+    repository.role_routes_by_code["delivery_manager"] = {"/admin/deliveries"}
+    service = PageAccessService(repository)
+    principal = _principal(roles=("delivery_manager",))
+
+    assert service.can_call_page_api(principal, method, path) is True
+
+
 def test_planning_grant_controls_project_parameter_updates_immediately() -> None:
     repository = FakeNavigationRepository()
     repository.access_by_route["/planning/projects"] = {"user-1"}

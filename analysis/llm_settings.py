@@ -83,11 +83,22 @@ class LLMSecretCipher:
 
         runtime_path = Path(runtime_dir)
         runtime_path.mkdir(parents=True, exist_ok=True)
-        key_path = runtime_path / "llm_config.key"
+        runtime_key_path = runtime_path / "llm_config.key"
+        common_git_dir = cls._find_git_common_dir(runtime_path.parent)
+        key_path = (
+            common_git_dir / "aiworker" / "llm_config.key"
+            if common_git_dir is not None
+            else runtime_key_path
+        )
+        key_path.parent.mkdir(parents=True, exist_ok=True)
         if key_path.exists():
             return cls._read_key_after_concurrent_write(key_path)
 
-        generated = Fernet.generate_key()
+        generated = (
+            runtime_key_path.read_bytes().strip()
+            if key_path != runtime_key_path and runtime_key_path.exists()
+            else Fernet.generate_key()
+        )
         try:
             descriptor = os.open(
                 key_path,
@@ -105,6 +116,37 @@ class LLMSecretCipher:
         except OSError:
             pass
         return cls(generated)
+
+    @staticmethod
+    def _find_git_common_dir(start: Path) -> Path | None:
+        for repository_root in (start, *start.parents):
+            marker = repository_root / ".git"
+            if marker.is_dir():
+                return marker.resolve()
+            if not marker.is_file():
+                continue
+            try:
+                prefix, separator, value = marker.read_text(
+                    encoding="utf-8"
+                ).strip().partition(":")
+                if separator != ":" or prefix.strip().casefold() != "gitdir":
+                    return None
+                git_dir = Path(value.strip())
+                if not git_dir.is_absolute():
+                    git_dir = marker.parent / git_dir
+                git_dir = git_dir.resolve()
+                common_marker = git_dir / "commondir"
+                if not common_marker.is_file():
+                    return git_dir
+                common_dir = Path(
+                    common_marker.read_text(encoding="utf-8").strip()
+                )
+                if not common_dir.is_absolute():
+                    common_dir = git_dir / common_dir
+                return common_dir.resolve()
+            except OSError:
+                return None
+        return None
 
     @classmethod
     def _read_key_after_concurrent_write(

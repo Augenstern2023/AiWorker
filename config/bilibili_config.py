@@ -109,6 +109,7 @@ ASR_API_KEY = os.getenv("ASR_API_KEY") or os.getenv("OPENAI_API_KEY") or os.gete
 ASR_MODEL = os.getenv("ASR_MODEL", "whisper-1")
 SENSEVOICE_PYTHON = os.getenv("SENSEVOICE_PYTHON", r"D:\qwen3_tts_rainfall\python\python.exe")
 SENSEVOICE_MODEL_DIR = os.getenv("SENSEVOICE_MODEL_DIR", r"D:\qwen3_tts_rainfall\models\SenseVoiceSmall")
+SENSEVOICE_VAD_MODEL_DIR = os.getenv("SENSEVOICE_VAD_MODEL_DIR", "fsmn-vad")
 SENSEVOICE_FFMPEG_DIR = os.getenv("SENSEVOICE_FFMPEG_DIR", r"D:\qwen3_tts_rainfall\python\ffmpeg\bin")
 SENSEVOICE_DEVICE = os.getenv("SENSEVOICE_DEVICE", "cuda:0")
 SENSEVOICE_SCRIPT_PATH = os.getenv("SENSEVOICE_SCRIPT_PATH", "tools/sensevoice_transcribe.py")

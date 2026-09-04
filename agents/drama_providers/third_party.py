@@ -32,19 +32,15 @@ from agents.hongguo_capture import normalize_title
 DEFAULT_CONFIG_URL = "https://mizhi.kissm.top/pc/go.php"
 LEGACY_CONFIG_URL = "https://mizhi.kissm.top/pc/con.php"
 DOWNLOAD_SEARCH_SOURCES = (
-    "hg",
     "hg1",
     "hg2",
-    "hgmj",
     "hm",
     "huolong",
     "xingyadongli",
 )
 PROVIDER_DISPLAY_NAMES = {
-    "hg": "红短剧-备用",
     "hg1": "红短剧",
     "hg2": "红漫剧",
-    "hgmj": "红漫剧-备用",
     "hm": "河马短剧",
     "huolong": "火龙漫剧",
     "xingyadongli": "星芽/东梨短剧",
@@ -351,7 +347,14 @@ class ThirdPartyDramaProvider:
         return [
             candidate
             for candidate in self.search(title, page=1)
-            if normalize_title(candidate.title) == expected
+            if (
+                (candidate_title := normalize_title(candidate.title)) == expected
+                or (
+                    len(expected) >= 4
+                    and len(candidate_title) >= 4
+                    and (expected in candidate_title or candidate_title in expected)
+                )
+            )
         ]
 
     def episodes(self, series_ref: str) -> list[DramaEpisode]:

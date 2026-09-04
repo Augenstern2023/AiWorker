@@ -29,6 +29,11 @@ def _parse_args():
     parser = argparse.ArgumentParser(description="Transcribe audio with local SenseVoiceSmall.")
     parser.add_argument("--audio", required=True, help="Path to wav/audio file.")
     parser.add_argument("--model-dir", required=True, help="SenseVoiceSmall model directory.")
+    parser.add_argument(
+        "--vad-model-dir",
+        default=os.getenv("SENSEVOICE_VAD_MODEL_DIR", "fsmn-vad"),
+        help="Local FSMN VAD model directory.",
+    )
     parser.add_argument("--device", default="cuda:0", help="cuda:0 or cpu.")
     parser.add_argument("--ffmpeg-dir", default="", help="Directory containing ffmpeg.exe.")
     parser.add_argument("--language", default="auto", help="SenseVoice language option.")
@@ -60,7 +65,7 @@ def main() -> int:
             model = AutoModel(
                 model=args.model_dir,
                 trust_remote_code=True,
-                vad_model="fsmn-vad",
+                vad_model=args.vad_model_dir,
                 vad_kwargs={"max_single_segment_time": 30000},
                 device=args.device,
             )

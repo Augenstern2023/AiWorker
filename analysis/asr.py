@@ -75,6 +75,7 @@ class SenseVoiceASRProvider(ASRProvider):
         self,
         python_path: str,
         model_dir: str,
+        vad_model_dir: str = "fsmn-vad",
         ffmpeg_dir: str = "",
         device: str = "cuda:0",
         script_path: str = "tools/sensevoice_transcribe.py",
@@ -82,6 +83,7 @@ class SenseVoiceASRProvider(ASRProvider):
     ):
         self.python_path = python_path
         self.model_dir = model_dir
+        self.vad_model_dir = vad_model_dir
         self.ffmpeg_dir = ffmpeg_dir
         self.device = device
         self.script_path = script_path
@@ -93,6 +95,7 @@ class SenseVoiceASRProvider(ASRProvider):
             script_path=self.script_path,
             audio_path=audio_path,
             model_dir=self.model_dir,
+            vad_model_dir=self.vad_model_dir,
             device=self.device,
             ffmpeg_dir=self.ffmpeg_dir,
         )
@@ -128,6 +131,7 @@ def build_sensevoice_command(
     model_dir: str,
     device: str,
     ffmpeg_dir: str = "",
+    vad_model_dir: str = "fsmn-vad",
 ) -> List[str]:
     command = [
         python_path,
@@ -137,6 +141,8 @@ def build_sensevoice_command(
         audio_path,
         "--model-dir",
         model_dir,
+        "--vad-model-dir",
+        vad_model_dir,
         "--device",
         device,
     ]

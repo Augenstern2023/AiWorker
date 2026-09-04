@@ -19,6 +19,7 @@ from creative.repository import CreativeRepository
 from screenplay_review.api import decode_script_upload
 from screenplay_review import worker
 from screenplay_review.service import (
+    _assert_outline_ref,
     _review_messages,
     build_review_markdown,
     build_text_source,
@@ -102,6 +103,25 @@ def test_project_source_freezes_the_locked_outline_beats_and_story_context() -> 
     assert source["brief"]["id"] == 11
     assert source["episodes"][0]["outline"]["content"]["core_event"] == "主角反击"
     assert source["episodes"][0]["beats"]["id"] == 41
+
+
+def test_outline_reference_accepts_authority_hash_after_series_overview_changes() -> None:
+    content = {"episode": 1, "core_event": "主角反击"}
+    fingerprint = CreativeRepository._outline_content_fingerprint(content)
+    outline = {
+        "id": 31,
+        "version": 1,
+        "content": {**content, "series_overview": {"theme": "后补的全剧概览"}},
+    }
+    beats = {
+        "upstream_refs": {
+            "outline_id": 31,
+            "outline_version": 1,
+            "outline_content_fingerprint": fingerprint,
+        }
+    }
+
+    _assert_outline_ref(beats, outline, "第 1 集 Beats")
 
 
 def test_formal_review_prompt_requires_an_independent_beats_audit() -> None:

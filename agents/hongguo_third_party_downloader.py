@@ -18,7 +18,7 @@ from agents.drama_providers import DownloadResult, DramaProvider, ProviderFailur
 
 
 def validate_downloaded_mp4(path: Path) -> None:
-    """Reject short, non-MP4, or unparseable third-party responses."""
+    """Reject invalid MP4 files and normalize codecs for browser playback."""
 
     media_path = Path(path)
     try:
@@ -42,7 +42,7 @@ def validate_downloaded_mp4(path: Path) -> None:
                 "-v",
                 "error",
                 "-show_entries",
-                "stream=index",
+                "stream=index,codec_type,codec_name",
                 "-of",
                 "json",
                 str(media_path),
@@ -63,6 +63,61 @@ def validate_downloaded_mp4(path: Path) -> None:
         streams = []
     if not streams:
         raise ProviderFailure("transfer_failed", "ffprobe 未识别到音视频流")
+
+    video_streams = [stream for stream in streams if stream.get("codec_type") == "video"]
+    audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    if not video_streams:
+        raise ProviderFailure("transfer_failed", "ffprobe 未识别到视频流")
+    if all(stream.get("codec_name") == "h264" for stream in video_streams) and all(
+        stream.get("codec_name") == "aac" for stream in audio_streams
+    ):
+        return
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise ProviderFailure("transfer_failed", "视频编码不兼容且未找到 ffmpeg")
+    converted_path = media_path.with_name(f"{media_path.stem}.browser{media_path.suffix}")
+    converted_path.unlink(missing_ok=True)
+    try:
+        converted = subprocess.run(
+            [
+                ffmpeg,
+                "-y",
+                "-v",
+                "error",
+                "-i",
+                str(media_path),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-movflags",
+                "+faststart",
+                str(converted_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=1800,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        converted_path.unlink(missing_ok=True)
+        raise ProviderFailure("transfer_failed", "ffmpeg 转码视频失败或超时") from exc
+    if converted.returncode != 0 or not converted_path.exists():
+        converted_path.unlink(missing_ok=True)
+        raise ProviderFailure("transfer_failed", "ffmpeg 无法转码为浏览器兼容格式")
+    try:
+        converted_path.replace(media_path)
+    except OSError as exc:
+        converted_path.unlink(missing_ok=True)
+        raise ProviderFailure("transfer_failed", "无法替换转码后的视频") from exc
 
 
 def download_third_party_episode(
@@ -96,7 +151,12 @@ def download_third_party_episode(
                 if attempt == 0:
                     partial_path.unlink(missing_ok=True)
                 raise
-            return result
+            return DownloadResult(
+                provider_id=result.provider_id,
+                path=result.path,
+                bytes=result.path.stat().st_size,
+                metadata=result.metadata,
+            )
         except ProviderFailure as exc:
             if exc.code == "paid_content":
                 raise

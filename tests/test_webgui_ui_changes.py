@@ -780,13 +780,29 @@ def test_today_hits_only_load_unadopted_recommendations_and_adoption_moves_them_
     section = _source("templates/common/workspace/selection_hits.html")
 
     assert "&status=pending_review" in topics.split("async fetchCreativeTopics", 1)[1].split("async fetchTopicLibrary", 1)[0]
-    assert "new URLSearchParams({status: 'adopted', all: 'true'})" in topics
+    assert "new URLSearchParams({status: 'adopted,archived', all: 'true'})" in topics
     update_topic = breakdowns.split("async updateCreativeTopic", 1)[1].split("createCreativeBreakdown", 1)[0]
     assert "this.creative.items = this.creative.items.filter" in update_topic
     assert "await this.fetchCreativeTopics();" not in update_topic
     assert "updateCreativeTopic(topic, 'adopted')" in section
     assert "createCreativeBreakdown(topic)" not in section
     assert "topic.status === 'adopted'" not in section
+
+
+def test_topic_library_keeps_archived_topics_and_offers_restore_and_delete():
+    topics = _source("static/js/selection/topics.js")
+    breakdowns = _source("static/js/selection/breakdowns.js")
+    section = _source("templates/common/workspace/selection_topics.html")
+
+    assert "status: 'adopted,archived'" in topics
+    assert '<option value="archived">已归档</option>' in section
+    assert "updateTopicLibrary(topic, 'adopted')" in section
+    assert "deleteTopicLibrary(topic)" in section
+    assert section.count('x-show="topic.status === \'archived\'"') == 2
+    assert 'x-show="topic.status === \'adopted\' && Number(topic.transcript_episode_count || 0) > 0"' in section
+    assert 'x-show="topic.status === \'adopted\' && topic.locked_breakdown_id && !topic.lifecycle_project_id"' in section
+    assert 'x-show="topic.status === \'adopted\' && topic.lifecycle_project_id && topic.can_open_project"' in section
+    assert "method: 'DELETE'" in breakdowns
 
 
 def test_topic_library_offers_filtered_csv_and_excel_exports():
@@ -1406,7 +1422,7 @@ def test_downloaded_topic_action_opens_episode_transcript_preview():
     html = _workspace_source()
     transcripts = _source("static/js/selection/breakdowns.js")
 
-    assert 'x-show="Number(topic.transcript_episode_count || 0) > 0"' in html
+    assert 'x-show="topic.status === \'adopted\' && Number(topic.transcript_episode_count || 0) > 0"' in html
     assert '@click="openTopicTranscriptPreview(topic)"' in html
     assert 'title="预览字幕转写"' in html
     assert '@click="downloadTopicTranscripts(topic)"' in html

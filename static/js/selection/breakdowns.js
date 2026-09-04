@@ -22,6 +22,26 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
+                async deleteTopicLibrary(topic) {
+                    if (topic?.status !== 'archived') return;
+                    if (!window.confirm(`确定删除已归档选题“${topic.title}”吗？删除后将不再显示。`)) return;
+                    this.topicLibrary.error = '';
+                    try {
+                        const res = await aiworkerApi.request(`/api/creative/topics/${topic.id}`, {
+                            method: 'DELETE'
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (!res.ok) {
+                            this.topicLibrary.error = data.detail || '删除选题失败';
+                            return;
+                        }
+                        window.aiworkerUi?.invalidateCache('creative:topics:');
+                        await this.fetchTopicLibrary();
+                    } catch (error) {
+                        this.topicLibrary.error = error.message || '删除选题失败';
+                    }
+                },
+
                 createTopicLibraryBreakdown(topic) {
                     return this.startTranscriptBreakdown(
                         topic,

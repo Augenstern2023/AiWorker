@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from analysis.monthly_report_service import MonthlyReportService
 from analysis.today_rank_service import TodayRankService
 from analysis.weekly_report_service import WeeklyReportService
 from core.events import emit_event
@@ -21,14 +22,21 @@ from core.job import CrawlJob
 def run_job(
     job: CrawlJob,
     service: WeeklyReportService | None = None,
+    monthly_service: MonthlyReportService | None = None,
 ) -> int:
     worker_id = "weekly-report-worker"
     emit_event("log", job_id=job.job_id, worker_id=worker_id, platform="analytics", message="开始生成周度流行趋势报告")
     if service is None:
         root = Path.cwd()
+        rank_service = TodayRankService.from_environment(root=root)
         service = WeeklyReportService(
             root=root,
-            rank_service=TodayRankService.from_environment(root=root),
+            rank_service=rank_service,
+        )
+        monthly_service = MonthlyReportService(
+            root=root,
+            rank_service=rank_service,
+            weekly_service=service,
         )
     reports = service.generate_all_available(with_llm=True)
     for report in reports:
@@ -38,6 +46,33 @@ def run_job(
                     emit_event("artifact", job_id=job.job_id, worker_id=worker_id, platform="analytics", message=f"生成周报产物: {path}", payload={"path": str(path), "artifact_type": artifact_type})
         else:
             emit_event("log", job_id=job.job_id, worker_id=worker_id, platform="analytics", level="warning", message=f"{report.get('platform', '-') } 周报未生成：数据不足")
+    monthly_reports = (
+        monthly_service.generate_all_available(with_llm=True)
+        if monthly_service is not None
+        else []
+    )
+    for report in monthly_reports:
+        for path, artifact_type in (
+            (report.get("markdown_path"), "markdown"),
+            (report.get("excel_path"), "excel"),
+        ):
+            if path and Path(str(path)).is_file():
+                emit_event(
+                    "artifact",
+                    job_id=job.job_id,
+                    worker_id=worker_id,
+                    platform="analytics",
+                    message=f"生成月报产物: {path}",
+                    payload={"path": str(path), "artifact_type": artifact_type},
+                )
+    emit_event(
+        "log",
+        job_id=job.job_id,
+        worker_id=worker_id,
+        platform="analytics",
+        message="月度流行趋势报告任务结束",
+        payload={"reports": monthly_reports},
+    )
     emit_event("log", job_id=job.job_id, worker_id=worker_id, platform="analytics", message="周度流行趋势报告任务结束", payload={"reports": reports})
     return 0
 

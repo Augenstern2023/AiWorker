@@ -1,14 +1,20 @@
 <section>
-            <div class="d-flex align-items-center justify-content-between mb-3">
-                <h3 class="mb-0">周报看板</h3>
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
+                <div class="d-flex align-items-center gap-3">
+                    <h3 class="mb-0" x-text="analyticsReportMode === 'monthly' ? '月报看板' : '周报看板'">周报看板</h3>
+                    <div class="btn-group btn-group-sm analytics-period-switch" role="group" aria-label="报告周期">
+                        <button type="button" class="btn" :class="analyticsReportMode === 'weekly' ? 'btn-primary' : 'btn-outline-secondary'" @click="setAnalyticsReportMode('weekly')" :aria-pressed="analyticsReportMode === 'weekly'">周报</button>
+                        <button type="button" class="btn" :class="analyticsReportMode === 'monthly' ? 'btn-primary' : 'btn-outline-secondary'" @click="setAnalyticsReportMode('monthly')" :aria-pressed="analyticsReportMode === 'monthly'">月报</button>
+                    </div>
+                </div>
                 <div class="d-flex gap-2">
                     <select class="form-select form-select-sm" style="width: 130px;" x-model="analyticsPlatform" @change="refreshAnalyticsDashboard()">
                         <option value="">全部平台</option>
                         <option value="dy">抖音</option>
                         <option value="hg">红果</option>
                     </select>
-                    <button class="btn btn-outline-secondary btn-sm" @click="refreshAnalyticsDashboard({notify: true})" :disabled="weeklyReportLoading" :aria-busy="weeklyReportLoading">
-                        <span class="spinner-border spinner-border-sm me-1" x-show="weeklyReportLoading" x-cloak aria-hidden="true"></span><i class="bi bi-arrow-clockwise me-1" x-show="!weeklyReportLoading" aria-hidden="true"></i><span x-text="weeklyReportLoading ? '更新中…' : '刷新'">刷新</span>
+                    <button class="btn btn-outline-secondary btn-sm" @click="refreshAnalyticsDashboard({notify: true})" :disabled="analyticsReportLoading()" :aria-busy="analyticsReportLoading()">
+                        <span class="spinner-border spinner-border-sm me-1" x-show="analyticsReportLoading()" x-cloak aria-hidden="true"></span><i class="bi bi-arrow-clockwise me-1" x-show="!analyticsReportLoading()" aria-hidden="true"></i><span x-text="analyticsReportLoading() ? '更新中…' : '刷新'">刷新</span>
                     </button>
                 </div>
             </div>
@@ -19,44 +25,63 @@
                     <div class="card"><div class="card-header">题材标签分布</div><div class="card-body"><div id="categoryChart" class="chart-box"></div></div></div>
                 </div>
                 <div class="col-xl-6">
-                    <div class="card"><div class="card-header d-flex justify-content-between gap-2"><span>推荐剧目指标趋势</span><small class="text-muted text-end" x-text="weeklyReport?.recommendation_metrics?.source_label || '来源：推荐剧目周报数据'"></small></div><div class="card-body"><div id="trendChart" class="chart-box"></div></div></div>
+                    <div class="card"><div class="card-header d-flex justify-content-between gap-2"><span x-text="analyticsReportMode === 'monthly' ? '推荐剧目分周趋势' : '推荐剧目指标趋势'">推荐剧目指标趋势</span><small class="text-muted text-end" x-text="activeAnalyticsReport()?.recommendation_metrics?.source_label || (analyticsReportMode === 'monthly' ? '来源：月度推荐剧目工作日数据' : '来源：推荐剧目周报数据')"></small></div><div class="card-body"><div id="trendChart" class="chart-box"></div></div></div>
                 </div>
             </div>
 
             <div class="card">
                 <div class="card-header d-flex align-items-center justify-content-between weekly-report-card-header">
-                    <span>周报预览</span>
+                    <span x-text="analyticsReportMode === 'monthly' ? '月报预览' : '周报预览'">周报预览</span>
                     <div class="weekly-report-controls">
-                        <select class="form-select form-select-sm weekly-report-selector" :value="weeklyReport?.report_id || ''" @change="selectWeeklyReport($event.target.value)" aria-label="选择周度报告">
-                            <template x-for="item in weeklyReports" :key="item.report_id">
-                                <option :value="item.report_id" x-text="`${item.platform === 'dy' ? '抖音' : '红果'} · ${item.period?.start || '-'} 至 ${item.period?.end || '-'}`"></option>
+                        <select class="form-select form-select-sm weekly-report-selector" :value="activeAnalyticsReport()?.report_id || ''" @change="selectAnalyticsReport($event.target.value)" :aria-label="analyticsReportMode === 'monthly' ? '选择月度报告' : '选择周度报告'">
+                            <template x-for="item in activeAnalyticsReports()" :key="item.report_id">
+                                <option :value="item.report_id" x-text="analyticsReportMode === 'monthly' ? `${item.platform === 'dy' ? '抖音' : '红果'} · ${item.month || item.period?.start?.slice(0, 7) || '-'}${item.status === 'partial' ? ' · 月度进展' : ''}` : `${item.platform === 'dy' ? '抖音' : '红果'} · ${item.period?.start || '-'} 至 ${item.period?.end || '-'}`"></option>
                             </template>
                         </select>
-                        <button class="btn btn-outline-secondary btn-sm btn-icon" @click="refreshAnalyticsDashboard({notify: true})" :disabled="weeklyReportLoading" :aria-busy="weeklyReportLoading" title="刷新周度报告" aria-label="刷新周度报告"><span class="spinner-border spinner-border-sm" x-show="weeklyReportLoading" x-cloak aria-hidden="true"></span><i class="bi bi-arrow-clockwise" x-show="!weeklyReportLoading" aria-hidden="true"></i></button>
-                        <button class="btn btn-outline-secondary btn-sm btn-icon" @click="weeklyReportExport('markdown')" :disabled="!weeklyReport" title="导出 Markdown" aria-label="导出 Markdown"><i class="bi bi-file-earmark-text"></i></button>
-                        <button class="btn btn-outline-success btn-sm btn-icon" @click="weeklyReportExport('excel')" :disabled="!weeklyReport" title="导出 Excel" aria-label="导出 Excel"><i class="bi bi-file-earmark-spreadsheet"></i></button>
+                        <button class="btn btn-outline-secondary btn-sm btn-icon" @click="refreshAnalyticsDashboard({notify: true})" :disabled="analyticsReportLoading()" :aria-busy="analyticsReportLoading()" :title="analyticsReportMode === 'monthly' ? '刷新月度报告' : '刷新周度报告'" :aria-label="analyticsReportMode === 'monthly' ? '刷新月度报告' : '刷新周度报告'"><span class="spinner-border spinner-border-sm" x-show="analyticsReportLoading()" x-cloak aria-hidden="true"></span><i class="bi bi-arrow-clockwise" x-show="!analyticsReportLoading()" aria-hidden="true"></i></button>
+                        <button class="btn btn-outline-secondary btn-sm btn-icon" @click="analyticsReportExport('markdown')" :disabled="!activeAnalyticsReport()" title="导出 Markdown" aria-label="导出 Markdown"><i class="bi bi-file-earmark-text"></i></button>
+                        <button class="btn btn-outline-success btn-sm btn-icon" @click="analyticsReportExport('excel')" :disabled="!activeAnalyticsReport()" title="导出 Excel" aria-label="导出 Excel"><i class="bi bi-file-earmark-spreadsheet"></i></button>
                     </div>
                 </div>
-                <div class="card-body" x-show="weeklyReport">
+                <div class="card-body" x-show="activeAnalyticsReport()">
                     <div class="d-flex flex-wrap gap-3 small text-secondary mb-3">
-                        <span>周期：<strong class="text-light" x-text="`${weeklyReport?.period?.start || '-'} 至 ${weeklyReport?.period?.end || '-'}`"></strong></span>
-                        <span>有效快照：<strong class="text-light" x-text="`${weeklyReport?.data_quality?.snapshot_days || 0}/${weeklyReport?.data_quality?.expected_weekdays || 5}`"></strong></span>
-                        <span>最新数据：<strong class="text-light" x-text="weeklyReport?.data_quality?.latest_snapshot_at || '-'"></strong></span>
-                        <span class="text-warning" x-show="weeklyReport?.data_quality?.is_stale">数据延迟</span>
+                        <span>周期：<strong class="text-light" x-text="`${activeAnalyticsReport()?.period?.start || '-'} 至 ${activeAnalyticsReport()?.period?.end || '-'}`"></strong></span>
+                        <span>有效快照：<strong class="text-light" x-text="`${activeAnalyticsReport()?.data_quality?.snapshot_days || 0}/${analyticsReportMode === 'monthly' ? (activeAnalyticsReport()?.data_quality?.elapsed_weekdays || 0) : (activeAnalyticsReport()?.data_quality?.expected_weekdays || 5)}`"></strong></span>
+                        <span>最新数据：<strong class="text-light" x-text="activeAnalyticsReport()?.data_quality?.latest_snapshot_at || '-'"></strong></span>
+                        <span class="badge text-bg-info" x-show="analyticsReportMode === 'monthly' && activeAnalyticsReport()?.status === 'partial'">月度进展</span>
+                        <span class="text-warning" x-show="activeAnalyticsReport()?.data_quality?.is_stale">数据延迟</span>
+                        <span class="text-warning" x-show="activeAnalyticsReport()?.data_quality?.has_gaps" x-text="`覆盖率 ${Math.round((activeAnalyticsReport()?.data_quality?.coverage || 0) * 1000) / 10}% · 缺失 ${(activeAnalyticsReport()?.data_quality?.missing_dates || []).length} 天`"></span>
                     </div>
-                    <p class="mb-3" x-text="weeklyReport?.llm?.content?.management_summary || weeklyReport?.summary?.management_summary || ''"></p>
+                    <div class="alert alert-warning py-2 small" x-show="activeAnalyticsReport()?.data_quality?.warning" x-text="activeAnalyticsReport()?.data_quality?.warning"></div>
+                    <p class="mb-3" x-text="activeAnalyticsReport()?.llm?.content?.management_summary || activeAnalyticsReport()?.summary?.management_summary || ''"></p>
                     <section class="border-top pt-3 mb-3">
-                        <h6 class="mb-2">综合趋势观察</h6>
-                        <p class="mb-0 text-light text-wrap" style="white-space: pre-line; line-height: 1.7;" x-text="weeklyReport?.llm?.content?.trend_analysis || weeklyReport?.summary?.trend_analysis || ''"></p>
+                        <h6 class="mb-2" x-text="analyticsReportMode === 'monthly' ? '月度综合趋势' : '综合趋势观察'">综合趋势观察</h6>
+                        <p class="mb-0 text-light text-wrap" style="white-space: pre-line; line-height: 1.7;" x-text="activeAnalyticsReport()?.llm?.content?.trend_analysis || activeAnalyticsReport()?.summary?.trend_analysis || ''"></p>
+                    </section>
+                    <section class="border-top pt-3 mb-3" x-show="analyticsReportMode === 'monthly'">
+                        <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                            <h6 class="mb-0">分周回顾</h6>
+                            <small class="text-muted" x-text="`来源周报 ${(activeAnalyticsReport()?.source_weekly_report_ids || []).length} 份`"></small>
+                        </div>
+                        <div class="monthly-weekly-highlights" x-show="(activeAnalyticsReport()?.weekly_highlights || []).length">
+                            <template x-for="item in (activeAnalyticsReport()?.weekly_highlights || [])" :key="item.report_id">
+                                <article class="monthly-weekly-highlight">
+                                    <div class="small fw-semibold mb-1" x-text="`${item.period?.start || '-'} 至 ${item.period?.end || '-'}`"></div>
+                                    <div class="small text-secondary text-wrap" x-text="item.management_summary || item.trend_analysis || '暂无摘要'"></div>
+                                    <div class="small text-muted mt-1" x-text="item.report_id"></div>
+                                </article>
+                            </template>
+                        </div>
+                        <div class="text-muted small" x-show="!(activeAnalyticsReport()?.weekly_highlights || []).length">暂无已完成周报，本月进展仅使用原始日榜规则计算。</div>
                     </section>
                     <div class="table-responsive scroll-pane">
                         <table class="table table-sm align-middle mb-0">
-                            <thead><tr><th>热剧推荐</th><th>榜单</th><th>排名</th><th>推荐分</th><th>状态</th><th>标签</th><th style="min-width: 270px;">推荐说明</th></tr></thead>
+                            <thead><tr><th x-text="analyticsReportMode === 'monthly' ? '月度 Top 10' : '热剧推荐'">热剧推荐</th><th>榜单</th><th x-text="analyticsReportMode === 'monthly' ? '月末排名' : '排名'">排名</th><th>推荐分</th><th>状态</th><th>标签</th><th style="min-width: 270px;">推荐说明</th></tr></thead>
                             <tbody>
-                                <template x-for="item in (weeklyReport?.recommendations || [])" :key="`${item.board}-${item.title}`">
-                                    <tr><td class="fw-semibold" x-text="item.title"></td><td x-text="item.board"></td><td x-text="item.current_rank"></td><td x-text="item.score"></td><td x-text="item.recommendation"></td><td x-text="(item.tags || []).join(' / ') || '-'"></td><td class="text-secondary text-wrap" x-text="item.reason"></td></tr>
+                                <template x-for="item in (activeAnalyticsReport()?.recommendations || [])" :key="`${item.board}-${item.title}`">
+                                    <tr><td class="fw-semibold" x-text="item.title"></td><td x-text="item.board"></td><td x-text="analyticsReportMode === 'monthly' && item.present_at_end === false ? '未在榜' : item.current_rank"></td><td x-text="item.score"></td><td x-text="item.recommendation"></td><td x-text="(item.tags || []).join(' / ') || '-'"></td><td class="text-secondary text-wrap" x-text="item.reason"></td></tr>
                                 </template>
-                                <tr x-show="!(weeklyReport?.recommendations || []).length"><td colspan="7" class="text-center text-muted py-3">暂无可推荐剧目</td></tr>
+                                <tr x-show="!(activeAnalyticsReport()?.recommendations || []).length"><td colspan="7" class="text-center text-muted py-3">暂无可推荐剧目</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -64,25 +89,39 @@
                         <div class="col-lg-6">
                             <h6 class="mb-2">标签升温</h6>
                             <div class="d-flex flex-wrap gap-2">
-                                <template x-for="item in (weeklyReport?.tags?.theme_tags || []).filter(item => item.net_change >= 0).slice(0, 8)" :key="item.tag">
+                                <template x-for="item in (activeAnalyticsReport()?.tags?.theme_tags || []).filter(item => item.net_change >= 0).slice(0, 8)" :key="item.tag">
                                     <span class="badge text-bg-light border" x-text="`${item.tag} ${item.net_change > 0 ? '+' : ''}${item.net_change}`"></span>
                                 </template>
-                                <span class="text-muted small" x-show="!(weeklyReport?.tags?.theme_tags || []).length">暂无标签数据</span>
+                                <span class="text-muted small" x-show="!(activeAnalyticsReport()?.tags?.theme_tags || []).length">暂无标签数据</span>
                             </div>
                         </div>
                         <div class="col-lg-6">
-                            <h6 class="mb-2">榜单变动</h6>
+                            <h6 class="mb-2" x-text="analyticsReportMode === 'monthly' ? '月初至月末净变动' : '榜单变动'">榜单变动</h6>
                             <div class="d-flex flex-wrap gap-3 small">
-                                <span>新上榜 <strong x-text="weeklyReport?.movements?.summary?.new_entries || 0"></strong></span>
-                                <span>下榜 <strong x-text="weeklyReport?.movements?.summary?.dropped_entries || 0"></strong></span>
-                                <span>上升 <strong x-text="weeklyReport?.movements?.summary?.rank_up || 0"></strong></span>
-                                <span>下降 <strong x-text="weeklyReport?.movements?.summary?.rank_down || 0"></strong></span>
-                                <span>热度指标 <strong x-text="weeklyReport?.heat_analysis?.metric_label || '-'"></strong></span>
+                                <span>新上榜 <strong x-text="activeAnalyticsReport()?.movements?.summary?.new_entries || 0"></strong></span>
+                                <span>下榜 <strong x-text="activeAnalyticsReport()?.movements?.summary?.dropped_entries || 0"></strong></span>
+                                <span>上升 <strong x-text="activeAnalyticsReport()?.movements?.summary?.rank_up || 0"></strong></span>
+                                <span>下降 <strong x-text="activeAnalyticsReport()?.movements?.summary?.rank_down || 0"></strong></span>
+                                <span x-show="analyticsReportMode === 'weekly'">热度指标 <strong x-text="activeAnalyticsReport()?.heat_analysis?.metric_label || '-'"></strong></span>
                             </div>
                         </div>
                     </div>
+                    <div class="row g-3 mt-1 border-top pt-3" x-show="analyticsReportMode === 'monthly'">
+                        <div class="col-lg-6">
+                            <h6 class="mb-2">风险</h6>
+                            <ul class="small text-secondary mb-0 ps-3">
+                                <template x-for="(item, index) in (activeAnalyticsReport()?.llm?.content?.risks || activeAnalyticsReport()?.summary?.risks || [])" :key="`risk-${index}`"><li x-text="item"></li></template>
+                            </ul>
+                        </div>
+                        <div class="col-lg-6">
+                            <h6 class="mb-2">行动建议</h6>
+                            <ul class="small text-secondary mb-0 ps-3">
+                                <template x-for="(item, index) in (activeAnalyticsReport()?.llm?.content?.actions || activeAnalyticsReport()?.summary?.actions || [])" :key="`action-${index}`"><li x-text="item"></li></template>
+                            </ul>
+                        </div>
+                    </div>
                 </div>
-                <div class="card-body text-muted" x-show="!weeklyReport && !weeklyReportLoading">暂无完整周度数据，自动任务会在下个完整数据周生成报告。</div>
-                <div class="card-body text-danger small" x-show="weeklyReportError" x-text="weeklyReportError"></div>
+                <div class="card-body text-muted" x-show="!activeAnalyticsReport() && !analyticsReportLoading()" x-text="analyticsReportMode === 'monthly' ? '暂无月度数据，请确认本月工作日榜单快照是否存在。' : '暂无完整周度数据，自动任务会在下个完整数据周生成报告。'">暂无完整周度数据，自动任务会在下个完整数据周生成报告。</div>
+                <div class="card-body text-danger small" x-show="analyticsReportError()" x-text="analyticsReportError()"></div>
             </div>
         </section>

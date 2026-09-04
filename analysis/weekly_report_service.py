@@ -359,7 +359,12 @@ class WeeklyReportService:
     def _complete_weeks_snapshots(self, platform: str, as_of: datetime) -> list[list[RankSnapshot]]:
         by_day: dict[date, RankSnapshot] = {}
         for snapshot in self.rank_service.list_snapshots(platform):
-            if snapshot.captured_at > as_of:
+            snapshot_as_of = as_of
+            if snapshot.captured_at.tzinfo is not None and as_of.tzinfo is None:
+                snapshot_as_of = as_of.replace(tzinfo=snapshot.captured_at.tzinfo)
+            elif snapshot.captured_at.tzinfo is None and as_of.tzinfo is not None:
+                snapshot_as_of = as_of.replace(tzinfo=None)
+            if snapshot.captured_at > snapshot_as_of:
                 continue
             snapshot_day = snapshot.captured_at.date()
             if snapshot_day not in by_day or snapshot.captured_at > by_day[snapshot_day].captured_at:

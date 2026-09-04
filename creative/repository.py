@@ -1046,7 +1046,8 @@ class CreativeRepository:
                 if self._matches_rank_source(item, rank_source)
             ]
         if status:
-            merged = [item for item in merged if item.get("status") == status]
+            statuses = {value.strip() for value in status.split(",") if value.strip()}
+            merged = [item for item in merged if item.get("status") in statuses]
         if has_locked_breakdown is True:
             merged = [item for item in merged if item.get("locked_breakdown_id")]
         elif has_locked_breakdown is False:
@@ -1064,6 +1065,20 @@ class CreativeRepository:
         with self._connect() as conn:
             conn.execute("UPDATE creative_topics SET status = ?, decision_note = ?, updated_at = ? WHERE id = ? AND deleted = 0", (status, decision_note, time.time(), topic_id))
         return self.get_topic(topic_id)
+
+    def delete_topic(self, topic_id: int) -> dict[str, Any] | None:
+        topic = self.get_topic(topic_id)
+        if topic is None:
+            return None
+        if topic.get("status") != "archived":
+            raise ValueError("只能删除已归档选题")
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE creative_topics SET deleted = 1, updated_at = ? "
+                "WHERE id = ? AND deleted = 0",
+                (time.time(), topic_id),
+            )
+        return topic
 
     def decide_topic(
         self, topic_id: int, status: str, decision_note: str, actor_user_id: str

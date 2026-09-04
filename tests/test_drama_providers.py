@@ -13,6 +13,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qsl, urlsplit
 
 import httpx
@@ -32,7 +33,11 @@ from agents.drama_providers.third_party import (
     ThirdPartyProviderConfig,
     build_third_party_registry,
 )
-from agents.hongguo_third_party_downloader import download_third_party_episode
+from agents import hongguo_third_party_downloader
+from agents.hongguo_third_party_downloader import (
+    download_third_party_episode,
+    validate_downloaded_mp4,
+)
 
 
 class FakeProvider:
@@ -222,7 +227,7 @@ def test_third_party_default_clients_ignore_broken_environment_proxy(
         base_url = f"http://127.0.0.1:{server.server_port}"
         registry = build_third_party_registry({"config_url": f"{base_url}/config"})
         report = registry.search_all("接口连通测试")
-        provider = registry.get("hg")
+        provider = registry.get("hg1")
         episode = provider.episodes("book-1")[0]
         media = provider.resolve_playable(episode.series_ref, episode.episode_ref)
         result = provider.download_episode(media, tmp_path / "episode.mp4")
@@ -356,10 +361,8 @@ def test_third_party_registry_loads_all_configured_sources_once():
 def test_default_dynamic_entry_resolves_current_config_center_and_sources():
     calls: list[tuple[str, dict]] = []
     expected_sources = (
-        "hg",
         "hg1",
         "hg2",
-        "hgmj",
         "hm",
         "huolong",
         "xingyadongli",
@@ -413,10 +416,10 @@ def test_incomplete_provider_config_is_reported_without_hiding_valid_source():
         if url == "https://config.example.test/providers":
             return {
                 "platforms": {
-                    "hg": {
-                        "searchUrl": "https://api.example.test/hg/search",
-                        "bookUrl": "https://api.example.test/hg/book",
-                        "playUrl": "https://api.example.test/hg/play",
+                    "hg1": {
+                        "searchUrl": "https://api.example.test/hg1/search",
+                        "bookUrl": "https://api.example.test/hg1/book",
+                        "playUrl": "https://api.example.test/hg1/play",
                     },
                     "hm": {
                         "searchUrl": "https://api.example.test/hm/search",
@@ -424,8 +427,8 @@ def test_incomplete_provider_config_is_reported_without_hiding_valid_source():
                     },
                 }
             }
-        assert url == "https://api.example.test/hg/search"
-        return {"data": [{"book_id": "hg-1", "title": "目标短剧"}]}
+        assert url == "https://api.example.test/hg1/search"
+        return {"data": [{"book_id": "hg1-1", "title": "目标短剧"}]}
 
     registry = build_third_party_registry(
         {"config_url": "https://config.example.test/providers"},
@@ -437,7 +440,7 @@ def test_incomplete_provider_config_is_reported_without_hiding_valid_source():
     assert [item.provider_id for item in report.providers] == list(
         DOWNLOAD_SEARCH_SOURCES
     )
-    assert [item.provider_id for item in report.candidates] == ["hg"]
+    assert [item.provider_id for item in report.candidates] == ["hg1"]
     hm_status = next(item for item in report.providers if item.provider_id == "hm")
     assert hm_status.status == "error"
     assert hm_status.error_code == "configuration_error"
@@ -486,22 +489,45 @@ def test_third_party_search_returns_provider_bound_candidate(monkeypatch):
     assert candidate.episode_count == 18
 
 
-def test_third_party_exact_search_filters_related_titles(monkeypatch):
-    provider = _provider("hg")
+def test_third_party_exact_search_supports_title_containment_for_four_chars(
+    monkeypatch,
+):
+    provider = _provider("hg1")
     monkeypatch.setattr(
         provider,
         "_json",
         lambda url, **params: {
             "data": [
-                {"book_id": "related", "title": "目标短剧续篇"},
+                {"book_id": "contained", "title": "目标短剧续篇"},
                 {"book_id": "exact", "title": "目标 短剧"},
+                {"book_id": "too-short", "title": "目标短"},
+                {"book_id": "unrelated", "title": "另一部短剧"},
             ]
         },
     )
 
     matches = provider.search_exact("目标短剧")
 
-    assert [item.series_ref for item in matches] == ["exact"]
+    assert [item.series_ref for item in matches] == ["contained", "exact"]
+
+
+def test_third_party_title_containment_requires_four_normalized_chars(monkeypatch):
+    provider = _provider("hg1")
+    monkeypatch.setattr(
+        provider,
+        "_json",
+        lambda url, **params: {
+            "data": [
+                {"book_id": "reverse-contained", "title": "目标短剧"},
+                {"book_id": "short-contained", "title": "目标剧续篇"},
+            ]
+        },
+    )
+
+    assert [
+        item.series_ref for item in provider.search_exact("目标短剧完整版")
+    ] == ["reverse-contained"]
+    assert provider.search_exact("目标剧") == []
 
 
 def test_third_party_provider_keeps_episode_identity_and_required_book_id(
@@ -647,6 +673,97 @@ def test_third_party_download_resumes_partial_file(tmp_path: Path):
     assert not target.with_suffix(".mp4.part").exists()
     assert requests[0]["headers"]["Range"] == "bytes=3-"
     assert progress[-1] == (6, 6)
+
+
+def test_validate_downloaded_mp4_skips_transcode_for_h264_aac(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    target = tmp_path / "video.mp4"
+    target.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"x" * 2048)
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(
+        hongguo_third_party_downloader.shutil,
+        "which",
+        lambda command: command,
+    )
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {"index": 0, "codec_type": "video", "codec_name": "h264"},
+                        {"index": 1, "codec_type": "audio", "codec_name": "aac"},
+                    ]
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(hongguo_third_party_downloader.subprocess, "run", fake_run)
+
+    validate_downloaded_mp4(target)
+
+    assert len(commands) == 1
+    assert commands[0][0] == "ffprobe"
+
+
+def test_validate_downloaded_mp4_transcodes_incompatible_codecs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    target = tmp_path / "video.mp4"
+    original = b"\x00\x00\x00\x18ftypmp42" + b"x" * 2048
+    target.write_bytes(original)
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(
+        hongguo_third_party_downloader.shutil,
+        "which",
+        lambda command: command,
+    )
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        if command[0] == "ffprobe":
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "streams": [
+                            {
+                                "index": 0,
+                                "codec_type": "video",
+                                "codec_name": "hevc",
+                            },
+                            {
+                                "index": 1,
+                                "codec_type": "audio",
+                                "codec_name": "mp3",
+                            },
+                        ]
+                    }
+                ),
+                stderr="",
+            )
+        Path(command[-1]).write_bytes(b"browser-compatible")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(hongguo_third_party_downloader.subprocess, "run", fake_run)
+
+    validate_downloaded_mp4(target)
+
+    assert target.read_bytes() == b"browser-compatible"
+    assert len(commands) == 2
+    ffmpeg_command = commands[1]
+    assert ffmpeg_command[0] == "ffmpeg"
+    assert ffmpeg_command[ffmpeg_command.index("-c:v") + 1] == "libx264"
+    assert ffmpeg_command[ffmpeg_command.index("-pix_fmt") + 1] == "yuv420p"
+    assert ffmpeg_command[ffmpeg_command.index("-c:a") + 1] == "aac"
+    assert ffmpeg_command[ffmpeg_command.index("-movflags") + 1] == "+faststart"
+    assert not target.with_name("video.browser.mp4").exists()
 
 
 def test_third_party_download_retries_invalid_mp4_and_keeps_final_part(

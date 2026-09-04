@@ -21,7 +21,7 @@ from creative.repository import CreativeRepository
 from identity.dependencies import current_principal
 from identity.permission_service import PermissionService
 from identity.schema import Principal
-from runtime.job_manager import JobConflictError
+from runtime.job_manager import JobConflictError, JobNotFoundError
 
 from .service import (
     build_project_source,
@@ -140,6 +140,10 @@ def build_script_review_router(
             return review
         try:
             job = job_manager.get_job(str(review["job_id"]))
+        except JobNotFoundError:
+            return repository.cancel_script_review(
+                review["id"], "审核任务已不存在"
+            )
         except Exception:
             return review
         job_status = str(job.get("status") or "")
@@ -303,6 +307,7 @@ def build_script_review_router(
             raise HTTPException(403, "没有访问此审核记录的权限")
         if bool((review.get("source_payload") or {}).get("audit_scope")):
             raise HTTPException(409, "完整项目审核不属于正式审核流程")
+        review = refresh_review(review)
         if review["status"] in {"queued", "running"}:
             raise HTTPException(409, "审核仍在执行，无法删除")
         repository.delete_script_review(review_id)

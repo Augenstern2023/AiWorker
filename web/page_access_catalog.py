@@ -151,6 +151,7 @@ _SELECTION_CONTENT_WORKSPACE: tuple[ApiRoute, ...] = (
     ("GET", "/api/creative/topics"),
     ("GET", "/api/creative/topics/{topic_id}"),
     ("PATCH", "/api/creative/topics/{topic_id}"),
+    ("DELETE", "/api/creative/topics/{topic_id}"),
     ("GET", "/api/creative/topics/{topic_id}/transcripts"),
     ("GET", "/api/creative/topics/{topic_id}/transcripts/download"),
     ("GET", "/api/creative/topics/{topic_id}/breakdowns"),
@@ -327,6 +328,9 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
         ("GET", "/api/analytics/weekly-reports"),
         ("GET", "/api/analytics/weekly-reports/{report_id}"),
         ("GET", "/api/analytics/weekly-reports/{report_id}/export"),
+        ("GET", "/api/analytics/monthly-reports"),
+        ("GET", "/api/analytics/monthly-reports/{report_id}"),
+        ("GET", "/api/analytics/monthly-reports/{report_id}/export"),
     ),
     "/admin/data": (
         ("GET", "/api/files"),

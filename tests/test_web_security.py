@@ -9,11 +9,15 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from sqlalchemy.engine import make_url
 
 from identity.api import build_identity_router
 from identity.repository import IdentityRepository
@@ -28,10 +32,11 @@ from WebGUI import (
     _api_permission,
 )
 from audit.service import AuditService
+from system_database import SystemDatabase, SystemDatabaseSettings
+from system_database.schema import SYSTEM_METADATA
 
 
-def _secured_app(tmp_path: Path) -> tuple[FastAPI, SessionService]:
-    repository = IdentityRepository(tmp_path / "system.db")
+def _secured_app(repository: IdentityRepository) -> tuple[FastAPI, SessionService]:
     session_service = SessionService(repository, secure_cookie=False)
     app = FastAPI()
     seen_request_ids: list[str | None] = []
@@ -55,8 +60,31 @@ def _secured_app(tmp_path: Path) -> tuple[FastAPI, SessionService]:
     return app, session_service
 
 
-def test_request_id_is_available_before_logging_and_returned(tmp_path: Path):
-    app, _ = _secured_app(tmp_path)
+@pytest.fixture
+def secured_app(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> tuple[FastAPI, SessionService]:
+    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not postgres_url:
+        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required")
+    if make_url(postgres_url).database == "aiworker_system":
+        raise ValueError("tests must not run against the production system database")
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
+    command.upgrade(Config("alembic.ini"), "head")
+    database = SystemDatabase(SystemDatabaseSettings(postgres_url))
+    table_names = ", ".join(
+        f'"{name}"' for name in sorted(SYSTEM_METADATA.tables)
+    )
+    with database.transaction() as connection:
+        connection.exec_driver_sql(
+            f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE"
+        )
+    request.addfinalizer(database.dispose)
+    return _secured_app(IdentityRepository(database))
+
+
+def test_request_id_is_available_before_logging_and_returned(secured_app):
+    app, _ = secured_app
 
     response = TestClient(app).post(
         "/api/public-write", headers={"X-Request-ID": "client-request-123"}
@@ -67,8 +95,8 @@ def test_request_id_is_available_before_logging_and_returned(tmp_path: Path):
     assert app.state.seen_request_ids == []
 
 
-def test_authenticated_write_requires_matching_csrf_token(tmp_path: Path):
-    app, _ = _secured_app(tmp_path)
+def test_authenticated_write_requires_matching_csrf_token(secured_app):
+    app, _ = secured_app
     client = TestClient(app)
     setup = client.post(
         "/api/auth/setup",
@@ -95,8 +123,8 @@ def test_authenticated_write_requires_matching_csrf_token(tmp_path: Path):
     assert accepted.status_code == 200
 
 
-def test_login_and_first_run_setup_are_csrf_exempt(tmp_path: Path):
-    app, _ = _secured_app(tmp_path)
+def test_login_and_first_run_setup_are_csrf_exempt(secured_app):
+    app, _ = secured_app
     client = TestClient(app)
 
     setup = client.post(
@@ -117,8 +145,8 @@ def test_login_and_first_run_setup_are_csrf_exempt(tmp_path: Path):
     assert login.status_code == 200
 
 
-def test_protected_api_rejects_anonymous_write_before_csrf(tmp_path: Path):
-    app, _ = _secured_app(tmp_path)
+def test_protected_api_rejects_anonymous_write_before_csrf(secured_app):
+    app, _ = secured_app
 
     response = TestClient(app).post("/api/public-write")
 

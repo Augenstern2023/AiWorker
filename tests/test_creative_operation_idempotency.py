@@ -212,12 +212,19 @@ def test_replay_returns_existing_beats_after_authority_pointers_change(
     first = repository.create_episode_beats(
         project["id"], 1, content, operation_id="writer-action-replay:beats:1"
     )
-    replacement = repository.create_blueprints(
-        project["id"],
-        [{"content": valid_original_brief("替代方向")}],
-        direction_type="original",
-    )[0]
-    repository.lock_brief(replacement["id"])
+    current = repository.get_project(project["id"])
+    assert current is not None
+    replacement = repository.create_blueprint_revision(
+        int(current["locked_brief_id"]),
+        valid_original_brief("替代方向"),
+        None,
+        "authority-change:brief-revision",
+        expected_project_revision=int(current["revision"]),
+        expected_project_id=project["id"],
+    )
+    repository.lock_brief(
+        replacement["id"], expected_revision=int(current["revision"])
+    )
     assert repository.get_project(project["id"])["outline_batch_id"] is None
 
     replay = repository.create_episode_beats(

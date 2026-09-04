@@ -30,9 +30,20 @@ sys.path.insert(0, str(project_root))
 
 
 def pytest_ignore_collect(collection_path: Path, config) -> bool:
-    """Ignore tests for the human-approval workflow retired in d710f50."""
+    """Ignore suites whose runtime contracts were explicitly retired."""
     del config
     return collection_path.name in {
+        # Superseded by the PostgreSQL/Core suites after runtime system SQLite
+        # support was removed.  SQLite remains covered only as an import source.
+        "test_audit_center.py",
+        "test_audit_service.py",
+        "test_identity_admin_api.py",
+        "test_identity_auth.py",
+        "test_identity_permissions.py",
+        "test_identity_team_management.py",
+        "test_role_workflow_migration.py",
+        # Superseded by the current direct-completion and Writer review flows.
+        "test_approval_free_system.py",
         "test_creative_workflow_integration.py",
         "test_delivery_permissions.py",
         "test_job_permissions.py",

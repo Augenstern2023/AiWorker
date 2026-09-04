@@ -457,12 +457,29 @@ def test_writer_non_brief_generation_does_not_prepare_original_seed(
 
 
 def lock_competing_brief(context: SimpleNamespace, project_id: int) -> dict[str, Any]:
-    brief = context.repository.create_blueprints(
-        project_id,
-        [{"content": valid_brief("并发 Brief")}],
-        direction_type="original",
-    )[0]
-    return context.repository.lock_brief(brief["id"])
+    project = context.repository.get_project(project_id)
+    assert project is not None
+    locked_brief_id = project.get("locked_brief_id")
+    if locked_brief_id:
+        reference = context.repository.create_blueprint_revision(
+            int(locked_brief_id),
+            valid_brief("并发 Brief"),
+            None,
+            f"competing-brief:{project_id}:{project.get('revision') or 0}",
+            expected_project_revision=int(project.get("revision") or 0),
+            expected_project_id=project_id,
+        )
+        brief_id = int(reference["id"])
+    else:
+        brief = context.repository.create_blueprints(
+            project_id,
+            [{"content": valid_brief("并发 Brief")}],
+            direction_type="original",
+        )[0]
+        brief_id = int(brief["id"])
+    return context.repository.lock_brief(
+        brief_id, expected_revision=int(project.get("revision") or 0)
+    )
 
 
 def seed_locked_episode_chain(context: SimpleNamespace, request_id: str) -> dict[str, Any]:

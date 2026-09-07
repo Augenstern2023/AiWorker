@@ -24,7 +24,7 @@ from typing import Any
 import httpx
 
 from agents.hongguo_capture import CapturedVideoVariant, HongguoCaptureCatalog
-from agents.spade_cenc import decrypt_mp4_cenc, derive_content_key
+from agents.spade_cenc import decrypt_mp4_cenc, derive_content_key, mp4_contains_cenc
 
 
 class CaptureDownloadError(RuntimeError):
@@ -334,68 +334,7 @@ class CapturedMediaDownloader:
 
     @staticmethod
     def _file_contains_any_marker(path: Path) -> bool:
-        marker_types = {b"tenc", b"encv", b"enca"}
-        container_types = {
-            b"moov",
-            b"trak",
-            b"mdia",
-            b"minf",
-            b"stbl",
-            b"stsd",
-            b"sinf",
-            b"schi",
-            b"edts",
-            b"dinf",
-            b"mvex",
-            b"moof",
-            b"traf",
-            b"mfra",
-            b"udta",
-            b"meta",
-            b"ilst",
-        }
-
-        with path.open("rb") as file:
-            file_size = path.stat().st_size
-
-            def walk_boxes(start: int, end: int, depth: int = 0) -> bool:
-                if depth > 16:
-                    return False
-                offset = start
-                while offset + 8 <= end:
-                    file.seek(offset)
-                    header = file.read(8)
-                    if len(header) != 8:
-                        return False
-                    box_size = struct.unpack(">I", header[:4])[0]
-                    box_type = header[4:8]
-                    header_size = 8
-                    if box_size == 1:
-                        extended = file.read(8)
-                        if len(extended) != 8:
-                            return False
-                        box_size = struct.unpack(">Q", extended)[0]
-                        header_size = 16
-                    elif box_size == 0:
-                        box_size = end - offset
-                    if box_size < header_size or offset + box_size > end:
-                        return False
-                    if box_type in marker_types:
-                        return True
-                    if box_type in container_types:
-                        child_start = offset + header_size
-                        if box_type == b"stsd":
-                            child_start += 8
-                        elif box_type == b"meta":
-                            child_start += 4
-                        if child_start < offset + box_size and walk_boxes(
-                            child_start, offset + box_size, depth + 1
-                        ):
-                            return True
-                    offset += box_size
-                return False
-
-            return walk_boxes(0, file_size)
+        return mp4_contains_cenc(path)
 
     def _ensure_before_deadline(
         self, deadline: CaptureDeadline | None, episode: int | None = None

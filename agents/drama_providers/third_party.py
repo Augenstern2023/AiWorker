@@ -8,11 +8,12 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -52,6 +53,32 @@ HttpClientFactory = Callable[[], Any]
 
 def _text(value: Any) -> str:
     return "" if value is None else str(value).strip()
+
+
+def _extract_embedded_query_value(url: str, parameter: str) -> tuple[str, str]:
+    """Extract a private URL value without normalizing the remaining signed query."""
+
+    parameter_name = _text(parameter)
+    if not parameter_name:
+        return url, ""
+    parsed = urlsplit(url)
+    expected = parameter_name.casefold()
+    kept: list[str] = []
+    matched = False
+    value = ""
+    for segment in parsed.query.split("&"):
+        raw_name, separator, raw_value = segment.partition("=")
+        if unquote(raw_name).casefold() != expected:
+            kept.append(segment)
+            continue
+        matched = True
+        if not value and separator:
+            value = unquote(raw_value).strip()
+    if not matched or not value:
+        return url, ""
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, "&".join(kept), parsed.fragment)
+    ), value
 
 
 def _data_list(payload: Any) -> list[dict[str, Any]]:
@@ -185,6 +212,7 @@ class ThirdPartyProviderConfig:
     play_requires_book_id: bool = False
     play_level: str = ""
     play_level_param: str = "level"
+    play_url_tag_param: str = ""
 
 
 class UnavailableThirdPartyDramaProvider:
@@ -418,11 +446,19 @@ class ThirdPartyDramaProvider:
         url = _text(data.get("video_url") or data.get("url"))
         if not url.startswith(("http://", "https://")):
             raise ProviderFailure("play_url_expired", "播放接口未返回有效视频地址")
+        url, decrypt_key = _extract_embedded_query_value(
+            url, self.config.play_url_tag_param
+        )
+        if decrypt_key and re.fullmatch(r"[0-9a-fA-F]{32}", decrypt_key) is None:
+            raise ProviderFailure(
+                "decryption_key_invalid", "播放接口返回的 CENC 解密密钥格式无效"
+            )
         return PlayableMedia(
             provider_id=self.provider_id,
             series_ref=_text(series_ref),
             episode_ref=_text(episode_ref),
             url=url,
+            decrypt_key=decrypt_key,
         )
 
     def _client(self) -> Any:
@@ -548,6 +584,7 @@ def build_third_party_registry(
             play_requires_book_id=bool(raw.get("playRequiresBookId")),
             play_level=_text(play_option.get("clarity")),
             play_level_param=_text(play_option.get("paramKey")) or "level",
+            play_url_tag_param=_text(raw.get("playUrlTagParam")),
         )
         missing = [
             name

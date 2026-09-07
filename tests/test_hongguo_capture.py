@@ -37,7 +37,12 @@ from agents.hongguo_drama import (
     public_settings,
     save_settings,
 )
-from agents.spade_cenc import _cenc_ctr, decrypt_mp4_cenc, derive_content_key
+from agents.spade_cenc import (
+    _cenc_ctr,
+    decrypt_mp4_cenc,
+    derive_content_key,
+    mp4_contains_cenc,
+)
 from core.job import CrawlJob
 
 
@@ -811,6 +816,8 @@ def test_cenc_detection_ignores_marker_bytes_inside_media_samples(tmp_path: Path
 
     assert CapturedMediaDownloader._file_contains_any_marker(clear_path) is False
     assert CapturedMediaDownloader._file_contains_any_marker(encrypted_path) is True
+    assert mp4_contains_cenc(clear_path) is False
+    assert mp4_contains_cenc(encrypted_path) is True
 
 
 def test_download_retries_main_then_uses_backup_without_leaking_urls(tmp_path: Path):

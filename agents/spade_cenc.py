@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import binascii
 import struct
+from pathlib import Path
 
 try:
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -24,6 +25,74 @@ except ImportError:  # pragma: no cover - only used by minimal deployments
 
     def _aes_encrypt_block(key: bytes, block: bytes) -> bytes:
         return AES.new(key, AES.MODE_ECB).encrypt(block)
+
+
+def mp4_contains_cenc(path: str | Path) -> bool:
+    """Inspect MP4 boxes for CENC metadata without scanning media samples."""
+
+    media_path = Path(path)
+    marker_types = {b"tenc", b"encv", b"enca"}
+    container_types = {
+        b"moov",
+        b"trak",
+        b"mdia",
+        b"minf",
+        b"stbl",
+        b"stsd",
+        b"sinf",
+        b"schi",
+        b"edts",
+        b"dinf",
+        b"mvex",
+        b"moof",
+        b"traf",
+        b"mfra",
+        b"udta",
+        b"meta",
+        b"ilst",
+    }
+
+    with media_path.open("rb") as file:
+        file_size = media_path.stat().st_size
+
+        def walk_boxes(start: int, end: int, depth: int = 0) -> bool:
+            if depth > 16:
+                return False
+            offset = start
+            while offset + 8 <= end:
+                file.seek(offset)
+                header = file.read(8)
+                if len(header) != 8:
+                    return False
+                box_size = struct.unpack(">I", header[:4])[0]
+                box_type = header[4:8]
+                header_size = 8
+                if box_size == 1:
+                    extended = file.read(8)
+                    if len(extended) != 8:
+                        return False
+                    box_size = struct.unpack(">Q", extended)[0]
+                    header_size = 16
+                elif box_size == 0:
+                    box_size = end - offset
+                if box_size < header_size or offset + box_size > end:
+                    return False
+                if box_type in marker_types:
+                    return True
+                if box_type in container_types:
+                    child_start = offset + header_size
+                    if box_type == b"stsd":
+                        child_start += 8
+                    elif box_type == b"meta":
+                        child_start += 4
+                    if child_start < offset + box_size and walk_boxes(
+                        child_start, offset + box_size, depth + 1
+                    ):
+                        return True
+                offset += box_size
+            return False
+
+        return walk_boxes(0, file_size)
 
 
 def derive_content_key(spade_b64: str) -> bytes:

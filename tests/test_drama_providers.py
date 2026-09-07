@@ -9,6 +9,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import struct
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -35,9 +39,11 @@ from agents.drama_providers.third_party import (
 )
 from agents import hongguo_third_party_downloader
 from agents.hongguo_third_party_downloader import (
+    decrypt_downloaded_cenc,
     download_third_party_episode,
     validate_downloaded_mp4,
 )
+from agents.spade_cenc import mp4_contains_cenc
 
 
 class FakeProvider:
@@ -411,6 +417,31 @@ def test_default_dynamic_entry_resolves_current_config_center_and_sources():
     assert registry.get("hg1").config.play_level == "1080p"
 
 
+def test_third_party_registry_loads_embedded_decryption_key_parameter():
+    def fake_json(url: str, params: dict) -> dict:
+        return {
+            "platforms": [
+                {
+                    "value": source,
+                    "searchUrl": f"https://api.example.test/{source}/search",
+                    "bookUrl": f"https://api.example.test/{source}/book",
+                    "playUrl": f"https://api.example.test/{source}/play",
+                    "playUrlTagParam": "rid" if source in {"hg1", "hg2"} else "",
+                }
+                for source in DOWNLOAD_SEARCH_SOURCES
+            ]
+        }
+
+    registry = build_third_party_registry(
+        {"config_url": "https://config.example.test/providers"},
+        request_json=fake_json,
+    )
+
+    assert registry.get("hg1").config.play_url_tag_param == "rid"
+    assert registry.get("hg2").config.play_url_tag_param == "rid"
+    assert registry.get("hm").config.play_url_tag_param == ""
+
+
 def test_incomplete_provider_config_is_reported_without_hiding_valid_source():
     def fake_json(url: str, params: dict) -> dict:
         if url == "https://config.example.test/providers":
@@ -572,6 +603,153 @@ def test_third_party_provider_keeps_episode_identity_and_required_book_id(
             {"video_id": "hm-video-1", "book_id": "hm-book-1"},
         ),
     ]
+
+
+def test_resolve_playable_extracts_key_and_preserves_signed_query_bytes(monkeypatch):
+    key = "0123456789abcdef0123456789abcdef"
+    provider = ThirdPartyDramaProvider(
+        ThirdPartyProviderConfig(
+            provider_id="hg1",
+            display_name="红短剧",
+            search_url="https://api.example.test/search",
+            book_url="https://api.example.test/book",
+            play_url="https://api.example.test/play",
+            play_url_tag_param="rid",
+        )
+    )
+    monkeypatch.setattr(
+        provider,
+        "_json",
+        lambda url, **params: {
+            "code": 200,
+            "data": {
+                "video_url": (
+                    "https://video.example.test/1.mp4?"
+                    f"sig=a%2Bb&RID={key}&keep=%2Fraw+plus&rid=ignored#episode"
+                )
+            },
+        },
+    )
+
+    media = provider.resolve_playable("book-1", "video-1")
+
+    assert media.decrypt_key == key
+    assert media.url == (
+        "https://video.example.test/1.mp4?"
+        "sig=a%2Bb&keep=%2Fraw+plus#episode"
+    )
+    assert key not in repr(media)
+
+
+def test_resolve_playable_rejects_invalid_embedded_decryption_key(monkeypatch):
+    provider = ThirdPartyDramaProvider(
+        ThirdPartyProviderConfig(
+            provider_id="hg1",
+            display_name="红短剧",
+            search_url="https://api.example.test/search",
+            book_url="https://api.example.test/book",
+            play_url="https://api.example.test/play",
+            play_url_tag_param="rid",
+        )
+    )
+    monkeypatch.setattr(
+        provider,
+        "_json",
+        lambda url, **params: {
+            "code": 200,
+            "data": {"video_url": "https://video.example.test/1.mp4?rid=not-a-key"},
+        },
+    )
+
+    with pytest.raises(ProviderFailure) as captured:
+        provider.resolve_playable("book-1", "video-1")
+
+    assert captured.value.code == "decryption_key_invalid"
+    assert "not-a-key" not in captured.value.safe_message
+
+
+def test_third_party_download_does_not_retry_invalid_decryption_key(tmp_path: Path):
+    attempts = 0
+
+    class InvalidKeyProvider:
+        provider_id = "hg1"
+
+        def resolve_playable(self, series_ref, episode_ref):
+            nonlocal attempts
+            attempts += 1
+            raise ProviderFailure(
+                "decryption_key_invalid", "播放接口返回的 CENC 解密密钥格式无效"
+            )
+
+        def download_episode(self, media, target, **kwargs):
+            pytest.fail("invalid keys must fail before download")
+
+    with pytest.raises(ProviderFailure) as captured:
+        download_third_party_episode(
+            InvalidKeyProvider(), "series-1", "episode-1", tmp_path / "video.mp4"
+        )
+
+    assert captured.value.code == "decryption_key_invalid"
+    assert attempts == 1
+
+
+def test_resolve_playable_uses_first_nonempty_duplicate_key(monkeypatch):
+    key = "fedcba9876543210fedcba9876543210"
+    provider = ThirdPartyDramaProvider(
+        ThirdPartyProviderConfig(
+            provider_id="hg2",
+            display_name="红漫剧",
+            search_url="https://api.example.test/search",
+            book_url="https://api.example.test/book",
+            play_url="https://api.example.test/play",
+            play_url_tag_param="rid",
+        )
+    )
+    monkeypatch.setattr(
+        provider,
+        "_json",
+        lambda url, **params: {
+            "code": 200,
+            "data": {
+                "video_url": (
+                    "https://video.example.test/1.mp4?rid=&keep=raw%2Bvalue&"
+                    f"RID={key}"
+                )
+            },
+        },
+    )
+
+    media = provider.resolve_playable("book-1", "video-1")
+
+    assert media.decrypt_key == key
+    assert media.url == "https://video.example.test/1.mp4?keep=raw%2Bvalue"
+
+
+def test_resolve_playable_keeps_clear_url_when_embedded_key_is_absent(monkeypatch):
+    provider = ThirdPartyDramaProvider(
+        ThirdPartyProviderConfig(
+            provider_id="hg1",
+            display_name="红短剧",
+            search_url="https://api.example.test/search",
+            book_url="https://api.example.test/book",
+            play_url="https://api.example.test/play",
+            play_url_tag_param="rid",
+        )
+    )
+    original_url = "https://video.example.test/clear.mp4?sig=a%2Bb#episode"
+    monkeypatch.setattr(
+        provider,
+        "_json",
+        lambda url, **params: {
+            "code": 200,
+            "data": {"video_url": original_url},
+        },
+    )
+
+    media = provider.resolve_playable("book-1", "video-1")
+
+    assert media.url == original_url
+    assert media.decrypt_key == ""
 
 
 def test_third_party_provider_forwards_configured_play_level(monkeypatch):
@@ -764,6 +942,462 @@ def test_validate_downloaded_mp4_transcodes_incompatible_codecs(
     assert ffmpeg_command[ffmpeg_command.index("-c:a") + 1] == "aac"
     assert ffmpeg_command[ffmpeg_command.index("-movflags") + 1] == "+faststart"
     assert not target.with_name("video.browser.mp4").exists()
+
+
+def _test_mp4_box(box_type: bytes, payload: bytes) -> bytes:
+    return struct.pack(">I4s", len(payload) + 8, box_type) + payload
+
+
+def _test_clear_mp4() -> bytes:
+    return _test_mp4_box(b"ftyp", b"isom" + bytes(4)) + _test_mp4_box(
+        b"mdat", bytes(2048)
+    )
+
+
+def _test_cenc_mp4() -> bytes:
+    return (
+        _test_mp4_box(b"ftyp", b"isom" + bytes(4))
+        + _test_mp4_box(b"moov", _test_mp4_box(b"tenc", bytes(8)))
+        + _test_mp4_box(b"mdat", bytes(2048))
+    )
+
+
+def test_third_party_download_decrypts_embedded_key_before_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    key = "0123456789abcdef0123456789abcdef"
+    downloaded_targets: list[Path] = []
+    commands: list[list[str]] = []
+
+    class EncryptedProvider:
+        provider_id = "hg1"
+
+        def resolve_playable(self, series_ref, episode_ref):
+            return PlayableMedia(
+                provider_id="hg1",
+                series_ref=series_ref,
+                episode_ref=episode_ref,
+                url="https://video.example.test/encrypted.mp4",
+                decrypt_key=key,
+            )
+
+        def download_episode(self, media, target, **kwargs):
+            path = Path(target)
+            downloaded_targets.append(path)
+            path.write_bytes(_test_cenc_mp4())
+            return DownloadResult("hg1", path, path.stat().st_size, {"safe": True})
+
+    monkeypatch.setattr(
+        hongguo_third_party_downloader.shutil, "which", lambda command: command
+    )
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        if command[0] == "ffmpeg":
+            Path(command[-1]).write_bytes(_test_clear_mp4())
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {"index": 0, "codec_type": "video", "codec_name": "h264"},
+                        {"index": 1, "codec_type": "audio", "codec_name": "aac"},
+                    ]
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(hongguo_third_party_downloader.subprocess, "run", fake_run)
+    target = tmp_path / "video.mp4"
+
+    result = download_third_party_episode(
+        EncryptedProvider(), "series-1", "episode-1", target
+    )
+
+    assert downloaded_targets == [tmp_path / "video.enc"]
+    assert target.read_bytes() == _test_clear_mp4()
+    assert not (tmp_path / "video.enc").exists()
+    assert not (tmp_path / "video.enc.part").exists()
+    assert result.path == target
+    assert result.metadata == {"safe": True}
+    decrypt_command = commands[0]
+    assert decrypt_command[decrypt_command.index("-decryption_key") + 1] == key
+    assert decrypt_command.index("-decryption_key") < decrypt_command.index("-i")
+    assert decrypt_command[decrypt_command.index("-c") + 1] == "copy"
+
+
+def test_third_party_download_retries_cenc_missing_embedded_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    attempts: list[str] = []
+
+    class MissingKeyProvider:
+        provider_id = "hg1"
+
+        def resolve_playable(self, series_ref, episode_ref):
+            attempts.append("resolve")
+            return PlayableMedia(
+                provider_id="hg1",
+                series_ref=series_ref,
+                episode_ref=episode_ref,
+                url="https://video.example.test/encrypted.mp4",
+            )
+
+        def download_episode(self, media, target, **kwargs):
+            attempts.append("download")
+            path = Path(target)
+            path.write_bytes(_test_cenc_mp4())
+            return DownloadResult("hg1", path, path.stat().st_size, {})
+
+    monkeypatch.setattr(
+        hongguo_third_party_downloader.shutil, "which", lambda command: command
+    )
+    monkeypatch.setattr(
+        hongguo_third_party_downloader.subprocess,
+        "run",
+        lambda command, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {"index": 0, "codec_type": "video", "codec_name": "h264"}
+                    ]
+                }
+            ),
+            stderr="",
+        ),
+    )
+    target = tmp_path / "video.mp4"
+
+    with pytest.raises(ProviderFailure) as captured:
+        download_third_party_episode(
+            MissingKeyProvider(), "series-1", "episode-1", target
+        )
+
+    assert captured.value.code == "decryption_key_missing"
+    assert attempts == ["resolve", "download", "resolve", "download"]
+    assert not target.exists()
+    assert target.with_suffix(".mp4.part").exists()
+
+
+def test_third_party_download_does_not_retry_when_ffmpeg_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    key = "0123456789abcdef0123456789abcdef"
+    attempts: list[str] = []
+
+    class EncryptedProvider:
+        provider_id = "hg1"
+
+        def resolve_playable(self, series_ref, episode_ref):
+            attempts.append("resolve")
+            return PlayableMedia(
+                provider_id="hg1",
+                series_ref=series_ref,
+                episode_ref=episode_ref,
+                url="https://video.example.test/encrypted.mp4",
+                decrypt_key=key,
+            )
+
+        def download_episode(self, media, target, **kwargs):
+            attempts.append("download")
+            path = Path(target)
+            path.write_bytes(_test_cenc_mp4())
+            return DownloadResult("hg1", path, path.stat().st_size, {})
+
+    monkeypatch.setattr(
+        hongguo_third_party_downloader.shutil,
+        "which",
+        lambda command: None if command == "ffmpeg" else command,
+    )
+    target = tmp_path / "video.mp4"
+
+    with pytest.raises(ProviderFailure) as captured:
+        download_third_party_episode(
+            EncryptedProvider(), "series-1", "episode-1", target
+        )
+
+    assert captured.value.code == "decryption_tool_missing"
+    assert key not in captured.value.safe_message
+    assert attempts == ["resolve", "download"]
+    assert not target.exists()
+    assert target.with_suffix(".mp4.part").exists()
+
+
+def test_third_party_download_refreshes_key_after_decryption_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    keys = [
+        "0123456789abcdef0123456789abcdef",
+        "fedcba9876543210fedcba9876543210",
+    ]
+    resolved: list[str] = []
+    downloaded: list[Path] = []
+    decrypt_attempts = 0
+
+    class RefreshingProvider:
+        provider_id = "hg1"
+
+        def resolve_playable(self, series_ref, episode_ref):
+            key = keys[len(resolved)]
+            resolved.append(key)
+            return PlayableMedia(
+                provider_id="hg1",
+                series_ref=series_ref,
+                episode_ref=episode_ref,
+                url="https://video.example.test/encrypted.mp4",
+                decrypt_key=key,
+            )
+
+        def download_episode(self, media, target, **kwargs):
+            path = Path(target)
+            downloaded.append(path)
+            path.write_bytes(_test_cenc_mp4())
+            return DownloadResult("hg1", path, path.stat().st_size, {})
+
+    monkeypatch.setattr(
+        hongguo_third_party_downloader.shutil, "which", lambda command: command
+    )
+
+    def fake_run(command, **kwargs):
+        nonlocal decrypt_attempts
+        if command[0] == "ffmpeg":
+            decrypt_attempts += 1
+            if decrypt_attempts == 1:
+                Path(command[-1]).write_bytes(b"incomplete")
+                return SimpleNamespace(returncode=1, stdout="", stderr="private")
+            Path(command[-1]).write_bytes(_test_clear_mp4())
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {"index": 0, "codec_type": "video", "codec_name": "h264"}
+                    ]
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(hongguo_third_party_downloader.subprocess, "run", fake_run)
+    target = tmp_path / "video.mp4"
+
+    result = download_third_party_episode(
+        RefreshingProvider(), "series-1", "episode-1", target
+    )
+
+    assert resolved == keys
+    assert downloaded == [tmp_path / "video.enc", tmp_path / "video.enc"]
+    assert decrypt_attempts == 2
+    assert result.path == target
+    assert target.read_bytes() == _test_clear_mp4()
+    assert not (tmp_path / "video.enc").exists()
+    assert not (tmp_path / "video.enc.part").exists()
+    assert not target.with_suffix(".mp4.part").exists()
+    assert not (tmp_path / "video.decrypting.mp4").exists()
+
+
+def test_third_party_download_discards_encrypted_partial_when_url_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    key = "0123456789abcdef0123456789abcdef"
+    resolve_count = 0
+    download_count = 0
+
+    class ChangingUrlProvider:
+        provider_id = "hg1"
+
+        def resolve_playable(self, series_ref, episode_ref):
+            nonlocal resolve_count
+            resolve_count += 1
+            return PlayableMedia(
+                provider_id="hg1",
+                series_ref=series_ref,
+                episode_ref=episode_ref,
+                url=f"https://video.example.test/object-{resolve_count}.mp4",
+                decrypt_key=key,
+            )
+
+        def download_episode(self, media, target, **kwargs):
+            nonlocal download_count
+            download_count += 1
+            path = Path(target)
+            partial = path.with_suffix(path.suffix + ".part")
+            if download_count == 1:
+                partial.write_bytes(b"old encrypted bytes")
+                raise ProviderFailure("transfer_failed", "下载视频失败", retryable=True)
+            assert not partial.exists()
+            path.write_bytes(_test_cenc_mp4())
+            return DownloadResult("hg1", path, path.stat().st_size, {})
+
+    monkeypatch.setattr(
+        hongguo_third_party_downloader.shutil, "which", lambda command: command
+    )
+
+    def fake_run(command, **kwargs):
+        if command[0] == "ffmpeg":
+            Path(command[-1]).write_bytes(_test_clear_mp4())
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {"index": 0, "codec_type": "video", "codec_name": "h264"}
+                    ]
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(hongguo_third_party_downloader.subprocess, "run", fake_run)
+    target = tmp_path / "video.mp4"
+
+    result = download_third_party_episode(
+        ChangingUrlProvider(), "series-1", "episode-1", target
+    )
+
+    assert resolve_count == 2
+    assert download_count == 2
+    assert result.path == target
+    assert not (tmp_path / "video.enc.part").exists()
+
+
+def test_encrypted_diagnostic_part_is_never_resumed_as_clear_media(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    target = tmp_path / "video.mp4"
+
+    class MissingKeyProvider:
+        provider_id = "hg1"
+
+        def resolve_playable(self, series_ref, episode_ref):
+            return PlayableMedia(
+                provider_id="hg1",
+                series_ref=series_ref,
+                episode_ref=episode_ref,
+                url="https://video.example.test/encrypted.mp4",
+            )
+
+        def download_episode(self, media, target, **kwargs):
+            path = Path(target)
+            path.write_bytes(_test_cenc_mp4())
+            return DownloadResult("hg1", path, path.stat().st_size, {})
+
+    class ClearProvider:
+        provider_id = "hg1"
+
+        def resolve_playable(self, series_ref, episode_ref):
+            return PlayableMedia(
+                provider_id="hg1",
+                series_ref=series_ref,
+                episode_ref=episode_ref,
+                url="https://video.example.test/clear.mp4",
+            )
+
+        def download_episode(self, media, target, **kwargs):
+            path = Path(target)
+            assert not path.with_suffix(path.suffix + ".part").exists()
+            path.write_bytes(_test_clear_mp4())
+            return DownloadResult("hg1", path, path.stat().st_size, {})
+
+    monkeypatch.setattr(
+        hongguo_third_party_downloader.shutil, "which", lambda command: command
+    )
+    monkeypatch.setattr(
+        hongguo_third_party_downloader.subprocess,
+        "run",
+        lambda command, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {"index": 0, "codec_type": "video", "codec_name": "h264"}
+                    ]
+                }
+            ),
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(ProviderFailure, match="CENC"):
+        download_third_party_episode(
+            MissingKeyProvider(), "series-1", "episode-1", target
+        )
+    assert target.with_suffix(".mp4.part").exists()
+
+    result = download_third_party_episode(
+        ClearProvider(), "series-1", "episode-1", target
+    )
+
+    assert result.path == target
+    assert target.read_bytes() == _test_clear_mp4()
+    assert not target.with_suffix(".mp4.part").exists()
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is unavailable")
+def test_ffmpeg_decrypts_and_decodes_generated_cenc_mp4(tmp_path: Path):
+    ffmpeg = shutil.which("ffmpeg")
+    assert ffmpeg is not None
+    key = "0123456789abcdef0123456789abcdef"
+    encrypted = tmp_path / "generated-encrypted.mp4"
+    decrypted = tmp_path / "generated-clear.mp4"
+    generated = subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=64x64:r=5:d=1",
+            "-c:v",
+            "mpeg4",
+            "-encryption_scheme",
+            "cenc-aes-ctr",
+            "-encryption_key",
+            key,
+            "-encryption_kid",
+            "11111111111111111111111111111111",
+            str(encrypted),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert generated.returncode == 0
+    assert mp4_contains_cenc(encrypted) is True
+
+    decrypt_downloaded_cenc(encrypted, decrypted, key)
+
+    assert decrypted.exists()
+    assert mp4_contains_cenc(decrypted) is False
+    decoded = subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(decrypted),
+            "-f",
+            "null",
+            os.devnull,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert decoded.returncode == 0
 
 
 def test_third_party_download_retries_invalid_mp4_and_keeps_final_part(

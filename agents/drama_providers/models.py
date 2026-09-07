@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +81,7 @@ class PlayableMedia:
     episode_ref: str
     url: str
     subtitle_url: str = ""
+    decrypt_key: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True)

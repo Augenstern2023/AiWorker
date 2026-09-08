@@ -322,6 +322,11 @@ async def _run_once(job: CrawlJob) -> None:
         raise ValueError("Phase 4 任务缺少有效 action 或 project_id")
 
     repository = CreativeRepository(db_path)
+    if extra.get("workflow_mode") == "free":
+        from creative.free_phase4_worker import run_free_generation
+
+        await run_free_generation(job, repository, emit)
+        return
     source_authority = _validate_source_authority(extra, repository, project_id)
     inputs = repository.get_project_inputs(project_id)
     source_snapshot = _load_source_snapshot(extra)
@@ -884,8 +889,10 @@ async def _run_once(job: CrawlJob) -> None:
 async def run(job: CrawlJob) -> None:
     extra = job.extra or {}
     action = str(extra.get("action") or "").strip()
-    reserved_generation = action == "outlines" or (
-        bool(extra.get("series")) and action in {"beats", "script"}
+    reserved_generation = extra.get("workflow_mode") != "free" and (
+        action == "outlines" or (
+            bool(extra.get("series")) and action in {"beats", "script"}
+        )
     )
     operation_id = str(extra.get("operation_id") or "").strip()
     request_hash = str(extra.get("generation_request_hash") or "").strip()

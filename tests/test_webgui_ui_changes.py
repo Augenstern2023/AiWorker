@@ -437,6 +437,48 @@ def test_writing_workspaces_offer_resumable_full_series_beats_and_script_generat
     assert "继续全剧生成" in creative
 
 
+def test_free_workspace_can_generate_beats_for_all_episodes_at_once():
+    creative = _source("static/js/common/creative.js")
+    tasks = _source("static/js/common/tasks.js")
+    beats = _source("templates/common/workspace/project_beats.html")
+    modal = _source("templates/common/workspace/free_creative_modals.html")
+
+    assert "openFreeCreativeGeneration('beats', {series: true})" in creative
+    assert "/free/${plural}/generate-series" in creative
+    assert "expected_head_revisions" in creative
+    assert "{series: true}" in creative
+    assert "series: false" in tasks
+    assert 'x-show="!isFreeCreativeProject()" @click="generateProjectBeatsSeries"' not in beats
+    assert "全剧 Beats" in modal
+
+
+def test_free_workspace_can_generate_scripts_for_all_episodes_at_once():
+    creative = _source("static/js/common/creative.js")
+    scripts = _source("templates/common/workspace/project_scripts.html")
+    modal = _source("templates/common/workspace/free_creative_modals.html")
+
+    assert "openFreeCreativeGeneration('script', {series: true})" in creative
+    assert "/free/${plural}/generate-series" in creative
+    assert "this.creativeHeadRevision(stage, number)" in creative
+    assert 'x-show="!isFreeCreativeProject()" @click="generateProjectScriptsSeries"' not in scripts
+    assert "全剧场次剧本" in modal
+    assert "if (state.series && field === 'beats_id') return false;" in creative
+
+
+def test_free_multi_episode_workspaces_offer_atomic_series_locking():
+    creative = _source("static/js/common/creative.js")
+    beats = _source("templates/common/workspace/project_beats.html")
+    scripts = _source("templates/common/workspace/project_scripts.html")
+
+    assert "completeFreeProjectEpisodeSeries(stage)" in creative
+    assert "/free/${plural}/lock-series" in creative
+    assert "expected_head_revisions" in creative
+    assert "canBatchLockProjectEpisodes(stage)" in creative
+    assert "全集完成并锁定" in beats
+    assert "全集完成并锁定" in scripts
+    assert "completeFreeProjectEpisodeSeries('script')" in scripts
+
+
 def test_beats_workspace_uses_an_episode_selector_to_review_series_drafts():
     creative = _source("static/js/common/creative.js")
     beats = _source("templates/common/workspace/project_beats.html")
@@ -1242,14 +1284,135 @@ def test_scene_script_workspace_calls_generation_a_regeneration_when_locked_beat
     assert 'x-text="creativeActionRunning(\'script\') ? \'生成中\' : projectScriptGenerationActionLabel()"' in scripts
 
 
-def test_scene_script_workspace_records_versions_without_a_lock_action():
+def test_scene_script_workspace_only_locks_free_mode_versions():
     creative = _source("static/js/common/creative.js")
     scripts = _source("templates/common/workspace/project_scripts.html")
 
-    assert "完成并锁定" not in scripts
-    assert "completeProjectScript" not in scripts
-    assert "completeProjectScript" not in creative
-    assert "生成版本" in scripts
+    assert 'x-show="isFreeCreativeProject()" @click="completeProjectScript"' in scripts
+    assert "if (!item || !this.isFreeCreativeProject()) return;" in creative
+    assert "await this.lockFreeCreativeResource('script'" in creative
+    assert 'x-show="!isFreeCreativeProject()" :href="mergedScriptDownloadUrl()"' in scripts
+    assert "selectedProjectScript().version" in scripts
+
+
+def test_all_creative_module_links_are_clickable_before_upstream_locking():
+    navigation = _source("templates/common/workspace/project_module_navigation.html")
+    project_list = _source("templates/common/workspace/project_list.html")
+
+    assert 'aria-label="全部创作模块"' in navigation
+    assert "creativeModuleUrl('brief')" in navigation
+    assert "creativeModuleUrl('characters')" in navigation
+    assert "creativeModuleUrl('outline')" in navigation
+    assert "creativeModuleUrl('beats')" in navigation
+    assert "creativeModuleUrl('script')" in navigation
+    assert '<template x-if="isFreeCreativeProject()">' not in navigation.split(
+        'aria-label="全部创作模块"', 1
+    )[0]
+    assert "所有模块入口均可直接进入；生成与锁定仍按标准流程校验上游内容。" in navigation
+    assert "五个创作模块入口始终可直接进入" in project_list
+
+
+def test_free_locked_resources_offer_non_destructive_revision_actions():
+    creative = _source("static/js/common/creative.js")
+    api = _source("creative/api.py")
+    blueprints = _source("templates/common/workspace/project_blueprints.html")
+    characters = _source("templates/common/workspace/project_characters.html")
+    outlines = _source("templates/common/workspace/project_outlines.html")
+    beats = _source("templates/common/workspace/project_beats.html")
+    scripts = _source("templates/common/workspace/project_scripts.html")
+    revision_method = creative.split(
+        "async createFreeResourceRevision(stage)", 1
+    )[1].split("async openCreativeModeMigration()", 1)[0]
+
+    assert "async createFreeResourceRevision(stage)" in creative
+    assert "structuredClone(" not in revision_method
+    assert revision_method.count("this.cloneCreativeJson(") == 6
+    assert "this.freeStageHeadRef(stage" in creative
+    assert "expected_head_revision" in creative
+    assert "原锁定版本保持不变" in creative
+    assert '"can_create_revision": can_write' in api
+    assert "createProjectBlueprintVersion" in blueprints
+    assert "freeStageHeadRef('brief')" in blueprints
+    for stage, template in (
+        ("characters", characters),
+        ("outline", outlines),
+        ("beats", beats),
+        ("script", scripts),
+    ):
+        assert f"createFreeResourceRevision('{stage}')" in template
+        assert f"freeStageCan('{stage}', 'can_create_revision')" in template
+        assert "['locked', 'approved'].includes" in template
+
+
+def test_free_revision_runtime_clones_alpine_proxy_content():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the browser module")
+
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+global.window = {aiworkerModules: []};
+vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'), {
+  filename: process.argv[1],
+});
+const component = window.aiworkerModules[0]();
+let requestCount = 0;
+let notice = '';
+global.aiworkerApi = {
+  request: async () => {
+    requestCount += 1;
+    return {ok: true, json: async () => ({resource: {id: 2}})};
+  },
+};
+Object.assign(component, {
+  creativeWorkspace: {
+    project: {
+      id: 4,
+      workflow_mode: 'free',
+      characters: [{
+        id: 1,
+        batch_id: 'current-batch',
+        status: 'locked',
+        character_key: 'hero',
+        content: new Proxy({name: '测试角色'}, {}),
+      }],
+      relationships: [],
+      resource_heads: [{
+        stage: 'characters',
+        episode_number: 0,
+        resource_ref: 'current-batch',
+        revision: 2,
+      }],
+    },
+    selectedEpisode: 1,
+    moduleCapabilities: {characters: {can_create_revision: true}},
+    error: '',
+  },
+  selectCreativeProject: async () => {},
+  showCreativeNotice: (message) => { notice = message; },
+});
+(async () => {
+  await component.createFreeResourceRevision('characters');
+  if (requestCount !== 1) {
+    throw new Error('revision did not issue exactly one request');
+  }
+  if (!notice.includes('原锁定版本保持不变')) {
+    throw new Error('revision did not report success');
+  }
+})().catch((error) => {
+  console.error(error.stack || error);
+  process.exit(1);
+});
+'''
+    result = subprocess.run(
+        [node, "-e", script, "static/js/common/creative.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_saving_a_scene_script_reloads_its_new_version():

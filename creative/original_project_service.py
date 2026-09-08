@@ -66,6 +66,7 @@ class OriginalProjectService:
                 reference_refs=bundle.source_refs,
                 created_by=actor.user_id,
                 creation_request_id=payload.creation_request_id,
+                workflow_mode=payload.workflow_mode,
             )
             try:
                 self._bootstrap(project, actor)
@@ -101,6 +102,8 @@ class OriginalProjectService:
     def _bootstrap(self, project: dict[str, Any], actor: Principal) -> None:
         project_id = str(project["id"])
         self.workflow_repository.ensure_project_creator(project_id, actor.user_id, actor)
+        if project.get("workflow_mode") == "free":
+            return
         for task_type, role_code in self._STAGE_ROLES:
             task = self.workflow_repository.ensure_project_task(
                 project_id,

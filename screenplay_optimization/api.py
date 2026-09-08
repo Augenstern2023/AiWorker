@@ -84,6 +84,8 @@ def build_script_optimization_router(
         project = repository.get_project(int(review.get("project_id") or 0))
         if not project:
             raise HTTPException(409, "创作项目已不存在")
+        if project.get("workflow_mode", "sequential") != "sequential":
+            raise HTTPException(409, "自由创作项目首版不接入剧本优化")
         try:
             source = build_project_source(
                 project, str(review["mode"]), [int(item) for item in review["episode_numbers"]]
@@ -181,6 +183,8 @@ def build_script_optimization_router(
         project = repository.get_project(project_id)
         if not project:
             raise HTTPException(404, "创作项目不存在")
+        if project.get("workflow_mode", "sequential") != "sequential":
+            raise HTTPException(409, "自由创作项目首版不接入剧本优化")
         if not can_access_project(request, principal, project_id):
             raise HTTPException(403, "没有访问此创作项目的权限")
         return {
@@ -236,6 +240,8 @@ def build_script_optimization_router(
         project = repository.get_project(int(optimization["project_id"]))
         if not project:
             raise HTTPException(409, "创作项目已不存在")
+        if project.get("workflow_mode", "sequential") != "sequential":
+            raise HTTPException(409, "自由创作项目首版不接入剧本优化")
         try:
             accepted_content = payload.content if payload and payload.content is not None else draft["content"]
             if draft["kind"] == "beats":

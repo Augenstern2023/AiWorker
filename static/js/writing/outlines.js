@@ -71,6 +71,7 @@ window.aiworkerModules.push(() => ({
     },
 
     outlineOverviewEditable() {
+        if (this.isFreeCreativeProject?.()) return false;
         const first = this.currentProjectOutlines()[0];
         return Boolean(first && this.creativeResourceEditable(first));
     },
@@ -81,6 +82,7 @@ window.aiworkerModules.push(() => ({
     },
 
     outlineOverviewGenerationAllowed() {
+        if (this.isFreeCreativeProject?.()) return false;
         const first = this.currentProjectOutlines()[0];
         if (!first) return false;
         if (first.status === 'draft') return true;
@@ -214,6 +216,7 @@ window.aiworkerModules.push(() => ({
     },
 
     outlineFieldRewriteAllowed(item) {
+        if (this.isFreeCreativeProject?.()) return false;
         if (!item || item.stage !== 'outline') return false;
         if (this.creativeResourceEditable(item)) return true;
         if (!['locked', 'approved'].includes(String(item.status || ''))) return false;

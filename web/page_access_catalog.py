@@ -98,6 +98,26 @@ _CREATIVE_JOB_MONITOR: tuple[ApiRoute, ...] = _JOB_MONITOR + (
     ("POST", "/api/jobs/{job_id}/retry"),
 )
 
+_CREATIVE_FREE_MODE: tuple[ApiRoute, ...] = (
+    ("GET", "/api/creative/projects/{project_id}/module-capabilities"),
+    ("GET", "/api/creative/projects/{project_id}/free/context-options"),
+    ("POST", "/api/creative/projects/{project_id}/free/briefs"),
+    ("POST", "/api/creative/projects/{project_id}/free/characters"),
+    ("POST", "/api/creative/projects/{project_id}/free/outlines"),
+    ("POST", "/api/creative/projects/{project_id}/free/episodes/{episode_number}/{stage}"),
+    ("PATCH", "/api/creative/projects/{project_id}/free/items/{item_type}/{item_id}"),
+    ("POST", "/api/creative/projects/{project_id}/free/{stage}/{resource_ref}/lock"),
+    ("POST", "/api/creative/projects/{project_id}/free/{stage}/lock-series"),
+    ("PUT", "/api/creative/projects/{project_id}/free/{stage}/head"),
+    ("POST", "/api/creative/projects/{project_id}/free/{stage}/generate"),
+    ("POST", "/api/creative/projects/{project_id}/free/beats/generate-series"),
+    ("POST", "/api/creative/projects/{project_id}/free/scripts/generate-series"),
+    ("PATCH", "/api/creative/projects/{project_id}/workflow-mode"),
+    ("GET", "/api/creative/projects/{project_id}/mode-migration-preview"),
+    ("POST", "/api/creative/projects/{project_id}/migrate-to-free"),
+    ("GET", "/api/creative/projects/{project_id}/legacy-creative-resources"),
+)
+
 _SCRIPT_REVIEWS: tuple[ApiRoute, ...] = (
     ("GET", "/api/creative/projects"),
     ("GET", "/api/creative/projects/{project_id}"),
@@ -227,6 +247,7 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
         ("GET", "/api/creative/projects/{project_id}/export"),
     )
     + _CREATIVE_TASK_SUPPORT
+    + _CREATIVE_FREE_MODE
     + _CREATIVE_JOB_MONITOR,
     "/planning/projects/{project_id}/characters": (
         ("GET", "/api/creative/projects/{project_id}"),
@@ -238,6 +259,7 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
         ("GET", "/api/creative/projects/{project_id}/export"),
     )
     + _CREATIVE_TASK_SUPPORT
+    + _CREATIVE_FREE_MODE
     + _CREATIVE_JOB_MONITOR,
     "/writing/dashboard": (
         ("GET", "/api/creative/projects"),
@@ -256,6 +278,7 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
         ("GET", "/api/creative/projects/{project_id}/export"),
     )
     + _CREATIVE_TASK_SUPPORT
+    + _CREATIVE_FREE_MODE
     + _CREATIVE_JOB_MONITOR,
     "/writing/projects/{project_id}/episodes/{episode_number}/beats": (
         ("GET", "/api/creative/projects/{project_id}"),
@@ -267,6 +290,7 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
         ("GET", "/api/creative/projects/{project_id}/export"),
     )
     + _CREATIVE_TASK_SUPPORT
+    + _CREATIVE_FREE_MODE
     + _CREATIVE_JOB_MONITOR,
     "/writing/projects/{project_id}/episodes/{episode_number}/scripts": (
         ("GET", "/api/creative/projects/{project_id}"),
@@ -278,6 +302,7 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
         ("GET", "/api/creative/projects/{project_id}/generated-content/download"),
     )
     + _CREATIVE_TASK_SUPPORT
+    + _CREATIVE_FREE_MODE
     + _CREATIVE_JOB_MONITOR,
     "/review/scripts": _SCRIPT_REVIEWS,
     "/review/writer-agent": _WRITER_AGENT,

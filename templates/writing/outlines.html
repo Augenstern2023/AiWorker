@@ -6,16 +6,19 @@
         <h3 class="mb-1">全剧大纲</h3>
         <div class="small text-muted">项目 {{ project_id }} · 全剧阶段弧线与分集大纲</div>
     </div>
-    <a class="btn btn-outline-light btn-sm flex-shrink-0" href="/planning/projects/{{ project_id }}/characters" title="返回人物关系" aria-label="返回人物关系">
+    <a class="btn btn-outline-light btn-sm flex-shrink-0" x-show="!isFreeCreativeProject()" x-cloak href="/planning/projects/{{ project_id }}/characters" title="返回人物关系" aria-label="返回人物关系">
         <i class="bi bi-arrow-left me-1" aria-hidden="true"></i>返回人物关系
     </a>
 </div>
 {% endblock %}
 
 {% block content %}
+{% set creative_module = "outline" %}
+{% include "common/workspace/project_module_navigation.html" %}
 {% include "common/workspace/project_progress.html" %}
 <template x-if="creativeWorkspace.project"><div>{% include "common/workspace/project_outlines.html" %}</div></template>
 {% include "common/workspace/creative_progress_modal.html" %}
+{% include "common/workspace/free_creative_modals.html" %}
 {% include "common/workspace/outline_field_rewrite_modal.html" %}
 <div class="modal fade" id="outlineEpisodeUpdatesModal" tabindex="-1" aria-labelledby="outlineEpisodeUpdatesModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-scrollable">

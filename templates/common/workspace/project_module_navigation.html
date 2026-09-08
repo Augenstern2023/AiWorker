@@ -1,0 +1,41 @@
+<section class="card border-secondary mb-3" x-show="creativeWorkspace.project" x-cloak aria-label="创作模块导航">
+    <div class="card-body py-2 px-3">
+        <div class="d-flex flex-wrap align-items-center gap-2">
+            <span class="badge" :class="isFreeCreativeProject() ? 'text-bg-info' : 'text-bg-secondary'" x-text="creativeProjectWorkflowModeLabel(creativeWorkspace.project)"></span>
+            <div class="d-flex flex-wrap align-items-center gap-2 flex-grow-1" aria-label="全部创作模块">
+                {% if can_open_planning_project_details %}
+                <a class="btn btn-sm {% if creative_module == 'brief' %}btn-primary{% else %}btn-outline-light{% endif %}" :href="creativeModuleUrl('brief')">Brief</a>
+                <a class="btn btn-sm {% if creative_module == 'characters' %}btn-primary{% else %}btn-outline-light{% endif %}" :href="creativeModuleUrl('characters')">人物</a>
+                {% endif %}
+                {% if can_open_writing_project_details %}
+                <a class="btn btn-sm {% if creative_module == 'outline' %}btn-primary{% else %}btn-outline-light{% endif %}" :href="creativeModuleUrl('outline')">大纲</a>
+                <a class="btn btn-sm {% if creative_module == 'beats' %}btn-primary{% else %}btn-outline-light{% endif %}" :href="creativeModuleUrl('beats')">Beats</a>
+                <a class="btn btn-sm {% if creative_module == 'script' %}btn-primary{% else %}btn-outline-light{% endif %}" :href="creativeModuleUrl('script')">场次剧本</a>
+                <label class="small text-muted ms-2" for="creative-module-episode">集数</label>
+                <select id="creative-module-episode" class="form-select form-select-sm" style="width:86px" x-model.number="creativeWorkspace.selectedEpisode">
+                    <template x-for="number in Array.from({length: Number(creativeWorkspace.project?.target_episode_count || 1)}, (_, index) => index + 1)" :key="`creative-nav-episode-${number}`">
+                        <option :value="number" x-text="`第 ${number} 集`"></option>
+                    </template>
+                </select>
+                {% endif %}
+            </div>
+            <template x-if="isFreeCreativeProject() && freeStageVersionOptions('{{ creative_module }}', ['beats', 'script'].includes('{{ creative_module }}') ? creativeWorkspace.selectedEpisode : 0).length">
+                <div class="d-flex align-items-center gap-2 ms-auto">
+                    <label class="small text-muted" for="free-module-version">当前版本</label>
+                    <select id="free-module-version" class="form-select form-select-sm" style="width:190px"
+                            :value="freeStageHeadRef('{{ creative_module }}', ['beats', 'script'].includes('{{ creative_module }}') ? creativeWorkspace.selectedEpisode : 0)"
+                            @change="setFreeCreativeHead('{{ creative_module }}', $event.target.value, ['beats', 'script'].includes('{{ creative_module }}') ? creativeWorkspace.selectedEpisode : 0)">
+                        <template x-for="item in freeStageVersionOptions('{{ creative_module }}', ['beats', 'script'].includes('{{ creative_module }}') ? creativeWorkspace.selectedEpisode : 0)" :key="item.resource_ref">
+                            <option :value="item.resource_ref" x-text="`v${item.version} · ${creativeWorkflowStatusLabel(item.status)} · ${item.label}`"></option>
+                        </template>
+                    </select>
+                </div>
+            </template>
+            <button class="btn btn-sm btn-outline-info ms-auto" type="button" x-show="creativeWorkspace.project?.workflow_mode === 'sequential'" @click="openCreativeModeMigration">
+                <i class="bi bi-shuffle me-1" aria-hidden="true"></i>切换自由创作
+            </button>
+        </div>
+        <div class="small text-muted mt-2" x-show="isFreeCreativeProject()">模块可独立创建和生成；引用上下文默认不选择，锁定不会推进其他模块。</div>
+        <div class="small text-muted mt-2" x-show="!isFreeCreativeProject()">所有模块入口均可直接进入；生成与锁定仍按标准流程校验上游内容。</div>
+    </div>
+</section>

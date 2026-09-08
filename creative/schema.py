@@ -24,6 +24,8 @@ class ProjectCreateRequest(BaseModel):
     episode_duration_seconds: int = Field(120, ge=30, le=1800)
     workflow_task_id: str | None = None
     creation_request_id: str = ""
+    workflow_mode: Literal["sequential", "free"] = "sequential"
+    seed_text: str = Field(default="", max_length=500)
 
 
 class MarketReferenceRequest(BaseModel):
@@ -43,6 +45,7 @@ class OriginalProjectCreateRequest(BaseModel):
     content_boundaries: list[str] = Field(default_factory=list, max_length=20)
     reference_refs: list[MarketReferenceRequest] = Field(default_factory=list, max_length=10)
     creation_request_id: str = Field(min_length=1, max_length=200)
+    workflow_mode: Literal["sequential", "free"] = "sequential"
 
 
 class SeedUpdateRequest(BaseModel):
@@ -183,6 +186,103 @@ class WorkflowLinkRequest(BaseModel):
 
 class CreativeLockRequest(BaseModel):
     workflow_task_id: str = Field(min_length=1)
+    operation_id: str | None = Field(None, max_length=200)
+
+
+class CreativeModeChangeRequest(BaseModel):
+    workflow_mode: Literal["sequential", "free"]
+    expected_mode_revision: int = Field(ge=0)
+    seed_text: str = Field(default="", max_length=500)
+    operation_id: str | None = Field(None, max_length=200)
+
+
+class CreativeModeMigrationRequest(BaseModel):
+    expected_mode_revision: int = Field(ge=0)
+    seed_text: str = Field(default="", max_length=500)
+    operation_id: str = Field(min_length=1, max_length=200)
+
+
+class FreeCreativeContextRefs(BaseModel):
+    brief_id: int | None = Field(None, ge=1)
+    character_batch_id: str | None = Field(None, max_length=200)
+    outline_batch_id: str | None = Field(None, max_length=200)
+    beats_id: int | None = Field(None, ge=1)
+
+
+class FreeCreativeGenerateRequest(BaseModel):
+    operation_id: str = Field(min_length=1, max_length=200)
+    expected_head_revision: int = Field(0, ge=0)
+    generation_instruction: str = Field("", max_length=2000)
+    context_refs: FreeCreativeContextRefs = Field(default_factory=FreeCreativeContextRefs)
+
+
+class FreeCreativeSeriesGenerateRequest(BaseModel):
+    operation_id: str = Field(min_length=1, max_length=200)
+    expected_head_revisions: dict[int, int]
+    generation_instruction: str = Field("", max_length=2000)
+    context_refs: FreeCreativeContextRefs = Field(default_factory=FreeCreativeContextRefs)
+
+    @field_validator("expected_head_revisions")
+    @classmethod
+    def validate_expected_head_revisions(
+        cls, value: dict[int, int]
+    ) -> dict[int, int]:
+        if not value:
+            raise ValueError("expected_head_revisions is required")
+        if any(number < 1 or number > 100 for number in value):
+            raise ValueError("episode number must be between 1 and 100")
+        if any(revision < 0 for revision in value.values()):
+            raise ValueError("head revision must be non-negative")
+        return value
+
+
+class FreeCreativeSeriesLockRequest(BaseModel):
+    expected_head_revisions: dict[int, int]
+
+    @field_validator("expected_head_revisions")
+    @classmethod
+    def validate_expected_head_revisions(
+        cls, value: dict[int, int]
+    ) -> dict[int, int]:
+        if not value:
+            raise ValueError("expected_head_revisions is required")
+        if any(number < 1 or number > 100 for number in value):
+            raise ValueError("episode number must be between 1 and 100")
+        if any(revision < 0 for revision in value.values()):
+            raise ValueError("head revision must be non-negative")
+        return value
+
+
+class FreeBriefCreateRequest(BaseModel):
+    content: dict[str, Any] = Field(default_factory=dict)
+    expected_head_revision: int = Field(0, ge=0)
+
+
+class FreeCharacterBatchCreateRequest(BaseModel):
+    characters: list[dict[str, Any]] = Field(default_factory=list)
+    relationships: list[dict[str, Any]] = Field(default_factory=list)
+    expected_head_revision: int = Field(0, ge=0)
+
+
+class FreeOutlineCreateRequest(BaseModel):
+    series_arc: str = ""
+    series_overview: dict[str, Any] | None = None
+    episodes: list[dict[str, Any]] = Field(default_factory=list)
+    expected_head_revision: int = Field(0, ge=0)
+
+
+class FreeEpisodeCreateRequest(BaseModel):
+    content: dict[str, Any] = Field(default_factory=dict)
+    expected_head_revision: int = Field(0, ge=0)
+
+
+class FreeCreativeHeadRequest(BaseModel):
+    resource_ref: str = Field(min_length=1, max_length=200)
+    expected_head_revision: int = Field(ge=0)
+
+
+class FreeCreativeLockRequest(BaseModel):
+    expected_head_revision: int = Field(ge=0)
     operation_id: str | None = Field(None, max_length=200)
 
 

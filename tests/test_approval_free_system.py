@@ -69,6 +69,9 @@ def test_creative_lock_routes_are_available_without_approval_router(tmp_path: Pa
     assert "/api/creative/projects/{project_id}/outlines/{batch_id}/lock" in paths
     assert "/api/creative/episodes/{episode_id}/lock" in paths
     assert "/api/creative/projects/{project_id}/beats/generate-series" in paths
+    assert "/api/creative/projects/{project_id}/free/beats/generate-series" in paths
+    assert "/api/creative/projects/{project_id}/free/scripts/generate-series" in paths
+    assert "/api/creative/projects/{project_id}/free/{stage}/lock-series" in paths
     assert "/api/creative/projects/{project_id}/scripts/generate-series" in paths
 
 

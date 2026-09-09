@@ -1,0 +1,71 @@
+<!-- Shared production package export dialog: included by managed projects and Brief pages. -->
+<div class="modal fade" id="productionExportModal" tabindex="-1" aria-labelledby="productionExportModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <h5 class="modal-title" id="productionExportModalLabel">导出生产项目包</h5>
+                    <div class="small text-muted" id="production-export-project-name" aria-live="polite"></div>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <ul class="nav nav-tabs mb-3" id="production-export-tabs" role="tablist">
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link active" id="production-export-tab-check" type="button"
+                                data-bs-toggle="tab" data-bs-target="#production-export-pane-check"
+                                role="tab" aria-controls="production-export-pane-check"
+                                aria-selected="true">导出检查</button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="production-export-tab-history" type="button"
+                                data-bs-toggle="tab" data-bs-target="#production-export-pane-history"
+                                role="tab" aria-controls="production-export-pane-history"
+                                aria-selected="false">历史导出</button>
+                    </li>
+                </ul>
+                <div class="tab-content">
+                    <div class="tab-pane fade show active" id="production-export-pane-check" role="tabpanel"
+                         aria-labelledby="production-export-tab-check">
+                        <div class="alert alert-secondary small mb-3">导出范围为全剧锁定版本，格式固定为 JSON。导出不等于生产审批，仅打包创作的锁定资料。</div>
+                        <div id="production-export-check-status" class="small text-muted" role="status" aria-live="polite">正在执行完整性检查…</div>
+                        <div id="production-export-error" class="alert alert-danger d-none" role="alert"></div>
+                        <div id="production-export-issues" class="mb-3"></div>
+                        <div id="production-export-stages" class="mb-3"></div>
+                        <div id="production-export-result" class="alert alert-success d-none" role="status"></div>
+                    </div>
+                    <div class="tab-pane fade" id="production-export-pane-history" role="tabpanel"
+                         aria-labelledby="production-export-tab-history">
+                        <div id="production-export-history-status" class="small text-muted" role="status" aria-live="polite">正在加载历史导出…</div>
+                        <div id="production-export-history-error" class="alert alert-danger d-none" role="alert"></div>
+                        <div class="table-responsive">
+                            <table class="table table-sm align-middle">
+                                <thead>
+                                    <tr>
+                                        <th>创建</th>
+                                        <th>版本</th>
+                                        <th>范围</th>
+                                        <th>状态</th>
+                                        <th class="text-end">下载</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="production-export-history-list"></tbody>
+                            </table>
+                        </div>
+                        <nav class="d-flex justify-content-between align-items-center" aria-label="历史导出分页">
+                            <span id="production-export-history-total" class="small text-muted"></span>
+                            <span class="d-flex gap-2">
+                                <button class="btn btn-sm btn-outline-secondary" id="production-export-history-prev" type="button">上一页</button>
+                                <button class="btn btn-sm btn-outline-secondary" id="production-export-history-next" type="button">下一页</button>
+                            </span>
+                        </nav>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">关闭</button>
+                <button type="button" class="btn btn-primary" id="production-export-generate" type="button" disabled>生成生产包</button>
+            </div>
+        </div>
+    </div>
+</div>

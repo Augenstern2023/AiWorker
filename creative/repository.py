@@ -63,6 +63,7 @@ _WRITER_PROJECT_DELETION_TABLES = (
     "script_optimizations",
     "script_optimization_drafts",
     "creative_deliveries",
+    "creative_production_exports",
 )
 _WRITER_PROJECT_EXTERNAL_TABLES = (
     "creative_stage_exports",
@@ -70,6 +71,7 @@ _WRITER_PROJECT_EXTERNAL_TABLES = (
     "script_optimizations",
     "script_optimization_drafts",
     "creative_deliveries",
+    "creative_production_exports",
 )
 
 
@@ -109,6 +111,10 @@ class CreativeRepository:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # Set by the production export service when the web handoff flow is
+        # enabled; only files inside this fixed directory may be unlinked by
+        # project deletion.
+        self.production_export_directory: Path | None = None
         self._migrate_project_table_if_needed(self.db_path)
         self._init_schema()
 
@@ -2900,6 +2906,29 @@ class CreativeRepository:
                     if row["path"]
                 ]
                 conn.execute("DELETE FROM creative_deliveries WHERE project_id = ?", (project_id,))
+
+            export_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'creative_production_exports'"
+            ).fetchone()
+            if export_table is not None:
+                export_rows = conn.execute(
+                    "SELECT path FROM creative_production_exports WHERE project_id = ?",
+                    (project_id,),
+                ).fetchall()
+                conn.execute(
+                    "DELETE FROM creative_production_exports WHERE project_id = ?", (project_id,)
+                )
+                export_directory = self.production_export_directory
+                for row in export_rows:
+                    raw_path = str(row["path"] or "")
+                    if not raw_path or export_directory is None:
+                        continue
+                    try:
+                        candidate = Path(raw_path).resolve()
+                    except OSError:
+                        continue
+                    if candidate.parent == export_directory:
+                        delivery_paths.append(str(candidate))
 
             now = time.time()
             conn.execute(

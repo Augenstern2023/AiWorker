@@ -17,6 +17,7 @@ from fastapi.routing import APIRoute
 from fastapi.templating import Jinja2Templates
 
 from identity.dependencies import current_principal
+from identity.permission_service import PermissionService
 from identity.schema import Principal
 
 from .navigation_service import PAGE_ROUTES, NavigationService
@@ -274,9 +275,28 @@ def _template_context(
         raw_token = request.cookies.get(service.session_service.cookie_name)
         session = service.session_service.resolve_session(raw_token)
         csrf_token = session.csrf_token if session is not None else ""
+    can_export_projects = bool(
+        principal
+        and (
+            principal.is_system_admin
+            or principal.data_scope == "all"
+            or "project_owner" in principal.role_codes
+        )
+    )
+    if not can_export_projects and principal is not None:
+        from identity.permission_service import PermissionService
+
+        managed = getattr(service, "can_access_managed_project", None)
+        project_id = request.path_params.get("project_id")
+        if project_id and isinstance(service, PermissionService) and callable(managed):
+            try:
+                can_export_projects = bool(managed(principal, str(project_id)))
+            except Exception:
+                can_export_projects = False
     return {
         "request": request,
         "principal": principal,
+        "can_export_projects": can_export_projects,
         "navigation": navigation_service.items_for(principal) if principal else [],
         "current_route": request.url.path,
         "page_title": page_title,

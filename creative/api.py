@@ -2583,6 +2583,15 @@ def build_creative_router(
                     principal, str(item["id"])
                 )
             )
+            item["can_production_export"] = bool(
+                principal.is_system_admin
+                or (
+                    isinstance(permission_service, PermissionService)
+                    and permission_service.can_access_managed_project(
+                        principal, str(item["id"])
+                    )
+                )
+            )
         return {"items": items}
 
     @router.get("/projects/{project_id}")

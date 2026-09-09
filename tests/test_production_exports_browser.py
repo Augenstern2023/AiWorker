@@ -1,0 +1,308 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) 2025 relakkes@gmail.com
+#
+# This file is part of MediaCrawler project.
+# Repository: https://github.com/NanmiCoder/MediaCrawler
+# GitHub: https://github.com/NanmiCoder
+# Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
+
+from __future__ import annotations
+
+import json
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+from playwright.sync_api import Page, sync_playwright
+
+
+ROOT = Path(__file__).resolve().parents[1]
+MODAL = ROOT / "templates/common/workspace/production_export_modal.html"
+CONTROLLER = ROOT / "static/js/common/production_export.js"
+
+
+@pytest.fixture
+def page() -> Iterator[Page]:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        current = browser.new_page(viewport={"width": 1280, "height": 900})
+        current.set_default_timeout(3_000)
+        yield current
+        browser.close()
+
+
+def _bootstrap_stub() -> str:
+    """A minimal Bootstrap Modal + nav-tabs substitute for headless testing."""
+    return """
+    window.bootstrap = {
+      Modal: {
+        getOrCreateInstance(el) {
+          el.__instance = el.__instance || new Modal(el);
+          return el.__instance;
+        }
+      }
+    };
+    function Modal(el) {
+      this.el = el;
+      this._closed = true;
+      const self = this;
+      this.show = function () {
+        el.classList.add('show');
+        el.style.display = 'block';
+        el.setAttribute('aria-hidden', 'false');
+        self._closed = false;
+        el.dispatchEvent(new Event('shown.bs.modal'));
+      };
+      this.hide = function () {
+        el.classList.remove('show');
+        el.style.display = 'none';
+        el.setAttribute('aria-hidden', 'true');
+        self._closed = true;
+        el.dispatchEvent(new Event('hidden.bs.modal'));
+      };
+    }
+    window.addEventListener('load', function () {
+      document.querySelectorAll('[data-bs-toggle="tab"]').forEach(function (tab) {
+        tab.addEventListener('click', function () {
+          var id = tab.getAttribute('data-bs-target');
+          var group = tab.closest('.tab-content');
+          tab.parentElement.parentElement.querySelectorAll('.nav-link').forEach(function (n) {
+            n.classList.remove('active'); n.setAttribute('aria-selected', 'false');
+          });
+          tab.classList.add('active'); tab.setAttribute('aria-selected', 'true');
+          group.querySelectorAll('.tab-pane').forEach(function (p) {
+            p.classList.toggle('show', p === document.querySelector(id));
+            p.classList.toggle('active', p === document.querySelector(id));
+          });
+        });
+      });
+      document.querySelectorAll('[data-bs-dismiss="modal"]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var el = document.getElementById('productionExportModal');
+          if (el && el.__instance) el.__instance.hide();
+        });
+      });
+    });
+    """
+
+
+def mount(page: Page, *, preview: dict, history: dict, export: dict | None = None) -> None:
+    fixtures = json.dumps(
+        {"preview": preview, "history": history, "export": export},
+        ensure_ascii=False,
+    )
+    modal_html = MODAL.read_text(encoding="utf-8")
+    page.set_content(f"<div class='container'>{modal_html}</div>")
+    page.add_script_tag(
+        content=f"""
+        {_bootstrap_stub()}
+        window.__fixtures = {fixtures};
+        window.__requestLog = [];
+        window.__pending = new Map();
+        window.__cancelled = [];
+        const __origAbort = AbortController.prototype.abort;
+        AbortController.prototype.abort = function () {{
+            window.__cancelled.push(true);
+            return __origAbort.call(this);
+        }};
+        window.aiworkerApi = {{
+          request(url, options = {{}}) {{
+            window.__requestLog.push({{url, method: options.method || 'GET'}});
+            if (options && options.signal && options.signal.aborted) {{
+              const err = new Error('Aborted'); err.name = 'AbortError';
+              return Promise.reject(err);
+            }}
+            if (url.endsWith('/production-export/preview')) {{
+              const payload = {{ok: true, json: () => Promise.resolve(window.__fixtures.preview)}};
+              return delay(payload);
+            }}
+            if (url.includes('/production-exports?')) return delay({{ok: true, json: () => Promise.resolve(window.__fixtures.history)}});
+            if (url.endsWith('/production-exports') && options.method === 'POST') {{
+              if (window.__fixtures.export === null) {{
+                return delay({{ok: false, status: 409, json: () => Promise.resolve({{detail: '版本已变化，请重新检查并确认'}})}});
+              }}
+              return delay({{ok: true, status: 201, json: () => Promise.resolve({{export: window.__fixtures.export, created: true}})}});
+            }}
+            if (url.includes('/download')) {{
+              return delay({{ok: true, headers: {{get: () => "attachment; filename*=UTF-8''%E5%AF%BB%E6%89%BE%E7%9C%9F%E7%9B%B8_%E7%94%9F%E4%BA%A7%E5%8C%85_abcabcabcabc.json"}}, blob: () => Promise.resolve(new Blob(['{{}}'], {{type: 'application/json'}}))}});
+            }}
+            return delay({{ok: false, status: 500, json: () => Promise.resolve({{}})}});
+          }}
+        }};
+        function delay(payload) {{
+          return new Promise((resolve) => setTimeout(() => resolve(payload), 25));
+        }}
+        window.aiworkerApi.isAbortError = (e) => e && e.name === 'AbortError';
+        window.aiworkerApi.parseErrorDetail = async (r) => (r && r.detail) || '';
+        window.aiworkerUi = {{
+          requestKey(key, factory) {{
+            const controller = new AbortController();
+            window.__pending.set(key, controller);
+            return factory(controller.signal).finally(() => {{
+              if (window.__pending.get(key) === controller) window.__pending.delete(key);
+            }});
+          }},
+          cancelRequest(key) {{
+            const controller = window.__pending.get(key);
+            if (controller) {{ controller.abort(); window.__pending.delete(key); }}
+          }},
+          setButtonLoading(button, opts) {{
+            button.disabled = opts.loading;
+            button.textContent = opts.loading ? (opts.label || '处理中…') : '生成生产包';
+          }},
+          showToast(opts) {{ window.__lastToast = opts; }},
+          announce() {{}},
+        }};
+        window.aiworkerProductionExport = {{ open() {{}} }};
+        """
+    )
+    page.add_script_tag(path=CONTROLLER)
+
+
+def _stage(state="ready", number=None):
+    return {"stage": "script", "episode_number": number, "state": state,
+            "versions": [{"id": 7, "version": 2}], "message": "检查通过"}
+
+
+def test_open_show_check_and_generate(page: Page) -> None:
+    """Generate button is only enabled when all checks pass; download fires after."""
+    preview = {"project": {"id": "3", "name": "寻找真相", "target_episode_count": 2},
+               "ready": True, "fingerprint": "abc" * 8,
+               "stages": [_stage()], "issues": []}
+    history = {"items": [], "total": 0, "page": 1, "page_size": 20}
+    export = {"id": "e1", "project_id": "3", "fingerprint": preview["fingerprint"],
+              "contract_version": "1.0", "created_by": "owner", "created_by_name": "负责人",
+              "created_at": 1, "episode_count": 2, "size_bytes": 100,
+              "file_sha256": "deadbeef", "audit_status": "recorded",
+              "download_url": "/api/creative/production-exports/e1/download"}
+    mount(page, preview=preview, history=history, export=export)
+
+    page.evaluate("""projectId => window.aiworkerProductionExport.open(projectId, {projectName: '寻找真相'})""", "3")
+
+    modal = page.locator("#productionExportModal")
+    modal.wait_for(state="visible")
+    assert modal.get_attribute("aria-hidden") == "false"
+    assert page.locator("#production-export-project-name").inner_text() == "寻找真相"
+    page.wait_for_function(
+        "() => document.querySelector('#production-export-check-status').textContent.includes('全部检查通过')"
+    )
+    assert page.locator("#production-export-check-status").inner_text() == "全部检查通过，可生成锁定版本的生产包。"
+
+    generate = page.locator("#production-export-generate")
+    assert not generate.is_disabled()
+    generate.click()
+    page.wait_for_function("() => !document.querySelector('#production-export-result').classList.contains('d-none')")
+    result_text = page.locator("#production-export-result").inner_text()
+    assert "生产包已生成并锁定版本" in result_text
+    assert "仅导出创作资料，尚未开始生产" in result_text
+    # The result panel shows the fingerprint's leading 12 characters.
+    assert "abcabcabcabc" in result_text
+    assert page.locator("#production-export-result a").get_attribute("href") == export["download_url"]
+
+
+def test_blocked_issues_disable_generate_and_link_to_edit(page: Page) -> None:
+    """When checks block, the generate button stays disabled and issues link out."""
+    preview = {"project": {"id": "3", "name": "寻找真相", "target_episode_count": 2},
+               "ready": False, "fingerprint": None, "stages": [_stage()],
+               "issues": [{"stage": "script", "episode_number": 1, "state": "invalid",
+                           "message": "缺少完整的锁定版本，请完成并锁定",
+                           "code": "missing_locked_input",
+                           "edit_url": "/writing/projects/3/scripts"}]}
+    history = {"items": [], "total": 0, "page": 1, "page_size": 20}
+    mount(page, preview=preview, history=history, export=None)
+
+    page.evaluate("() => window.aiworkerProductionExport.open('3', {projectName: '寻找真相'})")
+    page.wait_for_function(
+        "() => document.querySelector('#production-export-check-status').textContent.includes('阻塞项')"
+    )
+    assert page.locator("#production-export-check-status").inner_text() == "存在阻塞项，请先在对应页面完成并锁定内容。"
+    assert page.locator("#production-export-generate").is_disabled()
+    issue = page.locator("#production-export-issues .alert").first
+    assert "缺少完整的锁定版本" in issue.inner_text()
+    assert issue.locator("a").get_attribute("href") == "/writing/projects/3/scripts"
+
+
+def test_history_tab_tags_versions_and_pending_blocks_download(page: Page) -> None:
+    """History shows current/historical tags; pending-audit records cannot download."""
+    current = "abc" * 8
+    preview = {"project": {"id": "3", "name": "寻找真相", "target_episode_count": 2},
+               "ready": True, "fingerprint": current, "stages": [_stage()], "issues": []}
+    history = {"total": 2, "page": 1, "page_size": 20, "items": [
+        {"id": "e2", "project_id": "3", "fingerprint": current, "contract_version": "1.0",
+         "created_by": "owner", "created_by_name": "负责人", "created_at": 2,
+         "episode_count": 2, "size_bytes": 90, "file_sha256": "aa", "audit_status": "recorded",
+         "download_url": "/api/creative/production-exports/e2/download"},
+        {"id": "e1", "project_id": "3", "fingerprint": "old" * 8, "contract_version": "1.0",
+         "created_by": "admin", "created_by_name": "管理员", "created_at": 1,
+         "episode_count": 2, "size_bytes": 80, "file_sha256": "bb", "audit_status": "pending",
+         "download_url": "/api/creative/production-exports/e1/download"}]}
+    mount(page, preview=preview, history=history, export=None)
+
+    page.evaluate("() => window.aiworkerProductionExport.open('3', {projectName: '寻找真相'})")
+    page.locator("#production-export-tab-history").click()
+    page.wait_for_function(
+        "() => document.querySelectorAll('#production-export-history-list tr').length > 0"
+    )
+
+    rows = page.locator("#production-export-history-list tr")
+    assert rows.count() == 2
+    assert "当前版本" in rows.nth(0).inner_text()
+    assert "历史版本" in rows.nth(1).inner_text()
+    assert rows.nth(1).locator("button").is_disabled()
+    assert "审计待补记" in rows.nth(1).inner_text()
+
+
+def test_switching_project_cancels_stale_requests(page: Page) -> None:
+    """Opening another project aborts the previous project's in-flight requests."""
+    preview = {"project": {"id": "3", "name": "寻找真相", "target_episode_count": 2},
+               "ready": True, "fingerprint": "abc" * 8, "stages": [_stage()], "issues": []}
+    history = {"items": [], "total": 0, "page": 1, "page_size": 20}
+    mount(page, preview=preview, history=history, export=None)
+
+    page.evaluate("() => window.aiworkerProductionExport.open('3', {projectName: '寻找真相'})")
+    # Now open a different project; the stale preview/history keys should be cancelled.
+    page.evaluate("""() => {
+        window.__cancelled = [];
+        const origAbort = AbortController.prototype.abort;
+        AbortController.prototype.abort = function () {
+            window.__cancelled.push(true);
+            return origAbort.call(this);
+        };
+        window.aiworkerProductionExport.open('9', {projectName: '另一个'});
+    }""")
+    # The controller for project 3 preview/history/create should have been aborted.
+    assert page.evaluate("() => (window.__cancelled || []).length >= 1")
+
+
+def test_download_uses_server_fingerprint_name(page: Page) -> None:
+    """The download filename comes from content-disposition when present."""
+    current = "abc" * 8
+    preview = {"project": {"id": "3", "name": "寻找真相", "target_episode_count": 2},
+               "ready": True, "fingerprint": current, "stages": [_stage()], "issues": []}
+    history = {"total": 1, "page": 1, "page_size": 20, "items": [
+        {"id": "e1", "project_id": "3", "fingerprint": current, "contract_version": "1.0",
+         "created_by": "owner", "created_by_name": "负责人", "created_at": 2,
+         "episode_count": 2, "size_bytes": 90, "file_sha256": "aa", "audit_status": "recorded",
+         "download_url": "/api/creative/production-exports/e1/download"}]}
+    mount(page, preview=preview, history=history, export=None)
+
+    # Stub URL.createObjectURL / anchor.click to capture the download name.
+    page.evaluate("""
+        window.__downloads = [];
+        const origCreate = URL.createObjectURL.bind(URL);
+        URL.createObjectURL = function (blob) {
+            window.__downloads.push({blobType: blob.type, name: null});
+            return 'blob:fake';
+        };
+        HTMLAnchorElement.prototype.click = function () {
+            const last = window.__downloads[window.__downloads.length - 1];
+            if (last && this.download) last.name = this.download;
+        };
+    """)
+    page.evaluate("() => window.aiworkerProductionExport.open('3', {projectName: '寻找真相'})")
+    page.locator("#production-export-tab-history").click()
+    page.locator("#production-export-history-list button").first.click()
+    page.wait_for_function("() => (window.__downloads || []).length >= 1")
+    name = page.evaluate("() => window.__downloads[0].name")
+    assert name.endswith(".json")
+    assert "寻找真相" in name

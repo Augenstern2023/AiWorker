@@ -80,6 +80,8 @@ from creative.delivery import DeliveryService, build_delivery_router
 from creative.market_reference_service import MarketReferenceService
 from creative.original_project_service import OriginalProjectService
 from creative.project_creator_migration import migrate_project_creator_memberships
+from creative.production_exports import ProductionExportService
+from creative.production_exports_api import build_production_export_router
 from creative.repository import CreativeRepository, DownloadTopicDecisionConflict
 from creative.transcript_assets import normalize_title
 from creative.workflow_adapter import CreativeWorkflowAdapter
@@ -577,6 +579,14 @@ delivery_service = DeliveryService(
     workflow_repository=workflow_repository,
     audit_service=audit_service,
 )
+production_export_service = ProductionExportService(
+    root=WORKSPACE_ROOT,
+    repository=creative_repository,
+    audit_service=audit_service,
+)
+# Only registered files inside this fixed directory may be unlinked when a
+# project is deleted through the creative or writer-rollback flows.
+creative_repository.production_export_directory = production_export_service.export_dir
 writer_agent_store = WriterAgentStore(
     WORKSPACE_ROOT / ".runtime" / "writer_agent" / "writer_agent.db"
 )
@@ -648,6 +658,7 @@ app.state.workflow_transition_service = workflow_transition_service
 app.state.creative_repository = creative_repository
 app.state.creative_application_service = creative_application_service
 app.state.delivery_service = delivery_service
+app.state.production_export_service = production_export_service
 app.state.writer_action_runner = writer_action_runner
 app.state.writer_action_service = writer_action_service
 templates = Jinja2Templates(directory=str(WORKSPACE_ROOT / "templates"))
@@ -699,6 +710,7 @@ app.include_router(
 )
 app.include_router(build_audit_router(audit_service))
 app.include_router(build_delivery_router(delivery_service))
+app.include_router(build_production_export_router(production_export_service))
 app.include_router(
     build_llm_settings_router(llm_settings_service, audit_service)
 )

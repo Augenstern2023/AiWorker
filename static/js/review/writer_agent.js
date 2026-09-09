@@ -800,6 +800,7 @@
     let thinkingStartedAt = 0;
     let mountedProjectReviewSessionId = null;
     let pendingTurnChange = null;
+    let pendingSessionSwitch = null;
     const turnMutationRequestIds = new Map();
     const thinkingStages = [
         '正在阅读你提交的材料',
@@ -873,7 +874,7 @@
             meta.className = 'small text-muted mt-1';
             meta.textContent = `${session.reports?.length ? `${session.reports.length} 份报告` : '等待诊断'} · ${sessionTime(session.updated_at)}`;
             button.append(title, meta);
-            button.addEventListener('click', () => loadSession(session.id));
+            button.addEventListener('click', () => requestSessionSwitch(session, button));
             sessionsElement.append(button);
         });
     }
@@ -966,10 +967,41 @@
     }
 
     function closeTurnChangeDialog(restoreFocus = true) {
-        const trigger = pendingTurnChange?.trigger || null;
+        const trigger = pendingTurnChange?.trigger || pendingSessionSwitch?.trigger || null;
         pendingTurnChange = null;
+        pendingSessionSwitch = null;
         if (turnChangeDialog?.open) turnChangeDialog.close();
         if (restoreFocus && trigger?.isConnected) trigger.focus();
+    }
+
+    async function requestSessionSwitch(session, trigger) {
+        if (isBusy || Number(activeSession?.id) === Number(session?.id)) return;
+        if (!activeSession) {
+            await loadSession(session.id);
+            return;
+        }
+        pendingTurnChange = null;
+        pendingSessionSwitch = {sessionId: session.id, trigger};
+        if (turnChangeTitle) turnChangeTitle.textContent = '回档提醒';
+        if (turnChangeSummary) {
+            turnChangeSummary.textContent = `即将打开“${session.title || '未命名创作会话'}”。切换会话不会自动回档，也不会撤销当前会话已完成或已编辑的内容；如需恢复系统状态，请打开后在目标用户消息上点击“回档”并确认影响范围。`;
+        }
+        if (turnChangeConfirm) turnChangeConfirm.textContent = '仅打开会话';
+        if (turnChangeDialog?.showModal) turnChangeDialog.showModal();
+        else if (window.confirm(turnChangeSummary?.textContent || '确认打开该会话？')) {
+            await confirmTurnChangeDialog();
+        }
+    }
+
+    async function confirmTurnChangeDialog() {
+        const sessionSwitch = pendingSessionSwitch;
+        if (sessionSwitch) {
+            closeTurnChangeDialog(false);
+            await loadSession(sessionSwitch.sessionId);
+            messageInput.focus();
+            return;
+        }
+        await performTurnChange();
     }
 
     function setTurnTriggerLoading(trigger, loading) {
@@ -1038,6 +1070,7 @@
             if (!preview.can_rollback) {
                 throw new Error((preview.blockers || []).join('；') || '当前无法回档');
             }
+            pendingSessionSwitch = null;
             pendingTurnChange = {
                 mode,
                 preview,
@@ -1298,7 +1331,7 @@
 
     fileInput.addEventListener('change', () => { fileNameElement.textContent = fileInput.files?.[0]?.name || ''; });
     turnChangeCancel?.addEventListener('click', () => closeTurnChangeDialog(true));
-    turnChangeConfirm?.addEventListener('click', performTurnChange);
+    turnChangeConfirm?.addEventListener('click', confirmTurnChangeDialog);
     turnChangeDialog?.addEventListener('cancel', (event) => {
         event.preventDefault();
         closeTurnChangeDialog(true);

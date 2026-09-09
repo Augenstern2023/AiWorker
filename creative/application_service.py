@@ -411,6 +411,8 @@ class CreativeApplicationService:
         project = self.repository.get_project(project_id)
         if project is None:
             raise KeyError(project_id)
+        if project.get("workflow_mode", "sequential") != "sequential":
+            raise ValueError("自由创作项目不能创建标准阶段任务")
         role_code = (
             "creative_planner" if stage in {"brief", "characters"} else "screenwriter"
         )
@@ -478,6 +480,11 @@ class CreativeApplicationService:
         stage: str,
         actor: Principal,
     ) -> dict[str, Any]:
+        project = self.repository.get_project(project_id)
+        if project is None:
+            raise KeyError(project_id)
+        if project.get("workflow_mode", "sequential") != "sequential":
+            raise ValueError("自由创作项目不能使用标准阶段任务")
         try:
             return self.workflow_adapter.assert_task_for_creation(
                 workflow_task_id, stage, actor, project_id=project_id
@@ -1027,6 +1034,11 @@ class CreativeApplicationService:
     ) -> Any:
         if self.job_manager is None:
             raise RuntimeError("creative job manager is unavailable")
+        project = self.repository.get_project(project_id)
+        if project is None:
+            raise KeyError(project_id)
+        if project.get("workflow_mode", "sequential") != "sequential":
+            raise ValueError("自由创作项目必须使用自由创作生成接口")
         if actor is not None:
             self.assert_stage_write_access(project_id, stage, actor)
             if workflow_task_id is not None:

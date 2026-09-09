@@ -289,6 +289,11 @@ class CreativeRepository:
                     bootstrap_status TEXT NOT NULL DEFAULT 'ready'
                         CHECK (bootstrap_status IN ('pending', 'ready', 'failed')),
                     revision INTEGER NOT NULL DEFAULT 0,
+                    workflow_mode TEXT NOT NULL DEFAULT 'sequential'
+                        CHECK (workflow_mode IN ('sequential', 'free')),
+                    mode_revision INTEGER NOT NULL DEFAULT 0,
+                    mode_changed_at REAL,
+                    mode_changed_by TEXT,
                     created_at REAL NOT NULL, updated_at REAL NOT NULL,
                     FOREIGN KEY(topic_id) REFERENCES creative_topics(id),
                     FOREIGN KEY(breakdown_id) REFERENCES creative_breakdowns(id),
@@ -307,6 +312,24 @@ class CreativeRepository:
                     "ALTER TABLE creative_projects "
                     "ADD COLUMN revision INTEGER NOT NULL DEFAULT 0"
                 )
+            if "workflow_mode" not in project_columns:
+                conn.execute(
+                    "ALTER TABLE creative_projects ADD COLUMN workflow_mode TEXT "
+                    "NOT NULL DEFAULT 'sequential'"
+                )
+            if "mode_revision" not in project_columns:
+                conn.execute(
+                    "ALTER TABLE creative_projects ADD COLUMN mode_revision INTEGER "
+                    "NOT NULL DEFAULT 0"
+                )
+            if "mode_changed_at" not in project_columns:
+                conn.execute(
+                    "ALTER TABLE creative_projects ADD COLUMN mode_changed_at REAL"
+                )
+            if "mode_changed_by" not in project_columns:
+                conn.execute(
+                    "ALTER TABLE creative_projects ADD COLUMN mode_changed_by TEXT"
+                )
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS creative_blueprints (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -317,6 +340,7 @@ class CreativeRepository:
                     difference_note TEXT NOT NULL DEFAULT '', source_refs_json TEXT NOT NULL DEFAULT '{}',
                     direction_type TEXT NOT NULL DEFAULT 'imitation',
                     generation_meta_json TEXT NOT NULL DEFAULT '{}', locked_at REAL,
+                    resource_scope TEXT NOT NULL DEFAULT 'sequential',
                     created_at REAL NOT NULL, updated_at REAL NOT NULL,
                     FOREIGN KEY(project_id) REFERENCES creative_projects(id),
                     UNIQUE(project_id, candidate_group_id, version)
@@ -348,6 +372,7 @@ class CreativeRepository:
                     parent_version_id INTEGER, character_key TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'draft', content_json TEXT NOT NULL,
                     source_refs_json TEXT NOT NULL DEFAULT '{}', generation_meta_json TEXT NOT NULL DEFAULT '{}',
+                    resource_scope TEXT NOT NULL DEFAULT 'sequential',
                     locked_at REAL, created_at REAL NOT NULL, updated_at REAL NOT NULL,
                     FOREIGN KEY(project_id) REFERENCES creative_projects(id),
                     UNIQUE(project_id, batch_id, character_key)
@@ -360,6 +385,7 @@ class CreativeRepository:
                     parent_version_id INTEGER, relationship_key TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'draft', content_json TEXT NOT NULL,
                     source_refs_json TEXT NOT NULL DEFAULT '{}', generation_meta_json TEXT NOT NULL DEFAULT '{}',
+                    resource_scope TEXT NOT NULL DEFAULT 'sequential',
                     locked_at REAL, created_at REAL NOT NULL, updated_at REAL NOT NULL,
                     FOREIGN KEY(project_id) REFERENCES creative_projects(id),
                     UNIQUE(project_id, batch_id, relationship_key)
@@ -373,6 +399,7 @@ class CreativeRepository:
                     parent_version_id INTEGER, status TEXT NOT NULL DEFAULT 'draft',
                     content_json TEXT NOT NULL, upstream_refs_json TEXT NOT NULL DEFAULT '{}',
                     generation_meta_json TEXT NOT NULL DEFAULT '{}', locked_at REAL,
+                    resource_scope TEXT NOT NULL DEFAULT 'sequential',
                     created_at REAL NOT NULL, updated_at REAL NOT NULL,
                     FOREIGN KEY(project_id) REFERENCES creative_projects(id),
                     UNIQUE(project_id, stage, episode_number, version)
@@ -381,6 +408,77 @@ class CreativeRepository:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_creative_projects_topic ON creative_projects(topic_id, deleted)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_creative_blueprints_project ON creative_blueprints(project_id, status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_creative_episodes_project ON creative_episodes(project_id, stage, episode_number)")
+            for table in (
+                "creative_blueprints",
+                "creative_characters",
+                "creative_relationships",
+                "creative_episodes",
+            ):
+                columns = {
+                    row[1]
+                    for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+                if "resource_scope" not in columns:
+                    conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN resource_scope TEXT "
+                        "NOT NULL DEFAULT 'sequential'"
+                    )
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS creative_resource_heads (
+                    project_id INTEGER NOT NULL,
+                    resource_scope TEXT NOT NULL DEFAULT 'free',
+                    stage TEXT NOT NULL,
+                    episode_number INTEGER NOT NULL DEFAULT 0,
+                    resource_ref TEXT NOT NULL,
+                    resource_version INTEGER NOT NULL DEFAULT 1,
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL,
+                    updated_by TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY(project_id, resource_scope, stage, episode_number),
+                    FOREIGN KEY(project_id) REFERENCES creative_projects(id)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS creative_generation_contexts (
+                    id TEXT PRIMARY KEY,
+                    project_id INTEGER NOT NULL,
+                    target_stage TEXT NOT NULL,
+                    episode_number INTEGER,
+                    seed_version_id INTEGER,
+                    instruction TEXT NOT NULL DEFAULT '',
+                    context_manifest_json TEXT NOT NULL DEFAULT '{}',
+                    context_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                    context_hash TEXT NOT NULL,
+                    prompt_schema_version TEXT NOT NULL DEFAULT '',
+                    created_by TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES creative_projects(id)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS creative_mode_migrations (
+                    operation_id TEXT PRIMARY KEY,
+                    project_id INTEGER NOT NULL,
+                    from_mode TEXT NOT NULL,
+                    to_mode TEXT NOT NULL,
+                    source_mode_revision INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    mapping_json TEXT NOT NULL DEFAULT '{}',
+                    error TEXT NOT NULL DEFAULT '',
+                    requested_by TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES creative_projects(id)
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_creative_heads_project "
+                "ON creative_resource_heads(project_id, resource_scope, stage, episode_number)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_creative_contexts_project "
+                "ON creative_generation_contexts(project_id, target_stage, episode_number)"
+            )
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS creative_operation_results (
                     operation_id TEXT PRIMARY KEY,
@@ -1243,11 +1341,17 @@ class CreativeRepository:
         workflow_task_id: str | None = None,
         creation_request_id: str = "",
         created_by: str = "local",
+        workflow_mode: str = "sequential",
+        seed_text: str = "",
     ) -> dict[str, Any]:
         if not 1 <= int(target_episode_count) <= 100:
             raise ValueError("目标集数必须在 1-100 之间")
         if not 30 <= int(episode_duration_seconds) <= 1800:
             raise ValueError("单集时长必须在 30-1800 秒之间")
+        if workflow_mode not in {"sequential", "free"}:
+            raise ValueError("invalid creative workflow mode")
+        if workflow_mode == "free" and len(seed_text.strip()) < 2:
+            raise ValueError("自由创作项目需要至少 2 个字符的创作种子")
         with self._connect() as conn:
             normalized_request_id = creation_request_id.strip()
             if normalized_request_id:
@@ -1300,17 +1404,28 @@ class CreativeRepository:
                         topic_id, breakdown_id, name, genre, target_platform, target_audience,
                         target_episode_count, episode_duration_seconds, workflow_task_id,
                         creation_workflow_task_id, creation_request_id, created_by,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        workflow_mode, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         topic_id, breakdown_id, name.strip() or f"{topic['title']}创作项目",
                         genre.strip() or str(topic["category"] or ""), target_platform.strip(),
                         resolved_target_audience, int(target_episode_count),
                         int(episode_duration_seconds), workflow_task_id, workflow_task_id,
-                        normalized_request_id or None, created_by, now, now,
+                        normalized_request_id or None, created_by, workflow_mode,
+                        "free_active" if workflow_mode == "free" else "created", now, now,
                     ),
                 )
+                if workflow_mode == "free":
+                    conn.execute(
+                        """
+                        INSERT INTO creative_seeds (
+                            project_id, version, parent_version_id, status, seed_text,
+                            constraints_json, reference_refs_json, created_at, updated_at
+                        ) VALUES (?, 1, NULL, 'frozen', ?, '{}', '[]', ?, ?)
+                        """,
+                        (int(cursor.lastrowid), seed_text.strip(), now, now),
+                    )
             except sqlite3.IntegrityError:
                 if normalized_request_id:
                     existing = conn.execute(
@@ -1346,6 +1461,7 @@ class CreativeRepository:
         reference_refs: list[dict[str, Any]] | None = None,
         created_by: str,
         creation_request_id: str,
+        workflow_mode: str = "sequential",
     ) -> dict[str, Any]:
         project, _ = self.ensure_original_project(
             seed_text=seed_text,
@@ -1359,6 +1475,7 @@ class CreativeRepository:
             reference_refs=reference_refs,
             created_by=created_by,
             creation_request_id=creation_request_id,
+            workflow_mode=workflow_mode,
         )
         return project
 
@@ -1376,6 +1493,7 @@ class CreativeRepository:
         reference_refs: list[dict[str, Any]] | None = None,
         created_by: str,
         creation_request_id: str,
+        workflow_mode: str = "sequential",
     ) -> tuple[dict[str, Any], bool]:
         if not 1 <= int(target_episode_count) <= 100:
             raise ValueError("目标集数必须在 1-100 之间")
@@ -1383,19 +1501,23 @@ class CreativeRepository:
             raise ValueError("单集时长必须在 30-1800 秒之间")
         if not seed_text.strip():
             raise ValueError("原创种子不能为空")
+        if workflow_mode not in {"sequential", "free"}:
+            raise ValueError("invalid creative workflow mode")
         now = time.time()
         normalized_request_id = creation_request_id.strip()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             if normalized_request_id:
                 existing = conn.execute(
-                    "SELECT id, creation_mode FROM creative_projects "
+                    "SELECT id, creation_mode, workflow_mode FROM creative_projects "
                     "WHERE created_by = ? AND creation_request_id = ? AND deleted = 0",
                     (created_by, normalized_request_id),
                 ).fetchone()
                 if existing is not None:
                     if existing["creation_mode"] != "original":
                         raise ValueError("创建请求标识已用于其他项目模式")
+                    if str(existing["workflow_mode"] or "sequential") != workflow_mode:
+                        raise ValueError("创建请求标识已用于其他工作流模式")
                     project_id = int(existing["id"])
                     created = False
                 else:
@@ -1413,6 +1535,7 @@ class CreativeRepository:
                         created_by=created_by,
                         creation_request_id=normalized_request_id,
                         now=now,
+                        workflow_mode=workflow_mode,
                     )
             else:
                 project_id, created = self._insert_original_project(
@@ -1429,6 +1552,7 @@ class CreativeRepository:
                     created_by=created_by,
                     creation_request_id=normalized_request_id,
                     now=now,
+                    workflow_mode=workflow_mode,
                 )
         return self.get_project(project_id) or {}, created
 
@@ -1448,19 +1572,22 @@ class CreativeRepository:
         created_by: str,
         creation_request_id: str,
         now: float,
+        workflow_mode: str,
     ) -> tuple[int, bool]:
         cursor = conn.execute(
             """
             INSERT INTO creative_projects (
                 topic_id, breakdown_id, name, genre, target_platform, target_audience,
                 target_episode_count, episode_duration_seconds, creation_request_id,
-                created_by, creation_mode, bootstrap_status, created_at, updated_at
-            ) VALUES (NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'original', 'pending', ?, ?)
+                created_by, creation_mode, workflow_mode, status, bootstrap_status,
+                created_at, updated_at
+            ) VALUES (NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'original', ?, ?, 'pending', ?, ?)
             """,
             (
                 name.strip(), genre.strip(), target_platform.strip(), target_audience.strip(),
                 int(target_episode_count), int(episode_duration_seconds),
-                creation_request_id or None, created_by, now, now,
+                creation_request_id or None, created_by, workflow_mode,
+                "free_active" if workflow_mode == "free" else "created", now, now,
             ),
         )
         project_id = int(cursor.lastrowid)
@@ -2374,7 +2501,11 @@ class CreativeRepository:
         if not updates:
             return project
         content_updates = set(updates) - {"status"}
-        if project.get("locked_brief_id") and content_updates:
+        if (
+            project.get("workflow_mode", "sequential") == "sequential"
+            and project.get("locked_brief_id")
+            and content_updates
+        ):
             if draft_brief_id is None or expected_revision is None:
                 raise ValueError("锁定 Brief 后不能修改项目 Brief 参数")
             with self._connect() as conn:
@@ -2391,7 +2522,7 @@ class CreativeRepository:
                 != int(project["locked_brief_id"])
             ):
                 raise ValueError("只能通过当前锁定 Brief 的新草稿版本修改项目参数")
-        if content_updates:
+        if content_updates and project.get("workflow_mode", "sequential") == "sequential":
             with self._connect() as conn:
                 pending_brief = conn.execute(
                     "SELECT 1 FROM creative_blueprints WHERE project_id = ? "
@@ -2967,6 +3098,9 @@ class CreativeRepository:
             conn.execute("DELETE FROM creative_stage_exports WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_operation_results WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_generation_operations WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM creative_generation_contexts WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM creative_resource_heads WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM creative_mode_migrations WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_episodes WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_relationships WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_characters WHERE project_id = ?", (project_id,))
@@ -2994,26 +3128,40 @@ class CreativeRepository:
             if not row:
                 return None
             project = dict(row)
+            resource_scope = (
+                "free" if project.get("workflow_mode") == "free" else "sequential"
+            )
             project["source_platforms"] = json.loads(project.pop("source_platforms_json") or "[]")
             project["blueprints"] = [
                 self._blueprint(dict(item)) for item in conn.execute(
-                    "SELECT * FROM creative_blueprints WHERE project_id = ? ORDER BY id", (project_id,),
+                    "SELECT * FROM creative_blueprints WHERE project_id = ? "
+                    "AND resource_scope = ? ORDER BY id", (project_id, resource_scope),
                 ).fetchall()
             ]
             project["characters"] = [
                 self._creative_item(dict(item)) for item in conn.execute(
-                    "SELECT * FROM creative_characters WHERE project_id = ? ORDER BY version, id", (project_id,),
+                    "SELECT * FROM creative_characters WHERE project_id = ? "
+                    "AND resource_scope = ? ORDER BY version, id", (project_id, resource_scope),
                 ).fetchall()
             ]
             project["relationships"] = [
                 self._creative_item(dict(item)) for item in conn.execute(
-                    "SELECT * FROM creative_relationships WHERE project_id = ? ORDER BY version, id", (project_id,),
+                    "SELECT * FROM creative_relationships WHERE project_id = ? "
+                    "AND resource_scope = ? ORDER BY version, id", (project_id, resource_scope),
                 ).fetchall()
             ]
             project["episodes"] = [
                 self._episode(dict(item)) for item in conn.execute(
-                    "SELECT * FROM creative_episodes WHERE project_id = ? ORDER BY stage, episode_number, version",
-                    (project_id,),
+                    "SELECT * FROM creative_episodes WHERE project_id = ? "
+                    "AND resource_scope = ? ORDER BY stage, episode_number, version",
+                    (project_id, resource_scope),
+                ).fetchall()
+            ]
+            project["resource_heads"] = [
+                dict(item) for item in conn.execute(
+                    "SELECT * FROM creative_resource_heads WHERE project_id = ? "
+                    "AND resource_scope = ? ORDER BY stage, episode_number",
+                    (project_id, resource_scope),
                 ).fetchall()
             ]
             if project["creation_mode"] == "original":

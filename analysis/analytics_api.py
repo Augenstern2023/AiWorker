@@ -47,7 +47,7 @@ def build_analytics_router(
         return services["rank_service"]
 
     def get_services() -> tuple[DramaRepository, MetricsService]:
-        if not services:
+        if "repository" not in services:
             repository = DramaRepository(db_path=Path(runtime_dir) / "rag" / "analytics.db", root=root)
             services["repository"] = repository
             services["metrics"] = MetricsService(repository)

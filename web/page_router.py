@@ -275,6 +275,7 @@ def _template_context(
         raw_token = request.cookies.get(service.session_service.cookie_name)
         session = service.session_service.resolve_session(raw_token)
         csrf_token = session.csrf_token if session is not None else ""
+    project_id = request.path_params.get("project_id", "project")
     can_export_projects = bool(
         principal
         and (
@@ -284,11 +285,12 @@ def _template_context(
         )
     )
     if not can_export_projects and principal is not None:
-        from identity.permission_service import PermissionService
-
         managed = getattr(service, "can_access_managed_project", None)
-        project_id = request.path_params.get("project_id")
-        if project_id and isinstance(service, PermissionService) and callable(managed):
+        if (
+            project_id != "project"
+            and isinstance(service, PermissionService)
+            and callable(managed)
+        ):
             try:
                 can_export_projects = bool(managed(principal, str(project_id)))
             except Exception:
@@ -327,6 +329,18 @@ def _template_context(
         ),
         "can_open_writing_projects": bool(
             principal and navigation_service.can_open(principal, "/writing/projects")
+        ),
+        "can_open_planning_project_details": bool(
+            principal
+            and navigation_service.can_open(
+                principal, f"/planning/projects/{project_id}/brief"
+            )
+        ),
+        "can_open_writing_project_details": bool(
+            principal
+            and navigation_service.can_open(
+                principal, f"/writing/projects/{project_id}/outlines"
+            )
         ),
         **request.path_params,
     }

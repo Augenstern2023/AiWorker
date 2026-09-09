@@ -27,13 +27,14 @@ from pydantic import BaseModel
 from creative.hit_breakdown import breakdown_field_guide, personalize_breakdown_field_guide
 from creative.application_service import CreativeApplicationService, CreativeContextConflict
 from creative.imitation_service import assess_similarity_risk
+from creative.free_mode_service import FreeCreativeModeService
 from creative.lifecycle_service import TopicLifecycleService, content_fingerprint
 from creative.market_reference_service import MarketReferenceService
 from creative.original_direction_service import validate_original_direction_content
 from creative.original_project_service import OriginalProjectService
 from creative.outline_fields import OUTLINE_TEXT_FIELDS, outline_field_source_fingerprint
 from creative.outline_overview import SERIES_OVERVIEW_FIELD_LABELS, read_series_overview
-from creative.repository import CreativeRepository, TopicDecisionConflict
+from creative.repository import CreativeRepository, TopicDecisionConflict, canonical_request_hash
 from creative.script_service import normalize_script_content, rewrite_outline_field, validate_script
 from creative.selection_stage_service import SelectionStageService
 from creative.workflow_adapter import CreativeWorkflowAdapter
@@ -47,8 +48,19 @@ from creative.schema import (
     CharacterBatchRequest,
     CreativeLockRequest,
     CreativeItemUpdateRequest,
+    CreativeModeChangeRequest,
+    CreativeModeMigrationRequest,
 
     EpisodeBeatsRequest,
+    FreeBriefCreateRequest,
+    FreeCharacterBatchCreateRequest,
+    FreeCreativeGenerateRequest,
+    FreeCreativeHeadRequest,
+    FreeCreativeLockRequest,
+    FreeCreativeSeriesGenerateRequest,
+    FreeCreativeSeriesLockRequest,
+    FreeEpisodeCreateRequest,
+    FreeOutlineCreateRequest,
     OutlineBatchRequest,
     OutlineFieldRewriteApplyRequest,
     OutlineFieldRewriteRequest,
@@ -168,7 +180,7 @@ def uses_project_member_stage_authorization(path: str, method: str) -> bool:
     return bool(
         re.match(
             r"/(?:"
-            r"blueprints|briefs|seeds|characters|character-batches|outlines|"
+            r"free|blueprints|briefs|seeds|characters|character-batches|outlines|"
             r"beats|scripts|episodes/\d+/(?:beats|scripts)|"
             r"workflow-tasks/(?:brief|characters|outline|beats|script)"
             r")(?:/|$)",
@@ -749,6 +761,7 @@ def build_creative_router(
             repository, workflow_repository, market_reference_service
         )
     )
+    free_mode_service = FreeCreativeModeService(repository)
     if application_service is None:
         workflow_identity = getattr(
             workflow_repository, "identity_repository", None
@@ -1011,10 +1024,18 @@ def build_creative_router(
             raise HTTPException(403, "只能在已分配的项目中创建机器任务")
 
     def project_or_404(project_id: int) -> dict[str, Any]:
-        workflow_adapter.reconcile_project(project_id)
         project = repository.get_project(project_id)
         if not project:
             raise HTTPException(404, "creative project not found")
+        if project.get("workflow_mode", "sequential") == "sequential":
+            workflow_adapter.reconcile_project(project_id)
+            project = repository.get_project(project_id) or project
+        return project
+
+    def sequential_project_or_409(project_id: int) -> dict[str, Any]:
+        project = project_or_404(project_id)
+        if project.get("workflow_mode", "sequential") != "sequential":
+            raise HTTPException(409, "自由创作项目必须使用自由创作接口")
         return project
 
     def assert_project_read_access(
@@ -1261,6 +1282,8 @@ def build_creative_router(
         **extra: Any,
     ) -> dict[str, Any]:
         project = project_or_404(project_id)
+        if project.get("workflow_mode", "sequential") != "sequential":
+            raise HTTPException(409, "自由创作项目必须使用自由创作接口")
         if job_manager is None:
             raise HTTPException(503, "creative job manager is unavailable")
         required_permission = (
@@ -1373,6 +1396,8 @@ def build_creative_router(
         project_id: int | None = None,
         topic_id: int | None = None,
     ) -> str:
+        if project_id is not None:
+            sequential_project_or_409(project_id)
         if principal is None:
             raise HTTPException(401, "登录已失效，请重新登录")
         if resource_type == "brief" and project_id is None and topic_id is not None:
@@ -1444,6 +1469,7 @@ def build_creative_router(
         project_id: int,
         principal: Principal,
     ) -> str:
+        sequential_project_or_409(project_id)
         try:
             if task_id:
                 application_service.validate_task_for_creation(
@@ -1463,11 +1489,14 @@ def build_creative_router(
             raise HTTPException(409, str(exc)) from exc
 
     def persist_legacy_draft(**kwargs: Any) -> dict[str, Any]:
+        sequential_project_or_409(int(kwargs["project_id"]))
         return application_service.persist_legacy_draft(**kwargs)
 
     def outline_field_context_or_http(episode_id: int) -> dict[str, Any]:
         try:
-            return repository.get_outline_field_rewrite_context(episode_id)
+            context = repository.get_outline_field_rewrite_context(episode_id)
+            sequential_project_or_409(int(context["episode"]["project_id"]))
+            return context
         except ValueError as exc:
             detail = str(exc)
             status_code = 404 if detail in {"分集大纲不存在", "创作项目不存在"} else 409
@@ -2208,6 +2237,8 @@ def build_creative_router(
     ):
         try:
             workflow_task_id = payload.workflow_task_id or ""
+            if payload.workflow_mode == "free" and workflow_task_id:
+                raise HTTPException(409, "自由创作项目不能绑定标准工作流任务")
             breakdown = repository.get_breakdown(payload.breakdown_id)
             if breakdown is None or breakdown.get("status") not in {"locked", "approved"}:
                 raise HTTPException(
@@ -2259,6 +2290,10 @@ def build_creative_router(
                 raise HTTPException(
                     409, "workflow task is already linked to another project request"
                 )
+            if project is not None and str(
+                project.get("workflow_mode") or "sequential"
+            ) != payload.workflow_mode:
+                raise HTTPException(409, "创建请求标识已用于其他工作流模式")
             if project is None and task is not None and task.get("project_id") is not None:
                 raise HTTPException(
                     409, "brief workflow task is already linked to a project"
@@ -2276,13 +2311,15 @@ def build_creative_router(
                     workflow_task_id=workflow_task_id or None,
                     creation_request_id=payload.creation_request_id,
                     created_by=principal.user_id,
+                    workflow_mode=payload.workflow_mode,
+                    seed_text=payload.seed_text,
                 )
             resolved_project = repository.get_project(int(project["id"])) or project
             if resolved_project.get("created_by") == principal.user_id:
                 workflow_repository.ensure_project_creator(
                     str(resolved_project["id"]), principal.user_id, principal
                 )
-            if workflow_task_id and bound_id is None:
+            if payload.workflow_mode == "sequential" and workflow_task_id and bound_id is None:
                 try:
                     workflow_repository.bind_workflow_project(
                         workflow_task_id,
@@ -2301,7 +2338,10 @@ def build_creative_router(
                         503,
                         "project created but workflow binding requires reconciliation",
                     ) from exc
-            if resolved_project.get("created_by") == principal.user_id:
+            if (
+                payload.workflow_mode == "sequential"
+                and resolved_project.get("created_by") == principal.user_id
+            ):
                 _ensure_stage_tasks(
                     str(resolved_project["id"]), payload.topic_id, principal
                 )
@@ -2445,7 +2485,8 @@ def build_creative_router(
                     ) from exc
         items = repository.list_projects(topic_id=topic_id)
         for item in items:
-            workflow_adapter.reconcile_project(int(item["id"]))
+            if item.get("workflow_mode", "sequential") == "sequential":
+                workflow_adapter.reconcile_project(int(item["id"]))
         items = repository.list_projects(topic_id=topic_id)
         if participating_only:
             items = [
@@ -2497,6 +2538,634 @@ def build_creative_router(
             project_or_404(project_id),
             principal,
             managed_preview=has_managed_project_preview_access(request, principal),
+        )
+
+    def assert_mode_manager(project: dict[str, Any], principal: Principal) -> None:
+        if (
+            principal.is_system_admin
+            or project.get("created_by") == principal.user_id
+        ):
+            return
+        try:
+            workflow_repository.assert_can_manage_project(str(project["id"]), principal)
+        except PermissionError as exc:
+            raise HTTPException(403, "只有项目创建者或项目管理员可以修改创作模式") from exc
+
+    def project_creative_tasks(project_id: int, principal: Principal) -> list[dict[str, Any]]:
+        return [
+            task
+            for task in workflow_repository.list_tasks(principal)
+            if str(task.get("project_id") or "") == str(project_id)
+            and str(task.get("task_type") or "")
+            in {"brief", "characters", "outline", "beats", "script", "delivery"}
+        ]
+
+    def cancel_pending_creative_tasks(project_id: int, principal: Principal) -> None:
+        tasks = project_creative_tasks(project_id, principal)
+        if any(task.get("status") in {"in_progress", "returned"} for task in tasks):
+            raise HTTPException(409, "项目存在进行中的创作或交付任务，暂不能切换模式")
+        for task in tasks:
+            if task.get("status") in {"pool", "assigned"}:
+                workflow_repository.cancel_task(str(task["id"]), principal)
+
+    @router.patch("/projects/{project_id}/workflow-mode")
+    async def change_project_workflow_mode(
+        project_id: int,
+        payload: CreativeModeChangeRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        assert_project_read_access(request, project_id, principal)
+        project = project_or_404(project_id)
+        assert_mode_manager(project, principal)
+        if payload.workflow_mode == "free":
+            cancel_pending_creative_tasks(project_id, principal)
+        try:
+            changed = free_mode_service.switch_empty_mode(
+                project_id=project_id,
+                workflow_mode=payload.workflow_mode,
+                expected_mode_revision=payload.expected_mode_revision,
+                actor_user_id=principal.user_id,
+                seed_text=payload.seed_text,
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if payload.workflow_mode == "sequential":
+            _ensure_stage_tasks(str(project_id), changed.get("topic_id"), principal)
+        audit_service = getattr(request.app.state, "audit_service", None)
+        if isinstance(audit_service, AuditService):
+            audit_service.record(
+                actor=principal,
+                action="creative.project.workflow_mode.change",
+                target_type="creative_project",
+                target_id=str(project_id),
+                project_id=str(project_id),
+                before={"workflow_mode": project.get("workflow_mode")},
+                after={"workflow_mode": changed.get("workflow_mode")},
+                reason=None,
+                result="success",
+                request=request,
+            )
+        return changed
+
+    def active_project_job_labels(project_id: int) -> list[str]:
+        if job_manager is None:
+            return []
+        labels: list[str] = []
+        for item in job_manager.list_jobs():
+            job = item.get("job") if isinstance(item.get("job"), dict) else item
+            extra = job.get("extra") if isinstance(job.get("extra"), dict) else {}
+            bound_project = extra.get("project_id") or item.get("project_id")
+            status = str(item.get("status") or job.get("status") or "").lower()
+            if str(bound_project or "") != str(project_id):
+                continue
+            if status in {"completed", "success", "succeeded", "failed", "cancelled", "stopped"}:
+                continue
+            crawler_type = str(job.get("crawler_type") or "job")
+            labels.append(crawler_type)
+        return labels
+
+    @router.get("/projects/{project_id}/mode-migration-preview")
+    async def creative_mode_migration_preview(
+        project_id: int,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        assert_project_read_access(request, project_id, principal)
+        project = project_or_404(project_id)
+        assert_mode_manager(project, principal)
+        preview = free_mode_service.migration_preview(project_id)
+        tasks = project_creative_tasks(project_id, principal)
+        in_progress = [
+            task for task in tasks if task.get("status") in {"in_progress", "returned"}
+        ]
+        active_jobs = active_project_job_labels(project_id)
+        blockers = list(preview["blockers"])
+        if in_progress:
+            blockers.append("项目存在进行中的创作任务")
+        if active_jobs:
+            blockers.append("项目存在运行中的后台任务")
+        return {
+            **preview,
+            "blockers": blockers,
+            "can_migrate": not blockers,
+            "pending_task_count": sum(
+                task.get("status") in {"pool", "assigned"} for task in tasks
+            ),
+            "active_jobs": active_jobs,
+        }
+
+    @router.post("/projects/{project_id}/migrate-to-free")
+    async def migrate_project_to_free(
+        project_id: int,
+        payload: CreativeModeMigrationRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        assert_project_read_access(request, project_id, principal)
+        project = project_or_404(project_id)
+        assert_mode_manager(project, principal)
+        active_jobs = active_project_job_labels(project_id)
+        if active_jobs:
+            raise HTTPException(409, "项目存在运行中的后台任务，暂不能迁移")
+        cancel_pending_creative_tasks(project_id, principal)
+        try:
+            migrated = free_mode_service.migrate_to_free(
+                project_id=project_id,
+                expected_mode_revision=payload.expected_mode_revision,
+                operation_id=payload.operation_id,
+                actor_user_id=principal.user_id,
+                seed_text=payload.seed_text,
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        audit_service = getattr(request.app.state, "audit_service", None)
+        if isinstance(audit_service, AuditService):
+            audit_service.record(
+                actor=principal,
+                action="creative.project.workflow_mode.migrate",
+                target_type="creative_project",
+                target_id=str(project_id),
+                project_id=str(project_id),
+                before={"workflow_mode": project.get("workflow_mode")},
+                after={
+                    "workflow_mode": "free",
+                    "migration_operation_id": payload.operation_id,
+                },
+                reason=None,
+                result="success",
+                request=request,
+            )
+        return migrated
+
+    @router.get("/projects/{project_id}/legacy-creative-resources")
+    async def list_legacy_creative_resources(
+        project_id: int,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        assert_project_read_access(request, project_id, principal)
+        try:
+            return free_mode_service.list_legacy_resources(project_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.get("/projects/{project_id}/module-capabilities")
+    async def creative_module_capabilities(
+        project_id: int,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        assert_project_read_access(request, project_id, principal)
+        project = project_or_404(project_id)
+        capabilities: dict[str, Any] = {}
+        for stage in ("brief", "characters", "outline", "beats", "script"):
+            try:
+                application_service.assert_stage_write_access(project_id, stage, principal)
+                can_write = True
+                reason = ""
+            except PermissionError as exc:
+                can_write = False
+                reason = str(exc)
+            capabilities[stage] = {
+                "can_view": True,
+                "can_edit": can_write,
+                "can_create_blank": can_write and project.get("workflow_mode") == "free",
+                "can_create_revision": can_write and project.get("workflow_mode") == "free",
+                "can_generate": can_write and project.get("workflow_mode") == "free",
+                "can_lock": can_write and project.get("workflow_mode") == "free",
+                "reason": reason,
+            }
+        return {
+            "project_id": project_id,
+            "workflow_mode": project.get("workflow_mode", "sequential"),
+            "capabilities": capabilities,
+        }
+
+    @router.get("/projects/{project_id}/free/context-options")
+    async def free_context_options(
+        project_id: int,
+        request: Request,
+        episode_number: int | None = Query(None, ge=1, le=100),
+        principal: Principal = Depends(current_principal),
+    ):
+        assert_project_read_access(request, project_id, principal)
+        try:
+            return free_mode_service.context_options(project_id, episode_number)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post("/projects/{project_id}/free/briefs")
+    async def create_free_brief(
+        project_id: int,
+        payload: FreeBriefCreateRequest,
+        principal: Principal = Depends(current_principal),
+    ):
+        try:
+            application_service.assert_stage_write_access(project_id, "brief", principal)
+            project = project_or_404(project_id)
+            content = payload.content or {"title": project.get("name", ""), "logline": ""}
+            return free_mode_service.create_brief(
+                project_id,
+                content,
+                expected_head_revision=payload.expected_head_revision,
+                actor_user_id=principal.user_id,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post("/projects/{project_id}/free/characters")
+    async def create_free_characters(
+        project_id: int,
+        payload: FreeCharacterBatchCreateRequest,
+        principal: Principal = Depends(current_principal),
+    ):
+        try:
+            application_service.assert_stage_write_access(project_id, "characters", principal)
+            return free_mode_service.create_characters(
+                project_id,
+                payload.characters,
+                payload.relationships,
+                expected_head_revision=payload.expected_head_revision,
+                actor_user_id=principal.user_id,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post("/projects/{project_id}/free/outlines")
+    async def create_free_outline(
+        project_id: int,
+        payload: FreeOutlineCreateRequest,
+        principal: Principal = Depends(current_principal),
+    ):
+        try:
+            application_service.assert_stage_write_access(project_id, "outline", principal)
+            return free_mode_service.create_outline(
+                project_id,
+                payload.episodes,
+                series_arc=payload.series_arc,
+                series_overview=payload.series_overview,
+                expected_head_revision=payload.expected_head_revision,
+                actor_user_id=principal.user_id,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post("/projects/{project_id}/free/episodes/{episode_number}/{stage}")
+    async def create_free_episode_resource(
+        project_id: int,
+        episode_number: int,
+        stage: str,
+        payload: FreeEpisodeCreateRequest,
+        principal: Principal = Depends(current_principal),
+    ):
+        normalized = {"beats": "beats", "scripts": "script"}.get(stage)
+        if normalized is None:
+            raise HTTPException(404, "unsupported creative stage")
+        try:
+            application_service.assert_stage_write_access(project_id, normalized, principal)
+            default_content = (
+                {"beats": [], "updates": []}
+                if normalized == "beats"
+                else {"episode_title": "", "scenes": []}
+            )
+            return free_mode_service.create_episode_resource(
+                project_id,
+                normalized,
+                episode_number,
+                payload.content or default_content,
+                expected_head_revision=payload.expected_head_revision,
+                actor_user_id=principal.user_id,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.patch("/projects/{project_id}/free/items/{item_type}/{item_id}")
+    async def update_free_item(
+        project_id: int,
+        item_type: str,
+        item_id: int,
+        payload: CreativeItemUpdateRequest,
+        principal: Principal = Depends(current_principal),
+    ):
+        stage = {
+            "brief": "brief",
+            "character": "characters",
+            "relationship": "characters",
+            "episode": "outline",
+        }.get(item_type)
+        if stage is None:
+            raise HTTPException(404, "unsupported free creative item type")
+        episode = repository.get_episode(item_id) if item_type == "episode" else None
+        if episode and episode.get("stage") in {"beats", "script"}:
+            stage = str(episode["stage"])
+        try:
+            application_service.assert_stage_write_access(project_id, stage, principal)
+            return free_mode_service.update_item(
+                project_id=project_id,
+                item_type=item_type,
+                item_id=item_id,
+                content=payload.content,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post("/projects/{project_id}/free/{stage}/{resource_ref}/lock")
+    async def lock_free_resource(
+        project_id: int,
+        stage: str,
+        resource_ref: str,
+        payload: FreeCreativeLockRequest,
+        episode_number: int | None = Query(None, ge=1, le=100),
+        principal: Principal = Depends(current_principal),
+    ):
+        normalized = {"briefs": "brief", "characters": "characters", "outlines": "outline", "beats": "beats", "scripts": "script"}.get(stage)
+        if normalized is None:
+            raise HTTPException(404, "unsupported creative stage")
+        try:
+            application_service.assert_stage_write_access(project_id, normalized, principal)
+            return free_mode_service.lock_resource(
+                project_id=project_id,
+                stage=normalized,
+                resource_ref=resource_ref,
+                expected_head_revision=payload.expected_head_revision,
+                actor_user_id=principal.user_id,
+                episode_number=episode_number,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post("/projects/{project_id}/free/{stage}/lock-series")
+    async def lock_free_episode_series(
+        project_id: int,
+        stage: str,
+        payload: FreeCreativeSeriesLockRequest,
+        principal: Principal = Depends(current_principal),
+    ):
+        normalized = {"beats": "beats", "scripts": "script"}.get(stage)
+        if normalized is None:
+            raise HTTPException(404, "unsupported creative stage")
+        try:
+            application_service.assert_stage_write_access(
+                project_id, normalized, principal
+            )
+            return free_mode_service.lock_episode_series(
+                project_id=project_id,
+                stage=normalized,
+                expected_head_revisions=payload.expected_head_revisions,
+                actor_user_id=principal.user_id,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.put("/projects/{project_id}/free/{stage}/head")
+    async def set_free_resource_head(
+        project_id: int,
+        stage: str,
+        payload: FreeCreativeHeadRequest,
+        episode_number: int | None = Query(None, ge=1, le=100),
+        principal: Principal = Depends(current_principal),
+    ):
+        normalized = {"briefs": "brief", "characters": "characters", "outlines": "outline", "beats": "beats", "scripts": "script"}.get(stage)
+        if normalized is None:
+            raise HTTPException(404, "unsupported creative stage")
+        try:
+            application_service.assert_stage_write_access(project_id, normalized, principal)
+            return free_mode_service.set_head(
+                project_id=project_id,
+                stage=normalized,
+                resource_ref=payload.resource_ref,
+                expected_revision=payload.expected_head_revision,
+                actor_user_id=principal.user_id,
+                episode_number=episode_number,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    def start_free_generation_job(
+        *,
+        project_id: int,
+        stage: str,
+        episode_number: int | None,
+        payload: FreeCreativeGenerateRequest,
+        principal: Principal,
+    ) -> dict[str, Any]:
+        if job_manager is None:
+            raise HTTPException(503, "creative job manager is unavailable")
+        try:
+            application_service.assert_stage_write_access(project_id, stage, principal)
+            context = free_mode_service.create_generation_context(
+                context_id=payload.operation_id,
+                project_id=project_id,
+                stage=stage,
+                episode_number=episode_number,
+                instruction=payload.generation_instruction,
+                context_refs=payload.context_refs.model_dump(),
+                actor_user_id=principal.user_id,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        action = {
+            "brief": "blueprints",
+            "characters": "characters",
+            "outline": "outlines",
+            "beats": "beats",
+            "script": "script",
+        }[stage]
+        request_hash = canonical_request_hash({
+            "project_id": project_id,
+            "stage": stage,
+            "episode_number": episode_number,
+            "operation_id": payload.operation_id,
+            "context_hash": context["context_hash"],
+            "expected_head_revision": payload.expected_head_revision,
+        })
+        state = job_manager.create_job(
+            {
+                "platform": "creative",
+                "crawler_type": "phase4_generate",
+                "keywords": [],
+                "save_data_option": "json",
+                "get_comments": False,
+                "get_sub_comments": False,
+                "extra": {
+                    "action": action,
+                    "normalized_stage": stage,
+                    "workflow_mode": "free",
+                    "project_id": project_id,
+                    "episode_number": episode_number,
+                    "created_by_user_id": principal.user_id,
+                    "operation_id": payload.operation_id,
+                    "free_context_id": context["id"],
+                    "generation_request_hash": request_hash,
+                    "expected_head_revision": payload.expected_head_revision,
+                    "db_path": str(repository.db_path.resolve()),
+                    "runtime_dir": str(Path(runtime_dir).resolve()),
+                },
+            },
+            created_by_user_id=principal.user_id,
+            project_id=project_id,
+        )
+        return {"status": "success", "job": state.to_dict()}
+
+    def start_free_episode_series_generation_job(
+        *,
+        project_id: int,
+        stage: str,
+        payload: FreeCreativeSeriesGenerateRequest,
+        principal: Principal,
+    ) -> dict[str, Any]:
+        if job_manager is None:
+            raise HTTPException(503, "creative job manager is unavailable")
+        if stage not in {"beats", "script"}:
+            raise HTTPException(404, "unsupported creative stage")
+        context_refs = payload.context_refs.model_dump()
+        if stage == "script" and context_refs.get("beats_id") is not None:
+            raise HTTPException(400, "全集剧本生成不能把单集 Beats 引用应用到全部集")
+        resource_label = "Beats" if stage == "beats" else "场次剧本"
+        project = project_or_404(project_id)
+        total = int(project["target_episode_count"])
+        required_episodes = set(range(1, total + 1))
+        expected_head_revisions = {
+            int(number): int(revision)
+            for number, revision in payload.expected_head_revisions.items()
+        }
+        if set(expected_head_revisions) != required_episodes:
+            raise HTTPException(
+                400, f"必须提供项目全部集的{resource_label} Head 版本"
+            )
+        try:
+            application_service.assert_stage_write_access(project_id, stage, principal)
+            free_mode_service.assert_free_project(project_id)
+            contexts = {
+                episode_number: free_mode_service.create_generation_context(
+                    context_id=f"{payload.operation_id}:{stage}:{episode_number}",
+                    project_id=project_id,
+                    stage=stage,
+                    episode_number=episode_number,
+                    instruction=payload.generation_instruction,
+                    context_refs=context_refs,
+                    actor_user_id=principal.user_id,
+                )
+                for episode_number in range(1, total + 1)
+            }
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        request_hash = canonical_request_hash({
+            "project_id": project_id,
+            "stage": stage,
+            "series": True,
+            "operation_id": payload.operation_id,
+            "context_hashes": {
+                number: context["context_hash"]
+                for number, context in contexts.items()
+            },
+            "expected_head_revisions": expected_head_revisions,
+        })
+        state = job_manager.create_job(
+            {
+                "platform": "creative",
+                "crawler_type": "phase4_generate",
+                "keywords": [],
+                "save_data_option": "json",
+                "get_comments": False,
+                "get_sub_comments": False,
+                "extra": {
+                    "action": stage,
+                    "normalized_stage": stage,
+                    "workflow_mode": "free",
+                    "project_id": project_id,
+                    "episode_number": None,
+                    "episode_start": 1,
+                    "episode_end": total,
+                    "series": True,
+                    "created_by_user_id": principal.user_id,
+                    "operation_id": payload.operation_id,
+                    "free_context_ids": {
+                        str(number): context["id"]
+                        for number, context in contexts.items()
+                    },
+                    "generation_request_hash": request_hash,
+                    "expected_head_revisions": {
+                        str(number): revision
+                        for number, revision in expected_head_revisions.items()
+                    },
+                    "db_path": str(repository.db_path.resolve()),
+                    "runtime_dir": str(Path(runtime_dir).resolve()),
+                },
+            },
+            created_by_user_id=principal.user_id,
+            project_id=project_id,
+        )
+        return {"status": "success", "job": state.to_dict()}
+
+    @router.post("/projects/{project_id}/free/beats/generate-series")
+    async def generate_free_beats_series(
+        project_id: int,
+        payload: FreeCreativeSeriesGenerateRequest,
+        principal: Principal = Depends(current_principal),
+    ):
+        return start_free_episode_series_generation_job(
+            project_id=project_id,
+            stage="beats",
+            payload=payload,
+            principal=principal,
+        )
+
+    @router.post("/projects/{project_id}/free/scripts/generate-series")
+    async def generate_free_scripts_series(
+        project_id: int,
+        payload: FreeCreativeSeriesGenerateRequest,
+        principal: Principal = Depends(current_principal),
+    ):
+        return start_free_episode_series_generation_job(
+            project_id=project_id,
+            stage="script",
+            payload=payload,
+            principal=principal,
+        )
+
+    @router.post("/projects/{project_id}/free/{stage}/generate")
+    async def generate_free_resource(
+        project_id: int,
+        stage: str,
+        payload: FreeCreativeGenerateRequest,
+        episode_number: int | None = Query(None, ge=1, le=100),
+        principal: Principal = Depends(current_principal),
+    ):
+        normalized = {"briefs": "brief", "characters": "characters", "outlines": "outline", "beats": "beats", "scripts": "script"}.get(stage)
+        if normalized is None:
+            raise HTTPException(404, "unsupported creative stage")
+        if normalized in {"beats", "script"} and episode_number is None:
+            raise HTTPException(400, "Beats 和场次剧本生成需要集数")
+        if normalized not in {"beats", "script"}:
+            episode_number = None
+        return start_free_generation_job(
+            project_id=project_id,
+            stage=normalized,
+            episode_number=episode_number,
+            payload=payload,
+            principal=principal,
         )
 
     @router.get("/generated-resources")
@@ -3027,6 +3696,7 @@ def build_creative_router(
         current = repository.get_blueprint(blueprint_id)
         if not current:
             raise HTTPException(404, "blueprint not found")
+        sequential_project_or_409(int(current["project_id"]))
         try:
             workflow_adapter.assert_editable("brief", str(blueprint_id))
             if current.get("direction_type") == "original":
@@ -3119,6 +3789,7 @@ def build_creative_router(
         project_id: int,
         blueprint_id: int,
     ):
+        sequential_project_or_409(project_id)
         try:
             return repository.select_locked_brief(project_id, blueprint_id)
         except ValueError as exc:
@@ -3129,6 +3800,7 @@ def build_creative_router(
         project_id: int,
         batch_id: str,
     ):
+        sequential_project_or_409(project_id)
         try:
             return repository.select_locked_character_batch(project_id, batch_id)
         except ValueError as exc:
@@ -3193,6 +3865,7 @@ def build_creative_router(
         try:
             resource_id = batch_resource_for("creative_characters", character_id)
             if resource_id:
+                sequential_project_or_409(int(resource_id.split(":", 1)[0]))
                 workflow_adapter.assert_editable("characters", resource_id)
             result = repository.update_character(character_id, payload.content)
         except ValueError as exc:
@@ -3208,6 +3881,7 @@ def build_creative_router(
                 "creative_relationships", relationship_id
             )
             if resource_id:
+                sequential_project_or_409(int(resource_id.split(":", 1)[0]))
                 workflow_adapter.assert_editable("characters", resource_id)
             result = repository.update_relationship(relationship_id, payload.content)
         except ValueError as exc:
@@ -3490,6 +4164,7 @@ def build_creative_router(
         batch_id: str,
         payload: OutlineOverviewRequest,
     ):
+        sequential_project_or_409(project_id)
         try:
             workflow_adapter.assert_editable(
                 "outline", f"{project_id}:{batch_id}"
@@ -3505,6 +4180,7 @@ def build_creative_router(
         try:
             episode = repository.get_episode(episode_id)
             if episode:
+                sequential_project_or_409(int(episode["project_id"]))
                 resource_type = episode["stage"] if episode["stage"] in {"beats", "script"} else "outline"
                 resource_id = str(episode_id) if resource_type in {"beats", "script"} else f"{episode['project_id']}:{episode['batch_id']}"
                 workflow_adapter.assert_editable(resource_type, resource_id)

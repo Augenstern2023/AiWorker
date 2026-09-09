@@ -24,6 +24,7 @@ import pytest
 from analysis.today_rank_service import TodayRankService
 from core.job import CrawlJob
 from creative.api import creative_api_principal, register_creative_routes
+from creative.free_mode_service import FreeCreativeModeService
 from creative.lifecycle_service import content_fingerprint, current_beats_content
 from creative.repository import CreativeRepository
 from creative.topic_service import TopicService
@@ -254,6 +255,82 @@ def test_scene_script_download_api_returns_delivery_txt(tmp_path: Path):
     assert download.headers["content-type"].startswith("text/plain")
     assert "第1集场次剧本v1.txt" in unquote(download.headers["content-disposition"])
     assert "△ 主角走进客厅。" in download.text
+
+
+@pytest.mark.parametrize(
+    ("stage", "format"),
+    [
+        ("brief", "md"),
+        ("characters", "json"),
+        ("outline", "md"),
+        ("beats", "md"),
+        ("script", "txt"),
+    ],
+)
+def test_free_resources_keep_the_common_generated_content_download(
+    tmp_path: Path, stage: str, format: str
+):
+    client, repository, _ = build_client(tmp_path)
+    project = repository.create_original_project(
+        seed_text="一个能看见记忆裂缝的女孩",
+        name="记忆裂缝",
+        target_episode_count=2,
+        created_by="lifecycle-admin",
+        creation_request_id=f"free-download-{stage}",
+        workflow_mode="free",
+    )
+    project = repository.mark_project_bootstrap_status(project["id"], "ready")
+    service = FreeCreativeModeService(repository)
+
+    if stage == "brief":
+        created = service.create_brief(
+            project["id"], {"title": "记忆裂缝", "logline": "女孩寻找丢失记忆"},
+            expected_head_revision=0, actor_user_id="lifecycle-admin",
+        )
+        resource_id = str(created["resource"]["id"])
+    elif stage == "characters":
+        created = service.create_characters(
+            project["id"], [{"name": "林忆", "role": "主角"}], [],
+            expected_head_revision=0, actor_user_id="lifecycle-admin",
+        )
+        resource_id = f"{project['id']}:{created['resource']['batch_id']}"
+    elif stage == "outline":
+        created = service.create_outline(
+            project["id"], [
+                {"episode": 1, "core_event": "发现裂缝"},
+                {"episode": 2, "core_event": "找回记忆"},
+            ],
+            expected_head_revision=0, actor_user_id="lifecycle-admin",
+        )
+        resource_id = f"{project['id']}:{created['resource']['batch_id']}"
+    elif stage == "beats":
+        created = service.create_episode_resource(
+            project["id"], "beats", 1,
+            {"beats": [{"order": 1, "event": "发现裂缝"}]},
+            expected_head_revision=0, actor_user_id="lifecycle-admin",
+        )
+        resource_id = str(created["resource"]["id"])
+    else:
+        created = service.create_episode_resource(
+            project["id"], "script", 1,
+            {"episode_title": "裂缝", "scenes": [{
+                "sequence_no": 1, "scene_no": 1, "time_of_day": "夜",
+                "interior_exterior": "内", "location": "卧室", "props": [],
+                "characters": ["林忆"],
+                "blocks": [{"type": "action", "text": "墙上浮现一道裂缝。"}],
+            }]},
+            expected_head_revision=0, actor_user_id="lifecycle-admin",
+        )
+        resource_id = str(created["resource"]["id"])
+
+    download = client.get(
+        f"/api/creative/projects/{project['id']}/generated-content/download",
+        params={"stage": stage, "resource_id": resource_id, "format": format},
+    )
+
+    assert download.status_code == 200
+    assert download.content
+    assert "attachment" in download.headers["content-disposition"]
 
 
 def test_merged_scene_script_download_returns_current_episodes_in_one_txt(tmp_path: Path):

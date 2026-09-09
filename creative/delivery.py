@@ -157,6 +157,11 @@ class DeliveryService:
             raise ValueError("stage must be brief, characters, outline, beats, or script")
         if format not in {"md", "txt", "json"}:
             raise ValueError("format must be md, txt or json")
+        project = self.creative_repository.get_project(project_id)
+        if project is None:
+            raise KeyError(str(project_id))
+        if project.get("workflow_mode", "sequential") != "sequential":
+            raise ValueError("自由创作项目首版不接入正式交付")
         adapter = CreativeWorkflowAdapter(
             self.creative_repository, self.workflow_repository
         )
@@ -166,9 +171,6 @@ class DeliveryService:
         snapshot_project_id = self._snapshot_project_id(resource_type, snapshot)
         if snapshot_project_id != int(project_id):
             raise ValueError("resource does not belong to the requested project")
-        project = self.creative_repository.get_project(project_id)
-        if project is None:
-            raise KeyError(str(project_id))
         resource_version = self._resource_version(snapshot)
         payload = self._payload(project, stage, snapshot)
         content = self._serialize(project, payload, stage, format)
@@ -321,6 +323,8 @@ class DeliveryService:
                 continue
             project = self.creative_repository.get_project(int(project_summary["id"]))
             if project is None:
+                continue
+            if project.get("workflow_mode", "sequential") != "sequential":
                 continue
             resources: list[tuple[str, str, int, str]] = []
             resources.extend(

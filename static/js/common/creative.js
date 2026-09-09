@@ -258,8 +258,9 @@ window.aiworkerModules.push(() => ({
                         });
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.detail || '创建项目失败');
-                        this.creativeWorkspace.create = {topic_id: '', breakdown_id: '', name: '', target_platform: '', target_episode_count: 20, creation_request_id: ''};
-                        window.location.assign(`/planning/projects/${data.id}/brief?task_setup=1`);
+                        const isFree = data.workflow_mode === 'free';
+                        this.creativeWorkspace.create = {topic_id: '', breakdown_id: '', name: '', target_platform: '', target_episode_count: 20, workflow_mode: 'sequential', seed_text: '', creation_request_id: ''};
+                        window.location.assign(`/planning/projects/${data.id}/brief${isFree ? '' : '?task_setup=1'}`);
                     } catch (e) {
                         this.creativeWorkspace.error = e.message || '创建项目失败';
                     }
@@ -297,6 +298,7 @@ window.aiworkerModules.push(() => ({
                             cost_level: String(source.cost_level || ''),
                             content_boundaries: [...source.content_boundaries],
                             reference_refs: source.reference_refs.map(item => ({resource_type: item.resource_type, resource_id: Number(item.resource_id)})),
+                            workflow_mode: source.workflow_mode || 'sequential',
                             creation_request_id: source.creation_request_id,
                         };
                         const response = await aiworkerApi.request('/api/creative/projects/original', {
@@ -304,7 +306,9 @@ window.aiworkerModules.push(() => ({
                         });
                         const data = await response.json();
                         if (!response.ok) throw new Error(data.detail || '创建原创项目失败');
-                        window.location.assign(`/planning/projects/${data.id}/brief?generate_original=1`);
+                        window.location.assign(
+                            `/planning/projects/${data.id}/brief${data.workflow_mode === 'free' ? '' : '?generate_original=1'}`
+                        );
                     } catch (e) {
                         source.error = e.message || '创建原创项目失败';
                     } finally {
@@ -329,12 +333,16 @@ window.aiworkerModules.push(() => ({
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.detail || '读取项目失败');
                         this.creativeWorkspace.project = data;
+                        await this.loadCreativeModuleCapabilities(data.id);
                         this.creativeWorkspace.selectedSeedId = data.seed?.id || null;
                         this.creativeWorkspace.preservedBlueprintIds = [];
                         this.reconcileCreativeGenerationState(data);
                         const candidates = this.latestProjectBlueprints();
+                        const freeBriefHead = this.creativeHead('brief');
                         if (!candidates.some(item => item.id === this.creativeWorkspace.selectedBlueprintId)) {
-                            this.creativeWorkspace.selectedBlueprintId = data.locked_brief_id || candidates[0]?.id || null;
+                            this.creativeWorkspace.selectedBlueprintId = data.workflow_mode === 'free'
+                                ? Number(freeBriefHead?.resource_ref || candidates[0]?.id || 0) || null
+                                : data.locked_brief_id || candidates[0]?.id || null;
                         }
                         this.creativeWorkspace.selectedCharacterBriefId = data.locked_brief_id || null;
                         this.creativeWorkspace.selectedOutlineBriefId = data.locked_brief_id || null;
@@ -364,6 +372,136 @@ window.aiworkerModules.push(() => ({
 
                 creativeProjectModeLabel(project) {
                     return project?.creation_mode === 'original' ? '原创' : '仿写';
+                },
+
+                creativeProjectWorkflowModeLabel(project) {
+                    return project?.workflow_mode === 'free' ? '自由创作' : '标准流程';
+                },
+
+                isFreeCreativeProject() {
+                    return this.creativeWorkspace.project?.workflow_mode === 'free';
+                },
+
+                creativeHead(stage, episodeNumber = 0) {
+                    return (this.creativeWorkspace.project?.resource_heads || []).find(item =>
+                        item.stage === stage
+                        && Number(item.episode_number || 0) === Number(episodeNumber || 0)
+                    ) || null;
+                },
+
+                creativeHeadRevision(stage, episodeNumber = 0) {
+                    return Number(this.creativeHead(stage, episodeNumber)?.revision || 0);
+                },
+
+                freeStageVersionOptions(stage, episodeNumber = 0) {
+                    const project = this.creativeWorkspace.project;
+                    if (!project || project.workflow_mode !== 'free') return [];
+                    let items = [];
+                    if (stage === 'brief') {
+                        items = (project.blueprints || []).map(item => ({
+                            resource_ref: String(item.id), version: item.version,
+                            status: item.status, label: item.content?.title || '未命名 Brief'
+                        }));
+                    } else if (stage === 'characters') {
+                        const batches = new Map();
+                        (project.characters || []).forEach(item => {
+                            const ref = String(item.batch_id || '');
+                            if (ref && !batches.has(ref)) batches.set(ref, {
+                                resource_ref: ref, version: item.version, status: item.status,
+                                label: (project.characters || []).filter(value => value.batch_id === item.batch_id)
+                                    .map(value => value.content?.name).filter(Boolean).slice(0, 3).join('、') || '人物版本'
+                            });
+                        });
+                        items = [...batches.values()];
+                    } else if (stage === 'outline') {
+                        const batches = new Map();
+                        (project.episodes || []).filter(item => item.stage === 'outline').forEach(item => {
+                            const ref = String(item.batch_id || '');
+                            if (ref && !batches.has(ref)) batches.set(ref, {
+                                resource_ref: ref, version: item.version, status: item.status, label: '全剧大纲'
+                            });
+                        });
+                        items = [...batches.values()];
+                    } else {
+                        items = (project.episodes || []).filter(item =>
+                            item.stage === stage && Number(item.episode_number) === Number(episodeNumber)
+                        ).map(item => ({
+                            resource_ref: String(item.id), version: item.version,
+                            status: item.status, label: `第 ${item.episode_number} 集`
+                        }));
+                    }
+                    return items.sort((left, right) => Number(right.version || 0) - Number(left.version || 0));
+                },
+
+                freeStageHeadRef(stage, episodeNumber = 0) {
+                    return String(this.creativeHead(stage, episodeNumber)?.resource_ref || '');
+                },
+
+                async setFreeCreativeHead(stage, resourceRef, episodeNumber = 0) {
+                    if (!this.isFreeCreativeProject() || !resourceRef) return;
+                    const projectId = this.creativeWorkspace.project.id;
+                    const suffix = ['beats', 'script'].includes(stage)
+                        ? `?episode_number=${Number(episodeNumber)}` : '';
+                    const plural = {brief: 'briefs', characters: 'characters', outline: 'outlines', beats: 'beats', script: 'scripts'}[stage];
+                    try {
+                        const response = await aiworkerApi.request(`/api/creative/projects/${projectId}/free/${plural}/head${suffix}`, {
+                            method: 'PUT', headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({
+                                resource_ref: String(resourceRef),
+                                expected_head_revision: this.creativeHeadRevision(stage, episodeNumber)
+                            })
+                        });
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '切换当前版本失败');
+                        await this.selectCreativeProject(projectId);
+                        if (stage === 'brief') this.creativeWorkspace.selectedBlueprintId = Number(resourceRef);
+                        this.showCreativeNotice('已切换当前模块版本');
+                    } catch (error) {
+                        this.creativeWorkspace.error = error.message || '切换当前版本失败';
+                        this.showCreativeNotice(this.creativeWorkspace.error, 'error');
+                        await this.selectCreativeProject(projectId);
+                    }
+                },
+
+                creativeModuleUrl(stage, episodeNumber = null) {
+                    const projectId = this.creativeWorkspace.project?.id || '';
+                    const episode = Math.min(
+                        Math.max(1, Number(episodeNumber || this.creativeWorkspace.selectedEpisode || 1)),
+                        Number(this.creativeWorkspace.project?.target_episode_count || 1)
+                    );
+                    return {
+                        brief: `/planning/projects/${projectId}/brief`,
+                        characters: `/planning/projects/${projectId}/characters`,
+                        outline: `/writing/projects/${projectId}/outlines`,
+                        beats: `/writing/projects/${projectId}/episodes/${episode}/beats`,
+                        script: `/writing/projects/${projectId}/episodes/${episode}/scripts`,
+                    }[stage] || '#';
+                },
+
+                openCreativeEpisodeModule(stage) {
+                    window.location.assign(this.creativeModuleUrl(stage, this.creativeWorkspace.selectedEpisode));
+                },
+
+                async loadCreativeModuleCapabilities(projectId) {
+                    this.creativeWorkspace.moduleCapabilities = {};
+                    if (!projectId) return false;
+                    try {
+                        const response = await aiworkerApi.request(`/api/creative/projects/${projectId}/module-capabilities`);
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '读取模块权限失败');
+                        this.creativeWorkspace.moduleCapabilities = data.capabilities || {};
+                        return true;
+                    } catch (_error) {
+                        // The project remains viewable when the optional capability request
+                        // fails; free-mode write controls stay disabled until the next reload.
+                        return false;
+                    }
+                },
+
+                freeStageCan(stage, action) {
+                    if (!this.isFreeCreativeProject()) return true;
+                    const capability = this.creativeWorkspace.moduleCapabilities?.[stage] || {};
+                    return Boolean(capability[action]);
                 },
 
                 creativeProjectSource(project) {
@@ -662,6 +800,9 @@ window.aiworkerModules.push(() => ({
                 latestCharacterBatchId() {
                     const project = this.creativeWorkspace.project;
                     if (!project) return '';
+                    if (project.workflow_mode === 'free') {
+                        return String(this.creativeHead('characters')?.resource_ref || '');
+                    }
                     const drafts = (project.characters || [])
                         .filter(item => ['draft', 'submitted', 'returned'].includes(item.status))
                         .sort((a, b) => Number(b.version) - Number(a.version));
@@ -688,6 +829,9 @@ window.aiworkerModules.push(() => ({
                 latestOutlineBatchId() {
                     const project = this.creativeWorkspace.project;
                     if (!project) return '';
+                    if (project.workflow_mode === 'free') {
+                        return String(this.creativeHead('outline')?.resource_ref || '');
+                    }
                     const compatible = (project.episodes || []).filter(item =>
                         item.stage === 'outline'
                         && Number(item.upstream_refs?.brief_id || 0) === Number(project.locked_brief_id || 0)
@@ -732,10 +876,16 @@ window.aiworkerModules.push(() => ({
                 },
 
                 projectBeatsForEpisode(episodeNumber) {
-                    const items = (this.creativeWorkspace.project?.episodes || [])
+                    const project = this.creativeWorkspace.project;
+                    const headRef = project?.workflow_mode === 'free'
+                        ? String(this.creativeHead('beats', episodeNumber)?.resource_ref || '')
+                        : '';
+                    const items = (project?.episodes || [])
                         .filter(item => item.stage === 'beats'
                             && Number(item.episode_number) === Number(episodeNumber)
-                            && item.upstream_refs?.outline_batch_id === this.creativeWorkspace.project?.outline_batch_id)
+                            && (project?.workflow_mode === 'free'
+                                ? String(item.id) === headRef
+                                : item.upstream_refs?.outline_batch_id === project?.outline_batch_id))
                         .sort((a, b) => Number(b.version) - Number(a.version));
                     return items[0] || null;
                 },
@@ -756,6 +906,12 @@ window.aiworkerModules.push(() => ({
 
                 projectBeatsGenerationProgress() {
                     const project = this.creativeWorkspace.project;
+                    if (project?.workflow_mode === 'free') {
+                        const generated = new Set((project.resource_heads || [])
+                            .filter(item => item.stage === 'beats')
+                            .map(item => Number(item.episode_number)));
+                        return {generated: generated.size, required: Number(project.target_episode_count || 0)};
+                    }
                     const generated = new Set((project?.episodes || []).filter(item =>
                         item.stage === 'beats'
                         && item.upstream_refs?.outline_batch_id === project?.outline_batch_id
@@ -764,18 +920,32 @@ window.aiworkerModules.push(() => ({
                 },
 
                 batchLockableProjectBeats() {
+                    return this.batchLockableProjectEpisodes('beats');
+                },
+
+                batchLockableProjectEpisodes(stage) {
                     const total = Number(this.creativeWorkspace.project?.target_episode_count || 0);
+                    const resolve = stage === 'beats'
+                        ? episodeNumber => this.projectBeatsForEpisode(episodeNumber)
+                        : episodeNumber => this.projectEpisodeScript(episodeNumber);
                     return Array.from({length: total}, (_, index) => index + 1)
-                        .map((episodeNumber) => this.projectBeatsForEpisode(episodeNumber))
+                        .map(resolve)
                         .filter((item) => item?.status === 'draft');
                 },
 
                 canBatchLockProjectBeats() {
+                    return this.canBatchLockProjectEpisodes('beats');
+                },
+
+                canBatchLockProjectEpisodes(stage) {
                     const total = Number(this.creativeWorkspace.project?.target_episode_count || 0);
                     if (!total) return false;
-                    const items = Array.from({length: total}, (_, index) => this.projectBeatsForEpisode(index + 1));
+                    const resolve = stage === 'beats'
+                        ? episodeNumber => this.projectBeatsForEpisode(episodeNumber)
+                        : episodeNumber => this.projectEpisodeScript(episodeNumber);
+                    const items = Array.from({length: total}, (_, index) => resolve(index + 1));
                     return items.every((item) => item && ['draft', 'locked', 'approved'].includes(item.status))
-                        && this.batchLockableProjectBeats().length > 0;
+                        && this.batchLockableProjectEpisodes(stage).length > 0;
                 },
 
                 selectedProjectScript() {
@@ -793,6 +963,7 @@ window.aiworkerModules.push(() => ({
                 },
 
                 scriptWorkspaceEmptyMessage() {
+                    if (this.isFreeCreativeProject()) return '当前集尚未生成场次剧本';
                     const currentBeats = this.lockedProjectEpisodeBeats(
                         this.creativeWorkspace.selectedEpisode
                     );
@@ -814,6 +985,10 @@ window.aiworkerModules.push(() => ({
 
                 lockedProjectEpisodeBeats(episodeNumber) {
                     const project = this.creativeWorkspace.project;
+                    if (project?.workflow_mode === 'free') {
+                        const item = this.projectBeatsForEpisode(episodeNumber);
+                        return item && ['locked', 'approved'].includes(item.status) ? item : null;
+                    }
                     return (project?.episodes || [])
                         .filter(item => item.stage === 'beats'
                             && Number(item.episode_number) === Number(episodeNumber)
@@ -836,9 +1011,12 @@ window.aiworkerModules.push(() => ({
 
                 projectContinuityLedger() {
                     const latestByEpisode = new Map();
-                    (this.creativeWorkspace.project?.episodes || [])
+                    const project = this.creativeWorkspace.project;
+                    (project?.episodes || [])
                         .filter(item => item.stage === 'beats'
-                            && item.upstream_refs?.outline_batch_id === this.creativeWorkspace.project?.outline_batch_id)
+                            && (project?.workflow_mode === 'free'
+                                ? String(this.creativeHead('beats', item.episode_number)?.resource_ref || '') === String(item.id)
+                                : item.upstream_refs?.outline_batch_id === project?.outline_batch_id))
                         .forEach(item => {
                             const current = latestByEpisode.get(Number(item.episode_number));
                             if (!current || Number(item.version) > Number(current.version)) {
@@ -860,6 +1038,7 @@ window.aiworkerModules.push(() => ({
                 },
 
                 currentEpisodeHasLockedBeats() {
+                    if (this.isFreeCreativeProject()) return true;
                     return Boolean(
                         this.lockedProjectEpisodeBeats(
                             this.creativeWorkspace.selectedEpisode
@@ -869,6 +1048,14 @@ window.aiworkerModules.push(() => ({
 
                 projectEpisodeScript(episodeNumber) {
                     const project = this.creativeWorkspace.project;
+                    if (project?.workflow_mode === 'free') {
+                        const headRef = String(this.creativeHead('script', episodeNumber)?.resource_ref || '');
+                        return (project.episodes || []).find(item =>
+                            item.stage === 'script'
+                            && Number(item.episode_number) === Number(episodeNumber)
+                            && String(item.id) === headRef
+                        ) || null;
+                    }
                     const currentBeats = this.lockedProjectEpisodeBeats(episodeNumber);
                     if (!currentBeats) return null;
                     return (project?.episodes || [])
@@ -997,7 +1184,267 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
+                freeStageAction(stage) {
+                    return {brief: 'blueprints', characters: 'characters', outline: 'outlines', beats: 'beats', script: 'script'}[stage] || stage;
+                },
+
+                freeStageLabel(stage) {
+                    return {brief: 'Brief', characters: '人物', outline: '大纲', beats: 'Beats', script: '场次剧本'}[stage] || stage || '';
+                },
+
+                cloneCreativeJson(value, fallback = {}) {
+                    const source = value === null || value === undefined ? fallback : value;
+                    return JSON.parse(JSON.stringify(source));
+                },
+
+                async openFreeCreativeGeneration(stage, options = {}) {
+                    if (!this.isFreeCreativeProject() || !this.freeStageCan(stage, 'can_generate')) return;
+                    const state = this.creativeWorkspace.freeGeneration;
+                    Object.assign(state, {
+                        stage, series: Boolean(options.series), instruction: '', contextOptions: {},
+                        contextRefs: {brief_id: null, character_batch_id: '', outline_batch_id: '', beats_id: null},
+                        loading: true, submitting: false, error: ''
+                    });
+                    this.freeCreativeGenerationModal?.show();
+                    try {
+                        const query = ['beats', 'script'].includes(stage) && !state.series
+                            ? `?episode_number=${Number(this.creativeWorkspace.selectedEpisode || 1)}` : '';
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${this.creativeWorkspace.project.id}/free/context-options${query}`
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '读取可引用版本失败');
+                        state.contextOptions = data;
+                    } catch (error) {
+                        state.error = error.message || '读取可引用版本失败';
+                    } finally {
+                        state.loading = false;
+                    }
+                },
+
+                freeContextFieldAllowed(field) {
+                    const state = this.creativeWorkspace.freeGeneration;
+                    const stage = state.stage;
+                    if (state.series && field === 'beats_id') return false;
+                    return {
+                        brief_id: [],
+                        character_batch_id: ['outline', 'beats', 'script'],
+                        outline_batch_id: ['beats', 'script'],
+                        beats_id: ['script'],
+                    }[field]?.includes(stage) || (field === 'brief_id' && ['characters', 'outline', 'beats', 'script'].includes(stage));
+                },
+
+                async submitFreeCreativeGeneration() {
+                    const state = this.creativeWorkspace.freeGeneration;
+                    const stage = state.stage;
+                    if (!stage || state.submitting) return;
+                    state.submitting = true;
+                    state.error = '';
+                    const episode = Number(this.creativeWorkspace.selectedEpisode || 1);
+                    const series = ['beats', 'script'].includes(stage) && Boolean(state.series);
+                    const plural = {brief: 'briefs', characters: 'characters', outline: 'outlines', beats: 'beats', script: 'scripts'}[stage];
+                    const query = ['beats', 'script'].includes(stage) && !series ? `?episode_number=${episode}` : '';
+                    const refs = {};
+                    Object.entries(state.contextRefs || {}).forEach(([key, value]) => {
+                        if (this.freeContextFieldAllowed(key) && value !== null && value !== '') refs[key] = value;
+                    });
+                    try {
+                        this.freeCreativeGenerationModal?.hide();
+                        const operationId = globalThis.crypto?.randomUUID?.() || `free-generate-${Date.now()}`;
+                        const payload = {
+                            operation_id: operationId,
+                            generation_instruction: String(state.instruction || '').trim(),
+                            context_refs: refs,
+                        };
+                        if (series) {
+                            payload.expected_head_revisions = Object.fromEntries(
+                                Array.from(
+                                    {length: Number(this.creativeWorkspace.project.target_episode_count || 0)},
+                                    (_, index) => index + 1
+                                ).map(number => [number, this.creativeHeadRevision(stage, number)])
+                            );
+                        } else {
+                            payload.expected_head_revision = this.creativeHeadRevision(
+                                stage, ['beats', 'script'].includes(stage) ? episode : 0
+                            );
+                        }
+                        await this.startCreativeGeneration(
+                            series
+                                ? `/api/creative/projects/${this.creativeWorkspace.project.id}/free/${plural}/generate-series`
+                                : `/api/creative/projects/${this.creativeWorkspace.project.id}/free/${plural}/generate${query}`,
+                            payload,
+                            this.freeStageAction(stage),
+                            series ? {series: true} : {}
+                        );
+                    } catch (error) {
+                        state.error = error.message || '启动自由生成失败';
+                        this.freeCreativeGenerationModal?.show();
+                    } finally {
+                        state.submitting = false;
+                    }
+                },
+
+                async createFreeBlankResource(stage) {
+                    if (!this.isFreeCreativeProject() || !this.freeStageCan(stage, 'can_create_blank')) return;
+                    const project = this.creativeWorkspace.project;
+                    const episode = Number(this.creativeWorkspace.selectedEpisode || 1);
+                    const expected = this.creativeHeadRevision(
+                        stage, ['beats', 'script'].includes(stage) ? episode : 0
+                    );
+                    const endpoints = {
+                        brief: [`/api/creative/projects/${project.id}/free/briefs`, {content: {title: project.name || '', logline: ''}, expected_head_revision: expected}],
+                        characters: [`/api/creative/projects/${project.id}/free/characters`, {characters: [], relationships: [], expected_head_revision: expected}],
+                        outline: [`/api/creative/projects/${project.id}/free/outlines`, {episodes: [], expected_head_revision: expected}],
+                        beats: [`/api/creative/projects/${project.id}/free/episodes/${episode}/beats`, {content: {beats: [], updates: []}, expected_head_revision: expected}],
+                        script: [`/api/creative/projects/${project.id}/free/episodes/${episode}/scripts`, {content: {episode_title: '', scenes: []}, expected_head_revision: expected}],
+                    };
+                    const target = endpoints[stage];
+                    if (!target) return;
+                    try {
+                        const response = await aiworkerApi.request(target[0], {
+                            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(target[1])
+                        });
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '创建空白版本失败');
+                        await this.selectCreativeProject(project.id);
+                        this.showCreativeNotice('已创建空白版本');
+                    } catch (error) {
+                        this.creativeWorkspace.error = error.message || '创建空白版本失败';
+                        this.showCreativeNotice(this.creativeWorkspace.error, 'error');
+                    }
+                },
+
+                async createFreeResourceRevision(stage) {
+                    if (!this.isFreeCreativeProject() || !this.freeStageCan(stage, 'can_create_revision')) return;
+                    try {
+                        const project = this.creativeWorkspace.project;
+                        const episode = Number(this.creativeWorkspace.selectedEpisode || 1);
+                        const episodeScoped = ['beats', 'script'].includes(stage);
+                        const headRef = this.freeStageHeadRef(stage, episodeScoped ? episode : 0);
+                        const lockedStatuses = new Set(['brief_locked', 'locked', 'approved']);
+                        let sourceItems = [];
+                        let target = null;
+                        if (stage === 'brief') {
+                            const item = (project.blueprints || []).find(value => String(value.id) === headRef);
+                            if (item) sourceItems = [item];
+                            target = [`/api/creative/projects/${project.id}/free/briefs`, {
+                                content: this.cloneCreativeJson(item?.content || {}),
+                            }];
+                        } else if (stage === 'characters') {
+                            const characters = (project.characters || []).filter(item => String(item.batch_id) === headRef);
+                            const relationships = (project.relationships || []).filter(item => String(item.batch_id) === headRef);
+                            sourceItems = [...characters, ...relationships];
+                            target = [`/api/creative/projects/${project.id}/free/characters`, {
+                                characters: characters.map(item => ({
+                                    character_key: item.character_key,
+                                    content: this.cloneCreativeJson(item.content || {}),
+                                })),
+                                relationships: relationships.map(item => ({
+                                    relationship_key: item.relationship_key,
+                                    content: this.cloneCreativeJson(item.content || {}),
+                                })),
+                            }];
+                        } else if (stage === 'outline') {
+                            const outlines = (project.episodes || [])
+                                .filter(item => item.stage === 'outline' && String(item.batch_id) === headRef)
+                                .sort((left, right) => Number(left.episode_number) - Number(right.episode_number));
+                            const firstContent = outlines[0]?.content || {};
+                            sourceItems = outlines;
+                            target = [`/api/creative/projects/${project.id}/free/outlines`, {
+                                episodes: outlines.map(item => this.cloneCreativeJson(item.content || {})),
+                                series_arc: String(firstContent.series_arc || ''),
+                                series_overview: firstContent.series_overview
+                                    ? this.cloneCreativeJson(firstContent.series_overview) : null,
+                            }];
+                        } else {
+                            const item = (project.episodes || []).find(value =>
+                                value.stage === stage
+                                && Number(value.episode_number) === episode
+                                && String(value.id) === headRef
+                            );
+                            if (item) sourceItems = [item];
+                            const suffix = stage === 'beats' ? 'beats' : 'scripts';
+                            target = [`/api/creative/projects/${project.id}/free/episodes/${episode}/${suffix}`, {
+                                content: this.cloneCreativeJson(item?.content || {}),
+                            }];
+                        }
+                        if (!target || !sourceItems.length || !sourceItems.every(item => lockedStatuses.has(item.status))) {
+                            this.showCreativeNotice('只有当前已锁定版本可以创建修订版', 'error');
+                            return;
+                        }
+                        target[1].expected_head_revision = this.creativeHeadRevision(
+                            stage, episodeScoped ? episode : 0
+                        );
+                        const response = await aiworkerApi.request(target[0], {
+                            method: 'POST', headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify(target[1])
+                        });
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '创建修订版失败');
+                        await this.selectCreativeProject(project.id);
+                        if (stage === 'brief') {
+                            this.creativeWorkspace.selectedBlueprintId = Number(data.resource?.id || 0) || null;
+                        }
+                        this.showCreativeNotice(`已创建${this.freeStageLabel(stage)}修订版，原锁定版本保持不变`);
+                    } catch (error) {
+                        this.creativeWorkspace.error = error.message || '创建修订版失败';
+                        this.showCreativeNotice(this.creativeWorkspace.error, 'error');
+                    }
+                },
+
+                async openCreativeModeMigration() {
+                    const project = this.creativeWorkspace.project;
+                    if (!project || project.workflow_mode !== 'sequential') return;
+                    const state = this.creativeWorkspace.modeMigration;
+                    Object.assign(state, {preview: null, seed_text: '', confirmed: false, loading: true, submitting: false, error: ''});
+                    this.creativeModeMigrationModal?.show();
+                    try {
+                        const response = await aiworkerApi.request(`/api/creative/projects/${project.id}/mode-migration-preview`);
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '读取迁移预检失败');
+                        state.preview = data;
+                    } catch (error) {
+                        state.error = error.message || '读取迁移预检失败';
+                    } finally {
+                        state.loading = false;
+                    }
+                },
+
+                async migrateCreativeProjectToFree() {
+                    const project = this.creativeWorkspace.project;
+                    const state = this.creativeWorkspace.modeMigration;
+                    if (!project || !state.preview || !state.confirmed || state.submitting) return;
+                    state.submitting = true;
+                    state.error = '';
+                    try {
+                        const resourceCount = Object.values(state.preview.resource_counts || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+                        const url = resourceCount
+                            ? `/api/creative/projects/${project.id}/migrate-to-free`
+                            : `/api/creative/projects/${project.id}/workflow-mode`;
+                        const body = {
+                            expected_mode_revision: Number(project.mode_revision || 0),
+                            seed_text: String(state.seed_text || '').trim(),
+                        };
+                        if (resourceCount) body.operation_id = globalThis.crypto?.randomUUID?.() || `free-migration-${Date.now()}`;
+                        else body.workflow_mode = 'free';
+                        const response = await aiworkerApi.request(url, {
+                            method: resourceCount ? 'POST' : 'PATCH',
+                            headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+                        });
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '切换自由创作失败');
+                        this.creativeModeMigrationModal?.hide();
+                        await this.selectCreativeProject(project.id);
+                        this.showCreativeNotice('项目已切换为自由创作模式');
+                    } catch (error) {
+                        state.error = error.message || '切换自由创作失败';
+                    } finally {
+                        state.submitting = false;
+                    }
+                },
+
                 async generateProjectBlueprints() {
+                    if (this.isFreeCreativeProject()) return this.openFreeCreativeGeneration('brief');
                     try {
                         const task = await this.resolveCreativeWorkflowTask('brief', this.creativeWorkspace.project.id);
                         const body = {count: Number(this.creativeWorkspace.directionCount || 3), workflow_task_id: task.id};
@@ -1015,6 +1462,7 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async deriveOriginalDirection(item = null) {
+                    if (this.isFreeCreativeProject()) return this.openFreeCreativeGeneration('brief');
                     const parent = item || this.selectedProjectBlueprint();
                     const instruction = String(this.creativeWorkspace.variantInstruction || '').trim();
                     if (!parent || !instruction) return;
@@ -1031,6 +1479,7 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async generateProjectCharacters() {
+                    if (this.isFreeCreativeProject()) return this.openFreeCreativeGeneration('characters');
                     try {
                         const task = await this.resolveCreativeWorkflowTask('characters', this.creativeWorkspace.project.id);
                         return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/characters/generate`, {workflow_task_id: task.id}, 'characters');
@@ -1040,6 +1489,7 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async generateProjectOutlines() {
+                    if (this.isFreeCreativeProject()) return this.openFreeCreativeGeneration('outline');
                     try {
                         const task = await this.resolveCreativeWorkflowTask('outline', this.creativeWorkspace.project.id);
                         return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/outlines/generate`, {workflow_task_id: task.id}, 'outlines');
@@ -1049,6 +1499,7 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async generateProjectBeats() {
+                    if (this.isFreeCreativeProject()) return this.openFreeCreativeGeneration('beats');
                     try {
                         const episode = Number(this.creativeWorkspace.selectedEpisode || 0);
                         const task = await this.resolveCreativeWorkflowTask('beats', this.creativeWorkspace.project.id);
@@ -1097,6 +1548,7 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async generateProjectBeatsSeries() {
+                    if (this.isFreeCreativeProject()) return this.openFreeCreativeGeneration('beats', {series: true});
                     try {
                         const task = await this.resolveCreativeWorkflowTask('beats', this.creativeWorkspace.project.id);
                         return this.startCreativeGeneration(
@@ -1109,6 +1561,7 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async generateProjectScript() {
+                    if (this.isFreeCreativeProject()) return this.openFreeCreativeGeneration('script');
                     try {
                         if (!this.currentEpisodeHasLockedBeats()) {
                             throw new Error('请先生成并完成当前集 Beats，再生成场次剧本');
@@ -1124,6 +1577,14 @@ window.aiworkerModules.push(() => ({
                 lockedProjectBeatsProgress() {
                     const project = this.creativeWorkspace.project;
                     const required = Number(project?.target_episode_count || 0);
+                    if (project?.workflow_mode === 'free') {
+                        const locked = new Set((project.episodes || []).filter(item =>
+                            item.stage === 'beats'
+                            && ['locked', 'approved'].includes(item.status)
+                            && String(this.creativeHead('beats', item.episode_number)?.resource_ref || '') === String(item.id)
+                        ).map(item => Number(item.episode_number)));
+                        return {required, locked: locked.size, missing: []};
+                    }
                     const locked = new Set((project?.episodes || []).filter(item =>
                         item.stage === 'beats' && ['locked', 'approved'].includes(item.status)
                         && item.upstream_refs?.outline_batch_id === project?.outline_batch_id
@@ -1141,6 +1602,7 @@ window.aiworkerModules.push(() => ({
                 },
 
                 projectScriptsSeriesBlockReason() {
+                    if (this.isFreeCreativeProject()) return '';
                     const progress = this.lockedProjectBeatsProgress();
                     if (!progress.required) return '请先锁定分集大纲';
                     return progress.missing.length
@@ -1149,6 +1611,7 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async generateProjectScriptsSeries() {
+                    if (this.isFreeCreativeProject()) return this.openFreeCreativeGeneration('script', {series: true});
                     try {
                         if (!this.canGenerateProjectScriptsSeries()) throw new Error(this.projectScriptsSeriesBlockReason());
                         const task = await this.resolveCreativeWorkflowTask('script', this.creativeWorkspace.project.id);
@@ -1235,6 +1698,16 @@ window.aiworkerModules.push(() => ({
 
                 creativeActionDisabled(action, options = {}) {
                     if (this.creativeWorkspace.startingAction) return true;
+                    if (this.isFreeCreativeProject()) {
+                        const freeStage = {
+                            blueprints: 'brief',
+                            characters: 'characters',
+                            outlines: 'outline',
+                            beats: 'beats',
+                            script: 'script',
+                        }[action];
+                        if (freeStage && !this.freeStageCan(freeStage, 'can_generate')) return true;
+                    }
                     if (this.creativeServerRunningJob(action, options)) return true;
                     const isActiveRunning = this.creativeWorkspace.activeAction === action && this.creativeJobRunning();
                     if (!isActiveRunning) return false;
@@ -1486,7 +1959,7 @@ window.aiworkerModules.push(() => ({
                         episode_duration_seconds: Number(project.episode_duration_seconds),
                         expected_project_revision: Number(project.revision),
                     };
-                    if (project.locked_brief_id && brief?.status === 'draft') {
+                    if (!this.isFreeCreativeProject() && project.locked_brief_id && brief?.status === 'draft') {
                         payload.draft_brief_id = Number(brief.id);
                     }
                     const res = await aiworkerApi.request(`/api/creative/projects/${project.id}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
@@ -1503,7 +1976,13 @@ window.aiworkerModules.push(() => ({
                 async saveProjectBlueprint() {
                     const item = this.selectedProjectBlueprint();
                     if (!item) return;
-                    const res = await aiworkerApi.request(`/api/creative/blueprints/${item.id}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({content: item.content, difference_note: item.difference_note || ''})});
+                    const url = this.isFreeCreativeProject()
+                        ? `/api/creative/projects/${this.creativeWorkspace.project.id}/free/items/brief/${item.id}`
+                        : `/api/creative/blueprints/${item.id}`;
+                    const body = this.isFreeCreativeProject()
+                        ? {content: item.content}
+                        : {content: item.content, difference_note: item.difference_note || ''};
+                    const res = await aiworkerApi.request(url, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
                     const data = await res.json();
                     if (!res.ok) { this.creativeWorkspace.error = data.detail || '保存方向失败'; return false; }
                     Object.assign(item, data);
@@ -1513,6 +1992,9 @@ window.aiworkerModules.push(() => ({
                 async createProjectBlueprintVersion() {
                     const item = this.selectedProjectBlueprint();
                     if (!item) return;
+                    if (this.isFreeCreativeProject()) {
+                        return this.createFreeResourceRevision('brief');
+                    }
                     const task = await this.resolveCreativeWorkflowTask('brief', this.creativeWorkspace.project.id);
                     const res = await aiworkerApi.request(`/api/creative/blueprints/${item.id}/versions`, {
                         method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -1537,7 +2019,11 @@ window.aiworkerModules.push(() => ({
                         if (!await this.saveProjectBlueprint()) {
                             throw new Error(this.creativeWorkspace.error || '保存方向失败');
                         }
-                        await this.completeCreativeResource('brief', item.id, this.creativeWorkspace.project.id, item.difference_note);
+                        if (this.isFreeCreativeProject()) {
+                            await this.lockFreeCreativeResource('brief', String(item.id));
+                        } else {
+                            await this.completeCreativeResource('brief', item.id, this.creativeWorkspace.project.id, item.difference_note);
+                        }
                         await this.selectCreativeProject(this.creativeWorkspace.project.id);
                         this.showCreativeNotice('Brief 已完成并锁定');
                     } catch (error) {
@@ -1547,6 +2033,7 @@ window.aiworkerModules.push(() => ({
 
                 async createBlankCharacterBatch() {
                     const projectId = this.creativeWorkspace.project.id;
+                    if (this.isFreeCreativeProject()) return this.createFreeBlankResource('characters');
                     const task = await this.resolveCreativeWorkflowTask('characters', projectId);
                     const blank = {name: '新角色', age_range: '', identity: '', external_tags: [], desire: '', secret: '', growth_arc: '', dialogue_style: '', appearance_prompt: '', voice_prompt: '', action_goal: '', fear_of_loss: '', behavioral_contradiction: '', pressure_response: '', bottom_line: ''};
                     const res = await aiworkerApi.request(`/api/creative/projects/${projectId}/characters`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({characters: [blank], relationships: [], workflow_task_id: task.id})});
@@ -1555,10 +2042,23 @@ window.aiworkerModules.push(() => ({
                     await this.selectCreativeProject(projectId);
                 },
 
-                async saveProjectCharacter(item) { await this.saveCreativeItem(`/api/creative/characters/${item.id}`, item, '人物卡已保存', `character-${item.id}`); },
-                async saveProjectRelationship(item) { await this.saveCreativeItem(`/api/creative/relationships/${item.id}`, item, '人物关系已保存', `relationship-${item.id}`); },
+                async saveProjectCharacter(item) {
+                    const url = this.isFreeCreativeProject()
+                        ? `/api/creative/projects/${this.creativeWorkspace.project.id}/free/items/character/${item.id}`
+                        : `/api/creative/characters/${item.id}`;
+                    await this.saveCreativeItem(url, item, '人物卡已保存', `character-${item.id}`);
+                },
+                async saveProjectRelationship(item) {
+                    const url = this.isFreeCreativeProject()
+                        ? `/api/creative/projects/${this.creativeWorkspace.project.id}/free/items/relationship/${item.id}`
+                        : `/api/creative/relationships/${item.id}`;
+                    await this.saveCreativeItem(url, item, '人物关系已保存', `relationship-${item.id}`);
+                },
                 async saveProjectEpisode(item) {
-                    const saved = await this.saveCreativeItem(`/api/creative/episodes/${item.id}`, item, '分集内容已保存', `episode-${item.id}`);
+                    const url = this.isFreeCreativeProject()
+                        ? `/api/creative/projects/${this.creativeWorkspace.project.id}/free/items/episode/${item.id}`
+                        : `/api/creative/episodes/${item.id}`;
+                    const saved = await this.saveCreativeItem(url, item, '分集内容已保存', `episode-${item.id}`);
                     if (saved && item.stage === 'script') {
                         await this.selectCreativeProject(this.creativeWorkspace.project.id);
                         await this.refreshCreativeTopicLibrary();
@@ -1591,7 +2091,8 @@ window.aiworkerModules.push(() => ({
                     const batchId = this.latestCharacterBatchId();
                     if (!batchId) return;
                     try {
-                        await this.completeCreativeResource('characters', `${projectId}:${batchId}`, projectId);
+                        if (this.isFreeCreativeProject()) await this.lockFreeCreativeResource('characters', batchId);
+                        else await this.completeCreativeResource('characters', `${projectId}:${batchId}`, projectId);
                         await this.selectCreativeProject(projectId);
                         this.showCreativeNotice('人物关系已完成并锁定');
                     } catch (error) { this.creativeWorkspace.error = error.message || '完成人物关系失败'; }
@@ -1602,7 +2103,8 @@ window.aiworkerModules.push(() => ({
                     const batchId = this.latestOutlineBatchId();
                     if (!batchId) return;
                     try {
-                        await this.completeCreativeResource('outline', `${projectId}:${batchId}`, projectId);
+                        if (this.isFreeCreativeProject()) await this.lockFreeCreativeResource('outline', batchId);
+                        else await this.completeCreativeResource('outline', `${projectId}:${batchId}`, projectId);
                         await this.selectCreativeProject(projectId);
                         this.showCreativeNotice('分集大纲已完成并锁定');
                     } catch (error) { this.creativeWorkspace.error = error.message || '完成分集大纲失败'; }
@@ -1612,13 +2114,41 @@ window.aiworkerModules.push(() => ({
                     const item = this.selectedProjectBeats();
                     if (!item) return;
                     try {
-                        await this.completeCreativeResource('beats', item.id, this.creativeWorkspace.project.id);
+                        if (this.isFreeCreativeProject()) await this.lockFreeCreativeResource('beats', String(item.id), item.episode_number);
+                        else await this.completeCreativeResource('beats', item.id, this.creativeWorkspace.project.id);
                         await this.selectCreativeProject(this.creativeWorkspace.project.id);
                         this.showCreativeNotice('Beats 已完成并锁定');
                     } catch (error) { this.creativeWorkspace.error = error.message || '完成 Beats 失败'; }
                 },
 
+                async completeProjectScript() {
+                    const item = this.selectedProjectScript();
+                    if (!item || !this.isFreeCreativeProject()) return;
+                    try {
+                        await this.lockFreeCreativeResource('script', String(item.id), item.episode_number);
+                        await this.selectCreativeProject(this.creativeWorkspace.project.id);
+                        this.showCreativeNotice('场次剧本已完成并锁定');
+                    } catch (error) { this.creativeWorkspace.error = error.message || '完成场次剧本失败'; }
+                },
+
+                async lockFreeCreativeResource(stage, resourceRef, episodeNumber = 0) {
+                    const projectId = this.creativeWorkspace.project.id;
+                    const plural = {brief: 'briefs', characters: 'characters', outline: 'outlines', beats: 'beats', script: 'scripts'}[stage];
+                    const suffix = ['beats', 'script'].includes(stage) ? `?episode_number=${Number(episodeNumber)}` : '';
+                    const response = await aiworkerApi.request(
+                        `/api/creative/projects/${projectId}/free/${plural}/${encodeURIComponent(resourceRef)}/lock${suffix}`,
+                        {
+                            method: 'POST', headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({expected_head_revision: this.creativeHeadRevision(stage, episodeNumber)})
+                        }
+                    );
+                    const data = await response.json();
+                    if (!response.ok) throw new Error(data.detail || '完成并锁定失败');
+                    return data;
+                },
+
                 async completeProjectBeatsBatch() {
+                    if (this.isFreeCreativeProject()) return this.completeFreeProjectEpisodeSeries('beats');
                     const items = this.batchLockableProjectBeats();
                     if (!items.length) return;
                     const episodes = items.map((item) => Number(item.episode_number)).sort((a, b) => a - b);
@@ -1638,6 +2168,36 @@ window.aiworkerModules.push(() => ({
                         this.showCreativeNotice(`已完成并锁定 ${payload.resources?.length || episodes.length} 集 Beats`);
                     } catch (error) {
                         this.creativeWorkspace.error = error.message || '批量锁定 Beats 失败';
+                    }
+                },
+
+                async completeFreeProjectEpisodeSeries(stage) {
+                    if (!this.isFreeCreativeProject() || !['beats', 'script'].includes(stage)) return;
+                    const items = this.batchLockableProjectEpisodes(stage);
+                    if (!items.length || !this.canBatchLockProjectEpisodes(stage)) return;
+                    const label = stage === 'beats' ? 'Beats' : '场次剧本';
+                    const total = Number(this.creativeWorkspace.project.target_episode_count || 0);
+                    if (!window.confirm(`将完成并锁定全剧 ${total} 集当前 ${label}。已锁定集会跳过，锁定后不能直接编辑。是否继续？`)) return;
+                    const expectedHeadRevisions = Object.fromEntries(
+                        Array.from({length: total}, (_, index) => index + 1)
+                            .map(number => [number, this.creativeHeadRevision(stage, number)])
+                    );
+                    const plural = stage === 'beats' ? 'beats' : 'scripts';
+                    try {
+                        const projectId = this.creativeWorkspace.project.id;
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/free/${plural}/lock-series`,
+                            {
+                                method: 'POST', headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({expected_head_revisions: expectedHeadRevisions}),
+                            }
+                        );
+                        const payload = await response.json();
+                        if (!response.ok) throw new Error(payload.detail || `全集${label}锁定失败`);
+                        await this.selectCreativeProject(projectId);
+                        this.showCreativeNotice(`全集 ${total} 集${label}已完成并锁定`);
+                    } catch (error) {
+                        this.creativeWorkspace.error = error.message || `全集${label}锁定失败`;
                     }
                 },
 

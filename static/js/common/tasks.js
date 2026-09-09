@@ -178,8 +178,8 @@
                 hiddenDramaDownloadJobs: {},
                 creativeWorkspace: {
                     projects: [], eligibleTopics: [], lockedBreakdowns: [], project: null, loading: false, error: '', step: 'blueprints',
-                    create: {topic_id: '', breakdown_id: '', name: '', target_platform: '', target_episode_count: 20, creation_request_id: ''},
-                    originalCreate: {seed_text: '', name: '', genre: '', target_platform: '', target_audience: '', target_episode_count: 20, episode_duration_seconds: 120, cost_level: '', content_boundaries: [], reference_refs: [], creation_request_id: '', saving: false, error: ''},
+                    create: {topic_id: '', breakdown_id: '', name: '', target_platform: '', target_episode_count: 20, workflow_mode: 'sequential', seed_text: '', creation_request_id: ''},
+                    originalCreate: {seed_text: '', name: '', genre: '', target_platform: '', target_audience: '', target_episode_count: 20, episode_duration_seconds: 120, cost_level: '', content_boundaries: [], reference_refs: [], workflow_mode: 'sequential', creation_request_id: '', saving: false, error: ''},
                     directionCount: 3, selectedSeedId: null, preservedBlueprintIds: [], variantInstruction: '', selectedBlueprintId: null, selectedCharacterBriefId: null, selectedOutlineBriefId: null, selectedOutlineCharacterBatchId: null, selectedEpisode: 1,
                     jobId: '', jobMessage: '', jobProgress: {}, jobStatus: '', paused: false, notifiedStatus: '',
                     jobLogs: [], jobLogCount: 0, showJobLogs: false,
@@ -194,7 +194,14 @@
                     },
                     outlineOverviewExpanded: true, outlineOverviewDraft: {},
                     outlineOverviewErrors: {}, outlineOverviewSaving: false, outlineOverviewSaveSequence: 0,
-                    saveState: {}, notice: '', noticeType: 'success', noticeTimer: null
+                    saveState: {}, notice: '', noticeType: 'success', noticeTimer: null,
+                    moduleCapabilities: {},
+                    freeGeneration: {
+                        stage: '', series: false, instruction: '', contextOptions: {},
+                        contextRefs: {brief_id: null, character_batch_id: '', outline_batch_id: '', beats_id: null},
+                        loading: false, submitting: false, error: ''
+                    },
+                    modeMigration: {preview: null, seed_text: '', confirmed: false, loading: false, submitting: false, error: ''}
                 },
                 dramaDownload: {title: '', topic: null, source: 'hongguo', fallbackReason: '', candidates: [], providers: [], captureCandidates: [], thirdPartyError: '', captureError: '', selectedCandidate: null, selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], relatedVideos: [], missingEpisodes: [], seriesRangeLabel: '', seriesWarnings: [], selectedEpisodes: [], allEpisodes: false, episodesExpanded: true, searching: false, episodesLoading: false, starting: false, error: '', jobId: '', jobStatus: '', progress: {}, progressMessage: '', paused: false, finished: false, background: false, showFiles: false, logs: [], logCount: 0, videoPreviewPath: '', videoPreviewUrl: '', videoPreviewError: ''},
                 dramaReviews: {topic: null, title: '', platform: 'hg', limit: 100, allReviews: false, format: 'csv', jobId: '', status: '', reviewCount: 0, sourceTotal: 0, items: [], loading: false, polling: false, error: ''},
@@ -300,6 +307,8 @@
                         document.activeElement?.blur();
                     });
                     this.workflowTaskModal = this.modal('workflowTaskModal');
+                    this.freeCreativeGenerationModal = this.modal('freeCreativeGenerationModal');
+                    this.creativeModeMigrationModal = this.modal('creativeModeMigrationModal');
                     this.planningAssignmentModal = this.modal('planningAssignmentModal');
                     this.adoptionNoticeModal = this.modal('adoptionNoticeModal');
 

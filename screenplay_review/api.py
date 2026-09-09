@@ -115,6 +115,8 @@ def build_script_review_router(
         project = repository.get_project(project_id)
         if not project:
             raise HTTPException(409, "创作项目已不存在，无法确认审核")
+        if project.get("workflow_mode", "sequential") != "sequential":
+            raise HTTPException(409, "自由创作项目首版不接入剧本审核")
         return build_project_source(
             project,
             str(review["mode"]),
@@ -215,6 +217,8 @@ def build_script_review_router(
             project = repository.get_project(int(data["project_id"]))
             if not project:
                 raise HTTPException(404, "创作项目不存在")
+            if project.get("workflow_mode", "sequential") != "sequential":
+                raise HTTPException(409, "自由创作项目首版不接入剧本审核")
             assert_project_access(request, principal, int(project["id"]))
             try:
                 source = build_project_source(

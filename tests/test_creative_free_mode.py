@@ -10,11 +10,75 @@ from __future__ import annotations
 
 import pytest
 import json
+import sqlite3
 import time
 import uuid
 
 from creative.free_mode_service import FreeCreativeModeService
 from creative.repository import CreativeRepository
+
+
+def create_legacy_workflow_mode_database(db_path) -> None:
+    CreativeRepository(db_path)
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO creative_topics (
+                id, platform, job_id, source_path, captured_at, title, status,
+                score, confidence, score_details_json, recommendation,
+                evidence_json, created_at, updated_at
+            ) VALUES (
+                1, 'hg', 'legacy-job', 'legacy.json', '2026-09-09',
+                '旧库选题', 'adopted', 80, 'high', '{}', '可立项', '[]', 1, 1
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO creative_breakdowns (
+                id, topic_id, version, status, content_json,
+                field_sources_json, risks_json, created_at, updated_at
+            ) VALUES (1, 1, 1, 'locked', '{}', '{}', '[]', 1, 1)
+            """
+        )
+        connection.commit()
+        table_sql = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'creative_projects'"
+        ).fetchone()[0]
+        legacy_sql = table_sql.replace(
+            "CREATE TABLE creative_projects",
+            "CREATE TABLE creative_projects_legacy",
+            1,
+        ).replace(
+            "DEFAULT 'sequential'",
+            "DEFAULT 'strict'",
+        ).replace(
+            "('sequential', 'free')",
+            "('free', 'strict')",
+        )
+        assert legacy_sql != table_sql
+
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(legacy_sql)
+        connection.execute(
+            """
+            INSERT INTO creative_projects_legacy (
+                id, name, creation_mode, workflow_mode, created_at, updated_at
+            ) VALUES
+                (1, '旧标准流程项目', 'original', 'strict', 1, 1),
+                (2, '旧自由创作项目', 'original', 'free', 1, 1)
+            """
+        )
+        connection.execute("DROP TABLE creative_projects")
+        connection.execute(
+            "ALTER TABLE creative_projects_legacy RENAME TO creative_projects"
+        )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def create_free_project(repository: CreativeRepository) -> dict:
@@ -42,6 +106,73 @@ def test_existing_projects_default_to_sequential_mode(tmp_path):
     assert project["workflow_mode"] == "sequential"
     assert project["mode_revision"] == 0
     assert project["resource_heads"] == []
+
+
+def test_legacy_strict_workflow_mode_is_migrated_without_losing_projects(tmp_path):
+    db_path = tmp_path / "legacy-workflow-mode.sqlite3"
+    create_legacy_workflow_mode_database(db_path)
+
+    repository = CreativeRepository(db_path)
+
+    assert repository.get_project(1)["workflow_mode"] == "sequential"
+    assert repository.get_project(2)["workflow_mode"] == "free"
+    created = repository.create_project(
+        topic_id=1,
+        breakdown_id=1,
+        name="新标准流程项目",
+        target_episode_count=3,
+        created_by="owner-1",
+        creation_request_id="post-workflow-mode-migration",
+    )
+    assert created["workflow_mode"] == "sequential"
+
+    connection = sqlite3.connect(db_path)
+    try:
+        table_sql = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'creative_projects'"
+        ).fetchone()[0]
+        foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+        indexes = {
+            row[1] for row in connection.execute("PRAGMA index_list(creative_projects)")
+        }
+    finally:
+        connection.close()
+
+    assert "('sequential', 'free')" in table_sql
+    assert "('free', 'strict')" not in table_sql
+    assert foreign_key_errors == []
+    assert "idx_creative_projects_topic" in indexes
+
+
+def test_topic_based_free_project_does_not_require_manual_seed(tmp_path):
+    db_path = tmp_path / "topic-free-without-seed.sqlite3"
+    create_legacy_workflow_mode_database(db_path)
+    repository = CreativeRepository(db_path)
+
+    project = repository.create_project(
+        topic_id=1,
+        breakdown_id=1,
+        name="直接创建的自由项目",
+        target_episode_count=3,
+        created_by="owner-1",
+        creation_request_id="topic-free-without-seed",
+        workflow_mode="free",
+    )
+
+    seed = repository.get_current_seed(project["id"])
+    assert seed is not None
+    assert "旧库选题" in seed["seed_text"]
+    context = FreeCreativeModeService(repository).create_generation_context(
+        context_id="topic-free-without-seed-context",
+        project_id=project["id"],
+        stage="brief",
+        episode_number=None,
+        instruction="",
+        context_refs={},
+        actor_user_id="owner-1",
+    )
+    assert "旧库选题" in context["context_snapshot"]["seed"]["seed_text"]
 
 
 def test_free_resources_do_not_update_sequential_authority(tmp_path):
@@ -431,6 +562,219 @@ def test_empty_project_can_switch_mode_but_content_project_cannot(tmp_path):
             project_id=project["id"], workflow_mode="sequential",
             expected_mode_revision=1, actor_user_id="owner-1",
         )
+
+
+def test_topic_project_can_switch_to_free_without_manual_seed(tmp_path):
+    db_path = tmp_path / "switch-topic-project-without-seed.sqlite3"
+    create_legacy_workflow_mode_database(db_path)
+    repository = CreativeRepository(db_path)
+    project = repository.create_project(
+        topic_id=1,
+        breakdown_id=1,
+        name="待切换项目",
+        target_episode_count=3,
+        created_by="owner-1",
+        creation_request_id="switch-topic-project-without-seed",
+    )
+    assert repository.get_current_seed(project["id"]) is None
+
+    switched = FreeCreativeModeService(repository).switch_empty_mode(
+        project_id=project["id"],
+        workflow_mode="free",
+        expected_mode_revision=0,
+        actor_user_id="owner-1",
+    )
+
+    assert switched["workflow_mode"] == "free"
+    assert "旧库选题" in repository.get_current_seed(project["id"])["seed_text"]
+
+
+@pytest.mark.asyncio
+async def test_empty_project_preview_ignores_started_task_without_resources(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from creative.api import build_creative_router
+    from creative.schema import CreativeModeChangeRequest
+
+    repository = CreativeRepository(tmp_path / "empty-preview.sqlite3")
+    project = repository.create_original_project(
+        seed_text="尚未开始生成的项目",
+        name="空项目",
+        target_episode_count=3,
+        created_by="owner-1",
+        creation_request_id="empty-preview-project",
+    )
+    project = repository.mark_project_bootstrap_status(project["id"], "ready")
+    workflow = Mock()
+    workflow.list_tasks.return_value = [{
+        "id": "brief-started",
+        "project_id": str(project["id"]),
+        "task_type": "brief",
+        "status": "in_progress",
+    }]
+    router = build_creative_router(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        repository=repository,
+        workflow_repository=workflow,
+        application_service=Mock(),
+    )
+    endpoint = next(
+        route.endpoint for route in router.routes
+        if route.path == "/api/creative/projects/{project_id}/mode-migration-preview"
+    )
+
+    preview = await endpoint(
+        project_id=project["id"],
+        request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())),
+        principal=SimpleNamespace(is_system_admin=True, user_id="owner-1"),
+    )
+
+    assert preview["can_migrate"] is True
+    assert "项目存在进行中的创作任务" not in preview["blockers"]
+
+    change_endpoint = next(
+        route.endpoint for route in router.routes
+        if route.path == "/api/creative/projects/{project_id}/workflow-mode"
+    )
+    changed = await change_endpoint(
+        project_id=project["id"],
+        payload=CreativeModeChangeRequest(
+            workflow_mode="free", expected_mode_revision=0
+        ),
+        request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())),
+        principal=SimpleNamespace(is_system_admin=True, user_id="owner-1"),
+    )
+    assert changed["workflow_mode"] == "free"
+    workflow.cancel_task.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_content_project_migration_copies_resources_and_cancels_workflow_tasks(
+    tmp_path,
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from creative.api import build_creative_router
+    from creative.schema import CreativeModeMigrationRequest
+
+    repository = CreativeRepository(tmp_path / "content-migration.sqlite3")
+    project = repository.create_original_project(
+        seed_text="已有标准流程内容",
+        name="非空迁移项目",
+        target_episode_count=3,
+        created_by="owner-1",
+        creation_request_id="content-migration-project",
+    )
+    project = repository.mark_project_bootstrap_status(project["id"], "ready")
+    blueprint = repository.create_blueprints(
+        project["id"], [{"content": {"title": "标准流程方向"}}]
+    )[0]
+    workflow = Mock()
+    workflow.list_tasks.return_value = [
+        {
+            "id": "brief-started",
+            "project_id": str(project["id"]),
+            "task_type": "brief",
+            "status": "in_progress",
+        },
+        {
+            "id": "characters-returned",
+            "project_id": str(project["id"]),
+            "task_type": "characters",
+            "status": "returned",
+        },
+    ]
+    router = build_creative_router(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        repository=repository,
+        workflow_repository=workflow,
+        application_service=Mock(),
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    principal = SimpleNamespace(is_system_admin=True, user_id="owner-1")
+    preview_endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if route.path
+        == "/api/creative/projects/{project_id}/mode-migration-preview"
+    )
+
+    preview = await preview_endpoint(
+        project_id=project["id"], request=request, principal=principal
+    )
+
+    assert preview["resource_counts"]["brief"] == 1
+    assert preview["can_migrate"] is True
+    assert "项目存在进行中的创作任务" not in preview["blockers"]
+
+    migrate_endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if route.path == "/api/creative/projects/{project_id}/migrate-to-free"
+    )
+    migrated = await migrate_endpoint(
+        project_id=project["id"],
+        payload=CreativeModeMigrationRequest(
+            expected_mode_revision=0,
+            operation_id="content-migration-operation",
+        ),
+        request=request,
+        principal=principal,
+    )
+
+    mapping = migrated["mapping"]["brief"]
+    assert migrated["project"]["workflow_mode"] == "free"
+    assert mapping["source"] == blueprint["id"]
+    assert mapping["target"] != blueprint["id"]
+    assert repository.get_blueprint(mapping["target"])["resource_scope"] == "free"
+    assert workflow.cancel_task.call_count == 2
+
+
+def test_content_project_migrates_to_free_without_manual_seed(tmp_path):
+    db_path = tmp_path / "migrate-topic-project-without-seed.sqlite3"
+    create_legacy_workflow_mode_database(db_path)
+    repository = CreativeRepository(db_path)
+    project = repository.create_project(
+        topic_id=1,
+        breakdown_id=1,
+        name="已有内容待迁移项目",
+        target_episode_count=3,
+        created_by="owner-1",
+        creation_request_id="migrate-topic-project-without-seed",
+    )
+    repository.create_blueprints(
+        project["id"], [{"content": {"title": "已有方向"}}]
+    )
+
+    migrated = FreeCreativeModeService(repository).migrate_to_free(
+        project_id=project["id"],
+        expected_mode_revision=0,
+        operation_id="migrate-topic-project-without-seed",
+        actor_user_id="owner-1",
+    )
+
+    assert migrated["project"]["workflow_mode"] == "free"
+    assert "旧库选题" in repository.get_current_seed(project["id"])["seed_text"]
+
+
+def test_returned_workflow_task_can_be_cancelled_during_mode_migration():
+    from workflow.state_machine import WorkflowStateMachine
+
+    status = WorkflowStateMachine().transition(
+        {
+            "status": "returned",
+            "role_code": "creative_planner",
+            "assignee_user_id": "planner-1",
+        },
+        "cancel",
+        {"permissions": {"*"}},
+    )
+
+    assert status == "cancelled"
 
 
 def test_migration_copies_current_resources_and_preserves_legacy_history(tmp_path):

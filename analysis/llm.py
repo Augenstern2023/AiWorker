@@ -245,7 +245,11 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         headers: Dict[str, str],
         request_body: Dict[str, Any],
     ) -> httpx.Response:
-        async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
+        async with httpx.AsyncClient(
+            timeout=self.timeout,
+            transport=self.transport,
+            trust_env=False,
+        ) as client:
             for attempt in range(self.max_retries + 1):
                 try:
                     response = await client.post(endpoint, headers=headers, json=request_body)
@@ -526,10 +530,27 @@ def create_llm_provider_from_config(
     config_module: Any,
     prefix: str = "LLM",
     *,
+    model_record_id: str | None = None,
     retry_callback: Callable[[int, int, str], None] | None = None,
 ) -> OpenAICompatibleLLMProvider:
-    settings = resolve_llm_settings(config_module, prefix=prefix)
-    return OpenAICompatibleLLMProvider(
+    settings_repository = _default_llm_settings_repository()
+    settings = resolve_llm_settings(
+        config_module,
+        prefix=prefix,
+        settings_repository=settings_repository,
+    )
+    selected_model_record_id = str(model_record_id or "").strip()
+    if selected_model_record_id:
+        if settings_repository is None:
+            raise LLMError("模型配置存储不可用，无法使用所选模型")
+        try:
+            selected_settings = settings_repository.effective_model(
+                selected_model_record_id
+            )
+        except (ValueError, RuntimeError) as exc:
+            raise LLMError(str(exc)) from exc
+        settings.update(selected_settings)
+    provider = OpenAICompatibleLLMProvider(
         base_url=settings["base_url"],
         api_key=settings["api_key"],
         model=settings["model"],
@@ -544,6 +565,17 @@ def create_llm_provider_from_config(
         retry_base_delay=settings["retry_base_delay"],
         retry_callback=retry_callback,
     )
+    provider.provider_id = str(settings.get("provider_id") or "")
+    provider.provider_display_name = str(
+        settings.get("provider_display_name") or settings["provider"]
+    )
+    provider.model_record_id = str(
+        settings.get("model_record_id") or selected_model_record_id
+    )
+    provider.model_display_name = str(
+        settings.get("model_display_name") or settings["model"]
+    )
+    return provider
 
 
 def build_responses_request_body(

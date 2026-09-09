@@ -99,6 +99,7 @@ _CREATIVE_JOB_MONITOR: tuple[ApiRoute, ...] = _JOB_MONITOR + (
 )
 
 _CREATIVE_FREE_MODE: tuple[ApiRoute, ...] = (
+    ("GET", "/api/llm/available-models"),
     ("GET", "/api/creative/projects/{project_id}/module-capabilities"),
     ("GET", "/api/creative/projects/{project_id}/free/context-options"),
     ("POST", "/api/creative/projects/{project_id}/free/briefs"),

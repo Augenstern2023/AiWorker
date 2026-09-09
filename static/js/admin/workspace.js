@@ -1162,6 +1162,31 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
+                async deleteLLMModel(model) {
+                    const state = this.llmSettings;
+                    if (!model?.id || model.is_default || state.modelDeletingId) return;
+                    const label = model.display_name || model.model_id;
+                    if (!window.confirm(`确认删除模型「${label}」？删除后可重新同步或手工添加。`)) return;
+                    state.modelDeletingId = model.id;
+                    state.error = '';
+                    state.notice = '';
+                    try {
+                        const response = await aiworkerApi.request(`/api/llm/models/${model.id}`, {
+                            method: 'DELETE'
+                        });
+                        let data = {};
+                        try { data = await response.json(); } catch (_) {}
+                        if (!response.ok) throw new Error(this.llmResponseMessage(data, '删除模型失败'));
+                        if (state.modelEditor?.id === model.id) state.modelEditor = null;
+                        state.notice = `模型 ${label} 已删除`;
+                        await this.fetchLLMSettings({selectedProviderId: state.editor.id});
+                    } catch (error) {
+                        state.error = error.message || '删除模型失败';
+                    } finally {
+                        state.modelDeletingId = '';
+                    }
+                },
+
                 async setDefaultLLMModel(model) {
                     const state = this.llmSettings;
                     if (!model?.id || state.defaultSavingId) return;

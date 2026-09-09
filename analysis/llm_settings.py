@@ -461,6 +461,20 @@ class LLMSettingsRepository:
             ).mappings().one()
         return _model_dict(row)
 
+    def delete_model(self, model_record_id: str) -> dict[str, Any]:
+        with self.database.transaction() as connection:
+            current = connection.execute(
+                select(llm_models).where(llm_models.c.id == model_record_id)
+            ).mappings().first()
+            if current is None:
+                raise LLMSettingsError("模型不存在")
+            if self._is_default_model(connection, model_record_id):
+                raise LLMSettingsConflict("请先切换默认模型，再删除当前默认模型")
+            connection.execute(
+                llm_models.delete().where(llm_models.c.id == model_record_id)
+            )
+        return _model_dict(current)
+
     def merge_synced_models(
         self, provider_id: str, model_ids: list[str]
     ) -> dict[str, int]:
@@ -595,6 +609,76 @@ class LLMSettingsRepository:
             "default_model_id": default_model_id,
         }
 
+    def available_models_payload(self) -> dict[str, Any]:
+        """Return the safe model catalog used by creative generation pages."""
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                select(
+                    llm_models.c.id,
+                    llm_models.c.model_id,
+                    llm_models.c.display_name,
+                    llm_models.c.is_enabled.label("model_is_enabled"),
+                    llm_providers.c.id.label("provider_id"),
+                    llm_providers.c.name.label("provider_name"),
+                    llm_providers.c.api_key_encrypted,
+                    llm_providers.c.is_enabled.label("provider_is_enabled"),
+                )
+                .select_from(
+                    llm_models.join(
+                        llm_providers,
+                        llm_providers.c.id == llm_models.c.provider_id,
+                    )
+                )
+                .order_by(
+                    llm_providers.c.name,
+                    llm_models.c.display_name,
+                    llm_models.c.model_id,
+                )
+            ).mappings().all()
+            default_model_id = connection.execute(
+                select(llm_settings.c.default_model_id).where(
+                    llm_settings.c.id == "global"
+                )
+            ).scalar_one_or_none()
+
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            if not bool(row["model_is_enabled"]) or not bool(
+                row["provider_is_enabled"]
+            ):
+                continue
+            try:
+                api_key = self.cipher.decrypt(
+                    str(row["api_key_encrypted"] or "")
+                ).strip()
+            except LLMSecretError:
+                continue
+            if not api_key:
+                continue
+            display_name = str(row["display_name"] or row["model_id"])
+            provider_name = str(row["provider_name"])
+            items.append(
+                {
+                    "id": str(row["id"]),
+                    "provider_id": str(row["provider_id"]),
+                    "provider_name": provider_name,
+                    "model_id": str(row["model_id"]),
+                    "display_name": display_name,
+                    "label": f"{provider_name} / {display_name}",
+                    "is_default": str(row["id"]) == str(default_model_id or ""),
+                }
+            )
+        available_ids = {item["id"] for item in items}
+        normalized_default_id = str(default_model_id or "")
+        return {
+            "default_model_record_id": (
+                normalized_default_id
+                if normalized_default_id in available_ids
+                else ""
+            ),
+            "items": items,
+        }
+
     def effective_default(self) -> dict[str, Any] | None:
         with self.database.connection() as connection:
             row = connection.execute(
@@ -631,6 +715,66 @@ class LLMSettingsRepository:
             "model": str(row["model_id"]),
             "wire_api": str(row["wire_api"]),
             "allow_insecure_http": urlsplit(str(row["base_url"])).scheme.lower() == "http",
+        }
+
+    def effective_model(self, model_record_id: str) -> dict[str, Any]:
+        """Resolve one enabled model record to its server-side credentials."""
+        with self.database.connection() as connection:
+            row = connection.execute(
+                select(
+                    llm_models.c.id.label("model_record_id"),
+                    llm_models.c.model_id,
+                    llm_models.c.display_name,
+                    llm_models.c.is_enabled.label("model_is_enabled"),
+                    llm_providers.c.id.label("provider_id"),
+                    llm_providers.c.name.label("provider_name"),
+                    llm_providers.c.preset,
+                    llm_providers.c.base_url,
+                    llm_providers.c.wire_api,
+                    llm_providers.c.api_key_encrypted,
+                    llm_providers.c.is_enabled.label("provider_is_enabled"),
+                )
+                .select_from(
+                    llm_models.join(
+                        llm_providers,
+                        llm_providers.c.id == llm_models.c.provider_id,
+                    )
+                )
+                .where(llm_models.c.id == str(model_record_id or "").strip())
+            ).mappings().first()
+        if row is None:
+            raise LLMSettingsError("所选模型不存在")
+        if not bool(row["model_is_enabled"]):
+            raise LLMSettingsConflict("所选模型已停用")
+        if not bool(row["provider_is_enabled"]):
+            raise LLMSettingsConflict("所选模型的提供商已停用")
+        try:
+            api_key = self.cipher.decrypt(
+                str(row["api_key_encrypted"] or "")
+            ).strip()
+        except LLMSecretError as exc:
+            raise LLMSettingsConflict(
+                "所选模型的提供商 API Key 无法解密，请联系管理员重新录入"
+            ) from exc
+        if not api_key:
+            raise LLMSettingsConflict(
+                "所选模型的提供商尚未配置 API Key"
+            )
+        return {
+            "provider": str(row["preset"]),
+            "provider_id": str(row["provider_id"]),
+            "provider_display_name": str(row["provider_name"]),
+            "base_url": str(row["base_url"]),
+            "api_key": api_key,
+            "model": str(row["model_id"]),
+            "model_record_id": str(row["model_record_id"]),
+            "model_display_name": str(
+                row["display_name"] or row["model_id"]
+            ),
+            "wire_api": str(row["wire_api"]),
+            "allow_insecure_http": (
+                urlsplit(str(row["base_url"])).scheme.lower() == "http"
+            ),
         }
 
     def provider_connection(

@@ -399,6 +399,11 @@ def test_global_disable_precedes_whitelist_and_project_owner_navigation_privileg
         (
             "/planning/projects",
             "GET",
+            "/api/llm/available-models",
+        ),
+        (
+            "/planning/projects",
+            "GET",
             "/api/creative/projects/project-1/export",
         ),
         (

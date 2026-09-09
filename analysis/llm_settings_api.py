@@ -181,7 +181,9 @@ class LLMSettingsService:
             headers["Content-Type"] = "application/json"
         try:
             async with httpx.AsyncClient(
-                timeout=self.timeout_seconds, transport=self.transport
+                timeout=self.timeout_seconds,
+                transport=self.transport,
+                trust_env=False,
             ) as client:
                 response = await client.request(
                     method, endpoint, headers=headers, json=json
@@ -256,6 +258,12 @@ def build_llm_settings_router(
             status_code=409 if isinstance(exc, LLMSettingsConflict) else 400,
             detail=str(exc),
         )
+
+    @router.get("/available-models")
+    def get_available_models(
+        _: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        return service.repository.available_models_payload()
 
     @router.get("/settings")
     def get_settings(
@@ -382,6 +390,29 @@ def build_llm_settings_router(
             model,
         )
         return model
+
+    @router.delete("/models/{model_record_id}")
+    def delete_model(
+        model_record_id: str,
+        request: Request,
+        principal: Principal = Depends(administrator),
+    ) -> dict[str, str]:
+        before = settings_model(model_record_id)
+        try:
+            service.repository.delete_model(model_record_id)
+        except LLMSettingsError as exc:
+            raise route_error(exc) from exc
+        result = {"status": "success", "model_id": model_record_id}
+        record(
+            principal,
+            request,
+            "llm.model.delete",
+            "llm_model",
+            model_record_id,
+            before,
+            result,
+        )
+        return result
 
     @router.put("/default-model")
     def set_default_model(

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -28,6 +29,28 @@ def _free_project(repository: CreativeRepository) -> dict[str, Any]:
         workflow_mode="free",
     )
     return repository.mark_project_bootstrap_status(project["id"], "ready")
+
+
+def test_outline_export_includes_recorded_generation_model() -> None:
+    from creative.api import build_outline_markdown
+
+    markdown = build_outline_markdown(
+        {"name": "模型对比项目"},
+        [
+            {
+                "episode_number": 1,
+                "content": {"core_event": "主角作出选择"},
+                "generation_meta": {
+                    "llm_provider_name": "OpenAI 主账号",
+                    "llm_model_display_name": "GPT Screenwriter",
+                    "job_id": "job-model-test",
+                },
+            }
+        ],
+    )
+
+    assert "生成模型**：OpenAI 主账号 / GPT Screenwriter" in markdown
+    assert "生成任务 ID**：job-model-test" in markdown
 
 
 @pytest.mark.asyncio
@@ -148,6 +171,294 @@ async def test_free_generation_works_without_upstream_resources_and_updates_head
     assert refreshed["character_batch_id"] is None
     assert refreshed["outline_batch_id"] is None
     assert events[-1][0] == "job_finished"
+
+
+@pytest.mark.asyncio
+async def test_free_generation_uses_selected_model_and_persists_attribution(
+    tmp_path, monkeypatch
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = _free_project(repository)
+    service = FreeCreativeModeService(repository)
+    context = service.create_generation_context(
+        context_id="selected-model-context",
+        project_id=project["id"],
+        stage="brief",
+        episode_number=None,
+        instruction="",
+        context_refs={},
+        actor_user_id="owner-1",
+    )
+    selected_calls: list[str] = []
+    provider = SimpleNamespace(
+        provider_id="provider-1",
+        provider_name="openai",
+        provider_display_name="OpenAI 主账号",
+        model_record_id="model-1",
+        model="gpt-screenwriter",
+        model_display_name="GPT Screenwriter",
+    )
+
+    def create_provider(_config, *, model_record_id=None):
+        selected_calls.append(model_record_id)
+        return provider
+
+    async def generate_brief(*_args, **_kwargs):
+        return [{"content": {"title": "模型方向"}}], {"provider": "openai"}
+
+    monkeypatch.setattr(
+        free_phase4_worker, "create_llm_provider_from_config", create_provider
+    )
+    monkeypatch.setattr(
+        free_phase4_worker, "generate_original_directions", generate_brief
+    )
+    job = CrawlJob(
+        job_id="free-selected-model",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "blueprints",
+            "normalized_stage": "brief",
+            "workflow_mode": "free",
+            "project_id": project["id"],
+            "created_by_user_id": "owner-1",
+            "operation_id": "operation-selected-model",
+            "free_context_id": context["id"],
+            "expected_head_revision": 0,
+            "llm_model_record_id": "model-1",
+        },
+    )
+
+    await free_phase4_worker.run_free_generation(
+        job, repository, lambda *_args, **_kwargs: None
+    )
+
+    resource = repository.get_project(project["id"])["blueprints"][0]
+    assert selected_calls == ["model-1"]
+    expected_meta = {
+        "llm_provider_id": "provider-1",
+        "llm_provider_name": "OpenAI 主账号",
+        "llm_model_record_id": "model-1",
+        "llm_model_id": "gpt-screenwriter",
+        "llm_model_display_name": "GPT Screenwriter",
+    }
+    assert {
+        key: resource["generation_meta"].get(key) for key in expected_meta
+    } == expected_meta
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [1, 3, 5])
+async def test_free_brief_generation_preserves_requested_direction_count(tmp_path, monkeypatch, count):
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = _free_project(repository)
+    service = FreeCreativeModeService(repository)
+    context = service.create_generation_context(
+        context_id="context-three-briefs",
+        project_id=project["id"],
+        stage="brief",
+        episode_number=None,
+        instruction="生成三个补足方向",
+        context_refs={},
+        actor_user_id="owner-1",
+    )
+
+    async def generate_brief(_provider, _project, _seed, _sources, _existing, count):
+        return [
+            {"content": {"title": f"方向 {number}", "logline": f"故事 {number}"}}
+            for number in range(1, count + 1)
+        ], {"model": "fake"}
+
+    monkeypatch.setattr(free_phase4_worker, "create_llm_provider_from_config", lambda _config: object())
+    monkeypatch.setattr(free_phase4_worker, "generate_original_directions", generate_brief)
+    job = CrawlJob(
+        job_id="free-three-briefs",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "blueprints",
+            "normalized_stage": "brief",
+            "workflow_mode": "free",
+            "project_id": project["id"],
+            "created_by_user_id": "owner-1",
+            "free_context_id": context["id"],
+            "expected_head_revision": 0,
+            "count": count,
+        },
+    )
+    events = []
+    await free_phase4_worker.run_free_generation(
+        job, repository, lambda *_args, **kwargs: events.append(kwargs.get("payload")),
+    )
+
+    refreshed = repository.get_project(project["id"])
+    assert len(refreshed["blueprints"]) == count
+    assert {item["content"]["title"] for item in refreshed["blueprints"]} == {
+        f"方向 {number}" for number in range(1, count + 1)
+    }
+    assert len({item["candidate_group_id"] for item in refreshed["blueprints"]}) == count
+    assert len(events[-1]["blueprint_ids"]) == count
+    assert service.get_head(project["id"], "brief")["revision"] == 1
+
+
+def test_free_brief_batch_preserves_existing_direction_and_rolls_back_on_conflict(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = _free_project(repository)
+    service = FreeCreativeModeService(repository)
+    original = service.create_brief(
+        project["id"], {"title": "已有方向"},
+        expected_head_revision=0, actor_user_id="owner-1",
+    )
+    original_resource = repository.get_blueprint(original["resource"]["id"])
+    contents = [{"title": f"新方向 {number}"} for number in range(3)]
+    with pytest.raises(ValueError, match="head changed"):
+        service.create_briefs(
+            project["id"], contents,
+            expected_head_revision=0, actor_user_id="owner-1",
+        )
+    assert len(repository.get_project(project["id"])["blueprints"]) == 1
+    result = service.create_briefs(
+        project["id"], contents,
+        expected_head_revision=1, actor_user_id="owner-1",
+    )
+    assert len(repository.get_project(project["id"])["blueprints"]) == 4
+    assert repository.get_blueprint(original["resource"]["id"]) == original_resource
+    assert result["head"]["revision"] == 2
+    assert result["head"]["resource_ref"] == str(result["resources"][0]["id"])
+
+
+@pytest.mark.asyncio
+async def test_free_brief_api_forwards_direction_count(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from creative.api import build_creative_router
+    from creative.schema import FreeCreativeGenerateRequest
+
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = _free_project(repository)
+    requests = []
+
+    def create_job(payload, **_kwargs):
+        requests.append(payload)
+        return SimpleNamespace(to_dict=lambda: {"job_id": "brief-api-test"})
+
+    router = build_creative_router(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        repository=repository,
+        workflow_repository=Mock(),
+        application_service=Mock(assert_stage_write_access=Mock()),
+        job_manager=SimpleNamespace(create_job=create_job),
+    )
+    endpoint = next(
+        route.endpoint for route in router.routes
+        if route.path == "/api/creative/projects/{project_id}/free/{stage}/generate"
+    )
+    for count in (3, 5):
+        await endpoint(
+            project_id=project["id"], stage="briefs", episode_number=None,
+            payload=FreeCreativeGenerateRequest(operation_id="brief-api-count", count=count),
+            principal=SimpleNamespace(user_id="owner-1"),
+        )
+        assert requests[-1]["extra"]["count"] == count
+    assert requests[0]["extra"]["generation_request_hash"] != requests[1]["extra"]["generation_request_hash"]
+
+
+@pytest.mark.asyncio
+async def test_free_generation_api_validates_and_hashes_selected_model(tmp_path):
+    from unittest.mock import Mock
+    from creative.api import build_creative_router
+    from creative.schema import FreeCreativeGenerateRequest
+
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = _free_project(repository)
+    jobs = []
+    resolved = []
+
+    def create_job(payload, **_kwargs):
+        jobs.append(payload)
+        return SimpleNamespace(to_dict=lambda: {"job_id": "model-api-test"})
+
+    def resolve_model(model_record_id):
+        resolved.append(model_record_id)
+        return {"model_record_id": model_record_id}
+
+    router = build_creative_router(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        repository=repository,
+        workflow_repository=Mock(),
+        application_service=Mock(assert_stage_write_access=Mock()),
+        job_manager=SimpleNamespace(create_job=create_job),
+        llm_model_resolver=resolve_model,
+    )
+    endpoint = next(
+        route.endpoint for route in router.routes
+        if route.path == "/api/creative/projects/{project_id}/free/{stage}/generate"
+    )
+    for model_record_id in ("model-a", "model-b"):
+        await endpoint(
+            project_id=project["id"],
+            stage="briefs",
+            episode_number=None,
+            payload=FreeCreativeGenerateRequest(
+                operation_id="model-api-operation",
+                llm_model_record_id=model_record_id,
+            ),
+            principal=SimpleNamespace(user_id="owner-1"),
+        )
+
+    assert resolved == ["model-a", "model-b"]
+    assert [job["extra"]["llm_model_record_id"] for job in jobs] == [
+        "model-a", "model-b"
+    ]
+    assert jobs[0]["extra"]["generation_request_hash"] != (
+        jobs[1]["extra"]["generation_request_hash"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_free_series_api_forwards_one_selected_model_to_all_episodes(tmp_path):
+    from unittest.mock import Mock
+    from creative.api import build_creative_router
+    from creative.schema import FreeCreativeSeriesGenerateRequest
+
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = _free_project(repository)
+    jobs = []
+
+    def create_job(payload, **_kwargs):
+        jobs.append(payload)
+        return SimpleNamespace(to_dict=lambda: {"job_id": "series-model-test"})
+
+    router = build_creative_router(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        repository=repository,
+        workflow_repository=Mock(),
+        application_service=Mock(assert_stage_write_access=Mock()),
+        job_manager=SimpleNamespace(create_job=create_job),
+        llm_model_resolver=lambda model_record_id: {
+            "model_record_id": model_record_id
+        },
+    )
+    endpoint = next(
+        route.endpoint for route in router.routes
+        if route.path == "/api/creative/projects/{project_id}/free/beats/generate-series"
+    )
+
+    await endpoint(
+        project_id=project["id"],
+        payload=FreeCreativeSeriesGenerateRequest(
+            operation_id="series-model-operation",
+            expected_head_revisions={1: 0, 2: 0, 3: 0},
+            llm_model_record_id="model-series",
+        ),
+        principal=SimpleNamespace(user_id="owner-1"),
+    )
+
+    assert jobs[0]["extra"]["llm_model_record_id"] == "model-series"
+    assert len(jobs[0]["extra"]["free_context_ids"]) == 3
 
 
 @pytest.mark.asyncio

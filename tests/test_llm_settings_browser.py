@@ -88,6 +88,7 @@ def _llm_state() -> dict:
         "syncing": False,
         "testing": False,
         "modelSaving": False,
+        "modelDeletingId": "",
         "defaultSavingId": "",
         "error": "",
         "notice": "",
@@ -154,6 +155,15 @@ def _mount_llm_page(page: Page, payload: dict = SETTINGS_PAYLOAD) -> None:
               if (url.endsWith('/models/sync')) {
                 return {ok: false, status: 400, async json() {
                   return {detail: '模型列表响应缺少 data 数组，请改用手工新增'};
+                }};
+              }
+              if (url.startsWith('/api/llm/models/') && options.method === 'DELETE') {
+                const recordId = url.split('/').at(-1);
+                for (const provider of window.settingsPayload.providers || []) {
+                  provider.models = (provider.models || []).filter(model => model.id !== recordId);
+                }
+                return {ok: true, status: 200, async json() {
+                  return {status: 'success', model_id: recordId};
                 }};
               }
               return {ok: true, status: 200, async json() {
@@ -449,6 +459,41 @@ def test_llm_model_can_be_edited_and_selected_as_global_default() -> None:
             "window.requests.find(item => item.url === '/api/llm/default-model')"
         )
         assert default_request["body"] == {"model_id": "model-record-2"}
+        browser.close()
+
+
+def test_llm_non_default_model_can_be_deleted_after_confirmation() -> None:
+    payload = deepcopy(SETTINGS_PAYLOAD)
+    payload["providers"][0]["models"].append(
+        {
+            "id": "model-record-2",
+            "provider_id": "provider-1",
+            "model_id": "broken-model",
+            "display_name": "Broken Model",
+            "source": "manual",
+            "is_enabled": True,
+            "is_default": False,
+        }
+    )
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.on("dialog", lambda dialog: dialog.accept())
+        _mount_llm_page(page, payload)
+        page.evaluate(
+            "document.querySelector('main')._x_dataStack[0].fetchLLMSettings()"
+        )
+
+        assert page.get_by_role(
+            "button", name="删除模型 Model A"
+        ).is_disabled()
+        page.get_by_role("button", name="删除模型 Broken Model").click()
+        page.wait_for_function(
+            "window.requests.some(item => item.url === '/api/llm/models/model-record-2' && item.method === 'DELETE')"
+        )
+
+        assert not page.get_by_text("Broken Model", exact=True).is_visible()
+        assert page.get_by_text("模型 Broken Model 已删除", exact=True).is_visible()
         browser.close()
 
 

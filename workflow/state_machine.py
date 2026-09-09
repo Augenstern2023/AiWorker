@@ -46,7 +46,7 @@ TRANSITIONS = {
     ),
     "cancel": TransitionRule(
         frozenset(
-            {"pool", "assigned", "in_progress"}
+            {"pool", "assigned", "in_progress", "returned"}
         ),
         "cancelled",
         "manager",
@@ -60,6 +60,7 @@ class WorkflowStateMachine:
             "pool",
             "assigned",
             "in_progress",
+            "returned",
 
             "completed",
             "cancelled",

@@ -25,6 +25,40 @@ from creative.script_service import (
 )
 
 
+def _create_generation_provider(extra: dict[str, Any]) -> Any:
+    model_record_id = str(extra.get("llm_model_record_id") or "").strip()
+    if model_record_id:
+        return create_llm_provider_from_config(
+            config, model_record_id=model_record_id
+        )
+    return create_llm_provider_from_config(config)
+
+
+def _llm_generation_meta(
+    provider: Any, model_record_id: str = ""
+) -> dict[str, str]:
+    values = {
+        "llm_provider_id": str(getattr(provider, "provider_id", "") or ""),
+        "llm_provider_name": str(
+            getattr(provider, "provider_display_name", "")
+            or getattr(provider, "provider_name", "")
+            or ""
+        ),
+        "llm_model_record_id": str(
+            getattr(provider, "model_record_id", "")
+            or model_record_id
+            or ""
+        ),
+        "llm_model_id": str(getattr(provider, "model", "") or ""),
+        "llm_model_display_name": str(
+            getattr(provider, "model_display_name", "")
+            or getattr(provider, "model", "")
+            or ""
+        ),
+    }
+    return {key: value for key, value in values.items() if value}
+
+
 def _prompt_inputs(
     context: dict[str, Any], episode_number: int | None
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
@@ -132,7 +166,10 @@ async def _run_free_episode_series(
             )
         contexts[episode_number] = context
 
-    provider = create_llm_provider_from_config(config)
+    provider = _create_generation_provider(extra)
+    llm_meta = _llm_generation_meta(
+        provider, str(extra.get("llm_model_record_id") or "")
+    )
     emit(job, "job_started", f"开始自由创作：全剧{resource_label}")
     emit(
         job,
@@ -180,6 +217,7 @@ async def _run_free_episode_series(
             source_refs=dict(context.get("context_manifest") or {}),
             generation_meta={
                 **meta,
+                **llm_meta,
                 "job_id": job.job_id,
                 "operation_id": str(extra.get("operation_id") or ""),
                 "generation_context_id": context["id"],
@@ -269,8 +307,11 @@ async def run_free_generation(
     project = repository.get_project(project_id) or {}
     snapshot = dict(context["context_snapshot"])
     project.update(snapshot.get("project") or {})
-    provider = create_llm_provider_from_config(config)
+    provider = _create_generation_provider(extra)
     meta_base = {
+        **_llm_generation_meta(
+            provider, str(extra.get("llm_model_record_id") or "")
+        ),
         "job_id": job.job_id,
         "operation_id": str(extra.get("operation_id") or ""),
         "generation_context_id": context_id,
@@ -283,23 +324,32 @@ async def run_free_generation(
     emit(job, "progress", "准备自由创作模型请求", payload={"stage": stage, "completed": 0, "total": 1})
 
     if stage == "brief":
+        count = int(extra.get("count", 1))
+        if not 1 <= count <= 5:
+            raise ValueError("单次自由 Brief 生成数量必须在 1-5 之间")
         seed = dict(snapshot["seed"])
         seed["constraints"] = {
             **dict(seed.get("constraints") or {}),
             "generation_instruction": str(snapshot.get("instruction") or ""),
         }
         generated, meta = await generate_original_directions(
-            provider, project, seed, [], [], 1
+            provider, project, seed, [], [], count
         )
-        result = service.create_brief(
+        if len(generated) != count:
+            raise ValueError(f"自由 Brief 生成数量不足或超出请求：期望 {count}，实际 {len(generated)}")
+        result = service.create_briefs(
             project_id,
-            dict(generated[0].get("content") or generated[0]),
+            [dict(item.get("content") or item) for item in generated],
             expected_head_revision=expected_head_revision,
             actor_user_id=actor_user_id,
             source_refs=source_refs,
             generation_meta={**meta, **meta_base},
         )
-        result_payload = {"action": action, "blueprint_id": result["resource"]["id"]}
+        result_payload = {
+            "action": action,
+            "blueprint_id": result["resources"][0]["id"],
+            "blueprint_ids": [item["id"] for item in result["resources"]],
+        }
     else:
         brief, characters, relationships, outline, beats = _prompt_inputs(
             context, episode_number

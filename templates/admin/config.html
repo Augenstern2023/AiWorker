@@ -143,6 +143,7 @@
                                                 <div class="d-flex gap-2 flex-wrap flex-shrink-0">
                                                     <button type="button" class="btn btn-outline-secondary btn-sm" @click="startEditLLMModel(model)" :disabled="llmSettings.modelSaving" :aria-label="`编辑模型 ${model.display_name || model.model_id}`">编辑</button>
                                                     <button type="button" class="btn btn-outline-primary btn-sm" @click="setDefaultLLMModel(model)" :disabled="model.is_default || !model.is_enabled || !llmSettings.editor.is_enabled || Boolean(llmSettings.defaultSavingId)" :aria-label="`设为默认模型 ${model.display_name || model.model_id}`">设为默认</button>
+                                                    <button type="button" class="btn btn-outline-danger btn-sm" @click="deleteLLMModel(model)" :disabled="model.is_default || llmSettings.modelSaving || Boolean(llmSettings.modelDeletingId)" :title="model.is_default ? '请先切换全局默认模型' : ''" :aria-label="`删除模型 ${model.display_name || model.model_id}`"><span x-show="llmSettings.modelDeletingId !== model.id">删除</span><span x-show="llmSettings.modelDeletingId === model.id">删除中…</span></button>
                                                 </div>
                                             </div>
                                         </div>

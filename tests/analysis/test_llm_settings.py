@@ -357,6 +357,51 @@ def test_repository_sets_an_enabled_model_as_effective_default():
     }
 
 
+def test_repository_lists_and_resolves_enabled_models_without_exposing_secrets():
+    repository = _repository()
+    provider = repository.create_provider(
+        name="Creative Gateway",
+        preset="custom",
+        base_url="https://creative.example.test/v1",
+        wire_api="chat_completions",
+        api_key="creative-secret",
+    )
+    selected = repository.create_model(
+        provider["id"], model_id="screenwriter-a", display_name="编剧模型 A"
+    )
+    disabled = repository.create_model(
+        provider["id"], model_id="screenwriter-b", display_name="编剧模型 B"
+    )
+    repository.update_model(disabled["id"], is_enabled=False)
+    repository.set_default_model(selected["id"])
+
+    catalog = repository.available_models_payload()
+    effective = repository.effective_model(selected["id"])
+
+    assert catalog == {
+        "default_model_record_id": selected["id"],
+        "items": [
+            {
+                "id": selected["id"],
+                "provider_id": provider["id"],
+                "provider_name": "Creative Gateway",
+                "model_id": "screenwriter-a",
+                "display_name": "编剧模型 A",
+                "label": "Creative Gateway / 编剧模型 A",
+                "is_default": True,
+            }
+        ],
+    }
+    assert "creative-secret" not in repr(catalog)
+    assert "base_url" not in repr(catalog)
+    assert effective["api_key"] == "creative-secret"
+    assert effective["model_record_id"] == selected["id"]
+    assert effective["model"] == "screenwriter-a"
+    assert effective["provider_display_name"] == "Creative Gateway"
+    with pytest.raises(repository.conflict_error, match="模型已停用"):
+        repository.effective_model(disabled["id"])
+
+
 def test_repository_rejects_disabling_the_active_default():
     """Would catch an update leaving the global default unusable."""
 
@@ -375,6 +420,31 @@ def test_repository_rejects_disabling_the_active_default():
         repository.update_model(model["id"], is_enabled=False)
     with pytest.raises(repository.conflict_error, match="默认模型"):
         repository.update_provider(provider["id"], is_enabled=False)
+
+
+def test_repository_deletes_a_non_default_model_and_protects_the_default():
+    repository = _repository()
+    provider = repository.create_provider(
+        name="Delete Provider",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+        api_key="secret",
+    )
+    default_model = repository.create_model(provider["id"], model_id="model-a")
+    removable_model = repository.create_model(provider["id"], model_id="model-b")
+    repository.set_default_model(default_model["id"])
+
+    with pytest.raises(repository.conflict_error, match="默认模型"):
+        repository.delete_model(default_model["id"])
+
+    deleted = repository.delete_model(removable_model["id"])
+
+    assert deleted["id"] == removable_model["id"]
+    models = repository.settings_payload()["providers"][0]["models"]
+    assert [model["id"] for model in models] == [default_model["id"]]
+    with pytest.raises(ValueError, match="模型不存在"):
+        repository.delete_model(removable_model["id"])
 
 
 @pytest.mark.parametrize("api_key", ["", "   "])

@@ -797,21 +797,21 @@
         .blueprint-conflict-cell {
             transition: all 0.15s ease;
         }
-        .topic-desc-clamp {
+        .topic-desc-clamp,
+        .blueprint-conflict-clamp {
             display: -webkit-box;
             overflow: hidden;
             -webkit-box-orient: vertical;
             -webkit-line-clamp: 2;
         }
-        .topic-desc-cell:hover .topic-desc-clamp {
+        .topic-desc-cell:hover .topic-desc-clamp,
+        .blueprint-conflict-cell:hover .blueprint-conflict-clamp {
             overflow: visible;
             -webkit-line-clamp: unset;
         }
         .topic-desc-cell:hover,
         .blueprint-conflict-cell:hover {
             overflow: visible !important;
-            -webkit-line-clamp: unset !important;
-            display: table-cell !important;
             background: var(--bg-panel-2);
             border-radius: 4px;
             box-shadow: 0 2px 12px rgba(0,0,0,0.35);

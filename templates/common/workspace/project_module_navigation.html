@@ -22,11 +22,11 @@
             <template x-if="isFreeCreativeProject() && freeStageVersionOptions('{{ creative_module }}', ['beats', 'script'].includes('{{ creative_module }}') ? creativeWorkspace.selectedEpisode : 0).length">
                 <div class="d-flex align-items-center gap-2 ms-auto">
                     <label class="small text-muted" for="free-module-version">当前版本</label>
-                    <select id="free-module-version" class="form-select form-select-sm" style="width:190px"
+                    <select id="free-module-version" class="form-select form-select-sm" style="width:280px"
                             :value="freeStageHeadRef('{{ creative_module }}', ['beats', 'script'].includes('{{ creative_module }}') ? creativeWorkspace.selectedEpisode : 0)"
                             @change="setFreeCreativeHead('{{ creative_module }}', $event.target.value, ['beats', 'script'].includes('{{ creative_module }}') ? creativeWorkspace.selectedEpisode : 0)">
                         <template x-for="item in freeStageVersionOptions('{{ creative_module }}', ['beats', 'script'].includes('{{ creative_module }}') ? creativeWorkspace.selectedEpisode : 0)" :key="item.resource_ref">
-                            <option :value="item.resource_ref" x-text="`v${item.version} · ${creativeWorkflowStatusLabel(item.status)} · ${item.label}`"></option>
+                            <option :value="item.resource_ref" x-text="`v${item.version} · ${creativeWorkflowStatusLabel(item.status)} · ${item.label}${item.model_label ? ' · ' + item.model_label : ''}`"></option>
                         </template>
                     </select>
                 </div>

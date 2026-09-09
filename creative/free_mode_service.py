@@ -314,6 +314,51 @@ class FreeCreativeModeService:
             )
         return {"resource": self.repository.get_blueprint(resource_id), "head": head}
 
+    def create_briefs(
+        self,
+        project_id: int,
+        contents: list[dict[str, Any]],
+        *,
+        expected_head_revision: int,
+        actor_user_id: str,
+        source_refs: dict[str, Any] | None = None,
+        generation_meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Save independent directions atomically and select the first as current."""
+        if not 1 <= len(contents) <= 5:
+            raise ValueError("单次自由 Brief 生成数量必须在 1-5 之间")
+        with self.repository._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            project = self._raw_project(conn, project_id)
+            if project.get("workflow_mode") != FREE_SCOPE:
+                raise ValueError("该操作仅支持自由创作项目")
+            resources = [
+                self._create_brief_conn(
+                    conn,
+                    project_id=project_id,
+                    content=dict(content),
+                    source_refs=dict(source_refs or {}),
+                    generation_meta=dict(generation_meta or {}),
+                    status="draft",
+                )
+                for content in contents
+            ]
+            resource_id, version = resources[0]
+            head = self._set_head_conn(
+                conn,
+                project_id=project_id,
+                stage="brief",
+                episode_number=0,
+                resource_ref=str(resource_id),
+                resource_version=version,
+                expected_revision=expected_head_revision,
+                actor_user_id=actor_user_id,
+            )
+        return {
+            "resources": [self.repository.get_blueprint(item_id) for item_id, _ in resources],
+            "head": head,
+        }
+
     def create_characters(
         self,
         project_id: int,
@@ -1062,17 +1107,40 @@ class FreeCreativeModeService:
             "heads": self.list_heads(project_id),
         }
 
-    def ensure_seed(self, project_id: int, seed_text: str) -> dict[str, Any]:
+    def _automatic_seed_text_conn(
+        self, conn: Any, project: dict[str, Any], seed_text: str = ""
+    ) -> str:
+        supplied = str(seed_text or "").strip()
+        if len(supplied) >= 2:
+            return supplied
+        topic_id = project.get("topic_id")
+        breakdown_id = project.get("breakdown_id")
+        if topic_id is not None and breakdown_id is not None:
+            topic = conn.execute(
+                "SELECT * FROM creative_topics WHERE id = ?", (int(topic_id),)
+            ).fetchone()
+            breakdown = conn.execute(
+                "SELECT * FROM creative_breakdowns WHERE id = ?",
+                (int(breakdown_id),),
+            ).fetchone()
+            if topic is not None and breakdown is not None:
+                resolved = self.repository._topic_based_seed_text(topic, breakdown)
+                if len(resolved.strip()) >= 2:
+                    return resolved
+        return f"项目：{str(project.get('name') or '自由创作').strip()}"[:500]
+
+    def ensure_seed(self, project_id: int, seed_text: str = "") -> dict[str, Any]:
         with self.repository._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._raw_project(conn, project_id)
+            project = self._raw_project(conn, project_id)
             row = conn.execute(
                 "SELECT * FROM creative_seeds WHERE project_id = ? ORDER BY version DESC, id DESC LIMIT 1",
                 (int(project_id),),
             ).fetchone()
             if row is None:
-                if len(seed_text.strip()) < 2:
-                    raise ValueError("自由创作项目需要至少 2 个字符的创作种子")
+                resolved_seed_text = self._automatic_seed_text_conn(
+                    conn, project, seed_text
+                )
                 now = time.time()
                 cursor = conn.execute(
                     """
@@ -1081,7 +1149,7 @@ class FreeCreativeModeService:
                         reference_refs_json, created_at, updated_at, locked_at
                     ) VALUES (?, 1, 'frozen', ?, '{}', '[]', ?, ?, ?)
                     """,
-                    (int(project_id), seed_text.strip(), now, now, now),
+                    (int(project_id), resolved_seed_text, now, now, now),
                 )
                 seed_id = int(cursor.lastrowid)
             else:
@@ -1138,8 +1206,9 @@ class FreeCreativeModeService:
                     (int(project_id),),
                 ).fetchone()
                 if seed is None:
-                    if len(seed_text.strip()) < 2:
-                        raise ValueError("自由创作项目需要至少 2 个字符的创作种子")
+                    resolved_seed_text = self._automatic_seed_text_conn(
+                        conn, project, seed_text
+                    )
                     conn.execute(
                         """
                         INSERT INTO creative_seeds (
@@ -1147,7 +1216,7 @@ class FreeCreativeModeService:
                             reference_refs_json, created_at, updated_at, locked_at
                         ) VALUES (?, 1, 'frozen', ?, '{}', '[]', ?, ?, ?)
                         """,
-                        (int(project_id), seed_text.strip(), now, now, now),
+                        (int(project_id), resolved_seed_text, now, now, now),
                     )
             cursor = conn.execute(
                 """
@@ -1301,8 +1370,9 @@ class FreeCreativeModeService:
             ).fetchone()
             now = time.time()
             if seed is None:
-                if len(seed_text.strip()) < 2:
-                    raise ValueError("迁移到自由创作模式前必须补充创作种子")
+                resolved_seed_text = self._automatic_seed_text_conn(
+                    conn, project, seed_text
+                )
                 conn.execute(
                     """
                     INSERT INTO creative_seeds (
@@ -1310,7 +1380,7 @@ class FreeCreativeModeService:
                         reference_refs_json, created_at, updated_at, locked_at
                     ) VALUES (?, 1, 'frozen', ?, '{}', '[]', ?, ?, ?)
                     """,
-                    (int(project_id), seed_text.strip(), now, now, now),
+                    (int(project_id), resolved_seed_text, now, now, now),
                 )
             conn.execute(
                 """

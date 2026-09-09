@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 import pytest
@@ -18,8 +21,52 @@ from fastapi.testclient import TestClient
 
 from identity.schema import Principal
 from identity.dependencies import current_principal
+from analysis.llm import OpenAICompatibleLLMProvider
 
 from tests.analysis.test_llm_settings import _repository
+
+
+class _LocalLLMHandler(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(content_length)
+        payload = {"choices": [{"message": {"content": "OK"}}]}
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format: str, *args: object) -> None:
+        return
+
+
+@pytest.fixture
+def local_llm_base_url():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _LocalLLMHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/v1"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def _configure_unreachable_system_proxy(monkeypatch) -> None:
+    for name in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ):
+        monkeypatch.setenv(name, "http://127.0.0.1:1")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
 
 
 def _api_module():
@@ -113,6 +160,47 @@ async def test_connection_uses_unsaved_draft_and_returns_latency_without_secret(
     assert "draft-secret" not in repr(result)
 
 
+@pytest.mark.asyncio
+async def test_connection_ignores_unreachable_system_proxy(
+    monkeypatch, local_llm_base_url
+):
+    """Model checks must not inherit crawler or desktop proxy variables."""
+
+    _configure_unreachable_system_proxy(monkeypatch)
+    service = _api_module().LLMSettingsService(_repository(), timeout_seconds=1)
+
+    result = await service.test_connection(
+        base_url=local_llm_base_url,
+        api_key="test-secret",
+        model_id="test-model",
+        wire_api="chat_completions",
+    )
+
+    assert result["status"] == "success"
+    assert result["response_preview"] == "OK"
+
+
+@pytest.mark.asyncio
+async def test_generation_ignores_unreachable_system_proxy(
+    monkeypatch, local_llm_base_url
+):
+    """Free generation must connect directly even when a system proxy is stale."""
+
+    _configure_unreachable_system_proxy(monkeypatch)
+    provider = OpenAICompatibleLLMProvider(
+        base_url=local_llm_base_url,
+        api_key="test-secret",
+        model="test-model",
+        wire_api="chat_completions",
+        timeout=1,
+        max_retries=0,
+    )
+
+    result = await provider.complete_text([{"role": "user", "content": "test"}])
+
+    assert result == "OK"
+
+
 class _RecordingAudit:
     def __init__(self) -> None:
         self.events = []
@@ -169,6 +257,39 @@ def test_llm_routes_reject_non_admin_even_when_config_page_is_granted():
     assert response.status_code == 403
 
 
+def test_available_models_route_allows_authenticated_creator_without_secrets():
+    module = _api_module()
+    repository = _repository()
+    provider = repository.create_provider(
+        name="Creative Provider",
+        preset="custom",
+        base_url="https://creative.example.test/v1",
+        wire_api="chat_completions",
+        api_key="catalog-secret",
+    )
+    model = repository.create_model(
+        provider["id"], model_id="creative-model", display_name="创作模型"
+    )
+    repository.set_default_model(model["id"])
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = _non_admin
+    app.include_router(
+        module.build_llm_settings_router(
+            module.LLMSettingsService(repository), _RecordingAudit()
+        )
+    )
+
+    response = TestClient(app).get("/api/llm/available-models")
+
+    assert response.status_code == 200
+    assert response.json()["default_model_record_id"] == model["id"]
+    assert response.json()["items"][0]["label"] == (
+        "Creative Provider / 创作模型"
+    )
+    assert "catalog-secret" not in response.text
+    assert "creative.example.test" not in response.text
+
+
 def test_provider_and_model_routes_never_return_or_audit_api_key():
     """Would catch a management route leaking the submitted credential."""
 
@@ -217,6 +338,50 @@ def test_provider_and_model_routes_never_return_or_audit_api_key():
         "llm.model.create",
         "llm.default_model.update",
     ]
+
+
+def test_model_delete_route_removes_non_default_and_rejects_default():
+    module = _api_module()
+    repository = _repository()
+    provider = repository.create_provider(
+        name="Delete API Provider",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+        api_key="secret",
+    )
+    default_model = repository.create_model(provider["id"], model_id="model-a")
+    removable_model = repository.create_model(provider["id"], model_id="model-b")
+    repository.set_default_model(default_model["id"])
+    audit = _RecordingAudit()
+    app = FastAPI()
+    app.include_router(
+        module.build_llm_settings_router(
+            module.LLMSettingsService(repository),
+            audit,
+            administrator_dependency=lambda: _admin(),
+        )
+    )
+    client = TestClient(app)
+
+    default_response = client.delete(f"/api/llm/models/{default_model['id']}")
+    delete_response = client.delete(f"/api/llm/models/{removable_model['id']}")
+
+    assert default_response.status_code == 409
+    assert "默认模型" in default_response.json()["detail"]
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {
+        "status": "success",
+        "model_id": removable_model["id"],
+    }
+    assert audit.events[-1]["action"] == "llm.model.delete"
+    assert audit.events[-1]["before"]["id"] == removable_model["id"]
+    assert audit.events[-1]["after"] == delete_response.json()
+    remaining_ids = {
+        model["id"]
+        for model in client.get("/api/llm/settings").json()["providers"][0]["models"]
+    }
+    assert remaining_ids == {default_model["id"]}
 
 
 def test_settings_route_exposes_presets_and_current_default():

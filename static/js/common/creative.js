@@ -244,6 +244,7 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async createCreativeProject() {
+                    this.creativeWorkspace.error = '';
                     await this.syncCreativeProjectSource();
                     const source = this.creativeWorkspace.create;
                     if (!source.topic_id || !source.breakdown_id) return;
@@ -259,10 +260,33 @@ window.aiworkerModules.push(() => ({
                         const data = await res.json();
                         if (!res.ok) throw new Error(data.detail || '创建项目失败');
                         const isFree = data.workflow_mode === 'free';
-                        this.creativeWorkspace.create = {topic_id: '', breakdown_id: '', name: '', target_platform: '', target_episode_count: 20, workflow_mode: 'sequential', seed_text: '', creation_request_id: ''};
+                        this.creativeWorkspace.create = {topic_id: '', breakdown_id: '', name: '', target_platform: '', target_episode_count: 20, workflow_mode: 'sequential', creation_request_id: ''};
                         window.location.assign(`/planning/projects/${data.id}/brief${isFree ? '' : '?task_setup=1'}`);
                     } catch (e) {
                         this.creativeWorkspace.error = e.message || '创建项目失败';
+                        this.showCreativeNotice(this.creativeWorkspace.error, 'error');
+                    }
+                },
+
+                async deleteCreativeProject(project) {
+                    if (!project?.id || !project.can_delete || this.creativeWorkspace.deletingProjectId) return;
+                    const projectName = String(project.name || '未命名项目');
+                    if (!window.confirm(`确定永久删除项目“${projectName}”吗？关联的 Brief、人物关系、大纲、Beats、场次剧本和审核数据也会删除，且无法恢复。`)) return;
+                    this.creativeWorkspace.deletingProjectId = Number(project.id);
+                    this.creativeWorkspace.error = '';
+                    try {
+                        const response = await aiworkerApi.request(`/api/creative/projects/${project.id}`, {
+                            method: 'DELETE'
+                        });
+                        const data = await response.json().catch(() => ({}));
+                        if (!response.ok) throw new Error(data.detail || data.message || '删除项目失败');
+                        await this.fetchCreativeProjects();
+                        this.showCreativeNotice(`项目“${projectName}”已删除`, 'success');
+                    } catch (error) {
+                        this.creativeWorkspace.error = error.message || '删除项目失败';
+                        this.showCreativeNotice(this.creativeWorkspace.error, 'error');
+                    } finally {
+                        this.creativeWorkspace.deletingProjectId = null;
                     }
                 },
 
@@ -393,6 +417,17 @@ window.aiworkerModules.push(() => ({
                     return Number(this.creativeHead(stage, episodeNumber)?.revision || 0);
                 },
 
+                creativeGenerationModelLabel(meta = {}) {
+                    const provider = String(
+                        meta.llm_provider_name || meta.provider || ''
+                    ).trim();
+                    const model = String(
+                        meta.llm_model_display_name || meta.llm_model_id || meta.model || ''
+                    ).trim();
+                    if (provider && model && provider !== model) return `${provider} / ${model}`;
+                    return model || provider;
+                },
+
                 freeStageVersionOptions(stage, episodeNumber = 0) {
                     const project = this.creativeWorkspace.project;
                     if (!project || project.workflow_mode !== 'free') return [];
@@ -400,7 +435,8 @@ window.aiworkerModules.push(() => ({
                     if (stage === 'brief') {
                         items = (project.blueprints || []).map(item => ({
                             resource_ref: String(item.id), version: item.version,
-                            status: item.status, label: item.content?.title || '未命名 Brief'
+                            status: item.status, label: item.content?.title || '未命名 Brief',
+                            model_label: this.creativeGenerationModelLabel(item.generation_meta)
                         }));
                     } else if (stage === 'characters') {
                         const batches = new Map();
@@ -409,7 +445,8 @@ window.aiworkerModules.push(() => ({
                             if (ref && !batches.has(ref)) batches.set(ref, {
                                 resource_ref: ref, version: item.version, status: item.status,
                                 label: (project.characters || []).filter(value => value.batch_id === item.batch_id)
-                                    .map(value => value.content?.name).filter(Boolean).slice(0, 3).join('、') || '人物版本'
+                                    .map(value => value.content?.name).filter(Boolean).slice(0, 3).join('、') || '人物版本',
+                                model_label: this.creativeGenerationModelLabel(item.generation_meta)
                             });
                         });
                         items = [...batches.values()];
@@ -418,7 +455,8 @@ window.aiworkerModules.push(() => ({
                         (project.episodes || []).filter(item => item.stage === 'outline').forEach(item => {
                             const ref = String(item.batch_id || '');
                             if (ref && !batches.has(ref)) batches.set(ref, {
-                                resource_ref: ref, version: item.version, status: item.status, label: '全剧大纲'
+                                resource_ref: ref, version: item.version, status: item.status, label: '全剧大纲',
+                                model_label: this.creativeGenerationModelLabel(item.generation_meta)
                             });
                         });
                         items = [...batches.values()];
@@ -427,7 +465,8 @@ window.aiworkerModules.push(() => ({
                             item.stage === stage && Number(item.episode_number) === Number(episodeNumber)
                         ).map(item => ({
                             resource_ref: String(item.id), version: item.version,
-                            status: item.status, label: `第 ${item.episode_number} 集`
+                            status: item.status, label: `第 ${item.episode_number} 集`,
+                            model_label: this.creativeGenerationModelLabel(item.generation_meta)
                         }));
                     }
                     return items.sort((left, right) => Number(right.version || 0) - Number(left.version || 0));
@@ -1202,6 +1241,8 @@ window.aiworkerModules.push(() => ({
                     const state = this.creativeWorkspace.freeGeneration;
                     Object.assign(state, {
                         stage, series: Boolean(options.series), instruction: '', contextOptions: {},
+                        count: Number(this.creativeWorkspace.directionCount || 3),
+                        modelOptions: [], modelRecordId: '',
                         contextRefs: {brief_id: null, character_batch_id: '', outline_batch_id: '', beats_id: null},
                         loading: true, submitting: false, error: ''
                     });
@@ -1209,14 +1250,22 @@ window.aiworkerModules.push(() => ({
                     try {
                         const query = ['beats', 'script'].includes(stage) && !state.series
                             ? `?episode_number=${Number(this.creativeWorkspace.selectedEpisode || 1)}` : '';
-                        const response = await aiworkerApi.request(
-                            `/api/creative/projects/${this.creativeWorkspace.project.id}/free/context-options${query}`
-                        );
-                        const data = await response.json();
-                        if (!response.ok) throw new Error(data.detail || '读取可引用版本失败');
-                        state.contextOptions = data;
+                        const [contextResponse, modelResponse] = await Promise.all([
+                            aiworkerApi.request(
+                                `/api/creative/projects/${this.creativeWorkspace.project.id}/free/context-options${query}`
+                            ),
+                            aiworkerApi.request('/api/llm/available-models'),
+                        ]);
+                        const [contextData, modelData] = await Promise.all([
+                            contextResponse.json(), modelResponse.json(),
+                        ]);
+                        if (!contextResponse.ok) throw new Error(contextData.detail || '读取可引用版本失败');
+                        if (!modelResponse.ok) throw new Error(modelData.detail || '读取可用模型失败');
+                        state.contextOptions = contextData;
+                        state.modelOptions = Array.isArray(modelData.items) ? modelData.items : [];
+                        state.modelRecordId = String(modelData.default_model_record_id || '');
                     } catch (error) {
-                        state.error = error.message || '读取可引用版本失败';
+                        state.error = error.message || '读取生成配置失败';
                     } finally {
                         state.loading = false;
                     }
@@ -1256,6 +1305,9 @@ window.aiworkerModules.push(() => ({
                             generation_instruction: String(state.instruction || '').trim(),
                             context_refs: refs,
                         };
+                        const modelRecordId = String(state.modelRecordId || '').trim();
+                        if (modelRecordId) payload.llm_model_record_id = modelRecordId;
+                        if (stage === 'brief') payload.count = Number(state.count || 3);
                         if (series) {
                             payload.expected_head_revisions = Object.fromEntries(
                                 Array.from(
@@ -1396,7 +1448,7 @@ window.aiworkerModules.push(() => ({
                     const project = this.creativeWorkspace.project;
                     if (!project || project.workflow_mode !== 'sequential') return;
                     const state = this.creativeWorkspace.modeMigration;
-                    Object.assign(state, {preview: null, seed_text: '', confirmed: false, loading: true, submitting: false, error: ''});
+                    Object.assign(state, {preview: null, confirmed: false, loading: true, submitting: false, error: ''});
                     this.creativeModeMigrationModal?.show();
                     try {
                         const response = await aiworkerApi.request(`/api/creative/projects/${project.id}/mode-migration-preview`);
@@ -1423,7 +1475,6 @@ window.aiworkerModules.push(() => ({
                             : `/api/creative/projects/${project.id}/workflow-mode`;
                         const body = {
                             expected_mode_revision: Number(project.mode_revision || 0),
-                            seed_text: String(state.seed_text || '').trim(),
                         };
                         if (resourceCount) body.operation_id = globalThis.crypto?.randomUUID?.() || `free-migration-${Date.now()}`;
                         else body.workflow_mode = 'free';

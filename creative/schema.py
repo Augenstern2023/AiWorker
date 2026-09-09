@@ -212,6 +212,8 @@ class FreeCreativeContextRefs(BaseModel):
 class FreeCreativeGenerateRequest(BaseModel):
     operation_id: str = Field(min_length=1, max_length=200)
     expected_head_revision: int = Field(0, ge=0)
+    count: int = Field(1, ge=1, le=5)
+    llm_model_record_id: str | None = Field(None, min_length=1, max_length=64)
     generation_instruction: str = Field("", max_length=2000)
     context_refs: FreeCreativeContextRefs = Field(default_factory=FreeCreativeContextRefs)
 
@@ -219,6 +221,7 @@ class FreeCreativeGenerateRequest(BaseModel):
 class FreeCreativeSeriesGenerateRequest(BaseModel):
     operation_id: str = Field(min_length=1, max_length=200)
     expected_head_revisions: dict[int, int]
+    llm_model_record_id: str | None = Field(None, min_length=1, max_length=64)
     generation_instruction: str = Field("", max_length=2000)
     context_refs: FreeCreativeContextRefs = Field(default_factory=FreeCreativeContextRefs)
 

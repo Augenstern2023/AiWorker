@@ -358,6 +358,41 @@ def _format_export_time(value: Any) -> str:
         return "-"
 
 
+def _generation_model_label(meta: dict[str, Any] | None) -> str:
+    values = dict(meta or {})
+    provider = str(
+        values.get("llm_provider_name") or values.get("provider") or ""
+    ).strip()
+    model = str(
+        values.get("llm_model_display_name")
+        or values.get("llm_model_id")
+        or values.get("model")
+        or ""
+    ).strip()
+    if provider and model and provider != model:
+        return f"{provider} / {model}"
+    return model or provider
+
+
+def _generation_info_markdown(
+    meta: dict[str, Any] | None, *, heading: str = "##"
+) -> list[str]:
+    values = dict(meta or {})
+    model_label = _generation_model_label(values)
+    if not model_label:
+        return []
+    return [
+        f"{heading} 生成信息",
+        "",
+        f"- **生成模型**：{model_label or '-'}",
+        "",
+        f"- **提示词模板版本**：{values.get('prompt_template_version') or '-'}",
+        "",
+        f"- **生成任务 ID**：{values.get('job_id') or '-'}",
+        "",
+    ]
+
+
 def _status_label(value: Any) -> str:
     return {
         "draft": "草稿",
@@ -485,6 +520,8 @@ def build_beats_markdown(project: dict[str, Any], items: list[dict[str, Any]]) -
                 "",
                 f"- **生成服务**：{meta.get('provider') or '-'}",
                 "",
+                f"- **生成模型**：{_generation_model_label(meta) or '-'}",
+                "",
                 f"- **是否经过结构修复**：{'是' if meta.get('repair_attempted') else '否'}",
                 "",
                 f"- **提示词模板版本**：{meta.get('prompt_template_version') or '-'}",
@@ -519,6 +556,12 @@ def build_outline_markdown(project: dict[str, Any], items: list[dict[str, Any]])
     overview = read_series_overview(
         (ordered_items[0].get("content") or {}).get("series_overview")
     ) if ordered_items else None
+    if ordered_items:
+        lines.extend(
+            _generation_info_markdown(
+                ordered_items[0].get("generation_meta")
+            )
+        )
     if overview:
         lines.extend(["## 全集剧情概览", ""])
         for key, label in SERIES_OVERVIEW_FIELD_LABELS:
@@ -724,6 +767,7 @@ def build_creative_router(
     repository: CreativeRepository | None = None,
     application_service: CreativeApplicationService | None = None,
     llm_provider_factory: Callable[[], Any] | None = None,
+    llm_model_resolver: Callable[[str], dict[str, Any]] | None = None,
 ) -> APIRouter:
     router = APIRouter(
         prefix="/api/creative",
@@ -1186,16 +1230,34 @@ def build_creative_router(
             content = snapshot.get("episodes") or []
         else:
             content = snapshot
+        if stage == "characters":
+            generation_items = snapshot.get("characters") or []
+            generation_meta = (
+                generation_items[0].get("generation_meta")
+                if generation_items
+                else {}
+            )
+        elif stage == "outline":
+            generation_meta = (
+                content[0].get("generation_meta") if content else {}
+            )
+        else:
+            generation_meta = snapshot.get("generation_meta") or {}
         payload = {
             "project_id": project["id"],
             "project_name": project["name"],
             "stage": stage,
+            "generation_meta": generation_meta,
             "content": content,
         }
         if format == "json":
             return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"), "application/json"
         if stage == "script":
-            return build_script_text(project, snapshot.get("content") or {}, episode_number=int(snapshot.get("episode_number") or 0)).encode("utf-8"), "text/plain; charset=utf-8"
+            script = build_script_text(project, snapshot.get("content") or {}, episode_number=int(snapshot.get("episode_number") or 0))
+            model_label = _generation_model_label(generation_meta)
+            if model_label:
+                script = f"生成模型:{model_label}\n\n{script}"
+            return script.encode("utf-8"), "text/plain; charset=utf-8"
         if stage == "beats":
             markdown = build_beats_markdown(project, content)
         elif stage == "outline":
@@ -1203,6 +1265,7 @@ def build_creative_router(
         else:
             markdown = "\n".join(
                 [f"# {project['name']}", "", f"- 阶段：{stage}", ""]
+                + _generation_info_markdown(generation_meta)
                 + _markdown_value(content)
             )
         return markdown.encode("utf-8"), "text/markdown; charset=utf-8"
@@ -2488,6 +2551,9 @@ def build_creative_router(
             if item.get("workflow_mode", "sequential") == "sequential":
                 workflow_adapter.reconcile_project(int(item["id"]))
         items = repository.list_projects(topic_id=topic_id)
+        permission_service = getattr(
+            request.app.state, "identity_permission_service", None
+        )
         if participating_only:
             items = [
                 item
@@ -2497,9 +2563,6 @@ def build_creative_router(
                 )
             ]
         elif not principal.is_system_admin:
-            permission_service = getattr(
-                request.app.state, "identity_permission_service", None
-            )
             items = [
                 item
                 for item in items
@@ -2513,6 +2576,13 @@ def build_creative_router(
                     )
                 )
             ]
+        for item in items:
+            item["can_delete"] = bool(
+                isinstance(permission_service, PermissionService)
+                and permission_service.can_delete_project(
+                    principal, str(item["id"])
+                )
+            )
         return {"items": items}
 
     @router.get("/projects/{project_id}")
@@ -2549,10 +2619,13 @@ def build_creative_router(
 
     def cancel_pending_creative_tasks(project_id: int, principal: Principal) -> None:
         tasks = project_creative_tasks(project_id, principal)
-        if any(task.get("status") in {"in_progress", "returned"} for task in tasks):
-            raise HTTPException(409, "项目存在进行中的创作或交付任务，暂不能切换模式")
         for task in tasks:
-            if task.get("status") in {"pool", "assigned"}:
+            if task.get("status") in {
+                "pool",
+                "assigned",
+                "in_progress",
+                "returned",
+            }:
                 workflow_repository.cancel_task(str(task["id"]), principal)
 
     @router.patch("/projects/{project_id}/workflow-mode")
@@ -2566,6 +2639,9 @@ def build_creative_router(
         project = project_or_404(project_id)
         assert_mode_manager(project, principal)
         if payload.workflow_mode == "free":
+            active_jobs = active_project_job_labels(project_id)
+            if active_jobs:
+                raise HTTPException(409, "项目存在运行中的后台任务，暂不能切换模式")
             cancel_pending_creative_tasks(project_id, principal)
         try:
             changed = free_mode_service.switch_empty_mode(
@@ -2623,13 +2699,8 @@ def build_creative_router(
         assert_mode_manager(project, principal)
         preview = free_mode_service.migration_preview(project_id)
         tasks = project_creative_tasks(project_id, principal)
-        in_progress = [
-            task for task in tasks if task.get("status") in {"in_progress", "returned"}
-        ]
         active_jobs = active_project_job_labels(project_id)
         blockers = list(preview["blockers"])
-        if in_progress:
-            blockers.append("项目存在进行中的创作任务")
         if active_jobs:
             blockers.append("项目存在运行中的后台任务")
         return {
@@ -2637,7 +2708,9 @@ def build_creative_router(
             "blockers": blockers,
             "can_migrate": not blockers,
             "pending_task_count": sum(
-                task.get("status") in {"pool", "assigned"} for task in tasks
+                task.get("status")
+                in {"pool", "assigned", "in_progress", "returned"}
+                for task in tasks
             ),
             "active_jobs": active_jobs,
         }
@@ -2655,6 +2728,9 @@ def build_creative_router(
         active_jobs = active_project_job_labels(project_id)
         if active_jobs:
             raise HTTPException(409, "项目存在运行中的后台任务，暂不能迁移")
+        migration_preview = free_mode_service.migration_preview(project_id)
+        if migration_preview["blockers"]:
+            raise HTTPException(409, "；".join(migration_preview["blockers"]))
         cancel_pending_creative_tasks(project_id, principal)
         try:
             migrated = free_mode_service.migrate_to_free(
@@ -2945,6 +3021,18 @@ def build_creative_router(
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
+    def validate_free_llm_model(model_record_id: str | None) -> str:
+        normalized = str(model_record_id or "").strip()
+        if not normalized:
+            return ""
+        if llm_model_resolver is None:
+            raise HTTPException(503, "模型配置服务不可用")
+        try:
+            llm_model_resolver(normalized)
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return normalized
+
     def start_free_generation_job(
         *,
         project_id: int,
@@ -2955,6 +3043,9 @@ def build_creative_router(
     ) -> dict[str, Any]:
         if job_manager is None:
             raise HTTPException(503, "creative job manager is unavailable")
+        llm_model_record_id = validate_free_llm_model(
+            payload.llm_model_record_id
+        )
         try:
             application_service.assert_stage_write_access(project_id, stage, principal)
             context = free_mode_service.create_generation_context(
@@ -2984,6 +3075,8 @@ def build_creative_router(
             "operation_id": payload.operation_id,
             "context_hash": context["context_hash"],
             "expected_head_revision": payload.expected_head_revision,
+            "count": payload.count if stage == "brief" else 1,
+            "llm_model_record_id": llm_model_record_id,
         })
         state = job_manager.create_job(
             {
@@ -3004,6 +3097,8 @@ def build_creative_router(
                     "free_context_id": context["id"],
                     "generation_request_hash": request_hash,
                     "expected_head_revision": payload.expected_head_revision,
+                    "count": payload.count if stage == "brief" else 1,
+                    "llm_model_record_id": llm_model_record_id,
                     "db_path": str(repository.db_path.resolve()),
                     "runtime_dir": str(Path(runtime_dir).resolve()),
                 },
@@ -3024,6 +3119,9 @@ def build_creative_router(
             raise HTTPException(503, "creative job manager is unavailable")
         if stage not in {"beats", "script"}:
             raise HTTPException(404, "unsupported creative stage")
+        llm_model_record_id = validate_free_llm_model(
+            payload.llm_model_record_id
+        )
         context_refs = payload.context_refs.model_dump()
         if stage == "script" and context_refs.get("beats_id") is not None:
             raise HTTPException(400, "全集剧本生成不能把单集 Beats 引用应用到全部集")
@@ -3068,6 +3166,7 @@ def build_creative_router(
                 for number, context in contexts.items()
             },
             "expected_head_revisions": expected_head_revisions,
+            "llm_model_record_id": llm_model_record_id,
         })
         state = job_manager.create_job(
             {
@@ -3097,6 +3196,7 @@ def build_creative_router(
                         str(number): revision
                         for number, revision in expected_head_revisions.items()
                     },
+                    "llm_model_record_id": llm_model_record_id,
                     "db_path": str(repository.db_path.resolve()),
                     "runtime_dir": str(Path(runtime_dir).resolve()),
                 },
@@ -4453,6 +4553,7 @@ def register_creative_routes(
     repository: CreativeRepository | None = None,
     application_service: CreativeApplicationService | None = None,
     llm_provider_factory: Callable[[], Any] | None = None,
+    llm_model_resolver: Callable[[str], dict[str, Any]] | None = None,
 ) -> None:
     app.include_router(
         build_creative_router(
@@ -4463,5 +4564,6 @@ def register_creative_routes(
             repository=repository,
             application_service=application_service,
             llm_provider_factory=llm_provider_factory,
+            llm_model_resolver=llm_model_resolver,
         )
     )

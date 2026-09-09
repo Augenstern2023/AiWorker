@@ -332,6 +332,15 @@ def test_blueprint_table_shows_why_each_imitation_direction_was_generated():
     assert "imitationReason(content)" in creative_script
 
 
+def test_blueprint_text_clamp_does_not_break_table_row_alignment():
+    blueprint_template = _source("templates/common/workspace/project_blueprints.html")
+    workspace_css = _source("static/css/workspaces.css")
+
+    assert '<td class="blueprint-conflict-cell" style=' not in blueprint_template
+    assert blueprint_template.count('class="blueprint-conflict-clamp"') == 2
+    assert ".blueprint-conflict-clamp" in workspace_css
+
+
 def test_character_workspace_can_choose_among_locked_brief_directions():
     template = _source("templates/common/workspace/project_characters.html")
     script = _source("static/js/common/creative.js")
@@ -450,6 +459,23 @@ def test_free_workspace_can_generate_beats_for_all_episodes_at_once():
     assert "series: false" in tasks
     assert 'x-show="!isFreeCreativeProject()" @click="generateProjectBeatsSeries"' not in beats
     assert "全剧 Beats" in modal
+
+
+def test_free_workspace_uses_shared_per_request_model_selector():
+    creative = _source("static/js/common/creative.js")
+    tasks = _source("static/js/common/tasks.js")
+    modal = _source("templates/common/workspace/free_creative_modals.html")
+    navigation = _source(
+        "templates/common/workspace/project_module_navigation.html"
+    )
+
+    assert "/api/llm/available-models" in creative
+    assert "default_model_record_id" in creative
+    assert "payload.llm_model_record_id" in creative
+    assert "modelOptions: []" in tasks
+    assert 'x-model="creativeWorkspace.freeGeneration.modelRecordId"' in modal
+    assert "本次切换无需重新输入" in modal
+    assert "item.model_label" in navigation
 
 
 def test_free_workspace_can_generate_scripts_for_all_episodes_at_once():
@@ -797,6 +823,72 @@ def test_creative_project_creation_supports_selecting_a_locked_breakdown_version
     assert "选择拆解版本" in html
     assert ".form-select:disabled" in html
     assert "background-color: #151722;" in html
+
+
+def test_topic_project_creation_displays_api_errors():
+    template = _source("templates/common/workspace/project_list.html")
+    creative = _source("static/js/common/creative.js")
+
+    assert 'x-show="creativeWorkspace.error"' in template
+    assert 'x-text="creativeWorkspace.error"' in template
+    method = creative.split("async createCreativeProject()", 1)[1].split(
+        "setOriginalBoundaries(value)", 1
+    )[0]
+    assert "this.creativeWorkspace.error = '';" in method
+    assert "this.showCreativeNotice(this.creativeWorkspace.error, 'error');" in method
+
+
+def test_topic_project_free_mode_creates_without_seed_input():
+    template = _source("templates/common/workspace/project_list.html")
+    tasks = _source("static/js/common/tasks.js")
+    creative = _source("static/js/common/creative.js")
+    creation_section = template.split(
+        'data-section="topic-project-creation"', 1
+    )[1].split("{% endif %}", 1)[0]
+
+    assert "创作种子" not in creation_section
+    assert "seed_text.trim()" not in creation_section
+    assert "seed_text: ''" not in tasks.split("originalCreate:", 1)[0]
+    method = creative.split("async createCreativeProject()", 1)[1].split(
+        "setOriginalBoundaries(value)", 1
+    )[0]
+    assert "seed_text: ''" not in method
+
+
+def test_planning_project_list_offers_permission_aware_deletion():
+    template = _source("templates/common/workspace/project_list.html")
+    creative = _source("static/js/common/creative.js")
+    tasks = _source("static/js/common/tasks.js")
+    api = _source("creative/api.py")
+
+    assert 'x-show="project.can_delete"' in template
+    assert '@click="deleteCreativeProject(project)"' in template
+    assert "deletingProjectId: null" in tasks
+    method = creative.split("async deleteCreativeProject(project)", 1)[1].split(
+        "setOriginalBoundaries(value)", 1
+    )[0]
+    assert "window.confirm" in method
+    assert "method: 'DELETE'" in method
+    assert "await this.fetchCreativeProjects()" in method
+    assert 'item["can_delete"]' in api
+    assert "permission_service.can_delete_project" in api
+
+
+def test_mode_switch_does_not_request_a_creative_seed():
+    modal = _source("templates/common/workspace/free_creative_modals.html")
+    creative = _source("static/js/common/creative.js")
+    tasks = _source("static/js/common/tasks.js")
+    migration_modal = modal.split('id="creativeModeMigrationModal"', 1)[1]
+    method = creative.split("async openCreativeModeMigration()", 1)[1].split(
+        "async generateProjectBlueprints()", 1
+    )[0]
+
+    assert "创作种子" not in migration_modal
+    assert "modeMigration.seed_text" not in migration_modal
+    assert "seed_text" not in method
+    assert "modeMigration: {preview: null, confirmed:" in tasks
+    assert "仅复制已保存内容" in migration_modal
+    assert "自动取消" in migration_modal
 
 
 def test_draft_breakdowns_are_visible_but_not_project_eligible():
@@ -1342,6 +1434,52 @@ def test_free_locked_resources_offer_non_destructive_revision_actions():
         assert f"createFreeResourceRevision('{stage}')" in template
         assert f"freeStageCan('{stage}', 'can_create_revision')" in template
         assert "['locked', 'approved'].includes" in template
+
+
+def test_free_brief_generation_runtime_sends_selected_count():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the browser module")
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert/strict');
+global.window = {aiworkerModules: []};
+global.aiworkerApi = {request: async () => ({ok: true, json: async () => ({})})};
+vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
+const component = window.aiworkerModules[0]();
+const requests = [];
+Object.assign(component, {
+  creativeWorkspace: {
+    project: {id: 4, workflow_mode: 'free', resource_heads: []},
+    directionCount: 3,
+    freeGeneration: {},
+    moduleCapabilities: {brief: {can_generate: true}},
+  },
+  startCreativeGeneration: async (url, payload) => requests.push({url, payload}),
+});
+(async () => {
+  await component.generateProjectBlueprints();
+  assert.equal(component.creativeWorkspace.freeGeneration.count, 3);
+  component.creativeWorkspace.freeGeneration.modelRecordId = 'model-selected';
+  await component.submitFreeCreativeGeneration();
+  assert.equal(requests[0].url, '/api/creative/projects/4/free/briefs/generate');
+  assert.equal(requests[0].payload.count, 3);
+  assert.equal(requests[0].payload.llm_model_record_id, 'model-selected');
+  component.creativeWorkspace.freeGeneration.count = 5;
+  await component.submitFreeCreativeGeneration();
+  assert.equal(requests[1].payload.count, 5);
+  component.creativeWorkspace.project.blueprints = [1, 2, 3].map(id => ({
+    id, candidate_group_id: `direction-${id}`, version: 1,
+  }));
+  assert.equal(component.latestProjectBlueprints().length, 3);
+})().catch(error => { console.error(error); process.exit(1); });
+'''
+    result = subprocess.run(
+        [node, "-e", script, "static/js/common/creative.js"],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_free_revision_runtime_clones_alpine_proxy_content():

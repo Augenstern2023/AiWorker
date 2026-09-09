@@ -727,6 +727,7 @@ register_creative_routes(
     repository=creative_repository,
     application_service=creative_application_service,
     llm_provider_factory=lambda: create_llm_provider_from_config(config),
+    llm_model_resolver=llm_settings_repository.effective_model,
 )
 register_script_review_routes(
     app,

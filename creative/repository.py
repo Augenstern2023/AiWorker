@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import hashlib
 import json
+import re
 import sqlite3
 import time
 import unicodedata
@@ -110,6 +111,7 @@ class CreativeRepository:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate_project_table_if_needed(self.db_path)
+        self._migrate_legacy_workflow_mode_constraint_if_needed(self.db_path)
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
@@ -207,6 +209,101 @@ class CreativeRepository:
                 conn.rollback()
             raise
         finally:
+            conn.close()
+
+    @staticmethod
+    def _migrate_legacy_workflow_mode_constraint_if_needed(
+        db_path: str | Path,
+    ) -> None:
+        """Replace the legacy strict/free workflow constraint without losing projects."""
+        conn = sqlite3.connect(db_path)
+        foreign_keys_enabled = False
+        try:
+            table = conn.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'creative_projects'"
+            ).fetchone()
+            table_sql = str(table[0] or "") if table else ""
+            legacy_constraint = re.compile(
+                r"CHECK\s*\(\s*workflow_mode\s+IN\s*\(\s*'free'\s*,\s*'strict'\s*\)\s*\)",
+                re.IGNORECASE,
+            )
+            if not legacy_constraint.search(table_sql):
+                return
+
+            replacement_table = "creative_projects_workflow_mode_new"
+            create_sql, table_name_replacements = re.subn(
+                r"^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+                r'(?:"creative_projects"|`creative_projects`|\[creative_projects\]|creative_projects)',
+                f"CREATE TABLE {replacement_table}",
+                table_sql,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            create_sql = re.sub(
+                r"DEFAULT\s+'strict'",
+                "DEFAULT 'sequential'",
+                create_sql,
+                flags=re.IGNORECASE,
+            )
+            create_sql, constraint_replacements = legacy_constraint.subn(
+                "CHECK (workflow_mode IN ('sequential', 'free'))",
+                create_sql,
+                count=1,
+            )
+            if table_name_replacements != 1 or constraint_replacements != 1:
+                raise sqlite3.DatabaseError(
+                    "unable to prepare creative workflow mode migration"
+                )
+
+            schema_objects = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT sql FROM sqlite_master "
+                    "WHERE tbl_name = 'creative_projects' "
+                    "AND type IN ('index', 'trigger') AND sql IS NOT NULL"
+                ).fetchall()
+            ]
+            columns = [
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(creative_projects)")
+            ]
+            quoted_columns = ", ".join(f'"{column}"' for column in columns)
+            select_columns = ", ".join(
+                "CASE WHEN workflow_mode = 'strict' THEN 'sequential' "
+                "ELSE workflow_mode END"
+                if column == "workflow_mode"
+                else f'"{column}"'
+                for column in columns
+            )
+
+            foreign_keys_enabled = bool(conn.execute("PRAGMA foreign_keys").fetchone()[0])
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(create_sql)
+            conn.execute(
+                f"INSERT INTO {replacement_table} ({quoted_columns}) "
+                f"SELECT {select_columns} FROM creative_projects"
+            )
+            conn.execute("DROP TABLE creative_projects")
+            conn.execute(
+                f"ALTER TABLE {replacement_table} RENAME TO creative_projects"
+            )
+            for schema_sql in schema_objects:
+                conn.execute(schema_sql)
+            foreign_key_errors = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if foreign_key_errors:
+                raise sqlite3.IntegrityError(
+                    "creative workflow mode migration introduced foreign key errors"
+                )
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            if foreign_keys_enabled:
+                conn.execute("PRAGMA foreign_keys = ON")
             conn.close()
 
     def _init_schema(self) -> None:
@@ -1344,8 +1441,6 @@ class CreativeRepository:
             raise ValueError("单集时长必须在 30-1800 秒之间")
         if workflow_mode not in {"sequential", "free"}:
             raise ValueError("invalid creative workflow mode")
-        if workflow_mode == "free" and len(seed_text.strip()) < 2:
-            raise ValueError("自由创作项目需要至少 2 个字符的创作种子")
         with self._connect() as conn:
             normalized_request_id = creation_request_id.strip()
             if normalized_request_id:
@@ -1390,6 +1485,9 @@ class CreativeRepository:
                 target_audience.strip()
                 or self._breakdown_target_audience(breakdown["content_json"])
             )
+            resolved_seed_text = seed_text.strip()
+            if workflow_mode == "free" and len(resolved_seed_text) < 2:
+                resolved_seed_text = self._topic_based_seed_text(topic, breakdown)
             now = time.time()
             try:
                 cursor = conn.execute(
@@ -1418,7 +1516,7 @@ class CreativeRepository:
                             constraints_json, reference_refs_json, created_at, updated_at
                         ) VALUES (?, 1, NULL, 'frozen', ?, '{}', '[]', ?, ?)
                         """,
-                        (int(cursor.lastrowid), seed_text.strip(), now, now),
+                        (int(cursor.lastrowid), resolved_seed_text, now, now),
                     )
             except sqlite3.IntegrityError:
                 if normalized_request_id:
@@ -1735,6 +1833,22 @@ class CreativeRepository:
         if not isinstance(content, dict):
             return ""
         return str(content.get("target_audience") or "").strip()
+
+    @staticmethod
+    def _topic_based_seed_text(topic: sqlite3.Row, breakdown: sqlite3.Row) -> str:
+        parts = [f"选题：{str(topic['title'] or '').strip()}"]
+        description = str(topic["description"] or "").strip()
+        if description:
+            parts.append(f"简介：{description}")
+        try:
+            content = json.loads(breakdown["content_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            content = {}
+        if isinstance(content, dict):
+            conflict = str(content.get("core_conflict") or "").strip()
+            if conflict:
+                parts.append(f"核心冲突：{conflict}")
+        return "\n".join(parts)[:500]
 
     def list_projects(self, topic_id: int | None = None) -> list[dict[str, Any]]:
         clauses = ["p.deleted = 0", "p.bootstrap_status = 'ready'"]

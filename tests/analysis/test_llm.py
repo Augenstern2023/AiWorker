@@ -972,3 +972,55 @@ def test_configured_runtime_repository_applies_without_per_call_injection():
 
     assert settings["provider"] == "minimax"
     assert settings["model"] == "MiniMax-M3"
+
+
+def test_provider_factory_uses_explicit_model_record_instead_of_global_default():
+    class DummyConfig:
+        LLM_REASONING_EFFORT = "auto"
+
+    class SettingsRepository:
+        @staticmethod
+        def effective_default():
+            return {
+                "provider": "minimax",
+                "provider_id": "provider-default",
+                "base_url": "https://api.minimax.io/v1",
+                "api_key": "default-key",
+                "model": "MiniMax-M3",
+                "wire_api": "chat_completions",
+                "allow_insecure_http": False,
+            }
+
+        @staticmethod
+        def effective_model(model_record_id):
+            assert model_record_id == "model-selected"
+            return {
+                "provider": "openai",
+                "provider_id": "provider-selected",
+                "provider_display_name": "OpenAI 主账号",
+                "base_url": "https://api.openai.com/v1",
+                "api_key": "selected-key",
+                "model": "gpt-selected",
+                "model_record_id": "model-selected",
+                "model_display_name": "GPT Selected",
+                "wire_api": "responses",
+                "allow_insecure_http": False,
+            }
+
+    from analysis import llm as llm_module
+
+    llm_module.configure_llm_settings_repository(SettingsRepository())
+    try:
+        provider = create_llm_provider_from_config(
+            DummyConfig, model_record_id="model-selected"
+        )
+    finally:
+        llm_module.configure_llm_settings_repository(None)
+
+    assert provider.provider_name == "openai"
+    assert provider.provider_id == "provider-selected"
+    assert provider.provider_display_name == "OpenAI 主账号"
+    assert provider.model == "gpt-selected"
+    assert provider.model_record_id == "model-selected"
+    assert provider.model_display_name == "GPT Selected"
+    assert provider.api_key == "selected-key"

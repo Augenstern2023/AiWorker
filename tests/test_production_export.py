@@ -16,6 +16,9 @@ from pathlib import Path
 
 import pytest
 
+from creative.free_mode_service import FreeCreativeModeService
+from creative.repository import CreativeRepository
+
 
 def export(*args, **kwargs):
     # A missing implementation is an assertion failure, not a collection error.
@@ -82,6 +85,79 @@ def db(tmp_path):
     return path
 
 
+@pytest.fixture
+def free_db(tmp_path):
+    path = tmp_path / "free-creative.sqlite"
+    repository = CreativeRepository(path)
+    project = repository.create_original_project(
+        seed_text="一名记者能听见旧物的记忆",
+        name="旧物回声",
+        target_episode_count=2,
+        created_by="owner-1",
+        creation_request_id="free-export-project",
+        workflow_mode="free",
+    )
+    service = FreeCreativeModeService(repository)
+
+    brief = service.create_brief(
+        project["id"], {"premise": "记者从旧物记忆中寻找失踪者"},
+        expected_head_revision=0, actor_user_id="owner-1",
+    )
+    service.lock_resource(
+        project_id=project["id"], stage="brief",
+        resource_ref=str(brief["resource"]["id"]),
+        expected_head_revision=brief["head"]["revision"],
+        actor_user_id="owner-1",
+    )
+    cast = service.create_characters(
+        project["id"], [{"name": "林夏", "role": "记者"}], [],
+        expected_head_revision=0, actor_user_id="owner-1",
+    )
+    service.lock_resource(
+        project_id=project["id"], stage="characters",
+        resource_ref=cast["resource"]["batch_id"],
+        expected_head_revision=cast["head"]["revision"],
+        actor_user_id="owner-1",
+    )
+    outline = service.create_outline(
+        project["id"], [
+            {"episode": 1, "core_event": "收到旧怀表"},
+            {"episode": 2, "core_event": "找到失踪者"},
+        ],
+        expected_head_revision=0, actor_user_id="owner-1",
+    )
+    service.lock_resource(
+        project_id=project["id"], stage="outline",
+        resource_ref=outline["resource"]["batch_id"],
+        expected_head_revision=outline["head"]["revision"],
+        actor_user_id="owner-1",
+    )
+    for number in (1, 2):
+        beats = service.create_episode_resource(
+            project["id"], "beats", number,
+            {"beats": [{"summary": f"第 {number} 集节拍"}]},
+            expected_head_revision=0, actor_user_id="owner-1",
+        )
+        service.lock_resource(
+            project_id=project["id"], stage="beats", episode_number=number,
+            resource_ref=str(beats["resource"]["id"]),
+            expected_head_revision=beats["head"]["revision"],
+            actor_user_id="owner-1",
+        )
+        script = service.create_episode_resource(
+            project["id"], "script", number,
+            {"scenes": [{"heading": f"第 {number} 集场景"}]},
+            expected_head_revision=0, actor_user_id="owner-1",
+        )
+        service.lock_resource(
+            project_id=project["id"], stage="script", episode_number=number,
+            resource_ref=str(script["resource"]["id"]),
+            expected_head_revision=script["head"]["revision"],
+            actor_user_id="owner-1",
+        )
+    return path, project["id"]
+
+
 def test_complete_package_preserves_source_rows_and_parsed_content(db):
     package = export(db, 1)
     assert set(package) == {"schemaVersion", "sourceSystem", "project", "provenance", "brief",
@@ -98,6 +174,41 @@ def test_complete_package_preserves_source_rows_and_parsed_content(db):
     assert package["provenance"]["project_revision"] == package["project"]["revision"]
     assert len(package["fingerprint"]) == 64
     assert package == export(db, 1)
+
+
+def test_free_project_exports_complete_package_from_locked_resource_heads(free_db):
+    path, project_id = free_db
+
+    package = export(path, project_id)
+
+    assert package["project"]["workflow_mode"] == "free"
+    assert package["project"]["locked_brief_id"] is None
+    assert package["brief"]["resource_scope"] == "free"
+    assert package["characters"][0]["content"]["name"] == "林夏"
+    assert package["relationships"] == []
+    assert [item["episode_number"] for item in package["outlines"]] == [1, 2]
+    assert [item["episode_number"] for item in package["beats"]] == [1, 2]
+    assert [item["episode_number"] for item in package["scripts"]] == [1, 2]
+    assert package["provenance"]["workflow_mode"] == "free"
+    heads = package["provenance"]["resource_heads"]
+    assert [(head["stage"], head["episode_number"]) for head in heads] == [
+        ("brief", 0), ("characters", 0), ("outline", 0),
+        ("beats", 1), ("beats", 2), ("script", 1), ("script", 2),
+    ]
+
+
+def test_free_project_does_not_fall_back_when_current_head_is_draft(free_db):
+    path, project_id = free_db
+    repository = CreativeRepository(path)
+    service = FreeCreativeModeService(repository)
+    head = service.get_head(project_id, "brief")
+    service.create_brief(
+        project_id, {"premise": "尚未锁定的新方向"},
+        expected_head_revision=head["revision"], actor_user_id="owner-1",
+    )
+
+    with pytest.raises(ValueError, match="brief"):
+        export(path, project_id)
 
 
 def test_subset_is_sorted_deduplicated_and_does_not_require_other_scripts(db):

@@ -11,7 +11,7 @@ import sqlite3
 import pytest
 
 from creative import production_export
-from tests.test_production_export import db
+from tests.test_production_export import db, free_db
 
 
 def preview(db):
@@ -60,3 +60,22 @@ def test_missing_upstream_is_not_reported_as_downstream_success(db, sql):
 def test_preview_missing_project_retains_not_found_semantics(db):
     with pytest.raises(KeyError):
         production_export.preview_production_package(db, 99)
+
+
+def test_free_preview_reports_the_exact_missing_episode_head(free_db):
+    path, project_id = free_db
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "DELETE FROM creative_resource_heads WHERE project_id = ? "
+            "AND resource_scope = 'free' AND stage = 'script' "
+            "AND episode_number = 2",
+            (project_id,),
+        )
+
+    result = production_export.preview_production_package(path, project_id)
+
+    assert result["ready"] is False
+    assert {
+        (issue["stage"], issue["episode_number"])
+        for issue in result["issues"]
+    } == {("script", 2)}

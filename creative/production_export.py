@@ -15,10 +15,12 @@ Contract 1.0: project and brief are row dictionaries; characters, relationships,
  Episodes are sorted ascending; cast rows are sorted by id. Empty relationships
  are valid. Omitted episode_numbers means every episode in target_episode_count.
 
-The active brief/cast/outline pointers are authoritative. Beats and scripts use
- the latest locked/approved version, never a draft or an older fallback hiding a
- stale locked revision. Incomplete or stale inputs raise ValueError; absent or
- deleted projects raise KeyError; absent database files raise FileNotFoundError.
+Sequential projects use the active brief/cast/outline pointers; their beats and
+scripts use the latest locked/approved version. Free projects use the exact
+resource selected by each current free-mode head. Neither mode falls back from
+a draft or stale current selection to an older locked revision. Incomplete or
+stale inputs raise ValueError; absent or deleted projects raise KeyError;
+absent database files raise FileNotFoundError.
 
 fingerprint is lowercase SHA256 of canonical UTF-8 JSON (sorted keys, compact
  separators, ensure_ascii=False), excluding fingerprint itself, recursively
@@ -150,6 +152,179 @@ class _Inspection:
         }
 
 
+def _free_head(
+    heads: dict[tuple[str, int], dict[str, Any]], stage: str, number: int = 0,
+) -> dict[str, Any]:
+    head = heads.get((stage, number))
+    if head is None:
+        suffix = f" for episode {number}" if number else ""
+        raise ValueError(f"{stage}: missing locked input{suffix}")
+    return head
+
+
+def _free_head_version(
+    head: dict[str, Any], resource: dict[str, Any], label: str,
+) -> None:
+    if int(head.get("resource_version") or 0) != int(resource.get("version") or 0):
+        raise ValueError(f"{label}: stale resource head")
+
+
+def _free_head_provenance(head: dict[str, Any]) -> dict[str, Any]:
+    """Keep the selected source explicit without volatile head audit metadata."""
+    return {
+        "resource_scope": "free",
+        "stage": head["stage"],
+        "episode_number": int(head["episode_number"]),
+        "resource_ref": str(head["resource_ref"]),
+        "resource_version": int(head["resource_version"]),
+    }
+
+
+def _inspect_free_snapshot(
+    conn: sqlite3.Connection,
+    inspection: _Inspection,
+    project: dict[str, Any],
+    numbers: list[int],
+) -> dict[str, Any] | None:
+    """Resolve a free project exclusively through its current resource heads."""
+    project_id = int(project["id"])
+    heads = {
+        (str(row["stage"]), int(row["episode_number"])): dict(row)
+        for row in conn.execute(
+            "SELECT * FROM creative_resource_heads WHERE project_id = ? "
+            "AND resource_scope = 'free'",
+            (project_id,),
+        ).fetchall()
+    }
+
+    def read_brief() -> dict[str, Any]:
+        head = _free_head(heads, "brief")
+        try:
+            resource_id = int(head["resource_ref"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("brief: invalid resource head") from exc
+        raw = conn.execute(
+            "SELECT * FROM creative_blueprints WHERE project_id = ? AND id = ? "
+            "AND resource_scope = 'free'",
+            (project_id, resource_id),
+        ).fetchone()
+        if raw is None:
+            raise ValueError("brief: missing locked input")
+        value = _row(raw)
+        _locked(value, "brief")
+        _free_head_version(head, value, "brief")
+        _digest(value)
+        return value
+
+    brief = inspection.check("brief", read_brief)
+
+    def read_cast(category: str) -> list[dict[str, Any]]:
+        head = _free_head(heads, "characters")
+        values = [
+            _row(raw)
+            for raw in conn.execute(
+                f"SELECT * FROM creative_{category} WHERE project_id = ? "
+                "AND batch_id = ? AND resource_scope = 'free' ORDER BY id",
+                (project_id, str(head["resource_ref"])),
+            ).fetchall()
+        ]
+        if category == "characters" and not values:
+            raise ValueError("characters: missing locked input")
+        for item in values:
+            _locked(item, category)
+            _free_head_version(head, item, category)
+        _digest(values)
+        return values
+
+    characters = inspection.check("characters", lambda: read_cast("characters"))
+    relationships = inspection.check("relationships", lambda: read_cast("relationships"))
+
+    def read_outline(number: int) -> dict[str, Any]:
+        head = _free_head(heads, "outline")
+        raw = conn.execute(
+            "SELECT * FROM creative_episodes WHERE project_id = ? "
+            "AND stage = 'outline' AND episode_number = ? AND batch_id = ? "
+            "AND resource_scope = 'free'",
+            (project_id, number, str(head["resource_ref"])),
+        ).fetchone()
+        if raw is None:
+            raise ValueError(f"outline: missing locked input for episode {number}")
+        value = _row(raw)
+        _locked(value, "outline")
+        _free_head_version(head, value, "outline")
+        _digest(value)
+        return value
+
+    def read_episode(stage: str, number: int) -> dict[str, Any]:
+        head = _free_head(heads, stage, number)
+        try:
+            resource_id = int(head["resource_ref"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{stage}: invalid resource head for episode {number}") from exc
+        raw = conn.execute(
+            "SELECT * FROM creative_episodes WHERE id = ? AND project_id = ? "
+            "AND stage = ? AND episode_number = ? AND resource_scope = 'free'",
+            (resource_id, project_id, stage, number),
+        ).fetchone()
+        if raw is None:
+            raise ValueError(f"{stage}: missing locked input for episode {number}")
+        value = _row(raw)
+        _locked(value, stage)
+        _free_head_version(head, value, stage)
+        _digest(value)
+        return value
+
+    outlines = [
+        inspection.check("outline", lambda n=number: read_outline(n), number=number)
+        for number in numbers
+    ]
+    beats = [
+        inspection.check(
+            "beats", lambda n=number: read_episode("beats", n), number=number,
+        )
+        for number in numbers
+    ]
+    scripts = [
+        inspection.check(
+            "script", lambda n=number: read_episode("script", n), number=number,
+        )
+        for number in numbers
+    ]
+    if inspection.errors:
+        return None
+
+    head_order = [
+        ("brief", 0), ("characters", 0), ("outline", 0),
+        *(("beats", number) for number in numbers),
+        *(("script", number) for number in numbers),
+    ]
+    package = {
+        "schemaVersion": "1.0",
+        "sourceSystem": "AiWorker",
+        "project": project,
+        "provenance": {
+            "project_id": project_id,
+            "project_revision": project.get("revision", 0),
+            "episode_numbers": numbers,
+            "workflow_mode": "free",
+            "locked_brief_id": brief["id"],
+            "character_batch_id": heads[("characters", 0)]["resource_ref"],
+            "outline_batch_id": heads[("outline", 0)]["resource_ref"],
+            "resource_heads": [
+                _free_head_provenance(heads[key]) for key in head_order
+            ],
+        },
+        "brief": brief,
+        "characters": characters,
+        "relationships": relationships,
+        "outlines": outlines,
+        "beats": beats,
+        "scripts": scripts,
+    }
+    package["fingerprint"] = _digest(_fingerprint_payload(package))
+    return package
+
+
 def _inspect_snapshot(
     db_path: str | Path,
     project_id: int,
@@ -193,6 +368,9 @@ def _inspect_snapshot(
                 raise ValueError("episode_numbers: project has no target episodes")
             inspection.check('project', no_episodes)
             return inspection, None
+        if str(project.get("workflow_mode") or "sequential") == "free":
+            package = _inspect_free_snapshot(conn, inspection, project, numbers)
+            return inspection, package
         brief_row = conn.execute(
             "SELECT * FROM creative_blueprints WHERE project_id = ? AND id = ?",
             (project_id, project.get("locked_brief_id")),
@@ -273,7 +451,8 @@ def _inspect_snapshot(
             "schemaVersion": "1.0", "sourceSystem": "AiWorker", "project": project,
             "provenance": {
                 "project_id": project["id"], "project_revision": project.get("revision", 0),
-                "episode_numbers": numbers, "locked_brief_id": brief["id"],
+                "episode_numbers": numbers, "workflow_mode": "sequential",
+                "locked_brief_id": brief["id"],
                 "character_batch_id": project["character_batch_id"],
                 "outline_batch_id": project["outline_batch_id"],
             },

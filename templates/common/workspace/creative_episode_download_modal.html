@@ -1,0 +1,44 @@
+<div class="modal fade" id="creativeEpisodeDownloadModal" tabindex="-1" aria-labelledby="creativeEpisodeDownloadModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <h5 class="modal-title" id="creativeEpisodeDownloadModalLabel" x-text="`${creativeStageLabel(creativeWorkspace.episodeDownload.stage)}下载`"></h5>
+                    <div class="small text-muted">可选择多集，也可一次下载全部已生成集数</div>
+                </div>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <label class="form-check border border-secondary rounded p-3 mb-3">
+                    <input class="form-check-input me-2" type="checkbox" x-model="creativeWorkspace.episodeDownload.allEpisodes" @change="toggleEpisodeDownloadAll">
+                    <span class="fw-semibold">全集</span>
+                    <span class="small text-muted ms-1" x-text="`（已生成 ${episodeDownloadAvailableNumbers().length} 集）`"></span>
+                </label>
+                <div class="row row-cols-3 row-cols-sm-4 g-2">
+                    <template x-for="episodeNumber in episodeDownloadAvailableNumbers()" :key="`download-episode-${episodeNumber}`">
+                        <div class="col">
+                            <label class="form-check border border-secondary rounded p-2 h-100">
+                                <input class="form-check-input me-1" type="checkbox" :value="episodeNumber" x-model.number="creativeWorkspace.episodeDownload.selectedEpisodes" @change="syncEpisodeDownloadAll">
+                                <span x-text="`第 ${episodeNumber} 集`"></span>
+                            </label>
+                        </div>
+                    </template>
+                </div>
+                <div class="mt-3">
+                    <label class="form-label small" for="creative-episode-download-format">下载格式</label>
+                    <select id="creative-episode-download-format" class="form-select form-select-sm" x-model="creativeWorkspace.episodeDownload.format">
+                        <option value="md" x-show="creativeWorkspace.episodeDownload.stage !== 'script'">Markdown</option>
+                        <option value="txt" x-show="creativeWorkspace.episodeDownload.stage === 'script'">TXT</option>
+                        <option value="json">JSON</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" @click="downloadSelectedEpisodes" :disabled="!creativeWorkspace.episodeDownload.selectedEpisodes.length">
+                    <i class="bi bi-download me-1"></i><span x-text="episodeDownloadActionLabel()"></span>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>

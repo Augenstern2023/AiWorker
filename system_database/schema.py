@@ -610,6 +610,8 @@ audit_logs = Table(
     Column("before_summary_json", JSONB),
     Column("after_summary_json", JSONB),
     Column("request_id", Text),
+    Column("service_instance_id", Text),
+    Column("creative_store_id", Text),
     Column("ip_address", Text),
     Column("user_agent", Text),
     Column("result", Text, nullable=False, server_default=text("'success'")),

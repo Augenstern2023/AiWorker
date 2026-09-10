@@ -685,7 +685,7 @@ def test_workflow_script_lock_uses_highest_compatible_beats_not_stale_version(
     task = {
         "id": "script-task",
         "task_type": "script",
-        "project_id": str(project_id),
+        "project_id": real_writer_context.repository.workflow_project_id(project_id),
         "assignee_user_id": real_writer_context.actor.user_id,
     }
     adapter = CreativeWorkflowAdapter(

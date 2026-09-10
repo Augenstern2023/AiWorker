@@ -525,7 +525,17 @@ identity_session_service = SessionService(identity_repository)
 identity_permission_service = PermissionService(
     identity_repository, identity_session_service
 )
-audit_service = AuditService(identity_repository)
+creative_repository = CreativeRepository(
+    WORKSPACE_ROOT / ".runtime" / "creative" / "creative.db"
+)
+service_instance_id = (
+    os.getenv("AIWORKER_SERVICE_INSTANCE_ID", "").strip() or str(uuid.uuid4())
+)
+audit_service = AuditService(
+    identity_repository,
+    service_instance_id=service_instance_id,
+    creative_store_id=creative_repository.store_id,
+)
 llm_settings_repository = LLMSettingsRepository(
     system_database,
     LLMSecretCipher.from_environment(WORKSPACE_ROOT / ".runtime"),
@@ -548,9 +558,6 @@ if legacy_llm_import.get("imported"):
     )
 llm_settings_service = LLMSettingsService(llm_settings_repository)
 workflow_repository = WorkflowRepository(identity_repository)
-creative_repository = CreativeRepository(
-    WORKSPACE_ROOT / ".runtime" / "creative" / "creative.db"
-)
 migrate_project_creator_memberships(creative_repository, workflow_repository)
 creative_workflow_adapter = CreativeWorkflowAdapter(
     creative_repository, workflow_repository
@@ -630,6 +637,7 @@ writer_action_service = ActionService(
     audit_service=audit_service,
     permission_service=identity_permission_service,
     workflow_repository=workflow_repository,
+    creative_repository=creative_repository,
 )
 navigation_repository = (
     NavigationRepository(system_database) if system_database is not None else None
@@ -1166,6 +1174,16 @@ def _job_creation_permission(job: dict[str, Any]) -> str:
     return "job.create.selection"
 
 
+def _workflow_project_key(project_id: Any) -> str:
+    value = str(project_id)
+    if creative_repository.local_project_id_from_workflow(value) is not None:
+        return value
+    try:
+        return creative_repository.workflow_project_id(value)
+    except (TypeError, ValueError):
+        return value
+
+
 def _can_read_job(
     job: dict[str, Any],
     principal: Principal,
@@ -1185,7 +1203,9 @@ def _can_read_job(
         return False
     return any(
         member["user_id"] == principal.user_id and member["status"] == "active"
-        for member in workflow_repository.list_project_members(str(project_id))
+        for member in workflow_repository.list_project_members(
+            _workflow_project_key(project_id)
+        )
     )
 
 
@@ -1220,7 +1240,7 @@ def _assert_creator_has_live_job_scope(
         task_project_id = task.get("project_id")
         if (task_project_id is None) != (project_id is None) or (
             task_project_id is not None
-            and str(task_project_id) != str(project_id)
+            and str(task_project_id) != _workflow_project_key(project_id)
         ):
             raise HTTPException(403, "机器任务的项目范围与工作流任务不一致")
 
@@ -1228,7 +1248,9 @@ def _assert_creator_has_live_job_scope(
         active_member = any(
             member["user_id"] == principal.user_id
             and member["status"] == "active"
-            for member in workflow_repository.list_project_members(str(project_id))
+            for member in workflow_repository.list_project_members(
+                _workflow_project_key(project_id)
+            )
         )
         if not active_member:
             raise HTTPException(403, "机器任务创建人已不再是项目成员")

@@ -25,7 +25,12 @@ from openpyxl import Workbook
 from pydantic import BaseModel
 
 from creative.hit_breakdown import breakdown_field_guide, personalize_breakdown_field_guide
-from creative.application_service import CreativeApplicationService, CreativeContextConflict
+from creative.application_service import (
+    CreativeApplicationService,
+    CreativeContextConflict,
+    CreativeProjectAccessDenied,
+    CreativeTaskOccupied,
+)
 from creative.imitation_service import assess_similarity_risk
 from creative.free_mode_service import FreeCreativeModeService
 from creative.lifecycle_service import TopicLifecycleService, content_fingerprint
@@ -81,7 +86,7 @@ from creative.transcript_assets import (
     transcript_bundle_filename,
 )
 from audit.service import AuditService
-from runtime.job_manager import JobConflictError
+from runtime.job_manager import JobConflictError, JobNotFoundError
 from identity.dependencies import current_principal, require_permission
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
@@ -181,7 +186,7 @@ def uses_project_member_stage_authorization(path: str, method: str) -> bool:
         re.match(
             r"/(?:"
             r"free|blueprints|briefs|seeds|characters|character-batches|outlines|"
-            r"beats|scripts|episodes/\d+/(?:beats|scripts)|"
+            r"beats|scripts|episodes/\d+/(?:beats|scripts)|generation-jobs|"
             r"workflow-tasks/(?:brief|characters|outline|beats|script)"
             r")(?:/|$)",
             suffix,
@@ -285,7 +290,15 @@ def creative_api_authorization(
         )
         if not isinstance(permission_service, PermissionService):
             raise HTTPException(500, "identity permission service is not configured")
-        project_id = match.group(1)
+        local_project_id = match.group(1)
+        creative_repository = getattr(
+            request.app.state, "creative_repository", None
+        )
+        project_id = (
+            creative_repository.workflow_project_id(local_project_id)
+            if isinstance(creative_repository, CreativeRepository)
+            else local_project_id
+        )
         can_claim_established_writing = bool(
             method == "POST"
             and established_writing_ensure_resource(path)
@@ -710,6 +723,208 @@ def build_merged_script_download(project: dict[str, Any]) -> tuple[str, str]:
     return filename, "\n\n".join(sections).rstrip() + "\n"
 
 
+def current_episode_download_items(
+    project: dict[str, Any], stage: str
+) -> list[dict[str, Any]]:
+    """Return the same current episode resources shown by the writing workspace."""
+
+    if stage not in {"outline", "beats", "script"}:
+        raise ValueError("stage 必须是 outline、beats 或 script")
+    episodes = project.get("episodes") or []
+    heads = project.get("resource_heads") or []
+    free_mode = project.get("workflow_mode") == "free"
+    target_count = int(project.get("target_episode_count") or 0)
+    if target_count < 1:
+        target_count = max(
+            (int(item.get("episode_number") or 0) for item in episodes),
+            default=0,
+        )
+
+    def head_ref(head_stage: str, episode_number: int = 0) -> str:
+        head = next(
+            (
+                item for item in heads
+                if item.get("stage") == head_stage
+                and int(item.get("episode_number") or 0) == episode_number
+            ),
+            None,
+        )
+        return str((head or {}).get("resource_ref") or "")
+
+    if stage == "outline":
+        if free_mode:
+            batch_id = head_ref("outline")
+        else:
+            compatible = [
+                item for item in episodes
+                if item.get("stage") == "outline"
+                and int((item.get("upstream_refs") or {}).get("brief_id") or 0)
+                == int(project.get("locked_brief_id") or 0)
+                and str((item.get("upstream_refs") or {}).get("character_batch_id") or "")
+                == str(project.get("character_batch_id") or "")
+            ]
+            drafts = sorted(
+                (
+                    item for item in compatible
+                    if item.get("status") in {"draft", "submitted", "returned"}
+                ),
+                key=lambda item: (int(item.get("version") or 0), int(item.get("id") or 0)),
+                reverse=True,
+            )
+            if project.get("status") == "outline_draft" and drafts:
+                batch_id = str(drafts[0].get("batch_id") or "")
+            elif project.get("outline_batch_id") and any(
+                str(item.get("batch_id") or "") == str(project.get("outline_batch_id"))
+                for item in compatible
+            ):
+                batch_id = str(project.get("outline_batch_id"))
+            else:
+                batch_id = str(drafts[0].get("batch_id") or "") if drafts else ""
+        return sorted(
+            (
+                item for item in episodes
+                if item.get("stage") == "outline"
+                and str(item.get("batch_id") or "") == batch_id
+            ),
+            key=lambda item: int(item.get("episode_number") or 0),
+        )
+
+    def latest_by_episode(candidates: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+        selected: dict[int, dict[str, Any]] = {}
+        for item in candidates:
+            number = int(item.get("episode_number") or 0)
+            if not 1 <= number <= target_count:
+                continue
+            current = selected.get(number)
+            if current is None or (
+                int(item.get("version") or 0), int(item.get("id") or 0)
+            ) > (
+                int(current.get("version") or 0), int(current.get("id") or 0)
+            ):
+                selected[number] = item
+        return selected
+
+    beat_candidates = [
+        item for item in episodes
+        if item.get("stage") == "beats"
+        and (
+            str(item.get("id") or "") == head_ref(
+                "beats", int(item.get("episode_number") or 0)
+            )
+            if free_mode
+            else (item.get("upstream_refs") or {}).get("outline_batch_id")
+            == project.get("outline_batch_id")
+        )
+    ]
+    current_beats = latest_by_episode(beat_candidates)
+    if stage == "beats":
+        return [current_beats[number] for number in sorted(current_beats)]
+
+    if free_mode:
+        script_candidates = [
+            item for item in episodes
+            if item.get("stage") == "script"
+            and str(item.get("id") or "") == head_ref(
+                "script", int(item.get("episode_number") or 0)
+            )
+        ]
+    else:
+        locked_beats = {
+            number: item for number, item in current_beats.items()
+            if item.get("status") in {"locked", "approved"}
+        }
+        script_candidates = []
+        for item in episodes:
+            if item.get("stage") != "script":
+                continue
+            number = int(item.get("episode_number") or 0)
+            beats = locked_beats.get(number)
+            refs = item.get("upstream_refs") or {}
+            if beats and (
+                int(refs.get("beats_id") or 0),
+                int(refs.get("beats_version") or 0),
+            ) == (
+                int(beats.get("id") or 0),
+                int(beats.get("version") or 0),
+            ):
+                script_candidates.append(item)
+    current_scripts = latest_by_episode(script_candidates)
+    return [current_scripts[number] for number in sorted(current_scripts)]
+
+
+def build_episode_selection_download(
+    project: dict[str, Any],
+    stage: str,
+    episode_numbers: list[int] | None,
+    format: str,
+) -> tuple[str, bytes, str]:
+    """Build a writer-facing download for selected current episode resources."""
+
+    allowed_formats = {"script": {"txt", "json"}, "outline": {"md", "json"}, "beats": {"md", "json"}}
+    if stage not in allowed_formats:
+        raise ValueError("stage 必须是 outline、beats 或 script")
+    if format not in allowed_formats[stage]:
+        raise ValueError(f"{stage} 不支持 {format} 格式")
+    available = {
+        int(item.get("episode_number") or 0): item
+        for item in current_episode_download_items(project, stage)
+    }
+    requested = sorted(available) if episode_numbers is None else sorted(set(episode_numbers))
+    missing = [number for number in requested if number not in available]
+    if missing:
+        raise ValueError(f"以下集数没有当前可下载内容：{'、'.join(map(str, missing))}")
+    items = [available[number] for number in requested]
+    if not items:
+        raise ValueError(f"尚无可下载的{ {'outline': '分集大纲', 'beats': 'Beats', 'script': '场次剧本'}[stage] }")
+
+    if format == "json":
+        body = json.dumps(
+            {
+                "project_id": project["id"],
+                "project_name": project["name"],
+                "stage": stage,
+                "episode_numbers": requested,
+                "content": items,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ).encode("utf-8")
+        media_type = "application/json"
+    elif stage == "outline":
+        body = build_outline_markdown(project, items).encode("utf-8")
+        media_type = "text/markdown; charset=utf-8"
+    elif stage == "beats":
+        body = build_beats_markdown(project, items).encode("utf-8")
+        media_type = "text/markdown; charset=utf-8"
+    else:
+        sections = [
+            "\n".join(
+                [
+                    f"==================== 第 {number} 集 ====================",
+                    "",
+                    build_script_text(
+                        project, available[number].get("content") or {},
+                        episode_number=number,
+                    ).rstrip(),
+                ]
+            )
+            for number in requested
+        ]
+        body = ("\n\n".join(sections).rstrip() + "\n").encode("utf-8")
+        media_type = "text/plain; charset=utf-8"
+
+    project_name = str(project.get("topic_title") or project.get("name") or "项目").strip()
+    safe_name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", project_name).strip(" .") or "项目"
+    if len(requested) == 1:
+        scope = f"第{requested[0]}集"
+    elif requested == list(range(requested[0], requested[-1] + 1)):
+        scope = f"第{requested[0]}集-第{requested[-1]}集"
+    else:
+        scope = "第" + "、".join(map(str, requested)) + "集"
+    stage_label = {"outline": "分集大纲", "beats": "Beats", "script": "场次剧本"}[stage]
+    return f"{safe_name}{scope}{stage_label}.{format}", body, media_type
+
+
 def build_stage_export(project: dict[str, Any], stage: str) -> dict[str, Any]:
     if stage == "brief":
         selected = next(
@@ -777,6 +992,10 @@ def build_creative_router(
     repository = repository or CreativeRepository(
         Path(runtime_dir) / "creative" / "creative.db"
     )
+
+    def workflow_project_id(project_id: int | str) -> str:
+        return repository.workflow_project_id(project_id)
+
     if workflow_repository is None:
         workflow_repository = WorkflowRepository(
             IdentityRepository(
@@ -913,12 +1132,12 @@ def build_creative_router(
                 and (
                     principal.is_system_admin
                     or workflow_repository.is_active_project_member(
-                        str(project_id), principal
+                        workflow_project_id(project_id), principal
                     )
                     or (
                         isinstance(permission_service, PermissionService)
                         and permission_service.can_read_project(
-                            principal, str(project_id)
+                            principal, workflow_project_id(project_id)
                         )
                     )
                 )
@@ -991,7 +1210,7 @@ def build_creative_router(
             active_project_member = bool(
                 project_id is not None
                 and workflow_repository.is_active_project_member(
-                    str(project_id), principal
+                    workflow_project_id(project_id), principal
                 )
             )
             if (
@@ -1013,19 +1232,21 @@ def build_creative_router(
             )
             can_access = (
                 workflow_repository.is_active_project_member(
-                    str(project_id), principal
+                    workflow_project_id(project_id), principal
                 )
-                or permission_service.can_read_project(principal, str(project_id))
+                or permission_service.can_read_project(
+                    principal, workflow_project_id(project_id)
+                )
                 if request.method.upper() == "GET"
                 else (
                     workflow_repository.is_active_project_member(
-                        str(project_id), principal
+                        workflow_project_id(project_id), principal
                     )
                     or permission_service.can_access_assigned_project(
-                        principal, str(project_id)
+                        principal, workflow_project_id(project_id)
                     )
                     or permission_service.can_access_managed_project(
-                        principal, str(project_id)
+                        principal, workflow_project_id(project_id)
                     )
                     or can_claim_established_writing
                 )
@@ -1063,7 +1284,7 @@ def build_creative_router(
         if principal.is_system_admin or "project_owner" in principal.role_codes:
             return
         if not workflow_repository.is_active_project_member(
-            str(project_id), principal
+            workflow_project_id(project_id), principal
         ):
             raise HTTPException(403, "只能在已分配的项目中创建机器任务")
 
@@ -1094,10 +1315,10 @@ def build_creative_router(
             raise HTTPException(500, "identity permission service is not configured")
         if (
             not workflow_repository.is_active_project_member(
-                str(project_id), principal
+                workflow_project_id(project_id), principal
             )
             and not permission_service.can_read_project(
-                principal, str(project_id)
+                principal, workflow_project_id(project_id)
             )
         ):
             raise HTTPException(403, "只能访问当前分配或管理的项目")
@@ -1108,7 +1329,7 @@ def build_creative_router(
         if (
             principal.is_system_admin
             or workflow_repository.is_active_project_member(
-                str(project_id), principal
+                workflow_project_id(project_id), principal
             )
             or has_creative_page_api_access(request, principal)
         ):
@@ -1118,7 +1339,9 @@ def build_creative_router(
         )
         if not isinstance(permission_service, PermissionService):
             raise HTTPException(500, "identity permission service is not configured")
-        if not permission_service.can_access_managed_project(principal, str(project_id)):
+        if not permission_service.can_access_managed_project(
+            principal, workflow_project_id(project_id)
+        ):
             raise HTTPException(403, "只有项目负责人可以预览已生成内容")
 
     def generated_stage_versions(
@@ -1281,7 +1504,9 @@ def build_creative_router(
         has_active_membership = any(
             member["user_id"] == principal.user_id
             and member["status"] == "active"
-            for member in workflow_repository.list_project_members(str(project["id"]))
+            for member in workflow_repository.list_project_members(
+                workflow_project_id(project["id"])
+            )
         )
         read_only_portfolio_preview = not has_active_membership and (
             managed_preview
@@ -1359,7 +1584,7 @@ def build_creative_router(
             and not principal.is_system_admin
             and "project_owner" not in principal.role_codes
             and not workflow_repository.is_active_project_member(
-                str(project_id), principal
+                workflow_project_id(project_id), principal
             )
             and required_permission not in principal.permissions
         ):
@@ -1451,6 +1676,65 @@ def build_creative_router(
             "source_snapshot": getattr(payload, "source_snapshot", None),
         }
 
+    @router.post("/projects/{project_id}/generation-jobs/{job_id}/retry")
+    async def retry_project_generation_job(
+        project_id: int,
+        job_id: str,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        if job_manager is None:
+            raise HTTPException(503, "creative job manager is unavailable")
+        try:
+            before = job_manager.get_job(job_id)
+            job_project_id = int(
+                before.get("project_id")
+                or (before.get("job") or {}).get("extra", {}).get("project_id")
+                or 0
+            )
+            if job_project_id != project_id:
+                raise HTTPException(404, "创作任务不存在")
+            state = application_service.retry_generation_job(
+                job_state=before,
+                actor=principal,
+            )
+        except JobNotFoundError as exc:
+            raise HTTPException(404, "创作任务不存在") from exc
+        except (CreativeProjectAccessDenied, CreativeTaskOccupied, PermissionError) as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except HTTPException:
+            raise
+        except KeyError as exc:
+            raise HTTPException(404, "创作项目不存在") from exc
+        except (CreativeContextConflict, JobConflictError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+        job = state.to_dict()
+        job.update(
+            {
+                "job_id": state.job_id,
+                "platform": state.platform,
+                "created_by_user_id": state.job.extra.get("created_by_user_id"),
+                "workflow_task_id": state.job.extra.get("workflow_task_id"),
+                "project_id": state.job.extra.get("project_id"),
+            }
+        )
+        audit_service = getattr(request.app.state, "audit_service", None)
+        if isinstance(audit_service, AuditService):
+            audit_service.record(
+                actor=principal,
+                action="creative.generation.retry",
+                target_type="job",
+                target_id=state.job_id,
+                project_id=str(project_id),
+                before=before,
+                after=job,
+                reason=None,
+                result="success",
+                request=request,
+            )
+        return {"status": "success", "job": job}
+
     def validate_task(
         task_id: str | None,
         resource_type: str,
@@ -1470,7 +1754,7 @@ def build_creative_router(
             can_edit_project = bool(
                 project_id is not None
                 and workflow_repository.is_active_project_member(
-                    str(project_id), principal
+                    workflow_project_id(project_id), principal
                 )
             )
             candidates = [
@@ -1484,9 +1768,16 @@ def build_creative_router(
                 and task["status"] in {"assigned", "in_progress", "returned"}
                 and (
                     project_id is None
-                    or str(task.get("project_id") or "") == str(project_id)
+                    or str(task.get("project_id") or "")
+                    == workflow_project_id(project_id)
                 )
                 and (topic_id is None or task.get("topic_id") == topic_id)
+                and (
+                    project_id is not None
+                    or topic_id is None
+                    or task.get("workflow_id")
+                    == f"topic:{repository.workflow_topic_id(topic_id)}"
+                )
             ]
             if len(candidates) != 1:
                 raise HTTPException(
@@ -1829,14 +2120,17 @@ def build_creative_router(
                 created_by=principal.user_id,
             )
             project_id = str(project["id"])
-            workflow_repository.ensure_project_creator(project_id, principal.user_id, principal)
+            scoped_project_id = workflow_project_id(project_id)
+            workflow_repository.ensure_project_creator(
+                scoped_project_id, principal.user_id, principal
+            )
             for member_id in planner_member_ids:
                 workflow_repository.add_project_member(
-                    project_id, member_id, "creative_planner", principal
+                    scoped_project_id, member_id, "creative_planner", principal
                 )
             for member_id in writer_member_ids:
                 workflow_repository.add_project_member(
-                    project_id, member_id, "screenwriter", principal
+                    scoped_project_id, member_id, "screenwriter", principal
                 )
             tasks = _ensure_stage_tasks(
                 project_id, topic_id, principal
@@ -1856,7 +2150,7 @@ def build_creative_router(
                 action="project.create",
                 target_type="project",
                 target_id=project_id,
-                project_id=project_id,
+                project_id=str(project_id),
                 before=None,
                 after={
                     "topic_id": topic_id,
@@ -1919,7 +2213,7 @@ def build_creative_router(
         tasks: list[dict[str, Any]] = []
         for task_type, role_code in stage_roles:
             task = workflow_repository.ensure_project_task(
-                project_id,
+                workflow_project_id(project_id),
                 topic_id,
                 task_type=task_type,
                 role_code=role_code,
@@ -2333,12 +2627,11 @@ def build_creative_router(
             bound_id = task.get("project_id") if task else None
             is_existing_project = project is not None or bound_id is not None
             if bound_id is not None:
-                try:
-                    bound_project_id = int(bound_id)
-                except (TypeError, ValueError) as exc:
+                bound_project_id = repository.local_project_id_from_workflow(bound_id)
+                if bound_project_id is None:
                     raise HTTPException(
-                        409, "workflow task has an invalid project binding"
-                    ) from exc
+                        409, "workflow task belongs to another creative store"
+                    )
                 if project is None or int(project["id"]) != bound_project_id:
                     try:
                         project = repository.reconcile_project_workflow_task(
@@ -2380,13 +2673,15 @@ def build_creative_router(
             resolved_project = repository.get_project(int(project["id"])) or project
             if resolved_project.get("created_by") == principal.user_id:
                 workflow_repository.ensure_project_creator(
-                    str(resolved_project["id"]), principal.user_id, principal
+                    workflow_project_id(resolved_project["id"]),
+                    principal.user_id,
+                    principal,
                 )
             if payload.workflow_mode == "sequential" and workflow_task_id and bound_id is None:
                 try:
                     workflow_repository.bind_workflow_project(
                         workflow_task_id,
-                        str(resolved_project["id"]),
+                        workflow_project_id(resolved_project["id"]),
                         principal,
                         expected_task_type="brief",
                         expected_topic_id=payload.topic_id,
@@ -2519,38 +2814,24 @@ def build_creative_router(
         participating_only: bool = False,
         principal: Principal = Depends(current_principal),
     ):
-        original_project_service.reconcile_pending_for_actor(principal)
         items = repository.list_projects(topic_id=topic_id)
         for item in items:
             task_id = str(item.get("creation_workflow_task_id") or "")
-            if task_id and item.get("created_by") == principal.user_id:
-                try:
-                    task = workflow_repository.get_task(task_id)
-                    if task is None:
-                        raise ValueError("workflow task not found")
-                    if task["task_type"] != "brief":
-                        repository.clear_project_creation_task(
-                            int(item["id"]), task_id
-                        )
-                        continue
-                    bound_id = task.get("project_id")
-                    if bound_id is None:
-                        workflow_repository.bind_workflow_project(
-                            task_id, str(item["id"]), principal
-                        )
-                    elif int(bound_id) != int(item["id"]):
-                        repository.reconcile_project_workflow_task(
-                            task_id, int(bound_id)
-                        )
-                except Exception as exc:
-                    raise HTTPException(
-                        503, "project workflow reconciliation failed"
-                    ) from exc
-        items = repository.list_projects(topic_id=topic_id)
-        for item in items:
-            if item.get("workflow_mode", "sequential") == "sequential":
-                workflow_adapter.reconcile_project(int(item["id"]))
-        items = repository.list_projects(topic_id=topic_id)
+            if not task_id:
+                item["workflow_link_status"] = "unbound"
+                continue
+            task = workflow_repository.get_task(task_id)
+            if task is None:
+                item["workflow_link_status"] = "missing"
+                item["workflow_task_missing"] = True
+                continue
+            expected_project_id = workflow_project_id(item["id"])
+            item["workflow_link_status"] = (
+                "linked"
+                if task.get("task_type") == "brief"
+                and task.get("project_id") == expected_project_id
+                else "mismatched"
+            )
         permission_service = getattr(
             request.app.state, "identity_permission_service", None
         )
@@ -2559,7 +2840,7 @@ def build_creative_router(
                 item
                 for item in items
                 if workflow_repository.is_active_project_member(
-                    str(item["id"]), principal
+                    workflow_project_id(item["id"]), principal
                 )
             ]
         elif not principal.is_system_admin:
@@ -2569,10 +2850,10 @@ def build_creative_router(
                 if isinstance(permission_service, PermissionService)
                 and (
                     workflow_repository.is_active_project_member(
-                        str(item["id"]), principal
+                        workflow_project_id(item["id"]), principal
                     )
                     or permission_service.can_read_project(
-                        principal, str(item["id"])
+                        principal, workflow_project_id(item["id"])
                     )
                 )
             ]
@@ -2580,7 +2861,7 @@ def build_creative_router(
             item["can_delete"] = bool(
                 isinstance(permission_service, PermissionService)
                 and permission_service.can_delete_project(
-                    principal, str(item["id"])
+                    principal, workflow_project_id(item["id"])
                 )
             )
             item["can_production_export"] = bool(
@@ -2588,7 +2869,7 @@ def build_creative_router(
                 or (
                     isinstance(permission_service, PermissionService)
                     and permission_service.can_access_managed_project(
-                        principal, str(item["id"])
+                        principal, workflow_project_id(item["id"])
                     )
                 )
             )
@@ -2613,7 +2894,9 @@ def build_creative_router(
         ):
             return
         try:
-            workflow_repository.assert_can_manage_project(str(project["id"]), principal)
+            workflow_repository.assert_can_manage_project(
+                workflow_project_id(project["id"]), principal
+            )
         except PermissionError as exc:
             raise HTTPException(403, "只有项目创建者或项目管理员可以修改创作模式") from exc
 
@@ -2621,7 +2904,7 @@ def build_creative_router(
         return [
             task
             for task in workflow_repository.list_tasks(principal)
-            if str(task.get("project_id") or "") == str(project_id)
+            if str(task.get("project_id") or "") == workflow_project_id(project_id)
             and str(task.get("task_type") or "")
             in {"brief", "characters", "outline", "beats", "script", "delivery"}
         ]
@@ -3286,10 +3569,10 @@ def build_creative_router(
                 not principal.is_system_admin
                 and not page_authorized
                 and not workflow_repository.is_active_project_member(
-                    str(project_id), principal
+                    workflow_project_id(project_id), principal
                 )
                 and not permission_service.can_read_project(
-                    principal, str(project_id)
+                    principal, workflow_project_id(project_id)
                 )
             ):
                 continue
@@ -3362,7 +3645,7 @@ def build_creative_router(
         project = project_or_404(project_id)
         try:
             task = workflow_repository.ensure_project_task(
-                str(project_id),
+                workflow_project_id(project_id),
                 (
                     int(project["topic_id"])
                     if project.get("topic_id") is not None
@@ -3387,6 +3670,8 @@ def build_creative_router(
                 and task.get("assignee_user_id") != principal.user_id
             ):
                 raise HTTPException(409, "该创作阶段已由其他编剧处理")
+            if resource_type == "brief":
+                repository.reconcile_project_workflow_task(task["id"], project_id)
         except HTTPException:
             raise
         except (PermissionError, ValueError) as exc:
@@ -3469,6 +3754,50 @@ def build_creative_router(
             },
         )
 
+    @router.get("/projects/{project_id}/episodes/download")
+    async def download_project_episode_selection(
+        project_id: int,
+        request: Request,
+        stage: str = Query(...),
+        episodes: str = Query("all", min_length=1),
+        format: str = Query("md"),
+        principal: Principal = Depends(current_principal),
+    ):
+        assert_project_owner_preview_access(request, project_id, principal)
+        project = project_or_404(project_id)
+        allowed_formats = {
+            "outline": {"md", "json"},
+            "beats": {"md", "json"},
+            "script": {"txt", "json"},
+        }
+        if stage not in allowed_formats:
+            raise HTTPException(422, "stage 必须是 outline、beats 或 script")
+        if format not in allowed_formats[stage]:
+            raise HTTPException(422, f"{stage} 不支持 {format} 格式")
+        episode_numbers: list[int] | None
+        if episodes == "all":
+            episode_numbers = None
+        elif re.fullmatch(r"\d+(?:,\d+)*", episodes):
+            episode_numbers = sorted({int(value) for value in episodes.split(",")})
+            target_count = int(project.get("target_episode_count") or 0)
+            if any(number < 1 or number > target_count for number in episode_numbers):
+                raise HTTPException(422, "下载集数超出项目范围")
+        else:
+            raise HTTPException(422, "episodes 必须是 all 或逗号分隔的集数")
+        try:
+            filename, body, media_type = build_episode_selection_download(
+                project, stage, episode_numbers, format
+            )
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return Response(
+            content=body,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"
+            },
+        )
+
     @router.patch("/projects/{project_id}")
     async def update_project(
         project_id: int,
@@ -3483,13 +3812,14 @@ def build_creative_router(
             if not isinstance(permission_service, PermissionService):
                 raise HTTPException(500, "identity permission service is not configured")
             project = project_or_404(project_id)
+            scoped_project_id = workflow_project_id(project_id)
             is_active_member = workflow_repository.is_active_project_member(
-                str(project_id), principal
+                scoped_project_id, principal
             )
             if (
                 not principal.is_system_admin
                 and not permission_service.can_create_project_content(
-                    principal, str(project_id), active_member=is_active_member
+                    principal, scoped_project_id, active_member=is_active_member
                 )
             ):
                 raise HTTPException(403, "只能修改本人创建或参与的项目草稿")
@@ -3502,7 +3832,7 @@ def build_creative_router(
                 if not principal.is_system_admin and "project.archive" not in principal.permissions:
                     raise HTTPException(403, "没有归档项目的权限")
                 if not principal.is_system_admin and not permission_service.can_access_managed_project(
-                    principal, str(project_id)
+                    principal, scoped_project_id
                 ):
                     raise HTTPException(403, "无权管理该项目")
             return repository.update_project(
@@ -3520,13 +3850,14 @@ def build_creative_router(
         request: Request,
         principal: Principal = Depends(current_principal),
     ):
+        scoped_project_id = workflow_project_id(project_id)
         project = repository.get_project(project_id)
         pending_deletion = repository.get_pending_project_deletion(project_id)
         get_workflow_deletion = getattr(
             workflow_repository, "get_pending_project_deletion", None
         )
         workflow_deletion = (
-            get_workflow_deletion(str(project_id))
+            get_workflow_deletion(scoped_project_id)
             if callable(get_workflow_deletion)
             else None
         )
@@ -3538,7 +3869,7 @@ def build_creative_router(
         if not isinstance(permission_service, PermissionService):
             raise HTTPException(500, "identity permission service is not configured")
         if project is not None:
-            if not permission_service.can_delete_project(principal, str(project_id)):
+            if not permission_service.can_delete_project(principal, scoped_project_id):
                 raise HTTPException(403, "无权管理该项目")
         elif pending_deletion is not None and not (
             principal.is_system_admin
@@ -3582,10 +3913,12 @@ def build_creative_router(
         marker_snapshot = {
             "id": project_id,
             "name": str(recovery_project.get("name") or ""),
+            "creative_store_id": repository.store_id,
+            "workflow_project_id": scoped_project_id,
         }
         try:
             marker = workflow_repository.begin_project_deletion(
-                str(project_id),
+                scoped_project_id,
                 owner_token=deletion_owner,
                 requested_by=principal.user_id,
                 project_snapshot=marker_snapshot,
@@ -3611,7 +3944,7 @@ def build_creative_router(
                         (pending_deletion or {}).get("delivery_paths") or []
                     ),
                 }
-            workflow_repository.delete_project_data(str(project_id))
+            workflow_repository.delete_project_data(scoped_project_id)
         except HTTPException:
             raise
         except ValueError as exc:
@@ -3625,7 +3958,7 @@ def build_creative_router(
                 continue
         repository.complete_project_deletion(project_id)
         workflow_repository.complete_project_deletion(
-            str(project_id), owner_token=deletion_owner
+            scoped_project_id, owner_token=deletion_owner
         )
         audit_service = getattr(request.app.state, "audit_service", None)
         if isinstance(audit_service, AuditService):

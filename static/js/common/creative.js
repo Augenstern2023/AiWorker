@@ -371,8 +371,9 @@ window.aiworkerModules.push(() => ({
                         this.creativeWorkspace.selectedCharacterBriefId = data.locked_brief_id || null;
                         this.creativeWorkspace.selectedOutlineBriefId = data.locked_brief_id || null;
                         this.creativeWorkspace.selectedOutlineCharacterBatchId = data.character_batch_id || null;
-                        this.creativeWorkspace.selectedEpisode = Math.min(
-                            Math.max(1, Number(this.creativeWorkspace.selectedEpisode || 1)),
+                        const selectedEpisode = Number(this.creativeWorkspace.selectedEpisode);
+                        this.creativeWorkspace.selectedEpisode = selectedEpisode === 0 ? 0 : Math.min(
+                            Math.max(1, Number(selectedEpisode || 1)),
                             Number(data.target_episode_count || 1)
                         );
                     } catch (e) {
@@ -504,16 +505,20 @@ window.aiworkerModules.push(() => ({
 
                 creativeModuleUrl(stage, episodeNumber = null) {
                     const projectId = this.creativeWorkspace.project?.id || '';
+                    const requestedEpisode = episodeNumber === null
+                        ? Number(this.creativeWorkspace.selectedEpisode)
+                        : Number(episodeNumber);
+                    const allEpisodes = requestedEpisode === 0;
                     const episode = Math.min(
-                        Math.max(1, Number(episodeNumber || this.creativeWorkspace.selectedEpisode || 1)),
+                        Math.max(1, Number(requestedEpisode || 1)),
                         Number(this.creativeWorkspace.project?.target_episode_count || 1)
                     );
                     return {
                         brief: `/planning/projects/${projectId}/brief`,
                         characters: `/planning/projects/${projectId}/characters`,
-                        outline: `/writing/projects/${projectId}/outlines`,
-                        beats: `/writing/projects/${projectId}/episodes/${episode}/beats`,
-                        script: `/writing/projects/${projectId}/episodes/${episode}/scripts`,
+                        outline: `/writing/projects/${projectId}/outlines?episode=${allEpisodes ? 'all' : episode}`,
+                        beats: `/writing/projects/${projectId}/episodes/${episode}/beats${allEpisodes ? '?episode=all' : ''}`,
+                        script: `/writing/projects/${projectId}/episodes/${episode}/scripts${allEpisodes ? '?episode=all' : ''}`,
                     }[stage] || '#';
                 },
 
@@ -641,7 +646,7 @@ window.aiworkerModules.push(() => ({
                     const open = ['assigned', 'in_progress', 'returned'];
                     const matches = (tasks || []).filter(item =>
                         item.task_type === resourceType
-                        && (projectId === null || String(item.project_id || '') === String(projectId))
+                        && (projectId === null || String(item.local_project_id || item.project_id || '') === String(projectId))
                         && (topicId === null || Number(item.topic_id) === Number(topicId))
                     );
                     let task = matches.find(item => open.includes(item.status));
@@ -902,6 +907,23 @@ window.aiworkerModules.push(() => ({
                     return (this.creativeWorkspace.project?.episodes || [])
                         .filter(item => item.stage === 'outline' && item.batch_id === batch)
                         .sort((a, b) => Number(a.episode_number) - Number(b.episode_number));
+                },
+
+                projectStageEpisodeItems(stage) {
+                    const total = Number(this.creativeWorkspace.project?.target_episode_count || 0);
+                    if (stage === 'outline') return this.currentProjectOutlines();
+                    const resolve = stage === 'beats'
+                        ? episodeNumber => this.projectBeatsForEpisode(episodeNumber)
+                        : episodeNumber => this.projectEpisodeScript(episodeNumber);
+                    return Array.from({length: total}, (_, index) => resolve(index + 1)).filter(Boolean);
+                },
+
+                displayedProjectStageItems(stage) {
+                    const selected = Number(this.creativeWorkspace.selectedEpisode);
+                    const items = this.projectStageEpisodeItems(stage);
+                    return selected === 0
+                        ? items
+                        : items.filter(item => Number(item.episode_number) === selected);
                 },
 
                 hasResumableProjectOutlines() {
@@ -1179,6 +1201,85 @@ window.aiworkerModules.push(() => ({
                 mergedScriptDownloadUrl() {
                     const projectId = this.creativeWorkspace.project?.id || '';
                     return `/api/creative/projects/${projectId}/scripts/download`;
+                },
+
+                creativeStageLabel(stage) {
+                    return {outline: '分集大纲', beats: 'Beats', script: '场次剧本'}[stage] || stage;
+                },
+
+                openEpisodeDownload(stage) {
+                    const available = this.projectStageEpisodeItems(stage)
+                        .map(item => Number(item.episode_number))
+                        .filter(number => number > 0);
+                    if (!available.length) {
+                        this.showCreativeNotice(`尚无可下载的${this.creativeStageLabel(stage)}`, 'error');
+                        return;
+                    }
+                    const selected = Number(this.creativeWorkspace.selectedEpisode);
+                    const initial = selected > 0 && available.includes(selected) ? [selected] : [...available];
+                    this.creativeWorkspace.episodeDownload = {
+                        stage,
+                        selectedEpisodes: initial,
+                        allEpisodes: initial.length === available.length,
+                        format: stage === 'script' ? 'txt' : 'md',
+                    };
+                    this.modal('creativeEpisodeDownloadModal')?.show();
+                },
+
+                episodeDownloadAvailableNumbers() {
+                    const stage = this.creativeWorkspace.episodeDownload?.stage;
+                    return this.projectStageEpisodeItems(stage)
+                        .map(item => Number(item.episode_number))
+                        .filter(number => number > 0);
+                },
+
+                toggleEpisodeDownloadAll() {
+                    const state = this.creativeWorkspace.episodeDownload;
+                    state.selectedEpisodes = state.allEpisodes
+                        ? [...this.episodeDownloadAvailableNumbers()]
+                        : [];
+                },
+
+                syncEpisodeDownloadAll() {
+                    const state = this.creativeWorkspace.episodeDownload;
+                    const available = this.episodeDownloadAvailableNumbers();
+                    const selected = new Set((state.selectedEpisodes || []).map(Number));
+                    state.allEpisodes = available.length > 0 && available.every(number => selected.has(number));
+                },
+
+                episodeDownloadActionLabel() {
+                    const state = this.creativeWorkspace.episodeDownload;
+                    const count = (state.selectedEpisodes || []).length;
+                    return state.allEpisodes ? `下载全集（${count} 集）` : `下载已选 ${count} 集`;
+                },
+
+                downloadSelectedEpisodes() {
+                    const state = this.creativeWorkspace.episodeDownload;
+                    const selected = [...new Set((state.selectedEpisodes || []).map(Number))]
+                        .filter(number => number > 0)
+                        .sort((left, right) => left - right);
+                    if (!state.stage || !selected.length) return;
+                    const params = new URLSearchParams({
+                        stage: state.stage,
+                        episodes: state.allEpisodes ? 'all' : selected.join(','),
+                        format: state.format,
+                    });
+                    this.modal('creativeEpisodeDownloadModal')?.hide();
+                    window.location.assign(
+                        `/api/creative/projects/${this.creativeWorkspace.project.id}/episodes/download?${params.toString()}`
+                    );
+                },
+
+                scriptBlockDisplayText(block) {
+                    const type = String(block?.type || '');
+                    const text = String(block?.text || '');
+                    const speaker = String(block?.speaker || '');
+                    const modifier = String(block?.modifier || '');
+                    if (type === 'dialogue') return `${speaker}${modifier ? `（${modifier}）` : ''}：${text}`;
+                    if (type === 'voiceover') return `画外音${speaker ? `（${speaker}）` : ''}：${text}`;
+                    if (type === 'inner_voice') return `${speaker || '人物'}（内心）：${text}`;
+                    if (type === 'cut') return `【切镜】${text}`;
+                    return `△ ${text}`;
                 },
 
                 async startCreativeGeneration(url, body = {}, action = '', options = {}) {
@@ -1679,6 +1780,10 @@ window.aiworkerModules.push(() => ({
                 },
 
                 openProjectScriptWorkspace() {
+                    if (Number(this.creativeWorkspace.selectedEpisode) === 0) {
+                        window.location.assign(this.creativeModuleUrl('script', 0));
+                        return;
+                    }
                     if (!this.currentEpisodeHasLockedBeats()) {
                         window.dispatchEvent(new CustomEvent('aiworker:toast', {
                             detail: {message: '请先生成并完成当前集 Beats，再生成场次剧本', type: 'error'}
@@ -1881,7 +1986,14 @@ window.aiworkerModules.push(() => ({
                         this.creativeWorkspace.jobId
                     );
                 },
-                creativeJobRetryable() { return ['failed', 'cancelled'].includes(this.creativeWorkspace.jobStatus); },
+                creativeJobRetryable() {
+                    const status = this.creativeWorkspace.jobStatus;
+                    if (!['failed', 'cancelled'].includes(status)) return false;
+                    const currentJob = this.jobs.find(item => item.job_id === this.creativeWorkspace.jobId);
+                    const extra = currentJob?.job?.extra || {};
+                    if (!String(extra.operation_id || '').trim()) return true;
+                    return status === 'failed' && String(extra.workflow_mode || 'sequential') === 'sequential';
+                },
                 creativeProgressIndeterminate() {
                     const progress = this.creativeWorkspace.jobProgress || {};
                     return Boolean(this.creativeWorkspace.startingAction || this.creativeJobRunning())
@@ -1985,22 +2097,48 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async retryCreativeJob() {
-                    const res = await aiworkerApi.request(`/api/jobs/${this.creativeWorkspace.jobId}/retry`, {method: 'POST'});
-                    const data = await res.json();
-                    if (!res.ok || data.status === 'error') { this.creativeWorkspace.error = data.detail || data.message || '重试失败'; return; }
-                    this.creativeWorkspace.jobId = data.job.job_id;
-                    this.creativeWorkspace.jobStatus = data.job.status;
-                    this.creativeWorkspace.jobMessage = `${this.creativeActionLabel(this.creativeWorkspace.activeAction)}重试任务已发起，正在后台处理`;
-                    this.creativeWorkspace.jobProgress = {indeterminate: true};
-                    this.creativeWorkspace.jobStartedAt = Number(data.job.started_at || 0) > 0 ? Number(data.job.started_at) * 1000 : Date.now();
-                    this.creativeWorkspace.jobElapsedSeconds = 0;
-                    this.creativeWorkspace.paused = false;
-                    this.creativeWorkspace.notifiedStatus = '';
-                    this.creativeWorkspace.jobLogs = [];
-                    this.creativeWorkspace.jobLogCount = Number(data.job.log_count || 0);
-                    this.creativeWorkspace.showJobLogs = false;
-                    this.creativeGenerationProgressModal.show();
-                    await this.fetchJobs();
+                    if (this.creativeWorkspace.retrying) return;
+                    const currentJob = this.jobs.find(item => item.job_id === this.creativeWorkspace.jobId);
+                    const currentExtra = currentJob?.job?.extra || {};
+                    const operationBound = Boolean(String(currentExtra.operation_id || '').trim());
+                    if (operationBound && (
+                        this.creativeWorkspace.jobStatus !== 'failed'
+                        || String(currentExtra.workflow_mode || 'sequential') !== 'sequential'
+                    )) return;
+                    const projectId = Number(currentExtra.project_id || this.creativeWorkspace.project?.id || 0);
+                    const retryUrl = operationBound
+                        ? `/api/creative/projects/${projectId}/generation-jobs/${this.creativeWorkspace.jobId}/retry`
+                        : `/api/jobs/${this.creativeWorkspace.jobId}/retry`;
+                    this.creativeWorkspace.error = '';
+                    this.creativeWorkspace.retrying = true;
+                    try {
+                        const res = await aiworkerApi.request(retryUrl, {method: 'POST'});
+                        const data = await res.json();
+                        if (!res.ok || data.status === 'error') throw new Error(data.detail || data.message || '重试失败');
+                        const retryExtra = data.job?.job?.extra || currentExtra;
+                        this.creativeWorkspace.jobId = data.job.job_id;
+                        this.creativeWorkspace.jobStatus = data.job.status;
+                        this.creativeWorkspace.activeAction = String(retryExtra.action || this.creativeWorkspace.activeAction || '');
+                        this.creativeWorkspace.activeSeriesGeneration = Boolean(retryExtra.series);
+                        this.creativeWorkspace.activeEpisode = this.creativeWorkspace.activeSeriesGeneration
+                            ? 0
+                            : Number(retryExtra.episode_number || 0);
+                        this.creativeWorkspace.jobMessage = `${this.creativeActionLabel(this.creativeWorkspace.activeAction)}重试任务已发起，正在后台处理`;
+                        this.creativeWorkspace.jobProgress = {indeterminate: true};
+                        this.creativeWorkspace.jobStartedAt = Number(data.job.started_at || 0) > 0 ? Number(data.job.started_at) * 1000 : Date.now();
+                        this.creativeWorkspace.jobElapsedSeconds = 0;
+                        this.creativeWorkspace.paused = false;
+                        this.creativeWorkspace.notifiedStatus = '';
+                        this.creativeWorkspace.jobLogs = [];
+                        this.creativeWorkspace.jobLogCount = Number(data.job.log_count || 0);
+                        this.creativeWorkspace.showJobLogs = false;
+                        this.creativeGenerationProgressModal.show();
+                        await this.fetchJobs();
+                    } catch (error) {
+                        this.creativeWorkspace.error = error.message || '重试失败';
+                    } finally {
+                        this.creativeWorkspace.retrying = false;
+                    }
                 },
 
                 async saveCreativeProjectSettings() {

@@ -9,17 +9,19 @@
             <div>
                 <label class="form-label small">集数</label>
                 <select class="form-select form-select-sm" style="width:170px" x-model.number="creativeWorkspace.selectedEpisode">
+                    <option :value="0">全集</option>
                     <template x-for="episodeNumber in Array.from({length: Number(creativeWorkspace.project.target_episode_count || 0)}, (_, index) => index + 1)" :key="`beats-episode-${episodeNumber}`">
                         <option :value="episodeNumber" x-text="projectBeatEpisodeLabel(episodeNumber)"></option>
                     </template>
                 </select>
             </div>
-            <button class="btn btn-primary btn-sm" @click="generateProjectBeats" :disabled="creativeActionDisabled('beats') || (isFreeCreativeProject() && !freeStageCan('beats', 'can_generate'))"><span class="spinner-border spinner-border-sm me-1" x-show="creativeActionRunning('beats')"></span><i class="bi bi-arrow-clockwise me-1" x-show="!creativeActionRunning('beats') && selectedProjectBeats()"></i><i class="bi bi-magic me-1" x-show="!creativeActionRunning('beats') && !selectedProjectBeats()"></i><span x-text="creativeActionRunning('beats') ? '生成中' : projectBeatGenerationActionLabel()"></span></button>
-            <button class="btn btn-outline-light btn-sm" x-show="isFreeCreativeProject()" @click="createFreeBlankResource('beats')" :disabled="!freeStageCan('beats', 'can_create_blank')"><i class="bi bi-plus-lg me-1"></i>空白版本</button>
+            <button class="btn btn-primary btn-sm" @click="generateProjectBeats" :disabled="creativeWorkspace.selectedEpisode === 0 || creativeActionDisabled('beats') || (isFreeCreativeProject() && !freeStageCan('beats', 'can_generate'))"><span class="spinner-border spinner-border-sm me-1" x-show="creativeActionRunning('beats')"></span><i class="bi bi-arrow-clockwise me-1" x-show="!creativeActionRunning('beats') && selectedProjectBeats()"></i><i class="bi bi-magic me-1" x-show="!creativeActionRunning('beats') && !selectedProjectBeats()"></i><span x-text="creativeActionRunning('beats') ? '生成中' : projectBeatGenerationActionLabel()"></span></button>
+            <button class="btn btn-outline-light btn-sm" x-show="isFreeCreativeProject()" @click="createFreeBlankResource('beats')" :disabled="creativeWorkspace.selectedEpisode === 0 || !freeStageCan('beats', 'can_create_blank')"><i class="bi bi-plus-lg me-1"></i>空白版本</button>
             <button class="btn btn-outline-primary btn-sm" @click="generateProjectBeatsSeries" :disabled="creativeActionDisabled('beats', {series: true})"><i class="bi bi-collection-play me-1"></i><span x-text="seriesGenerationActionLabel('beats')"></span></button>
             <button class="btn btn-warning btn-sm" @click="completeProjectBeatsBatch" :disabled="creativeActionDisabled('beats') || !canBatchLockProjectBeats()" title="完成并锁定当前全部 Beats 草稿"><i class="bi bi-lock-fill me-1"></i><span x-text="isFreeCreativeProject() ? '全集完成并锁定' : '批量完成并锁定'"></span></button>
             <button type="button" class="btn btn-outline-primary btn-sm" @click="openProjectScriptWorkspace" title="场次剧本" aria-label="场次剧本"><i class="bi bi-file-earmark-richtext me-1" aria-hidden="true"></i>场次剧本</button>
-            <a class="btn btn-outline-secondary btn-sm" x-show="currentGeneratedResourceId('beats')" :href="creativeGeneratedDownloadUrl('beats', 'md')" title="下载当前 Beats"><i class="bi bi-download"></i></a>
+            <a class="btn btn-outline-secondary btn-sm" x-show="currentGeneratedResourceId('beats')" :href="creativeGeneratedDownloadUrl('beats', 'md')" title="下载当前 Beats"><i class="bi bi-file-earmark-arrow-down"></i></a>
+            <button class="btn btn-outline-secondary btn-sm" type="button" x-show="projectStageEpisodeItems('beats').length" @click="openEpisodeDownload('beats')" title="选择多集或全集下载"><i class="bi bi-download me-1"></i>多集/全集下载</button>
         </div>
     </div>
 
@@ -28,7 +30,25 @@
         <div class="progress mt-2" style="height:6px"><div class="progress-bar" :class="creativeWorkspace.jobStatus === 'failed' ? 'bg-danger' : ''" :style="`width:${creativeProgressPercent()}%`"></div></div>
     </div>
 
-    <template x-if="selectedProjectBeats()">
+    <div x-show="creativeWorkspace.selectedEpisode === 0" x-cloak>
+        <template x-for="item in projectStageEpisodeItems('beats')" :key="`all-beats-${item.id}`">
+            <section class="border border-secondary rounded p-3 mb-3">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="fw-semibold" x-text="`第 ${item.episode_number} 集 · v${item.version} · ${creativeWorkflowStatusLabel(item.status)}`"></span>
+                    <a class="btn btn-outline-primary btn-sm" :href="creativeModuleUrl('beats', item.episode_number)">打开单集编辑</a>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                        <thead><tr><th style="width:55px">序号</th><th>场景</th><th>人物</th><th>行动目标</th><th>阻力</th><th>情绪变化</th><th>局面变化</th><th>代价</th><th>对抗策略</th><th>转折</th><th>结尾钩子</th></tr></thead>
+                        <tbody><template x-for="beat in (item.content?.beats || [])" :key="`all-${item.id}-${beat.order}`"><tr><td x-text="beat.order"></td><td x-text="beat.scene || '-' "></td><td x-text="listText(beat.characters) || '-' "></td><td x-text="beat.goal || '-' "></td><td x-text="beat.obstacle || '-' "></td><td x-text="beat.emotion_change || '-' "></td><td x-text="beat.state_change || '-' "></td><td x-text="beat.cost || '-' "></td><td x-text="beat.opposition_tactic || '-' "></td><td x-text="beat.turn || '-' "></td><td x-text="beat.hook || '-' "></td></tr></template></tbody>
+                    </table>
+                </div>
+            </section>
+        </template>
+        <div class="text-center text-muted py-4" x-show="!projectStageEpisodeItems('beats').length">尚未生成任何 Beats</div>
+    </div>
+
+    <template x-if="creativeWorkspace.selectedEpisode > 0 && selectedProjectBeats()">
         <div>
             <div class="d-flex justify-content-between align-items-center mb-2">
                 <span class="fw-semibold" x-text="`第 ${creativeWorkspace.selectedEpisode} 集 · v${selectedProjectBeats().version} · ${creativeWorkflowStatusLabel(selectedProjectBeats().status)}`"></span>
@@ -125,5 +145,5 @@
             </div>
         </div>
     </template>
-    <div class="text-center text-muted py-4" x-show="!selectedProjectBeats()">当前集尚未生成 Beats</div>
+    <div class="text-center text-muted py-4" x-show="creativeWorkspace.selectedEpisode > 0 && !selectedProjectBeats()">当前集尚未生成 Beats</div>
 </div>

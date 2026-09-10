@@ -139,7 +139,9 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.Fixt
         for project in owner_client.repository.list_projects_for_bootstrap(
             owner_principal.user_id
         ):
-            workflow.delete_project_data(str(project["id"]))
+            workflow.delete_project_data(
+                owner_client.repository.workflow_project_id(project["id"])
+            )
         for user_id in (owner["id"], denied["id"], creator_only["id"]):
             if identity.get_user(user_id) is not None:
                 identity.soft_delete_user(user_id)
@@ -170,11 +172,39 @@ def test_original_project_can_ensure_a_successor_brief_task(
 
     assert response.status_code == 200, response.text
     task = response.json()
-    assert task["project_id"] == str(project["id"])
+    assert task["project_id"] == client.repository.workflow_project_id(project["id"])
+    assert task["local_project_id"] == str(project["id"])
     assert task["topic_id"] is None
     assert task["task_type"] == "brief"
     assert task["status"] in {"assigned", "in_progress", "returned"}
     assert task["assignee_user_id"] == client.principal.user_id
+
+
+def test_project_list_reports_a_missing_creation_task_without_failing(
+    client: TestClient,
+) -> None:
+    project = create_original_project(client, "missing-project-workflow-task")
+    client.workflow.delete_project_data(
+        client.repository.workflow_project_id(project["id"])
+    )
+
+    response = client.get("/api/creative/projects")
+
+    assert response.status_code == 200, response.text
+    listed = next(item for item in response.json()["items"] if item["id"] == project["id"])
+    assert listed["workflow_link_status"] == "missing"
+    assert listed["workflow_task_missing"] is True
+
+    repaired = client.post(
+        f"/api/creative/projects/{project['id']}/workflow-tasks/brief/ensure"
+    )
+    refreshed = client.get("/api/creative/projects")
+
+    assert repaired.status_code == 200, repaired.text
+    relisted = next(
+        item for item in refreshed.json()["items"] if item["id"] == project["id"]
+    )
+    assert relisted["workflow_link_status"] == "linked"
 
 
 def test_original_successor_brief_can_update_version_scoped_project_settings(
@@ -544,7 +574,7 @@ def test_blank_draft_seed_patch_returns_conflict_without_erasing_the_seed(
     assert client.repository.get_seed(seed["id"])["seed_text"] == seed["seed_text"]
 
 
-def test_project_list_api_reconciles_current_users_pending_original_project(
+def test_project_list_api_does_not_mutate_a_pending_original_project(
     client: TestClient,
 ) -> None:
     pending = client.repository.create_original_project(
@@ -558,8 +588,8 @@ def test_project_list_api_reconciles_current_users_pending_original_project(
     listed = client.get("/api/creative/projects")
 
     assert listed.status_code == 200, listed.text
-    assert [item["id"] for item in listed.json()["items"]] == [pending["id"]]
-    assert client.repository.get_project(pending["id"])["bootstrap_status"] == "ready"
+    assert listed.json()["items"] == []
+    assert client.repository.get_project(pending["id"])["bootstrap_status"] == "pending"
 
 
 def test_original_routes_enforce_create_and_reference_permissions_and_keep_imitation_create(

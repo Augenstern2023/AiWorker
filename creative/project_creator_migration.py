@@ -19,6 +19,8 @@ def migrate_project_creator_memberships(
 ) -> int:
     """Migrate only legacy owner memberships that match each project's creator."""
     return sum(
-        workflow_repository.migrate_creator_membership(project_id, created_by)
+        workflow_repository.migrate_creator_membership(
+            creative_repository.workflow_project_id(project_id), created_by
+        )
         for project_id, created_by in creative_repository.list_project_creator_audit_rows()
     )

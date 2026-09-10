@@ -41,12 +41,20 @@ _SENSITIVE_TEXT_VALUE = re.compile(
 
 
 class AuditService:
-    def __init__(self, repository: IdentityRepository | AuditRepository) -> None:
+    def __init__(
+        self,
+        repository: IdentityRepository | AuditRepository,
+        *,
+        service_instance_id: str | None = None,
+        creative_store_id: str | None = None,
+    ) -> None:
         self.repository = (
             repository
             if isinstance(repository, AuditRepository)
             else AuditRepository(repository)
         )
+        self.service_instance_id = service_instance_id
+        self.creative_store_id = creative_store_id
 
     def record(
         self,
@@ -84,6 +92,8 @@ class AuditService:
                 "before_summary_json": self._summary_json(before),
                 "after_summary_json": self._summary_json(after),
                 "request_id": request_id,
+                "service_instance_id": self.service_instance_id,
+                "creative_store_id": self.creative_store_id,
                 "ip_address": ip_address,
                 "user_agent": user_agent,
                 "reason": reason,

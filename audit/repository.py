@@ -58,6 +58,8 @@ class AuditRepository:
                 before_summary_json=event["before_summary_json"],
                 after_summary_json=event["after_summary_json"],
                 request_id=event["request_id"],
+                service_instance_id=event.get("service_instance_id"),
+                creative_store_id=event.get("creative_store_id"),
                 ip_address=event["ip_address"],
                 user_agent=event["user_agent"],
                 result=event["result"],
@@ -306,6 +308,8 @@ class AuditRepository:
                 else None
             ),
             "request_id": row["request_id"],
+            "service_instance_id": row["service_instance_id"],
+            "creative_store_id": row["creative_store_id"],
             "ip_address": row["ip_address"],
             "user_agent": row["user_agent"],
             "reason": row["reason"],

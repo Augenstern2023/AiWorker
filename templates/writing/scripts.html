@@ -3,9 +3,9 @@
 <div class="d-flex justify-content-between align-items-start gap-3 mb-3">
     <div>
         <h3 class="mb-1">场次剧本</h3>
-        <div class="small text-muted">项目 {{ project_id }} · 第 {{ episode_number }} 集 · 可拍摄场次、动作与台词</div>
+        <div class="small text-muted" x-text="creativeWorkspace.selectedEpisode === 0 ? '项目 {{ project_id }} · 全集 · 可拍摄场次、动作与台词' : `项目 {{ project_id }} · 第 ${creativeWorkspace.selectedEpisode} 集 · 可拍摄场次、动作与台词`">项目 {{ project_id }} · 第 {{ episode_number }} 集 · 可拍摄场次、动作与台词</div>
     </div>
-    <a id="script-page-back-link" class="btn btn-outline-light btn-sm flex-shrink-0" x-show="!isFreeCreativeProject()" x-cloak href="/writing/projects/{{ project_id }}/episodes/{{ episode_number }}/beats" title="返回 Beats" aria-label="返回 Beats">
+    <a id="script-page-back-link" class="btn btn-outline-light btn-sm flex-shrink-0" x-show="!isFreeCreativeProject()" x-cloak href="/writing/projects/{{ project_id }}/episodes/{{ episode_number }}/beats" :href="creativeModuleUrl('beats')" title="返回 Beats" aria-label="返回 Beats">
         <i class="bi bi-arrow-left me-1" aria-hidden="true"></i><span id="script-page-back-label">返回 Beats</span>
     </a>
 </div>
@@ -17,5 +17,6 @@
 <template x-if="creativeWorkspace.project"><div>{% include "common/workspace/project_scripts.html" %}</div></template>
 {% include "common/workspace/creative_progress_modal.html" %}
 {% include "common/workspace/free_creative_modals.html" %}
+{% include "common/workspace/creative_episode_download_modal.html" %}
 {% endblock %}
 {% block scripts %}<script src="/static/js/common/creative.js?v={{ asset_version }}"></script><script src="/static/js/writing/scripts.js?v={{ asset_version }}"></script><script src="/static/js/writing/optimization_draft.js?v={{ asset_version }}-return-review"></script>{% endblock %}

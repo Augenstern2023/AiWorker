@@ -509,10 +509,21 @@ class CreativeWorkflowAdapter:
             raise ValueError("workflow node does not match resource type")
         if not self._actor_can_edit_task(task, actor):
             raise PermissionError("only the task assignee may create this resource")
-        if project_id is not None and str(task["project_id"] or "") != str(project_id):
+        if (
+            project_id is not None
+            and str(task["project_id"] or "")
+            != self.creative_repository.workflow_project_id(project_id)
+        ):
             raise ValueError("resource does not belong to the task project")
         if topic_id is not None and task["topic_id"] != topic_id:
             raise ValueError("resource does not belong to the task topic")
+        if (
+            topic_id is not None
+            and project_id is None
+            and task.get("workflow_id")
+            != f"topic:{self.creative_repository.workflow_topic_id(topic_id)}"
+        ):
+            raise ValueError("workflow task belongs to another creative store")
         if task["status"] not in {"assigned", "in_progress", "returned"}:
             raise ValueError("workflow task is not open for creative work")
         return task
@@ -865,7 +876,9 @@ class CreativeWorkflowAdapter:
         if resource_type == "breakdown":
             if task["topic_id"] != snapshot["topic_id"]:
                 raise ValueError("resource does not belong to the task topic")
-        elif str(task["project_id"] or "") != str(snapshot["project_id"]):
+        elif str(task["project_id"] or "") != self.creative_repository.workflow_project_id(
+            snapshot["project_id"]
+        ):
             raise ValueError("resource does not belong to the task project")
         return task
 

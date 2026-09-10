@@ -431,6 +431,7 @@ class DeliveryService:
     def _resolve_delivery_task(
         self, project_id: int, workflow_task_id: str | None
     ) -> dict[str, Any]:
+        scoped_project_id = self.creative_repository.workflow_project_id(project_id)
         with self.workflow_repository.identity_repository.connect() as connection:
             if workflow_task_id:
                 row = connection.execute(
@@ -447,7 +448,7 @@ class DeliveryService:
                       AND status IN ('pool', 'assigned', 'in_progress')
                     ORDER BY created_at, id
                     """),
-                    {"project_id": str(project_id)},
+                    {"project_id": scoped_project_id},
                 ).fetchall()
                 if not rows:
                     rows = connection.execute(
@@ -463,7 +464,7 @@ class DeliveryService:
                           )
                         ORDER BY t.updated_at DESC, t.id DESC
                         """),
-                        {"project_id": str(project_id)},
+                        {"project_id": scoped_project_id},
                     ).fetchall()
         if not rows:
             raise ValueError("an active terminal delivery workflow task is required")
@@ -474,7 +475,7 @@ class DeliveryService:
             raise ValueError("workflow task must be the terminal delivery node")
         if task["role_code"] != "system_admin":
             raise ValueError("delivery workflow task must belong to system_admin")
-        if str(task["project_id"] or "") != str(project_id):
+        if str(task["project_id"] or "") != scoped_project_id:
             raise ValueError("delivery workflow task belongs to another project")
         if task["status"] not in {"pool", "assigned", "in_progress", "completed"}:
             raise ValueError("delivery workflow task is not active")
@@ -569,7 +570,8 @@ class DeliveryService:
             if (
                 task["task_type"] != "delivery"
                 or task["role_code"] != "system_admin"
-                or str(task["project_id"] or "") != str(record["project_id"])
+                or str(task["project_id"] or "")
+                != self.creative_repository.workflow_project_id(record["project_id"])
             ):
                 raise ValueError("delivery registry references a mismatched workflow task")
             if task["status"] != "completed":
@@ -806,9 +808,14 @@ def build_delivery_router(service: DeliveryService) -> APIRouter:
         if principal.is_system_admin:
             return True
         permission_service = permission_service_for_request(request)
+        scoped_project_id = service.creative_repository.workflow_project_id(
+            project_id
+        )
         return permission_service.can_access_assigned_project(
-            principal, project_id
-        ) or permission_service.can_access_managed_project(principal, project_id)
+            principal, scoped_project_id
+        ) or permission_service.can_access_managed_project(
+            principal, scoped_project_id
+        )
 
     def assert_project_access(
         request: Request, principal: Principal, project_id: str

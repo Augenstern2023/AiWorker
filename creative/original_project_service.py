@@ -101,12 +101,15 @@ class OriginalProjectService:
 
     def _bootstrap(self, project: dict[str, Any], actor: Principal) -> None:
         project_id = str(project["id"])
-        self.workflow_repository.ensure_project_creator(project_id, actor.user_id, actor)
+        scoped_project_id = self.creative_repository.workflow_project_id(project_id)
+        self.workflow_repository.ensure_project_creator(
+            scoped_project_id, actor.user_id, actor
+        )
         if project.get("workflow_mode") == "free":
             return
         for task_type, role_code in self._STAGE_ROLES:
             task = self.workflow_repository.ensure_project_task(
-                project_id,
+                scoped_project_id,
                 None,
                 task_type=task_type,
                 role_code=role_code,

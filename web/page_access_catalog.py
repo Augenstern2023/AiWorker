@@ -119,6 +119,10 @@ _CREATIVE_FREE_MODE: tuple[ApiRoute, ...] = (
     ("GET", "/api/creative/projects/{project_id}/legacy-creative-resources"),
 )
 
+_CREATIVE_EPISODE_DOWNLOAD: tuple[ApiRoute, ...] = (
+    ("GET", "/api/creative/projects/{project_id}/episodes/download"),
+)
+
 _SCRIPT_REVIEWS: tuple[ApiRoute, ...] = (
     ("GET", "/api/creative/projects"),
     ("GET", "/api/creative/projects/{project_id}"),
@@ -278,6 +282,7 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
         ("POST", "/api/creative/projects/{project_id}/outlines/{batch_id}/lock"),
         ("GET", "/api/creative/projects/{project_id}/export"),
     )
+    + _CREATIVE_EPISODE_DOWNLOAD
     + _CREATIVE_TASK_SUPPORT
     + _CREATIVE_FREE_MODE
     + _CREATIVE_JOB_MONITOR,
@@ -290,6 +295,7 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
         ("POST", "/api/creative/episodes/{episode_id}/lock"),
         ("GET", "/api/creative/projects/{project_id}/export"),
     )
+    + _CREATIVE_EPISODE_DOWNLOAD
     + _CREATIVE_TASK_SUPPORT
     + _CREATIVE_FREE_MODE
     + _CREATIVE_JOB_MONITOR,
@@ -302,6 +308,7 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
         ("POST", "/api/creative/scripts/{episode_id}/lock"),
         ("GET", "/api/creative/projects/{project_id}/generated-content/download"),
     )
+    + _CREATIVE_EPISODE_DOWNLOAD
     + _CREATIVE_TASK_SUPPORT
     + _CREATIVE_FREE_MODE
     + _CREATIVE_JOB_MONITOR,

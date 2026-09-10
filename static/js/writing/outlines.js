@@ -16,7 +16,13 @@ function copyOutlineSeriesOverview(value) {
 
 window.aiworkerModules.push(() => ({
     filteredProjectOutlines() {
-        const items = this.currentProjectOutlines();
+        const rawSelected = this.creativeWorkspace.selectedEpisode;
+        const selected = rawSelected === undefined || rawSelected === null || rawSelected === ''
+            ? 0
+            : Number(rawSelected);
+        const items = this.currentProjectOutlines().filter(
+            item => selected === 0 || Number(item.episode_number) === selected
+        );
         const query = String(this.creativeWorkspace.outlineQuery || '').trim().toLocaleLowerCase();
         if (!query) return items;
         return items.filter((item) => {

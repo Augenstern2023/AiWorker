@@ -39,7 +39,12 @@ def environment(db, tmp_path):
     permissions = PermissionService.__new__(PermissionService)
     permissions.session_service = sessions
     permissions.principal_for_session = lambda token: {'admin': admin, 'owner': owner, 'writer': writer}.get(token)
-    permissions.can_access_managed_project = Mock(side_effect=lambda principal, project_id: principal.user_id == 'owner' and project_id == '1')
+    permissions.can_access_managed_project = Mock(
+        side_effect=lambda principal, project_id: (
+            principal.user_id == 'owner'
+            and project_id == repository.workflow_project_id(1)
+        )
+    )
     service = module.ProductionExportService(root=tmp_path, repository=repository, audit_service=audit)
     app = FastAPI()
     app.state.identity_permission_service = permissions

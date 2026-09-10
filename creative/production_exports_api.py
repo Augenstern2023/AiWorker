@@ -45,7 +45,9 @@ def build_production_export_router(service: ProductionExportService) -> APIRoute
         permission_service = permission_service_for_request(request)
         if not isinstance(permission_service, PermissionService):
             raise HTTPException(500, "identity permission service is not configured")
-        if not permission_service.can_access_managed_project(principal, str(project_id)):
+        if not permission_service.can_access_managed_project(
+            principal, service.repository.workflow_project_id(project_id)
+        ):
             raise HTTPException(403, "没有导出该项目生产包的权限")
 
     def verify_csrf(request: Request) -> None:
@@ -190,7 +192,10 @@ def build_production_export_router(service: ProductionExportService) -> APIRoute
                     principal.is_system_admin
                     or permission_service_for_request(
                         request
-                    ).can_access_managed_project(principal, str(project_id))
+                    ).can_access_managed_project(
+                        principal,
+                        service.repository.workflow_project_id(project_id),
+                    )
                 ),
             )
         except KeyError as exc:

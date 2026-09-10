@@ -1,5 +1,85 @@
 <div id="project-script-workspace">
-    <div class="d-flex justify-content-between align-items-end mb-3"><div><h5 class="mb-1">场次剧本</h5><div class="small text-muted" x-text="isFreeCreativeProject() ? '当前集可独立创建或生成；首版不进入审核、优化和正式交付。' : '基于已锁定 Beats 生成可拍摄场次与台词'"></div><div class="small text-muted" x-show="!isFreeCreativeProject()" x-text="projectScriptsSeriesBlockReason()"></div></div><div class="d-flex gap-2 align-items-end"><div><label class="form-label small">集数</label><input class="form-control form-control-sm" style="width:90px" type="number" min="1" :max="creativeWorkspace.project.target_episode_count" x-model.number="creativeWorkspace.selectedEpisode"></div><button class="btn btn-primary btn-sm" @click="generateProjectScript" :disabled="creativeActionDisabled('script') || (isFreeCreativeProject() && !freeStageCan('script', 'can_generate'))"><i class="bi bi-magic me-1"></i><span x-text="creativeActionRunning('script') ? '生成中' : projectScriptGenerationActionLabel()"></span></button><button class="btn btn-outline-light btn-sm" x-show="isFreeCreativeProject()" @click="createFreeBlankResource('script')" :disabled="!freeStageCan('script', 'can_create_blank')"><i class="bi bi-plus-lg me-1"></i>空白版本</button><button class="btn btn-outline-primary btn-sm" @click="generateProjectScriptsSeries" :disabled="creativeActionDisabled('script', {series: true}) || (!isFreeCreativeProject() && !canGenerateProjectScriptsSeries())" :title="projectScriptsSeriesBlockReason()"><i class="bi bi-collection-play me-1"></i><span x-text="creativeActionRunning('script') ? '全剧生成中' : seriesGenerationActionLabel('script')"></span></button><button class="btn btn-warning btn-sm" x-show="isFreeCreativeProject()" @click="completeFreeProjectEpisodeSeries('script')" :disabled="creativeActionDisabled('script') || !canBatchLockProjectEpisodes('script')" title="完成并锁定当前全部场次剧本草稿"><i class="bi bi-lock-fill me-1"></i>全集完成并锁定</button></div></div>
-    <template x-if="selectedProjectScript()"><div><div class="d-flex justify-content-between align-items-center mb-2"><span class="fw-semibold" x-text="`第 ${creativeWorkspace.selectedEpisode} 集 · v${selectedProjectScript().version} · ${creativeWorkflowStatusLabel(selectedProjectScript().status)}`"></span><div class="d-flex gap-2"><button class="btn btn-outline-light btn-sm" @click="saveProjectEpisode(selectedProjectScript())" :disabled="!creativeResourceEditable(selectedProjectScript())"><i class="bi bi-save me-1"></i>保存</button><button class="btn btn-warning btn-sm" x-show="isFreeCreativeProject()" @click="completeProjectScript" :disabled="!creativeResourceEditable(selectedProjectScript())"><i class="bi bi-lock-fill me-1"></i>完成并锁定</button><button class="btn btn-outline-info btn-sm" x-show="isFreeCreativeProject() && ['locked', 'approved'].includes(selectedProjectScript().status)" @click="createFreeResourceRevision('script')" :disabled="!freeStageCan('script', 'can_create_revision')"><i class="bi bi-files me-1"></i>创建修订版</button><a class="btn btn-outline-info btn-sm" x-show="!isFreeCreativeProject()" :href="mergedScriptDownloadUrl()" title="合并下载已生成场次剧本"><i class="bi bi-download me-1"></i>剧本下载</a><a class="btn btn-outline-secondary btn-sm" :href="`/api/creative/projects/${creativeWorkspace.project.id}/generated-content/download?stage=script&resource_id=${selectedProjectScript().id}&format=txt`" title="下载本集 TXT"><i class="bi bi-download me-1"></i>本集下载</a></div></div><div class="mb-3"><label class="form-label small">集标题</label><input class="form-control form-control-sm" x-model="selectedProjectScript().content.episode_title" :disabled="!creativeResourceEditable(selectedProjectScript())"></div><template x-for="scene in selectedProjectScript().content.scenes" :key="`${scene.sequence_no}-${scene.scene_no}`"><div class="border-top py-3"><div class="row g-2"><div class="col-3"><label class="form-label small">段</label><input class="form-control form-control-sm" type="number" min="1" x-model.number="scene.sequence_no" :disabled="!creativeResourceEditable(selectedProjectScript())"></div><div class="col-3"><label class="form-label small">场</label><input class="form-control form-control-sm" type="number" min="1" x-model.number="scene.scene_no" :disabled="!creativeResourceEditable(selectedProjectScript())"></div><div class="col-3"><label class="form-label small">时间</label><input class="form-control form-control-sm" x-model="scene.time_of_day" :disabled="!creativeResourceEditable(selectedProjectScript())"></div><div class="col-3"><label class="form-label small">内外</label><input class="form-control form-control-sm" x-model="scene.interior_exterior" :disabled="!creativeResourceEditable(selectedProjectScript())"></div><div class="col-md-6"><label class="form-label small">场景</label><input class="form-control form-control-sm" x-model="scene.location" :disabled="!creativeResourceEditable(selectedProjectScript())"></div><div class="col-md-3"><label class="form-label small">道具</label><input class="form-control form-control-sm" :value="listText(scene.props)" @input="setListField(scene, 'props', $event.target.value)" :disabled="!creativeResourceEditable(selectedProjectScript())"></div><div class="col-md-3"><label class="form-label small">出场人物</label><input class="form-control form-control-sm" :value="listText(scene.characters)" @input="setListField(scene, 'characters', $event.target.value)" :disabled="!creativeResourceEditable(selectedProjectScript())"></div></div><template x-for="block in scene.blocks"><div class="row g-2 mt-1"><div class="col-md-2"><select class="form-select form-select-sm" x-model="block.type" :disabled="!creativeResourceEditable(selectedProjectScript())"><option value="action">动作</option><option value="dialogue">台词</option><option value="voiceover">画外音</option><option value="inner_voice">内心独白</option><option value="cut">切镜</option></select></div><div class="col-md-2" x-show="['dialogue', 'voiceover', 'inner_voice'].includes(block.type)"><input class="form-control form-control-sm" placeholder="人物" x-model="block.speaker" :disabled="!creativeResourceEditable(selectedProjectScript())"></div><div class="col-md-2" x-show="block.type === 'dialogue'"><input class="form-control form-control-sm" placeholder="情绪" x-model="block.modifier" :disabled="!creativeResourceEditable(selectedProjectScript())"></div><div class="col"><textarea class="form-control form-control-sm" rows="2" x-model="block.text" :disabled="!creativeResourceEditable(selectedProjectScript())"></textarea></div></div></template></div></template></div></template>
-    <div class="text-center text-muted py-4" x-show="!selectedProjectScript()" x-text="scriptWorkspaceEmptyMessage()"></div>
+    <div class="d-flex justify-content-between align-items-end mb-3">
+        <div>
+            <h5 class="mb-1">场次剧本</h5>
+            <div class="small text-muted" x-text="isFreeCreativeProject() ? '当前集可独立创建或生成；首版不进入审核、优化和正式交付。' : '基于已锁定 Beats 生成可拍摄场次与台词'"></div>
+            <div class="small text-muted" x-show="!isFreeCreativeProject()" x-text="projectScriptsSeriesBlockReason()"></div>
+        </div>
+        <div class="d-flex gap-2 align-items-end flex-wrap justify-content-end">
+            <div>
+                <label class="form-label small">集数</label>
+                <select class="form-select form-select-sm" style="width:150px" x-model.number="creativeWorkspace.selectedEpisode">
+                    <option :value="0">全集</option>
+                    <template x-for="episodeNumber in Array.from({length: Number(creativeWorkspace.project.target_episode_count || 0)}, (_, index) => index + 1)" :key="`script-episode-${episodeNumber}`">
+                        <option :value="episodeNumber" x-text="`第 ${episodeNumber} 集${projectEpisodeScript(episodeNumber) ? ' · 已生成' : ' · 未生成'}`"></option>
+                    </template>
+                </select>
+            </div>
+            <button class="btn btn-primary btn-sm" @click="generateProjectScript" :disabled="creativeWorkspace.selectedEpisode === 0 || creativeActionDisabled('script') || (isFreeCreativeProject() && !freeStageCan('script', 'can_generate'))"><i class="bi bi-magic me-1"></i><span x-text="creativeActionRunning('script') ? '生成中' : projectScriptGenerationActionLabel()"></span></button>
+            <button class="btn btn-outline-light btn-sm" x-show="isFreeCreativeProject()" @click="createFreeBlankResource('script')" :disabled="creativeWorkspace.selectedEpisode === 0 || !freeStageCan('script', 'can_create_blank')"><i class="bi bi-plus-lg me-1"></i>空白版本</button>
+            <button class="btn btn-outline-primary btn-sm" @click="generateProjectScriptsSeries" :disabled="creativeActionDisabled('script', {series: true}) || (!isFreeCreativeProject() && !canGenerateProjectScriptsSeries())" :title="projectScriptsSeriesBlockReason()"><i class="bi bi-collection-play me-1"></i><span x-text="creativeActionRunning('script') ? '全剧生成中' : seriesGenerationActionLabel('script')"></span></button>
+            <button class="btn btn-warning btn-sm" x-show="isFreeCreativeProject()" @click="completeFreeProjectEpisodeSeries('script')" :disabled="creativeActionDisabled('script') || !canBatchLockProjectEpisodes('script')" title="完成并锁定当前全部场次剧本草稿"><i class="bi bi-lock-fill me-1"></i>全集完成并锁定</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" x-show="projectStageEpisodeItems('script').length" @click="openEpisodeDownload('script')" title="选择多集或全集下载"><i class="bi bi-download me-1"></i>多集/全集下载</button>
+        </div>
+    </div>
+
+    <div x-show="creativeWorkspace.selectedEpisode === 0" x-cloak>
+        <template x-for="item in projectStageEpisodeItems('script')" :key="`all-script-${item.id}`">
+            <section class="border border-secondary rounded p-3 mb-3">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <div><span class="fw-semibold" x-text="`第 ${item.episode_number} 集 · ${item.content?.episode_title || '未命名'} `"></span><span class="small text-muted" x-text="`v${item.version} · ${creativeWorkflowStatusLabel(item.status)}`"></span></div>
+                    <a class="btn btn-outline-primary btn-sm" :href="creativeModuleUrl('script', item.episode_number)">打开单集编辑</a>
+                </div>
+                <template x-for="scene in (item.content?.scenes || [])" :key="`all-scene-${item.id}-${scene.sequence_no}-${scene.scene_no}`">
+                    <div class="border-top py-3">
+                        <div class="small fw-semibold mb-2" x-text="`[${scene.sequence_no}]-[${scene.scene_no}] [${scene.time_of_day || ''}] [${scene.interior_exterior || ''}] [${scene.location || ''}]`"></div>
+                        <div class="small text-muted mb-2" x-text="`道具：${listText(scene.props) || '无'}　出场人物：${listText(scene.characters) || '无'}`"></div>
+                        <template x-for="(block, blockIndex) in (scene.blocks || [])" :key="`all-block-${item.id}-${scene.sequence_no}-${scene.scene_no}-${blockIndex}`">
+                            <p class="mb-2" x-text="scriptBlockDisplayText(block)"></p>
+                        </template>
+                    </div>
+                </template>
+            </section>
+        </template>
+        <div class="text-center text-muted py-4" x-show="!projectStageEpisodeItems('script').length">尚未生成任何场次剧本</div>
+    </div>
+
+    <template x-if="creativeWorkspace.selectedEpisode > 0 && selectedProjectScript()">
+        <div>
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <span class="fw-semibold" x-text="`第 ${creativeWorkspace.selectedEpisode} 集 · v${selectedProjectScript().version} · ${creativeWorkflowStatusLabel(selectedProjectScript().status)}`"></span>
+                <div class="d-flex gap-2">
+                    <button class="btn btn-outline-light btn-sm" @click="saveProjectEpisode(selectedProjectScript())" :disabled="!creativeResourceEditable(selectedProjectScript())"><i class="bi bi-save me-1"></i>保存</button>
+                    <button class="btn btn-warning btn-sm" x-show="isFreeCreativeProject()" @click="completeProjectScript" :disabled="!creativeResourceEditable(selectedProjectScript())"><i class="bi bi-lock-fill me-1"></i>完成并锁定</button>
+                    <button class="btn btn-outline-info btn-sm" x-show="isFreeCreativeProject() && ['locked', 'approved'].includes(selectedProjectScript().status)" @click="createFreeResourceRevision('script')" :disabled="!freeStageCan('script', 'can_create_revision')"><i class="bi bi-files me-1"></i>创建修订版</button>
+                    <button class="btn btn-outline-info btn-sm" type="button" @click="openEpisodeDownload('script')" title="多集或全集剧本下载"><i class="bi bi-download me-1"></i>剧本下载</button>
+                    <a class="btn btn-outline-info btn-sm" x-show="!isFreeCreativeProject()" :href="mergedScriptDownloadUrl()" title="合并下载全部已生成场次剧本"><i class="bi bi-collection me-1"></i>全集下载</a>
+                    <a class="btn btn-outline-secondary btn-sm" :href="`/api/creative/projects/${creativeWorkspace.project.id}/generated-content/download?stage=script&resource_id=${selectedProjectScript().id}&format=txt`" title="下载本集 TXT"><i class="bi bi-download me-1"></i>本集下载</a>
+                </div>
+            </div>
+            <div class="mb-3"><label class="form-label small">集标题</label><input class="form-control form-control-sm" x-model="selectedProjectScript().content.episode_title" :disabled="!creativeResourceEditable(selectedProjectScript())"></div>
+            <template x-for="scene in selectedProjectScript().content.scenes" :key="`${scene.sequence_no}-${scene.scene_no}`">
+                <div class="border-top py-3">
+                    <div class="row g-2">
+                        <div class="col-3"><label class="form-label small">段</label><input class="form-control form-control-sm" type="number" min="1" x-model.number="scene.sequence_no" :disabled="!creativeResourceEditable(selectedProjectScript())"></div>
+                        <div class="col-3"><label class="form-label small">场</label><input class="form-control form-control-sm" type="number" min="1" x-model.number="scene.scene_no" :disabled="!creativeResourceEditable(selectedProjectScript())"></div>
+                        <div class="col-3"><label class="form-label small">时间</label><input class="form-control form-control-sm" x-model="scene.time_of_day" :disabled="!creativeResourceEditable(selectedProjectScript())"></div>
+                        <div class="col-3"><label class="form-label small">内外</label><input class="form-control form-control-sm" x-model="scene.interior_exterior" :disabled="!creativeResourceEditable(selectedProjectScript())"></div>
+                        <div class="col-md-6"><label class="form-label small">场景</label><input class="form-control form-control-sm" x-model="scene.location" :disabled="!creativeResourceEditable(selectedProjectScript())"></div>
+                        <div class="col-md-3"><label class="form-label small">道具</label><input class="form-control form-control-sm" :value="listText(scene.props)" @input="setListField(scene, 'props', $event.target.value)" :disabled="!creativeResourceEditable(selectedProjectScript())"></div>
+                        <div class="col-md-3"><label class="form-label small">出场人物</label><input class="form-control form-control-sm" :value="listText(scene.characters)" @input="setListField(scene, 'characters', $event.target.value)" :disabled="!creativeResourceEditable(selectedProjectScript())"></div>
+                    </div>
+                    <template x-for="block in scene.blocks">
+                        <div class="row g-2 mt-1">
+                            <div class="col-md-2"><select class="form-select form-select-sm" x-model="block.type" :disabled="!creativeResourceEditable(selectedProjectScript())"><option value="action">动作</option><option value="dialogue">台词</option><option value="voiceover">画外音</option><option value="inner_voice">内心独白</option><option value="cut">切镜</option></select></div>
+                            <div class="col-md-2" x-show="['dialogue', 'voiceover', 'inner_voice'].includes(block.type)"><input class="form-control form-control-sm" placeholder="人物" x-model="block.speaker" :disabled="!creativeResourceEditable(selectedProjectScript())"></div>
+                            <div class="col-md-2" x-show="block.type === 'dialogue'"><input class="form-control form-control-sm" placeholder="情绪" x-model="block.modifier" :disabled="!creativeResourceEditable(selectedProjectScript())"></div>
+                            <div class="col"><textarea class="form-control form-control-sm" rows="2" x-model="block.text" :disabled="!creativeResourceEditable(selectedProjectScript())"></textarea></div>
+                        </div>
+                    </template>
+                </div>
+            </template>
+        </div>
+    </template>
+    <div class="text-center text-muted py-4" x-show="creativeWorkspace.selectedEpisode > 0 && !selectedProjectScript()" x-text="scriptWorkspaceEmptyMessage()"></div>
 </div>

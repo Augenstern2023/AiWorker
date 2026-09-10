@@ -182,7 +182,8 @@
                     create: {topic_id: '', breakdown_id: '', name: '', target_platform: '', target_episode_count: 20, workflow_mode: 'sequential', creation_request_id: ''},
                     originalCreate: {seed_text: '', name: '', genre: '', target_platform: '', target_audience: '', target_episode_count: 20, episode_duration_seconds: 120, cost_level: '', content_boundaries: [], reference_refs: [], workflow_mode: 'sequential', creation_request_id: '', saving: false, error: ''},
                     directionCount: 3, selectedSeedId: null, preservedBlueprintIds: [], variantInstruction: '', selectedBlueprintId: null, selectedCharacterBriefId: null, selectedOutlineBriefId: null, selectedOutlineCharacterBatchId: null, selectedEpisode: 1,
-                    jobId: '', jobMessage: '', jobProgress: {}, jobStatus: '', paused: false, notifiedStatus: '',
+                    episodeDownload: {stage: '', selectedEpisodes: [], allEpisodes: true, format: 'md'},
+                    jobId: '', jobMessage: '', jobProgress: {}, jobStatus: '', paused: false, notifiedStatus: '', retrying: false,
                     jobLogs: [], jobLogCount: 0, showJobLogs: false,
                     jobStartedAt: 0, jobElapsedSeconds: 0,
                     startingAction: '', activeAction: '', activeEpisode: 0, activeSeriesGeneration: false, activeBatchId: '',
@@ -371,7 +372,16 @@
                             }
                         }
                         const episode = window.location.pathname.match(/\/episodes\/(\d+)\/(?:beats|scripts)/)?.[1];
-                        if (episode) this.creativeWorkspace.selectedEpisode = Number(episode);
+                        const episodeView = new URLSearchParams(window.location.search).get('episode');
+                        if (episodeView === 'all') {
+                            this.creativeWorkspace.selectedEpisode = 0;
+                        } else if (/^\d+$/.test(String(episodeView || '')) && Number(episodeView) > 0) {
+                            this.creativeWorkspace.selectedEpisode = Number(episodeView);
+                        } else if (this.page === 'writing-outlines') {
+                            this.creativeWorkspace.selectedEpisode = 0;
+                        } else if (episode) {
+                            this.creativeWorkspace.selectedEpisode = Number(episode);
+                        }
                         if (
                             this.page === 'planning-brief'
                             && new URLSearchParams(window.location.search).get('task_setup') === '1'
@@ -482,7 +492,7 @@
                     title.textContent = task.task_type;
                     const context = document.createElement('div');
                     context.className = 'small text-muted';
-                    context.textContent = [task.project_id, task.role_code].filter(Boolean).join(' · ');
+                    context.textContent = [task.local_project_id || task.project_id, task.role_code].filter(Boolean).join(' · ');
                     identity.append(title, context);
                     const statusCell = document.createElement('td');
                     statusCell.className = 'text-nowrap';
@@ -567,7 +577,7 @@
                         if (!response.ok) throw new Error(payload.detail || '读取项目任务失败');
                         const task = (payload || []).find(item =>
                             item.task_type === taskType
-                            && String(item.project_id || '') === String(projectId)
+                            && String(item.local_project_id || item.project_id || '') === String(projectId)
                             && !['completed', 'cancelled'].includes(item.status)
                         );
                         if (!task) throw new Error('当前账号没有可操作的 Brief 任务');

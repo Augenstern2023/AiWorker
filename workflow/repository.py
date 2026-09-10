@@ -14,6 +14,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from datetime import date, datetime
 import hashlib
 import json
+import re
 import time
 import uuid
 from contextlib import nullcontext
@@ -948,8 +949,9 @@ class WorkflowRepository:
         role_code: str,
         actor: Principal | dict[str, Any],
         project_id: str | None = None,
+        workflow_scope: str | None = None,
     ) -> dict[str, Any]:
-        workflow_id = f"topic:{topic_id}"
+        workflow_id = f"topic:{workflow_scope or topic_id}"
         actor_id = self._actor_id(actor)
         with self.identity_repository.transaction() as connection:
             if project_id is not None:
@@ -963,7 +965,14 @@ class WorkflowRepository:
                 (workflow_id, task_type, topic_id),
             ).mappings().fetchone()
             if existing is not None:
-                if project_id is not None and existing["project_id"] != project_id:
+                if existing["role_code"] != role_code:
+                    raise ValueError("workflow task role does not match topic workflow")
+                if (
+                    project_id is not None
+                    and existing["project_id"] not in {None, project_id}
+                ):
+                    raise ValueError("topic workflow is already linked to another project")
+                if project_id is not None and existing["project_id"] is None:
                     connection.exec_driver_sql(
                         "UPDATE workflow_instances SET project_id = %s, resource_type = 'project', "
                         "resource_id = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
@@ -1005,7 +1014,7 @@ class WorkflowRepository:
     def ensure_project_task(
         self,
         project_id: str,
-        topic_id: int,
+        topic_id: int | None,
         task_type: str = "brief",
         role_code: str = "creative_planner",
         *,
@@ -1038,6 +1047,10 @@ class WorkflowRepository:
                 (workflow_id, task_type, project_id),
             ).mappings().fetchone()
             if existing is not None:
+                if existing["topic_id"] != topic_id:
+                    raise ValueError("project workflow task belongs to another topic")
+                if existing["role_code"] != role_code:
+                    raise ValueError("project workflow task role does not match")
                 return self._task_dict(existing)
             role = connection.exec_driver_sql(
                 "SELECT 1 FROM roles WHERE code = %s  "
@@ -2688,7 +2701,22 @@ class WorkflowRepository:
         task = dict(row)
         task["assignee_user_id"] = task.pop("assignee_id")
         task["assigned_by_user_id"] = task.pop("assigned_by")
+        task["local_project_id"] = WorkflowRepository.local_project_id(
+            task.get("project_id")
+        )
         return task
+
+    @staticmethod
+    def local_project_id(project_id: Any) -> str | None:
+        """Decode a creative scoped ID for local URLs without weakening DB scope."""
+
+        if project_id is None:
+            return None
+        value = str(project_id)
+        match = re.fullmatch(
+            r"creative:[0-9a-fA-F-]{36}:project:([1-9][0-9]*)", value
+        )
+        return match.group(1) if match is not None else value
 
     @staticmethod
     def _submission_dict(row: Any) -> dict[str, Any]:

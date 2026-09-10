@@ -28,6 +28,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from jinja2 import Environment, FileSystemLoader
 
 import WebGUI
 from core.events import WorkerEvent
@@ -512,6 +513,50 @@ def test_beats_workspace_uses_an_episode_selector_to_review_series_drafts():
     assert "projectBeatEpisodeLabel(episodeNumber)" in creative
     assert "projectBeatEpisodeLabel(episodeNumber)" in beats
     assert '<select class="form-select form-select-sm"' in beats
+
+
+def test_writing_episode_workspaces_can_show_and_download_selected_or_all_episodes():
+    navigation = _source("templates/common/workspace/project_module_navigation.html")
+    outlines = _source("templates/common/workspace/project_outlines.html")
+    beats = _source("templates/common/workspace/project_beats.html")
+    scripts = _source("templates/common/workspace/project_scripts.html")
+    modal = _source("templates/common/workspace/creative_episode_download_modal.html")
+    creative = _source("static/js/common/creative.js")
+    tasks = _source("static/js/common/tasks.js")
+    api = _source("creative/api.py")
+
+    assert '<option :value="0">全集</option>' in navigation
+    assert '<option :value="0">全集</option>' in beats
+    assert '<option :value="0">全集</option>' in scripts
+    assert "selected === 0" in _source("static/js/writing/outlines.js")
+    assert "projectStageEpisodeItems('beats')" in beats
+    assert "projectStageEpisodeItems('script')" in scripts
+    assert "多集/全集下载" in outlines
+    assert "多集/全集下载" in beats
+    assert "多集/全集下载" in scripts
+    assert "selectedEpisodes" in modal
+    assert "downloadSelectedEpisodes()" in creative
+    assert "episodeView === 'all'" in tasks
+    assert '"/projects/{project_id}/episodes/download"' in api
+
+
+def test_brief_and_characters_navigation_hide_episode_selector():
+    environment = Environment(loader=FileSystemLoader("templates"), autoescape=True)
+    template = environment.get_template(
+        "common/workspace/project_module_navigation.html"
+    )
+    context = {
+        "can_open_planning_project_details": True,
+        "can_open_writing_project_details": True,
+    }
+
+    for module in ("brief", "characters"):
+        rendered = template.render(creative_module=module, **context)
+        assert 'id="creative-module-episode"' not in rendered
+
+    for module in ("outline", "beats", "script"):
+        rendered = template.render(creative_module=module, **context)
+        assert 'id="creative-module-episode"' in rendered
 
 
 def test_beats_workspace_labels_single_episode_generation_as_regeneration_when_present():
@@ -1719,6 +1764,17 @@ def test_creative_generation_opens_progress_modal_with_retry_controls():
     assert "人物关系生成任务已发起" in html
     assert "关闭弹窗不会中断生成任务" in html
     assert '@click="retryCreativeJob"' in html
+
+
+def test_creative_generation_retry_uses_owning_business_action():
+    script = _source("static/js/common/creative.js")
+    modal = _source("templates/common/workspace/creative_progress_modal.html")
+
+    assert "/generation-jobs/${this.creativeWorkspace.jobId}/retry" in script
+    assert "operation-bound jobs" not in script
+    assert "String(extra.workflow_mode || 'sequential') === 'sequential'" in script
+    assert "this.creativeWorkspace.retrying = true" in script
+    assert "creativeJobRunning() && creativeWorkspace.jobProgress?.retry_attempt" in modal
 
 
 def test_downloaded_topic_action_opens_episode_transcript_preview():

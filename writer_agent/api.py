@@ -285,6 +285,9 @@ def build_writer_agent_router(
     store = store or WriterAgentStore(
         Path(runtime_dir) / "writer_agent" / "writer_agent.db"
     )
+    authority_repository = creative_repository or getattr(
+        creative_application_service, "repository", None
+    )
     resolved_action_service = action_service
     if resolved_action_service is None and runner is not None:
         resolved_action_service = ActionService(
@@ -293,10 +296,8 @@ def build_writer_agent_router(
             audit_service=audit_service,
             permission_service=permission_service,
             workflow_repository=workflow_repository,
+            creative_repository=authority_repository,
         )
-    authority_repository = creative_repository or getattr(
-        creative_application_service, "repository", None
-    )
     router = APIRouter(prefix="/api/writer-agent", tags=["writer-agent"])
     router.creative_dependencies = SimpleNamespace(
         repository=creative_repository,
@@ -331,6 +332,10 @@ def build_writer_agent_router(
     def assert_access(principal: Principal) -> None:
         if not principal.is_system_admin and "script.review.generate" not in principal.permissions:
             raise HTTPException(403, "没有使用编剧大师的权限")
+
+    def workflow_project_id(project_id: int | str) -> str:
+        scope = getattr(authority_repository, "workflow_project_id", None)
+        return scope(project_id) if callable(scope) else str(project_id)
 
     def session_user_id(principal: Principal) -> str | None:
         return None if principal.is_system_admin else principal.user_id
@@ -649,7 +654,7 @@ def build_writer_agent_router(
             except Exception as exc:
                 raise HTTPException(404, "可关联项目不存在") from exc
             if permission_service is not None and not permission_service.can_read_project(
-                principal, str(project_id)
+                principal, workflow_project_id(project_id)
             ):
                 raise HTTPException(403, "无权关联该项目")
             materials = _session_materials(session)
@@ -703,7 +708,7 @@ def build_writer_agent_router(
             if permission_service is None:
                 raise HTTPException(503, "项目权限服务不可用")
             if not permission_service.can_read_project(
-                principal, str(linked_project_id)
+                principal, workflow_project_id(linked_project_id)
             ):
                 raise HTTPException(403, "当前账号已无权读取关联项目")
             review_turn = ensure_checkpoint()
@@ -779,7 +784,7 @@ def build_writer_agent_router(
             if permission_service is None:
                 raise HTTPException(503, "项目权限服务不可用")
             if not permission_service.can_read_project(
-                principal, str(linked_project_id)
+                principal, workflow_project_id(linked_project_id)
             ):
                 raise HTTPException(403, "当前账号已无权读取关联项目")
         try:

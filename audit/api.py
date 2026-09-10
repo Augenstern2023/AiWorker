@@ -217,6 +217,8 @@ _EXPORT_HEADERS = (
     "变更前摘要",
     "变更后摘要",
     "请求 ID",
+    "服务实例 ID",
+    "创作库 ID",
     "IP 地址",
     "用户代理",
 )
@@ -239,6 +241,8 @@ def _export_rows(events: list[dict[str, Any]]) -> list[tuple[str, ...]]:
                 _export_json(event["before_summary"]),
                 _export_json(event["after_summary"]),
                 _export_value(event["request_id"]),
+                _export_value(event["service_instance_id"]),
+                _export_value(event["creative_store_id"]),
                 _export_value(event["ip_address"]),
                 _export_value(event["user_agent"]),
             )

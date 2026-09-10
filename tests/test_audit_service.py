@@ -129,6 +129,33 @@ def test_audit_redacts_secrets_and_records_request_metadata(
     assert event["user_agent"] == "audit-test"
 
 
+def test_audit_records_service_and_creative_store_identity(
+    repository: IdentityRepository, admin: Principal
+) -> None:
+    audit_service = AuditService(
+        repository,
+        service_instance_id="service-instance-1",
+        creative_store_id="creative-store-1",
+    )
+
+    event_id = audit_service.record(
+        actor=admin,
+        action="creative.project.delete",
+        target_type="creative_project",
+        target_id="6",
+        project_id="creative:creative-store-1:project:6",
+        before={"id": 6},
+        after=None,
+        reason=None,
+        result="success",
+    )
+
+    event = audit_service.get(event_id)
+    assert event is not None
+    assert event["service_instance_id"] == "service-instance-1"
+    assert event["creative_store_id"] == "creative-store-1"
+
+
 def test_audit_redacts_sensitive_key_value_text_inside_error_summaries(
     audit_service: AuditService, admin: Principal
 ):

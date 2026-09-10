@@ -13,7 +13,7 @@ from io import BytesIO, StringIO
 import json
 from pathlib import Path
 import sqlite3
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from urllib.parse import unquote
 
 from fastapi import FastAPI
@@ -75,6 +75,66 @@ def build_client(tmp_path: Path) -> tuple[TestClient, CreativeRepository, Lifecy
             job_manager=manager,
         )
     return TestClient(app), CreativeRepository(runtime_dir / "creative" / "creative.db"), manager
+
+
+def test_generation_retry_route_uses_creative_application_service(tmp_path: Path):
+    app = FastAPI()
+    principal = Principal(
+        user_id="retry-owner",
+        username="retry-owner",
+        display_name="重试任务创建人",
+        role_codes=("system_admin",),
+        permissions=frozenset({"*"}),
+        data_scope="all",
+        session_id="retry-session",
+    )
+    app.dependency_overrides[creative_api_principal] = lambda: principal
+    app.dependency_overrides[current_principal] = lambda: principal
+    failed_job = CrawlJob(
+        job_id="failed-series-beats",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "project_id": 3,
+            "action": "beats",
+            "normalized_stage": "beats",
+            "operation_id": "series-beats-operation",
+        },
+    )
+    before = {
+        "job_id": failed_job.job_id,
+        "project_id": 3,
+        "status": "failed",
+        "job": failed_job.to_dict(),
+    }
+    retried = JobState(job=failed_job, status="running")
+    manager = MagicMock()
+    manager.get_job.return_value = before
+    application_service = MagicMock()
+    application_service.workflow_adapter = MagicMock()
+    application_service.transitions = MagicMock()
+    application_service.original_project_service = MagicMock()
+    application_service.retry_generation_job.return_value = retried
+    register_creative_routes(
+        app,
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        job_manager=manager,
+        workflow_repository=MagicMock(),
+        repository=CreativeRepository(tmp_path / "creative.db"),
+        application_service=application_service,
+    )
+
+    response = TestClient(app).post(
+        "/api/creative/projects/3/generation-jobs/failed-series-beats/retry"
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["job"]["job_id"] == failed_job.job_id
+    application_service.retry_generation_job.assert_called_once_with(
+        job_state=before,
+        actor=principal,
+    )
 
 
 def seed_topic(
@@ -333,6 +393,55 @@ def test_free_resources_keep_the_common_generated_content_download(
     assert "attachment" in download.headers["content-disposition"]
 
 
+def test_free_workspace_downloads_selected_and_all_episode_heads(tmp_path: Path):
+    client, repository, _ = build_client(tmp_path)
+    project = repository.create_original_project(
+        seed_text="女孩能读取遗失的梦",
+        name="梦境档案",
+        target_episode_count=2,
+        created_by="lifecycle-admin",
+        creation_request_id="free-episode-downloads",
+        workflow_mode="free",
+    )
+    repository.mark_project_bootstrap_status(project["id"], "ready")
+    service = FreeCreativeModeService(repository)
+    service.create_outline(
+        project["id"],
+        [
+            {"episode": 1, "core_event": "收到梦境"},
+            {"episode": 2, "core_event": "归还梦境"},
+        ],
+        expected_head_revision=0,
+        actor_user_id="lifecycle-admin",
+    )
+    for episode_number in (1, 2):
+        service.create_episode_resource(
+            project["id"], "beats", episode_number,
+            {"beats": [{"order": 1, "scene": f"梦境 {episode_number}"}]},
+            expected_head_revision=0, actor_user_id="lifecycle-admin",
+        )
+        service.create_episode_resource(
+            project["id"], "script", episode_number,
+            {"episode_title": f"梦境 {episode_number}", "scenes": []},
+            expected_head_revision=0, actor_user_id="lifecycle-admin",
+        )
+
+    all_beats = client.get(
+        f"/api/creative/projects/{project['id']}/episodes/download",
+        params={"stage": "beats", "episodes": "all", "format": "json"},
+    )
+    assert all_beats.status_code == 200
+    assert all_beats.json()["episode_numbers"] == [1, 2]
+
+    one_script = client.get(
+        f"/api/creative/projects/{project['id']}/episodes/download",
+        params={"stage": "script", "episodes": "2", "format": "txt"},
+    )
+    assert one_script.status_code == 200
+    assert "第 2 集:梦境 2" in one_script.text
+    assert "第 1 集:" not in one_script.text
+
+
 def test_merged_scene_script_download_returns_current_episodes_in_one_txt(tmp_path: Path):
     client, repository, _ = build_client(tmp_path)
     topic = seed_topic(repository, "合并剧本接口剧")
@@ -374,6 +483,39 @@ def test_merged_scene_script_download_returns_current_episodes_in_one_txt(tmp_pa
     assert "========== 第 1 集 ==========" in download.text
     assert "========== 第 3 集 ==========" in download.text
     assert download.text.index("第 1 集:开局") < download.text.index("第 3 集:转折")
+
+    selected_scripts = client.get(
+        f"/api/creative/projects/{project['id']}/episodes/download",
+        params={"stage": "script", "episodes": "1,3", "format": "txt"},
+    )
+    assert selected_scripts.status_code == 200
+    assert "第1、3集场次剧本.txt" in unquote(
+        selected_scripts.headers["content-disposition"]
+    )
+    assert "第 1 集:开局" in selected_scripts.text
+    assert "第 3 集:转折" in selected_scripts.text
+
+    all_outlines = client.get(
+        f"/api/creative/projects/{project['id']}/episodes/download",
+        params={"stage": "outline", "episodes": "all", "format": "md"},
+    )
+    assert all_outlines.status_code == 200
+    assert "共 3 集" in all_outlines.text
+    assert "## 第 2 集" in all_outlines.text
+
+    selected_beats = client.get(
+        f"/api/creative/projects/{project['id']}/episodes/download",
+        params={"stage": "beats", "episodes": "3", "format": "json"},
+    )
+    assert selected_beats.status_code == 200
+    assert selected_beats.json()["episode_numbers"] == [3]
+
+    unavailable = client.get(
+        f"/api/creative/projects/{project['id']}/episodes/download",
+        params={"stage": "script", "episodes": "2", "format": "txt"},
+    )
+    assert unavailable.status_code == 404
+    assert "以下集数没有当前可下载内容：2" in unavailable.json()["detail"]
 
     repository.create_episode_script(project["id"], 1, {
         "episode_title": "开局重写", "scenes": [{

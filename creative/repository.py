@@ -119,12 +119,53 @@ class CreativeRepository:
         self._migrate_project_table_if_needed(self.db_path)
         self._migrate_legacy_workflow_mode_constraint_if_needed(self.db_path)
         self._init_schema()
+        self.store_id = self._load_or_create_store_id()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
+
+    def _load_or_create_store_id(self) -> str:
+        """Return the durable identity of this SQLite creative store."""
+
+        with self._connect() as conn:
+            candidate = str(uuid.uuid4())
+            conn.execute(
+                "INSERT OR IGNORE INTO creative_store_metadata(key, value) "
+                "VALUES ('store_id', ?)",
+                (candidate,),
+            )
+            row = conn.execute(
+                "SELECT value FROM creative_store_metadata WHERE key = 'store_id'"
+            ).fetchone()
+            assert row is not None
+        store_id = str(row["value"] or "").strip()
+        try:
+            return str(uuid.UUID(store_id))
+        except ValueError as exc:
+            raise ValueError("creative store identity is invalid") from exc
+
+    def workflow_project_id(self, project_id: int | str) -> str:
+        """Build the globally scoped workflow identity for a local project."""
+
+        return f"creative:{self.store_id}:project:{int(project_id)}"
+
+    def workflow_topic_id(self, topic_id: int | str) -> str:
+        """Build the globally scoped workflow identity for a local topic."""
+
+        return f"creative:{self.store_id}:topic:{int(topic_id)}"
+
+    def local_project_id_from_workflow(self, project_id: Any) -> int | None:
+        """Decode only project identities that belong to this creative store."""
+
+        prefix = f"creative:{self.store_id}:project:"
+        value = str(project_id or "")
+        if not value.startswith(prefix):
+            return None
+        local_id = value.removeprefix(prefix)
+        return int(local_id) if local_id.isdigit() and int(local_id) > 0 else None
 
     @staticmethod
     def _migrate_project_table_if_needed(db_path: str | Path) -> None:
@@ -314,6 +355,12 @@ class CreativeRepository:
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS creative_store_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+            """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS creative_topics (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,

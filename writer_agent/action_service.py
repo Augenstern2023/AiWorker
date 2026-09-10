@@ -60,12 +60,14 @@ class ActionService:
         audit_service: Any | None = None,
         permission_service: Any | None = None,
         workflow_repository: Any | None = None,
+        creative_repository: Any | None = None,
     ) -> None:
         self.store = store
         self.runner = runner
         self.audit_service = audit_service
         self.permission_service = permission_service
         self.workflow_repository = workflow_repository
+        self.creative_repository = creative_repository
 
     def _require_owned_action(self, command: ActionCommand) -> dict[str, Any]:
         session = self.store.get(command.session_id, command.actor.user_id)
@@ -89,7 +91,8 @@ class ActionService:
             raise WriterActionError("PROJECT_ACCESS_DENIED", "关联项目不可写")
         if self.permission_service is None or self.workflow_repository is None:
             return
-        project_key = str(project_id)
+        scope = getattr(self.creative_repository, "workflow_project_id", None)
+        project_key = scope(project_id) if callable(scope) else str(project_id)
         if action["action_type"] == "project.link":
             if not self.permission_service.can_read_project(actor, project_key):
                 raise WriterActionError("PROJECT_ACCESS_DENIED", "无权关联该项目")

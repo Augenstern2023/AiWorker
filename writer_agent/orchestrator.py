@@ -992,7 +992,15 @@ class WriterProjectOrchestrator:
                     "RESULT_VALIDATION_FAILED", "关联项目 ID 缺失或无效"
                 ) from exc
             project = self.creative_service.get_project(project_id)
-            if not self.permission_service.can_read_project(actor, str(project_id)):
+            scope = getattr(
+                getattr(self.creative_service, "repository", None),
+                "workflow_project_id",
+                None,
+            )
+            project_key = scope(project_id) if callable(scope) else str(project_id)
+            if not self.permission_service.can_read_project(
+                actor, project_key
+            ):
                 raise WriterActionError("PROJECT_ACCESS_DENIED", "无权关联该项目")
         elif action["action_type"] == "project.create_original":
             if not (

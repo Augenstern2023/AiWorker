@@ -417,7 +417,7 @@ class CreativeApplicationService:
             "creative_planner" if stage in {"brief", "characters"} else "screenwriter"
         )
         task = self.workflow_repository.ensure_project_task(
-            str(project_id),
+            self.repository.workflow_project_id(project_id),
             project.get("topic_id"),
             task_type=stage,
             role_code=role_code,
@@ -447,7 +447,7 @@ class CreativeApplicationService:
             task["status"] in {"assigned", "in_progress", "returned"}
             and task.get("assignee_user_id") not in {None, actor.user_id}
             and not self.workflow_repository.is_active_project_member(
-                str(project_id), actor
+                self.repository.workflow_project_id(project_id), actor
             )
         ):
             raise CreativeTaskOccupied("该创作阶段已由其他人员处理")
@@ -463,12 +463,12 @@ class CreativeApplicationService:
             False
             if globally_authorized
             else self.workflow_repository.is_active_project_member(
-                str(project_id), actor
+                self.repository.workflow_project_id(project_id), actor
             )
         )
         if not self.permission_service.can_create_project_content(
             actor,
-            str(project_id),
+            self.repository.workflow_project_id(project_id),
             active_member=active_member,
         ):
             raise CreativeProjectAccessDenied("无权创作该项目")
@@ -1011,6 +1011,101 @@ class CreativeApplicationService:
             "workflow_task_id": workflow_task_id,
             "operation_id": operation_id,
         }
+
+    def retry_generation_job(
+        self,
+        *,
+        job_state: dict[str, Any],
+        actor: Principal,
+    ) -> Any:
+        """Retry one failed sequential generation through its owning operation."""
+
+        if self.job_manager is None:
+            raise RuntimeError("creative job manager is unavailable")
+        if str(job_state.get("status") or "") != "failed":
+            raise ValueError("只有失败的创作任务可以重试")
+        payload = job_state.get("job")
+        if not isinstance(payload, dict):
+            raise ValueError("创作任务载荷缺失")
+        if (
+            str(payload.get("platform") or "") != "creative"
+            or str(payload.get("crawler_type") or "") != "phase4_generate"
+        ):
+            raise ValueError("该任务不是创作生成任务")
+        extra = payload.get("extra")
+        if not isinstance(extra, dict):
+            raise ValueError("创作任务上下文缺失")
+        if str(extra.get("workflow_mode") or "sequential") != "sequential":
+            raise ValueError("自由创作任务需要重新发起生成")
+
+        operation_id = str(extra.get("operation_id") or "").strip()
+        request_hash = str(extra.get("generation_request_hash") or "").strip()
+        creator_id = str(extra.get("created_by_user_id") or "").strip()
+        workflow_task_id = str(extra.get("workflow_task_id") or "").strip()
+        try:
+            project_id = int(extra.get("project_id") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("创作任务项目范围无效") from exc
+        action = str(extra.get("action") or "").strip()
+        stage = str(extra.get("normalized_stage") or "").strip()
+        expected_stage = {
+            "blueprints": "brief",
+            "blueprint_variant": "brief",
+            "characters": "characters",
+            "outlines": "outline",
+            "outline_overview": "outline",
+            "beats": "beats",
+            "script": "script",
+        }.get(action)
+        if (
+            project_id < 1
+            or not operation_id
+            or not request_hash
+            or not creator_id
+            or not workflow_task_id
+            or expected_stage is None
+            or stage != expected_stage
+        ):
+            raise ValueError("创作任务业务身份不完整，无法安全重试")
+        project = self.repository.get_project(project_id)
+        if project is None:
+            raise KeyError(project_id)
+        if project.get("workflow_mode", "sequential") != "sequential":
+            raise ValueError("项目创作模式已变化，请重新发起生成")
+        if not actor.is_system_admin and creator_id != actor.user_id:
+            raise CreativeProjectAccessDenied("只有原任务创建人可以重试")
+
+        self.assert_stage_write_access(project_id, stage, actor)
+        self.validate_task_for_creation(
+            workflow_task_id, project_id, stage, actor
+        )
+        authority = extra.get("source_authority")
+        authority_sha = str(extra.get("source_authority_sha256") or "").strip()
+        if (
+            not isinstance(authority, dict)
+            or not authority_sha
+            or canonical_request_hash(authority) != authority_sha
+        ):
+            raise ValueError("创作任务来源校验失败，无法安全重试")
+        try:
+            self.repository.assert_generation_authority(project_id, authority)
+        except ValueError as exc:
+            raise CreativeContextConflict(
+                "项目上游版本已变化，请重新发起生成"
+            ) from exc
+
+        retry_payload = json.loads(json.dumps(payload, ensure_ascii=False))
+        retry_payload["extra"]["retry_failed_operation"] = True
+        get_or_create = getattr(self.job_manager, "get_or_create_job", None)
+        if not callable(get_or_create):
+            raise RuntimeError("creative operation retry is unavailable")
+        return get_or_create(
+            operation_id,
+            retry_payload,
+            created_by_user_id=creator_id,
+            workflow_task_id=workflow_task_id,
+            project_id=project_id,
+        )
 
     def start_generation_compat(
         self,

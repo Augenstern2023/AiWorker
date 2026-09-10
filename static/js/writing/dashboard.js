@@ -73,7 +73,7 @@
         stage.textContent = stageLabels[task.task_type] || task.task_type;
 
         const project = document.createElement('td');
-        const projectId = String(task.project_id || '');
+        const projectId = String(task.local_project_id || task.project_id || '');
         const projectName = projectNames.get(projectId) || (projectId ? `项目 #${projectId}` : '未关联项目');
         if (projectId) {
             const link = document.createElement('a');

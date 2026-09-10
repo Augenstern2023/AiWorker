@@ -44,6 +44,10 @@ class ProjectReviewCoordinator:
         self.job_manager = job_manager
         self.runtime_dir = Path(runtime_dir)
 
+    def _workflow_project_id(self, project_id: Any) -> str:
+        scope = getattr(self.repository, "workflow_project_id", None)
+        return scope(project_id) if callable(scope) else str(project_id)
+
     def preview(self, session_id: int, principal: Any, audit_scope: str) -> dict[str, Any]:
         session, project = self._session_project(session_id, principal)
         del session
@@ -173,7 +177,7 @@ class ProjectReviewCoordinator:
         if project_id is None:
             raise ProjectReviewError(409, "请先关联创作项目后再发起完整项目审核")
         if self.permission_service is None or not self.permission_service.can_read_project(
-            principal, str(project_id)
+            principal, self._workflow_project_id(project_id)
         ):
             raise ProjectReviewError(403, "当前账号已无权读取关联项目")
         project = self.repository.get_project(int(project_id))
@@ -219,7 +223,13 @@ class ProjectReviewCoordinator:
         ):
             raise ProjectReviewError(403, "没有访问此完整项目审核的权限")
         project_id = review.get("project_id")
-        if project_id is None or self.permission_service is None or not self.permission_service.can_read_project(principal, str(project_id)):
+        if (
+            project_id is None
+            or self.permission_service is None
+            or not self.permission_service.can_read_project(
+                principal, self._workflow_project_id(project_id)
+            )
+        ):
             raise ProjectReviewError(403, "当前账号已无权读取关联项目")
 
     def _queue(self, review: dict[str, Any], principal: Any, *, retry_failed_operation: bool) -> Any:

@@ -100,11 +100,17 @@ class RollbackService:
             )
         for project_id in project_ids:
             try:
+                scope = getattr(
+                    self.creative_repository, "workflow_project_id", None
+                )
+                project_key = (
+                    scope(project_id) if callable(scope) else str(project_id)
+                )
                 active_member = self.workflow_repository.is_active_project_member(
-                    str(project_id), actor
+                    project_key, actor
                 )
                 allowed = self.permission_service.can_create_project_content(
-                    actor, str(project_id), active_member=active_member
+                    actor, project_key, active_member=active_member
                 )
             except (AttributeError, OSError, TypeError, ValueError):
                 allowed = False

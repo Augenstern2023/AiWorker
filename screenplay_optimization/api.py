@@ -60,9 +60,10 @@ def build_script_optimization_router(
         if principal.is_system_admin:
             return True
         service = getattr(request.app.state, "identity_permission_service", None)
+        scoped_project_id = repository.workflow_project_id(project_id)
         return isinstance(service, PermissionService) and (
-            service.can_access_assigned_project(principal, str(project_id))
-            or service.can_access_managed_project(principal, str(project_id))
+            service.can_access_assigned_project(principal, scoped_project_id)
+            or service.can_access_managed_project(principal, scoped_project_id)
         )
 
     def get_review_or_404(request: Request, principal: Principal, review_id: int) -> dict[str, Any]:

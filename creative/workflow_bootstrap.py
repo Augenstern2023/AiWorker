@@ -50,7 +50,12 @@ class WorkflowBootstrapService:
             task_type="topic_decision",
             role_code="selection_operator",
             actor=actor,
-            project_id=project_id,
+            project_id=(
+                self.creative_repository.workflow_project_id(project_id)
+                if project_id is not None
+                else None
+            ),
+            workflow_scope=self.creative_repository.workflow_topic_id(topic_id),
         )
         if self.audit_service is not None:
             self.audit_service.record(
@@ -77,4 +82,6 @@ class WorkflowBootstrapService:
                 "project.manage permission is required to bootstrap workflow"
             )
         if project_id is not None and not live_actor["is_system_admin"]:
-            self.workflow_repository.assert_can_manage_project(project_id, actor)
+            self.workflow_repository.assert_can_manage_project(
+                self.creative_repository.workflow_project_id(project_id), actor
+            )

@@ -10,6 +10,7 @@
 {% include "common/workspace/project_progress.html" %}
 <template x-if="creativeWorkspace.project"><div>{% include "common/workspace/project_blueprints.html" %}</div></template>
 {% include "common/workspace/creative_progress_modal.html" %}
+{% if can_export_projects %}{% include "common/workspace/production_export_modal.html" %}{% endif %}
 {% include "common/workspace/free_creative_modals.html" %}
 {% if can_export_projects %}{% include "common/workspace/production_export_modal.html" %}{% endif %}
 {% endblock %}

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -197,6 +198,17 @@ def mount_writer_agent_controller_with_rollback_history(page: Page) -> None:
             {role: 'assistant', content: '已完成修改'}
           ]
         };
+        window.__writerEarlierSession = {
+          id: 40, title: '上一个会话', content: '旧材料', filename: '',
+          project_id: null, history_revision: 1, reports: [], actions: [],
+          messages: [
+            {kind: 'material', role: 'user', message_id: 'material-0',
+             material_name: '旧材料', material_length: 3,
+             material_preview: '旧材料'},
+            {role: 'user', content: '旧会话内容', message_id: 'message-0',
+             turn_controls: {can_rollback: true, can_resend: true, blocked_reason: ''}}
+          ]
+        };
         window.aiworkerApi = {
           async request(url, options = {}) {
             window.__writerRollbackRequests.push({
@@ -205,9 +217,13 @@ def mount_writer_agent_controller_with_rollback_history(page: Page) -> None:
             });
             let payload;
             if (url === '/api/writer-agent/sessions' && !options.method) {
-              payload = {items: [window.__writerRollbackSession]};
+              payload = {items: [
+                window.__writerRollbackSession, window.__writerEarlierSession
+              ]};
             } else if (url === '/api/writer-agent/sessions/41') {
               payload = window.__writerRollbackSession;
+            } else if (url === '/api/writer-agent/sessions/40') {
+              payload = window.__writerEarlierSession;
             } else if (url.endsWith('/rollback-preview')) {
               payload = {
                 history_revision: 2, messages_to_remove: 3,
@@ -254,6 +270,33 @@ def mount_writer_agent_controller_with_rollback_history(page: Page) -> None:
     page.add_script_tag(path=ROOT / "static/js/review/writer_project_review.js")
     page.add_script_tag(path=ROOT / "static/js/review/writer_agent.js")
     page.get_by_text("修改第一幕").wait_for()
+
+
+def test_switching_to_an_earlier_session_shows_rollback_notice_first(
+    page: Page,
+) -> None:
+    """Would catch an earlier session opening without explaining rollback semantics."""
+
+    mount_writer_agent_controller_with_rollback_history(page)
+
+    page.get_by_role("button", name=re.compile("上一个会话")).click()
+
+    page.get_by_role("heading", name="回档提醒").wait_for()
+    page.get_by_text("切换会话不会自动回档").wait_for()
+    requests = page.evaluate("window.__writerRollbackRequests")
+    assert not any(request["url"] == "/api/writer-agent/sessions/40" for request in requests)
+
+    page.get_by_role("button", name="取消", exact=True).click()
+    assert page.get_by_text("修改第一幕").count() == 1
+
+    page.get_by_role("button", name=re.compile("上一个会话")).click()
+    page.get_by_role("button", name="仅打开会话").click()
+    page.get_by_text("旧会话内容").wait_for()
+    requests = page.evaluate("window.__writerRollbackRequests")
+    assert sum(
+        request["url"] == "/api/writer-agent/sessions/40"
+        for request in requests
+    ) == 1
 
 
 def test_message_rollback_controls_preview_before_mutating_history(

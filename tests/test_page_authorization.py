@@ -52,6 +52,7 @@ class FakeNavigationRepository:
 class FakeIdentityPermissionService:
     def __init__(self, principal: Principal | None) -> None:
         self.principal = principal
+        self.participating_project_ids: set[str] = set()
         self.session_service = SimpleNamespace(
             cookie_name="aiworker_session",
             resolve_session=lambda raw_token: None,
@@ -59,6 +60,15 @@ class FakeIdentityPermissionService:
 
     def principal_for_session(self, raw_token: str | None) -> Principal | None:
         return self.principal
+
+    def can_participate_in_project(
+        self, principal: Principal, project_id: str
+    ) -> bool:
+        return (
+            principal.is_system_admin
+            or "project_owner" in principal.role_codes
+            or project_id in self.participating_project_ids
+        )
 
 
 def _principal(
@@ -254,6 +264,26 @@ def test_writer_can_open_read_only_planning_pages_from_a_project(page_app):
     assert characters_response.status_code == 200
 
 
+@pytest.mark.parametrize(
+    "route",
+    (
+        "/writing/projects/project-9/outlines",
+        "/writing/projects/project-9/episodes/1/beats",
+        "/writing/projects/project-9/episodes/1/scripts",
+    ),
+)
+def test_writer_project_pages_require_project_participation(page_app, route: str):
+    principal = _principal(roles=("screenwriter",))
+    page_app[1].access_by_route["/writing/projects"] = {principal.user_id}
+    client = _client(page_app, principal)
+
+    assert client.get(route).status_code == 403
+    page_app[0].state.identity_permission_service.participating_project_ids.add(
+        "project-9"
+    )
+    assert client.get(route).status_code == 200
+
+
 def test_project_brief_versions_permission_and_workspace_scripts(page_app):
     """A deployed permission fix must not be hidden by cached workspace assets."""
 
@@ -281,13 +311,36 @@ def test_managed_project_page_grant_keeps_project_preview_navigation_available(
 
     assert response.status_code == 307
     assert response.headers["location"] == "/review/projects"
-    for route in (
-        "/planning/projects/project-1/characters",
+    assert client.get(
+        "/planning/projects/project-1/characters"
+    ).status_code == 200
+    writing_routes = (
         "/writing/projects/project-1/outlines",
         "/writing/projects/project-1/episodes/1/beats",
         "/writing/projects/project-1/episodes/1/scripts",
-    ):
+    )
+    for route in writing_routes:
+        assert client.get(route).status_code == 403
+
+    page_app[0].state.identity_permission_service.participating_project_ids.add(
+        "project-1"
+    )
+    for route in writing_routes:
         assert client.get(route).status_code == 200
+
+
+@pytest.mark.parametrize("role", ("system_admin", "project_owner"))
+def test_global_project_roles_can_open_writer_project_without_membership(
+    page_app, role: str
+):
+    principal = _principal(roles=(role,))
+    page_app[1].access_by_route["/writing/projects"] = {principal.user_id}
+
+    response = _client(page_app, principal).get(
+        "/writing/projects/unassigned-project/outlines"
+    )
+
+    assert response.status_code == 200
 
 
 @pytest.mark.parametrize("route", ("/", "/tasks", "/writing/projects"))

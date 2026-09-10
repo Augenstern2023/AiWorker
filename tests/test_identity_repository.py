@@ -165,6 +165,29 @@ def test_project_owner_project_scope_and_configuration_do_not_require_membership
         )
 
 
+def test_project_participation_accepts_assigned_or_managed_scope() -> None:
+    permissions = object.__new__(PermissionService)
+    permissions.can_access_assigned_project = (  # type: ignore[method-assign]
+        lambda principal, project_id: project_id == "assigned"
+    )
+    permissions.can_access_managed_project = (  # type: ignore[method-assign]
+        lambda principal, project_id: project_id == "managed"
+    )
+    principal = Principal(
+        user_id="writer",
+        username="writer",
+        display_name="Writer",
+        role_codes=("screenwriter",),
+        permissions=frozenset(),
+        data_scope="project",
+        session_id="session",
+    )
+
+    assert permissions.can_participate_in_project(principal, "assigned")
+    assert permissions.can_participate_in_project(principal, "managed")
+    assert not permissions.can_participate_in_project(principal, "foreign")
+
+
 def test_project_owner_sees_project_tasks_without_membership() -> None:
     project_task = {
         "id": "foreign-project-task",

@@ -2489,11 +2489,15 @@ def build_creative_router(
                 workflow_adapter.reconcile_project(int(item["id"]))
         items = repository.list_projects(topic_id=topic_id)
         if participating_only:
+            permission_service = getattr(
+                request.app.state, "identity_permission_service", None
+            )
             items = [
                 item
                 for item in items
-                if workflow_repository.is_active_project_member(
-                    str(item["id"]), principal
+                if isinstance(permission_service, PermissionService)
+                and permission_service.can_participate_in_project(
+                    principal, str(item["id"])
                 )
             ]
         elif not principal.is_system_admin:

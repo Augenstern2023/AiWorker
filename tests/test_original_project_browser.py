@@ -176,6 +176,47 @@ def test_shared_project_table_exposes_mode_source_and_stage_columns() -> None:
         assert label in html
 
 
+@pytest.mark.parametrize(
+    ("workspace_page", "expected_project_url"),
+    (
+        ("writing-projects", "/api/creative/projects?participating_only=true"),
+        ("planning-projects", "/api/creative/projects"),
+    ),
+)
+def test_project_list_requests_the_page_visibility_scope(
+    workspace_page: str, expected_project_url: str
+) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            f'<body data-workspace-page="{workspace_page}"></body>'
+        )
+        page.add_script_tag(
+            content="""
+            window.__projectListUrls = [];
+            window.aiworkerApi = {request: async (url) => {
+              window.__projectListUrls.push(url);
+              return {ok: true, json: async () => ({items: []})};
+            }};
+            """
+        )
+        page.add_script_tag(content=_source("static/js/common/creative.js"))
+        page.add_script_tag(content=_source("static/js/common/tasks.js"))
+
+        urls = page.evaluate(
+            """async () => {
+                const workspace = appData();
+                await workspace.fetchCreativeProjects();
+                return window.__projectListUrls;
+            }"""
+        )
+        browser.close()
+
+    assert urls[0] == expected_project_url
+    assert urls[1] == "/api/creative/topics?status=adopted&limit=500"
+
+
 def test_original_brief_uses_mode_templates_and_original_fields() -> None:
     source = (ROOT / "templates/common/workspace/project_blueprints.html").read_text(
         encoding="utf-8"

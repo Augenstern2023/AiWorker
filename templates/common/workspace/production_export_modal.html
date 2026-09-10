@@ -28,6 +28,30 @@
                     <div class="tab-pane fade show active" id="production-export-pane-check" role="tabpanel"
                          aria-labelledby="production-export-tab-check">
                         <div class="alert alert-secondary small mb-3">可导出全剧或指定集的锁定版本，格式固定为 JSON。导出不等于生产审批，仅打包创作资料。</div>
+                        <div class="border rounded p-3 mb-3" id="production-export-version-section">
+                            <div class="row g-2 align-items-end">
+                                <div class="col-md-5">
+                                    <label class="form-label small" for="production-export-version-strategy">版本选择</label>
+                                    <select class="form-select form-select-sm" id="production-export-version-strategy">
+                                        <option value="current">当前锁定版本（推荐）</option>
+                                        <option value="custom">自定义兼容版本</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-7 small text-muted" id="production-export-version-summary">
+                                    默认使用项目当前锁定的完整版本链。
+                                </div>
+                            </div>
+                            <div class="alert alert-warning small py-2 mt-2 mb-0 d-none" id="production-export-version-warning" role="alert"></div>
+                            <div class="mt-3 d-none" id="production-export-version-controls">
+                                <div class="row g-2">
+                                    <div class="col-md-4"><label class="form-label small" for="production-export-version-brief">Brief</label><select class="form-select form-select-sm" id="production-export-version-brief"></select></div>
+                                    <div class="col-md-4"><label class="form-label small" for="production-export-version-characters">人物关系</label><select class="form-select form-select-sm" id="production-export-version-characters"></select></div>
+                                    <div class="col-md-4"><label class="form-label small" for="production-export-version-outline">全剧大纲</label><select class="form-select form-select-sm" id="production-export-version-outline"></select></div>
+                                </div>
+                                <div class="table-responsive mt-3" id="production-export-episode-version-controls"></div>
+                                <div class="small text-muted mt-2">选择上游版本后，下游只会自动采用兼容的已锁定版本；不兼容版本会置灰。</div>
+                            </div>
+                        </div>
                         <div class="border rounded p-3 mb-3" id="production-export-scope-controls">
                             <div class="row g-2 align-items-end">
                                 <div class="col-md-4">

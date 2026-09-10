@@ -22,6 +22,11 @@ a draft or stale current selection to an older locked revision. Incomplete or
 stale inputs raise ValueError; absent or deleted projects raise KeyError;
 absent database files raise FileNotFoundError.
 
+Passing a version_manifest opts into an explicit export-only snapshot. Standard
+projects still require every selected downstream resource to match its upstream
+references. Free projects may combine independently locked resources; callers
+surface the returned consistency warning before export.
+
 fingerprint is lowercase SHA256 of canonical UTF-8 JSON (sorted keys, compact
  separators, ensure_ascii=False), excluding fingerprint itself, recursively
  excluding timestamp metadata (keys ending _at, timestamp, timestamps) and raw
@@ -111,6 +116,12 @@ class _Inspection:
         self.stages: list[dict[str, Any]] = []
         self.issues: list[dict[str, Any]] = []
         self.errors: list[ValueError] = []
+        self.version_selection: dict[str, Any] = {
+            "strategy": "current",
+            "manifest": {},
+            "candidates": {},
+            "warnings": [],
+        }
 
     def check(self, stage: str, operation: Callable, *, number: int | None = None,
               dependencies: bool = True) -> Any:
@@ -152,6 +163,7 @@ class _Inspection:
             },
             'ready': package is not None, 'fingerprint': package['fingerprint'] if package else None,
             'stages': self.stages, 'issues': self.issues,
+            'version_selection': self.version_selection,
         }
 
 
@@ -193,6 +205,726 @@ def _free_head_provenance(head: dict[str, Any]) -> dict[str, Any]:
         "resource_ref": str(head["resource_ref"]),
         "resource_version": int(head["resource_version"]),
     }
+
+
+def _manifest_item(resource_ref: Any, version: Any) -> dict[str, Any]:
+    return {
+        "resource_ref": str(resource_ref),
+        "version": int(version or 0),
+    }
+
+
+def _package_version_manifest(package: dict[str, Any]) -> dict[str, Any]:
+    brief = package["brief"]
+    characters = package["characters"]
+    outlines = {int(item["episode_number"]): item for item in package["outlines"]}
+    beats = {int(item["episode_number"]): item for item in package["beats"]}
+    scripts = {int(item["episode_number"]): item for item in package["scripts"]}
+    provenance = package["provenance"]
+    character_version = max((int(item.get("version") or 0) for item in characters), default=0)
+    outline_version = max((int(item.get("version") or 0) for item in outlines.values()), default=0)
+    return {
+        "brief": _manifest_item(brief["id"], brief.get("version")),
+        "characters": _manifest_item(
+            provenance["character_batch_id"], character_version,
+        ),
+        "outline": _manifest_item(
+            provenance["outline_batch_id"], outline_version,
+        ),
+        "episodes": {
+            str(number): {
+                "outline": _manifest_item(outlines[number]["id"], outlines[number].get("version")),
+                "beats": _manifest_item(beats[number]["id"], beats[number].get("version")),
+                "script": _manifest_item(scripts[number]["id"], scripts[number].get("version")),
+            }
+            for number in provenance["episode_numbers"]
+        },
+    }
+
+
+def _requested_manifest_item(
+    manifest: dict[str, Any], stage: str, number: int | None = None,
+) -> dict[str, Any] | None:
+    if not isinstance(manifest, dict):
+        raise ValueError("version_manifest: must be an object")
+    if number is None:
+        value = manifest.get(stage)
+    else:
+        episodes = manifest.get("episodes", {})
+        if not isinstance(episodes, dict):
+            raise ValueError("version_manifest: episodes must be an object")
+        episode = episodes.get(str(number), episodes.get(number, {}))
+        if episode is None:
+            return None
+        if not isinstance(episode, dict):
+            raise ValueError("version_manifest: episode entry must be an object")
+        value = episode.get(stage)
+    if value is None:
+        return None
+    if not isinstance(value, dict) or not str(value.get("resource_ref") or "").strip():
+        raise ValueError("version_manifest: resource_ref is required")
+    if "version" in value and (
+        type(value["version"]) is not int or int(value["version"]) < 1
+    ):
+        raise ValueError("version_manifest: version must be a positive integer")
+    return value
+
+
+def _select_resource(
+    candidates: list[Any], requested: dict[str, Any] | None, preferred_ref: Any,
+    *, ref: Callable[[Any], Any], compatible: Callable[[Any], bool],
+) -> Any | None:
+    if requested is not None:
+        requested_ref = str(requested["resource_ref"])
+        return next(
+            (item for item in candidates if str(ref(item)) == requested_ref), None,
+        )
+    preferred = str(preferred_ref or "")
+    if preferred:
+        selected = next(
+            (
+                item for item in candidates
+                if str(ref(item)) == preferred and compatible(item)
+            ),
+            None,
+        )
+        if selected is not None:
+            return selected
+    compatible_rows = [item for item in candidates if compatible(item)]
+    if not compatible_rows:
+        return None
+    return max(compatible_rows, key=lambda item: (
+        int((item[0] if isinstance(item, tuple) else item).get("version") or 0),
+        int((item[0] if isinstance(item, tuple) else item).get("id") or 0),
+    ))
+
+
+def _assert_requested_version(
+    requested: dict[str, Any] | None, version: Any, label: str,
+) -> None:
+    if requested is not None and "version" in requested:
+        if int(requested["version"]) != int(version or 0):
+            raise ValueError(f"{label}: selected version no longer exists")
+
+
+def _locked_cast_batches(
+    conn: sqlite3.Connection, project_id: int, resource_scope: str,
+) -> list[tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]]:
+    characters = []
+    relationships = []
+    for target, table in (
+        (characters, "creative_characters"),
+        (relationships, "creative_relationships"),
+    ):
+        for raw in conn.execute(
+            f"SELECT * FROM {table} WHERE project_id = ? "
+            "AND resource_scope = ? ORDER BY version, id",
+            (project_id, resource_scope),
+        ).fetchall():
+            try:
+                target.append(_row(raw))
+            except ValueError:
+                continue
+    batch_ids = {str(item["batch_id"]) for item in characters}
+    result = []
+    for batch_id in batch_ids:
+        cast = [item for item in characters if str(item["batch_id"]) == batch_id]
+        relations = [item for item in relationships if str(item["batch_id"]) == batch_id]
+        if cast and all(item.get("status") in _LOCKED for item in cast + relations):
+            result.append((cast[0], cast, relations))
+    return result
+
+
+def _locked_outline_batches(
+    conn: sqlite3.Connection, project_id: int, resource_scope: str,
+    numbers: list[int],
+) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
+    rows = []
+    for raw in conn.execute(
+        "SELECT * FROM creative_episodes WHERE project_id = ? "
+        "AND resource_scope = ? AND stage = 'outline' "
+        "ORDER BY version, episode_number, id",
+        (project_id, resource_scope),
+    ).fetchall():
+        try:
+            rows.append(_row(raw))
+        except ValueError:
+            continue
+    result = []
+    for batch_id in {str(item["batch_id"]) for item in rows}:
+        batch = [item for item in rows if str(item["batch_id"]) == batch_id]
+        selected = [item for item in batch if int(item["episode_number"]) in numbers]
+        if (
+            {int(item["episode_number"]) for item in selected} == set(numbers)
+            and all(item.get("status") in _LOCKED for item in selected)
+        ):
+            result.append((selected[0], selected))
+    return result
+
+
+def _custom_free_snapshot(
+    conn: sqlite3.Connection,
+    inspection: _Inspection,
+    project: dict[str, Any],
+    numbers: list[int],
+    manifest: dict[str, Any],
+) -> dict[str, Any] | None:
+    project_id = int(project["id"])
+    heads = {
+        (str(row["stage"]), int(row["episode_number"])): dict(row)
+        for row in conn.execute(
+            "SELECT * FROM creative_resource_heads WHERE project_id = ? "
+            "AND resource_scope = 'free'",
+            (project_id,),
+        ).fetchall()
+    }
+    briefs = [
+        _row(row) for row in conn.execute(
+            "SELECT * FROM creative_blueprints WHERE project_id = ? "
+            "AND resource_scope = 'free' AND status IN ('brief_locked', 'locked', 'approved')",
+            (project_id,),
+        ).fetchall()
+    ]
+    brief_request = _requested_manifest_item(manifest, "brief")
+    brief_row = _select_resource(
+        briefs, brief_request, (heads.get(("brief", 0)) or {}).get("resource_ref"),
+        ref=lambda item: item["id"], compatible=lambda item: True,
+    )
+
+    def read_brief() -> dict[str, Any]:
+        if brief_row is None:
+            raise ValueError("brief: missing locked input")
+        _assert_requested_version(brief_request, brief_row.get("version"), "brief")
+        _digest(brief_row)
+        return brief_row
+
+    brief = inspection.check("brief", read_brief)
+    cast_batches = _locked_cast_batches(conn, project_id, "free")
+    cast_request = _requested_manifest_item(manifest, "characters")
+    cast_batch = _select_resource(
+        cast_batches, cast_request, (heads.get(("characters", 0)) or {}).get("resource_ref"),
+        ref=lambda item: item[0]["batch_id"], compatible=lambda item: True,
+    )
+
+    def read_cast(category: str) -> list[dict[str, Any]]:
+        if cast_batch is None:
+            raise ValueError(f"{category}: missing locked input")
+        _assert_requested_version(cast_request, cast_batch[0].get("version"), category)
+        values = cast_batch[1] if category == "characters" else cast_batch[2]
+        _digest(values)
+        return values
+
+    characters = inspection.check("characters", lambda: read_cast("characters"))
+    relationships = inspection.check("relationships", lambda: read_cast("relationships"))
+    outline_batches = _locked_outline_batches(conn, project_id, "free", numbers)
+    outline_request = _requested_manifest_item(manifest, "outline")
+    outline_batch = _select_resource(
+        outline_batches, outline_request, (heads.get(("outline", 0)) or {}).get("resource_ref"),
+        ref=lambda item: item[0]["batch_id"], compatible=lambda item: True,
+    )
+
+    def read_outline(number: int) -> dict[str, Any]:
+        if outline_batch is None:
+            raise ValueError(f"outline: missing locked input for episode {number}")
+        _assert_requested_version(outline_request, outline_batch[0].get("version"), "outline")
+        value = next(
+            (
+                item for item in outline_batch[1]
+                if int(item["episode_number"]) == number
+            ),
+            None,
+        )
+        if value is None:
+            raise ValueError(f"outline: missing locked input for episode {number}")
+        _digest(value)
+        return value
+
+    outlines = [
+        inspection.check(
+            "outline", lambda n=number: read_outline(n),
+            number=number,
+        )
+        for number in numbers
+    ]
+    episode_rows = []
+    for raw in conn.execute(
+        "SELECT * FROM creative_episodes WHERE project_id = ? "
+        "AND resource_scope = 'free' AND stage IN ('beats', 'script') "
+        "AND status IN ('locked', 'approved') ORDER BY version, id",
+        (project_id,),
+    ).fetchall():
+        try:
+            episode_rows.append(_row(raw))
+        except ValueError:
+            continue
+
+    def read_episode(stage: str, number: int) -> dict[str, Any]:
+        request = _requested_manifest_item(manifest, stage, number)
+        candidates = [
+            item for item in episode_rows
+            if item["stage"] == stage and int(item["episode_number"]) == number
+        ]
+        selected = _select_resource(
+            candidates, request, (heads.get((stage, number)) or {}).get("resource_ref"),
+            ref=lambda item: item["id"], compatible=lambda item: True,
+        )
+        if selected is None:
+            raise ValueError(f"{stage}: missing locked input for episode {number}")
+        _assert_requested_version(request, selected.get("version"), stage)
+        _digest(selected)
+        return selected
+
+    beats = [
+        inspection.check("beats", lambda n=number: read_episode("beats", n), number=number)
+        for number in numbers
+    ]
+    scripts = [
+        inspection.check("script", lambda n=number: read_episode("script", n), number=number)
+        for number in numbers
+    ]
+    if inspection.errors or brief is None or characters is None or relationships is None:
+        return None
+    package = {
+        "schemaVersion": "1.0", "sourceSystem": "AiWorker", "project": project,
+        "provenance": {
+            "project_id": project_id,
+            "project_revision": project.get("revision", 0),
+            "episode_numbers": numbers,
+            **_scope_provenance(project, numbers),
+            "workflow_mode": "free",
+            "locked_brief_id": brief["id"],
+            "character_batch_id": characters[0]["batch_id"],
+            "outline_batch_id": outlines[0]["batch_id"],
+            "resource_heads": [],
+        },
+        "brief": brief, "characters": characters, "relationships": relationships,
+        "outlines": outlines, "beats": beats, "scripts": scripts,
+    }
+    package["version_manifest"] = _package_version_manifest(package)
+    package["provenance"]["resource_heads"] = [
+        {
+            "resource_scope": "free", "stage": stage,
+            "episode_number": number,
+            "resource_ref": item["resource_ref"],
+            "resource_version": item["version"],
+        }
+        for stage, number, item in [
+            ("brief", 0, package["version_manifest"]["brief"]),
+            ("characters", 0, package["version_manifest"]["characters"]),
+            ("outline", 0, package["version_manifest"]["outline"]),
+            *(
+                (stage, number, package["version_manifest"]["episodes"][str(number)][stage])
+                for stage in ("beats", "script") for number in numbers
+            ),
+        ]
+    ]
+    package["fingerprint"] = _digest(_fingerprint_payload(package))
+    return package
+
+
+def _refs_match(
+    item: dict[str, Any], key: str, expected: dict[str, Any], label: str,
+) -> bool:
+    try:
+        _refs(item, key, expected, label)
+    except ValueError:
+        return False
+    return True
+
+
+def _authority_matches(
+    item: dict[str, Any], expected: dict[str, Any], outline: dict[str, Any],
+) -> bool:
+    try:
+        _authority(item, expected, outline)
+    except ValueError:
+        return False
+    return True
+
+
+def _custom_sequential_snapshot(
+    conn: sqlite3.Connection,
+    inspection: _Inspection,
+    project: dict[str, Any],
+    numbers: list[int],
+    manifest: dict[str, Any],
+) -> dict[str, Any] | None:
+    project_id = int(project["id"])
+    briefs = [
+        _row(row) for row in conn.execute(
+            "SELECT * FROM creative_blueprints WHERE project_id = ? "
+            "AND resource_scope = 'sequential' "
+            "AND status IN ('brief_locked', 'locked', 'approved')",
+            (project_id,),
+        ).fetchall()
+    ]
+    brief_request = _requested_manifest_item(manifest, "brief")
+    brief_row = _select_resource(
+        briefs, brief_request, project.get("locked_brief_id"),
+        ref=lambda item: item["id"], compatible=lambda item: True,
+    )
+
+    def read_brief() -> dict[str, Any]:
+        if brief_row is None:
+            raise ValueError("brief: missing locked input")
+        _assert_requested_version(brief_request, brief_row.get("version"), "brief")
+        _digest(brief_row)
+        return brief_row
+
+    brief = inspection.check("brief", read_brief)
+    cast_batches = _locked_cast_batches(conn, project_id, "sequential")
+    cast_request = _requested_manifest_item(manifest, "characters")
+
+    def cast_compatible(
+        batch: tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]],
+    ) -> bool:
+        return brief is not None and all(
+            _refs_match(item, "source_refs", {"brief_id": brief["id"]}, "characters")
+            for item in batch[1] + batch[2]
+        )
+
+    cast_batch = _select_resource(
+        cast_batches, cast_request, project.get("character_batch_id"),
+        ref=lambda item: item[0]["batch_id"], compatible=cast_compatible,
+    )
+
+    def read_cast(category: str) -> list[dict[str, Any]]:
+        if cast_batch is None:
+            raise ValueError(f"{category}: missing locked input")
+        _assert_requested_version(cast_request, cast_batch[0].get("version"), category)
+        values = cast_batch[1] if category == "characters" else cast_batch[2]
+        for item in values:
+            _refs(item, "source_refs", {"brief_id": brief["id"]}, category)
+        _digest(values)
+        return values
+
+    characters = inspection.check(
+        "characters", lambda: read_cast("characters"), dependencies=brief is not None,
+    )
+    relationships = inspection.check(
+        "relationships", lambda: read_cast("relationships"), dependencies=brief is not None,
+    )
+    upstream_ready = (
+        brief is not None and characters is not None and relationships is not None
+    )
+    outline_batches = _locked_outline_batches(conn, project_id, "sequential", numbers)
+    outline_request = _requested_manifest_item(manifest, "outline")
+
+    def outline_compatible(batch: tuple[dict[str, Any], list[dict[str, Any]]]) -> bool:
+        return upstream_ready and all(
+            _refs_match(
+                item, "upstream_refs",
+                {"brief_id": brief["id"], "character_batch_id": characters[0]["batch_id"]},
+                "outline",
+            )
+            for item in batch[1]
+        )
+
+    outline_batch = _select_resource(
+        outline_batches, outline_request, project.get("outline_batch_id"),
+        ref=lambda item: item[0]["batch_id"], compatible=outline_compatible,
+    )
+    outline_rows = outline_batch[1] if outline_batch is not None else []
+
+    def read_outline(number: int) -> dict[str, Any]:
+        if outline_batch is None:
+            raise ValueError(f"outline: missing locked input for episode {number}")
+        _assert_requested_version(outline_request, outline_batch[0].get("version"), "outline")
+        value = next(
+            (item for item in outline_rows if int(item["episode_number"]) == number),
+            None,
+        )
+        if value is None:
+            raise ValueError(f"outline: missing locked input for episode {number}")
+        _refs(value, "upstream_refs", {
+            "brief_id": brief["id"],
+            "character_batch_id": characters[0]["batch_id"],
+        }, "outline")
+        _digest(value)
+        return value
+
+    outlines = [
+        inspection.check(
+            "outline", lambda n=number: read_outline(n), number=number,
+            dependencies=upstream_ready,
+        )
+        for number in numbers
+    ]
+    episode_rows = []
+    for raw in conn.execute(
+        "SELECT * FROM creative_episodes WHERE project_id = ? "
+        "AND resource_scope = 'sequential' AND stage IN ('beats', 'script') "
+        "AND status IN ('locked', 'approved') ORDER BY version, id",
+        (project_id,),
+    ).fetchall():
+        try:
+            episode_rows.append(_row(raw))
+        except ValueError:
+            continue
+    context = {
+        "brief_id": brief["id"],
+        "brief_version": brief["version"],
+        "brief_content_fingerprint": _digest(brief["content"]),
+        "character_batch_id": characters[0]["batch_id"],
+        "character_content_fingerprint": _digest({
+            "characters": [
+                {"id": item["id"], "version": item["version"], "content": item["content"]}
+                for item in characters
+            ],
+            "relationships": [
+                {"id": item["id"], "version": item["version"], "content": item["content"]}
+                for item in relationships
+            ],
+        }),
+    } if upstream_ready else {}
+    beats: list[dict[str, Any] | None] = []
+    scripts: list[dict[str, Any] | None] = []
+    for index, number in enumerate(numbers):
+        outline = outlines[index]
+        expected = (
+            dict(
+                context,
+                outline_batch_id=outline["batch_id"],
+                outline_id=outline["id"],
+                outline_version=outline["version"],
+            )
+            if outline is not None else {}
+        )
+        beat_request = _requested_manifest_item(manifest, "beats", number)
+        beat_candidates = [
+            item for item in episode_rows
+            if item["stage"] == "beats" and int(item["episode_number"]) == number
+        ]
+        beat_row = _select_resource(
+            beat_candidates, beat_request, None,
+            ref=lambda item: item["id"],
+            compatible=lambda item: outline is not None and _authority_matches(
+                item, expected, outline,
+            ),
+        )
+
+        def read_beats() -> dict[str, Any]:
+            if beat_row is None:
+                raise ValueError(f"beats: missing locked input for episode {number}")
+            _assert_requested_version(beat_request, beat_row.get("version"), "beats")
+            _authority(beat_row, expected, outline)
+            _digest(beat_row)
+            return beat_row
+
+        beat = inspection.check(
+            "beats", read_beats, number=number, dependencies=outline is not None,
+        )
+        beats.append(beat)
+        script_request = _requested_manifest_item(manifest, "script", number)
+        script_candidates = [
+            item for item in episode_rows
+            if item["stage"] == "script" and int(item["episode_number"]) == number
+        ]
+        script_expected = (
+            dict(
+                expected,
+                beats_id=beat["id"],
+                beats_version=beat["version"],
+                beats_content_fingerprint=_digest(beat["content"]),
+            )
+            if beat is not None else {}
+        )
+        script_row = _select_resource(
+            script_candidates, script_request, None,
+            ref=lambda item: item["id"],
+            compatible=lambda item: beat is not None and _authority_matches(
+                item, script_expected, outline,
+            ),
+        )
+
+        def read_script() -> dict[str, Any]:
+            if script_row is None:
+                raise ValueError(f"script: missing locked input for episode {number}")
+            _assert_requested_version(script_request, script_row.get("version"), "script")
+            _authority(script_row, script_expected, outline)
+            _digest(script_row)
+            return script_row
+
+        scripts.append(inspection.check(
+            "script", read_script, number=number, dependencies=beat is not None,
+        ))
+    if inspection.errors:
+        return None
+    package = {
+        "schemaVersion": "1.0", "sourceSystem": "AiWorker", "project": project,
+        "provenance": {
+            "project_id": project_id,
+            "project_revision": project.get("revision", 0),
+            "episode_numbers": numbers,
+            "workflow_mode": "sequential",
+            **_scope_provenance(project, numbers),
+            "locked_brief_id": brief["id"],
+            "character_batch_id": characters[0]["batch_id"],
+            "outline_batch_id": outlines[0]["batch_id"],
+        },
+        "brief": brief, "characters": characters, "relationships": relationships,
+        "outlines": outlines, "beats": beats, "scripts": scripts,
+    }
+    package["version_manifest"] = _package_version_manifest(package)
+    package["fingerprint"] = _digest(_fingerprint_payload(package))
+    return package
+
+
+def _candidate_item(
+    resource_ref: Any, version: Any, selected_ref: Any, compatible: bool,
+) -> dict[str, Any]:
+    value = str(resource_ref)
+    return {
+        "resource_ref": value,
+        "version": int(version or 0),
+        "label": f"v{int(version or 0)} · {value[:12]}",
+        "compatible": bool(compatible),
+        "disabled_reason": "与已选上游版本不兼容" if not compatible else "",
+        "selected": value == str(selected_ref),
+    }
+
+
+def _version_candidates(
+    conn: sqlite3.Connection,
+    project: dict[str, Any],
+    package: dict[str, Any],
+    numbers: list[int],
+) -> dict[str, Any]:
+    project_id = int(project["id"])
+    workflow_mode = str(project.get("workflow_mode") or "sequential")
+    scope = "free" if workflow_mode == "free" else "sequential"
+    strict = workflow_mode != "free"
+    manifest = package["version_manifest"]
+    brief = package["brief"]
+    characters = package["characters"]
+    relationships = package["relationships"]
+    outlines = {int(item["episode_number"]): item for item in package["outlines"]}
+    beats = {int(item["episode_number"]): item for item in package["beats"]}
+    briefs = []
+    for raw in conn.execute(
+        "SELECT * FROM creative_blueprints WHERE project_id = ? AND resource_scope = ? "
+        "AND status IN ('brief_locked', 'locked', 'approved') ORDER BY version DESC, id DESC",
+        (project_id, scope),
+    ).fetchall():
+        try:
+            briefs.append(_row(raw))
+        except ValueError:
+            continue
+    selected_brief_ref = manifest["brief"]["resource_ref"]
+    cast_batches = _locked_cast_batches(conn, project_id, scope)
+    selected_cast_ref = manifest["characters"]["resource_ref"]
+    outline_batches = _locked_outline_batches(conn, project_id, scope, numbers)
+    selected_outline_ref = manifest["outline"]["resource_ref"]
+    context = {
+        "brief_id": brief["id"],
+        "brief_version": brief["version"],
+        "brief_content_fingerprint": _digest(brief["content"]),
+        "character_batch_id": selected_cast_ref,
+        "character_content_fingerprint": _digest({
+            "characters": [
+                {"id": item["id"], "version": item["version"], "content": item["content"]}
+                for item in characters
+            ],
+            "relationships": [
+                {"id": item["id"], "version": item["version"], "content": item["content"]}
+                for item in relationships
+            ],
+        }),
+    }
+    candidates: dict[str, Any] = {
+        "brief": [
+            _candidate_item(item["id"], item["version"], selected_brief_ref, True)
+            for item in briefs
+        ],
+        "characters": [],
+        "outline": [],
+        "episodes": {},
+    }
+    for first, cast, relations in cast_batches:
+        compatible = not strict or all(
+            _refs_match(item, "source_refs", {"brief_id": brief["id"]}, "characters")
+            for item in cast + relations
+        )
+        candidates["characters"].append(_candidate_item(
+            first["batch_id"], first["version"], selected_cast_ref, compatible,
+        ))
+    for first, rows in outline_batches:
+        compatible = not strict or all(
+            _refs_match(item, "upstream_refs", {
+                "brief_id": brief["id"], "character_batch_id": selected_cast_ref,
+            }, "outline")
+            for item in rows
+        )
+        candidates["outline"].append(_candidate_item(
+            first["batch_id"], first["version"], selected_outline_ref, compatible,
+        ))
+    episode_rows = []
+    for raw in conn.execute(
+        "SELECT * FROM creative_episodes WHERE project_id = ? AND resource_scope = ? "
+        "AND stage IN ('beats', 'script') AND status IN ('locked', 'approved') "
+        "ORDER BY version DESC, id DESC",
+        (project_id, scope),
+    ).fetchall():
+        try:
+            episode_rows.append(_row(raw))
+        except ValueError:
+            continue
+    for number in numbers:
+        outline = outlines[number]
+        beat = beats[number]
+        expected = dict(
+            context,
+            outline_batch_id=selected_outline_ref,
+            outline_id=outline["id"],
+            outline_version=outline["version"],
+        )
+        script_expected = dict(
+            expected,
+            beats_id=beat["id"],
+            beats_version=beat["version"],
+            beats_content_fingerprint=_digest(beat["content"]),
+        )
+        selected = manifest["episodes"][str(number)]
+        candidates["episodes"][str(number)] = {
+            "beats": [
+                _candidate_item(
+                    item["id"], item["version"], selected["beats"]["resource_ref"],
+                    not strict or _authority_matches(item, expected, outline),
+                )
+                for item in episode_rows
+                if item["stage"] == "beats" and int(item["episode_number"]) == number
+            ],
+            "script": [
+                _candidate_item(
+                    item["id"], item["version"], selected["script"]["resource_ref"],
+                    not strict or _authority_matches(item, script_expected, outline),
+                )
+                for item in episode_rows
+                if item["stage"] == "script" and int(item["episode_number"]) == number
+            ],
+        }
+    return candidates
+
+
+def _attach_version_selection(
+    conn: sqlite3.Connection,
+    inspection: _Inspection,
+    project: dict[str, Any],
+    package: dict[str, Any] | None,
+    numbers: list[int],
+    strategy: str,
+) -> None:
+    inspection.version_selection["strategy"] = strategy
+    if package is None:
+        return
+    inspection.version_selection["manifest"] = package["version_manifest"]
+    inspection.version_selection["candidates"] = _version_candidates(
+        conn, project, package, numbers,
+    )
+    if strategy == "custom" and str(project.get("workflow_mode")) == "free":
+        inspection.version_selection["warnings"] = [
+            "自由创作的自定义版本可独立组合，请确认跨阶段内容一致；导出后会固化为不可变快照。"
+        ]
 
 
 def _inspect_free_snapshot(
@@ -337,6 +1069,7 @@ def _inspect_free_snapshot(
         "beats": beats,
         "scripts": scripts,
     }
+    package["version_manifest"] = _package_version_manifest(package)
     package["fingerprint"] = _digest(_fingerprint_payload(package))
     return package
 
@@ -345,6 +1078,7 @@ def _inspect_snapshot(
     db_path: str | Path,
     project_id: int,
     episode_numbers: Iterable[int] | None = None,
+    version_manifest: dict[str, Any] | None = None,
 ) -> tuple[_Inspection, dict[str, Any] | None]:
     path = Path(db_path).resolve()
     if not path.is_file():
@@ -384,8 +1118,28 @@ def _inspect_snapshot(
                 raise ValueError("episode_numbers: project has no target episodes")
             inspection.check('project', no_episodes)
             return inspection, None
+        strategy = "custom" if version_manifest is not None else "current"
+        if version_manifest is not None and not isinstance(version_manifest, dict):
+            raise ValueError("version_manifest: must be an object")
         if str(project.get("workflow_mode") or "sequential") == "free":
-            package = _inspect_free_snapshot(conn, inspection, project, numbers)
+            package = (
+                _custom_free_snapshot(
+                    conn, inspection, project, numbers, version_manifest or {},
+                )
+                if version_manifest is not None
+                else _inspect_free_snapshot(conn, inspection, project, numbers)
+            )
+            _attach_version_selection(
+                conn, inspection, project, package, numbers, strategy,
+            )
+            return inspection, package
+        if version_manifest is not None:
+            package = _custom_sequential_snapshot(
+                conn, inspection, project, numbers, version_manifest,
+            )
+            _attach_version_selection(
+                conn, inspection, project, package, numbers, strategy,
+            )
             return inspection, package
         brief_row = conn.execute(
             "SELECT * FROM creative_blueprints WHERE project_id = ? AND id = ?",
@@ -475,7 +1229,11 @@ def _inspect_snapshot(
             },
             "brief": brief, **cast, "outlines": outlines, "beats": beats, "scripts": scripts,
         }
+        package["version_manifest"] = _package_version_manifest(package)
         package["fingerprint"] = _digest(_fingerprint_payload(package))
+        _attach_version_selection(
+            conn, inspection, project, package, numbers, strategy,
+        )
         return inspection, package
     finally:
         if conn.in_transaction:
@@ -486,14 +1244,22 @@ def _inspect_snapshot(
 def export_production_package(
     db_path: str | Path, project_id: int,
     episode_numbers: Iterable[int] | None = None,
+    version_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return one validated snapshot. Does not create files or alter SQLite."""
-    inspection, package = _inspect_snapshot(db_path, project_id, episode_numbers)
+    inspection, package = _inspect_snapshot(
+        db_path, project_id, episode_numbers, version_manifest,
+    )
     if inspection.errors:
         raise inspection.errors[0]
     return package
 
 
-def preview_production_package(db_path: str | Path, project_id: int) -> dict[str, Any]:
-    inspection, package = _inspect_snapshot(db_path, project_id)
+def preview_production_package(
+    db_path: str | Path, project_id: int,
+    version_manifest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    inspection, package = _inspect_snapshot(
+        db_path, project_id, version_manifest=version_manifest,
+    )
     return inspection.preview(package)

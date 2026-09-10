@@ -26,7 +26,24 @@ def test_preview_matches_export_without_exposing_content(db):
     assert result['issues'] == []
     assert len(result['stages']) == 9
     assert all(item['state'] == 'ready' for item in result['stages'])
+    assert result['version_selection']['strategy'] == 'current'
+    assert result['version_selection']['manifest'] == package['version_manifest']
+    assert result['version_selection']['candidates']['brief'][0]['selected'] is True
     assert '寻找真相' not in str(result)
+
+
+def test_free_custom_version_selection_is_explicitly_warned(free_db):
+    path, project_id = free_db
+    current = production_export.export_production_package(path, project_id)
+
+    result = production_export.preview_production_package(
+        path, project_id, current["version_manifest"],
+    )
+
+    assert result["ready"] is True
+    assert result["version_selection"]["strategy"] == "custom"
+    assert result["version_selection"]["warnings"]
+    assert "自由创作" in result["version_selection"]["warnings"][0]
 
 
 def test_preview_collects_independent_issues_and_blocks_dependents(db):

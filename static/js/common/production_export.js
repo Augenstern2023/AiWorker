@@ -23,6 +23,9 @@
     let selectedEpisodeNumbers = null;
     let availableEpisodeNumbers = [];
     let projectTotalEpisodes = 0;
+    let selectedVersionManifest = null;
+    let currentVersionManifest = null;
+    let versionCandidates = {};
 
     function requestUi() { return window.aiworkerUi; }
 
@@ -176,6 +179,148 @@
         return `${base}?${query.toString()}`;
     }
 
+    function cloneValue(value) {
+        return JSON.parse(JSON.stringify(value || {}));
+    }
+
+    function manifestHasValues(value) {
+        return value && typeof value === 'object' && Object.keys(value).length > 0;
+    }
+
+    function fillVersionSelect(select, options, selectedRef) {
+        select.replaceChildren();
+        (options || []).forEach((item) => {
+            const option = document.createElement('option');
+            option.value = String(item.resource_ref);
+            option.textContent = item.compatible
+                ? item.label
+                : `${item.label}（不兼容）`;
+            option.disabled = !item.compatible;
+            option.dataset.version = String(item.version || 0);
+            option.title = item.disabled_reason || '';
+            option.selected = String(item.resource_ref) === String(selectedRef || '');
+            select.appendChild(option);
+        });
+        select.disabled = !(options || []).some((item) => item.compatible);
+    }
+
+    function selectedManifestRef(stage, number) {
+        if (!selectedVersionManifest) return '';
+        if (!number) return selectedVersionManifest[stage]?.resource_ref || '';
+        return selectedVersionManifest.episodes?.[String(number)]?.[stage]?.resource_ref || '';
+    }
+
+    function setManifestItem(stage, option, number) {
+        if (!selectedVersionManifest) selectedVersionManifest = {};
+        const item = {
+            resource_ref: String(option.value),
+            version: Number(option.dataset.version || 0),
+        };
+        if (!number) {
+            selectedVersionManifest[stage] = item;
+            if (stage === 'brief') {
+                delete selectedVersionManifest.characters;
+                delete selectedVersionManifest.outline;
+                selectedVersionManifest.episodes = {};
+            } else if (stage === 'characters') {
+                delete selectedVersionManifest.outline;
+                selectedVersionManifest.episodes = {};
+            } else if (stage === 'outline') {
+                selectedVersionManifest.episodes = {};
+            }
+            return;
+        }
+        if (!selectedVersionManifest.episodes) selectedVersionManifest.episodes = {};
+        if (!selectedVersionManifest.episodes[String(number)]) {
+            selectedVersionManifest.episodes[String(number)] = {};
+        }
+        selectedVersionManifest.episodes[String(number)][stage] = item;
+        if (stage === 'beats') {
+            delete selectedVersionManifest.episodes[String(number)].script;
+        }
+    }
+
+    function requestVersionChange(stage, select, number) {
+        const option = select.selectedOptions[0];
+        if (!option) return;
+        setManifestItem(stage, option, number);
+        currentFingerprint = null;
+        elements.generate.disabled = true;
+        loadPreview();
+    }
+
+    function renderVersionControls(selection) {
+        const strategy = elements.versionStrategy.value;
+        elements.versionControls.classList.toggle('d-none', strategy !== 'custom');
+        elements.versionSummary.textContent = strategy === 'custom'
+            ? '自定义组合会在导出前重新校验并固化。'
+            : '默认使用项目当前锁定的完整版本链。';
+        const warnings = selection?.warnings || [];
+        showError(elements.versionWarning, warnings.join(' '));
+        if (strategy !== 'custom') return;
+
+        const candidates = versionCandidates || {};
+        fillVersionSelect(
+            elements.versionBrief, candidates.brief || [],
+            selectedManifestRef('brief'),
+        );
+        fillVersionSelect(
+            elements.versionCharacters, candidates.characters || [],
+            selectedManifestRef('characters'),
+        );
+        fillVersionSelect(
+            elements.versionOutline, candidates.outline || [],
+            selectedManifestRef('outline'),
+        );
+        elements.episodeVersionControls.replaceChildren();
+        const episodeCandidates = candidates.episodes || {};
+        const numbers = Object.keys(episodeCandidates).map(Number).sort((left, right) => left - right);
+        if (!numbers.length) return;
+        const table = document.createElement('table');
+        table.className = 'table table-sm align-middle mb-0';
+        table.innerHTML = '<thead><tr><th>集数</th><th>Beats</th><th>场次剧本</th></tr></thead>';
+        const body = document.createElement('tbody');
+        numbers.forEach((number) => {
+            const row = document.createElement('tr');
+            const numberCell = document.createElement('td');
+            numberCell.textContent = `第 ${number} 集`;
+            const beatsCell = document.createElement('td');
+            const beatsSelect = document.createElement('select');
+            beatsSelect.className = 'form-select form-select-sm';
+            fillVersionSelect(
+                beatsSelect, episodeCandidates[String(number)].beats || [],
+                selectedManifestRef('beats', number),
+            );
+            beatsSelect.addEventListener('change', () => requestVersionChange('beats', beatsSelect, number));
+            beatsCell.appendChild(beatsSelect);
+            const scriptCell = document.createElement('td');
+            const scriptSelect = document.createElement('select');
+            scriptSelect.className = 'form-select form-select-sm';
+            fillVersionSelect(
+                scriptSelect, episodeCandidates[String(number)].script || [],
+                selectedManifestRef('script', number),
+            );
+            scriptSelect.addEventListener('change', () => requestVersionChange('script', scriptSelect, number));
+            scriptCell.appendChild(scriptSelect);
+            row.append(numberCell, beatsCell, scriptCell);
+            body.appendChild(row);
+        });
+        table.appendChild(body);
+        elements.episodeVersionControls.appendChild(table);
+    }
+
+    function handleVersionStrategyChange() {
+        if (elements.versionStrategy.value === 'custom') {
+            selectedVersionManifest = cloneValue(currentVersionManifest);
+        } else {
+            selectedVersionManifest = null;
+        }
+        currentFingerprint = null;
+        elements.generate.disabled = true;
+        renderVersionControls({warnings: []});
+        loadPreview();
+    }
+
     function showError(box, message) {
         box.textContent = message || '';
         box.classList.toggle('d-none', !message);
@@ -215,6 +360,15 @@
 
     function renderPreview(payload) {
         currentFingerprint = payload.fingerprint || null;
+        const versionSelection = payload.version_selection || {};
+        if (manifestHasValues(versionSelection.manifest)) {
+            currentVersionManifest = cloneValue(versionSelection.manifest);
+            versionCandidates = cloneValue(versionSelection.candidates);
+            if (elements.versionStrategy.value === 'custom') {
+                selectedVersionManifest = cloneValue(versionSelection.manifest);
+            }
+        }
+        renderVersionControls(versionSelection);
         if (payload.project && payload.project.name) {
             activeProject.name = payload.project.name;
             elements.projectName.textContent = activeProject.name;
@@ -294,9 +448,19 @@
         setCheckStatus('正在执行完整性检查…');
         elements.generate.disabled = true;
         try {
+            const custom = elements.versionStrategy.value === 'custom';
             const response = await requestUi().requestKey(keyFor('preview'), (signal) =>
                 window.aiworkerApi.request(
-                    previewUrl(project.id), {signal},
+                    previewUrl(project.id), custom ? {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({
+                            episode_numbers: selectedEpisodeNumbers,
+                            version_strategy: 'custom',
+                            version_manifest: selectedVersionManifest || {},
+                        }),
+                        signal,
+                    } : {signal},
                 ));
             if (!activeProject || activeProject.id !== project.id) return;
             if (!response.ok) throw new Error(await readDetail(response, '导出检查失败'));
@@ -382,6 +546,14 @@
             const actions = document.createElement('td');
             actions.className = 'text-end';
             const pending = record.audit_status === 'pending';
+            if (manifestHasValues(record.version_manifest)) {
+                const reuse = document.createElement('button');
+                reuse.type = 'button';
+                reuse.className = 'btn btn-sm btn-outline-primary me-1';
+                reuse.textContent = '复用版本';
+                reuse.addEventListener('click', () => reuseHistoryVersion(record));
+                actions.appendChild(reuse);
+            }
             const button = document.createElement('button');
             button.type = 'button';
             button.className = 'btn btn-sm btn-outline-success';
@@ -393,6 +565,26 @@
             row.append(created, version, scope, state, actions);
             elements.historyList.appendChild(row);
         });
+    }
+
+    function reuseHistoryVersion(record) {
+        const numbers = (record.episode_numbers || []).map(Number);
+        selectedEpisodeNumbers = record.export_scope === 'full' ? null : numbers;
+        elements.scope.value = record.export_scope === 'full' ? 'all' : 'custom';
+        elements.customEpisodes.value = compactEpisodes(numbers);
+        updateScopeFields();
+        elements.versionStrategy.value = 'custom';
+        selectedVersionManifest = cloneValue(record.version_manifest);
+        currentFingerprint = null;
+        elements.generate.disabled = true;
+        const checkTab = document.getElementById('production-export-tab-check');
+        if (checkTab && window.bootstrap.Tab?.getOrCreateInstance) {
+            window.bootstrap.Tab.getOrCreateInstance(checkTab).show();
+        } else if (checkTab) {
+            checkTab.click();
+        }
+        renderVersionControls({warnings: []});
+        loadPreview();
     }
 
     async function loadHistory(page) {
@@ -474,6 +666,10 @@
                         body: JSON.stringify({
                             expected_fingerprint: currentFingerprint,
                             episode_numbers: selectedEpisodeNumbers,
+                            version_strategy: elements.versionStrategy.value,
+                            version_manifest: elements.versionStrategy.value === 'custom'
+                                ? selectedVersionManifest
+                                : undefined,
                         }),
                         signal,
                     },
@@ -554,6 +750,10 @@
         selectedEpisodeNumbers = null;
         availableEpisodeNumbers = [];
         projectTotalEpisodes = 0;
+        selectedVersionManifest = null;
+        currentVersionManifest = null;
+        versionCandidates = {};
+        elements.versionStrategy.value = 'current';
         elements.scope.value = 'all';
         elements.rangeStart.value = 1;
         elements.rangeEnd.value = 1;
@@ -601,6 +801,14 @@
             availableSummary: document.getElementById('production-export-available-summary'),
             scopeApply: document.getElementById('production-export-scope-apply'),
             scopeError: document.getElementById('production-export-scope-error'),
+            versionStrategy: document.getElementById('production-export-version-strategy'),
+            versionSummary: document.getElementById('production-export-version-summary'),
+            versionWarning: document.getElementById('production-export-version-warning'),
+            versionControls: document.getElementById('production-export-version-controls'),
+            versionBrief: document.getElementById('production-export-version-brief'),
+            versionCharacters: document.getElementById('production-export-version-characters'),
+            versionOutline: document.getElementById('production-export-version-outline'),
+            episodeVersionControls: document.getElementById('production-export-episode-version-controls'),
         };
         elements.generate.addEventListener('click', generatePackage);
         elements.scope.addEventListener('change', handleScopeChange);
@@ -608,6 +816,10 @@
         elements.rangeEnd.addEventListener('input', invalidateScopeConfirmation);
         elements.customEpisodes.addEventListener('input', invalidateScopeConfirmation);
         elements.scopeApply.addEventListener('click', applyScopeSelection);
+        elements.versionStrategy.addEventListener('change', handleVersionStrategyChange);
+        elements.versionBrief.addEventListener('change', () => requestVersionChange('brief', elements.versionBrief));
+        elements.versionCharacters.addEventListener('change', () => requestVersionChange('characters', elements.versionCharacters));
+        elements.versionOutline.addEventListener('change', () => requestVersionChange('outline', elements.versionOutline));
         elements.historyPrev.addEventListener('click', () => loadHistory(historyPage - 1));
         elements.historyNext.addEventListener('click', () => loadHistory(historyPage + 1));
         modalElement.addEventListener('hidden.bs.modal', () => {

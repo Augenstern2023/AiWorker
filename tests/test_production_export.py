@@ -161,7 +161,8 @@ def free_db(tmp_path):
 def test_complete_package_preserves_source_rows_and_parsed_content(db):
     package = export(db, 1)
     assert set(package) == {"schemaVersion", "sourceSystem", "project", "provenance", "brief",
-                            "characters", "relationships", "outlines", "beats", "scripts", "fingerprint"}
+                            "characters", "relationships", "outlines", "beats", "scripts",
+                            "version_manifest", "fingerprint"}
     assert package["schemaVersion"] == "1.0"
     assert package["sourceSystem"] == "AiWorker"
     assert package["project"]["name"] == "测试剧"
@@ -175,6 +176,10 @@ def test_complete_package_preserves_source_rows_and_parsed_content(db):
     assert package["provenance"]["project_total_episodes"] == 2
     assert package["provenance"]["exported_episode_count"] == 2
     assert package["provenance"]["project_revision"] == package["project"]["revision"]
+    assert package["version_manifest"]["brief"] == {"resource_ref": "1", "version": 1}
+    assert package["version_manifest"]["episodes"]["1"]["script"] == {
+        "resource_ref": str(package["scripts"][0]["id"]), "version": 1,
+    }
     assert len(package["fingerprint"]) == 64
     assert package == export(db, 1)
 
@@ -361,6 +366,26 @@ def test_newer_stale_lock_is_not_silently_replaced_by_old_version(db, stage):
         insert(conn, "creative_episodes", **row)
     with pytest.raises(ValueError, match=stage):
         export(db, 1)
+
+
+def test_custom_manifest_can_reuse_an_older_compatible_locked_chain(db):
+    original = export(db, 1)
+    manifest = original["version_manifest"]
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        row = dict(conn.execute(
+            "SELECT * FROM creative_episodes WHERE stage='beats' AND episode_number=1"
+        ).fetchone())
+        row.pop("id")
+        row.update(version=2, upstream_refs_json="{}")
+        insert(conn, "creative_episodes", **row)
+
+    with pytest.raises(ValueError, match="beats"):
+        export(db, 1)
+    selected = export(db, 1, version_manifest=manifest)
+    assert selected["beats"][0]["id"] == original["beats"][0]["id"]
+    assert selected["scripts"][0]["id"] == original["scripts"][0]["id"]
+    assert selected["version_manifest"] == manifest
 
 
 def test_draft_revision_does_not_replace_locked_script(db):

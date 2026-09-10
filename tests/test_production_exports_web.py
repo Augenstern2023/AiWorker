@@ -130,6 +130,43 @@ def test_preview_create_and_history_preserve_selected_episodes(environment):
     assert '%E7%AC%AC2%E9%9B%86' in downloaded.headers['content-disposition']
 
 
+def test_custom_version_manifest_is_prechecked_exported_and_kept_in_history(environment):
+    current = environment.client.get(
+        '/api/creative/projects/1/production-export/preview'
+    ).json()
+    manifest = current['version_selection']['manifest']
+    preview = environment.client.post(
+        '/api/creative/projects/1/production-export/preview',
+        json={
+            'version_strategy': 'custom',
+            'version_manifest': manifest,
+        },
+    )
+    assert preview.status_code == 200, preview.text
+    checked = preview.json()
+    assert checked['ready'] is True
+    assert checked['version_selection']['strategy'] == 'custom'
+    assert checked['version_selection']['manifest'] == manifest
+
+    created = environment.client.post(
+        '/api/creative/projects/1/production-exports',
+        json={
+            'expected_fingerprint': checked['fingerprint'],
+            'version_strategy': 'custom',
+            'version_manifest': manifest,
+        },
+    )
+    assert created.status_code == 201, created.text
+    record = created.json()['export']
+    assert record['version_strategy'] == 'custom'
+    assert record['version_manifest'] == manifest
+    assert environment.client.get(record['download_url']).json()['version_manifest'] == manifest
+    history = environment.client.get(
+        '/api/creative/projects/1/production-exports'
+    ).json()['items'][0]
+    assert history['version_manifest'] == manifest
+
+
 @pytest.mark.parametrize('episode_numbers', [[], [0], [3], ['1'], [True]])
 def test_invalid_episode_selection_is_rejected(environment, episode_numbers):
     preview = environment.client.get(
@@ -281,4 +318,5 @@ def test_existing_export_table_is_upgraded_for_episode_scope(tmp_path):
     assert {
         'episode_numbers_json', 'export_scope',
         'project_total_episodes', 'workflow_mode',
+        'version_strategy', 'version_manifest_json',
     } <= columns

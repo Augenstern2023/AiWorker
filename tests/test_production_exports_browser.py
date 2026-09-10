@@ -352,6 +352,116 @@ def test_history_tab_tags_versions_and_pending_blocks_download(page: Page) -> No
     assert "审计待补记" in rows.nth(1).inner_text()
 
 
+def test_custom_version_controls_filter_and_send_the_confirmed_manifest(page: Page) -> None:
+    manifest = {
+        "brief": {"resource_ref": "11", "version": 2},
+        "characters": {"resource_ref": "cast-2", "version": 2},
+        "outline": {"resource_ref": "outline-2", "version": 2},
+        "episodes": {
+            "1": {
+                "outline": {"resource_ref": "21", "version": 2},
+                "beats": {"resource_ref": "31", "version": 3},
+                "script": {"resource_ref": "41", "version": 4},
+            }
+        },
+    }
+    preview = {
+        "project": {"id": "3", "name": "寻找真相", "target_episode_count": 1},
+        "ready": True, "fingerprint": "abc" * 8,
+        "stages": [_stage(number=1)], "issues": [],
+        "version_selection": {
+            "strategy": "current", "manifest": manifest,
+            "warnings": ["自由创作的自定义版本请确认一致性"],
+            "candidates": {
+                "brief": [
+                    {"resource_ref": "11", "version": 2, "label": "v2 · 11", "compatible": True, "selected": True},
+                    {"resource_ref": "10", "version": 1, "label": "v1 · 10", "compatible": True, "selected": False},
+                ],
+                "characters": [
+                    {"resource_ref": "cast-2", "version": 2, "label": "v2 · cast-2", "compatible": True, "selected": True},
+                    {"resource_ref": "cast-bad", "version": 1, "label": "v1 · cast-bad", "compatible": False, "selected": False, "disabled_reason": "与上游不兼容"},
+                ],
+                "outline": [
+                    {"resource_ref": "outline-2", "version": 2, "label": "v2 · outline-2", "compatible": True, "selected": True},
+                ],
+                "episodes": {"1": {
+                    "beats": [{"resource_ref": "31", "version": 3, "label": "v3 · 31", "compatible": True, "selected": True}],
+                    "script": [{"resource_ref": "41", "version": 4, "label": "v4 · 41", "compatible": True, "selected": True}],
+                }},
+            },
+        },
+    }
+    exported = {
+        "id": "e-custom", "project_id": "3", "fingerprint": preview["fingerprint"],
+        "contract_version": "1.0", "created_by": "owner", "created_by_name": "负责人",
+        "created_at": 1, "episode_count": 1, "episode_numbers": [1],
+        "export_scope": "full", "project_total_episodes": 1,
+        "workflow_mode": "free", "version_strategy": "custom",
+        "version_manifest": manifest, "size_bytes": 100, "file_sha256": "deadbeef",
+        "audit_status": "recorded",
+        "download_url": "/api/creative/production-exports/e-custom/download",
+    }
+    mount(page, preview=preview, history={"items": [], "total": 0}, export=exported)
+    page.evaluate("() => window.aiworkerProductionExport.open('3', {projectName: '寻找真相'})")
+    page.wait_for_function(
+        "() => document.querySelector('#production-export-check-status').textContent.includes('全部检查通过')"
+    )
+
+    page.locator("#production-export-version-strategy").select_option("custom")
+    page.wait_for_function(
+        "() => window.__requestLog.some(item => item.method === 'POST' && item.url.includes('/production-export/preview'))"
+    )
+    assert page.locator("#production-export-version-controls").is_visible()
+    assert page.locator("#production-export-version-characters option").nth(1).is_disabled()
+    assert "自由创作" in page.locator("#production-export-version-warning").inner_text()
+
+    page.locator("#production-export-generate").click()
+    page.wait_for_function(
+        "() => window.__requestLog.some(item => item.method === 'POST' && item.url.endsWith('/production-exports'))"
+    )
+    body = page.evaluate(
+        "() => JSON.parse(window.__requestLog.findLast(item => item.url.endsWith('/production-exports')).body)"
+    )
+    assert body["version_strategy"] == "custom"
+    assert body["version_manifest"] == manifest
+
+
+def test_history_version_combination_can_be_reused(page: Page) -> None:
+    manifest = {
+        "brief": {"resource_ref": "1", "version": 1},
+        "characters": {"resource_ref": "cast", "version": 1},
+        "outline": {"resource_ref": "outline", "version": 1},
+        "episodes": {},
+    }
+    preview = {
+        "project": {"id": "3", "name": "寻找真相", "target_episode_count": 2},
+        "ready": True, "fingerprint": "abc" * 8, "stages": [_stage()], "issues": [],
+        "version_selection": {"strategy": "current", "manifest": manifest, "candidates": {}, "warnings": []},
+    }
+    record = {
+        "id": "e1", "project_id": "3", "fingerprint": "old" * 8,
+        "contract_version": "1.0", "created_by": "owner", "created_by_name": "负责人",
+        "created_at": 1, "episode_count": 1, "episode_numbers": [2],
+        "export_scope": "partial", "project_total_episodes": 2,
+        "workflow_mode": "sequential", "version_strategy": "custom",
+        "version_manifest": manifest, "size_bytes": 80, "file_sha256": "bb",
+        "audit_status": "recorded", "download_url": "/download",
+    }
+    mount(page, preview=preview, history={"items": [record], "total": 1}, export=None)
+    page.evaluate("() => window.aiworkerProductionExport.open('3', {projectName: '寻找真相'})")
+    page.locator("#production-export-tab-history").click()
+    page.get_by_role("button", name="复用版本").click()
+    page.wait_for_function(
+        "() => window.__requestLog.some(item => item.method === 'POST' && item.url.includes('/production-export/preview'))"
+    )
+    assert page.locator("#production-export-version-strategy").input_value() == "custom"
+    body = page.evaluate(
+        "() => JSON.parse(window.__requestLog.findLast(item => item.url.includes('/production-export/preview')).body)"
+    )
+    assert body["episode_numbers"] == [2]
+    assert body["version_manifest"] == manifest
+
+
 def test_switching_project_cancels_stale_requests(page: Page) -> None:
     """Opening another project aborts the previous project's in-flight requests."""
     preview = {"project": {"id": "3", "name": "寻找真相", "target_episode_count": 2},

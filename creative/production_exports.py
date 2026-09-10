@@ -96,6 +96,8 @@ class ProductionExportService:
                     export_scope TEXT NOT NULL DEFAULT 'full',
                     project_total_episodes INTEGER NOT NULL DEFAULT 0,
                     workflow_mode TEXT NOT NULL DEFAULT 'sequential',
+                    version_strategy TEXT NOT NULL DEFAULT 'current',
+                    version_manifest_json TEXT NOT NULL DEFAULT '{}',
                     path TEXT NOT NULL,
                     size_bytes INTEGER NOT NULL,
                     file_sha256 TEXT NOT NULL,
@@ -115,6 +117,8 @@ class ProductionExportService:
                 "export_scope": "TEXT NOT NULL DEFAULT 'full'",
                 "project_total_episodes": "INTEGER NOT NULL DEFAULT 0",
                 "workflow_mode": "TEXT NOT NULL DEFAULT 'sequential'",
+                "version_strategy": "TEXT NOT NULL DEFAULT 'current'",
+                "version_manifest_json": "TEXT NOT NULL DEFAULT '{}'",
             }
             for column, definition in additions.items():
                 if column not in columns:
@@ -133,10 +137,11 @@ class ProductionExportService:
         self,
         project_id: int,
         episode_numbers: Iterable[int] | None = None,
+        version_manifest: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         requested = None if episode_numbers is None else list(episode_numbers)
         inspection, package = _inspect_snapshot(
-            self.repository.db_path, project_id, requested
+            self.repository.db_path, project_id, requested, version_manifest
         )
         result = inspection.preview(package)
         total = int(inspection.project["target_episode_count"])
@@ -167,6 +172,7 @@ class ProductionExportService:
         request: Request | None = None,
         *,
         episode_numbers: Iterable[int] | None = None,
+        version_manifest: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """Export the confirmed version, or reuse the stored artifact for it.
 
@@ -175,7 +181,7 @@ class ProductionExportService:
         AuditUnavailable (503). Never rebuilds a registered historical file.
         """
         inspection, package = _inspect_snapshot(
-            self.repository.db_path, project_id, episode_numbers
+            self.repository.db_path, project_id, episode_numbers, version_manifest
         )
         if package is None:
             raise ExportBlocked("production export: locked inputs are incomplete")
@@ -202,8 +208,9 @@ class ProductionExportService:
                         id, project_id, fingerprint, contract_version,
                         created_by, created_by_name, created_at, episode_count,
                         episode_numbers_json, export_scope, project_total_episodes,
-                        workflow_mode, path, size_bytes, file_sha256
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        workflow_mode, version_strategy, version_manifest_json,
+                        path, size_bytes, file_sha256
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         export_id,
@@ -218,6 +225,8 @@ class ProductionExportService:
                         provenance["export_scope"],
                         provenance["project_total_episodes"],
                         provenance["workflow_mode"],
+                        "custom" if version_manifest is not None else "current",
+                        json.dumps(package["version_manifest"], ensure_ascii=False),
                         str(path),
                         len(content),
                         hashlib.sha256(content).hexdigest(),
@@ -382,6 +391,8 @@ class ProductionExportService:
                     "episode_numbers": record["episode_numbers"],
                     "export_scope": record["export_scope"],
                     "workflow_mode": record["workflow_mode"],
+                    "version_strategy": record["version_strategy"],
+                    "version_manifest": record["version_manifest"],
                     "size_bytes": record["size_bytes"],
                     "file_sha256": record["file_sha256"],
                 },
@@ -418,6 +429,14 @@ class ProductionExportService:
                 if episode_numbers == list(range(1, project_total + 1))
                 else "partial"
             )
+        try:
+            version_manifest = json.loads(
+                record.get("version_manifest_json") or "{}"
+            )
+            if not isinstance(version_manifest, dict):
+                version_manifest = {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            version_manifest = {}
         return {
             "id": record["id"],
             "project_id": str(record["project_id"]),
@@ -431,6 +450,8 @@ class ProductionExportService:
             "export_scope": export_scope,
             "project_total_episodes": project_total,
             "workflow_mode": str(record.get("workflow_mode") or "sequential"),
+            "version_strategy": str(record.get("version_strategy") or "current"),
+            "version_manifest": version_manifest,
             "size_bytes": record["size_bytes"],
             "file_sha256": record["file_sha256"],
             "audit_status": "recorded" if record.get("audit_recorded_at") is not None else "pending",

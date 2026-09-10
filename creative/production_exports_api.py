@@ -10,12 +10,14 @@
 
 Authorization is project-scoped on purpose: system admins plus owners covered by
 the managed-project scope may preview, create, list and download. Page access
-alone never opens these endpoints, and the client only ever sends the project id
-and the confirmed fingerprint - never a database path, output path, or package
-body. Responses stay server-relative; downloads are attachments with no-store.
+alone never opens these endpoints. The client sends only the project id, episode
+scope, selected server resource references and confirmed fingerprint - never a
+database path, output path, or package body. Responses stay server-relative;
+downloads are attachments with no-store.
 """
 from __future__ import annotations
 
+import json
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -66,6 +68,38 @@ def build_production_export_router(service: ProductionExportService) -> APIRoute
             raise HTTPException(422, "导出集数必须是非空的整数列表")
         return value
 
+    def requested_manifest(payload: dict) -> dict | None:
+        strategy = str(payload.get("version_strategy") or "current")
+        if strategy == "current":
+            return None
+        if strategy != "custom":
+            raise HTTPException(422, "版本策略必须是 current 或 custom")
+        value = payload.get("version_manifest", {})
+        if not isinstance(value, dict):
+            raise HTTPException(422, "版本清单必须是对象")
+        if len(json.dumps(value, ensure_ascii=False)) > 100_000:
+            raise HTTPException(422, "版本清单过大")
+        return value
+
+    def run_preview(project_id: int, payload: dict) -> dict:
+        try:
+            return service.preview(
+                project_id,
+                requested_episodes(payload),
+                requested_manifest(payload),
+            )
+        except KeyError as exc:
+            raise HTTPException(404, "创作项目不存在") from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(404, "创作项目数据库不存在") from exc
+        except ValueError as exc:
+            detail = str(exc)
+            if "episode_numbers" in detail:
+                raise HTTPException(422, "导出集数超出项目范围") from exc
+            if "version_manifest" in detail:
+                raise HTTPException(422, "版本清单格式无效") from exc
+            raise HTTPException(500, "生产包检查失败，请稍后重试") from exc
+
     @router.get("/projects/{project_id}/production-export/preview")
     def preview_export(
         project_id: int,
@@ -74,16 +108,17 @@ def build_production_export_router(service: ProductionExportService) -> APIRoute
         principal: Principal = Depends(current_principal),
     ):
         assert_project_access(request, principal, project_id)
-        try:
-            return service.preview(project_id, episode_numbers)
-        except KeyError as exc:
-            raise HTTPException(404, "创作项目不存在") from exc
-        except FileNotFoundError as exc:
-            raise HTTPException(404, "创作项目数据库不存在") from exc
-        except ValueError as exc:
-            if "episode_numbers" in str(exc):
-                raise HTTPException(422, "导出集数超出项目范围") from exc
-            raise HTTPException(500, "生产包检查失败，请稍后重试") from exc
+        return run_preview(project_id, {"episode_numbers": episode_numbers})
+
+    @router.post("/projects/{project_id}/production-export/preview")
+    def preview_selected_export(
+        project_id: int,
+        payload: dict,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        assert_project_access(request, principal, project_id)
+        return run_preview(project_id, payload)
 
     @router.post("/projects/{project_id}/production-exports")
     def create_export(
@@ -96,6 +131,7 @@ def build_production_export_router(service: ProductionExportService) -> APIRoute
         assert_project_access(request, principal, project_id)
         expected = str(payload.get("expected_fingerprint") or "")
         episode_numbers = requested_episodes(payload)
+        version_manifest = requested_manifest(payload)
         if len(expected) != 64:
             raise HTTPException(409, "请先完成导出检查并确认当前版本")
         try:
@@ -105,6 +141,7 @@ def build_production_export_router(service: ProductionExportService) -> APIRoute
                 principal,
                 request,
                 episode_numbers=episode_numbers,
+                version_manifest=version_manifest,
             )
         except KeyError as exc:
             raise HTTPException(404, "创作项目不存在") from exc
@@ -119,6 +156,8 @@ def build_production_export_router(service: ProductionExportService) -> APIRoute
         except ValueError as exc:
             if "episode_numbers" in str(exc):
                 raise HTTPException(422, "导出集数超出项目范围") from exc
+            if "version_manifest" in str(exc):
+                raise HTTPException(422, "版本清单格式无效") from exc
             raise
         return JSONResponse(
             status_code=201 if created else 200,

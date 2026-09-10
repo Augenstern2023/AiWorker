@@ -187,18 +187,24 @@
         return value && typeof value === 'object' && Object.keys(value).length > 0;
     }
 
+    function readableVersion(value) {
+        const version = Number(value);
+        return Number.isInteger(version) && version > 0 ? `第 ${version} 版` : '未标版本';
+    }
+
     function fillVersionSelect(select, options, selectedRef) {
         select.replaceChildren();
         (options || []).forEach((item) => {
             const option = document.createElement('option');
             option.value = String(item.resource_ref);
-            option.textContent = item.compatible
-                ? item.label
-                : `${item.label}（不兼容）`;
+            const isSelected = String(item.resource_ref) === String(selectedRef || '');
+            option.textContent = `${readableVersion(item.version)}`
+                + (isSelected ? '（当前选择）' : '')
+                + (!item.compatible ? '（不兼容）' : '');
             option.disabled = !item.compatible;
             option.dataset.version = String(item.version || 0);
             option.title = item.disabled_reason || '';
-            option.selected = String(item.resource_ref) === String(selectedRef || '');
+            option.selected = isSelected;
             select.appendChild(option);
         });
         select.disabled = !(options || []).some((item) => item.compatible);
@@ -338,8 +344,10 @@
             : stage.state === 'blocked'
                 ? '<i class="bi bi-dash-circle text-muted" aria-hidden="true"></i>'
                 : '<i class="bi bi-exclamation-triangle-fill text-danger" aria-hidden="true"></i>';
-        const versions = (stage.versions || [])
-            .map((item) => `#${item.id} v${item.version}`).join('、') || '-';
+        const versions = Array.from(new Set(
+            (stage.versions || []).map((item) => Number(item.version)),
+        )).filter((version) => Number.isInteger(version) && version > 0)
+            .map(readableVersion).join('、') || '-';
 
         const stageCell = document.createElement('td');
         stageCell.innerHTML = `${icon} <span></span>`;

@@ -413,6 +413,15 @@ def test_custom_version_controls_filter_and_send_the_confirmed_manifest(page: Pa
     )
     assert page.locator("#production-export-version-controls").is_visible()
     assert page.locator("#production-export-version-characters option").nth(1).is_disabled()
+    assert page.locator("#production-export-version-brief").input_value() == "11"
+    assert page.locator("#production-export-version-brief option:checked").inner_text() == (
+        "第 2 版（当前选择）"
+    )
+    assert "cast-2" not in page.locator(
+        "#production-export-version-characters"
+    ).inner_text()
+    assert "第 2 版" in page.locator("#production-export-stages").inner_text()
+    assert "#7" not in page.locator("#production-export-stages").inner_text()
     assert "自由创作" in page.locator("#production-export-version-warning").inner_text()
 
     page.locator("#production-export-generate").click()

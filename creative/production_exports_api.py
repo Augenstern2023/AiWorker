@@ -54,20 +54,35 @@ def build_production_export_router(service: ProductionExportService) -> APIRoute
         ):
             raise HTTPException(403, "CSRF 校验失败")
 
+    def requested_episodes(payload: dict) -> list[int] | None:
+        value = payload.get("episode_numbers")
+        if value is None:
+            return None
+        if (
+            not isinstance(value, list)
+            or not value
+            or any(type(number) is not int for number in value)
+        ):
+            raise HTTPException(422, "导出集数必须是非空的整数列表")
+        return value
+
     @router.get("/projects/{project_id}/production-export/preview")
     def preview_export(
         project_id: int,
         request: Request,
+        episode_numbers: list[int] | None = Query(default=None),
         principal: Principal = Depends(current_principal),
     ):
         assert_project_access(request, principal, project_id)
         try:
-            return service.preview(project_id)
+            return service.preview(project_id, episode_numbers)
         except KeyError as exc:
             raise HTTPException(404, "创作项目不存在") from exc
         except FileNotFoundError as exc:
             raise HTTPException(404, "创作项目数据库不存在") from exc
         except ValueError as exc:
+            if "episode_numbers" in str(exc):
+                raise HTTPException(422, "导出集数超出项目范围") from exc
             raise HTTPException(500, "生产包检查失败，请稍后重试") from exc
 
     @router.post("/projects/{project_id}/production-exports")
@@ -80,10 +95,17 @@ def build_production_export_router(service: ProductionExportService) -> APIRoute
         verify_csrf(request)
         assert_project_access(request, principal, project_id)
         expected = str(payload.get("expected_fingerprint") or "")
+        episode_numbers = requested_episodes(payload)
         if len(expected) != 64:
             raise HTTPException(409, "请先完成导出检查并确认当前版本")
         try:
-            record, created = service.create(project_id, expected, principal, request)
+            record, created = service.create(
+                project_id,
+                expected,
+                principal,
+                request,
+                episode_numbers=episode_numbers,
+            )
         except KeyError as exc:
             raise HTTPException(404, "创作项目不存在") from exc
         except ExportBlocked as exc:
@@ -94,6 +116,10 @@ def build_production_export_router(service: ProductionExportService) -> APIRoute
             raise HTTPException(410, str(exc)) from exc
         except AuditUnavailable as exc:
             raise HTTPException(503, "审计记录暂不可用，请稍后重试") from exc
+        except ValueError as exc:
+            if "episode_numbers" in str(exc):
+                raise HTTPException(422, "导出集数超出项目范围") from exc
+            raise
         return JSONResponse(
             status_code=201 if created else 200,
             content={"export": record, "created": created},

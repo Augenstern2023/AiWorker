@@ -29,6 +29,7 @@ import re
 import sqlite3
 import time
 import uuid
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Callable
 
@@ -91,6 +92,10 @@ class ProductionExportService:
                     created_by_name TEXT NOT NULL DEFAULT '',
                     created_at REAL NOT NULL,
                     episode_count INTEGER NOT NULL,
+                    episode_numbers_json TEXT NOT NULL DEFAULT '[]',
+                    export_scope TEXT NOT NULL DEFAULT 'full',
+                    project_total_episodes INTEGER NOT NULL DEFAULT 0,
+                    workflow_mode TEXT NOT NULL DEFAULT 'sequential',
                     path TEXT NOT NULL,
                     size_bytes INTEGER NOT NULL,
                     file_sha256 TEXT NOT NULL,
@@ -99,6 +104,24 @@ class ProductionExportService:
                 )
                 """
             )
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(creative_production_exports)"
+                ).fetchall()
+            }
+            additions = {
+                "episode_numbers_json": "TEXT NOT NULL DEFAULT '[]'",
+                "export_scope": "TEXT NOT NULL DEFAULT 'full'",
+                "project_total_episodes": "INTEGER NOT NULL DEFAULT 0",
+                "workflow_mode": "TEXT NOT NULL DEFAULT 'sequential'",
+            }
+            for column, definition in additions.items():
+                if column not in columns:
+                    connection.execute(
+                        f"ALTER TABLE creative_production_exports "
+                        f"ADD COLUMN {column} {definition}"
+                    )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_creative_production_exports_project "
                 "ON creative_production_exports(project_id, created_at DESC, id)"
@@ -106,9 +129,33 @@ class ProductionExportService:
 
     # ---------------------------------------------------------------- preview
 
-    def preview(self, project_id: int) -> dict[str, Any]:
-        inspection, package = _inspect_snapshot(self.repository.db_path, project_id)
-        return inspection.preview(package)
+    def preview(
+        self,
+        project_id: int,
+        episode_numbers: Iterable[int] | None = None,
+    ) -> dict[str, Any]:
+        requested = None if episode_numbers is None else list(episode_numbers)
+        inspection, package = _inspect_snapshot(
+            self.repository.db_path, project_id, requested
+        )
+        result = inspection.preview(package)
+        total = int(inspection.project["target_episode_count"])
+        selected = (
+            list(package["provenance"]["episode_numbers"])
+            if package is not None
+            else list(range(1, total + 1))
+            if requested is None
+            else sorted(set(int(number) for number in requested))
+        )
+        result["selection"] = {
+            "export_scope": (
+                "full" if selected == list(range(1, total + 1)) else "partial"
+            ),
+            "episode_numbers": selected,
+            "project_total_episodes": total,
+            "exported_episode_count": len(selected),
+        }
+        return result
 
     # ----------------------------------------------------------------- create
 
@@ -118,6 +165,8 @@ class ProductionExportService:
         expected_fingerprint: str,
         actor: Principal,
         request: Request | None = None,
+        *,
+        episode_numbers: Iterable[int] | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """Export the confirmed version, or reuse the stored artifact for it.
 
@@ -125,7 +174,9 @@ class ProductionExportService:
         ExportBlocked/FingerprintConflict (409), ExportUnavailable (410) or
         AuditUnavailable (503). Never rebuilds a registered historical file.
         """
-        inspection, package = _inspect_snapshot(self.repository.db_path, project_id)
+        inspection, package = _inspect_snapshot(
+            self.repository.db_path, project_id, episode_numbers
+        )
         if package is None:
             raise ExportBlocked("production export: locked inputs are incomplete")
         if package["fingerprint"] != expected_fingerprint:
@@ -136,6 +187,8 @@ class ProductionExportService:
             return self._ensure_reuse_audit(self._public(existing), actor, request), False
         export_id = str(uuid.uuid4())
         content = json.dumps(package, ensure_ascii=False, indent=2).encode("utf-8")
+        provenance = package["provenance"]
+        selected_numbers = list(provenance["episode_numbers"])
         path = (self.export_dir / f"{export_id}.json").resolve()
         temporary = path.with_name(f"{export_id}.json.tmp")
         temporary.write_bytes(content)
@@ -148,8 +201,9 @@ class ProductionExportService:
                     INSERT INTO creative_production_exports (
                         id, project_id, fingerprint, contract_version,
                         created_by, created_by_name, created_at, episode_count,
-                        path, size_bytes, file_sha256
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        episode_numbers_json, export_scope, project_total_episodes,
+                        workflow_mode, path, size_bytes, file_sha256
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         export_id,
@@ -159,7 +213,11 @@ class ProductionExportService:
                         actor.user_id,
                         actor.display_name,
                         created_at,
-                        len(package["provenance"]["episode_numbers"]),
+                        len(selected_numbers),
+                        json.dumps(selected_numbers, ensure_ascii=False),
+                        provenance["export_scope"],
+                        provenance["project_total_episodes"],
+                        provenance["workflow_mode"],
                         str(path),
                         len(content),
                         hashlib.sha256(content).hexdigest(),
@@ -262,7 +320,10 @@ class ProductionExportService:
         path = self._verified_path(row)
         self._audit(actor, "production_export.download_started", record, request)
         name = _safe_project_name(project["name"])
-        return path, f"{name}_生产包_{str(record['fingerprint'])[:12]}.json"
+        scope = _episode_scope_label(
+            record["episode_numbers"], record["export_scope"]
+        )
+        return path, f"{name}_{scope}_生产包_{str(record['fingerprint'])[:12]}.json"
 
     # -------------------------------------------------------------- internals
 
@@ -318,6 +379,9 @@ class ProductionExportService:
                     "fingerprint": record["fingerprint"],
                     "contract_version": record["contract_version"],
                     "episode_count": record["episode_count"],
+                    "episode_numbers": record["episode_numbers"],
+                    "export_scope": record["export_scope"],
+                    "workflow_mode": record["workflow_mode"],
                     "size_bytes": record["size_bytes"],
                     "file_sha256": record["file_sha256"],
                 },
@@ -336,6 +400,24 @@ class ProductionExportService:
 
     @staticmethod
     def _public(record: dict[str, Any]) -> dict[str, Any]:
+        try:
+            episode_numbers = [
+                int(number)
+                for number in json.loads(record.get("episode_numbers_json") or "[]")
+            ]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            episode_numbers = []
+        episode_count = int(record["episode_count"])
+        if not episode_numbers and episode_count:
+            episode_numbers = list(range(1, episode_count + 1))
+        project_total = int(record.get("project_total_episodes") or episode_count)
+        export_scope = str(record.get("export_scope") or "")
+        if export_scope not in {"full", "partial"}:
+            export_scope = (
+                "full"
+                if episode_numbers == list(range(1, project_total + 1))
+                else "partial"
+            )
         return {
             "id": record["id"],
             "project_id": str(record["project_id"]),
@@ -344,7 +426,11 @@ class ProductionExportService:
             "created_by": record["created_by"],
             "created_by_name": record["created_by_name"],
             "created_at": record["created_at"],
-            "episode_count": record["episode_count"],
+            "episode_count": episode_count,
+            "episode_numbers": episode_numbers,
+            "export_scope": export_scope,
+            "project_total_episodes": project_total,
+            "workflow_mode": str(record.get("workflow_mode") or "sequential"),
             "size_bytes": record["size_bytes"],
             "file_sha256": record["file_sha256"],
             "audit_status": "recorded" if record.get("audit_recorded_at") is not None else "pending",
@@ -355,3 +441,20 @@ class ProductionExportService:
 def _safe_project_name(name: str) -> str:
     cleaned = _UNSAFE_FILENAME.sub("_", str(name or "")).strip("_")
     return cleaned or "项目"
+
+
+def _episode_scope_label(numbers: list[int], scope: str) -> str:
+    if scope == "full":
+        return "全剧"
+    if not numbers:
+        return "部分集"
+    ranges: list[str] = []
+    start = previous = numbers[0]
+    for number in numbers[1:]:
+        if number == previous + 1:
+            previous = number
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = number
+    ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    return f"第{'、'.join(ranges)}集"

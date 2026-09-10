@@ -27,7 +27,36 @@
                 <div class="tab-content">
                     <div class="tab-pane fade show active" id="production-export-pane-check" role="tabpanel"
                          aria-labelledby="production-export-tab-check">
-                        <div class="alert alert-secondary small mb-3">导出范围为全剧锁定版本，格式固定为 JSON。导出不等于生产审批，仅打包创作的锁定资料。</div>
+                        <div class="alert alert-secondary small mb-3">可导出全剧或指定集的锁定版本，格式固定为 JSON。导出不等于生产审批，仅打包创作资料。</div>
+                        <div class="border rounded p-3 mb-3" id="production-export-scope-controls">
+                            <div class="row g-2 align-items-end">
+                                <div class="col-md-4">
+                                    <label class="form-label small" for="production-export-scope">导出范围</label>
+                                    <select class="form-select form-select-sm" id="production-export-scope">
+                                        <option value="all">全剧</option>
+                                        <option value="range">连续区间</option>
+                                        <option value="custom">自选集数</option>
+                                        <option value="available" id="production-export-available-option">当前可用集</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-5 d-none" id="production-export-range-fields">
+                                    <div class="d-flex align-items-end gap-2">
+                                        <div><label class="form-label small" for="production-export-range-start">开始集</label><input class="form-control form-control-sm" id="production-export-range-start" type="number" min="1" value="1"></div>
+                                        <span class="pb-1">至</span>
+                                        <div><label class="form-label small" for="production-export-range-end">结束集</label><input class="form-control form-control-sm" id="production-export-range-end" type="number" min="1" value="1"></div>
+                                    </div>
+                                </div>
+                                <div class="col-md-5 d-none" id="production-export-custom-fields">
+                                    <label class="form-label small" for="production-export-custom-episodes">集数</label>
+                                    <input class="form-control form-control-sm" id="production-export-custom-episodes" placeholder="例如：1-5、8、10">
+                                </div>
+                                <div class="col-md-3 ms-auto">
+                                    <button class="btn btn-sm btn-outline-primary w-100" id="production-export-scope-apply" type="button">检查此范围</button>
+                                </div>
+                            </div>
+                            <div class="small text-muted mt-2" id="production-export-available-summary">正在识别当前可用集…</div>
+                            <div class="small text-danger mt-2 d-none" id="production-export-scope-error" role="alert"></div>
+                        </div>
                         <div id="production-export-check-status" class="small text-muted" role="status" aria-live="polite">正在执行完整性检查…</div>
                         <div id="production-export-error" class="alert alert-danger d-none" role="alert"></div>
                         <div id="production-export-issues" class="mb-3"></div>

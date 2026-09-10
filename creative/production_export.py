@@ -146,10 +146,25 @@ class _Inspection:
 
     def preview(self, package: dict[str, Any] | None) -> dict[str, Any]:
         return {
-            'project': {key: self.project[key] for key in ('id', 'name', 'target_episode_count')},
+            'project': {
+                key: self.project[key]
+                for key in ('id', 'name', 'target_episode_count', 'workflow_mode')
+            },
             'ready': package is not None, 'fingerprint': package['fingerprint'] if package else None,
             'stages': self.stages, 'issues': self.issues,
         }
+
+
+def _scope_provenance(
+    project: dict[str, Any], numbers: list[int],
+) -> dict[str, Any]:
+    total = int(project["target_episode_count"])
+    complete = numbers == list(range(1, total + 1))
+    return {
+        "export_scope": "full" if complete else "partial",
+        "project_total_episodes": total,
+        "exported_episode_count": len(numbers),
+    }
 
 
 def _free_head(
@@ -306,6 +321,7 @@ def _inspect_free_snapshot(
             "project_id": project_id,
             "project_revision": project.get("revision", 0),
             "episode_numbers": numbers,
+            **_scope_provenance(project, numbers),
             "workflow_mode": "free",
             "locked_brief_id": brief["id"],
             "character_batch_id": heads[("characters", 0)]["resource_ref"],
@@ -452,6 +468,7 @@ def _inspect_snapshot(
             "provenance": {
                 "project_id": project["id"], "project_revision": project.get("revision", 0),
                 "episode_numbers": numbers, "workflow_mode": "sequential",
+                **_scope_provenance(project, numbers),
                 "locked_brief_id": brief["id"],
                 "character_batch_id": project["character_batch_id"],
                 "outline_batch_id": project["outline_batch_id"],

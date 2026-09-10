@@ -10,10 +10,10 @@
 4. 网页生产包导出（`creative.production_exports` + `creative.production_exports_api`）：
    - 入口一：`/review/projects`（负责项目）列表每行“导出生产项目包”按钮。
    - 入口二：`/planning/projects/{id}/brief`（创作任务书）页头“导出项目”按钮。
-   - 两处共用 `templates/common/workspace/production_export_modal.html` 与 `static/js/common/production_export.js`，分“导出检查/历史导出”两个页签。
-   - 四个接口：`GET /api/creative/projects/{id}/production-export/preview`、`POST /api/creative/projects/{id}/production-exports`（携带 `expected_fingerprint`，创建接口校验 CSRF）、`GET /api/creative/projects/{id}/production-exports`（历史，默认每页 20 条）、`GET /api/creative/production-exports/{export_id}/download`。
+   - 两处共用 `templates/common/workspace/production_export_modal.html` 与 `static/js/common/production_export.js`，分“导出检查/历史导出”两个页签；范围支持全剧、连续区间、自选集数和当前可用集。
+   - 四个接口：`GET /api/creative/projects/{id}/production-export/preview` 可重复传入 `episode_numbers`；`POST /api/creative/projects/{id}/production-exports` 携带同一组 `episode_numbers` 与 `expected_fingerprint` 并校验 CSRF；另有历史列表与下载接口。
    - 权限：仅系统管理员，及拥有项目管理权限（`can_access_managed_project` 语义）的负责人。页面访问权限、普通成员身份一律不放行；未登录 401、无权限 403、项目/记录缺失 404、文件缺失/篡改/越界 410、审计暂不可用 503、检查未通过或版本变化 409。
-   - 不可变记录：表 `creative_production_exports` 以“项目 + 指纹 + 契约版本 1.0”为唯一键，重复请求复用原产物并保留最初创建信息；文件存入 `.runtime/production-exports/{服务端生成 ID}.json`，临时写入后原子发布；下载名为“项目名_生产包_指纹前12位.json”。
+   - 不可变记录：表 `creative_production_exports` 以“项目 + 指纹 + 契约版本 1.0”为唯一键，保存全剧/部分集标记、具体集数、项目总集数和创作模式；重复请求复用原产物并保留最初创建信息。
    - 版本指纹（锁定内容）与文件 SHA256（磁盘字节）分开：历史包不可被当前内容覆盖，下载前校验路径边界、文件存在性与文件校验值，损坏即 410，不静默重建。
    - 审计至少一次：`production_export.create / .reuse / .download_started`；审计失败记录保持 `pending` 并阻塞下载，重试（再次创建/下载）自动补记后才可下载。下载审计表示服务端批准开始返回文件，不证明浏览器已完整保存。
    - 生命周期：导出记录已纳入 Writer 回滚的删除状态与外部使用指纹；显式删除项目时，记录随 `creative_production_exports` 删除，文件仅允许清理固定导出目录内已登记路径；审计记录保留。
@@ -70,7 +70,7 @@ npm --prefix ../auto_short_play/automation/framework test
 ## 边界
 
 - 当前 Node 入口只接受完整连续全剧，Python 的部分集导出仅供其他调用方；不要把局部包送到该入口。
-- 网页导出首期仅全剧锁定版本、固定 JSON；不支持选集、ZIP、自定义输出目录或上传外部包。
+- 网页导出支持全剧或选集的锁定版本，格式固定为 JSON；不支持 ZIP、自定义输出目录或上传外部包。“当前可用集”只选择大纲、Beats、剧本均已锁定的集，并在生成前再次预检。
 - 下游保留 Brief/人物/关系/大纲/Beats，但没有在本次自动生成视觉资产或替代原有分镜编排。
 - Node 校验指纹非空并原样保存，不重新计算上游指纹；只接收可信本地导出包。状态同步校验来源绑定，不证明文件未经篡改，也不自动检测原剧库后续变化。
 - 完成集数仅检查索引和非空文件，不代表媒体可解码、口型准确或内容质量通过。

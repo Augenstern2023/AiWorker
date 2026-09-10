@@ -171,6 +171,9 @@ def test_complete_package_preserves_source_rows_and_parsed_content(db):
     assert package["scripts"][0]["content"]["scenes"][0]["blocks"][0]["text"] == "开门"
     assert package["scripts"][0]["upstream_refs"]["beats_id"] == package["beats"][0]["id"]
     assert package["provenance"]["episode_numbers"] == [1, 2]
+    assert package["provenance"]["export_scope"] == "full"
+    assert package["provenance"]["project_total_episodes"] == 2
+    assert package["provenance"]["exported_episode_count"] == 2
     assert package["provenance"]["project_revision"] == package["project"]["revision"]
     assert len(package["fingerprint"]) == 64
     assert package == export(db, 1)
@@ -197,6 +200,20 @@ def test_free_project_exports_complete_package_from_locked_resource_heads(free_d
     ]
 
 
+def test_free_project_can_export_selected_episodes(free_db):
+    path, project_id = free_db
+
+    package = export(path, project_id, [2])
+
+    assert package["provenance"]["export_scope"] == "partial"
+    assert package["provenance"]["project_total_episodes"] == 2
+    assert package["provenance"]["exported_episode_count"] == 1
+    assert package["provenance"]["episode_numbers"] == [2]
+    assert [item["episode_number"] for item in package["outlines"]] == [2]
+    assert [item["episode_number"] for item in package["beats"]] == [2]
+    assert [item["episode_number"] for item in package["scripts"]] == [2]
+
+
 def test_free_project_does_not_fall_back_when_current_head_is_draft(free_db):
     path, project_id = free_db
     repository = CreativeRepository(path)
@@ -216,6 +233,9 @@ def test_subset_is_sorted_deduplicated_and_does_not_require_other_scripts(db):
         conn.execute("DELETE FROM creative_episodes WHERE stage='script' AND episode_number=1")
     package = export(db, 1, [2, 2])
     assert package["provenance"]["episode_numbers"] == [2]
+    assert package["provenance"]["export_scope"] == "partial"
+    assert package["provenance"]["project_total_episodes"] == 2
+    assert package["provenance"]["exported_episode_count"] == 1
     for stage in ("outlines", "beats", "scripts"):
         assert [row["episode_number"] for row in package[stage]] == [2]
     with pytest.raises(ValueError, match="script"):

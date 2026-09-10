@@ -20,6 +20,9 @@
     let generateInFlight = false;
     let historyPage = 1;
     let historyTotal = 0;
+    let selectedEpisodeNumbers = null;
+    let availableEpisodeNumbers = [];
+    let projectTotalEpisodes = 0;
 
     function requestUi() { return window.aiworkerUi; }
 
@@ -53,6 +56,124 @@
 
     function shortFingerprint(value) {
         return String(value || '').slice(0, 12);
+    }
+
+    function allEpisodes(total) {
+        return Array.from({length: Math.max(0, total)}, (_, index) => index + 1);
+    }
+
+    function compactEpisodes(numbers) {
+        if (!numbers || !numbers.length) return '无';
+        const ranges = [];
+        let start = numbers[0];
+        let previous = numbers[0];
+        numbers.slice(1).forEach((number) => {
+            if (number === previous + 1) {
+                previous = number;
+                return;
+            }
+            ranges.push(start === previous ? `${start}` : `${start}-${previous}`);
+            start = number;
+            previous = number;
+        });
+        ranges.push(start === previous ? `${start}` : `${start}-${previous}`);
+        return ranges.join('、');
+    }
+
+    function scopeLabel(record) {
+        if (!record.export_scope || record.export_scope === 'full') {
+            return `全剧 ${record.episode_count} 集`;
+        }
+        return `部分集：第 ${compactEpisodes(record.episode_numbers || [])} 集`;
+    }
+
+    function deriveAvailableEpisodes(payload) {
+        const stages = payload.stages || [];
+        const globalReady = stages
+            .filter((stage) => !stage.episode_number)
+            .every((stage) => stage.state === 'ready');
+        if (!globalReady) return [];
+        const states = new Map();
+        stages.filter((stage) => stage.episode_number).forEach((stage) => {
+            const number = Number(stage.episode_number);
+            if (!states.has(number)) states.set(number, new Map());
+            states.get(number).set(stage.stage, stage.state);
+        });
+        return allEpisodes(projectTotalEpisodes).filter((number) => {
+            const episode = states.get(number);
+            return episode && ['outline', 'beats', 'script'].every(
+                (stage) => episode.get(stage) === 'ready',
+            );
+        });
+    }
+
+    function updateAvailableSummary() {
+        const hasAvailable = availableEpisodeNumbers.length > 0;
+        elements.availableOption.disabled = !hasAvailable;
+        elements.availableSummary.textContent = hasAvailable
+            ? `当前可用集：第 ${compactEpisodes(availableEpisodeNumbers)} 集（大纲、Beats、剧本均已锁定）`
+            : '当前没有同时完成大纲、Beats 和剧本锁定的集数。';
+    }
+
+    function updateScopeFields() {
+        const mode = elements.scope.value;
+        elements.rangeFields.classList.toggle('d-none', mode !== 'range');
+        elements.customFields.classList.toggle('d-none', mode !== 'custom');
+    }
+
+    function invalidateScopeConfirmation() {
+        currentFingerprint = null;
+        elements.generate.disabled = true;
+        if (projectTotalEpisodes) {
+            showError(elements.scopeError, '导出范围已修改，请点击“检查此范围”重新确认。');
+        }
+    }
+
+    function handleScopeChange() {
+        updateScopeFields();
+        invalidateScopeConfirmation();
+    }
+
+    function parseCustomEpisodes(raw) {
+        const values = new Set();
+        const parts = String(raw || '').trim().split(/[、,，\s]+/).filter(Boolean);
+        if (!parts.length) throw new Error('请输入需要导出的集数');
+        parts.forEach((part) => {
+            const match = part.match(/^(\d+)(?:\s*[-至~～]\s*(\d+))?$/);
+            if (!match) throw new Error(`无法识别集数“${part}”`);
+            const start = Number(match[1]);
+            const end = Number(match[2] || match[1]);
+            if (start < 1 || end < start || end > projectTotalEpisodes) {
+                throw new Error(`集数必须在 1-${projectTotalEpisodes} 范围内`);
+            }
+            for (let number = start; number <= end; number += 1) values.add(number);
+        });
+        return Array.from(values).sort((left, right) => left - right);
+    }
+
+    function requestedEpisodesFromControls() {
+        const mode = elements.scope.value;
+        if (mode === 'all') return null;
+        if (mode === 'available') {
+            if (!availableEpisodeNumbers.length) throw new Error('当前没有可导出的完整锁定集');
+            return [...availableEpisodeNumbers];
+        }
+        if (mode === 'custom') return parseCustomEpisodes(elements.customEpisodes.value);
+        const start = Number(elements.rangeStart.value);
+        const end = Number(elements.rangeEnd.value);
+        if (!Number.isInteger(start) || !Number.isInteger(end)
+            || start < 1 || end < start || end > projectTotalEpisodes) {
+            throw new Error(`连续区间必须在 1-${projectTotalEpisodes} 范围内`);
+        }
+        return Array.from({length: end - start + 1}, (_, index) => start + index);
+    }
+
+    function previewUrl(projectId) {
+        const base = `/api/creative/projects/${projectId}/production-export/preview`;
+        if (!selectedEpisodeNumbers) return base;
+        const query = new URLSearchParams();
+        selectedEpisodeNumbers.forEach((number) => query.append('episode_numbers', number));
+        return `${base}?${query.toString()}`;
     }
 
     function showError(box, message) {
@@ -98,10 +219,31 @@
             activeProject.name = payload.project.name;
             elements.projectName.textContent = activeProject.name;
         }
+        projectTotalEpisodes = Number(
+            (payload.selection && payload.selection.project_total_episodes)
+            || (payload.project && payload.project.target_episode_count)
+            || 0,
+        );
+        elements.rangeStart.max = projectTotalEpisodes;
+        elements.rangeEnd.max = projectTotalEpisodes;
+        if (elements.scope.value === 'all') {
+            elements.rangeStart.value = 1;
+            elements.rangeEnd.value = projectTotalEpisodes;
+        }
+        const selection = payload.selection || {};
+        selectedEpisodeNumbers = Array.isArray(selection.episode_numbers)
+            ? selection.episode_numbers.map(Number)
+            : allEpisodes(projectTotalEpisodes);
+        if (selectedEpisodeNumbers.length === projectTotalEpisodes
+            && selectedEpisodeNumbers.every((number, index) => number === index + 1)) {
+            availableEpisodeNumbers = deriveAvailableEpisodes(payload);
+            updateAvailableSummary();
+        }
         elements.issues.replaceChildren();
         elements.stages.replaceChildren();
         elements.result.classList.add('d-none');
         showError(elements.error, '');
+        showError(elements.scopeError, '');
 
         (payload.issues || []).forEach((issue) => {
             const item = document.createElement('div');
@@ -154,7 +296,7 @@
         try {
             const response = await requestUi().requestKey(keyFor('preview'), (signal) =>
                 window.aiworkerApi.request(
-                    `/api/creative/projects/${project.id}/production-export/preview`, {signal},
+                    previewUrl(project.id), {signal},
                 ));
             if (!activeProject || activeProject.id !== project.id) return;
             if (!response.ok) throw new Error(await readDetail(response, '导出检查失败'));
@@ -232,7 +374,7 @@
             version.appendChild(code);
 
             const scope = document.createElement('td');
-            scope.textContent = `${record.episode_count} 集 · ${formatSize(record.size_bytes)}`;
+            scope.textContent = `${scopeLabel(record)} · ${formatSize(record.size_bytes)}`;
 
             const state = document.createElement('td');
             state.appendChild(historyStateCell(record));
@@ -290,7 +432,8 @@
             if (!response.ok) {
                 throw new Error(await readDetail(response, '下载失败，请稍后重试'));
             }
-            let filename = `${projectName}_生产包_${shortFingerprint(record.fingerprint)}.json`;
+            let filename = `${projectName}_${scopeLabel(record)}_生产包_`
+                + `${shortFingerprint(record.fingerprint)}.json`;
             const disposition = response.headers.get('content-disposition') || '';
             const match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
             if (match) filename = decodeURIComponent(match[1]);
@@ -328,7 +471,10 @@
                     {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({expected_fingerprint: currentFingerprint}),
+                        body: JSON.stringify({
+                            expected_fingerprint: currentFingerprint,
+                            episode_numbers: selectedEpisodeNumbers,
+                        }),
                         signal,
                     },
                 ));
@@ -346,7 +492,7 @@
                 : '该版本已有生产包，直接复用原产物。';
             const detail = document.createElement('div');
             detail.className = 'small mt-1';
-            detail.textContent = `指纹 ${shortFingerprint(record.fingerprint)} · ${record.episode_count} 集 · `
+            detail.textContent = `指纹 ${shortFingerprint(record.fingerprint)} · ${scopeLabel(record)} · `
                 + `${formatSize(record.size_bytes)}。仅导出创作资料，尚未开始生产。`;
             const link = document.createElement('a');
             link.className = 'btn btn-sm btn-success mt-2';
@@ -368,6 +514,8 @@
         } catch (reason) {
             if (window.aiworkerApi.isAbortError(reason)) return;
             if (!activeProject || activeProject.id !== project.id) return;
+            currentFingerprint = null;
+            elements.generate.disabled = true;
             showError(elements.error, reason.message || '生成生产包失败，请稍后重试');
             // A version conflict means the earlier preview no longer matches, so
             // require a fresh confirmation instead of exporting an unreviewed version.
@@ -381,6 +529,20 @@
         }
     }
 
+    function applyScopeSelection() {
+        try {
+            selectedEpisodeNumbers = requestedEpisodesFromControls();
+            currentFingerprint = null;
+            elements.generate.disabled = true;
+            showError(elements.scopeError, '');
+            loadPreview();
+        } catch (reason) {
+            currentFingerprint = null;
+            elements.generate.disabled = true;
+            showError(elements.scopeError, reason.message || '导出范围无效');
+        }
+    }
+
     function open(projectId, options) {
         const id = String(projectId);
         if (activeProject && activeProject.id !== id) cancelAllRequests();
@@ -389,6 +551,16 @@
         currentFingerprint = null;
         historyPage = 1;
         historyTotal = 0;
+        selectedEpisodeNumbers = null;
+        availableEpisodeNumbers = [];
+        projectTotalEpisodes = 0;
+        elements.scope.value = 'all';
+        elements.rangeStart.value = 1;
+        elements.rangeEnd.value = 1;
+        elements.customEpisodes.value = '';
+        elements.availableOption.disabled = true;
+        elements.availableSummary.textContent = '正在检查当前可用集…';
+        updateScopeFields();
         elements.projectName.textContent = activeProject.name;
         elements.result.classList.add('d-none');
         showError(elements.error, '');
@@ -419,8 +591,23 @@
             historyTotal: document.getElementById('production-export-history-total'),
             historyPrev: document.getElementById('production-export-history-prev'),
             historyNext: document.getElementById('production-export-history-next'),
+            scope: document.getElementById('production-export-scope'),
+            rangeFields: document.getElementById('production-export-range-fields'),
+            rangeStart: document.getElementById('production-export-range-start'),
+            rangeEnd: document.getElementById('production-export-range-end'),
+            customFields: document.getElementById('production-export-custom-fields'),
+            customEpisodes: document.getElementById('production-export-custom-episodes'),
+            availableOption: document.getElementById('production-export-available-option'),
+            availableSummary: document.getElementById('production-export-available-summary'),
+            scopeApply: document.getElementById('production-export-scope-apply'),
+            scopeError: document.getElementById('production-export-scope-error'),
         };
         elements.generate.addEventListener('click', generatePackage);
+        elements.scope.addEventListener('change', handleScopeChange);
+        elements.rangeStart.addEventListener('input', invalidateScopeConfirmation);
+        elements.rangeEnd.addEventListener('input', invalidateScopeConfirmation);
+        elements.customEpisodes.addEventListener('input', invalidateScopeConfirmation);
+        elements.scopeApply.addEventListener('click', applyScopeSelection);
         elements.historyPrev.addEventListener('click', () => loadHistory(historyPage - 1));
         elements.historyNext.addEventListener('click', () => loadHistory(historyPage + 1));
         modalElement.addEventListener('hidden.bs.modal', () => {

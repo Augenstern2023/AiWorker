@@ -107,13 +107,28 @@ def mount(page: Page, *, preview: dict, history: dict, export: dict | None = Non
         }};
         window.aiworkerApi = {{
           request(url, options = {{}}) {{
-            window.__requestLog.push({{url, method: options.method || 'GET'}});
+            window.__requestLog.push({{url, method: options.method || 'GET', body: options.body || null}});
             if (options && options.signal && options.signal.aborted) {{
               const err = new Error('Aborted'); err.name = 'AbortError';
               return Promise.reject(err);
             }}
-            if (url.endsWith('/production-export/preview')) {{
-              const payload = {{ok: true, json: () => Promise.resolve(window.__fixtures.preview)}};
+            if (url.includes('/production-export/preview')) {{
+              const parsed = new URL(url, 'http://test.local');
+              const episodes = parsed.searchParams.getAll('episode_numbers').map(Number);
+              const preview = JSON.parse(JSON.stringify(window.__fixtures.preview));
+              if (episodes.length) {{
+                const total = Number(preview.project.target_episode_count || episodes.length);
+                preview.selection = {{
+                  export_scope: episodes.length === total && episodes.every((n, i) => n === i + 1) ? 'full' : 'partial',
+                  episode_numbers: episodes,
+                  project_total_episodes: total,
+                  exported_episode_count: episodes.length,
+                }};
+                preview.stages = (preview.stages || []).filter(
+                  (stage) => !stage.episode_number || episodes.includes(Number(stage.episode_number))
+                );
+              }}
+              const payload = {{ok: true, json: () => Promise.resolve(preview)}};
               return delay(payload);
             }}
             if (url.includes('/production-exports?')) return delay({{ok: true, json: () => Promise.resolve(window.__fixtures.history)}});
@@ -198,6 +213,91 @@ def test_open_show_check_and_generate(page: Page) -> None:
     # The result panel shows the fingerprint's leading 12 characters.
     assert "abcabcabcabc" in result_text
     assert page.locator("#production-export-result a").get_attribute("href") == export["download_url"]
+
+
+def test_custom_episode_selection_is_rechecked_and_sent_to_create(page: Page) -> None:
+    stages = [
+        _stage(number=number)
+        for number in (1, 2, 3)
+        for _ in ("outline", "beats", "script")
+    ]
+    for index, stage in enumerate(stages):
+        stage["stage"] = ("outline", "beats", "script")[index % 3]
+    preview = {
+        "project": {"id": "3", "name": "寻找真相", "target_episode_count": 3},
+        "ready": True,
+        "fingerprint": "abc" * 8,
+        "stages": stages,
+        "issues": [],
+    }
+    history = {"items": [], "total": 0, "page": 1, "page_size": 20}
+    exported = {
+        "id": "e-partial", "project_id": "3", "fingerprint": preview["fingerprint"],
+        "contract_version": "1.0", "created_by": "owner", "created_by_name": "负责人",
+        "created_at": 1, "episode_count": 2, "episode_numbers": [1, 3],
+        "export_scope": "partial", "project_total_episodes": 3,
+        "workflow_mode": "free", "size_bytes": 100, "file_sha256": "deadbeef",
+        "audit_status": "recorded",
+        "download_url": "/api/creative/production-exports/e-partial/download",
+    }
+    mount(page, preview=preview, history=history, export=exported)
+    page.evaluate(
+        "() => window.aiworkerProductionExport.open('3', {projectName: '寻找真相'})"
+    )
+    page.wait_for_function(
+        "() => document.querySelector('#production-export-check-status').textContent.includes('全部检查通过')"
+    )
+
+    page.locator("#production-export-scope").select_option("custom")
+    page.locator("#production-export-custom-episodes").fill("1,3")
+    assert page.locator("#production-export-generate").is_disabled()
+    page.locator("#production-export-scope-apply").click()
+    page.wait_for_function(
+        "() => window.__requestLog.some(item => item.url.includes('episode_numbers=1') && item.url.includes('episode_numbers=3'))"
+    )
+    page.locator("#production-export-generate").click()
+    page.wait_for_function(
+        "() => window.__requestLog.some(item => item.method === 'POST' && item.url.endsWith('/production-exports'))"
+    )
+    body = page.evaluate(
+        "() => JSON.parse(window.__requestLog.findLast(item => item.method === 'POST').body)"
+    )
+    assert body["episode_numbers"] == [1, 3]
+
+
+def test_available_selection_uses_only_fully_ready_episodes(page: Page) -> None:
+    stages = []
+    for number in (1, 2, 3):
+        for stage_name in ("outline", "beats", "script"):
+            stage = _stage(number=number)
+            stage["stage"] = stage_name
+            if number == 2 and stage_name == "script":
+                stage["state"] = "invalid"
+            stages.append(stage)
+    preview = {
+        "project": {"id": "3", "name": "寻找真相", "target_episode_count": 3},
+        "ready": False,
+        "fingerprint": None,
+        "stages": stages,
+        "issues": [],
+    }
+    mount(
+        page,
+        preview=preview,
+        history={"items": [], "total": 0, "page": 1, "page_size": 20},
+        export=None,
+    )
+    page.evaluate(
+        "() => window.aiworkerProductionExport.open('3', {projectName: '寻找真相'})"
+    )
+    page.wait_for_function(
+        "() => document.querySelector('#production-export-available-summary').textContent.includes('第 1、3 集')"
+    )
+    page.locator("#production-export-scope").select_option("available")
+    page.locator("#production-export-scope-apply").click()
+    page.wait_for_function(
+        "() => window.__requestLog.some(item => item.url.includes('episode_numbers=1') && item.url.includes('episode_numbers=3'))"
+    )
 
 
 def test_blocked_issues_disable_generate_and_link_to_edit(page: Page) -> None:

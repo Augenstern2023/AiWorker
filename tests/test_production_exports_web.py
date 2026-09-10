@@ -51,9 +51,16 @@ def environment(db, tmp_path):
                            permissions=permissions, admin=admin, owner=owner, root=tmp_path)
 
 
-def create(environment):
-    fingerprint = export_production_package(environment.repository.db_path, 1)['fingerprint']
-    return environment.client.post('/api/creative/projects/1/production-exports', json={'expected_fingerprint': fingerprint})
+def create(environment, episode_numbers=None):
+    fingerprint = export_production_package(
+        environment.repository.db_path, 1, episode_numbers
+    )['fingerprint']
+    payload = {'expected_fingerprint': fingerprint}
+    if episode_numbers is not None:
+        payload['episode_numbers'] = episode_numbers
+    return environment.client.post(
+        '/api/creative/projects/1/production-exports', json=payload
+    )
 
 
 def test_create_download_and_reuse_are_immutable_and_audited(environment, db):
@@ -78,6 +85,80 @@ def test_create_download_and_reuse_are_immutable_and_audited(environment, db):
     assert actions == ['production_export.create', 'production_export.download_started', 'production_export.reuse', 'production_export.download_started']
     assert '寻找真相' not in str(environment.audit.record.call_args_list)
     assert 'path' not in record
+
+
+def test_preview_create_and_history_preserve_selected_episodes(environment):
+    preview = environment.client.get(
+        '/api/creative/projects/1/production-export/preview',
+        params=[('episode_numbers', 2)],
+    )
+    assert preview.status_code == 200, preview.text
+    payload = preview.json()
+    assert payload['ready'] is True
+    assert payload['selection'] == {
+        'export_scope': 'partial',
+        'episode_numbers': [2],
+        'project_total_episodes': 2,
+        'exported_episode_count': 1,
+    }
+
+    created = environment.client.post(
+        '/api/creative/projects/1/production-exports',
+        json={
+            'expected_fingerprint': payload['fingerprint'],
+            'episode_numbers': [2],
+        },
+    )
+    assert created.status_code == 201, created.text
+    record = created.json()['export']
+    assert record['episode_numbers'] == [2]
+    assert record['episode_count'] == 1
+    assert record['project_total_episodes'] == 2
+    assert record['export_scope'] == 'partial'
+    assert record['workflow_mode'] == 'sequential'
+
+    downloaded = environment.client.get(record['download_url'])
+    package = downloaded.json()
+    assert package['provenance']['episode_numbers'] == [2]
+    assert package['provenance']['export_scope'] == 'partial'
+    for stage in ('outlines', 'beats', 'scripts'):
+        assert [item['episode_number'] for item in package[stage]] == [2]
+    history = environment.client.get(
+        '/api/creative/projects/1/production-exports'
+    ).json()['items'][0]
+    assert history['episode_numbers'] == [2]
+    assert '%E7%AC%AC2%E9%9B%86' in downloaded.headers['content-disposition']
+
+
+@pytest.mark.parametrize('episode_numbers', [[], [0], [3], ['1'], [True]])
+def test_invalid_episode_selection_is_rejected(environment, episode_numbers):
+    preview = environment.client.get(
+        '/api/creative/projects/1/production-export/preview',
+        params=[('episode_numbers', number) for number in episode_numbers],
+    )
+    if episode_numbers and all(type(number) is int for number in episode_numbers):
+        assert preview.status_code == 422
+
+    created = environment.client.post(
+        '/api/creative/projects/1/production-exports',
+        json={'expected_fingerprint': 'a' * 64, 'episode_numbers': episode_numbers},
+    )
+    assert created.status_code == 422
+
+
+def test_selection_change_after_preview_requires_new_confirmation(environment):
+    preview = environment.client.get(
+        '/api/creative/projects/1/production-export/preview',
+        params=[('episode_numbers', 2)],
+    ).json()
+    response = environment.client.post(
+        '/api/creative/projects/1/production-exports',
+        json={
+            'expected_fingerprint': preview['fingerprint'],
+            'episode_numbers': [1],
+        },
+    )
+    assert response.status_code == 409
 
 
 @pytest.mark.parametrize('token,status', [(None, 401), ('writer', 403), ('admin', 200), ('owner', 200)])
@@ -166,3 +247,38 @@ def test_history_versions_pagination_and_deleted_project(environment, db):
     with sqlite3.connect(db) as connection:
         connection.execute('UPDATE creative_projects SET deleted=1')
     assert environment.client.get(first['download_url']).status_code == 404
+
+
+def test_existing_export_table_is_upgraded_for_episode_scope(tmp_path):
+    repository = CreativeRepository(tmp_path / 'existing.sqlite')
+    with repository._connect() as connection:
+        connection.execute(
+            '''
+            CREATE TABLE creative_production_exports (
+                id TEXT PRIMARY KEY, project_id INTEGER NOT NULL,
+                fingerprint TEXT NOT NULL, contract_version TEXT NOT NULL,
+                created_by TEXT NOT NULL, created_by_name TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL, episode_count INTEGER NOT NULL,
+                path TEXT NOT NULL, size_bytes INTEGER NOT NULL,
+                file_sha256 TEXT NOT NULL, audit_recorded_at REAL,
+                UNIQUE(project_id, fingerprint, contract_version)
+            )
+            '''
+        )
+    module = importlib.import_module('creative.production_exports')
+    module.ProductionExportService(
+        root=tmp_path,
+        repository=repository,
+        audit_service=Mock(),
+    )
+    with repository._connect() as connection:
+        columns = {
+            row['name']
+            for row in connection.execute(
+                'PRAGMA table_info(creative_production_exports)'
+            ).fetchall()
+        }
+    assert {
+        'episode_numbers_json', 'export_scope',
+        'project_total_episodes', 'workflow_mode',
+    } <= columns

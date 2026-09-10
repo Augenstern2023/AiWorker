@@ -1314,6 +1314,63 @@ class FreeCreativeModeService:
         value = latest[key]
         return [row for row in rows if row[key] == value]
 
+    def _completed_migration_result(
+        self, row: Any, operation_id: str
+    ) -> dict[str, Any]:
+        mapping = self._loads(row["mapping_json"], {})
+        project_mapping = mapping.get("project") or {}
+        target_project_id = int(
+            project_mapping.get("target") or row["project_id"]
+        )
+        return {
+            "project": self.repository.get_project(target_project_id) or {},
+            "mapping": mapping,
+            "operation_id": operation_id,
+            "created": False,
+        }
+
+    @staticmethod
+    def _create_free_project_copy_conn(
+        conn: Any,
+        *,
+        source_project: dict[str, Any],
+        operation_id: str,
+        actor_user_id: str,
+        now: float,
+    ) -> int:
+        cursor = conn.execute(
+            """
+            INSERT INTO creative_projects (
+                topic_id, breakdown_id, name, genre, target_platform,
+                target_audience, target_episode_count, episode_duration_seconds,
+                status, locked_brief_id, character_batch_id, outline_batch_id,
+                workflow_task_id, creation_workflow_task_id, creation_request_id,
+                created_by, deleted, creation_mode, bootstrap_status, revision,
+                workflow_mode, mode_revision, mode_changed_at, mode_changed_by,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'free_active', NULL, NULL, NULL,
+                      NULL, NULL, ?, ?, 0, ?, 'ready', 0, 'free', 0, ?, ?, ?, ?)
+            """,
+            (
+                source_project.get("topic_id"),
+                source_project.get("breakdown_id"),
+                f"{str(source_project.get('name') or '未命名项目').strip()}（自由副本）",
+                str(source_project.get("genre") or ""),
+                str(source_project.get("target_platform") or ""),
+                str(source_project.get("target_audience") or ""),
+                int(source_project.get("target_episode_count") or 20),
+                int(source_project.get("episode_duration_seconds") or 120),
+                f"free-migration:{operation_id}",
+                actor_user_id,
+                str(source_project.get("creation_mode") or "imitation"),
+                now,
+                actor_user_id,
+                now,
+                now,
+            ),
+        )
+        return int(cursor.lastrowid)
+
     def migrate_to_free(
         self,
         *,
@@ -1333,12 +1390,7 @@ class FreeCreativeModeService:
                 raise ValueError("migration operation id belongs to another project")
             if prior["status"] != "completed":
                 raise ValueError("creative mode migration is not complete")
-            return {
-                "project": self.repository.get_project(project_id) or {},
-                "mapping": self._loads(prior["mapping_json"], {}),
-                "operation_id": operation_id,
-                "created": False,
-            }
+            return self._completed_migration_result(prior, operation_id)
         preview = self.migration_preview(project_id)
         if preview["blockers"]:
             raise ValueError("；".join(preview["blockers"]))
@@ -1353,35 +1405,17 @@ class FreeCreativeModeService:
                     raise ValueError("migration operation id belongs to another project")
                 if existing["status"] != "completed":
                     raise ValueError("creative mode migration is not complete")
-                return {
-                    "project": self.repository.get_project(project_id) or {},
-                    "mapping": self._loads(existing["mapping_json"], {}),
-                    "operation_id": operation_id,
-                    "created": False,
-                }
+                return self._completed_migration_result(existing, operation_id)
             project = self._raw_project(conn, project_id)
             if project.get("workflow_mode", "sequential") != "sequential":
                 raise ValueError("项目已经是自由创作模式")
             if int(project.get("mode_revision") or 0) != int(expected_mode_revision):
                 raise ValueError("creative workflow mode changed")
             seed = conn.execute(
-                "SELECT id FROM creative_seeds WHERE project_id = ? ORDER BY version DESC LIMIT 1",
+                "SELECT * FROM creative_seeds WHERE project_id = ? ORDER BY version DESC LIMIT 1",
                 (int(project_id),),
             ).fetchone()
             now = time.time()
-            if seed is None:
-                resolved_seed_text = self._automatic_seed_text_conn(
-                    conn, project, seed_text
-                )
-                conn.execute(
-                    """
-                    INSERT INTO creative_seeds (
-                        project_id, version, status, seed_text, constraints_json,
-                        reference_refs_json, created_at, updated_at, locked_at
-                    ) VALUES (?, 1, 'frozen', ?, '{}', '[]', ?, ?, ?)
-                    """,
-                    (int(project_id), resolved_seed_text, now, now, now),
-                )
             conn.execute(
                 """
                 INSERT INTO creative_mode_migrations (
@@ -1394,7 +1428,40 @@ class FreeCreativeModeService:
                     actor_user_id, now, now,
                 ),
             )
+            target_project_id = self._create_free_project_copy_conn(
+                conn,
+                source_project=project,
+                operation_id=operation_id,
+                actor_user_id=actor_user_id,
+                now=now,
+            )
+            resolved_seed_text = (
+                str(seed["seed_text"] or "").strip()
+                if seed is not None
+                else self._automatic_seed_text_conn(conn, project, seed_text)
+            )
+            conn.execute(
+                """
+                INSERT INTO creative_seeds (
+                    project_id, version, status, seed_text, constraints_json,
+                    reference_refs_json, created_at, updated_at, locked_at
+                ) VALUES (?, 1, 'frozen', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    target_project_id,
+                    resolved_seed_text,
+                    str(seed["constraints_json"] or "{}") if seed is not None else "{}",
+                    str(seed["reference_refs_json"] or "[]") if seed is not None else "[]",
+                    now,
+                    now,
+                    now,
+                ),
+            )
             mapping: dict[str, Any] = {
+                "project": {
+                    "source": int(project_id),
+                    "target": target_project_id,
+                },
                 "brief": None,
                 "characters": None,
                 "outline": None,
@@ -1419,7 +1486,7 @@ class FreeCreativeModeService:
                 content = self._loads(brief_row["content_json"], {})
                 new_id, version = self._create_brief_conn(
                     conn,
-                    project_id=project_id,
+                    project_id=target_project_id,
                     content=content,
                     source_refs={
                         "migration_source": self._manifest_item(
@@ -1430,7 +1497,7 @@ class FreeCreativeModeService:
                     status=str(brief_row["status"]),
                 )
                 self._set_head_conn(
-                    conn, project_id=project_id, stage="brief", episode_number=0,
+                    conn, project_id=target_project_id, stage="brief", episode_number=0,
                     resource_ref=str(new_id), resource_version=version,
                     expected_revision=0, actor_user_id=actor_user_id,
                 )
@@ -1453,7 +1520,7 @@ class FreeCreativeModeService:
                 new_batch = uuid.uuid4().hex
                 version = int(conn.execute(
                     "SELECT COALESCE(MAX(version), 0) + 1 AS version FROM creative_characters "
-                    "WHERE project_id = ?", (int(project_id),)
+                    "WHERE project_id = ?", (target_project_id,)
                 ).fetchone()["version"])
                 for row in selected_characters:
                     conn.execute(
@@ -1465,7 +1532,7 @@ class FreeCreativeModeService:
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'free', ?, ?, ?)
                         """,
                         (
-                            int(project_id), new_batch, version, str(row["character_key"]),
+                            target_project_id, new_batch, version, str(row["character_key"]),
                             str(row["status"]), str(row["content_json"]),
                             json.dumps({"migration_source_id": int(row["id"])}, ensure_ascii=False),
                             json.dumps({"origin": "sequential_migration", "operation_id": operation_id}, ensure_ascii=False),
@@ -1487,7 +1554,7 @@ class FreeCreativeModeService:
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'free', ?, ?, ?)
                         """,
                         (
-                            int(project_id), new_batch, version, str(row["relationship_key"]),
+                            target_project_id, new_batch, version, str(row["relationship_key"]),
                             str(row["status"]), str(row["content_json"]),
                             json.dumps({"migration_source_id": int(row["id"])}, ensure_ascii=False),
                             json.dumps({"origin": "sequential_migration", "operation_id": operation_id}, ensure_ascii=False),
@@ -1495,7 +1562,7 @@ class FreeCreativeModeService:
                         ),
                     )
                 self._set_head_conn(
-                    conn, project_id=project_id, stage="characters", episode_number=0,
+                    conn, project_id=target_project_id, stage="characters", episode_number=0,
                     resource_ref=new_batch, resource_version=version,
                     expected_revision=0, actor_user_id=actor_user_id,
                 )
@@ -1518,7 +1585,7 @@ class FreeCreativeModeService:
                 new_batch = uuid.uuid4().hex
                 version = int(conn.execute(
                     "SELECT COALESCE(MAX(version), 0) + 1 AS version FROM creative_episodes "
-                    "WHERE project_id = ? AND stage = 'outline'", (int(project_id),)
+                    "WHERE project_id = ? AND stage = 'outline'", (target_project_id,)
                 ).fetchone()["version"])
                 for row in selected_outlines:
                     conn.execute(
@@ -1530,7 +1597,7 @@ class FreeCreativeModeService:
                         ) VALUES (?, 'outline', ?, ?, ?, ?, ?, ?, ?, 'free', ?, ?, ?)
                         """,
                         (
-                            int(project_id), int(row["episode_number"]), new_batch, version,
+                            target_project_id, int(row["episode_number"]), new_batch, version,
                             str(row["status"]), str(row["content_json"]),
                             json.dumps({"migration_source_refs": self._loads(row["upstream_refs_json"], {})}, ensure_ascii=False),
                             json.dumps({"origin": "sequential_migration", "operation_id": operation_id, "migration_source_id": int(row["id"])}, ensure_ascii=False),
@@ -1538,7 +1605,7 @@ class FreeCreativeModeService:
                         ),
                     )
                 self._set_head_conn(
-                    conn, project_id=project_id, stage="outline", episode_number=0,
+                    conn, project_id=target_project_id, stage="outline", episode_number=0,
                     resource_ref=new_batch, resource_version=version,
                     expected_revision=0, actor_user_id=actor_user_id,
                 )
@@ -1557,7 +1624,7 @@ class FreeCreativeModeService:
                     version = int(conn.execute(
                         "SELECT COALESCE(MAX(version), 0) + 1 AS version FROM creative_episodes "
                         "WHERE project_id = ? AND stage = ? AND episode_number = ?",
-                        (int(project_id), stage, number),
+                        (target_project_id, stage, number),
                     ).fetchone()["version"])
                     cursor = conn.execute(
                         """
@@ -1568,7 +1635,7 @@ class FreeCreativeModeService:
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'free', ?, ?, ?)
                         """,
                         (
-                            int(project_id), stage, number, uuid.uuid4().hex, version,
+                            target_project_id, stage, number, uuid.uuid4().hex, version,
                             str(row["status"]), str(row["content_json"]),
                             json.dumps({"migration_source_refs": self._loads(row["upstream_refs_json"], {})}, ensure_ascii=False),
                             json.dumps({"origin": "sequential_migration", "operation_id": operation_id, "migration_source_id": int(row["id"])}, ensure_ascii=False),
@@ -1577,31 +1644,19 @@ class FreeCreativeModeService:
                     )
                     new_id = int(cursor.lastrowid)
                     self._set_head_conn(
-                        conn, project_id=project_id, stage=stage, episode_number=number,
+                        conn, project_id=target_project_id, stage=stage, episode_number=number,
                         resource_ref=str(new_id), resource_version=version,
                         expected_revision=0, actor_user_id=actor_user_id,
                     )
                     mapping[stage][str(number)] = {"source": int(row["id"]), "target": new_id}
 
-            cursor = conn.execute(
-                """
-                UPDATE creative_projects
-                SET workflow_mode = 'free', mode_revision = mode_revision + 1,
-                    mode_changed_at = ?, mode_changed_by = ?, status = 'free_active',
-                    updated_at = ?
-                WHERE id = ? AND workflow_mode = 'sequential' AND mode_revision = ?
-                """,
-                (now, actor_user_id, now, int(project_id), int(expected_mode_revision)),
-            )
-            if cursor.rowcount != 1:
-                raise ValueError("creative workflow mode changed")
             conn.execute(
                 "UPDATE creative_mode_migrations SET status = 'completed', mapping_json = ?, "
                 "updated_at = ? WHERE operation_id = ?",
                 (json.dumps(mapping, ensure_ascii=False), now, str(operation_id)),
             )
         return {
-            "project": self.repository.get_project(project_id) or {},
+            "project": self.repository.get_project(target_project_id) or {},
             "mapping": mapping,
             "operation_id": operation_id,
             "created": True,

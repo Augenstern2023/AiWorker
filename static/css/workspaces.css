@@ -1012,7 +1012,78 @@
             max-height: 180px; overflow-y: auto;
         }
         .project-source-cell { max-width: 360px; overflow-wrap: anywhere; }
-        .original-direction-grid td { max-width: 260px; overflow-wrap: anywhere; }
+        .creative-direction-grid { overflow-x: auto; }
+        .creative-direction-table {
+            width: 100%; min-width: 1440px; table-layout: fixed;
+        }
+        .creative-direction-table th,
+        .creative-direction-table td {
+            white-space: normal; overflow-wrap: anywhere; word-break: break-word;
+        }
+        .creative-direction-table th { white-space: nowrap; }
+        .creative-direction-table .blueprint-conflict-clamp {
+            display: block; overflow: visible; -webkit-line-clamp: unset;
+        }
+        .creative-direction-table .direction-action-cell { text-align: center; }
+        .creative-direction-table-original .col-direction-preserve { width: 2.5%; }
+        .creative-direction-table-original .col-direction-title { width: 11.5%; }
+        .creative-direction-table-original .col-direction-detail { width: 13.8%; }
+        .creative-direction-table-original .col-direction-action { width: 3.2%; }
+        .creative-direction-table-imitation .col-direction-preserve { width: 2.5%; }
+        .creative-direction-table-imitation .col-direction-title { width: 11.5%; }
+        .creative-direction-table-imitation .col-imitation-reason { width: 16%; }
+        .creative-direction-table-imitation .col-imitation-protagonist { width: 14%; }
+        .creative-direction-table-imitation .col-imitation-conflict { width: 14%; }
+        .creative-direction-table-imitation .col-imitation-background { width: 13%; }
+        .creative-direction-table-imitation .col-imitation-cost { width: 11%; }
+        .creative-direction-table-imitation .col-imitation-risk { width: 8%; }
+        .creative-direction-table-imitation .col-imitation-version { width: 6%; }
+        .creative-direction-table-imitation .col-direction-action { width: 4%; }
+        .creative-project-settings-grid {
+            display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+            grid-template-areas:
+                "name genre platform audience"
+                "episodes duration save audience";
+            gap: .5rem; align-items: start;
+        }
+        .creative-project-setting-name { grid-area: name; }
+        .creative-project-setting-genre { grid-area: genre; }
+        .creative-project-setting-platform { grid-area: platform; }
+        .creative-project-setting-audience {
+            display: flex; grid-area: audience; flex-direction: column;
+            align-self: stretch; min-width: 0;
+        }
+        .creative-project-setting-episodes { grid-area: episodes; }
+        .creative-project-setting-duration { grid-area: duration; }
+        .creative-project-setting-save { grid-area: save; align-self: end; }
+        .creative-project-audience {
+            flex: 1 1 auto; min-height: 0; overflow-y: auto; resize: vertical;
+        }
+        @media (max-width: 991.98px) {
+            .creative-project-settings-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                grid-template-areas:
+                    "name genre"
+                    "platform audience"
+                    "episodes audience"
+                    "duration save";
+            }
+        }
+        @media (max-width: 575.98px) {
+            .creative-project-settings-grid {
+                grid-template-columns: minmax(0, 1fr);
+                grid-template-areas:
+                    "name"
+                    "genre"
+                    "platform"
+                    "audience"
+                    "episodes"
+                    "duration"
+                    "save";
+            }
+            .creative-project-setting-audience { align-self: start; }
+            .creative-project-audience { min-height: 4.5rem; }
+        }
         .variant-instruction { flex: 1 1 260px; min-width: 180px; }
 
         .writer-project-review-drawer {

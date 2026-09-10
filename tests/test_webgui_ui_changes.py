@@ -888,7 +888,8 @@ def test_mode_switch_does_not_request_a_creative_seed():
     assert "seed_text" not in method
     assert "modeMigration: {preview: null, confirmed:" in tasks
     assert "仅复制已保存内容" in migration_modal
-    assert "自动取消" in migration_modal
+    assert "原标准流程项目和任务保持不变" in migration_modal
+    assert "await this.selectCreativeProject(data.project.id)" in method
 
 
 def test_draft_breakdowns_are_visible_but_not_project_eligible():

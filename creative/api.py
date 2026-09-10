@@ -2619,13 +2619,17 @@ def build_creative_router(
 
     def cancel_pending_creative_tasks(project_id: int, principal: Principal) -> None:
         tasks = project_creative_tasks(project_id, principal)
+        has_resources = free_mode_service.has_creative_resources(project_id)
+        if any(
+            task.get("status") == "returned"
+            or (has_resources and task.get("status") == "in_progress")
+            for task in tasks
+        ):
+            raise HTTPException(409, "项目存在进行中的创作或交付任务，暂不能切换模式")
         for task in tasks:
-            if task.get("status") in {
-                "pool",
-                "assigned",
-                "in_progress",
-                "returned",
-            }:
+            if task.get("status") in {"pool", "assigned"} or (
+                not has_resources and task.get("status") == "in_progress"
+            ):
                 workflow_repository.cancel_task(str(task["id"]), principal)
 
     @router.patch("/projects/{project_id}/workflow-mode")
@@ -2731,7 +2735,6 @@ def build_creative_router(
         migration_preview = free_mode_service.migration_preview(project_id)
         if migration_preview["blockers"]:
             raise HTTPException(409, "；".join(migration_preview["blockers"]))
-        cancel_pending_creative_tasks(project_id, principal)
         try:
             migrated = free_mode_service.migrate_to_free(
                 project_id=project_id,
@@ -2752,7 +2755,8 @@ def build_creative_router(
                 project_id=str(project_id),
                 before={"workflow_mode": project.get("workflow_mode")},
                 after={
-                    "workflow_mode": "free",
+                    "workflow_mode": project.get("workflow_mode"),
+                    "free_copy_project_id": migrated.get("project", {}).get("id"),
                     "migration_operation_id": payload.operation_id,
                 },
                 reason=None,

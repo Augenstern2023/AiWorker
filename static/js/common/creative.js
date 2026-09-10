@@ -731,6 +731,14 @@ window.aiworkerModules.push(() => ({
                     return (this.creativeWorkspace.project?.blueprints || []).find(item => item.id === this.creativeWorkspace.selectedBlueprintId) || null;
                 },
 
+                openProjectBlueprintEditor(blueprintId) {
+                    this.creativeWorkspace.selectedBlueprintId = blueprintId;
+                    window.requestAnimationFrame(() => {
+                        document.querySelector('[data-creative-blueprint-editor]')
+                            ?.scrollIntoView({behavior: 'smooth', block: 'start'});
+                    });
+                },
+
                 availableLockedBriefs() {
                     return (this.creativeWorkspace.project?.blueprints || [])
                         .filter(item => item.status === 'brief_locked')
@@ -1469,26 +1477,21 @@ window.aiworkerModules.push(() => ({
                     state.submitting = true;
                     state.error = '';
                     try {
-                        const resourceCount = Object.values(state.preview.resource_counts || {}).reduce((sum, value) => sum + Number(value || 0), 0);
-                        const url = resourceCount
-                            ? `/api/creative/projects/${project.id}/migrate-to-free`
-                            : `/api/creative/projects/${project.id}/workflow-mode`;
                         const body = {
                             expected_mode_revision: Number(project.mode_revision || 0),
+                            operation_id: globalThis.crypto?.randomUUID?.() || `free-migration-${Date.now()}`,
                         };
-                        if (resourceCount) body.operation_id = globalThis.crypto?.randomUUID?.() || `free-migration-${Date.now()}`;
-                        else body.workflow_mode = 'free';
-                        const response = await aiworkerApi.request(url, {
-                            method: resourceCount ? 'POST' : 'PATCH',
+                        const response = await aiworkerApi.request(`/api/creative/projects/${project.id}/migrate-to-free`, {
+                            method: 'POST',
                             headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
                         });
                         const data = await response.json();
-                        if (!response.ok) throw new Error(data.detail || '切换自由创作失败');
+                        if (!response.ok) throw new Error(data.detail || '创建自由创作副本失败');
                         this.creativeModeMigrationModal?.hide();
-                        await this.selectCreativeProject(project.id);
-                        this.showCreativeNotice('项目已切换为自由创作模式');
+                        await this.selectCreativeProject(data.project.id);
+                        this.showCreativeNotice('已创建并打开自由创作副本');
                     } catch (error) {
-                        state.error = error.message || '切换自由创作失败';
+                        state.error = error.message || '创建自由创作副本失败';
                     } finally {
                         state.submitting = false;
                     }

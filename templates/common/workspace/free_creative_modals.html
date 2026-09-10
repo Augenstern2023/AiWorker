@@ -25,17 +25,17 @@
 
 <div class="modal fade" id="creativeModeMigrationModal" tabindex="-1" aria-labelledby="creativeModeMigrationModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content">
-        <div class="modal-header"><div><h5 class="modal-title" id="creativeModeMigrationModalLabel">切换为自由创作</h5><div class="small text-muted mt-1">已有标准资源会复制为自由副本，原标准历史只读保留。该迁移不可逆。</div></div><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button></div>
+        <div class="modal-header"><div><h5 class="modal-title" id="creativeModeMigrationModalLabel">创建自由创作副本</h5><div class="small text-muted mt-1">将新建一个自由创作项目并复制当前已保存内容，原标准流程项目完整保留。</div></div><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button></div>
         <div class="modal-body">
             <div class="d-flex align-items-center gap-2 text-muted" x-show="creativeWorkspace.modeMigration.loading"><span class="spinner-border spinner-border-sm"></span>正在执行迁移预检</div>
             <template x-if="creativeWorkspace.modeMigration.preview"><div>
                 <div class="row g-2 mb-3"><template x-for="(count, stage) in (creativeWorkspace.modeMigration.preview.resource_counts || {})" :key="`migration-count-${stage}`"><div class="col"><div class="border rounded p-2 text-center"><div class="small text-muted" x-text="freeStageLabel(stage)"></div><div class="fw-semibold" x-text="count"></div></div></div></template></div>
-                <div class="small text-muted mb-3">仅复制已保存内容；标准流程中的未完成任务将在切换时自动取消。</div>
+                <div class="small text-muted mb-3">仅复制已保存内容；原标准流程项目和任务保持不变。</div>
                 <div class="alert alert-warning py-2" x-show="(creativeWorkspace.modeMigration.preview.blockers || []).length"><div class="fw-semibold mb-1">当前不能迁移</div><ul class="mb-0"><template x-for="item in creativeWorkspace.modeMigration.preview.blockers" :key="item"><li x-text="item"></li></template></ul></div>
-                <label class="form-check"><input class="form-check-input" type="checkbox" x-model="creativeWorkspace.modeMigration.confirmed"><span class="form-check-label">我确认迁移不可逆，并理解原标准资源只读保留</span></label>
+                <label class="form-check"><input class="form-check-input" type="checkbox" x-model="creativeWorkspace.modeMigration.confirmed"><span class="form-check-label">我确认创建独立的自由创作副本</span></label>
             </div></template>
             <div class="alert alert-danger py-2 mt-3 mb-0" x-show="creativeWorkspace.modeMigration.error" x-text="creativeWorkspace.modeMigration.error" role="alert"></div>
         </div>
-        <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button><button type="button" class="btn btn-info" @click="migrateCreativeProjectToFree" :disabled="creativeWorkspace.modeMigration.loading || creativeWorkspace.modeMigration.submitting || !creativeWorkspace.modeMigration.confirmed || !creativeWorkspace.modeMigration.preview?.can_migrate"><span class="spinner-border spinner-border-sm me-1" x-show="creativeWorkspace.modeMigration.submitting"></span>确认切换</button></div>
+        <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button><button type="button" class="btn btn-info" @click="migrateCreativeProjectToFree" :disabled="creativeWorkspace.modeMigration.loading || creativeWorkspace.modeMigration.submitting || !creativeWorkspace.modeMigration.confirmed || !creativeWorkspace.modeMigration.preview?.can_migrate"><span class="spinner-border spinner-border-sm me-1" x-show="creativeWorkspace.modeMigration.submitting"></span>确认创建</button></div>
     </div></div>
 </div>

@@ -595,7 +595,7 @@ async def test_empty_project_preview_ignores_started_task_without_resources(tmp_
     from unittest.mock import Mock
 
     from creative.api import build_creative_router
-    from creative.schema import CreativeModeChangeRequest
+    from creative.schema import CreativeModeMigrationRequest
 
     repository = CreativeRepository(tmp_path / "empty-preview.sqlite3")
     project = repository.create_original_project(
@@ -634,24 +634,27 @@ async def test_empty_project_preview_ignores_started_task_without_resources(tmp_
     assert preview["can_migrate"] is True
     assert "项目存在进行中的创作任务" not in preview["blockers"]
 
-    change_endpoint = next(
+    migrate_endpoint = next(
         route.endpoint for route in router.routes
-        if route.path == "/api/creative/projects/{project_id}/workflow-mode"
+        if route.path == "/api/creative/projects/{project_id}/migrate-to-free"
     )
-    changed = await change_endpoint(
+    migrated = await migrate_endpoint(
         project_id=project["id"],
-        payload=CreativeModeChangeRequest(
-            workflow_mode="free", expected_mode_revision=0
+        payload=CreativeModeMigrationRequest(
+            expected_mode_revision=0,
+            operation_id="empty-project-free-copy",
         ),
         request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())),
         principal=SimpleNamespace(is_system_admin=True, user_id="owner-1"),
     )
-    assert changed["workflow_mode"] == "free"
-    workflow.cancel_task.assert_called_once()
+    assert repository.get_project(project["id"])["workflow_mode"] == "sequential"
+    assert migrated["project"]["id"] != project["id"]
+    assert migrated["project"]["workflow_mode"] == "free"
+    workflow.cancel_task.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_content_project_migration_copies_resources_and_cancels_workflow_tasks(
+async def test_content_project_migration_creates_free_copy_and_preserves_source(
     tmp_path,
 ):
     from types import SimpleNamespace
@@ -726,12 +729,26 @@ async def test_content_project_migration_copies_resources_and_cancels_workflow_t
         principal=principal,
     )
 
-    mapping = migrated["mapping"]["brief"]
-    assert migrated["project"]["workflow_mode"] == "free"
-    assert mapping["source"] == blueprint["id"]
-    assert mapping["target"] != blueprint["id"]
-    assert repository.get_blueprint(mapping["target"])["resource_scope"] == "free"
-    assert workflow.cancel_task.call_count == 2
+    source_project = repository.get_project(project["id"])
+    free_project = migrated["project"]
+    project_mapping = migrated["mapping"]["project"]
+    brief_mapping = migrated["mapping"]["brief"]
+    assert source_project["workflow_mode"] == "sequential"
+    assert source_project["mode_revision"] == 0
+    assert free_project["id"] != source_project["id"]
+    assert free_project["workflow_mode"] == "free"
+    assert free_project["name"] == "非空迁移项目（自由副本）"
+    assert project_mapping == {
+        "source": source_project["id"],
+        "target": free_project["id"],
+    }
+    assert brief_mapping["source"] == blueprint["id"]
+    assert brief_mapping["target"] != blueprint["id"]
+    assert repository.get_blueprint(blueprint["id"])["resource_scope"] == "sequential"
+    copied_brief = repository.get_blueprint(brief_mapping["target"])
+    assert copied_brief["project_id"] == free_project["id"]
+    assert copied_brief["resource_scope"] == "free"
+    workflow.cancel_task.assert_not_called()
 
 
 def test_content_project_migrates_to_free_without_manual_seed(tmp_path):
@@ -757,24 +774,13 @@ def test_content_project_migrates_to_free_without_manual_seed(tmp_path):
         actor_user_id="owner-1",
     )
 
-    assert migrated["project"]["workflow_mode"] == "free"
-    assert "旧库选题" in repository.get_current_seed(project["id"])["seed_text"]
-
-
-def test_returned_workflow_task_can_be_cancelled_during_mode_migration():
-    from workflow.state_machine import WorkflowStateMachine
-
-    status = WorkflowStateMachine().transition(
-        {
-            "status": "returned",
-            "role_code": "creative_planner",
-            "assignee_user_id": "planner-1",
-        },
-        "cancel",
-        {"permissions": {"*"}},
-    )
-
-    assert status == "cancelled"
+    source_project = repository.get_project(project["id"])
+    free_project = migrated["project"]
+    assert source_project["workflow_mode"] == "sequential"
+    assert free_project["id"] != source_project["id"]
+    assert free_project["workflow_mode"] == "free"
+    assert repository.get_current_seed(source_project["id"]) is None
+    assert "旧库选题" in repository.get_current_seed(free_project["id"])["seed_text"]
 
 
 def test_migration_copies_current_resources_and_preserves_legacy_history(tmp_path):
@@ -831,16 +837,24 @@ def test_migration_copies_current_resources_and_preserves_legacy_history(tmp_pat
     )
 
     free_project = migrated["project"]
-    legacy = service.list_legacy_resources(project["id"])
+    source_project = repository.get_project(project["id"])
     assert free_project["workflow_mode"] == "free"
-    assert free_project["locked_brief_id"] == brief_id
+    assert free_project["id"] != source_project["id"]
+    assert free_project["locked_brief_id"] is None
     assert all(item["resource_scope"] == "free" for item in free_project["blueprints"])
     assert all(item["resource_scope"] == "free" for item in free_project["episodes"])
-    assert legacy["blueprints"][0]["id"] == brief_id
-    assert legacy["episodes"][0]["id"] == source_beats_id
+    assert source_project["workflow_mode"] == "sequential"
+    assert source_project["locked_brief_id"] == brief_id
+    assert source_project["blueprints"][0]["id"] == brief_id
+    assert source_project["episodes"][0]["id"] == source_beats_id
+    assert migrated["mapping"]["project"] == {
+        "source": source_project["id"],
+        "target": free_project["id"],
+    }
     assert migrated["mapping"]["brief"]["source"] == brief_id
     assert migrated["mapping"]["beats"]["1"]["source"] == source_beats_id
     assert repeated["created"] is False
+    assert repeated["project"]["id"] == free_project["id"]
     assert repeated["mapping"] == migrated["mapping"]
 
 
@@ -881,13 +895,17 @@ def test_migrated_free_project_can_update_settings_without_rewriting_legacy_auth
     )["project"]
 
     updated = repository.update_project(
-        project["id"], {"name": "迁移后名称"},
+        migrated["id"], {"name": "迁移后名称"},
         expected_revision=migrated["revision"],
     )
 
     assert updated["name"] == "迁移后名称"
     assert updated["workflow_mode"] == "free"
-    assert updated["locked_brief_id"] == legacy_brief_id
+    assert updated["locked_brief_id"] is None
+    source_project = repository.get_project(project["id"])
+    assert source_project["name"] == "迁移前名称"
+    assert source_project["workflow_mode"] == "sequential"
+    assert source_project["locked_brief_id"] == legacy_brief_id
 
 
 def test_migration_is_blocked_by_active_review(tmp_path):
@@ -942,35 +960,36 @@ def test_project_deletion_cleans_free_mode_authority_and_audit_rows(tmp_path):
         operation_id="migration-before-delete",
         actor_user_id="owner-1",
     )
+    free_project_id = migrated["project"]["id"]
     brief = service.create_brief(
-        project["id"], {"title": "待删除 Brief"},
+        free_project_id, {"title": "待删除 Brief"},
         expected_head_revision=0, actor_user_id="owner-1",
     )
     service.lock_resource(
-        project_id=project["id"], stage="brief",
+        project_id=free_project_id, stage="brief",
         resource_ref=str(brief["resource"]["id"]),
         expected_head_revision=brief["head"]["revision"],
         actor_user_id="owner-1",
     )
     service.create_generation_context(
         context_id="context-before-delete",
-        project_id=project["id"], stage="characters", episode_number=None,
+        project_id=free_project_id, stage="characters", episode_number=None,
         instruction="", context_refs={"brief_id": brief["resource"]["id"]},
         actor_user_id="owner-1",
     )
 
     assert migrated["created"] is True
-    repository.delete_project(project["id"], requested_by="owner-1")
+    repository.delete_project(free_project_id, requested_by="owner-1")
+    assert repository.get_project(project["id"])["workflow_mode"] == "sequential"
 
     with repository._connect() as conn:
         for table in (
             "creative_resource_heads",
             "creative_generation_contexts",
-            "creative_mode_migrations",
         ):
             count = conn.execute(
                 f"SELECT COUNT(*) AS count FROM {table} WHERE project_id = ?",
-                (project["id"],),
+                (free_project_id,),
             ).fetchone()["count"]
             assert count == 0
 

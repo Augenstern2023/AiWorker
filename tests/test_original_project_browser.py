@@ -74,6 +74,7 @@ def mount_blueprint_workspace(
     blueprint_status: str = "draft",
     locked_brief_id: int | None = None,
     parent_version_id: int | None = None,
+    creation_mode: str = "original",
 ) -> None:
     blueprint = _source("templates/common/workspace/project_blueprints.html")
     bootstrap_css = _source("static/css/bootstrap.min.css")
@@ -90,12 +91,13 @@ def mount_blueprint_workspace(
             f"window.__blueprintStatus = {blueprint_status!r};"
             f"window.__lockedBriefId = {locked_brief_id if locked_brief_id is not None else 'null'};"
             f"window.__parentVersionId = {parent_version_id if parent_version_id is not None else 'null'};"
+            f"window.__creationMode = {creation_mode!r};"
         )
     )
     page.add_script_tag(
         content="""
         window.__project = {
-          id: 9, revision: 7, name: '情绪公司', creation_mode: 'original', genre: '都市奇幻',
+          id: 9, revision: 7, name: '情绪公司', creation_mode: window.__creationMode, genre: '都市奇幻',
           locked_brief_id: window.__lockedBriefId,
           target_platform: '长篇小说', target_audience: '18-35岁',
           target_episode_count: 100, episode_duration_seconds: 900,
@@ -286,6 +288,124 @@ def test_original_brief_does_not_mount_imitation_only_fields() -> None:
         assert page.get_by_text("仿制原因", exact=True).count() == 0
         assert page.get_by_text("借鉴元素", exact=True).count() == 0
         browser.close()
+
+
+def test_imitation_direction_edit_button_reveals_editor() -> None:
+    """The pencil action must reveal the editor even when the row is preselected."""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1280, "height": 180})
+        page.set_default_timeout(2_000)
+        mount_blueprint_workspace(page, creation_mode="imitation")
+
+        edit_button = page.locator(
+            ".imitation-brief-workspace table tbody button"
+        ).first
+        edit_button.click()
+        page.wait_for_function(
+            "document.querySelector('[data-creative-blueprint-editor]')"
+            ".getBoundingClientRect().top <= 8"
+        )
+        browser.close()
+
+
+def test_imitation_direction_table_keeps_reference_column_proportions() -> None:
+    """Long generated copy must not squeeze risk, version, and action columns."""
+    expected_ratios = (
+        0.025, 0.115, 0.16, 0.14, 0.14, 0.13, 0.11, 0.08, 0.06, 0.04,
+    )
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 2048, "height": 900})
+        mount_blueprint_workspace(page, creation_mode="imitation")
+        page.evaluate(
+            """
+            () => {
+              const workspace = document.querySelector('main')._x_dataStack[0];
+              Object.assign(workspace.creativeWorkspace.project.blueprints[0].content, {
+                title: '方向标题'.repeat(4),
+                imitation_reason: '仿制原因'.repeat(24),
+                protagonist: '主角身份'.repeat(18),
+                core_conflict: '核心冲突'.repeat(18),
+                background: '故事背景'.repeat(12),
+                cost_level: '成本说明'.repeat(10),
+                risks: ['风险说明'.repeat(12)],
+              });
+            }
+            """
+        )
+        table = page.locator(".imitation-brief-workspace table")
+        table_width = table.evaluate("element => element.getBoundingClientRect().width")
+        column_widths = table.locator("thead th").evaluate_all(
+            "elements => elements.map(element => element.getBoundingClientRect().width)"
+        )
+        line_clamps = table.locator(".blueprint-conflict-clamp").evaluate_all(
+            "elements => elements.map(element => getComputedStyle(element).webkitLineClamp)"
+        )
+        browser.close()
+
+    actual_ratios = tuple(width / table_width for width in column_widths)
+    assert actual_ratios == pytest.approx(expected_ratios, abs=0.012)
+    assert set(line_clamps) == {"none"}
+
+
+def test_imitation_editor_uses_reference_grid() -> None:
+    """The imitation editor should follow the reference four/three-column grid."""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 2048, "height": 900})
+        mount_blueprint_workspace(page, creation_mode="imitation")
+        editor = page.locator("[data-creative-blueprint-editor]")
+        audience = editor.get_by_text("目标受众", exact=True).locator("..")
+        audience.locator("textarea").fill("偏向中老年婚恋与家庭关系观众，关注人物成长和代际冲突。" * 4)
+        project_boxes = {
+            label: editor.get_by_text(label, exact=True).locator("..").bounding_box()
+            for label in ("项目名称", "题材", "目标平台/载体", "目标受众")
+        }
+        save_button_box = editor.get_by_role(
+            "button", name="保存任务书参数"
+        ).bounding_box()
+        primary_columns = [
+            editor.get_by_text(label, exact=True).locator("..").evaluate(
+                "element => element.getBoundingClientRect().width"
+            )
+            for label in ("方向名称", "新主角", "核心冲突")
+        ]
+        browser.close()
+
+    assert all(box is not None for box in project_boxes.values())
+    assert save_button_box is not None
+    project_widths = [box["width"] for box in project_boxes.values() if box]
+    project_tops = [box["y"] for box in project_boxes.values() if box]
+    audience_box = project_boxes["目标受众"]
+    assert max(project_widths) - min(project_widths) <= 2
+    assert max(project_tops) - min(project_tops) <= 2
+    assert audience_box is not None
+    assert abs(
+        audience_box["y"] + audience_box["height"]
+        - save_button_box["y"] - save_button_box["height"]
+    ) <= 2
+    assert max(primary_columns) - min(primary_columns) <= 2
+
+
+def test_imitation_direction_table_keeps_the_preserve_option() -> None:
+    """The reference layout includes a working preserve checkbox per draft."""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 2048, "height": 900})
+        mount_blueprint_workspace(page, creation_mode="imitation")
+
+        table = page.locator(".creative-direction-table-imitation")
+        preserve = table.locator('tbody input[type="checkbox"]')
+        assert preserve.count() == 1
+        preserve.check()
+        preserved_ids = page.evaluate(
+            "document.querySelector('main')._x_dataStack[0]"
+            ".creativeWorkspace.preservedBlueprintIds"
+        )
+        browser.close()
+
+    assert preserved_ids == [11]
 
 
 def test_writer_can_submit_a_lightweight_original_project_request() -> None:

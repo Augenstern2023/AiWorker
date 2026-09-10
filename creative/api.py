@@ -2839,8 +2839,9 @@ def build_creative_router(
             items = [
                 item
                 for item in items
-                if workflow_repository.is_active_project_member(
-                    workflow_project_id(item["id"]), principal
+                if isinstance(permission_service, PermissionService)
+                and permission_service.can_participate_in_project(
+                    principal, workflow_project_id(item["id"])
                 )
             ]
         elif not principal.is_system_admin:

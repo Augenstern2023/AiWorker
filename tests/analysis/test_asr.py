@@ -115,6 +115,30 @@ def test_build_sensevoice_env_removes_parent_python_runtime_injection():
     assert env["PYTHONNOUSERSITE"] == "1"
 
 
+def test_build_sensevoice_env_removes_stale_proxy_settings():
+    env = build_sensevoice_env(
+        {
+            "PATH": "old",
+            "HTTP_PROXY": "http://127.0.0.1:7890",
+            "HTTPS_PROXY": "http://127.0.0.1:7890",
+            "ALL_PROXY": "socks5://127.0.0.1:7890",
+            "http_proxy": "http://127.0.0.1:7890",
+            "https_proxy": "http://127.0.0.1:7890",
+            "all_proxy": "socks5://127.0.0.1:7890",
+        }
+    )
+
+    for variable in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ):
+        assert variable not in env
+
+
 def test_parse_sensevoice_stdout_uses_last_json_line():
     result = parse_sensevoice_stdout(
         'loading model...\n{"source":"asr","provider":"sensevoice","language":"auto","segments":[],"text":"识别文本"}'

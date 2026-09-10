@@ -191,6 +191,13 @@ class PermissionService:
             ).mappings().all()
         return any(row["project_role"] in _MANAGED_PROJECT_ROLES for row in rows)
 
+    def can_participate_in_project(
+        self, principal: Principal, project_id: str
+    ) -> bool:
+        return self.can_access_assigned_project(
+            principal, project_id
+        ) or self.can_access_managed_project(principal, project_id)
+
     def can_create_project_content(
         self, principal: Principal, project_id: str, *, active_member: bool
     ) -> bool:

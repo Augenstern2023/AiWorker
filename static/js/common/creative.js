@@ -184,8 +184,11 @@ window.aiworkerModules.push(() => ({
                     this.creativeWorkspace.loading = true;
                     this.creativeWorkspace.error = '';
                     try {
+                        const projectsUrl = this.page === 'writing-projects'
+                            ? '/api/creative/projects?participating_only=true'
+                            : '/api/creative/projects';
                         const [projectsResponse, topicsResponse] = await Promise.all([
-                            aiworkerApi.request('/api/creative/projects'),
+                            aiworkerApi.request(projectsUrl),
                             aiworkerApi.request('/api/creative/topics?status=adopted&limit=500')
                         ]);
                         const projectsData = await projectsResponse.json();

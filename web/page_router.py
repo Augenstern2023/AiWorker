@@ -79,6 +79,24 @@ def build_page_router(
     ) -> Principal:
         if not navigation_service.can_open(principal, request.url.path):
             raise HTTPException(status_code=403, detail="没有执行此操作的权限")
+        project_id = request.path_params.get("project_id")
+        if (
+            project_id is not None
+            and request.url.path.startswith("/writing/projects/")
+        ):
+            service = getattr(
+                request.app.state, "identity_permission_service", None
+            )
+            can_participate = getattr(
+                service, "can_participate_in_project", None
+            )
+            if not callable(can_participate) or not can_participate(
+                principal, str(project_id)
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="只能访问当前分配或管理的项目",
+                )
         return principal
 
     class PageRoute(APIRoute):

@@ -68,6 +68,7 @@ def main() -> int:
                 vad_model=args.vad_model_dir,
                 vad_kwargs={"max_single_segment_time": 30000},
                 device=args.device,
+                disable_update=True,
             )
             result = model.generate(
                 input=args.audio,

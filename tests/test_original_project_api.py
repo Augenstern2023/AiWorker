@@ -130,6 +130,9 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.Fixt
     owner_client.repository = repository
     owner_client.workflow = workflow
     owner_client.principal = owner_principal
+    owner_client.identity = identity
+    owner_client.sessions = sessions
+    owner_client.created_user_ids = []
     owner_client.denied_client = _client_for_user(app, sessions, denied["id"])
     owner_client.creator_only_client = _client_for_user(
         app, sessions, creator_only["id"]
@@ -142,7 +145,12 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.Fixt
             workflow.delete_project_data(
                 owner_client.repository.workflow_project_id(project["id"])
             )
-        for user_id in (owner["id"], denied["id"], creator_only["id"]):
+        for user_id in (
+            owner["id"],
+            denied["id"],
+            creator_only["id"],
+            *owner_client.created_user_ids,
+        ):
             if identity.get_user(user_id) is not None:
                 identity.soft_delete_user(user_id)
         if identity.get_role(creator_role["id"]) is not None:
@@ -158,6 +166,46 @@ def create_original_project(client: TestClient, request_id: str) -> dict[str, ob
     )
     assert response.status_code == 201, response.text
     return response.json()
+
+
+def test_participating_project_list_only_returns_assigned_projects(
+    client: TestClient,
+) -> None:
+    assigned_project = create_original_project(client, "participating-assigned")
+    foreign_project = create_original_project(
+        client.creator_only_client, "participating-foreign"
+    )
+    writer_role = client.identity.get_role_by_code("screenwriter")
+    assert writer_role is not None
+    writer = client.identity.create_user(
+        f"participating-writer-{uuid.uuid4().hex}", "参与项目编剧", "hash"
+    )
+    client.created_user_ids.append(writer["id"])
+    client.identity.replace_user_roles(writer["id"], [writer_role["id"]])
+    client.workflow.add_project_member(
+        client.repository.workflow_project_id(assigned_project["id"]),
+        writer["id"],
+        "screenwriter",
+        client.principal,
+    )
+    writer_client = _client_for_user(client.app, client.sessions, writer["id"])
+
+    writer_response = writer_client.get(
+        "/api/creative/projects", params={"participating_only": "true"}
+    )
+    owner_response = client.get(
+        "/api/creative/projects", params={"participating_only": "true"}
+    )
+
+    assert writer_response.status_code == 200, writer_response.text
+    assert [item["id"] for item in writer_response.json()["items"]] == [
+        assigned_project["id"]
+    ]
+    assert owner_response.status_code == 200, owner_response.text
+    assert {item["id"] for item in owner_response.json()["items"]} >= {
+        assigned_project["id"],
+        foreign_project["id"],
+    }
 
 
 def test_original_project_can_ensure_a_successor_brief_task(

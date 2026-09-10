@@ -157,6 +157,12 @@ def build_sensevoice_env(env: Dict[str, str], ffmpeg_dir: str = "") -> Dict[str,
         "PYTHONHOME",
         "PYTHONUSERBASE",
         "VIRTUAL_ENV",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
     ):
         env.pop(variable, None)
     if ffmpeg_dir:

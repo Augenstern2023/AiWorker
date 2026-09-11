@@ -14,11 +14,9 @@ import uuid
 import pytest
 
 from creative.repository import CreativeRepository
-from creative.workflow_adapter import CreativeWorkflowAdapter
 from creative.workflow_identity_migration import (
     migrate_legacy_workflow_project_identities,
 )
-from identity.schema import Principal
 from identity.repository import IdentityRepository
 from workflow.repository import WorkflowRepository
 
@@ -41,7 +39,7 @@ class LegacyWorkflowRepository:
         return True
 
 
-def test_startup_migration_repairs_legacy_task_project_binding(
+def test_explicit_migration_repairs_legacy_task_project_binding(
     tmp_path: Path,
 ) -> None:
     creative = CreativeRepository(tmp_path / "creative.db")
@@ -61,32 +59,21 @@ def test_startup_migration_repairs_legacy_task_project_binding(
         "status": "in_progress",
     }
     workflow = LegacyWorkflowRepository(task)
-    adapter = CreativeWorkflowAdapter(creative, workflow)
-    actor = Principal(
-        user_id="writer-1",
-        username="writer",
-        display_name="编剧",
-        role_codes=("creative_planner",),
-        permissions=frozenset(),
-        data_scope="task",
-        session_id="session-1",
-    )
-
-    with pytest.raises(
-        ValueError, match="resource does not belong to the task project"
-    ):
-        adapter.assert_task_for_creation(
-            task["id"], "brief", actor, project_id=project["id"]
-        )
 
     assert migrate_legacy_workflow_project_identities(creative, workflow) == 1
     assert migrate_legacy_workflow_project_identities(creative, workflow) == 0
     assert workflow.migrations[0] == (
         str(project["id"]), creative.workflow_project_id(project["id"])
     )
-    assert adapter.assert_task_for_creation(
-        task["id"], "brief", actor, project_id=project["id"]
-    )["id"] == task["id"]
+    assert task["project_id"] == creative.workflow_project_id(project["id"])
+
+
+def test_webgui_does_not_run_unproven_legacy_identity_migration_on_startup() -> None:
+    source = (Path(__file__).resolve().parents[1] / "WebGUI.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "migrate_legacy_workflow_project_identities" not in source
 
 
 def test_postgres_migration_moves_tasks_instances_and_memberships(

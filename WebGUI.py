@@ -80,9 +80,6 @@ from creative.delivery import DeliveryService, build_delivery_router
 from creative.market_reference_service import MarketReferenceService
 from creative.original_project_service import OriginalProjectService
 from creative.project_creator_migration import migrate_project_creator_memberships
-from creative.workflow_identity_migration import (
-    migrate_legacy_workflow_project_identities,
-)
 from creative.production_exports import ProductionExportService
 from creative.production_exports_api import build_production_export_router
 from creative.repository import CreativeRepository, DownloadTopicDecisionConflict
@@ -566,7 +563,6 @@ if legacy_llm_import.get("imported"):
     )
 llm_settings_service = LLMSettingsService(llm_settings_repository)
 workflow_repository = WorkflowRepository(identity_repository)
-migrate_legacy_workflow_project_identities(creative_repository, workflow_repository)
 migrate_project_creator_memberships(creative_repository, workflow_repository)
 creative_workflow_adapter = CreativeWorkflowAdapter(
     creative_repository, workflow_repository

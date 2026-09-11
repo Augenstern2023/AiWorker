@@ -1245,7 +1245,11 @@ def test_new_project_rollback_releases_its_marker_when_lease_is_lost_before_crea
     assert creative.get_project(project_id) is not None
     assert creative.get_pending_project_deletion(project_id) is None
     assert str(project_id) not in workflow.deleting_projects
-    assert captured_snapshot == {"id": project_id, "name": "回档前项目"}
+    assert captured_snapshot == {
+        "id": project_id,
+        "name": "回档前项目",
+        "workflow_project_id": str(project_id),
+    }
 
 
 def test_new_project_rollback_reports_conflict_after_predelete_marker_is_aborted(

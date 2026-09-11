@@ -89,6 +89,7 @@ def test_system_administrator_navigation_keeps_system_backend_page():
 
 def test_team_management_routes_and_permissions_are_removed():
     removed_routes = {"/review/users", "/review/roles"}
+    removed_navigation_id_prefix = "navigation:team"
     removed_permissions = {
         "page.team_management",
         "identity.user.read",
@@ -99,6 +100,10 @@ def test_team_management_routes_and_permissions_are_removed():
         "identity.role.manage_created",
     }
 
+    assert all(
+        not item["id"].startswith(removed_navigation_id_prefix)
+        for item in NAVIGATION_CATALOG
+    )
     assert removed_routes.isdisjoint({item[0] for item in PAGE_ROUTES})
     assert removed_routes.isdisjoint({item["route"] for item in NAVIGATION_CATALOG})
     assert removed_permissions.isdisjoint(PERMISSIONS)

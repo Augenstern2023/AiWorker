@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import os
 import uuid
 from pathlib import Path
 
@@ -18,24 +17,34 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import BigInteger, DateTime, Numeric, Text, create_engine, inspect, text
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.engine import make_url
 
 from system_database.baseline_schema import BASELINE_METADATA
 from identity.repository import IdentityRepository
-from system_database import SystemDatabase, SystemDatabaseSettings
+from system_database import SystemDatabase
 from system_database.schema import SYSTEM_METADATA
+from web.navigation_repository import NavigationRepository
 
 
 PROJECT_ROOT = Path(__file__).parent.parent
+REMOVED_TEAM_PERMISSIONS = (
+    "page.team_management",
+    "identity.user.read",
+    "identity.user.create",
+    "identity.user.manage_created",
+    "identity.role.read",
+    "identity.role.create",
+    "identity.role.manage_created",
+)
 
 
 @pytest.fixture
-def postgres_url() -> str:
-    value = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
-    if not value:
-        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required for PostgreSQL tests")
-    if make_url(value).database == "aiworker_system":
-        raise ValueError("tests must not run against the aiworker_system database")
+def postgres_url(isolated_system_database: SystemDatabase, monkeypatch) -> str:
+    """Keep all upgrade/downgrade tests in a disposable, uniquely named schema."""
+    value = isolated_system_database.settings.url
+    monkeypatch.setenv("AIWORKER_TEST_SYSTEM_DATABASE_URL", value)
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", value)
+    IdentityRepository(isolated_system_database).seed_defaults()
+    NavigationRepository(isolated_system_database).seed_catalog()
     return value
 
 
@@ -75,6 +84,293 @@ def test_system_schema_declares_all_shared_tables():
 
 def test_system_schema_keeps_existing_user_ids_as_text():
     assert isinstance(SYSTEM_METADATA.tables["users"].c.id.type, Text)
+
+
+def test_llm_provider_schema_declares_local_api_key_reference():
+    columns = SYSTEM_METADATA.tables["llm_providers"].c
+    assert "api_key_env_var" in columns
+    assert isinstance(columns.api_key_env_var.type, Text)
+    assert columns.api_key_env_var.nullable is False
+    assert str(columns.api_key_env_var.server_default.arg) == "''"
+
+
+def test_empty_schema_upgrade_reaches_team_removal_head(postgres_url):
+    engine = create_engine(postgres_url)
+    try:
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalar_one()
+                == "0022_remove_team_management"
+            )
+        column = next(
+            item
+            for item in inspect(engine).get_columns("llm_providers")
+            if item["name"] == "api_key_env_var"
+        )
+        assert column["nullable"] is False
+        assert column["default"] == "''::text"
+    finally:
+        engine.dispose()
+
+
+def test_local_api_key_migration_preserves_provider_data(postgres_url):
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    engine = create_engine(postgres_url)
+    try:
+        command.downgrade(config, "0020_user_presence")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO llm_providers (id, name, normalized_name, preset, base_url, wire_api, api_key_encrypted) "
+                    "VALUES ('migration-provider', 'Migration', 'migration', 'custom', 'https://example.invalid', 'responses', 'opaque-ciphertext')"
+                )
+            )
+        command.upgrade(config, "0021_llm_local_api_keys")
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT api_key_env_var, api_key_encrypted FROM llm_providers WHERE id = 'migration-provider'"
+                )
+            ).one() == ("", "opaque-ciphertext")
+        command.downgrade(config, "0020_user_presence")
+        assert "api_key_env_var" not in {
+            item["name"] for item in inspect(engine).get_columns("llm_providers")
+        }
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT api_key_encrypted FROM llm_providers WHERE id = 'migration-provider'"
+                    )
+                ).scalar_one()
+                == "opaque-ciphertext"
+            )
+    finally:
+        engine.dispose()
+
+
+def test_team_removal_cleans_grants_and_preserves_unrelated_data(postgres_url):
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    engine = create_engine(postgres_url)
+    user_id = "migration-team-user"
+    role_id = "role:screenwriter"
+    try:
+        command.downgrade(config, "0021_llm_local_api_keys")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO users (id, username, normalized_username, display_name, password_hash) "
+                    "VALUES (:id, :id, :id, 'Migration User', 'hash')"
+                ),
+                {"id": user_id},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO user_roles (user_id, role_id) VALUES (:user_id, :role_id)"
+                ),
+                {"user_id": user_id, "role_id": role_id},
+            )
+            for route in ("/review/users", "/review/roles", "/writing/projects"):
+                connection.execute(
+                    text(
+                        "INSERT INTO user_page_access (user_id, route, is_allowed) VALUES (:user_id, :route, :allowed)"
+                    ),
+                    {
+                        "user_id": user_id,
+                        "route": route,
+                        "allowed": route != "/review/roles",
+                    },
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO role_page_access (role_id, route) VALUES (:role_id, :route) ON CONFLICT DO NOTHING"
+                    ),
+                    {"role_id": role_id, "route": route},
+                )
+            for code in REMOVED_TEAM_PERMISSIONS:
+                connection.execute(
+                    text(
+                        "INSERT INTO permissions (code, label) VALUES (:code, :code) ON CONFLICT DO NOTHING"
+                    ),
+                    {"code": code},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO role_permissions (role_id, permission_code, data_scope) VALUES (:role_id, :code, 'project')"
+                    ),
+                    {"role_id": role_id, "code": code},
+                )
+            for identifier, parent, route in (
+                ("navigation:team", None, "/review/users"),
+                ("navigation:team:users", "navigation:team", "/review/users"),
+                ("navigation:team:roles", "navigation:team", "/review/roles"),
+            ):
+                connection.execute(
+                    text(
+                        "INSERT INTO navigation_items (id, parent_id, label, route, required_permission) "
+                        "VALUES (:id, :parent, :id, :route, 'page.team_management') ON CONFLICT DO NOTHING"
+                    ),
+                    {"id": identifier, "parent": parent, "route": route},
+                )
+            for code, depends in (
+                ("identity.user.create", "identity.user.read"),
+                ("project.create", "identity.role.read"),
+                ("identity.role.create", "project.create"),
+            ):
+                connection.execute(
+                    text(
+                        "INSERT INTO permission_dependencies (permission_code, depends_on_code) VALUES (:code, :depends) ON CONFLICT DO NOTHING"
+                    ),
+                    {"code": code, "depends": depends},
+                )
+            retained_grants = connection.execute(
+                text(
+                    "SELECT permission_code, data_scope FROM role_permissions WHERE role_id = :role_id AND NOT (permission_code = ANY(:codes)) ORDER BY permission_code"
+                ),
+                {"role_id": role_id, "codes": list(REMOVED_TEAM_PERMISSIONS)},
+            ).all()
+
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM navigation_items WHERE id LIKE 'navigation:team%'"
+                    )
+                ).scalar_one()
+                == 0
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM user_page_access WHERE route IN ('/review/users', '/review/roles')"
+                    )
+                ).scalar_one()
+                == 0
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM role_page_access WHERE route IN ('/review/users', '/review/roles')"
+                    )
+                ).scalar_one()
+                == 0
+            )
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM permissions WHERE code = ANY(:codes)"),
+                    {"codes": list(REMOVED_TEAM_PERMISSIONS)},
+                ).scalar_one()
+                == 0
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM permission_dependencies WHERE permission_code = ANY(:codes) OR depends_on_code = ANY(:codes)"
+                    ),
+                    {"codes": list(REMOVED_TEAM_PERMISSIONS)},
+                ).scalar_one()
+                == 0
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT permission_code, data_scope FROM role_permissions WHERE role_id = :role_id ORDER BY permission_code"
+                    ),
+                    {"role_id": role_id},
+                ).all()
+                == retained_grants
+            )
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM users WHERE id = :id"), {"id": user_id}
+                ).scalar_one()
+                == 1
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM user_roles WHERE user_id = :id AND role_id = :role_id"
+                    ),
+                    {"id": user_id, "role_id": role_id},
+                ).scalar_one()
+                == 1
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT is_allowed FROM user_page_access WHERE user_id = :id AND route = '/writing/projects'"
+                    ),
+                    {"id": user_id},
+                ).scalar_one()
+                is True
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM role_page_access WHERE role_id = :id AND route = '/writing/projects'"
+                    ),
+                    {"id": role_id},
+                ).scalar_one()
+                == 1
+            )
+
+        command.downgrade(config, "0021_llm_local_api_keys")
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM permissions WHERE code = ANY(:codes)"),
+                    {"codes": list(REMOVED_TEAM_PERMISSIONS)},
+                ).scalar_one()
+                == 7
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM navigation_items WHERE id LIKE 'navigation:team%'"
+                    )
+                ).scalar_one()
+                == 3
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM role_permissions WHERE role_id = 'role:project_owner' AND permission_code = ANY(:codes) AND data_scope = 'managed_projects'"
+                    ),
+                    {"codes": list(REMOVED_TEAM_PERMISSIONS)},
+                ).scalar_one()
+                == 7
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM user_page_access WHERE route IN ('/review/users', '/review/roles')"
+                    )
+                ).scalar_one()
+                == 0
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM role_page_access WHERE route IN ('/review/users', '/review/roles')"
+                    )
+                ).scalar_one()
+                == 0
+            )
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT count(*) FROM role_permissions WHERE role_id = :id AND permission_code = ANY(:codes)"
+                    ),
+                    {"id": role_id, "codes": list(REMOVED_TEAM_PERMISSIONS)},
+                ).scalar_one()
+                == 0
+            )
+        command.upgrade(config, "head")
+    finally:
+        engine.dispose()
 
 
 def test_workflow_deletion_marker_persists_owner_and_recovery_snapshot():
@@ -124,8 +420,7 @@ def test_upgrade_head_creates_central_rank_constraints(postgres_url, monkeypatch
         assert inspector.has_table("rank_snapshots")
         assert inspector.has_table("rank_entries")
         assert {
-            item["name"]
-            for item in inspector.get_unique_constraints("rank_snapshots")
+            item["name"] for item in inspector.get_unique_constraints("rank_snapshots")
         } >= {
             "uq_rank_snapshots_source_ref",
             "uq_rank_snapshots_checksum",
@@ -142,7 +437,9 @@ def test_baseline_users_structure_excludes_contact_profile():
 
     baseline_column_names = {column.name for column in users.c}
     assert not {"email", "phone", "gender"} & baseline_column_names
-    assert "ck_users_gender" not in {constraint.name for constraint in users.constraints}
+    assert "ck_users_gender" not in {
+        constraint.name for constraint in users.constraints
+    }
     baseline_indexes = {
         index.name
         for table in BASELINE_METADATA.tables.values()
@@ -198,7 +495,11 @@ def test_upgrade_head_creates_system_tables(postgres_url, monkeypatch):
             column["name"]
             for column in inspector.get_columns("workflow_project_deletions")
         }
-        assert {"owner_token", "requested_by", "project_snapshot_json"} <= marker_columns
+        assert {
+            "owner_token",
+            "requested_by",
+            "project_snapshot_json",
+        } <= marker_columns
         assert inspector.has_table("audit_logs")
         assert inspector.has_table("llm_providers")
         assert inspector.has_table("llm_models")
@@ -258,7 +559,9 @@ def test_project_creator_permission_backfill_includes_disabled_builtin_roles(
     finally:
         with engine.begin() as connection:
             connection.execute(
-                text("UPDATE roles SET is_enabled = 1 WHERE lower(code) = 'screenwriter'")
+                text(
+                    "UPDATE roles SET is_enabled = 1 WHERE lower(code) = 'screenwriter'"
+                )
             )
         command.upgrade(config, "head")
         engine.dispose()
@@ -315,9 +618,7 @@ def test_writer_stage_permission_migration_preserves_admin_owned_grants(
         command.upgrade(config, "head")
         with engine.begin() as connection:
             connection.execute(
-                text(
-                    "DELETE FROM role_permissions WHERE permission_code = :code"
-                ),
+                text("DELETE FROM role_permissions WHERE permission_code = :code"),
                 {"code": custom_permission},
             )
             connection.execute(
@@ -363,13 +664,16 @@ def test_role_page_access_migration_round_trips_existing_account_grants(
 
         command.upgrade(config, "head")
         with engine.connect() as connection:
-            assert connection.execute(
-                text(
-                    "SELECT is_allowed FROM user_page_access "
-                    "WHERE user_id = :user_id AND route = '/selection/ranks'"
-                ),
-                {"user_id": user_id},
-            ).scalar_one() is True
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT is_allowed FROM user_page_access "
+                        "WHERE user_id = :user_id AND route = '/selection/ranks'"
+                    ),
+                    {"user_id": user_id},
+                ).scalar_one()
+                is True
+            )
             defaults = set(
                 connection.execute(
                     text(

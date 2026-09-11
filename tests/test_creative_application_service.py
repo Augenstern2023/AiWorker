@@ -199,6 +199,30 @@ def test_application_service_generation_job_contains_context(
     assert job.job.extra["operation_id"] == "act-7:outline"
 
 
+def test_application_service_generation_job_contains_selected_model(
+    creative_context,
+) -> None:
+    project = creative_context.create_original_project()
+    creative_context.jobs.get_or_create_job.return_value = SimpleNamespace(
+        job_id="job-model", status="pending"
+    )
+
+    creative_context.application_service.start_generation(
+        project_id=project["id"],
+        stage="outline",
+        actor=creative_context.actor,
+        workflow_task_id="outline-task",
+        operation_id="act-model:outline",
+        generation_instruction="",
+        source_snapshot_id="snapshot-model",
+        source_snapshot={"snapshot_id": "snapshot-model"},
+        llm_model_record_id="model-record-2",
+    )
+
+    payload = creative_context.jobs.get_or_create_job.call_args.args[1]
+    assert payload["extra"]["llm_model_record_id"] == "model-record-2"
+
+
 def test_application_service_forwards_original_brief_context_to_job_and_hash(
     creative_context,
 ) -> None:

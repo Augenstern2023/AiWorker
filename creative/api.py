@@ -1591,6 +1591,9 @@ def build_creative_router(
             raise HTTPException(403, "没有创建此机器任务的权限")
         assert_project_generation_access(project_id, principal)
         workflow_task_id = str(extra.pop("workflow_task_id", "") or "") or None
+        llm_model_record_id = validate_llm_model(
+            extra.pop("llm_model_record_id", None)
+        )
         normalized_stage = {
             "blueprints": "brief",
             "blueprint_variant": "brief",
@@ -1632,6 +1635,7 @@ def build_creative_router(
                 generation_instruction=generation_instruction,
                 source_snapshot_id=source_snapshot_id,
                 source_snapshot=source_snapshot,
+                llm_model_record_id=llm_model_record_id,
                 **extra,
             )
         except JobConflictError as exc:
@@ -1674,6 +1678,7 @@ def build_creative_router(
             ),
             "source_snapshot_id": getattr(payload, "source_snapshot_id", None),
             "source_snapshot": getattr(payload, "source_snapshot", None),
+            "llm_model_record_id": getattr(payload, "llm_model_record_id", None),
         }
 
     @router.post("/projects/{project_id}/generation-jobs/{job_id}/retry")
@@ -3318,7 +3323,7 @@ def build_creative_router(
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
-    def validate_free_llm_model(model_record_id: str | None) -> str:
+    def validate_llm_model(model_record_id: str | None) -> str:
         normalized = str(model_record_id or "").strip()
         if not normalized:
             return ""
@@ -3340,7 +3345,7 @@ def build_creative_router(
     ) -> dict[str, Any]:
         if job_manager is None:
             raise HTTPException(503, "creative job manager is unavailable")
-        llm_model_record_id = validate_free_llm_model(
+        llm_model_record_id = validate_llm_model(
             payload.llm_model_record_id
         )
         try:
@@ -3416,7 +3421,7 @@ def build_creative_router(
             raise HTTPException(503, "creative job manager is unavailable")
         if stage not in {"beats", "script"}:
             raise HTTPException(404, "unsupported creative stage")
-        llm_model_record_id = validate_free_llm_model(
+        llm_model_record_id = validate_llm_model(
             payload.llm_model_record_id
         )
         context_refs = payload.context_refs.model_dump()
@@ -4123,6 +4128,7 @@ def build_creative_router(
             generation_instruction=payload.instruction,
             source_snapshot_id=payload.source_snapshot_id,
             source_snapshot=payload.source_snapshot,
+            llm_model_record_id=payload.llm_model_record_id,
         )
 
     @router.patch("/blueprints/{blueprint_id}")

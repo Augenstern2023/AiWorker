@@ -1450,6 +1450,18 @@ def test_all_creative_module_links_are_clickable_before_upstream_locking():
     assert "五个创作模块入口始终可直接进入" in project_list
 
 
+def test_sequential_workflow_exposes_and_submits_selected_model():
+    navigation = _source("templates/common/workspace/project_module_navigation.html")
+    creative = _source("static/js/common/creative.js")
+    tasks = _source("static/js/common/tasks.js")
+
+    assert 'id="sequential-generation-model"' in navigation
+    assert "creativeWorkspace.sequentialGeneration.modelRecordId" in navigation
+    assert "loadSequentialGenerationModels(data.id)" in creative
+    assert "llm_model_record_id: modelRecordId" in creative
+    assert "sequentialGeneration:" in tasks
+
+
 def test_free_locked_resources_offer_non_destructive_revision_actions():
     creative = _source("static/js/common/creative.js")
     api = _source("creative/api.py")

@@ -2079,6 +2079,79 @@ class WorkflowRepository:
                 connection.exec_driver_sql("DELETE FROM project_members WHERE id = %s", (legacy["id"],))
         return True
 
+    def migrate_legacy_project_identity(
+        self, legacy_project_id: str, scoped_project_id: str
+    ) -> bool:
+        """Move one live creative project from a local ID to its scoped identity."""
+        legacy = str(legacy_project_id).strip()
+        scoped = str(scoped_project_id).strip()
+        if not re.fullmatch(r"[1-9][0-9]*", legacy):
+            raise ValueError("legacy project id must be a positive integer")
+        scoped_pattern = rf"creative:[0-9a-fA-F-]{{36}}:project:{re.escape(legacy)}"
+        if re.fullmatch(scoped_pattern, scoped) is None:
+            raise ValueError("scoped project id does not match the legacy project")
+
+        changed = False
+        with self.identity_repository.transaction() as connection:
+            self._lock_project_write(connection, legacy)
+            self._lock_project_write(connection, scoped)
+            legacy_members = connection.exec_driver_sql(
+                "SELECT * FROM project_members WHERE project_id = %s FOR UPDATE",
+                (legacy,),
+            ).mappings().fetchall()
+            for member in legacy_members:
+                target = connection.exec_driver_sql(
+                    "SELECT * FROM project_members WHERE project_id = %s "
+                    "AND user_id = %s AND project_role = %s FOR UPDATE",
+                    (scoped, member["user_id"], member["project_role"]),
+                ).mappings().fetchone()
+                if target is None:
+                    connection.exec_driver_sql(
+                        "UPDATE project_members SET project_id = %s, "
+                        "updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                        (scoped, member["id"]),
+                    )
+                else:
+                    if member["status"] == "active" and target["status"] != "active":
+                        connection.exec_driver_sql(
+                            "UPDATE project_members SET status = 'active', "
+                            "updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                            (target["id"],),
+                        )
+                    connection.exec_driver_sql(
+                        "UPDATE workflow_project_member_events SET project_id = %s, "
+                        "membership_id = %s WHERE membership_id = %s",
+                        (scoped, target["id"], member["id"]),
+                    )
+                    connection.exec_driver_sql(
+                        "DELETE FROM project_members WHERE id = %s",
+                        (member["id"],),
+                    )
+                changed = True
+
+            for statement, parameters in (
+                (
+                    "UPDATE workflow_project_member_events SET project_id = %s "
+                    "WHERE project_id = %s",
+                    (scoped, legacy),
+                ),
+                (
+                    "UPDATE workflow_instances SET project_id = %s, "
+                    "resource_id = CASE WHEN resource_type = 'project' "
+                    "AND resource_id = %s THEN %s ELSE resource_id END, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE project_id = %s",
+                    (scoped, legacy, scoped, legacy),
+                ),
+                (
+                    "UPDATE workflow_tasks SET project_id = %s, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE project_id = %s",
+                    (scoped, legacy),
+                ),
+            ):
+                result = connection.exec_driver_sql(statement, parameters)
+                changed = changed or result.rowcount > 0
+        return changed
+
     def list_project_members(self, project_id: str) -> list[dict[str, Any]]:
         with self.identity_repository.connect() as connection:
             rows = connection.exec_driver_sql(

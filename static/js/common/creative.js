@@ -361,6 +361,9 @@ window.aiworkerModules.push(() => ({
                         if (!res.ok) throw new Error(data.detail || '读取项目失败');
                         this.creativeWorkspace.project = data;
                         await this.loadCreativeModuleCapabilities(data.id);
+                        if (data.workflow_mode === 'sequential') {
+                            await this.loadSequentialGenerationModels(data.id);
+                        }
                         this.creativeWorkspace.selectedSeedId = data.seed?.id || null;
                         this.creativeWorkspace.preservedBlueprintIds = [];
                         this.reconcileCreativeGenerationState(data);
@@ -408,6 +411,44 @@ window.aiworkerModules.push(() => ({
 
                 isFreeCreativeProject() {
                     return this.creativeWorkspace.project?.workflow_mode === 'free';
+                },
+
+                sequentialModelStorageKey(projectId = null) {
+                    const id = projectId || this.creativeWorkspace.project?.id || '';
+                    return `creative:sequential-model:${id}`;
+                },
+
+                async loadSequentialGenerationModels(projectId) {
+                    const state = this.creativeWorkspace.sequentialGeneration;
+                    if (state.loaded || state.loading) return;
+                    state.loading = true;
+                    state.error = '';
+                    try {
+                        const response = await aiworkerApi.request('/api/llm/available-models');
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '读取可用模型失败');
+                        state.modelOptions = Array.isArray(data.items) ? data.items : [];
+                        let saved = null;
+                        try {
+                            saved = sessionStorage.getItem(this.sequentialModelStorageKey(projectId));
+                        } catch (_) {}
+                        const validIds = new Set(state.modelOptions.map(item => String(item.id)));
+                        state.modelRecordId = saved !== null && (saved === '' || validIds.has(saved))
+                            ? saved : String(data.default_model_record_id || '');
+                        state.loaded = true;
+                    } catch (error) {
+                        state.error = error.message || '读取可用模型失败';
+                    } finally {
+                        state.loading = false;
+                    }
+                },
+
+                selectSequentialGenerationModel(value) {
+                    const selected = String(value || '');
+                    this.creativeWorkspace.sequentialGeneration.modelRecordId = selected;
+                    try {
+                        sessionStorage.setItem(this.sequentialModelStorageKey(), selected);
+                    } catch (_) {}
                 },
 
                 creativeHead(stage, episodeNumber = 0) {
@@ -1286,6 +1327,12 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async startCreativeGeneration(url, body = {}, action = '', options = {}) {
+                    if (!this.isFreeCreativeProject()) {
+                        const modelRecordId = String(
+                            this.creativeWorkspace.sequentialGeneration?.modelRecordId || ''
+                        ).trim();
+                        if (modelRecordId) body = {...body, llm_model_record_id: modelRecordId};
+                    }
                     this.creativeWorkspace.error = '';
                     this.creativeWorkspace.startingAction = action;
                     this.creativeWorkspace.jobMessage = '正在创建生成任务';

@@ -85,6 +85,7 @@ class BlueprintGenerateRequest(BaseModel):
     count: int = Field(3, ge=3, le=5)
     preserve_blueprint_ids: list[int] = Field(default_factory=list, max_length=5)
     workflow_task_id: str | None = None
+    llm_model_record_id: str | None = Field(None, min_length=1, max_length=64)
     operation_id: str | None = Field(None, max_length=200)
     generation_instruction: str = Field("", max_length=2000)
     source_snapshot_id: str | None = Field(None, max_length=200)
@@ -102,6 +103,7 @@ class BlueprintCreateRequest(BaseModel):
 class BlueprintDeriveRequest(BaseModel):
     instruction: str = Field(min_length=1, max_length=500)
     workflow_task_id: str = Field(min_length=1)
+    llm_model_record_id: str | None = Field(None, min_length=1, max_length=64)
     operation_id: str | None = Field(None, max_length=200)
     source_snapshot_id: str | None = Field(None, max_length=200)
     source_snapshot: dict[str, Any] | None = None
@@ -177,6 +179,7 @@ class EpisodeBeatsRequest(BaseModel):
 
 class WorkflowLinkRequest(BaseModel):
     workflow_task_id: str | None = None
+    llm_model_record_id: str | None = Field(None, min_length=1, max_length=64)
     operation_id: str | None = Field(None, max_length=200)
     generation_instruction: str = Field("", max_length=2000)
     source_snapshot_id: str | None = Field(None, max_length=200)

@@ -48,8 +48,41 @@ from creative.script_service import (
 MAX_INLINE_SOURCE_SNAPSHOT_BYTES = 2 * 1024 * 1024
 
 
-def create_provider():
+def create_provider(model_record_id: str | None = None):
+    if model_record_id:
+        return create_llm_provider_from_config(
+            config, model_record_id=model_record_id
+        )
     return create_llm_provider_from_config(config)
+
+
+def _create_generation_provider(extra: dict[str, Any]) -> Any:
+    model_record_id = str(extra.get("llm_model_record_id") or "").strip()
+    if model_record_id:
+        return create_provider(model_record_id)
+    return create_provider()
+
+
+def _provider_generation_meta(
+    provider: Any, model_record_id: str = ""
+) -> dict[str, str]:
+    return {
+        "llm_provider_id": str(getattr(provider, "provider_id", "") or ""),
+        "llm_provider_name": str(
+            getattr(provider, "provider_display_name", "")
+            or getattr(provider, "provider_name", "")
+            or ""
+        ),
+        "llm_model_record_id": str(
+            getattr(provider, "model_record_id", "") or model_record_id
+        ),
+        "llm_model_id": str(getattr(provider, "model", "") or ""),
+        "llm_model_display_name": str(
+            getattr(provider, "model_display_name", "")
+            or getattr(provider, "model", "")
+            or ""
+        ),
+    }
 
 
 def emit(job: CrawlJob, event: str, message: str, level: str = "info", payload: dict[str, Any] | None = None) -> None:
@@ -287,6 +320,13 @@ def _generation_meta(
         "source_snapshot_id": str(extra.get("source_snapshot_id") or ""),
         "source_snapshot_sha256": str(extra.get("source_snapshot_sha256") or ""),
         "operation_id": str(extra.get("operation_id") or ""),
+        "llm_provider_id": str(extra.get("llm_provider_id") or ""),
+        "llm_provider_name": str(extra.get("llm_provider_name") or ""),
+        "llm_model_record_id": str(extra.get("llm_model_record_id") or ""),
+        "llm_model_id": str(extra.get("llm_model_id") or ""),
+        "llm_model_display_name": str(
+            extra.get("llm_model_display_name") or ""
+        ),
     }
 
 
@@ -371,7 +411,12 @@ async def _run_once(job: CrawlJob) -> None:
                 payload=generation_reservation["result"],
             )
             return
-    provider = create_provider()
+    provider = _create_generation_provider(extra)
+    extra.update(
+        _provider_generation_meta(
+            provider, str(extra.get("llm_model_record_id") or "")
+        )
+    )
     outline_reasoning_effort = "high"
     if action == "outlines":
         outline_reasoning_effort = _resolve_outline_reasoning_effort(job)

@@ -1877,6 +1877,13 @@ class CreativeRepository:
             ).fetchall()
         return [(str(row["id"]), str(row["created_by"])) for row in rows]
 
+    def list_active_project_ids(self) -> list[int]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id FROM creative_projects WHERE deleted = 0 ORDER BY id"
+            ).fetchall()
+        return [int(row["id"]) for row in rows]
+
     @staticmethod
     def _breakdown_target_audience(content_json: str) -> str:
         try:

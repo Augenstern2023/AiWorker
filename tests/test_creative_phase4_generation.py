@@ -12,6 +12,7 @@ import asyncio
 import json
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -36,6 +37,32 @@ from creative.script_service import (
     generate_outline_bundle,
     validate_beats,
 )
+
+
+def test_phase4_worker_creates_provider_with_selected_model(monkeypatch) -> None:
+    selected = []
+    provider = SimpleNamespace(
+        provider_id="provider-1",
+        provider_display_name="主提供商",
+        model_record_id="model-record-2",
+        model="model-api-2",
+        model_display_name="模型二",
+    )
+
+    def create_provider(model_record_id=None):
+        selected.append(model_record_id)
+        return provider
+
+    monkeypatch.setattr(phase4_worker, "create_provider", create_provider)
+
+    resolved = phase4_worker._create_generation_provider(
+        {"llm_model_record_id": "model-record-2"}
+    )
+    meta = phase4_worker._provider_generation_meta(resolved)
+
+    assert selected == ["model-record-2"]
+    assert meta["llm_provider_name"] == "主提供商"
+    assert meta["llm_model_display_name"] == "模型二"
 
 
 class SequentialProvider:

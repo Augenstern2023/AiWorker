@@ -15,10 +15,9 @@
     if (!elements.body) return;
 
     const editor = bootstrap.Modal.getOrCreateInstance(document.getElementById('user-editor-modal'));
-    const teamMode = window.location.pathname.startsWith('/review/');
-    const usersApi = teamMode ? '/api/team/users' : '/api/admin/users';
-    const rolesApi = teamMode ? '/api/team/roles' : '/api/admin/roles';
-    const presenceEnabled = !teamMode && elements.body.dataset.presenceEnabled === 'true';
+    const usersApi = '/api/admin/users';
+    const rolesApi = '/api/admin/roles';
+    const presenceEnabled = elements.body.dataset.presenceEnabled === 'true';
     const genderLabels = { unspecified: '未填写', male: '男', female: '女' };
     let users = [];
     let roles = [];
@@ -35,9 +34,8 @@
     function formatDate(value) { return value ? String(value).replace('T', ' ').replace(/\.\d+(?=(?:Z|[+-]\d\d(?::?\d\d)?$))/, '').replace(/(?:Z|[+-]\d\d(?::?\d\d)?)$/, '') : '-'; }
     function actionButton(icon, label, style, handler) { const button = document.createElement('button'); button.type = 'button'; button.className = `btn btn-sm ${style}`; button.title = label; button.setAttribute('aria-label', label); const glyph = document.createElement('i'); glyph.className = `bi ${icon}`; button.appendChild(glyph); button.addEventListener('click', handler); return button; }
     function flatten(items, output = []) { for (const item of items) { output.push(item); flatten(item.children || [], output); } return output; }
-    function renderRoleOptions(selectedCodes = []) { const selected = new Set(selectedCodes); const available = teamMode ? roles.filter(role => role.can_assign) : roles; elements.roles.replaceChildren(...available.map(role => { const option = new Option(`${role.name} (${role.code})`, role.id); option.selected = selected.has(role.code); return option; })); }
+    function renderRoleOptions(selectedCodes = []) { const selected = new Set(selectedCodes); elements.roles.replaceChildren(...roles.map(role => { const option = new Option(`${role.name} (${role.code})`, role.id); option.selected = selected.has(role.code); return option; })); }
     function renderFilterOptions() {
-        if (teamMode) return;
         const selectedRole = elements.filterRole.value;
         elements.filterRole.replaceChildren(new Option('全部角色', ''), ...roles.map(role => new Option(role.name, role.code)));
         elements.filterRole.value = selectedRole;
@@ -88,18 +86,18 @@
     function openUserEditor(user = null) {
         elements.form.reset(); showError(elements.formError); elements.id.value = user?.id || ''; elements.title.textContent = user ? '编辑用户' : '新建用户';
         elements.username.value = user?.username || ''; elements.username.disabled = Boolean(user); elements.displayName.value = user?.display_name || '';
-        if (!teamMode) { elements.email.value = user?.email || ''; elements.phone.value = user?.phone || ''; elements.gender.value = user?.gender || 'unspecified'; }
+        elements.email.value = user?.email || ''; elements.phone.value = user?.phone || ''; elements.gender.value = user?.gender || 'unspecified';
         elements.password.required = !user; elements.passwordField.classList.toggle('d-none', Boolean(user)); renderRoleOptions(user?.role_codes || []); editor.show();
     }
     function renderUsers() {
-        if (!users.length) { const row = document.createElement('tr'); const cell = document.createElement('td'); cell.colSpan = teamMode ? 6 : (presenceEnabled ? 10 : 9); cell.className = 'text-center text-muted py-4'; cell.textContent = '暂无用户'; row.appendChild(cell); elements.body.replaceChildren(row); return; }
+        if (!users.length) { const row = document.createElement('tr'); const cell = document.createElement('td'); cell.colSpan = presenceEnabled ? 10 : 9; cell.className = 'text-center text-muted py-4'; cell.textContent = '暂无用户'; row.appendChild(cell); elements.body.replaceChildren(row); return; }
         const statusOrder = {active: 0, idle: 1, offline: 2, unknown: 3};
         const displayUsers = presenceEnabled && presenceAvailable
             ? [...users].sort((left, right) => (statusOrder[presenceByUser[left.id]?.status || 'unknown'] - statusOrder[presenceByUser[right.id]?.status || 'unknown']))
             : users;
         elements.body.replaceChildren(...displayUsers.map(user => {
             const row = document.createElement('tr');
-            const values = teamMode ? [user.username, user.display_name, (user.role_codes || []).map(roleDisplayName).join('、') || '-', user.status === 'active' ? '启用' : '停用', formatDate(user.last_login_at)] : [user.username, departmentDisplay(user), user.email || '-', user.phone || '-', genderLabels[user.gender] || '未填写', (user.role_codes || []).map(roleDisplayName).join('、') || '-', formatDate(user.created_at), user.status === 'active' ? '启用' : '停用'];
+            const values = [user.username, departmentDisplay(user), user.email || '-', user.phone || '-', genderLabels[user.gender] || '未填写', (user.role_codes || []).map(roleDisplayName).join('、') || '-', formatDate(user.created_at), user.status === 'active' ? '启用' : '停用'];
             values.forEach(value => { const cell = document.createElement('td'); cell.textContent = value; row.appendChild(cell); });
             if (presenceEnabled) row.appendChild(presenceCell(user));
             const actions = document.createElement('td'); const group = document.createElement('div'); group.className = 'd-flex gap-1';
@@ -112,11 +110,10 @@
     async function loadUsersAndRoles() {
         showError(elements.error);
         try {
-            const requests = [window.aiworkerApi.request(`${usersApi}${teamMode ? '' : `?${filterParameters().toString()}`}`), window.aiworkerApi.request(rolesApi)];
-            if (!teamMode) requests.push(window.aiworkerApi.request('/api/admin/departments'));
+            const requests = [window.aiworkerApi.request(`${usersApi}?${filterParameters().toString()}`), window.aiworkerApi.request(rolesApi), window.aiworkerApi.request('/api/admin/departments')];
             const responses = await Promise.all(requests);
             if (!responses.every(response => response.ok)) throw new Error('用户、角色或部门加载失败');
-            users = await responses[0].json(); roles = await responses[1].json(); departments = teamMode ? [] : await responses[2].json(); renderFilterOptions(); renderUsers();
+            users = await responses[0].json(); roles = await responses[1].json(); departments = await responses[2].json(); renderFilterOptions(); renderUsers();
             if (presenceEnabled) void loadPresence();
         } catch (error) { showError(elements.error, error.message || '用户加载失败'); }
     }
@@ -152,7 +149,7 @@
         } catch (error) { showError(elements.error, error.message || '用户删除失败'); if (window.aiworkerUi) window.aiworkerUi.showToast({kind: 'danger', title: '删除失败', message: error.message || '用户删除失败'}); }
     }
     async function exportUsers(format) { try { const response = await window.aiworkerApi.request(`/api/admin/users/export?${filterParameters().toString()}&format=${format}`); if (!response.ok) throw new Error(await responseError(response, '人员表导出失败')); const link = document.createElement('a'); link.href = URL.createObjectURL(await response.blob()); link.download = `用户人员表.${format}`; link.click(); URL.revokeObjectURL(link.href); } catch (error) { showError(elements.error, error.message || '人员表导出失败'); } }
-    elements.form.addEventListener('submit', async event => { event.preventDefault(); showError(elements.formError); const userId = elements.id.value; const submitBtn = document.getElementById('save-user'); if (window.aiworkerUi) window.aiworkerUi.setButtonLoading(submitBtn, {loading: true, label: '保存中…'}); const payload = userId ? {display_name: elements.displayName.value.trim(), role_ids: selectedRoleIds()} : {username: elements.username.value.trim(), display_name: elements.displayName.value.trim(), password: elements.password.value, role_ids: selectedRoleIds()}; if (!teamMode) Object.assign(payload, {email: elements.email.value.trim() || null, phone: elements.phone.value.trim() || null, gender: elements.gender.value}); try { const response = await window.aiworkerApi.request(userId ? `${usersApi}/${userId}` : usersApi, {method: userId ? 'PATCH' : 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)}); if (!response.ok) throw new Error(await responseError(response, userId ? '用户更新失败' : '用户创建失败')); editor.hide(); if (window.aiworkerUi) window.aiworkerUi.showToast({kind: 'success', title: '保存成功', message: '用户已保存。'}); await loadUsersAndRoles(); } catch (error) { showError(elements.formError, error.message || '用户保存失败'); if (window.aiworkerUi) window.aiworkerUi.showToast({kind: 'danger', title: '保存失败', message: error.message || '用户保存失败'}); } finally { if (window.aiworkerUi) window.aiworkerUi.setButtonLoading(submitBtn, {loading: false}); } });
+    elements.form.addEventListener('submit', async event => { event.preventDefault(); showError(elements.formError); const userId = elements.id.value; const submitBtn = document.getElementById('save-user'); if (window.aiworkerUi) window.aiworkerUi.setButtonLoading(submitBtn, {loading: true, label: '保存中…'}); const payload = userId ? {display_name: elements.displayName.value.trim(), role_ids: selectedRoleIds()} : {username: elements.username.value.trim(), display_name: elements.displayName.value.trim(), password: elements.password.value, role_ids: selectedRoleIds()}; Object.assign(payload, {email: elements.email.value.trim() || null, phone: elements.phone.value.trim() || null, gender: elements.gender.value}); try { const response = await window.aiworkerApi.request(userId ? `${usersApi}/${userId}` : usersApi, {method: userId ? 'PATCH' : 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)}); if (!response.ok) throw new Error(await responseError(response, userId ? '用户更新失败' : '用户创建失败')); editor.hide(); if (window.aiworkerUi) window.aiworkerUi.showToast({kind: 'success', title: '保存成功', message: '用户已保存。'}); await loadUsersAndRoles(); } catch (error) { showError(elements.formError, error.message || '用户保存失败'); if (window.aiworkerUi) window.aiworkerUi.showToast({kind: 'danger', title: '保存失败', message: error.message || '用户保存失败'}); } finally { if (window.aiworkerUi) window.aiworkerUi.setButtonLoading(submitBtn, {loading: false}); } });
     elements.filters?.addEventListener('submit', event => { event.preventDefault(); loadUsersAndRoles(); });
     document.getElementById('create-user')?.addEventListener('click', () => openUserEditor());
     document.getElementById('export-users-csv')?.addEventListener('click', () => exportUsers('csv'));

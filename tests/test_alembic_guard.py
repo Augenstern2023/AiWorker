@@ -65,6 +65,7 @@ def _migration_tree(
 ) -> Path:
     versions_dir = tmp_path / "system_database" / "alembic" / "versions"
     versions_dir.mkdir(parents=True)
+    (tmp_path / "system_database" / "__init__.py").write_text("", encoding="utf-8")
     (tmp_path / "alembic.ini").write_text(
         "[alembic]\nscript_location = system_database/alembic\n",
         encoding="utf-8",
@@ -174,6 +175,16 @@ def test_repository_rejects_untracked_migration(git_repo: Path) -> None:
     _write_revision(versions, "0003_untracked.py", "0003_untracked", "0002_current")
 
     with pytest.raises(GuardError, match="存在未跟踪迁移脚本.*0003_untracked.py"):
+        validate_repository(git_repo)
+
+
+def test_repository_rejects_ignored_migration(git_repo: Path) -> None:
+    ignored_path = "system_database/alembic/versions/0003_ignored.py"
+    (git_repo / ".gitignore").write_text(ignored_path + "\n", encoding="utf-8")
+    versions = git_repo / "system_database" / "alembic" / "versions"
+    _write_revision(versions, "0003_ignored.py", "0003_ignored", "0002_current")
+
+    with pytest.raises(GuardError, match="未进入 Git 索引.*0003_ignored.py"):
         validate_repository(git_repo)
 
 
@@ -288,6 +299,30 @@ def test_push_validates_committed_tree_not_worktree(git_repo: Path) -> None:
     _write_revision(versions, migration.name, "0003_added", "0002_current")
     tip_sha = _commit(git_repo, "schema and migration")
     migration.write_text("broken worktree content\n", encoding="utf-8")
+    update = PushUpdate("refs/heads/main", tip_sha, "refs/heads/main", base_sha)
+
+    reports = validate_push_updates(git_repo, "manjuxuanpin", (update,))
+
+    assert tuple(report.head for report in reports) == ("0003_added",)
+
+
+def test_push_loads_schema_imports_from_committed_tree(git_repo: Path) -> None:
+    base_sha = _git(git_repo, "rev-parse", "HEAD")
+    schema = git_repo / "system_database" / "schema.py"
+    schema.write_text("expected_marker = object()\n", encoding="utf-8")
+    versions = git_repo / "system_database" / "alembic" / "versions"
+    migration = versions / "0003_added.py"
+    _write_revision(versions, migration.name, "0003_added", "0002_current")
+    migration.write_text(
+        migration.read_text("utf-8").replace(
+            "from __future__ import annotations\n",
+            "from __future__ import annotations\n"
+            "from system_database.schema import expected_marker\n",
+        ),
+        encoding="utf-8",
+    )
+    tip_sha = _commit(git_repo, "schema and importing migration")
+    schema.write_text("different_marker = object()\n", encoding="utf-8")
     update = PushUpdate("refs/heads/main", tip_sha, "refs/heads/main", base_sha)
 
     reports = validate_push_updates(git_repo, "manjuxuanpin", (update,))

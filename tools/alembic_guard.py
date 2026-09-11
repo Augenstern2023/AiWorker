@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from io import BytesIO
 import re
 import subprocess
+import sys
 import tarfile
 import tempfile
 import warnings
@@ -97,6 +98,27 @@ def _validate_filename_prefixes(scripts: ScriptDirectory) -> None:
             )
 
 
+@contextmanager
+def _isolated_system_database_imports(repo_root: Path) -> Iterator[None]:
+    original_path = list(sys.path)
+    saved_modules = {
+        name: module
+        for name, module in tuple(sys.modules.items())
+        if name == "system_database" or name.startswith("system_database.")
+    }
+    for name in saved_modules:
+        sys.modules.pop(name, None)
+    sys.path.insert(0, str(repo_root.resolve()))
+    try:
+        yield
+    finally:
+        for name in tuple(sys.modules):
+            if name == "system_database" or name.startswith("system_database."):
+                sys.modules.pop(name, None)
+        sys.modules.update(saved_modules)
+        sys.path[:] = original_path
+
+
 def validate_migration_tree(repo_root: Path) -> MigrationReport:
     config = Config(str(repo_root / "alembic.ini"))
     config.set_main_option(
@@ -104,24 +126,25 @@ def validate_migration_tree(repo_root: Path) -> MigrationReport:
         str(repo_root / "system_database" / "alembic"),
     )
     try:
-        with warnings.catch_warnings(record=True) as caught_warnings:
-            warnings.simplefilter("always")
-            scripts = ScriptDirectory.from_config(config)
-            heads = scripts.get_heads()
-            duplicate_warnings = [
-                str(item.message)
-                for item in caught_warnings
-                if "present more than once" in str(item.message)
-            ]
-            if len(heads) != len(set(heads)) or duplicate_warnings:
-                details = "; ".join(duplicate_warnings) or repr(heads)
-                raise GuardError(f"Alembic revision 必须唯一: {details}")
-            if len(heads) != 1:
-                raise GuardError(f"Alembic 必须只有一个 head，当前为: {heads}")
-            revisions = tuple(
-                script.revision for script in scripts.walk_revisions()
-            )
-            _validate_filename_prefixes(scripts)
+        with _isolated_system_database_imports(repo_root):
+            with warnings.catch_warnings(record=True) as caught_warnings:
+                warnings.simplefilter("always")
+                scripts = ScriptDirectory.from_config(config)
+                heads = scripts.get_heads()
+                duplicate_warnings = [
+                    str(item.message)
+                    for item in caught_warnings
+                    if "present more than once" in str(item.message)
+                ]
+                if len(heads) != len(set(heads)) or duplicate_warnings:
+                    details = "; ".join(duplicate_warnings) or repr(heads)
+                    raise GuardError(f"Alembic revision 必须唯一: {details}")
+                if len(heads) != 1:
+                    raise GuardError(f"Alembic 必须只有一个 head，当前为: {heads}")
+                revisions = tuple(
+                    script.revision for script in scripts.walk_revisions()
+                )
+                _validate_filename_prefixes(scripts)
     except GuardError:
         raise
     except Exception as exc:
@@ -133,24 +156,29 @@ def untracked_migration_files(repo_root: Path) -> tuple[Path, ...]:
     raw = run_git_bytes(
         repo_root,
         "ls-files",
-        "--others",
-        "--exclude-standard",
         "-z",
         "--",
         "system_database/alembic/versions",
     )
-    return tuple(
-        Path(value.decode("utf-8", errors="strict"))
+    tracked = {
+        value.decode("utf-8", errors="strict").replace("\\", "/")
         for value in raw.split(b"\0")
         if value and value.lower().endswith(b".py")
-    )
+    }
+    versions = repo_root / "system_database" / "alembic" / "versions"
+    physical = {
+        path.relative_to(repo_root).as_posix()
+        for path in versions.glob("*.py")
+        if path.is_file()
+    }
+    return tuple(Path(path) for path in sorted(physical - tracked))
 
 
 def validate_repository(repo_root: Path) -> MigrationReport:
     untracked = untracked_migration_files(repo_root)
     if untracked:
         rendered = ", ".join(path.as_posix() for path in untracked)
-        raise GuardError(f"存在未跟踪迁移脚本: {rendered}")
+        raise GuardError(f"存在未跟踪迁移脚本（未进入 Git 索引）: {rendered}")
     return validate_migration_tree(repo_root)
 
 
@@ -240,7 +268,7 @@ def _index_paths(repo_root: Path) -> tuple[str, ...]:
         "-z",
         "--",
         "alembic.ini",
-        "system_database/alembic",
+        "system_database",
     )
     return tuple(
         value.decode("utf-8", errors="strict")
@@ -264,7 +292,7 @@ def validate_staged_changes(repo_root: Path) -> MigrationReport | None:
     untracked = untracked_migration_files(repo_root)
     if untracked:
         rendered = ", ".join(path.as_posix() for path in untracked)
-        raise GuardError(f"存在未跟踪迁移脚本: {rendered}")
+        raise GuardError(f"存在未跟踪迁移脚本（未进入 Git 索引）: {rendered}")
     changes = staged_changes(repo_root)
     _reject_historical_migration_changes(changes)
     _require_migration_for_schema_changes(changes, context="暂存区")
@@ -365,7 +393,7 @@ def exported_commit_migration_tree(
         "--format=tar",
         revision,
         "alembic.ini",
-        "system_database/alembic",
+        "system_database",
     )
     with tempfile.TemporaryDirectory(prefix="aiworker-alembic-commit-") as raw_dir:
         destination = Path(raw_dir)
@@ -381,7 +409,7 @@ def validate_push_updates(
     untracked = untracked_migration_files(repo_root)
     if untracked:
         rendered = ", ".join(path.as_posix() for path in untracked)
-        raise GuardError(f"存在未跟踪迁移脚本: {rendered}")
+        raise GuardError(f"存在未跟踪迁移脚本（未进入 Git 索引）: {rendered}")
     reports: list[MigrationReport] = []
     for update in updates:
         if update.local_sha == ZERO_SHA:

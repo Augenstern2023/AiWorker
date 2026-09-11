@@ -16,8 +16,13 @@ import pytest
 
 from tools.alembic_guard import (
     GuardError,
+    PushUpdate,
+    ZERO_SHA,
+    parse_push_updates,
     validate_migration_tree,
+    validate_push_updates,
     validate_repository,
+    validate_staged_changes,
 )
 
 
@@ -74,6 +79,12 @@ def _git(repo: Path, *args: str) -> str:
         text=True,
         encoding="utf-8",
     ).strip()
+
+
+def _commit(repo: Path, message: str) -> str:
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", message)
+    return _git(repo, "rev-parse", "HEAD")
 
 
 @pytest.fixture
@@ -162,3 +173,123 @@ def test_repository_rejects_untracked_migration(git_repo: Path) -> None:
 
     with pytest.raises(GuardError, match="存在未跟踪迁移脚本.*0003_untracked.py"):
         validate_repository(git_repo)
+
+
+def test_staged_schema_change_requires_new_staged_migration(git_repo: Path) -> None:
+    schema = git_repo / "system_database" / "schema.py"
+    schema.write_text("schema_version = 2\n", encoding="utf-8")
+    _git(git_repo, "add", "system_database/schema.py")
+
+    with pytest.raises(GuardError, match="必须同时暂存新增 Alembic migration"):
+        validate_staged_changes(git_repo)
+
+
+def test_staged_schema_and_new_migration_pass(git_repo: Path) -> None:
+    schema = git_repo / "system_database" / "schema.py"
+    schema.write_text("schema_version = 2\n", encoding="utf-8")
+    versions = git_repo / "system_database" / "alembic" / "versions"
+    _write_revision(versions, "0003_added.py", "0003_added", "0002_current")
+    _git(git_repo, "add", "system_database/schema.py")
+    _git(git_repo, "add", "system_database/alembic/versions/0003_added.py")
+
+    report = validate_staged_changes(git_repo)
+
+    assert report is not None
+    assert report.head == "0003_added"
+
+
+@pytest.mark.parametrize("operation", ["modify", "delete", "rename"])
+def test_staged_historical_migration_is_immutable(
+    git_repo: Path,
+    operation: str,
+) -> None:
+    versions = git_repo / "system_database" / "alembic" / "versions"
+    migration = versions / "0002_current.py"
+    if operation == "modify":
+        migration.write_text(migration.read_text("utf-8") + "# changed\n", "utf-8")
+        _git(git_repo, "add", migration.as_posix())
+    elif operation == "delete":
+        _git(git_repo, "rm", migration.as_posix())
+    else:
+        _git(git_repo, "mv", migration.as_posix(), (versions / "0002_moved.py").as_posix())
+
+    with pytest.raises(GuardError, match="禁止修改、删除或重命名历史 migration"):
+        validate_staged_changes(git_repo)
+
+
+def test_staged_validation_reads_index_instead_of_worktree(git_repo: Path) -> None:
+    versions = git_repo / "system_database" / "alembic" / "versions"
+    migration = versions / "0003_added.py"
+    _write_revision(migration.parent, migration.name, "0003_added", "0002_missing")
+    _git(git_repo, "add", migration.as_posix())
+    _write_revision(migration.parent, migration.name, "0003_added", "0002_current")
+
+    with pytest.raises(GuardError, match="无法解析 Alembic 迁移图"):
+        validate_staged_changes(git_repo)
+
+
+def test_parse_push_updates_accepts_git_hook_protocol() -> None:
+    value = (
+        "refs/heads/main " + "a" * 40 + " refs/heads/main " + "b" * 40 + "\n"
+    )
+
+    assert parse_push_updates(value) == (
+        PushUpdate(
+            local_ref="refs/heads/main",
+            local_sha="a" * 40,
+            remote_ref="refs/heads/main",
+            remote_sha="b" * 40,
+        ),
+    )
+
+
+def test_push_to_manjuxuanpin_requires_migration_for_schema_change(
+    git_repo: Path,
+) -> None:
+    base_sha = _git(git_repo, "rev-parse", "HEAD")
+    schema = git_repo / "system_database" / "schema.py"
+    schema.write_text("schema_version = 2\n", encoding="utf-8")
+    tip_sha = _commit(git_repo, "schema without migration")
+    update = PushUpdate("refs/heads/main", tip_sha, "refs/heads/main", base_sha)
+
+    with pytest.raises(GuardError, match="推送范围修改了数据库结构.*没有新增 migration"):
+        validate_push_updates(git_repo, "manjuxuanpin", (update,))
+
+
+def test_push_validates_committed_tree_not_worktree(git_repo: Path) -> None:
+    base_sha = _git(git_repo, "rev-parse", "HEAD")
+    schema = git_repo / "system_database" / "schema.py"
+    schema.write_text("schema_version = 2\n", encoding="utf-8")
+    versions = git_repo / "system_database" / "alembic" / "versions"
+    migration = versions / "0003_added.py"
+    _write_revision(versions, migration.name, "0003_added", "0002_current")
+    tip_sha = _commit(git_repo, "schema and migration")
+    migration.write_text("broken worktree content\n", encoding="utf-8")
+    update = PushUpdate("refs/heads/main", tip_sha, "refs/heads/main", base_sha)
+
+    reports = validate_push_updates(git_repo, "manjuxuanpin", (update,))
+
+    assert tuple(report.head for report in reports) == ("0003_added",)
+
+
+def test_push_deletion_has_no_commit_tree_to_validate(git_repo: Path) -> None:
+    update = PushUpdate(
+        "(delete)",
+        ZERO_SHA,
+        "refs/heads/obsolete",
+        _git(git_repo, "rev-parse", "HEAD"),
+    )
+
+    assert validate_push_updates(git_repo, "manjuxuanpin", (update,)) == ()
+
+
+def test_other_remote_only_requires_valid_commit_tree(git_repo: Path) -> None:
+    base_sha = _git(git_repo, "rev-parse", "HEAD")
+    schema = git_repo / "system_database" / "schema.py"
+    schema.write_text("schema_version = 2\n", encoding="utf-8")
+    tip_sha = _commit(git_repo, "schema without migration")
+    update = PushUpdate("refs/heads/main", tip_sha, "refs/heads/main", base_sha)
+
+    reports = validate_push_updates(git_repo, "origin", (update,))
+
+    assert tuple(report.head for report in reports) == ("0002_current",)

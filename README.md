@@ -59,7 +59,7 @@ AiWorker 由两层组成：底层是 MediaCrawler 派生的**通用采集层**�
 ┌─────────────────────────────── 应用工作层（FastAPI Web GUI） ──────────────────────────────┐
 │  WebGUI.py                                                                                │
 │  ├─ web/           页面路由、导航、页面访问控制                                             │
-│  ├─ identity/      本地账号、角色、权限、会话、团队                                          │
+│  ├─ identity/      本地账号、角色、权限、会话                                                │
 │  ├─ organization/  组织架构（部门）                                                         │
 │  ├─ workflow/      任务池、项目成员、审批、状态机、流转                                       │
 │  ├─ audit/         安全与业务审计                                                           │
@@ -76,7 +76,7 @@ AiWorker 由两层组成：底层是 MediaCrawler 派生的**通用采集层**�
    PostgreSQL（system_database，Alembic 迁移）   SQLite（.runtime/creative/creative.db）    data/ 文件
 ```
 
-- **系统数据**：账号、角色、权限、团队、部门、任务、审批、审计等保存在 PostgreSQL（`system_database`），由 Alembic 迁移维护。
+- **系统数据**：账号、角色、权限、部门、任务、审批、审计等保存在 PostgreSQL（`system_database`），由 Alembic 迁移维护。
 - **创意数据**：选题、拆解、创作版本保存在 `.runtime/creative/creative.db`（SQLite）。
 - **采集数据**：爬取内容、剧目媒体、转写脚本、分析报告、导出文件保存在 `data/`。
 
@@ -159,7 +159,7 @@ uv run main.py --platform xhs --lt qrcode --type creator
 
 ## 角色与权限
 
-- 系统内置账号、角色、权限、会话和团队管理（`identity/`）。
+- 系统内置账号、角色、权限和会话（`identity/`）；相关维护入口统一位于系统管理 → 用户管理 / 角色管理 / 导航配置。
 - 五个默认角色为选品运营、创意策划、编剧、项目负责人和系统管理员。
 - 页面访问与 API 权限按角色收敛（`web/page_access_service.py`、`identity/permission_service.py`），系统管理员不受页面权限限制。
 - 组织架构（部门）通过 `organization/` 管理；操作审计记录在 `audit/`。
@@ -216,7 +216,7 @@ config/                  全局与平台配置
 core/                    事件总线、采集任务定义
 creative/                选题、拆解、创作项目、版本与交付导出
 database/                数据库 ORM 与会话层
-identity/                本地账号、角色、权限、会话、团队
+identity/                本地账号、角色、权限、会话
 libs/                    JS 反检测脚本等资源
 media_platform/          各内容平台采集实现
 model/                   Pydantic 数据模型

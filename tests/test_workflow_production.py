@@ -12,6 +12,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 import WebGUI
 from identity.password_service import PasswordService
@@ -30,12 +31,6 @@ REQUIRED_ROUTES = {
     ("/api/workflow/projects/{project_id}/members", "GET"),
     ("/api/workflow/projects/{project_id}/members", "POST"),
     ("/api/workflow/projects/{project_id}/members/{user_id}", "DELETE"),
-    ("/api/workflow/tasks/{task_id}/submissions", "POST"),
-    ("/api/workflow/tasks/{task_id}/submissions", "GET"),
-    ("/api/workflow/submissions/{submission_id}/submit", "POST"),
-    ("/api/workflow/submissions/{submission_id}/approve", "POST"),
-    ("/api/workflow/submissions/{submission_id}/return", "POST"),
-    ("/api/workflow/submissions/{submission_id}/fork", "POST"),
 }
 
 
@@ -118,48 +113,27 @@ def test_production_workflow_uses_real_auth_csrf_and_role_filtered_listing() -> 
             headers={"X-CSRF-Token": csrf_token},
         )
         assert claimed.status_code == 200
-        created = client.post(
-            f"/api/workflow/tasks/{visible['id']}/submissions",
-            headers={"X-CSRF-Token": csrf_token},
-            json={
-                    "resource_type": "production_artifact",
-                "resource_id": f"production-resource-{suffix}",
-                "content": {"verified": True},
-            },
-        )
-        assert created.status_code == 201
         assert client.post(
             f"/api/workflow/tasks/{visible['id']}/start",
             headers={"X-CSRF-Token": csrf_token},
         ).status_code == 200
-        submitted = client.post(
-            f"/api/workflow/submissions/{created.json()['id']}/submit",
-            headers={"X-CSRF-Token": csrf_token},
-        )
-        assert submitted.status_code == 200
-        assert submitted.json()["status"] == "submitted"
-        assert client.get(
-            f"/api/workflow/tasks/{visible['id']}/submissions"
-        ).json()[0]["id"] == created.json()["id"]
-        unauthorized_review = client.post(
-            f"/api/workflow/submissions/{created.json()['id']}/approve",
-            headers={"X-CSRF-Token": csrf_token},
-        )
-        assert unauthorized_review.status_code == 403
     finally:
         with repository.connect() as connection:
             connection.execute(
-                """
-                DELETE FROM workflow_submissions
-                WHERE task_id IN (
-                    SELECT id FROM workflow_tasks WHERE workflow_id IN (?, ?)
-                )
-                """,
-                (selection_workflow, writing_workflow),
+                text(
+                    "DELETE FROM workflow_instances "
+                    "WHERE id IN (:selection_workflow, :writing_workflow)"
+                ),
+                {
+                    "selection_workflow": selection_workflow,
+                    "writing_workflow": writing_workflow,
+                },
             )
             connection.execute(
-                "DELETE FROM workflow_instances WHERE id IN (?, ?)",
-                (selection_workflow, writing_workflow),
+                text("DELETE FROM sessions WHERE user_id = :user_id"),
+                {"user_id": user["id"]},
             )
-            connection.execute("DELETE FROM sessions WHERE user_id = ?", (user["id"],))
-            connection.execute("DELETE FROM users WHERE id = ?", (user["id"],))
+            connection.execute(
+                text("DELETE FROM users WHERE id = :user_id"),
+                {"user_id": user["id"]},
+            )

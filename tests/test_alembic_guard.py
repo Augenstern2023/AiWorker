@@ -21,6 +21,7 @@ from tools.alembic_guard import (
     parse_push_updates,
     push_update_from_pre_commit_environment,
     validate_migration_tree,
+    validate_commit_range,
     validate_push_updates,
     validate_repository,
     validate_staged_changes,
@@ -315,3 +316,15 @@ def test_other_remote_only_requires_valid_commit_tree(git_repo: Path) -> None:
     reports = validate_push_updates(git_repo, "origin", (update,))
 
     assert tuple(report.head for report in reports) == ("0002_current",)
+
+
+def test_remote_ci_range_rejects_schema_change_without_migration(
+    git_repo: Path,
+) -> None:
+    base_sha = _git(git_repo, "rev-parse", "HEAD")
+    schema = git_repo / "system_database" / "schema.py"
+    schema.write_text("schema_version = 2\n", encoding="utf-8")
+    tip_sha = _commit(git_repo, "schema without migration")
+
+    with pytest.raises(GuardError, match="推送范围修改了数据库结构.*没有新增 migration"):
+        validate_commit_range(git_repo, base_sha, tip_sha)

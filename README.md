@@ -214,6 +214,11 @@ uv run python scripts/upgrade_production_database.py
 
 `uv run alembic upgrade head` 仅用于隔离测试数据库，不作为生产升级入口。
 
+`manjuxuanpin` 使用 `.gitea/workflows/alembic-integrity.yml` 在干净 checkout 中复验
+提交范围、迁移图和 PostgreSQL 空库升级。仓库管理员必须启用 Gitea Actions，禁止
+直接推送 `main`，并把 `verify-migrations` 设置为合并请求的必需状态检查；工作流未
+实际运行时，不能把配置文件存在视为远端保护已经生效。
+
 ## 配置与凭证安全
 
 - 外部服务地址、激活码、Cookie、模型密钥等仅保存在本机配置或环境变量中。

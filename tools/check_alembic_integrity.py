@@ -26,6 +26,7 @@ from tools.alembic_guard import (
     read_database_revision,
     read_remote_main_sha,
     validate_production_preconditions,
+    validate_commit_range,
     validate_push_updates,
     validate_repository,
     validate_staged_changes,
@@ -38,6 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("repository")
     subparsers.add_parser("staged")
     subparsers.add_parser("production")
+    compare = subparsers.add_parser("compare")
+    compare.add_argument("--base", required=True)
+    compare.add_argument("--tip", required=True)
     push = subparsers.add_parser("pre-push")
     push.add_argument("remote_name", nargs="?")
     push.add_argument("remote_url", nargs="?")
@@ -64,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
                 database_revision=read_database_revision(settings.url),
             )
             reports = (report,)
+        elif args.mode == "compare":
+            reports = (validate_commit_range(PROJECT_ROOT, args.base, args.tip),)
         else:
             remote_name = args.remote_name_option or args.remote_name
             pre_commit_context = push_update_from_pre_commit_environment(os.environ)

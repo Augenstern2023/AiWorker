@@ -349,6 +349,8 @@ def _safe_extract_archive(archive: bytes, destination: Path) -> None:
             member_path = PurePosixPath(member.name)
             if member_path.is_absolute() or ".." in member_path.parts:
                 raise GuardError(f"Git archive 包含不安全路径: {member.name}")
+            if not (member.isfile() or member.isdir()):
+                raise GuardError(f"Git archive 包含不安全条目: {member.name}")
         bundle.extractall(destination)
 
 
@@ -384,17 +386,31 @@ def validate_push_updates(
     for update in updates:
         if update.local_sha == ZERO_SHA:
             continue
-        changes = committed_changes(
-            repo_root,
-            push_base(repo_root, remote_name, update),
-            update.local_sha,
-        )
         if remote_name == "manjuxuanpin":
-            _reject_historical_migration_changes(changes)
-            _require_migration_for_schema_changes(changes, context="推送范围")
-        with exported_commit_migration_tree(repo_root, update.local_sha) as tree_root:
-            reports.append(validate_migration_tree(tree_root))
+            reports.append(
+                validate_commit_range(
+                    repo_root,
+                    push_base(repo_root, remote_name, update),
+                    update.local_sha,
+                )
+            )
+        else:
+            with exported_commit_migration_tree(repo_root, update.local_sha) as tree_root:
+                reports.append(validate_migration_tree(tree_root))
     return tuple(reports)
+
+
+def validate_commit_range(
+    repo_root: Path,
+    base_sha: str,
+    tip_sha: str,
+) -> MigrationReport:
+    effective_base = EMPTY_TREE_SHA if base_sha == ZERO_SHA else base_sha
+    changes = committed_changes(repo_root, effective_base, tip_sha)
+    _reject_historical_migration_changes(changes)
+    _require_migration_for_schema_changes(changes, context="推送范围")
+    with exported_commit_migration_tree(repo_root, tip_sha) as tree_root:
+        return validate_migration_tree(tree_root)
 
 
 def tracked_worktree_changes(repo_root: Path) -> tuple[str, ...]:

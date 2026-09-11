@@ -14,6 +14,7 @@ import shutil
 import subprocess
 
 from pre_commit.clientlib import load_config
+import yaml
 
 from tools import install_git_hooks
 
@@ -51,3 +52,17 @@ def test_hook_installer_creates_commit_and_push_hooks(tmp_path: Path) -> None:
     hooks = tmp_path / ".git" / "hooks"
     assert (hooks / "pre-commit").is_file()
     assert (hooks / "pre-push").is_file()
+
+
+def test_gitea_workflow_runs_range_and_postgres_migration_checks() -> None:
+    workflow_path = PROJECT_ROOT / ".gitea" / "workflows" / "alembic-integrity.yml"
+    workflow = yaml.load(workflow_path.read_text("utf-8"), Loader=yaml.BaseLoader)
+    job = workflow["jobs"]["verify-migrations"]
+
+    assert job["services"]["postgres"]["image"] == "postgres:16"
+    assert "AIWORKER_TEST_SYSTEM_DATABASE_URL" in job["env"]
+    commands = [step["run"] for step in job["steps"] if "run" in step]
+    assert "uv run python tools/check_alembic_integrity.py repository" in commands
+    assert any("check_alembic_integrity.py compare" in command for command in commands)
+    assert "uv run alembic upgrade head" in commands
+    assert any("tests/test_alembic_guard.py" in command for command in commands)

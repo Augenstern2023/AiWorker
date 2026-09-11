@@ -18,7 +18,7 @@ import tempfile
 import warnings
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterator
+from typing import Iterator, Mapping
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -282,6 +282,25 @@ def parse_push_updates(value: str) -> tuple[PushUpdate, ...]:
             raise GuardError(f"pre-push 第 {line_number} 行必须包含 4 个字段")
         updates.append(PushUpdate(*fields))
     return tuple(updates)
+
+
+def push_update_from_pre_commit_environment(
+    environment: Mapping[str, str],
+) -> tuple[str, PushUpdate] | None:
+    remote_name = environment.get("PRE_COMMIT_REMOTE_NAME")
+    local_sha = environment.get("PRE_COMMIT_TO_REF")
+    remote_sha = environment.get("PRE_COMMIT_FROM_REF")
+    if not remote_name or not local_sha or not remote_sha:
+        return None
+    return (
+        remote_name,
+        PushUpdate(
+            local_ref=environment.get("PRE_COMMIT_LOCAL_BRANCH", "(unknown)"),
+            local_sha=local_sha,
+            remote_ref=environment.get("PRE_COMMIT_REMOTE_BRANCH", "(unknown)"),
+            remote_sha=remote_sha,
+        ),
+    )
 
 
 def _try_git(repo_root: Path, *args: str) -> str | None:

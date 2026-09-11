@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -21,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from tools.alembic_guard import (
     GuardError,
     parse_push_updates,
+    push_update_from_pre_commit_environment,
     validate_push_updates,
     validate_repository,
     validate_staged_changes,
@@ -50,7 +52,11 @@ def main(argv: list[str] | None = None) -> int:
             reports = (report,) if report else ()
         else:
             remote_name = args.remote_name_option or args.remote_name
-            if not remote_name:
+            pre_commit_context = push_update_from_pre_commit_environment(os.environ)
+            if pre_commit_context:
+                remote_name, update = pre_commit_context
+                reports = validate_push_updates(PROJECT_ROOT, remote_name, (update,))
+            elif not remote_name:
                 reports = (validate_repository(PROJECT_ROOT),)
             else:
                 updates = parse_push_updates(sys.stdin.read())

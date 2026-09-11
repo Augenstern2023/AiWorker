@@ -19,6 +19,7 @@ from tools.alembic_guard import (
     PushUpdate,
     ZERO_SHA,
     parse_push_updates,
+    push_update_from_pre_commit_environment,
     validate_migration_tree,
     validate_push_updates,
     validate_repository,
@@ -240,6 +241,27 @@ def test_parse_push_updates_accepts_git_hook_protocol() -> None:
             remote_ref="refs/heads/main",
             remote_sha="b" * 40,
         ),
+    )
+
+
+def test_pre_commit_push_environment_reconstructs_update() -> None:
+    environment = {
+        "PRE_COMMIT_LOCAL_BRANCH": "refs/heads/main",
+        "PRE_COMMIT_REMOTE_BRANCH": "refs/heads/main",
+        "PRE_COMMIT_REMOTE_NAME": "manjuxuanpin",
+        "PRE_COMMIT_REMOTE_URL": "https://example.invalid/repository.git",
+        "PRE_COMMIT_FROM_REF": "b" * 40,
+        "PRE_COMMIT_TO_REF": "a" * 40,
+    }
+
+    remote_name, update = push_update_from_pre_commit_environment(environment)
+
+    assert remote_name == "manjuxuanpin"
+    assert update == PushUpdate(
+        local_ref="refs/heads/main",
+        local_sha="a" * 40,
+        remote_ref="refs/heads/main",
+        remote_sha="b" * 40,
     )
 
 

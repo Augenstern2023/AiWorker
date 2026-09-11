@@ -192,7 +192,17 @@ uv run playwright install
 
 # 提交前检查
 uv run pre-commit run --all-files
+
+# 首次检出后安装提交与推送保护
+uv run python tools/install_git_hooks.py
+
+# 手工检查 Alembic 迁移图
+uv run python tools/check_alembic_integrity.py repository
 ```
+
+Alembic 保护以 `manjuxuanpin` 为唯一主上游：数据库结构声明变化必须与新增迁移脚本
+一同提交，历史迁移不可修改或删除，推送时会再次校验提交范围。数据库结构提交不得
+使用 `--no-verify` 绕过本地检查；远端 CI 和分支保护仍是最终保障。
 
 ## 配置与凭证安全
 

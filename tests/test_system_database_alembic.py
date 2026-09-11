@@ -335,22 +335,30 @@ def test_role_page_access_migration_round_trips_existing_account_grants(
     engine = create_engine(postgres_url)
     command.downgrade(config, "0006_user_page_access")
     try:
-        database = SystemDatabase(SystemDatabaseSettings(postgres_url))
-        repository = IdentityRepository(database)
-        repository.seed_defaults()
-        user = repository.create_user(
-            f"migration-page-access-{uuid.uuid4()}",
-            "Migration Page Access User",
-            "hash",
-        )
-        with database.transaction() as connection:
+        user_id = str(uuid.uuid4())
+        username = f"migration-page-access-{uuid.uuid4()}"
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO users "
+                    "(id, username, normalized_username, display_name, password_hash) "
+                    "VALUES (:id, :username, :normalized_username, :display_name, :password_hash)"
+                ),
+                {
+                    "id": user_id,
+                    "username": username,
+                    "normalized_username": username.casefold(),
+                    "display_name": "Migration Page Access User",
+                    "password_hash": "hash",
+                },
+            )
             connection.execute(
                 text(
                     "INSERT INTO user_page_access (user_id, route) "
                     "VALUES (:user_id, '/selection/ranks') "
                     "ON CONFLICT (user_id, route) DO NOTHING"
                 ),
-                {"user_id": user["id"]},
+                {"user_id": user_id},
             )
 
         command.upgrade(config, "head")
@@ -360,7 +368,7 @@ def test_role_page_access_migration_round_trips_existing_account_grants(
                     "SELECT is_allowed FROM user_page_access "
                     "WHERE user_id = :user_id AND route = '/selection/ranks'"
                 ),
-                {"user_id": user["id"]},
+                {"user_id": user_id},
             ).scalar_one() is True
             defaults = set(
                 connection.execute(

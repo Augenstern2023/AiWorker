@@ -19,7 +19,6 @@ _PERMISSION_CODES = (
     "page.writing",
     "page.review",
     "page.script_review",
-    "page.team_management",
     "page.admin.delivery",
     "page.data_management",
     "rank.read",
@@ -107,12 +106,6 @@ _PERMISSION_CODES = (
     "audit.read.project",
     "approved_content.read",
     "export.create",
-    "identity.user.read",
-    "identity.user.create",
-    "identity.user.manage_created",
-    "identity.role.read",
-    "identity.role.create",
-    "identity.role.manage_created",
 )
 
 # The catalog keeps the stable permission code for authorization and a clear
@@ -124,7 +117,6 @@ PERMISSIONS = {
     "page.writing": "访问编剧工作台",
     "page.review": "访问项目管理",
     "page.script_review": "访问剧本审核",
-    "page.team_management": "访问团队管理",
     "page.admin.delivery": "访问成果交付",
     "page.data_management": "访问数据管理",
     "rank.read": "查看榜单",
@@ -211,12 +203,6 @@ PERMISSIONS = {
     "audit.read.project": "查看项目审计日志",
     "approved_content.read": "查看已完成内容",
     "export.create": "导出成果",
-    "identity.user.read": "查看用户",
-    "identity.user.create": "创建用户",
-    "identity.user.manage_created": "管理已创建用户",
-    "identity.role.read": "查看角色",
-    "identity.role.create": "创建角色",
-    "identity.role.manage_created": "管理已创建角色",
 }
 
 # Navigation configuration refers to permission codes from the catalog above;
@@ -376,31 +362,6 @@ NAVIGATION_CATALOG = (
         "sort_order": 30,
     },
     {
-        "id": "navigation:team",
-        "label": "团队管理",
-        "icon": "bi-people",
-        "route": "/review/users",
-        "required_permission": "page.team_management",
-        "sort_order": 50,
-        "hide_for_system_admin": True,
-    },
-    {
-        "id": "navigation:team:users",
-        "parent_id": "navigation:team",
-        "label": "团队账号",
-        "route": "/review/users",
-        "required_permission": "page.team_management",
-        "sort_order": 10,
-    },
-    {
-        "id": "navigation:team:roles",
-        "parent_id": "navigation:team",
-        "label": "角色授权",
-        "route": "/review/roles",
-        "required_permission": "page.team_management",
-        "sort_order": 20,
-    },
-    {
         "id": "navigation:admin",
         "label": "系统管理",
         "icon": "bi-gear",
@@ -504,7 +465,6 @@ PERMISSION_DEPENDENCIES = {
 _NON_DELEGABLE_PERMISSIONS = {
     "*",
     "page.review",
-    "page.team_management",
     "page.admin.delivery",
     "page.data_management",
     "project.read.managed",
@@ -524,12 +484,6 @@ _NON_DELEGABLE_PERMISSIONS = {
     "audit.read.project",
     "approved_content.read",
     "export.create",
-    "identity.user.read",
-    "identity.user.create",
-    "identity.user.manage_created",
-    "identity.role.read",
-    "identity.role.create",
-    "identity.role.manage_created",
 }
 DELEGABLE_PERMISSIONS = frozenset(PERMISSIONS) - _NON_DELEGABLE_PERMISSIONS
 DELEGABLE_TASK_TYPES = frozenset({"brief", "characters", "outline", "beats", "script"})
@@ -600,14 +554,12 @@ DEFAULT_ROLES = (
         description="负责项目组织、任务分配、阶段流转与全局审计监督。",
         is_system=True,
         permissions=_scoped(
-            """page.review page.team_management page.script_review script.review.generate script.review.read
+            """page.review page.script_review script.review.generate script.review.read
             script.optimize.generate script.optimize.read script.optimize.accept
             project.read.managed project.create project.manage project.member.manage
             project.archive project.delete workflow.read.managed workflow.assign workflow.reassign
             workflow.reclaim workflow.cancel version.read.managed version.compare
-            job.read.project page.data_management data.media.preview data.media.delete
-            identity.user.read identity.user.create identity.user.manage_created
-            identity.role.read identity.role.create identity.role.manage_created""",
+            job.read.project page.data_management data.media.preview data.media.delete""",
             "managed_projects",
         ) + (("audit.read", "all"),),
     ),

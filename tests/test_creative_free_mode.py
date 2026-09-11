@@ -15,6 +15,7 @@ import time
 import uuid
 
 from creative.free_mode_service import FreeCreativeModeService
+from creative.outline_fields import outline_field_source_fingerprint
 from creative.repository import CreativeRepository
 
 
@@ -106,6 +107,163 @@ def test_existing_projects_default_to_sequential_mode(tmp_path):
     assert project["workflow_mode"] == "sequential"
     assert project["mode_revision"] == 0
     assert project["resource_heads"] == []
+
+
+def create_free_outline_for_rewrite(
+    repository: CreativeRepository, *, locked: bool
+) -> tuple[dict, dict, dict]:
+    project = create_free_project(repository)
+    service = FreeCreativeModeService(repository)
+    created = service.create_outline(
+        project["id"],
+        [
+            {
+                "episode": number,
+                "core_event": f"事件 {number}",
+                "conflict": f"冲突 {number}",
+                "character_progress": f"人物推进 {number}",
+                "highlight": f"亮点 {number}",
+                "reversal": f"反转 {number}",
+                "cliffhanger": f"悬念 {number}",
+            }
+            for number in range(1, 4)
+        ],
+        series_arc="调查、受阻、反击",
+        expected_head_revision=0,
+        actor_user_id="owner-1",
+    )
+    if locked:
+        service.lock_resource(
+            project_id=project["id"],
+            stage="outline",
+            resource_ref=created["resource"]["batch_id"],
+            expected_head_revision=created["head"]["revision"],
+            actor_user_id="owner-1",
+        )
+    return (
+        repository.get_project(project["id"]),
+        repository.get_outline_batch(project["id"], created["resource"]["batch_id"]),
+        service.get_head(project["id"], "outline"),
+    )
+
+
+def test_free_outline_field_rewrite_updates_only_current_draft_field(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project, batch, head = create_free_outline_for_rewrite(
+        repository, locked=False
+    )
+    source = batch["episodes"][0]
+    original_conflict = source["content"]["conflict"]
+
+    result = FreeCreativeModeService(repository).apply_outline_field_rewrite(
+        project_id=project["id"],
+        episode_id=source["id"],
+        field="core_event",
+        candidate_value="重写后的自由大纲核心事件",
+        source_fingerprint=outline_field_source_fingerprint(source, "core_event"),
+        expected_head_revision=head["revision"],
+        actor_user_id="owner-1",
+        operation_id="free-draft-rewrite",
+    )
+
+    assert result["created_new_version"] is False
+    assert result["episode"]["content"]["core_event"] == "重写后的自由大纲核心事件"
+    assert result["episode"]["content"]["conflict"] == original_conflict
+    assert result["batch_id"] == batch["batch_id"]
+
+
+def test_free_locked_outline_field_rewrite_creates_complete_new_head(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project, locked, head = create_free_outline_for_rewrite(
+        repository, locked=True
+    )
+    source = locked["episodes"][0]
+    original = [dict(item["content"]) for item in locked["episodes"]]
+    service = FreeCreativeModeService(repository)
+
+    result = service.apply_outline_field_rewrite(
+        project_id=project["id"],
+        episode_id=source["id"],
+        field="core_event",
+        candidate_value="锁定版派生出的自由大纲核心事件",
+        source_fingerprint=outline_field_source_fingerprint(source, "core_event"),
+        expected_head_revision=head["revision"],
+        actor_user_id="owner-1",
+        operation_id="free-locked-rewrite",
+    )
+
+    assert result["created_new_version"] is True
+    assert result["batch_id"] != locked["batch_id"]
+    derived = repository.get_outline_batch(project["id"], result["batch_id"])
+    assert len(derived["episodes"]) == len(locked["episodes"]) == 3
+    assert derived["episodes"][0]["content"]["core_event"] == (
+        "锁定版派生出的自由大纲核心事件"
+    )
+    assert derived["episodes"][1]["content"] == original[1]
+    assert repository.get_outline_batch(
+        project["id"], locked["batch_id"]
+    )["episodes"][0]["content"] == original[0]
+    assert service.get_head(project["id"], "outline")["resource_ref"] == result[
+        "batch_id"
+    ]
+
+
+def test_free_outline_field_rewrite_rejects_stale_head_and_old_version(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project, locked, head = create_free_outline_for_rewrite(
+        repository, locked=True
+    )
+    source = locked["episodes"][0]
+    service = FreeCreativeModeService(repository)
+    fingerprint = outline_field_source_fingerprint(source, "core_event")
+
+    service.apply_outline_field_rewrite(
+        project_id=project["id"],
+        episode_id=source["id"],
+        field="core_event",
+        candidate_value="先创建一个新 Head",
+        source_fingerprint=fingerprint,
+        expected_head_revision=head["revision"],
+        actor_user_id="owner-1",
+    )
+
+    with pytest.raises(ValueError, match="只能编辑当前自由创作大纲版本"):
+        service.apply_outline_field_rewrite(
+            project_id=project["id"],
+            episode_id=source["id"],
+            field="core_event",
+            candidate_value="迟到请求不得创建分支",
+            source_fingerprint=fingerprint,
+            expected_head_revision=head["revision"],
+            actor_user_id="owner-1",
+        )
+
+
+def test_free_draft_outline_field_rewrite_rejects_stale_head_revision(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project, batch, head = create_free_outline_for_rewrite(
+        repository, locked=False
+    )
+    source = batch["episodes"][0]
+    service = FreeCreativeModeService(repository)
+    service.set_head(
+        project_id=project["id"],
+        stage="outline",
+        resource_ref=batch["batch_id"],
+        expected_revision=head["revision"],
+        actor_user_id="owner-1",
+    )
+
+    with pytest.raises(ValueError, match="creative resource head changed"):
+        service.apply_outline_field_rewrite(
+            project_id=project["id"],
+            episode_id=source["id"],
+            field="core_event",
+            candidate_value="旧请求不得覆盖当前草稿",
+            source_fingerprint=outline_field_source_fingerprint(source, "core_event"),
+            expected_head_revision=head["revision"],
+            actor_user_id="owner-1",
+        )
 
 
 def test_legacy_strict_workflow_mode_is_migrated_without_losing_projects(tmp_path):

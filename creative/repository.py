@@ -4706,6 +4706,10 @@ class CreativeRepository:
         if project_row is None:
             raise ValueError("创作项目不存在")
         project = dict(project_row)
+        if str(project.get("workflow_mode") or "sequential") == "free":
+            return self._free_outline_field_rewrite_context_conn(
+                conn, project, target_row
+            )
         locked_brief_id = int(project.get("locked_brief_id") or 0)
         character_batch_id = str(project.get("character_batch_id") or "")
         if not locked_brief_id:
@@ -4801,6 +4805,79 @@ class CreativeRepository:
             "next_episode": self._episode(dict(following)) if following else None,
         }
 
+    def _free_outline_field_rewrite_context_conn(
+        self,
+        conn: sqlite3.Connection,
+        project: dict[str, Any],
+        target_row: sqlite3.Row,
+    ) -> dict[str, Any]:
+        if str(target_row["resource_scope"] or "sequential") != "free":
+            raise ValueError("分集大纲不属于当前自由创作版本")
+        head = conn.execute(
+            "SELECT resource_ref FROM creative_resource_heads WHERE project_id = ? "
+            "AND resource_scope = 'free' AND stage = 'outline' AND episode_number = 0",
+            (int(project["id"]),),
+        ).fetchone()
+        if head is None or str(head["resource_ref"] or "") != str(target_row["batch_id"]):
+            raise ValueError("只能编辑当前自由创作大纲版本")
+        if str(target_row["status"] or "") not in {"draft", "locked", "approved"}:
+            raise ValueError("当前自由创作大纲版本不可重写")
+
+        same_batch = conn.execute(
+            "SELECT * FROM creative_episodes WHERE project_id = ? AND stage = 'outline' "
+            "AND batch_id = ? AND resource_scope = 'free' ORDER BY episode_number",
+            (int(project["id"]), str(target_row["batch_id"])),
+        ).fetchall()
+        by_episode_number = {
+            int(row["episode_number"]): row for row in same_batch
+        }
+        episode_number = int(target_row["episode_number"])
+        refs = json.loads(target_row["upstream_refs_json"] or "{}")
+
+        brief = None
+        brief_id = int(refs.get("brief_id") or 0)
+        if brief_id:
+            brief_row = conn.execute(
+                "SELECT * FROM creative_blueprints WHERE id = ? AND project_id = ? "
+                "AND resource_scope = 'free'",
+                (brief_id, int(project["id"])),
+            ).fetchone()
+            if brief_row is not None:
+                brief = self._blueprint(dict(brief_row))
+
+        characters: list[dict[str, Any]] = []
+        relationships: list[dict[str, Any]] = []
+        character_batch_id = str(refs.get("character_batch_id") or "")
+        if character_batch_id:
+            characters = [
+                self._creative_item(dict(row))
+                for row in conn.execute(
+                    "SELECT * FROM creative_characters WHERE project_id = ? AND batch_id = ? "
+                    "AND resource_scope = 'free' ORDER BY id",
+                    (int(project["id"]), character_batch_id),
+                ).fetchall()
+            ]
+            relationships = [
+                self._creative_item(dict(row))
+                for row in conn.execute(
+                    "SELECT * FROM creative_relationships WHERE project_id = ? AND batch_id = ? "
+                    "AND resource_scope = 'free' ORDER BY id",
+                    (int(project["id"]), character_batch_id),
+                ).fetchall()
+            ]
+
+        previous = by_episode_number.get(episode_number - 1)
+        following = by_episode_number.get(episode_number + 1)
+        return {
+            "project": project,
+            "brief": brief or {},
+            "characters": characters,
+            "relationships": relationships,
+            "episode": self._episode(dict(target_row)),
+            "previous_episode": self._episode(dict(previous)) if previous else None,
+            "next_episode": self._episode(dict(following)) if following else None,
+        }
+
     def get_outline_field_rewrite_context(self, episode_id: int) -> dict[str, Any]:
         with self._connect() as conn:
             conn.execute("BEGIN")
@@ -4812,6 +4889,8 @@ class CreativeRepository:
         field: str,
         candidate_value: str,
         expected_fingerprint: str,
+        *,
+        expected_head_revision: int | None = None,
     ) -> dict[str, Any]:
         if field not in OUTLINE_TEXT_FIELDS:
             raise ValueError("不支持的大纲字段")
@@ -4820,7 +4899,18 @@ class CreativeRepository:
 
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._outline_field_rewrite_context_conn(conn, episode_id)
+            context = self._outline_field_rewrite_context_conn(conn, episode_id)
+            if expected_head_revision is not None:
+                head = conn.execute(
+                    "SELECT revision FROM creative_resource_heads WHERE project_id = ? "
+                    "AND resource_scope = 'free' AND stage = 'outline' "
+                    "AND episode_number = 0",
+                    (int(context["project"]["id"]),),
+                ).fetchone()
+                if head is None or int(head["revision"]) != int(
+                    expected_head_revision
+                ):
+                    raise ValueError("creative resource head changed")
             row = conn.execute(
                 "SELECT * FROM creative_episodes WHERE id = ?", (int(episode_id),)
             ).fetchone()

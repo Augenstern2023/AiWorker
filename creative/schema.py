@@ -158,6 +158,7 @@ class OutlineFieldRewriteApplyRequest(BaseModel):
     candidate_value: str = Field(min_length=1, max_length=6000)
     source_fingerprint: str = Field(min_length=64, max_length=64)
     expected_project_revision: int = Field(ge=0)
+    expected_head_revision: int | None = Field(None, ge=0)
     operation_id: str | None = Field(None, max_length=200)
 
     @field_validator("candidate_value")

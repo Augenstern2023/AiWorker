@@ -1853,9 +1853,7 @@ def build_creative_router(
 
     def outline_field_context_or_http(episode_id: int) -> dict[str, Any]:
         try:
-            context = repository.get_outline_field_rewrite_context(episode_id)
-            sequential_project_or_409(int(context["episode"]["project_id"]))
-            return context
+            return repository.get_outline_field_rewrite_context(episode_id)
         except ValueError as exc:
             detail = str(exc)
             status_code = 404 if detail in {"分集大纲不存在", "创作项目不存在"} else 409
@@ -4423,7 +4421,10 @@ def build_creative_router(
             application_service.assert_stage_write_access(
                 project_id, "outline", principal
             )
-            if episode.get("status") == "draft":
+            if (
+                context["project"].get("workflow_mode", "sequential") == "sequential"
+                and episode.get("status") == "draft"
+            ):
                 workflow_adapter.assert_editable(
                     "outline", f"{project_id}:{episode['batch_id']}"
                 )
@@ -4484,10 +4485,24 @@ def build_creative_router(
             raise HTTPException(400, "不支持的大纲字段")
         episode = context["episode"]
         project_id = int(episode["project_id"])
+        is_free = context["project"].get("workflow_mode", "sequential") == "free"
         try:
             application_service.assert_stage_write_access(
                 project_id, "outline", principal
             )
+            if is_free:
+                if payload.expected_head_revision is None:
+                    raise CreativeContextConflict("缺少自由创作版本校验信息")
+                return free_mode_service.apply_outline_field_rewrite(
+                    project_id=project_id,
+                    episode_id=episode_id,
+                    field=field,
+                    candidate_value=payload.candidate_value,
+                    source_fingerprint=payload.source_fingerprint,
+                    expected_head_revision=payload.expected_head_revision,
+                    actor_user_id=principal.user_id,
+                    operation_id=payload.operation_id,
+                )
             if episode.get("status") == "draft":
                 workflow_adapter.assert_editable(
                     "outline", f"{project_id}:{episode['batch_id']}"

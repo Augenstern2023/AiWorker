@@ -52,6 +52,7 @@ users = Table(
     Column("deleted_at", Text),
     Column("deleted_by_user_id", Text, ForeignKey("users.id", ondelete="SET NULL")),
     Column("last_login_at", Text),
+    Column("last_online_at", DateTime(timezone=True)),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     CheckConstraint("status IN ('active', 'disabled')", name="ck_users_status"),
@@ -220,6 +221,29 @@ sessions = Table(
     Column("revoked_at", DateTime(timezone=True)),
     Column("user_agent", Text),
     Column("ip_address", Text),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+user_presence = Table(
+    "user_presence",
+    SYSTEM_METADATA,
+    Column(
+        "session_id",
+        Text,
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("tab_id", Text, primary_key=True),
+    Column(
+        "user_id",
+        Text,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("page_label", Text),
+    Column("is_visible", Boolean, nullable=False, server_default=text("false")),
+    Column("last_activity_at", DateTime(timezone=True), nullable=False),
+    Column("last_heartbeat_at", DateTime(timezone=True), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
@@ -657,6 +681,12 @@ BASELINE_TABLE_NAMES = frozenset(
 Index("uq_users_normalized_username", func.lower(users.c.normalized_username), unique=True)
 Index("uq_roles_code", func.lower(roles.c.code), unique=True)
 Index("idx_sessions_user_id", sessions.c.user_id)
+Index(
+    "idx_user_presence_user_heartbeat",
+    user_presence.c.user_id,
+    user_presence.c.last_heartbeat_at,
+)
+Index("idx_user_presence_heartbeat", user_presence.c.last_heartbeat_at)
 Index("idx_user_page_access_route", user_page_access.c.route)
 Index(
     "idx_navigation_items_parent_sort",

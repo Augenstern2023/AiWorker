@@ -97,6 +97,8 @@ from writer_agent.runner import WriterActionRunner
 from writer_agent.store import WriterAgentStore
 from identity.api import build_identity_router
 from identity.password_service import PasswordService
+from identity.presence_api import build_presence_router
+from identity.presence_service import PresenceService
 from identity.dependencies import (
     current_principal,
     enforce_permission,
@@ -150,6 +152,7 @@ UNSAFE_HTTP_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 CSRF_EXEMPT_PATHS = frozenset(
     {"/api/auth/login", "/api/auth/register", "/api/auth/setup"}
 )
+AUDIT_EXEMPT_PATHS = frozenset({"/api/presence/heartbeat"})
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 BACKUP_FILENAME_PATTERN = re.compile(r"^data_backup_[A-Za-z0-9_-]+\.json$")
 DRAMA_PLAYER_TOKEN_SECRET = os.getenv("AIWORKER_DRAMA_PLAYER_TOKEN_SECRET", uuid.uuid4().hex).encode("utf-8")
@@ -384,6 +387,7 @@ def install_security_middleware(target_app: FastAPI, session_service=None) -> No
             principal is not None
             and request.method.upper() in UNSAFE_HTTP_METHODS
             and request.url.path not in CSRF_EXEMPT_PATHS
+            and request.url.path not in AUDIT_EXEMPT_PATHS
             and not request.url.path.startswith("/api/workflow/")
         ):
             audit = getattr(request.app.state, "audit_service", None)
@@ -528,6 +532,7 @@ identity_session_service = SessionService(identity_repository)
 identity_permission_service = PermissionService(
     identity_repository, identity_session_service
 )
+presence_service = PresenceService(identity_repository)
 creative_repository = CreativeRepository(
     WORKSPACE_ROOT / ".runtime" / "creative" / "creative.db"
 )
@@ -662,6 +667,7 @@ app.state.system_database = system_database
 app.state.identity_password_service = identity_password_service
 app.state.identity_session_service = identity_session_service
 app.state.identity_permission_service = identity_permission_service
+app.state.presence_service = presence_service
 app.state.audit_service = audit_service
 app.state.navigation_repository = navigation_repository
 app.state.page_access_service = page_access_service
@@ -709,6 +715,14 @@ app.include_router(
         identity_session_service,
         audit_service,
         password_service=identity_password_service,
+        permission_service=identity_permission_service,
+        presence_service=presence_service,
+    )
+)
+app.include_router(
+    build_presence_router(
+        presence_service,
+        identity_session_service,
         permission_service=identity_permission_service,
     )
 )

@@ -655,6 +655,7 @@ class IdentityRepository:
         d.pop('password_hash', None)
         d.pop('normalized_username', None)
         d.pop('is_deleted', None)
+        d.pop('last_online_at', None)
         d.pop('updated_at', None)
         return d
 

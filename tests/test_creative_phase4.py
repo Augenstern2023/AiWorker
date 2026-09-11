@@ -24,6 +24,7 @@ from creative.api import (
     creative_api_principal,
     register_creative_routes,
 )
+from creative.free_mode_service import FreeCreativeModeService
 from creative.imitation_service import assess_similarity_risk
 from creative.outline_fields import outline_field_source_fingerprint
 from creative.repository import CreativeRepository
@@ -1080,6 +1081,131 @@ def test_outline_field_rewrite_api_derives_complete_draft_from_locked_batch(tmp_
     assert derived["episodes"][0]["content"]["conflict"] == original[0]["conflict"]
     assert derived["episodes"][1]["content"] == original[1]
     assert repository.get_outline_batch(project["id"], locked["batch_id"])["episodes"][0]["content"] == original[0]
+
+
+def seed_free_outline_for_api(
+    client: TestClient,
+    repository: CreativeRepository,
+    *,
+    locked: bool,
+) -> tuple[dict, dict, dict]:
+    project = repository.create_original_project(
+        seed_text="一名记者调查被篡改的旧案",
+        name="自由大纲字段重写",
+        target_episode_count=2,
+        created_by=client.principal.user_id,
+        creation_request_id=f"free-outline-rewrite-{uuid.uuid4().hex}",
+        workflow_mode="free",
+    )
+    repository.mark_project_bootstrap_status(project["id"], "ready")
+    service = FreeCreativeModeService(repository)
+    created = service.create_outline(
+        project["id"],
+        [
+            {
+                "episode": number,
+                "core_event": core_event,
+                "conflict": f"冲突 {number}",
+                "character_progress": f"人物推进 {number}",
+                "highlight": f"亮点 {number}",
+                "reversal": f"反转 {number}",
+                "cliffhanger": f"悬念 {number}",
+                "series_overview": outline_series_overview(),
+            }
+            for number, core_event in ((1, "记者找到旧案卷宗"), (2, "证人公开关键录音"))
+        ],
+        series_arc="调查、受阻、公开真相",
+        series_overview=outline_series_overview(),
+        expected_head_revision=0,
+        actor_user_id=client.principal.user_id,
+    )
+    if locked:
+        service.lock_resource(
+            project_id=project["id"],
+            stage="outline",
+            resource_ref=created["resource"]["batch_id"],
+            expected_head_revision=created["head"]["revision"],
+            actor_user_id=client.principal.user_id,
+        )
+    head = service.get_head(project["id"], "outline")
+    return repository.get_project(project["id"]), repository.get_outline_batch(
+        project["id"], created["resource"]["batch_id"]
+    ), head
+
+
+def test_free_outline_field_rewrite_generates_and_applies_to_current_draft(
+    tmp_path: Path,
+):
+    provider = InlineSequentialProvider([{"value": "记者在密室中找到被调包的原始卷宗"}])
+    client, repository, _ = build_phase4_client(
+        tmp_path, llm_provider_factory=lambda: provider
+    )
+    project, batch, head = seed_free_outline_for_api(
+        client, repository, locked=False
+    )
+    source = batch["episodes"][0]
+    original_conflict = source["content"]["conflict"]
+
+    generated = client.post(
+        f"/api/creative/episodes/{source['id']}/fields/core_event/rewrite",
+        json={"instruction": "强化发现证据的危险感"},
+    )
+    assert generated.status_code == 200, generated.text
+    assert generated.json()["candidate_value"] == "记者在密室中找到被调包的原始卷宗"
+    assert repository.get_episode(source["id"])["content"]["core_event"] == "记者找到旧案卷宗"
+
+    applied = client.post(
+        f"/api/creative/episodes/{source['id']}/fields/core_event/apply-rewrite",
+        json={
+            "candidate_value": generated.json()["candidate_value"],
+            "source_fingerprint": generated.json()["source_fingerprint"],
+            "expected_project_revision": project["revision"],
+            "expected_head_revision": head["revision"],
+            "operation_id": "free-draft-field-rewrite",
+        },
+    )
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["created_new_version"] is False
+    saved = repository.get_episode(source["id"])
+    assert saved["content"]["core_event"] == "记者在密室中找到被调包的原始卷宗"
+    assert saved["content"]["conflict"] == original_conflict
+
+
+def test_free_locked_outline_field_rewrite_derives_new_head_without_mutating_source(
+    tmp_path: Path,
+):
+    client, repository, _ = build_phase4_client(tmp_path)
+    project, locked, head = seed_free_outline_for_api(
+        client, repository, locked=True
+    )
+    source = locked["episodes"][0]
+    original = [dict(item["content"]) for item in locked["episodes"]]
+
+    response = client.post(
+        f"/api/creative/episodes/{source['id']}/fields/core_event/apply-rewrite",
+        json={
+            "candidate_value": "锁定版派生出的新核心事件",
+            "source_fingerprint": outline_field_source_fingerprint(source, "core_event"),
+            "expected_project_revision": project["revision"],
+            "expected_head_revision": head["revision"],
+            "operation_id": "free-locked-field-rewrite",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["created_new_version"] is True
+    assert payload["batch_id"] != locked["batch_id"]
+    derived = repository.get_outline_batch(project["id"], payload["batch_id"])
+    assert len(derived["episodes"]) == len(locked["episodes"]) == 2
+    assert derived["episodes"][0]["content"]["core_event"] == "锁定版派生出的新核心事件"
+    assert derived["episodes"][1]["content"] == original[1]
+    assert repository.get_outline_batch(
+        project["id"], locked["batch_id"]
+    )["episodes"][0]["content"] == original[0]
+    assert FreeCreativeModeService(repository).get_head(
+        project["id"], "outline"
+    )["resource_ref"] == payload["batch_id"]
 
 
 def test_outline_field_rewrite_api_rejects_whitespace_candidate_without_deriving_locked_version(

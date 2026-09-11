@@ -1,7 +1,16 @@
 {% extends "layouts/base.html" %}
 
+{% block styles %}
+<style>
+    .user-table-presence { min-width: calc(100% + 130px); }
+    .presence-column { width: 130px; min-width: 130px; max-width: 130px; }
+    .presence-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
+{% endblock %}
+
 {% block content %}
 {% set team_mode = request.url.path.startswith('/review/') %}
+{% set can_view_presence = not team_mode and principal and ('system_admin' in principal.role_codes) %}
 <div class="d-flex align-items-center justify-content-between mb-3"><div><h3 class="mb-1">{{ '团队账号' if team_mode else '用户管理' }}</h3><div class="small text-muted">{{ '管理自己创建的普通账号及角色绑定' if team_mode else '管理本地账号、资料、状态与角色分配' }}</div></div><button class="btn btn-primary btn-sm" id="create-user"><i class="bi bi-person-plus me-1"></i>新建用户</button></div>
 <div class="alert alert-danger d-none" id="user-error" role="alert"></div>
 {% if not team_mode %}
@@ -14,7 +23,7 @@
     <div class="col-lg-2 d-flex gap-2"><button class="btn btn-primary btn-sm" type="submit">筛选</button><button class="btn btn-outline-secondary btn-sm" id="export-users-csv" type="button"><i class="bi bi-download"></i> CSV</button><button class="btn btn-outline-secondary btn-sm" id="export-users-xlsx" type="button"><i class="bi bi-download"></i> XLSX</button></div>
 </form>
 {% endif %}
-<div class="table-responsive"><table class="table table-sm align-middle"><thead><tr>{% if team_mode %}<th>用户名</th><th>显示名称</th><th>角色</th><th>状态</th><th>最近登录</th>{% else %}<th>用户名</th><th>部门</th><th>邮箱</th><th>手机号</th><th>性别</th><th>角色</th><th>创建时间</th><th>状态</th>{% endif %}<th>操作</th></tr></thead><tbody id="user-list"><tr id="user-list-skeleton" aria-hidden="true"><td colspan="9"><div class="ui-skeleton" style="height:20px;width:60%;margin:8px 0;"></div><div class="ui-skeleton" style="height:14px;width:40%;"></div></td></tr></tbody></table></div>
+<div class="table-responsive"><table class="table table-sm align-middle{% if can_view_presence %} user-table-presence{% endif %}"><thead><tr>{% if team_mode %}<th>用户名</th><th>显示名称</th><th>角色</th><th>状态</th><th>最近登录</th>{% else %}<th>用户名</th><th>部门</th><th>邮箱</th><th>手机号</th><th>性别</th><th>角色</th><th>创建时间</th><th>状态</th>{% if can_view_presence %}<th class="presence-column">在线情况</th>{% endif %}{% endif %}<th>操作</th></tr></thead><tbody id="user-list" data-presence-enabled="{{ 'true' if can_view_presence else 'false' }}"><tr id="user-list-skeleton" aria-hidden="true"><td colspan="{{ 10 if can_view_presence else (6 if team_mode else 9) }}"><div class="ui-skeleton" style="height:20px;width:60%;margin:8px 0;"></div><div class="ui-skeleton" style="height:14px;width:40%;"></div></td></tr></tbody></table></div>
 
 <div class="modal fade" id="user-editor-modal" tabindex="-1" aria-labelledby="user-editor-title" aria-hidden="true"><div class="modal-dialog modal-dialog-centered"><form class="modal-content" id="user-editor-form"><div class="modal-header"><h5 class="modal-title" id="user-editor-title">新建用户</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button></div><div class="modal-body">
     <input type="hidden" id="user-id">

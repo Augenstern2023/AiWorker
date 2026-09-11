@@ -12,6 +12,5 @@
 {% include "common/workspace/creative_progress_modal.html" %}
 {% if can_export_projects %}{% include "common/workspace/production_export_modal.html" %}{% endif %}
 {% include "common/workspace/free_creative_modals.html" %}
-{% if can_export_projects %}{% include "common/workspace/production_export_modal.html" %}{% endif %}
 {% endblock %}
 {% block scripts %}<script src="/static/js/common/creative.js?v={{ asset_version }}"></script><script src="/static/js/planning/brief.js?v={{ asset_version }}"></script>{% if can_export_projects %}<script src="/static/js/common/production_export.js?v={{ asset_version }}"></script><script src="/static/js/planning/brief_export.js?v={{ asset_version }}"></script>{% endif %}{% endblock %}

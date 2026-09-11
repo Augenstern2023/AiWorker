@@ -379,6 +379,7 @@ def test_global_disable_precedes_whitelist_and_project_owner_navigation_privileg
         ("/admin/config", "GET", "/api/hongguo/drama/settings"),
         ("/admin/config", "GET", "/api/llm/settings"),
         ("/admin/config", "POST", "/api/llm/providers"),
+        ("/admin/config", "DELETE", "/api/llm/providers/provider-1"),
         ("/admin/config", "POST", "/api/llm/providers/provider-1/models/sync"),
         ("/admin/config", "PUT", "/api/llm/default-model"),
         ("/admin/config", "POST", "/api/llm/test"),

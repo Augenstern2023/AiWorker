@@ -222,11 +222,17 @@ window.aiworkerModules.push(() => ({
     },
 
     outlineFieldRewriteAllowed(item) {
-        if (this.isFreeCreativeProject?.()) return false;
         if (!item || item.stage !== 'outline') return false;
         if (this.creativeResourceEditable(item)) return true;
         if (!['locked', 'approved'].includes(String(item.status || ''))) return false;
         const project = this.creativeWorkspace.project;
+        if (this.isFreeCreativeProject?.()) {
+            return Boolean(
+                project
+                && String(item.batch_id || '') === String(this.latestOutlineBatchId() || '')
+                && String(item.batch_id || '') === String(this.creativeHead?.('outline')?.resource_ref || '')
+            );
+        }
         return Boolean(
             project
             && String(item.batch_id || '') === String(project.outline_batch_id || '')
@@ -357,6 +363,9 @@ window.aiworkerModules.push(() => ({
                         candidate_value: candidate,
                         source_fingerprint: state.sourceFingerprint,
                         expected_project_revision: Number(this.creativeWorkspace.project?.revision || 0),
+                        expected_head_revision: this.isFreeCreativeProject?.()
+                            ? Number(this.creativeHeadRevision?.('outline') || 0)
+                            : undefined,
                         operation_id: operationId,
                     }),
                 }

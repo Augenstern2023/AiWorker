@@ -70,6 +70,17 @@ PAGE_TEMPLATES = {
 }
 
 
+def _workflow_project_id(request: Request, project_id: str) -> str:
+    repository = getattr(request.app.state, "creative_repository", None)
+    resolver = getattr(repository, "workflow_project_id", None)
+    if not callable(resolver):
+        return str(project_id)
+    try:
+        return str(resolver(project_id))
+    except (TypeError, ValueError):
+        return str(project_id)
+
+
 def build_page_router(
     templates: Jinja2Templates, navigation_service: NavigationService
 ) -> APIRouter:
@@ -91,7 +102,7 @@ def build_page_router(
                 service, "can_participate_in_project", None
             )
             if not callable(can_participate) or not can_participate(
-                principal, str(project_id)
+                principal, _workflow_project_id(request, str(project_id))
             ):
                 raise HTTPException(
                     status_code=403,
@@ -310,7 +321,9 @@ def _template_context(
             and callable(managed)
         ):
             try:
-                can_export_projects = bool(managed(principal, str(project_id)))
+                can_export_projects = bool(
+                    managed(principal, _workflow_project_id(request, str(project_id)))
+                )
             except Exception:
                 can_export_projects = False
     return {

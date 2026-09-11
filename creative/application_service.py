@@ -979,6 +979,7 @@ class CreativeApplicationService:
         market_context: list[dict[str, Any]] | None = None,
         blocked_terms: list[str] | None = None,
         reference_snapshot: list[dict[str, Any]] | None = None,
+        llm_model_record_id: str | None = None,
         expected_context: dict[str, Any] | None = None,
         retry_failed_operation: bool = False,
     ) -> dict[str, Any]:
@@ -1000,6 +1001,7 @@ class CreativeApplicationService:
             market_context=market_context,
             blocked_terms=blocked_terms,
             reference_snapshot=reference_snapshot,
+            llm_model_record_id=llm_model_record_id,
             chunk_size=10,
             expected_context=expected_context,
             retry_failed_operation=retry_failed_operation,

@@ -386,6 +386,23 @@ class LLMSettingsRepository:
             ).mappings().one()
         return public_provider(_provider_dict(row))
 
+    def delete_provider(self, provider_id: str) -> dict[str, Any]:
+        with self.database.transaction() as connection:
+            current = connection.execute(
+                select(llm_providers).where(llm_providers.c.id == provider_id)
+            ).mappings().first()
+            if current is None:
+                raise LLMSettingsError("提供商不存在")
+            if self._provider_has_default(connection, provider_id):
+                raise LLMSettingsConflict("请先切换默认模型，再删除该提供商")
+            connection.execute(
+                llm_models.delete().where(llm_models.c.provider_id == provider_id)
+            )
+            connection.execute(
+                llm_providers.delete().where(llm_providers.c.id == provider_id)
+            )
+        return public_provider(_provider_dict(current))
+
     def create_model(
         self,
         provider_id: str,

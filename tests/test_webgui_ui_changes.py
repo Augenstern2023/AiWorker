@@ -1450,6 +1450,37 @@ def test_all_creative_module_links_are_clickable_before_upstream_locking():
     assert "五个创作模块入口始终可直接进入" in project_list
 
 
+def test_sequential_workflow_exposes_and_submits_selected_model():
+    navigation = _source("templates/common/workspace/project_module_navigation.html")
+    creative = _source("static/js/common/creative.js")
+    tasks = _source("static/js/common/tasks.js")
+
+    assert 'id="sequential-generation-model"' in navigation
+    assert "creativeWorkspace.sequentialGeneration.modelRecordId" in navigation
+    assert "loadSequentialGenerationModels(data.id)" in creative
+    assert "llm_model_record_id: modelRecordId" in creative
+    assert "sequentialGeneration:" in tasks
+
+
+def test_free_outline_keeps_field_level_ai_rewrite_and_head_conflict_guard():
+    outlines = _source("static/js/writing/outlines.js")
+    schema = _source("creative/schema.py")
+
+    rewrite_guard = outlines.split("outlineFieldRewriteAllowed(item)", 1)[1].split(
+        "openOutlineFieldRewrite", 1
+    )[0]
+    assert "if (this.isFreeCreativeProject?.()) return false" not in rewrite_guard
+    assert "this.creativeHead?.('outline')?.resource_ref" in rewrite_guard
+    assert "expected_head_revision" in outlines
+    assert "expected_head_revision: int | None" in schema
+
+
+def test_brief_page_mounts_only_one_production_export_modal():
+    brief = _source("templates/planning/brief.html")
+
+    assert brief.count('include "common/workspace/production_export_modal.html"') == 1
+
+
 def test_free_locked_resources_offer_non_destructive_revision_actions():
     creative = _source("static/js/common/creative.js")
     api = _source("creative/api.py")

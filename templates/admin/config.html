@@ -112,7 +112,12 @@
                                     </div>
                                 </div>
                             </div>
-                            <div class="d-flex justify-content-end mt-3">
+                            <div class="d-flex justify-content-between align-items-center gap-2 mt-3 flex-wrap">
+                                <button type="button" class="btn btn-outline-danger" x-show="llmSettings.editor.id" @click="deleteLLMProvider" :disabled="selectedLLMProvider()?.is_default || llmSettings.saving || Boolean(llmSettings.providerDeletingId)" :title="selectedLLMProvider()?.is_default ? '请先切换全局默认模型' : '删除提供商及其所有模型和凭据'" :aria-label="`删除提供商 ${selectedLLMProvider()?.name || ''}`">
+                                    <span x-show="llmSettings.providerDeletingId !== llmSettings.editor.id"><i class="bi bi-trash me-1" aria-hidden="true"></i>删除提供商</span>
+                                    <span x-show="llmSettings.providerDeletingId === llmSettings.editor.id">删除中…</span>
+                                </button>
+                                <span x-show="!llmSettings.editor.id"></span>
                                 <button type="submit" class="btn btn-primary" :disabled="llmSettings.saving || !llmSettings.editor.name || !llmSettings.editor.base_url" :aria-busy="llmSettings.saving">
                                     <span x-show="!llmSettings.saving"><i class="bi bi-save me-1" aria-hidden="true"></i>保存提供商</span>
                                     <span x-show="llmSettings.saving">保存中…</span>

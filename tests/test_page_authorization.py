@@ -284,6 +284,21 @@ def test_writer_project_pages_require_project_participation(page_app, route: str
     assert client.get(route).status_code == 200
 
 
+def test_writer_project_page_scopes_local_project_id_before_membership_check(page_app):
+    principal = _principal(roles=("screenwriter",))
+    page_app[1].access_by_route["/writing/projects"] = {principal.user_id}
+    page_app[0].state.creative_repository = SimpleNamespace(
+        workflow_project_id=lambda project_id: f"creative:store-1:project:{project_id}"
+    )
+    page_app[0].state.identity_permission_service.participating_project_ids.add(
+        "creative:store-1:project:9"
+    )
+
+    response = _client(page_app, principal).get("/writing/projects/9/outlines")
+
+    assert response.status_code == 200
+
+
 def test_project_brief_versions_permission_and_workspace_scripts(page_app):
     """A deployed permission fix must not be hidden by cached workspace assets."""
 

@@ -143,6 +143,7 @@
                     saving: false,
                     syncing: false,
                     testing: false,
+                    providerDeletingId: '',
                     modelSaving: false,
                     modelDeletingId: '',
                     defaultSavingId: '',
@@ -198,6 +199,9 @@
                     outlineOverviewErrors: {}, outlineOverviewSaving: false, outlineOverviewSaveSequence: 0,
                     saveState: {}, notice: '', noticeType: 'success', noticeTimer: null,
                     moduleCapabilities: {},
+                    sequentialGeneration: {
+                        modelOptions: [], modelRecordId: '', loading: false, error: '', loaded: false
+                    },
                     freeGeneration: {
                         stage: '', series: false, instruction: '', contextOptions: {},
                         modelOptions: [], modelRecordId: '',

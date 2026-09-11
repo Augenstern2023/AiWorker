@@ -384,6 +384,63 @@ def test_model_delete_route_removes_non_default_and_rejects_default():
     assert remaining_ids == {default_model["id"]}
 
 
+def test_provider_delete_route_removes_non_default_and_rejects_default():
+    module = _api_module()
+    repository = _repository()
+    default_provider = repository.create_provider(
+        name="Default API Provider",
+        preset="custom",
+        base_url="https://default.example.test/v1",
+        wire_api="chat_completions",
+        api_key="secret",
+    )
+    default_model = repository.create_model(
+        default_provider["id"], model_id="default-model"
+    )
+    repository.set_default_model(default_model["id"])
+    removable_provider = repository.create_provider(
+        name="Delete API Provider",
+        preset="custom",
+        base_url="https://delete.example.test/v1",
+        wire_api="chat_completions",
+        api_key="delete-secret",
+    )
+    repository.create_model(removable_provider["id"], model_id="unused-model")
+    audit = _RecordingAudit()
+    app = FastAPI()
+    app.include_router(
+        module.build_llm_settings_router(
+            module.LLMSettingsService(repository),
+            audit,
+            administrator_dependency=lambda: _admin(),
+        )
+    )
+    client = TestClient(app)
+
+    default_response = client.delete(
+        f"/api/llm/providers/{default_provider['id']}"
+    )
+    delete_response = client.delete(
+        f"/api/llm/providers/{removable_provider['id']}"
+    )
+
+    assert default_response.status_code == 409
+    assert "默认模型" in default_response.json()["detail"]
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {
+        "status": "success",
+        "provider_id": removable_provider["id"],
+    }
+    assert audit.events[-1]["action"] == "llm.provider.delete"
+    assert audit.events[-1]["before"]["id"] == removable_provider["id"]
+    assert audit.events[-1]["after"] == delete_response.json()
+    remaining_ids = {
+        provider["id"]
+        for provider in client.get("/api/llm/settings").json()["providers"]
+    }
+    assert remaining_ids == {default_provider["id"]}
+
+
 def test_settings_route_exposes_presets_and_current_default():
     """Would catch the UI loading without enough data to render its master-detail state."""
 

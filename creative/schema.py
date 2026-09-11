@@ -85,6 +85,7 @@ class BlueprintGenerateRequest(BaseModel):
     count: int = Field(3, ge=3, le=5)
     preserve_blueprint_ids: list[int] = Field(default_factory=list, max_length=5)
     workflow_task_id: str | None = None
+    llm_model_record_id: str | None = Field(None, min_length=1, max_length=64)
     operation_id: str | None = Field(None, max_length=200)
     generation_instruction: str = Field("", max_length=2000)
     source_snapshot_id: str | None = Field(None, max_length=200)
@@ -102,6 +103,7 @@ class BlueprintCreateRequest(BaseModel):
 class BlueprintDeriveRequest(BaseModel):
     instruction: str = Field(min_length=1, max_length=500)
     workflow_task_id: str = Field(min_length=1)
+    llm_model_record_id: str | None = Field(None, min_length=1, max_length=64)
     operation_id: str | None = Field(None, max_length=200)
     source_snapshot_id: str | None = Field(None, max_length=200)
     source_snapshot: dict[str, Any] | None = None
@@ -156,6 +158,7 @@ class OutlineFieldRewriteApplyRequest(BaseModel):
     candidate_value: str = Field(min_length=1, max_length=6000)
     source_fingerprint: str = Field(min_length=64, max_length=64)
     expected_project_revision: int = Field(ge=0)
+    expected_head_revision: int | None = Field(None, ge=0)
     operation_id: str | None = Field(None, max_length=200)
 
     @field_validator("candidate_value")
@@ -177,6 +180,7 @@ class EpisodeBeatsRequest(BaseModel):
 
 class WorkflowLinkRequest(BaseModel):
     workflow_task_id: str | None = None
+    llm_model_record_id: str | None = Field(None, min_length=1, max_length=64)
     operation_id: str | None = Field(None, max_length=200)
     generation_instruction: str = Field("", max_length=2000)
     source_snapshot_id: str | None = Field(None, max_length=200)

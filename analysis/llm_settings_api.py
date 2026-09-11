@@ -321,6 +321,29 @@ def build_llm_settings_router(
         )
         return provider
 
+    @router.delete("/providers/{provider_id}")
+    def delete_provider(
+        provider_id: str,
+        request: Request,
+        principal: Principal = Depends(administrator),
+    ) -> dict[str, str]:
+        before = settings_provider(provider_id)
+        try:
+            service.repository.delete_provider(provider_id)
+        except LLMSettingsError as exc:
+            raise route_error(exc) from exc
+        result = {"status": "success", "provider_id": provider_id}
+        record(
+            principal,
+            request,
+            "llm.provider.delete",
+            "llm_provider",
+            provider_id,
+            before,
+            result,
+        )
+        return result
+
     @router.post("/providers/{provider_id}/models/sync")
     async def sync_models(
         provider_id: str,

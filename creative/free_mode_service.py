@@ -13,6 +13,7 @@ import time
 import uuid
 from typing import Any
 
+from creative.outline_fields import outline_field_source_fingerprint
 from creative.prompt_templates import PROMPT_TEMPLATE_VERSION
 from creative.repository import CreativeRepository, canonical_request_hash
 
@@ -707,6 +708,92 @@ class FreeCreativeModeService:
         if item_type == "relationship":
             return self.repository.get_relationship(item_id) or {}
         return self.repository.get_episode(item_id) or {}
+
+    def apply_outline_field_rewrite(
+        self,
+        *,
+        project_id: int,
+        episode_id: int,
+        field: str,
+        candidate_value: str,
+        source_fingerprint: str,
+        expected_head_revision: int,
+        actor_user_id: str,
+        operation_id: str | None = None,
+    ) -> dict[str, Any]:
+        context = self.repository.get_outline_field_rewrite_context(episode_id)
+        project = context["project"]
+        episode = context["episode"]
+        if (
+            int(project["id"]) != int(project_id)
+            or str(project.get("workflow_mode") or "sequential") != FREE_SCOPE
+        ):
+            raise ValueError("该操作仅支持当前自由创作项目")
+        candidate = str(candidate_value or "").strip()
+        if not candidate:
+            raise ValueError("重写内容不能为空")
+        if outline_field_source_fingerprint(episode, field) != source_fingerprint:
+            raise ValueError("该字段已被更新，请重新生成")
+
+        if episode["status"] == "draft":
+            saved = self.repository.apply_outline_field_rewrite(
+                episode_id,
+                field,
+                candidate,
+                source_fingerprint,
+                expected_head_revision=expected_head_revision,
+            )
+            return {
+                "episode": saved,
+                "batch_id": saved["batch_id"],
+                "version": saved["version"],
+                "created_new_version": False,
+                "head": self.get_head(project_id, "outline"),
+            }
+
+        source_batch = self.repository.get_outline_batch(
+            project_id, str(episode["batch_id"])
+        )
+        source_episodes = sorted(
+            source_batch["episodes"], key=lambda item: int(item["episode_number"])
+        )
+        episodes = [dict(item["content"]) for item in source_episodes]
+        target_number = int(episode["episode_number"])
+        for item in episodes:
+            if int(item.get("episode") or 0) == target_number:
+                item[field] = candidate
+                break
+        created = self.create_outline(
+            project_id,
+            episodes,
+            series_arc=str(
+                (source_episodes[0].get("content") or {}).get("series_arc") or ""
+            ),
+            series_overview=source_batch.get("series_overview"),
+            expected_head_revision=expected_head_revision,
+            actor_user_id=actor_user_id,
+            source_refs=dict(episode.get("upstream_refs") or {}),
+            generation_meta={
+                "source": "outline_field_rewrite",
+                "source_batch_id": str(episode["batch_id"]),
+                "source_episode_id": int(episode["id"]),
+                "field": field,
+                "operation_id": str(operation_id or ""),
+            },
+        )
+        derived = created["resource"]
+        saved = next(
+            item
+            for item in derived["episodes"]
+            if int(item["episode_number"]) == target_number
+        )
+        return {
+            "episode": saved,
+            "batch_id": derived["batch_id"],
+            "version": saved["version"],
+            "created_new_version": True,
+            "head": created["head"],
+        }
 
     def lock_resource(
         self,

@@ -18,10 +18,15 @@
     const teamMode = window.location.pathname.startsWith('/review/');
     const usersApi = teamMode ? '/api/team/users' : '/api/admin/users';
     const rolesApi = teamMode ? '/api/team/roles' : '/api/admin/roles';
+    const presenceEnabled = !teamMode && elements.body.dataset.presenceEnabled === 'true';
     const genderLabels = { unspecified: '未填写', male: '男', female: '女' };
     let users = [];
     let roles = [];
     let departments = [];
+    let presenceByUser = {};
+    let presenceAvailable = false;
+    let lastPresenceRefreshAt = null;
+    let presenceRequestInFlight = false;
 
     function showError(target, message = '') { target.textContent = message; target.classList.toggle('d-none', !message); }
     async function responseError(response, fallback) { const data = await response.json().catch(() => ({})); return data.detail || data.message || fallback; }
@@ -42,6 +47,44 @@
     }
     function roleDisplayName(roleCode) { return roles.find(role => role.code === roleCode)?.name || roleCode; }
     function departmentDisplay(user) { const primary = user.primary_department?.name; const extra = Math.max(0, (user.departments || []).length - (primary ? 1 : 0)); return primary ? `${primary}${extra ? ` +${extra}` : ''}` : '-'; }
+    function presenceCell(user) {
+        const cell = document.createElement('td');
+        cell.className = 'presence-column';
+        const presence = presenceAvailable ? presenceByUser[user.id] : null;
+        const status = presence?.status || 'unknown';
+        const statusLabels = {active: '活跃', idle: '闲置', offline: '离线', unknown: '状态未知'};
+        const statusColors = {active: 'text-success', idle: 'text-warning', offline: 'text-secondary', unknown: 'text-secondary'};
+        const summary = document.createElement('div');
+        summary.className = 'd-flex align-items-center gap-1 text-nowrap';
+        const dot = document.createElement('span');
+        dot.className = statusColors[status] || 'text-secondary';
+        dot.textContent = '●';
+        dot.setAttribute('aria-hidden', 'true');
+        const label = document.createElement('span');
+        label.textContent = statusLabels[status] || '状态未知';
+        summary.append(dot, label);
+        if (presence?.device_count > 1) {
+            const devices = document.createElement('span');
+            devices.className = 'small text-muted';
+            devices.textContent = `· ${presence.device_count}台`;
+            summary.appendChild(devices);
+        }
+
+        const detail = document.createElement('div');
+        detail.className = 'small text-muted presence-detail';
+        if (status === 'active' || status === 'idle') {
+            detail.textContent = presence.page || '工作台';
+        } else if (status === 'offline') {
+            detail.textContent = presence.last_online_at ? `最后在线 ${formatDate(presence.last_online_at)}` : '从未上线';
+        } else {
+            detail.textContent = lastPresenceRefreshAt
+                ? `监测暂不可用 · 上次 ${formatDate(lastPresenceRefreshAt)}`
+                : '监测暂不可用';
+        }
+        cell.title = `${label.textContent}｜${detail.textContent}`;
+        cell.append(summary, detail);
+        return cell;
+    }
     function openUserEditor(user = null) {
         elements.form.reset(); showError(elements.formError); elements.id.value = user?.id || ''; elements.title.textContent = user ? '编辑用户' : '新建用户';
         elements.username.value = user?.username || ''; elements.username.disabled = Boolean(user); elements.displayName.value = user?.display_name || '';
@@ -49,11 +92,16 @@
         elements.password.required = !user; elements.passwordField.classList.toggle('d-none', Boolean(user)); renderRoleOptions(user?.role_codes || []); editor.show();
     }
     function renderUsers() {
-        if (!users.length) { const row = document.createElement('tr'); const cell = document.createElement('td'); cell.colSpan = teamMode ? 6 : 9; cell.className = 'text-center text-muted py-4'; cell.textContent = '暂无用户'; row.appendChild(cell); elements.body.replaceChildren(row); return; }
-        elements.body.replaceChildren(...users.map(user => {
+        if (!users.length) { const row = document.createElement('tr'); const cell = document.createElement('td'); cell.colSpan = teamMode ? 6 : (presenceEnabled ? 10 : 9); cell.className = 'text-center text-muted py-4'; cell.textContent = '暂无用户'; row.appendChild(cell); elements.body.replaceChildren(row); return; }
+        const statusOrder = {active: 0, idle: 1, offline: 2, unknown: 3};
+        const displayUsers = presenceEnabled && presenceAvailable
+            ? [...users].sort((left, right) => (statusOrder[presenceByUser[left.id]?.status || 'unknown'] - statusOrder[presenceByUser[right.id]?.status || 'unknown']))
+            : users;
+        elements.body.replaceChildren(...displayUsers.map(user => {
             const row = document.createElement('tr');
             const values = teamMode ? [user.username, user.display_name, (user.role_codes || []).map(roleDisplayName).join('、') || '-', user.status === 'active' ? '启用' : '停用', formatDate(user.last_login_at)] : [user.username, departmentDisplay(user), user.email || '-', user.phone || '-', genderLabels[user.gender] || '未填写', (user.role_codes || []).map(roleDisplayName).join('、') || '-', formatDate(user.created_at), user.status === 'active' ? '启用' : '停用'];
             values.forEach(value => { const cell = document.createElement('td'); cell.textContent = value; row.appendChild(cell); });
+            if (presenceEnabled) row.appendChild(presenceCell(user));
             const actions = document.createElement('td'); const group = document.createElement('div'); group.className = 'd-flex gap-1';
             if (user.can_edit !== false) group.append(actionButton('bi-pencil', '编辑用户', 'btn-outline-light', () => openUserEditor(user)), actionButton('bi-diagram-3', '编辑部门归属', 'btn-outline-info', () => { window.location.assign(`/admin/departments?user_id=${encodeURIComponent(user.id)}`); }), actionButton(user.status === 'active' ? 'bi-person-dash' : 'bi-person-check', user.status === 'active' ? '停用用户' : '启用用户', user.status === 'active' ? 'btn-outline-warning' : 'btn-outline-success', () => toggleUserStatus(user)));
             if (user.can_reset_password !== false) group.append(actionButton('bi-key', '重置密码', 'btn-outline-info', () => resetUserPassword(user)));
@@ -69,7 +117,28 @@
             const responses = await Promise.all(requests);
             if (!responses.every(response => response.ok)) throw new Error('用户、角色或部门加载失败');
             users = await responses[0].json(); roles = await responses[1].json(); departments = teamMode ? [] : await responses[2].json(); renderFilterOptions(); renderUsers();
+            if (presenceEnabled) void loadPresence();
         } catch (error) { showError(elements.error, error.message || '用户加载失败'); }
+    }
+    async function loadPresence() {
+        if (!presenceEnabled || document.hidden || presenceRequestInFlight) return;
+        presenceRequestInFlight = true;
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), 4000);
+        try {
+            const response = await window.aiworkerApi.request('/api/admin/presence', {signal: controller.signal});
+            if (!response.ok) throw new Error(await responseError(response, '在线情况加载失败'));
+            const payload = await response.json();
+            presenceByUser = payload.users || {};
+            presenceAvailable = true;
+            lastPresenceRefreshAt = payload.refreshed_at || new Date().toISOString();
+        } catch (_) {
+            presenceAvailable = false;
+        } finally {
+            window.clearTimeout(timeoutId);
+            presenceRequestInFlight = false;
+            renderUsers();
+        }
     }
     async function toggleUserStatus(user) { const status = user.status === 'active' ? 'disabled' : 'active'; try { const response = await window.aiworkerApi.request(`${usersApi}/${user.id}`, { method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({status}) }); if (!response.ok) throw new Error(await responseError(response, '状态更新失败')); await loadUsersAndRoles(); } catch (error) { showError(elements.error, error.message || '状态更新失败'); } }
     async function resetUserPassword(user) { const password = window.prompt(`为 ${user.username} 设置新密码\n密码需为 10 至 128 个字符，并包含字母、数字和特殊字符`); if (!password) return; try { const response = await window.aiworkerApi.request(`${usersApi}/${user.id}/reset-password`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({password}) }); if (!response.ok) throw new Error(await responseError(response, '密码重置失败')); window.alert('密码已重置，该用户现有会话已退出'); } catch (error) { showError(elements.error, error.message || '密码重置失败'); } }
@@ -88,5 +157,11 @@
     document.getElementById('create-user')?.addEventListener('click', () => openUserEditor());
     document.getElementById('export-users-csv')?.addEventListener('click', () => exportUsers('csv'));
     document.getElementById('export-users-xlsx')?.addEventListener('click', () => exportUsers('xlsx'));
+    if (presenceEnabled) {
+        window.setInterval(() => { void loadPresence(); }, 5000);
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) void loadPresence();
+        });
+    }
     loadUsersAndRoles();
 })();

@@ -113,6 +113,7 @@ def build_identity_router(
     *,
     password_service: PasswordService | None = None,
     permission_service: PermissionService | None = None,
+    presence_service=None,
 ) -> APIRouter:
     permission_service = permission_service or PermissionService(
         repository, session_service
@@ -368,6 +369,12 @@ def build_identity_router(
             if raw_token:
                 session_service.revoke_session(
                     raw_token, connection=connection
+                )
+            if presence_service is not None:
+                presence_service.disconnect_session(
+                    user_id=context.principal.user_id,
+                    session_id=context.principal.session_id,
+                    connection=connection,
                 )
             record_audit(
                 actor=context.principal,

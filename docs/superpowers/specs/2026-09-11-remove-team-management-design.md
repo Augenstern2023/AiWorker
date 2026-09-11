@@ -64,7 +64,9 @@
 
 ### PostgreSQL 数据迁移
 
-新增 Alembic 版本 `0021_remove_team_management`，升级时在同一事务中按依赖顺序清理：
+隔离工作区基线检查发现，当前生产库已经标记为 `0021_llm_local_api_keys`，并存在 `llm_providers.api_key_env_var` 列，但仓库缺少对应迁移文件且代码 head 仍是 `0020_user_presence`。为避免改写生产库版本号或形成断裂的迁移图，先恢复与现有数据库结构一致的 `0021_llm_local_api_keys` 迁移和元数据声明，再新增 `0022_remove_team_management`。
+
+`0022_remove_team_management` 升级时在同一事务中按依赖顺序清理：
 
 1. 删除 `user_page_access` 中 `/review/users`、`/review/roles` 的记录；
 2. 删除 `role_page_access` 中这两个路由的记录；
@@ -90,6 +92,7 @@
 - 所有 `/api/team/*` 请求返回 404。
 - 已登录会话不需要强制失效；下一次请求会使用更新后的权限和页面目录。
 - 数据库尚未升级至新 Alembic head 时，应用继续遵循现有数据库版本检查策略，不增加启动时隐式清理。
+- 不重写生产库的 `alembic_version`；通过恢复缺失的 `0021_llm_local_api_keys` 迁移，使现有库和空库共享同一条可验证的升级链。
 - 当前运行中的 8899、8900 服务不在本次修改过程中停止或重启。
 
 ## 测试策略

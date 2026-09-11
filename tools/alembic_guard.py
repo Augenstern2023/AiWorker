@@ -22,6 +22,8 @@ from typing import Iterator, Mapping
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 
 
 MIGRATION_DIRECTORY = "system_database/alembic/versions/"
@@ -393,3 +395,69 @@ def validate_push_updates(
         with exported_commit_migration_tree(repo_root, update.local_sha) as tree_root:
             reports.append(validate_migration_tree(tree_root))
     return tuple(reports)
+
+
+def tracked_worktree_changes(repo_root: Path) -> tuple[str, ...]:
+    output = run_git(repo_root, "status", "--porcelain", "--untracked-files=no")
+    return tuple(line for line in output.splitlines() if line)
+
+
+def read_remote_main_sha(repo_root: Path) -> str:
+    try:
+        output = run_git(
+            repo_root,
+            "ls-remote",
+            "--exit-code",
+            "manjuxuanpin",
+            "refs/heads/main",
+        )
+    except GuardError as exc:
+        raise GuardError("无法确认 manjuxuanpin/main") from exc
+    fields = output.split()
+    if len(fields) != 2 or fields[1] != "refs/heads/main" or len(fields[0]) != 40:
+        raise GuardError("无法确认 manjuxuanpin/main")
+    return fields[0]
+
+
+def read_database_revision(database_url: str) -> str | None:
+    engine = create_engine(database_url, pool_pre_ping=True)
+    try:
+        with engine.connect() as connection:
+            table_name = connection.execute(
+                text("SELECT to_regclass('alembic_version')")
+            ).scalar_one()
+            if table_name is None:
+                return None
+            rows = connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalars().fetchmany(2)
+            if len(rows) > 1:
+                raise GuardError("alembic_version 包含多个当前 revision")
+            return rows[0] if rows else None
+    except GuardError:
+        raise
+    except SQLAlchemyError as exc:
+        raise GuardError("无法读取数据库当前 revision") from exc
+    finally:
+        engine.dispose()
+
+
+def validate_production_preconditions(
+    repo_root: Path,
+    *,
+    remote_sha: str,
+    database_revision: str | None,
+) -> MigrationReport:
+    if run_git(repo_root, "branch", "--show-current") != "main":
+        raise GuardError("生产迁移必须从 main 分支执行")
+    if tracked_worktree_changes(repo_root):
+        raise GuardError("生产迁移前工作树不干净")
+    report = validate_repository(repo_root)
+    local_sha = run_git(repo_root, "rev-parse", "HEAD")
+    if local_sha != remote_sha:
+        raise GuardError("当前 HEAD 尚未同步至 manjuxuanpin/main")
+    if database_revision is not None and database_revision not in report.revisions:
+        raise GuardError(
+            f"数据库 revision {database_revision} 不存在于本地迁移图"
+        )
+    return report

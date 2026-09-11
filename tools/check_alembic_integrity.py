@@ -23,6 +23,9 @@ from tools.alembic_guard import (
     GuardError,
     parse_push_updates,
     push_update_from_pre_commit_environment,
+    read_database_revision,
+    read_remote_main_sha,
+    validate_production_preconditions,
     validate_push_updates,
     validate_repository,
     validate_staged_changes,
@@ -34,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="mode", required=True)
     subparsers.add_parser("repository")
     subparsers.add_parser("staged")
+    subparsers.add_parser("production")
     push = subparsers.add_parser("pre-push")
     push.add_argument("remote_name", nargs="?")
     push.add_argument("remote_url", nargs="?")
@@ -50,6 +54,16 @@ def main(argv: list[str] | None = None) -> int:
         elif args.mode == "staged":
             report = validate_staged_changes(PROJECT_ROOT)
             reports = (report,) if report else ()
+        elif args.mode == "production":
+            from system_database.config import SystemDatabaseSettings
+
+            settings = SystemDatabaseSettings.from_environment()
+            report = validate_production_preconditions(
+                PROJECT_ROOT,
+                remote_sha=read_remote_main_sha(PROJECT_ROOT),
+                database_revision=read_database_revision(settings.url),
+            )
+            reports = (report,)
         else:
             remote_name = args.remote_name_option or args.remote_name
             pre_commit_context = push_update_from_pre_commit_environment(os.environ)
@@ -61,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 updates = parse_push_updates(sys.stdin.read())
                 reports = validate_push_updates(PROJECT_ROOT, remote_name, updates)
-    except GuardError as exc:
+    except (GuardError, ValueError) as exc:
         print(f"Alembic guard failed: {exc}", file=sys.stderr)
         return 1
     if reports:

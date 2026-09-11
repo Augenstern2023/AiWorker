@@ -204,6 +204,16 @@ Alembic 保护以 `manjuxuanpin` 为唯一主上游：数据库结构声明变�
 一同提交，历史迁移不可修改或删除，推送时会再次校验提交范围。数据库结构提交不得
 使用 `--no-verify` 绕过本地检查；远端 CI 和分支保护仍是最终保障。
 
+生产数据库只能通过受控入口升级；该命令会先确认当前分支、干净工作树、数据库
+revision，以及当前 `HEAD` 已存在于 `manjuxuanpin/main`：
+
+```powershell
+uv run python tools/check_alembic_integrity.py production
+uv run python scripts/upgrade_production_database.py
+```
+
+`uv run alembic upgrade head` 仅用于隔离测试数据库，不作为生产升级入口。
+
 ## 配置与凭证安全
 
 - 外部服务地址、激活码、Cookie、模型密钥等仅保存在本机配置或环境变量中。

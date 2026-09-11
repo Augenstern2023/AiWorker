@@ -11,6 +11,8 @@ from __future__ import annotations
 from typing import Any
 from uuid import uuid4
 
+from creative.workflow_identity import WorkflowIdentityResolver
+
 from .schema import WriterActionError
 from .store import WriterAgentStore
 
@@ -42,13 +44,51 @@ class RollbackService:
         *,
         permission_service: Any | None = None,
         action_runner: Any | None = None,
+        workflow_identity_resolver: Any | None = None,
     ) -> None:
         self.store = store
         self.creative_repository = creative_repository
         self.workflow_repository = workflow_repository
         self.permission_service = permission_service
         self.action_runner = action_runner
+        if workflow_identity_resolver is not None:
+            self.workflow_identity_resolver = workflow_identity_resolver
+        elif callable(
+            getattr(creative_repository, "project_workflow_identity_evidence", None)
+        ) and callable(
+            getattr(workflow_repository, "resolve_creative_project_identity", None)
+        ):
+            self.workflow_identity_resolver = WorkflowIdentityResolver(
+                creative_repository, workflow_repository
+            )
+        else:
+            self.workflow_identity_resolver = None
         self._mutation_lease_seconds = 120.0
+
+    def _workflow_project_id(
+        self,
+        project_id: int,
+        undo: dict[str, Any] | None = None,
+    ) -> str:
+        """Return the durable Workflow key captured for this rollback."""
+
+        undo = undo or {}
+        preimage = undo.get("preimage") or {}
+        postcondition = undo.get("postcondition") or {}
+        workflow_preimage = undo.get("workflow_preimage") or {}
+        ownership = preimage.get("ownership") or {}
+        workflow_external_state = ownership.get("workflow_external_state") or {}
+        for candidate in (
+            preimage.get("workflow_project_id"),
+            postcondition.get("workflow_project_id"),
+            workflow_preimage.get("project_id"),
+            workflow_external_state.get("project_id"),
+        ):
+            if candidate:
+                return str(candidate)
+        if self.workflow_identity_resolver is not None:
+            return str(self.workflow_identity_resolver.project_id(project_id))
+        return str(project_id)
 
     def _assert_current_project_write_authority(
         self,
@@ -100,12 +140,21 @@ class RollbackService:
             )
         for project_id in project_ids:
             try:
-                scope = getattr(
-                    self.creative_repository, "workflow_project_id", None
+                undo = next(
+                    (
+                        candidate
+                        for candidate in undos
+                        if int(
+                            (candidate.get("postcondition") or {}).get(
+                                "project_id"
+                            )
+                            or 0
+                        )
+                        == project_id
+                    ),
+                    None,
                 )
-                project_key = (
-                    scope(project_id) if callable(scope) else str(project_id)
-                )
+                project_key = self._workflow_project_id(project_id, undo)
                 active_member = self.workflow_repository.is_active_project_member(
                     project_key, actor
                 )
@@ -178,9 +227,11 @@ class RollbackService:
                     project_id
                 ),
             }
+            workflow_project_id = self._workflow_project_id(project_id)
+            preimage["workflow_project_id"] = workflow_project_id
             workflow_preimage = (
                 self.workflow_repository.export_writer_rollback_state(
-                    str(project_id)
+                    workflow_project_id
                 )
             )
             undo_project_id = project_id
@@ -212,6 +263,7 @@ class RollbackService:
                 "PROJECT_NOT_AVAILABLE", "新建项目动作缺少有效项目"
             )
         try:
+            workflow_project_id = self._workflow_project_id(project_id)
             creative_fingerprint = (
                 self.creative_repository.writer_project_external_use_fingerprint(
                     project_id, str(action["id"])
@@ -223,13 +275,13 @@ class RollbackService:
                 None,
             )
             workflow_state = (
-                export_workflow_state(str(project_id))
+                export_workflow_state(workflow_project_id)
                 if callable(export_workflow_state)
                 else None
             )
             workflow_fingerprint = (
                 self.workflow_repository.writer_project_external_use_fingerprint(
-                    str(project_id)
+                    workflow_project_id
                 )
             )
         except (AttributeError, OSError, TypeError, ValueError) as exc:
@@ -246,6 +298,7 @@ class RollbackService:
             workflow_external_state=workflow_state,
             session_id=int(action["session_id"]),
             actor_user_id=str(action["actor_user_id"]),
+            workflow_project_id=workflow_project_id,
         )
 
     def _workflow_ownership_manifest(
@@ -356,6 +409,7 @@ class RollbackService:
         postcondition: dict[str, Any] = {"kind": kind}
         if kind in {"existing_project", "new_project"} and project_id is not None:
             project_id = int(project_id)
+            workflow_project_id = self._workflow_project_id(project_id, undo)
             if kind == "new_project":
                 creative_fingerprint = (
                     self.creative_repository.writer_project_deletion_fingerprint(
@@ -364,7 +418,7 @@ class RollbackService:
                 )
                 workflow_fingerprint = (
                     self.workflow_repository.writer_project_deletion_fingerprint(
-                        str(project_id)
+                        workflow_project_id
                     )
                 )
             else:
@@ -375,12 +429,13 @@ class RollbackService:
                 )
                 workflow_fingerprint = (
                     self.workflow_repository.writer_rollback_fingerprint(
-                        str(project_id)
+                        workflow_project_id
                     )
                 )
             postcondition.update(
                 {
                     "project_id": project_id,
+                    "workflow_project_id": workflow_project_id,
                     "creative_fingerprint": creative_fingerprint,
                     "workflow_fingerprint": workflow_fingerprint,
                 }
@@ -499,6 +554,7 @@ class RollbackService:
             if project_id is None:
                 continue
             project_id = int(project_id)
+            workflow_project_id = self._workflow_project_id(project_id, undo)
             if project_id not in creative_state:
                 try:
                     if (undo.get("preimage") or {}).get("kind") == "new_project":
@@ -514,11 +570,11 @@ class RollbackService:
                 try:
                     if (undo.get("preimage") or {}).get("kind") == "new_project":
                         workflow_state[project_id] = self.workflow_repository.writer_project_deletion_fingerprint(
-                            str(project_id)
+                            workflow_project_id
                         )
                     else:
                         workflow_state[project_id] = self.workflow_repository.writer_rollback_fingerprint(
-                            str(project_id)
+                            workflow_project_id
                         )
                 except ValueError as exc:
                     raise WriterActionError(
@@ -552,13 +608,13 @@ class RollbackService:
                 )
                 workflow_current = (
                     self.workflow_repository.writer_project_external_use_fingerprint(
-                        str(project_id),
+                        workflow_project_id,
                         baseline_state=workflow_baseline,
                         manifest=workflow_manifest,
                     )
                     if workflow_baseline is not None
                     else self.workflow_repository.writer_project_external_use_fingerprint(
-                        str(project_id)
+                        workflow_project_id
                     )
                 )
                 if workflow_current != workflow_expected:
@@ -596,7 +652,7 @@ class RollbackService:
                 preimage.get("kind") == "new_project"
                 and undo.get("status") == "creative_restored"
                 and callable(project_data_exists)
-                and not project_data_exists(str(project_id))
+                and not project_data_exists(workflow_project_id)
             ):
                 allowed_workflow.add(workflow_state[project_id])
             if workflow_state[project_id] not in allowed_workflow:
@@ -860,7 +916,7 @@ class RollbackService:
             "conversation_restored",
             "completed",
         } or any(undo.get("status") == "creative_restored" for undo in undos)
-        workflow_deletion_markers: list[tuple[int, str]] = []
+        workflow_deletion_markers: list[tuple[int, str, str]] = []
 
         def abort_unstarted_project_deletions() -> bool:
             abort_deletion = getattr(
@@ -874,7 +930,7 @@ class RollbackService:
             ):
                 return bool(workflow_deletion_markers)
             unresolved_marker = False
-            for candidate_project_id, marker_owner in reversed(
+            for candidate_project_id, workflow_project_id, marker_owner in reversed(
                 workflow_deletion_markers
             ):
                 try:
@@ -887,7 +943,7 @@ class RollbackService:
                     )
                     if creative_project_exists and not creative_deletion_started:
                         removed = abort_deletion(
-                            str(candidate_project_id), owner_token=marker_owner
+                            workflow_project_id, owner_token=marker_owner
                         )
                         unresolved_marker = unresolved_marker or not removed
                     else:
@@ -921,6 +977,7 @@ class RollbackService:
                     self.store.mark_action_undo_compensated(undo["action_id"])
                     continue
                 project_id = int(project_id)
+                workflow_project_id = self._workflow_project_id(project_id, undo)
                 if preimage.get("kind") == "new_project":
                     marker_owner = (
                         f"writer-rollback:{rollback['id']}:{undo['action_id']}"
@@ -933,11 +990,12 @@ class RollbackService:
                     if callable(begin_workflow_deletion):
                         fence()
                         marker = begin_workflow_deletion(
-                            str(project_id),
+                            workflow_project_id,
                             owner_token=marker_owner,
                             requested_by=actor_user_id,
                             project_snapshot={
                                 "id": project_id,
+                                "workflow_project_id": workflow_project_id,
                                 "name": str(
                                     (
                                         self.creative_repository.get_project(
@@ -955,7 +1013,7 @@ class RollbackService:
                         ):
                             raise ValueError("project deletion is owned by another operation")
                         workflow_deletion_markers.append(
-                            (project_id, marker_owner)
+                            (project_id, workflow_project_id, marker_owner)
                         )
                         fence()
                 if undo.get("status") == "applied":
@@ -999,7 +1057,7 @@ class RollbackService:
                         None,
                     )
                     if not callable(project_data_exists) or project_data_exists(
-                        str(project_id)
+                        workflow_project_id
                     ):
                         workflow_expected, workflow_baseline, workflow_manifest = (
                             workflow_external_ownership[project_id]
@@ -1007,12 +1065,12 @@ class RollbackService:
                         fence()
                         workflow_fingerprint = (
                             self.workflow_repository.writer_project_deletion_fingerprint(
-                                str(project_id)
+                                workflow_project_id
                             )
                         )
                         fence()
                         self.workflow_repository.delete_project_data(
-                            str(project_id),
+                            workflow_project_id,
                             expected_writer_fingerprint=str(
                                 workflow_fingerprint
                             ),
@@ -1040,13 +1098,13 @@ class RollbackService:
                     if callable(complete_workflow_deletion):
                         fence()
                         complete_workflow_deletion(
-                            str(project_id), owner_token=marker_owner
+                            workflow_project_id, owner_token=marker_owner
                         )
                         fence()
                 else:
                     fence()
                     self.workflow_repository.restore_writer_rollback_state(
-                        str(project_id),
+                        workflow_project_id,
                         undo["workflow_preimage"],
                         expected_fingerprint=str(post["workflow_fingerprint"]),
                         actor=actor,

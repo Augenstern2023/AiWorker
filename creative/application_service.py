@@ -66,6 +66,7 @@ class CreativeApplicationService:
         self.runtime_dir = Path(runtime_dir)
         self.original_project_service = original_project_service
         self.workflow_adapter = workflow_adapter
+        self.workflow_identity = workflow_adapter.workflow_identity
         self.permission_service = permission_service
 
     def get_project(self, project_id: int) -> dict[str, Any]:
@@ -417,7 +418,7 @@ class CreativeApplicationService:
             "creative_planner" if stage in {"brief", "characters"} else "screenwriter"
         )
         task = self.workflow_repository.ensure_project_task(
-            self.repository.workflow_project_id(project_id),
+            self.workflow_identity.project_id(project_id),
             project.get("topic_id"),
             task_type=stage,
             role_code=role_code,
@@ -447,7 +448,7 @@ class CreativeApplicationService:
             task["status"] in {"assigned", "in_progress", "returned"}
             and task.get("assignee_user_id") not in {None, actor.user_id}
             and not self.workflow_repository.is_active_project_member(
-                self.repository.workflow_project_id(project_id), actor
+                self.workflow_identity.project_id(project_id), actor
             )
         ):
             raise CreativeTaskOccupied("该创作阶段已由其他人员处理")
@@ -463,12 +464,12 @@ class CreativeApplicationService:
             False
             if globally_authorized
             else self.workflow_repository.is_active_project_member(
-                self.repository.workflow_project_id(project_id), actor
+                self.workflow_identity.project_id(project_id), actor
             )
         )
         if not self.permission_service.can_create_project_content(
             actor,
-            self.repository.workflow_project_id(project_id),
+            self.workflow_identity.project_id(project_id),
             active_member=active_member,
         ):
             raise CreativeProjectAccessDenied("无权创作该项目")

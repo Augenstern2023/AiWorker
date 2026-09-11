@@ -19,6 +19,7 @@ from identity.schema import Principal
 from workflow.repository import SYSTEM_ACTOR, WorkflowRepository
 
 from .repository import CreativeRepository
+from .workflow_identity import WorkflowIdentityResolver
 
 
 RESOURCE_TYPES = frozenset({"breakdown", "brief", "characters", "outline", "beats", "script"})
@@ -42,6 +43,9 @@ class CreativeWorkflowAdapter:
             else CreativeRepository(creative_repository)
         )
         self.workflow_repository = workflow_repository
+        self.workflow_identity = WorkflowIdentityResolver(
+            self.creative_repository, self.workflow_repository
+        )
 
     def snapshot(
         self, resource_type: str, resource_id: str, *, reconcile: bool = True
@@ -512,7 +516,7 @@ class CreativeWorkflowAdapter:
         if (
             project_id is not None
             and str(task["project_id"] or "")
-            != self.creative_repository.workflow_project_id(project_id)
+            != self.workflow_identity.project_id(project_id)
         ):
             raise ValueError("resource does not belong to the task project")
         if topic_id is not None and task["topic_id"] != topic_id:
@@ -520,8 +524,13 @@ class CreativeWorkflowAdapter:
         if (
             topic_id is not None
             and project_id is None
-            and task.get("workflow_id")
-            != f"topic:{self.creative_repository.workflow_topic_id(topic_id)}"
+            and not (
+                str(task.get("workflow_id") or "")
+                == f"topic:{self.workflow_identity.topic_scope(topic_id)}"
+                or str(task.get("workflow_id") or "").startswith(
+                    f"topic:{self.workflow_identity.topic_scope(topic_id)}:"
+                )
+            )
         ):
             raise ValueError("workflow task belongs to another creative store")
         if task["status"] not in {"assigned", "in_progress", "returned"}:
@@ -876,7 +885,7 @@ class CreativeWorkflowAdapter:
         if resource_type == "breakdown":
             if task["topic_id"] != snapshot["topic_id"]:
                 raise ValueError("resource does not belong to the task topic")
-        elif str(task["project_id"] or "") != self.creative_repository.workflow_project_id(
+        elif str(task["project_id"] or "") != self.workflow_identity.project_id(
             snapshot["project_id"]
         ):
             raise ValueError("resource does not belong to the task project")

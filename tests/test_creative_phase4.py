@@ -187,12 +187,13 @@ def test_project_delete_api_removes_its_workflow_members_and_tasks(tmp_path: Pat
         topic["id"], breakdown["id"], "API 删除项目", 1,
         created_by=principal.user_id,
     )
+    workflow_project_id = repository.workflow_project_id(project["id"])
     task = workflow.ensure_project_task(
-        str(project["id"]), topic["id"], task_type="brief",
+        workflow_project_id, topic["id"], task_type="brief",
         role_code="creative_planner", actor=principal,
     )
     workflow.add_project_member(
-        str(project["id"]), principal.user_id, "project_owner", principal,
+        workflow_project_id, principal.user_id, "project_owner", principal,
     )
     app = FastAPI()
     app.state.identity_permission_service = permissions
@@ -210,10 +211,12 @@ def test_project_delete_api_removes_its_workflow_members_and_tasks(tmp_path: Pat
     assert repository.get_project(project["id"]) is None
     with workflow.identity_repository.connect() as connection:
         assert connection.exec_driver_sql(
-            "SELECT COUNT(*) FROM workflow_tasks WHERE project_id = %s", (str(project["id"]),)
+            "SELECT COUNT(*) FROM workflow_tasks WHERE project_id = %s",
+            (workflow_project_id,),
         ).scalar_one() == 0
         assert connection.exec_driver_sql(
-            "SELECT COUNT(*) FROM project_members WHERE project_id = %s", (str(project["id"]),)
+            "SELECT COUNT(*) FROM project_members WHERE project_id = %s",
+            (workflow_project_id,),
         ).scalar_one() == 0
         assert connection.exec_driver_sql(
             "SELECT COUNT(*) FROM workflow_instances WHERE id = %s", (task["workflow_id"],)
@@ -789,14 +792,32 @@ def assign_phase4_task(
     role_code = (
         "selection_operator" if task_type == "breakdown" else "creative_planner"
     )
-    task = client.workflow.create_task(
-        f"phase4-{task_type}-{topic_id}-{project_id}-{len(client.workflow.list_tasks(client.principal))}",
-        task_type,
-        role_code,
-        topic_id=topic_id,
-        project_id=str(project_id) if project_id is not None else None,
-        actor=SYSTEM_ACTOR,
-    )
+    if topic_id is not None and project_id is None:
+        topic_scope = client.app.state.workflow_identity_resolver.topic_scope(
+            topic_id
+        )
+        task = client.workflow.create_task(
+            f"topic:{topic_scope}:candidate:"
+            f"{len(client.workflow.list_tasks(client.principal))}",
+            task_type,
+            role_code,
+            topic_id=topic_id,
+            actor=SYSTEM_ACTOR,
+        )
+    else:
+        resolved_project_id = (
+            client.app.state.workflow_identity_resolver.project_id(project_id)
+            if project_id is not None
+            else None
+        )
+        task = client.workflow.create_task(
+            f"phase4-{task_type}-{topic_id}-{project_id}-{len(client.workflow.list_tasks(client.principal))}",
+            task_type,
+            role_code,
+            topic_id=topic_id,
+            project_id=resolved_project_id,
+            actor=SYSTEM_ACTOR,
+        )
     return client.workflow.claim_task(task["id"], client.principal)
 
 
@@ -1212,6 +1233,9 @@ def test_outline_overview_api_saves_and_starts_legacy_generation(tmp_path: Path)
     client.workflow = workflow
     client.principal = principal
     repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
+    app.state.workflow_identity_resolver = CreativeWorkflowAdapter(
+        repository, workflow
+    ).workflow_identity
     project, batch, task = seed_draft_outline_for_api(client, repository)
     latest = repository.create_outline_batch(
         project["id"],
@@ -1351,10 +1375,13 @@ def test_project_creation_retries_binding_without_duplicate(
         item["id"] == orphan["id"]
         for item in reconciled_list.json()["items"]
     )
-    assert client.workflow.get_task(task["id"])["project_id"] == str(orphan["id"])
+    assert client.workflow.get_task(task["id"])["project_id"] is None
     retried = client.post("/api/creative/projects", json=payload)
     assert retried.status_code == 200, retried.text
     assert retried.json()["id"] == orphan["id"]
+    assert client.workflow.get_task(task["id"])["project_id"] == (
+        repository.workflow_project_id(orphan["id"])
+    )
     assert len([
         project
         for project in repository.list_projects(topic_id=topic["id"])
@@ -1456,7 +1483,7 @@ def test_project_duplicate_migration_keeps_newest_nondeleted_row(tmp_path: Path)
     assert rows[1]["creation_workflow_task_id"] == "duplicate-task"
 
 
-def test_legacy_brief_orphan_reconciliation_preserves_new_current_stage_task(
+def test_project_list_reports_legacy_orphan_mismatch_without_rewriting_links(
     tmp_path: Path,
 ):
     client, repository, _ = build_phase4_client(tmp_path)
@@ -1499,9 +1526,12 @@ def test_legacy_brief_orphan_reconciliation_preserves_new_current_stage_task(
     assert reloaded_target is not None
     assert reloaded_orphan is not None
     assert reloaded_target["workflow_task_id"] == characters_task["id"]
-    assert reloaded_target["creation_workflow_task_id"] == brief_task["id"]
-    assert reloaded_orphan["workflow_task_id"] is None
-    assert reloaded_orphan["creation_workflow_task_id"] is None
+    assert reloaded_target["creation_workflow_task_id"] is None
+    assert reloaded_orphan["workflow_task_id"] == brief_task["id"]
+    assert reloaded_orphan["creation_workflow_task_id"] == brief_task["id"]
+    items = {item["id"]: item for item in listed.json()["items"]}
+    assert items[target["id"]]["workflow_link_status"] == "unbound"
+    assert items[orphan["id"]]["workflow_link_status"] == "mismatched"
 
 
 def test_breakdown_api_returns_personalized_field_writing_guide(tmp_path: Path):
@@ -1730,7 +1760,7 @@ def test_phase4_generation_api_enqueues_standard_creative_job(tmp_path: Path):
         "brief",
         "creative_planner",
         topic_id=topic["id"],
-        project_id=str(project["id"]),
+        project_id=repository.workflow_project_id(project["id"]),
         actor=SYSTEM_ACTOR,
     )
     client.workflow.claim_task(task["id"], client.principal)

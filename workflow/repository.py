@@ -941,6 +941,128 @@ class WorkflowRepository:
         with self.identity_repository.connect() as connection:
             return self._get_task(connection, task_id)
 
+    def resolve_creative_project_identity(
+        self,
+        *,
+        scoped_id: str,
+        legacy_id: str,
+        task_ids: set[str],
+        creator_user_id: str,
+    ) -> str:
+        """Choose a legacy project key only when local read-only evidence proves it."""
+
+        scoped_workflow_id = f"project:{scoped_id}"
+        legacy_workflow_id = f"project:{legacy_id}"
+        with self.identity_repository.connect() as connection:
+            scoped_exists = any(
+                (
+                    connection.execute(
+                        select(table).where(condition).limit(1)
+                    ).first()
+                    is not None
+                )
+                for table, condition in (
+                    (
+                        workflow_instances,
+                        or_(
+                            workflow_instances.c.project_id == scoped_id,
+                            workflow_instances.c.id == scoped_workflow_id,
+                        ),
+                    ),
+                    (workflow_tasks, workflow_tasks.c.project_id == scoped_id),
+                    (project_members, project_members.c.project_id == scoped_id),
+                    (
+                        workflow_project_deletions,
+                        workflow_project_deletions.c.project_id == scoped_id,
+                    ),
+                )
+            )
+            if scoped_exists:
+                return scoped_id
+            if task_ids:
+                task_evidence = connection.execute(
+                    select(workflow_tasks.c.id)
+                    .where(
+                        workflow_tasks.c.id.in_(sorted(task_ids)),
+                        or_(
+                            workflow_tasks.c.project_id == legacy_id,
+                            workflow_tasks.c.workflow_id == legacy_workflow_id,
+                        ),
+                    )
+                    .limit(1)
+                ).first()
+                if task_evidence is not None:
+                    return legacy_id
+            if creator_user_id:
+                creator_evidence = connection.execute(
+                    select(project_members.c.id)
+                    .where(
+                        project_members.c.project_id == legacy_id,
+                        project_members.c.user_id == creator_user_id,
+                        project_members.c.project_role == PROJECT_CREATOR_ROLE,
+                        project_members.c.status == "active",
+                    )
+                    .limit(1)
+                ).first()
+                if creator_evidence is not None:
+                    return legacy_id
+        return scoped_id
+
+    def resolve_creative_topic_scope(
+        self,
+        *,
+        scoped_scope: str,
+        legacy_scope: str,
+        task_ids: set[str],
+    ) -> str:
+        """Choose a legacy topic scope only when a local task points to it."""
+
+        scoped_workflow_id = f"topic:{scoped_scope}"
+        legacy_workflow_id = f"topic:{legacy_scope}"
+        with self.identity_repository.connect() as connection:
+            scoped_exists = connection.execute(
+                select(workflow_instances.c.id)
+                .where(
+                    or_(
+                        workflow_instances.c.id == scoped_workflow_id,
+                        workflow_instances.c.id.like(f"{scoped_workflow_id}:%"),
+                    )
+                )
+                .limit(1)
+            ).first()
+            if scoped_exists is None:
+                scoped_exists = connection.execute(
+                    select(workflow_tasks.c.id)
+                    .where(
+                        or_(
+                            workflow_tasks.c.workflow_id == scoped_workflow_id,
+                            workflow_tasks.c.workflow_id.like(
+                                f"{scoped_workflow_id}:%"
+                            ),
+                        )
+                    )
+                    .limit(1)
+                ).first()
+            if scoped_exists is not None:
+                return scoped_scope
+            if task_ids:
+                legacy_evidence = connection.execute(
+                    select(workflow_tasks.c.id)
+                    .where(
+                        workflow_tasks.c.id.in_(sorted(task_ids)),
+                        or_(
+                            workflow_tasks.c.workflow_id == legacy_workflow_id,
+                            workflow_tasks.c.workflow_id.like(
+                                f"{legacy_workflow_id}:%"
+                            ),
+                        ),
+                    )
+                    .limit(1)
+                ).first()
+                if legacy_evidence is not None:
+                    return legacy_scope
+        return scoped_scope
+
     def ensure_topic_task(
         self,
         topic_id: int | None,

@@ -1692,6 +1692,7 @@ class WriterAgentStore:
         workflow_external_state: dict[str, Any] | None = None,
         session_id: int | None = None,
         actor_user_id: str | None = None,
+        workflow_project_id: str | None = None,
     ) -> dict[str, Any]:
         """Bind a newly created project and its non-action baseline to the undo."""
 
@@ -1723,12 +1724,34 @@ class WriterAgentStore:
                 raise WriterActionError(
                     "ROLLBACK_STATE_CONFLICT", "动作不是新建项目"
                 )
+            existing_workflow_project_id = preimage.get("workflow_project_id")
+            if (
+                existing_workflow_project_id is not None
+                and workflow_project_id is not None
+                and existing_workflow_project_id != workflow_project_id
+            ):
+                raise WriterActionError(
+                    "IDEMPOTENCY_KEY_REUSED",
+                    "新建项目已记录不同工作流归属",
+                )
+            if workflow_project_id is not None:
+                preimage["workflow_project_id"] = workflow_project_id
             existing = preimage.get("ownership")
             if existing is not None:
                 if existing != ownership:
                     raise WriterActionError(
                         "IDEMPOTENCY_KEY_REUSED", "新建项目已记录不同归属"
                     )
+                if existing_workflow_project_id is None and workflow_project_id:
+                    conn.execute(
+                        "UPDATE writer_agent_action_undo SET preimage_json=?, "
+                        "updated_at=? WHERE action_id=? AND status='prepared'",
+                        (_json(preimage), time.time(), action_id),
+                    )
+                    row = conn.execute(
+                        "SELECT * FROM writer_agent_action_undo WHERE action_id=?",
+                        (action_id,),
+                    ).fetchone()
                 return self._undo_row(row)
             preimage["ownership"] = ownership
             conn.execute(

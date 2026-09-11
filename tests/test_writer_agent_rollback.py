@@ -257,6 +257,14 @@ class ProjectWritePermissions:
         return self.allowed and active_member
 
 
+class FixedWorkflowIdentityResolver:
+    def __init__(self, workflow_project_id: str) -> None:
+        self.workflow_project_id = workflow_project_id
+
+    def project_id(self, _local_project_id: int) -> str:
+        return self.workflow_project_id
+
+
 def test_workflow_ownership_manifest_includes_every_writer_step_operation(
     tmp_path: Path,
 ) -> None:
@@ -454,12 +462,22 @@ def completed_new_project_action(
 
 def completed_project_edit(
     tmp_path: Path,
+    *,
+    workflow_project_id: str | None = None,
 ) -> tuple[RollbackService, WriterAgentStore, CreativeRepository, dict, dict, object]:
     store = WriterAgentStore(tmp_path / "writer-agent.db")
     creative = CreativeRepository(tmp_path / "creative.db")
     workflow = StableWorkflowRepository()
     service = RollbackService(
-        store, creative, workflow, permission_service=ProjectWritePermissions()
+        store,
+        creative,
+        workflow,
+        permission_service=ProjectWritePermissions(),
+        workflow_identity_resolver=(
+            FixedWorkflowIdentityResolver(workflow_project_id)
+            if workflow_project_id is not None
+            else None
+        ),
     )
     actor = SimpleNamespace(user_id="writer-1")
     project = ready_project(creative)
@@ -492,8 +510,9 @@ def completed_project_edit(
     creative.update_project(
         project["id"], {"name": "动作完成后的项目"}, expected_revision=0
     )
-    workflow.states[str(project["id"])] = {
-        "project_id": str(project["id"]),
+    resolved_workflow_project_id = workflow_project_id or str(project["id"])
+    workflow.states[resolved_workflow_project_id] = {
+        "project_id": resolved_workflow_project_id,
         "tables": {"workflow_tasks": [{"id": "task-after-action"}]},
         "fingerprint": "workflow-1",
     }
@@ -514,6 +533,34 @@ def completed_project_edit(
     )
     store.complete_turn(checkpoint["id"])
     return service, store, creative, saved, checkpoint, actor
+
+
+def test_rollback_persists_and_reuses_one_resolved_workflow_project_id(
+    tmp_path: Path,
+) -> None:
+    workflow_project_id = "creative:test-store:project:1"
+    service, store, _creative, session, checkpoint, actor = completed_project_edit(
+        tmp_path,
+        workflow_project_id=workflow_project_id,
+    )
+    action = store.list_actions_for_turns([checkpoint["id"]])[0]
+    undo = store.require_action_undo(action["id"])
+
+    assert undo["preimage"]["workflow_project_id"] == workflow_project_id
+    assert undo["postcondition"]["workflow_project_id"] == workflow_project_id
+
+    restored = service.rollback(
+        session["id"],
+        "message-1",
+        actor=actor,
+        mode="rollback",
+        client_request_id="scoped-workflow-rollback",
+        expected_history_revision=session["history_revision"],
+    )
+
+    assert [message["kind"] for message in restored["messages"]] == ["material"]
+    assert workflow_project_id in service.workflow_repository.states
+    assert str(session["project_id"]) not in service.workflow_repository.states
 
 
 def test_rollback_service_restores_project_and_conversation(tmp_path: Path) -> None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+import logging
 import os
 from pathlib import Path
 import threading
@@ -25,6 +26,7 @@ from sqlalchemy.engine import make_url
 from creative.api import build_creative_router
 from creative.market_reference_service import MarketReferenceService
 from creative.repository import CreativeRepository
+from creative.workflow_identity import WorkflowIdentityResolver
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.session_service import SessionService
@@ -133,6 +135,11 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.Fixt
     owner_client.identity = identity
     owner_client.sessions = sessions
     owner_client.created_user_ids = []
+    app.state.creative_repository = repository
+    app.state.workflow_repository = workflow
+    app.state.workflow_identity_resolver = WorkflowIdentityResolver(
+        repository, workflow
+    )
     owner_client.denied_client = _client_for_user(app, sessions, denied["id"])
     owner_client.creator_only_client = _client_for_user(
         app, sessions, creator_only["id"]
@@ -208,6 +215,56 @@ def test_participating_project_list_only_returns_assigned_projects(
     }
 
 
+def test_legacy_project_membership_remains_visible_without_rewriting_ids(
+    client: TestClient,
+) -> None:
+    project = create_original_project(client, "legacy-membership-project")
+    scoped_id = client.repository.workflow_project_id(project["id"])
+    client.workflow.delete_project_data(scoped_id)
+    legacy_id = str(project["id"])
+    task = client.workflow.ensure_project_task(
+        legacy_id,
+        None,
+        actor=client.principal,
+    )
+    client.workflow.ensure_project_creator(
+        legacy_id,
+        client.principal.user_id,
+        client.principal,
+    )
+    with client.repository._connect() as connection:
+        connection.execute(
+            "UPDATE creative_projects SET workflow_task_id = ?, "
+            "creation_workflow_task_id = ? WHERE id = ?",
+            (task["id"], task["id"], project["id"]),
+        )
+    writer_role = client.identity.get_role_by_code("screenwriter")
+    assert writer_role is not None
+    writer = client.identity.create_user(
+        f"legacy-writer-{uuid.uuid4().hex}", "历史项目编剧", "hash"
+    )
+    client.created_user_ids.append(writer["id"])
+    client.identity.replace_user_roles(writer["id"], [writer_role["id"]])
+    client.workflow.add_project_member(
+        legacy_id,
+        writer["id"],
+        "screenwriter",
+        client.principal,
+    )
+    writer_client = _client_for_user(client.app, client.sessions, writer["id"])
+
+    listed = writer_client.get(
+        "/api/creative/projects", params={"participating_only": "true"}
+    )
+    opened = writer_client.get(f"/api/creative/projects/{project['id']}")
+
+    assert listed.status_code == 200, listed.text
+    assert [item["id"] for item in listed.json()["items"]] == [project["id"]]
+    assert opened.status_code == 200, opened.text
+    assert opened.json()["id"] == project["id"]
+    assert client.workflow.get_task(task["id"])["project_id"] == legacy_id
+
+
 def test_original_project_can_ensure_a_successor_brief_task(
     client: TestClient,
 ) -> None:
@@ -230,18 +287,22 @@ def test_original_project_can_ensure_a_successor_brief_task(
 
 def test_project_list_reports_a_missing_creation_task_without_failing(
     client: TestClient,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     project = create_original_project(client, "missing-project-workflow-task")
     client.workflow.delete_project_data(
         client.repository.workflow_project_id(project["id"])
     )
 
-    response = client.get("/api/creative/projects")
+    with caplog.at_level(logging.WARNING, logger="aiworker.creative"):
+        response = client.get("/api/creative/projects")
 
     assert response.status_code == 200, response.text
     listed = next(item for item in response.json()["items"] if item["id"] == project["id"])
     assert listed["workflow_link_status"] == "missing"
     assert listed["workflow_task_missing"] is True
+    assert str(project["id"]) in caplog.text
+    assert str(project["creation_workflow_task_id"]) in caplog.text
 
     repaired = client.post(
         f"/api/creative/projects/{project['id']}/workflow-tasks/brief/ensure"
@@ -253,6 +314,31 @@ def test_project_list_reports_a_missing_creation_task_without_failing(
         item for item in refreshed.json()["items"] if item["id"] == project["id"]
     )
     assert relisted["workflow_link_status"] == "linked"
+
+
+def test_project_list_returns_stable_503_when_workflow_storage_is_unavailable(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    project = create_original_project(client, "project-list-storage-unavailable")
+
+    def unavailable(_task_id: str) -> None:
+        raise RuntimeError("workflow storage unavailable")
+
+    monkeypatch.setattr(client.workflow, "get_task", unavailable)
+    failure_client = TestClient(client.app, raise_server_exceptions=False)
+    failure_client.cookies.update(client.cookies)
+
+    with caplog.at_level(logging.ERROR, logger="aiworker.creative"):
+        response = failure_client.get("/api/creative/projects")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "项目工作流状态暂不可用，请稍后重试"
+    assert "workflow storage unavailable" not in response.text
+    assert str(project["id"]) in caplog.text
+    assert str(project["creation_workflow_task_id"]) in caplog.text
+    assert any(record.exc_info for record in caplog.records)
 
 
 def test_original_successor_brief_can_update_version_scoped_project_settings(
@@ -363,11 +449,12 @@ def test_project_delete_retries_cross_database_cleanup_from_durable_tombstone(
     client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = create_original_project(client, "delete-saga")
+    workflow_project_id = client.repository.workflow_project_id(project["id"])
     delete_workflow = client.workflow.delete_project_data
     delete_creative = CreativeRepository.delete_project
 
     def delete_creative_after_workflow_fence(repository, *args, **kwargs):
-        assert client.workflow.is_project_deleting(str(project["id"])) is True
+        assert client.workflow.is_project_deleting(workflow_project_id) is True
         return delete_creative(repository, *args, **kwargs)
 
     monkeypatch.setattr(
@@ -389,7 +476,7 @@ def test_project_delete_retries_cross_database_cleanup_from_durable_tombstone(
 
     assert second.status_code == 200, second.text
     assert client.repository.get_pending_project_deletion(project["id"]) is None
-    assert client.workflow.is_project_deleting(str(project["id"])) is False
+    assert client.workflow.is_project_deleting(workflow_project_id) is False
 
 
 def test_project_delete_recovers_from_workflow_marker_after_creative_tombstone_cleared(
@@ -398,6 +485,7 @@ def test_project_delete_recovers_from_workflow_marker_after_creative_tombstone_c
     """A crash between the two marker clears must remain retryable by its requester."""
 
     project = create_original_project(client, "delete-marker-only-recovery")
+    workflow_project_id = client.repository.workflow_project_id(project["id"])
     complete_workflow = client.workflow.complete_project_deletion
     monkeypatch.setattr(
         client.workflow,
@@ -410,7 +498,7 @@ def test_project_delete_recovers_from_workflow_marker_after_creative_tombstone_c
 
     assert client.repository.get_project(project["id"]) is None
     assert client.repository.get_pending_project_deletion(project["id"]) is None
-    pending = client.workflow.get_pending_project_deletion(str(project["id"]))
+    pending = client.workflow.get_pending_project_deletion(workflow_project_id)
     assert pending is not None
     assert pending["requested_by"] == client.principal.user_id
     assert pending["project_snapshot"]["name"] == project["name"]
@@ -420,13 +508,13 @@ def test_project_delete_recovers_from_workflow_marker_after_creative_tombstone_c
     )
 
     assert denied.status_code == 403, denied.text
-    assert client.workflow.is_project_deleting(str(project["id"])) is True
+    assert client.workflow.is_project_deleting(workflow_project_id) is True
 
     recovered = client.delete(f"/api/creative/projects/{project['id']}")
 
     assert recovered.status_code == 200, recovered.text
     assert recovered.json() == {"id": project["id"], "name": project["name"]}
-    assert client.workflow.is_project_deleting(str(project["id"])) is False
+    assert client.workflow.is_project_deleting(workflow_project_id) is False
 
 
 def test_project_delete_does_not_adopt_an_active_writer_rollback_marker(
@@ -435,7 +523,7 @@ def test_project_delete_does_not_adopt_an_active_writer_rollback_marker(
     """A normal DELETE must not take ownership of a pre-delete Writer fence."""
 
     project = create_original_project(client, "delete-writer-marker-conflict")
-    project_id = str(project["id"])
+    project_id = client.repository.workflow_project_id(project["id"])
     client.workflow.begin_project_deletion(
         project_id,
         owner_token="writer-rollback:other-operation",
@@ -461,7 +549,7 @@ def test_project_delete_resumes_its_own_marker_before_creative_delete(
     """A crash after the Workflow fence but before Creative must be retryable."""
 
     project = create_original_project(client, "delete-pre-creative-recovery")
-    project_id = str(project["id"])
+    project_id = client.repository.workflow_project_id(project["id"])
     owner_token = f"creative-delete:{project_id}:interrupted-request"
     client.workflow.begin_project_deletion(
         project_id,
@@ -506,7 +594,9 @@ def test_original_create_api_is_idempotent_and_bootstraps_empty_topic_tasks(
         "brief", "characters", "outline", "beats", "script",
     }
     assert all(task["topic_id"] is None for task in tasks)
-    members = client.workflow.list_project_members(str(first_project["id"]))
+    members = client.workflow.list_project_members(
+        client.repository.workflow_project_id(first_project["id"])
+    )
     assert [item["project_role"] for item in members] == ["project_creator"]
 
 

@@ -167,6 +167,59 @@ class CreativeRepository:
         local_id = value.removeprefix(prefix)
         return int(local_id) if local_id.isdigit() and int(local_id) > 0 else None
 
+    def project_workflow_identity_evidence(
+        self, project_id: int
+    ) -> dict[str, Any]:
+        """Return local task and creator evidence without modifying history."""
+
+        with self._connect() as conn:
+            project = conn.execute(
+                "SELECT created_by, workflow_task_id, creation_workflow_task_id "
+                "FROM creative_projects WHERE id = ? AND deleted = 0",
+                (int(project_id),),
+            ).fetchone()
+            if project is None:
+                return {"created_by": "", "task_ids": set()}
+            task_ids = {
+                str(value)
+                for value in (
+                    project["workflow_task_id"],
+                    project["creation_workflow_task_id"],
+                )
+                if value
+            }
+            for table in (
+                "creative_blueprints",
+                "creative_characters",
+                "creative_relationships",
+                "creative_episodes",
+            ):
+                task_ids.update(
+                    str(row["workflow_task_id"])
+                    for row in conn.execute(
+                        f"SELECT workflow_task_id FROM {table} "
+                        "WHERE project_id = ? AND workflow_task_id IS NOT NULL",
+                        (int(project_id),),
+                    ).fetchall()
+                )
+        return {
+            "created_by": str(project["created_by"] or ""),
+            "task_ids": task_ids,
+        }
+
+    def topic_workflow_task_ids(self, topic_id: int) -> set[str]:
+        """Return local breakdown tasks that can prove a legacy topic scope."""
+
+        with self._connect() as conn:
+            return {
+                str(row["workflow_task_id"])
+                for row in conn.execute(
+                    "SELECT workflow_task_id FROM creative_breakdowns "
+                    "WHERE topic_id = ? AND workflow_task_id IS NOT NULL",
+                    (int(topic_id),),
+                ).fetchall()
+            }
+
     @staticmethod
     def _migrate_project_table_if_needed(db_path: str | Path) -> None:
         """Rebuild legacy project constraints so originals can omit source records."""

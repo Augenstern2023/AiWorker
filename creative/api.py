@@ -13,6 +13,7 @@ import csv
 from datetime import datetime
 from io import BytesIO, StringIO
 import json
+import logging
 from pathlib import Path
 import re
 from typing import Any, Callable
@@ -43,6 +44,7 @@ from creative.repository import CreativeRepository, TopicDecisionConflict, canon
 from creative.script_service import normalize_script_content, rewrite_outline_field, validate_script
 from creative.selection_stage_service import SelectionStageService
 from creative.workflow_adapter import CreativeWorkflowAdapter
+from creative.workflow_identity import WorkflowIdentityResolver
 
 from creative.schema import (
     BlueprintDeriveRequest,
@@ -100,6 +102,9 @@ from workflow.repository import (
     WorkflowRepository,
 )
 from workflow.transition_service import TransitionService
+
+
+logger = logging.getLogger("aiworker.creative")
 
 
 class TopicGenerateRequest(BaseModel):
@@ -294,10 +299,17 @@ def creative_api_authorization(
         creative_repository = getattr(
             request.app.state, "creative_repository", None
         )
+        workflow_identity = getattr(
+            request.app.state, "workflow_identity_resolver", None
+        )
         project_id = (
-            creative_repository.workflow_project_id(local_project_id)
-            if isinstance(creative_repository, CreativeRepository)
-            else local_project_id
+            workflow_identity.project_id(local_project_id)
+            if isinstance(workflow_identity, WorkflowIdentityResolver)
+            else (
+                creative_repository.workflow_project_id(local_project_id)
+                if isinstance(creative_repository, CreativeRepository)
+                else local_project_id
+            )
         )
         can_claim_established_writing = bool(
             method == "POST"
@@ -993,15 +1005,17 @@ def build_creative_router(
         Path(runtime_dir) / "creative" / "creative.db"
     )
 
-    def workflow_project_id(project_id: int | str) -> str:
-        return repository.workflow_project_id(project_id)
-
     if workflow_repository is None:
         workflow_repository = WorkflowRepository(
             IdentityRepository(
                 SystemDatabase(SystemDatabaseSettings.from_environment())
             )
         )
+    workflow_identity = WorkflowIdentityResolver(repository, workflow_repository)
+
+    def workflow_project_id(project_id: int | str) -> str:
+        return workflow_identity.project_id(project_id)
+
     workflow_adapter = (
         application_service.workflow_adapter
         if application_service is not None
@@ -1026,13 +1040,13 @@ def build_creative_router(
     )
     free_mode_service = FreeCreativeModeService(repository)
     if application_service is None:
-        workflow_identity = getattr(
+        workflow_identity_repository = getattr(
             workflow_repository, "identity_repository", None
         )
-        if workflow_identity is not None:
+        if workflow_identity_repository is not None:
             application_permission_service: Any = PermissionService(
-                workflow_identity,
-                SessionService(workflow_identity),
+                workflow_identity_repository,
+                SessionService(workflow_identity_repository),
             )
         else:
             class InjectedWorkflowPermissionBoundary:
@@ -1776,7 +1790,7 @@ def build_creative_router(
                     project_id is not None
                     or topic_id is None
                     or task.get("workflow_id")
-                    == f"topic:{repository.workflow_topic_id(topic_id)}"
+                    == f"topic:{workflow_identity.topic_scope(topic_id)}"
                 )
             ]
             if len(candidates) != 1:
@@ -2820,8 +2834,24 @@ def build_creative_router(
             if not task_id:
                 item["workflow_link_status"] = "unbound"
                 continue
-            task = workflow_repository.get_task(task_id)
+            try:
+                task = workflow_repository.get_task(task_id)
+            except Exception as exc:
+                logger.exception(
+                    "Project workflow lookup failed: project_id=%s task_id=%s",
+                    item["id"],
+                    task_id,
+                )
+                raise HTTPException(
+                    503, "项目工作流状态暂不可用，请稍后重试"
+                ) from exc
             if task is None:
+                logger.warning(
+                    "Project creation workflow task missing; retaining source reference: "
+                    "project_id=%s task_id=%s",
+                    item["id"],
+                    task_id,
+                )
                 item["workflow_link_status"] = "missing"
                 item["workflow_task_missing"] = True
                 continue
@@ -4902,6 +4932,20 @@ def register_creative_routes(
     llm_provider_factory: Callable[[], Any] | None = None,
     llm_model_resolver: Callable[[str], dict[str, Any]] | None = None,
 ) -> None:
+    repository = repository or CreativeRepository(
+        Path(runtime_dir) / "creative" / "creative.db"
+    )
+    if workflow_repository is None:
+        workflow_repository = WorkflowRepository(
+            IdentityRepository(
+                SystemDatabase(SystemDatabaseSettings.from_environment())
+            )
+        )
+    app.state.creative_repository = repository
+    app.state.workflow_repository = workflow_repository
+    app.state.workflow_identity_resolver = WorkflowIdentityResolver(
+        repository, workflow_repository
+    )
     app.include_router(
         build_creative_router(
             root=root,

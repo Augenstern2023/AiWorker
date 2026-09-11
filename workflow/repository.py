@@ -999,7 +999,9 @@ class WorkflowRepository:
                     .where(
                         project_members.c.project_id == legacy_id,
                         project_members.c.user_id == creator_user_id,
-                        project_members.c.project_role == PROJECT_CREATOR_ROLE,
+                        project_members.c.project_role.in_(
+                            (PROJECT_CREATOR_ROLE, "project_owner")
+                        ),
                         project_members.c.status == "active",
                     )
                     .limit(1)

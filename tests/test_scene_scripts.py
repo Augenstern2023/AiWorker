@@ -63,6 +63,11 @@ def test_delivery_task_lookup_uses_sqlalchemy_bind_parameters() -> None:
 
     service = object.__new__(DeliveryService)
     service.workflow_repository = WorkflowRepository()
+    service.creative_repository = type(
+        "CreativeRepository",
+        (),
+        {"workflow_project_id": staticmethod(lambda project_id: str(project_id))},
+    )()
 
     task = service._resolve_delivery_task(42, None)
 

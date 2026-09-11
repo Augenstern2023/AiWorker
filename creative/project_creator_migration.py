@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from creative.repository import CreativeRepository
+from creative.workflow_identity import WorkflowIdentityResolver
 from workflow.repository import WorkflowRepository
 
 
@@ -18,9 +19,10 @@ def migrate_project_creator_memberships(
     workflow_repository: WorkflowRepository,
 ) -> int:
     """Migrate only legacy owner memberships that match each project's creator."""
+    identity = WorkflowIdentityResolver(creative_repository, workflow_repository)
     return sum(
         workflow_repository.migrate_creator_membership(
-            creative_repository.workflow_project_id(project_id), created_by
+            identity.project_id(project_id), created_by
         )
         for project_id, created_by in creative_repository.list_project_creator_audit_rows()
     )

@@ -26,10 +26,15 @@ class WorkflowIdentityResolver:
     def project_id(self, local_project_id: int | str) -> str:
         local_id = int(local_project_id)
         scoped_id = self.creative_repository.workflow_project_id(local_id)
+        resolve = getattr(
+            self.workflow_repository, "resolve_creative_project_identity", None
+        )
+        if not callable(resolve):
+            return scoped_id
         evidence = self.creative_repository.project_workflow_identity_evidence(
             local_id
         )
-        return self.workflow_repository.resolve_creative_project_identity(
+        return resolve(
             scoped_id=scoped_id,
             legacy_id=str(local_id),
             task_ids=evidence["task_ids"],
@@ -47,8 +52,13 @@ class WorkflowIdentityResolver:
     def topic_scope(self, local_topic_id: int | str) -> str:
         local_id = int(local_topic_id)
         scoped_scope = self.creative_repository.workflow_topic_id(local_id)
+        resolve = getattr(
+            self.workflow_repository, "resolve_creative_topic_scope", None
+        )
+        if not callable(resolve):
+            return scoped_scope
         task_ids = self.creative_repository.topic_workflow_task_ids(local_id)
-        return self.workflow_repository.resolve_creative_topic_scope(
+        return resolve(
             scoped_scope=scoped_scope,
             legacy_scope=str(local_id),
             task_ids=task_ids,

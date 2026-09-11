@@ -44,6 +44,9 @@ def orchestrator_context(tmp_path: Path) -> SimpleNamespace:
     creative_service.get_project.side_effect = lambda project_id: {
         "id": project_id, "name": f"项目 {project_id}", "revision": 0,
     }
+    creative_service.repository.workflow_project_id.side_effect = (
+        lambda project_id: str(project_id)
+    )
     permission_service = MagicMock()
     permission_service.can_read_project.side_effect = (
         lambda _actor, project_id: project_id != "404"

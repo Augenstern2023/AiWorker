@@ -197,13 +197,7 @@ def test_project_brief_long_text_controls_wrap_without_clipping():
     blueprint = _read("templates/common/workspace/project_blueprints.html")
     workspace_css = _read("static/css/workspaces.css")
     bootstrap_css = _read("static/css/bootstrap.min.css")
-    markup = blueprint.replace(
-        '<template x-if="selectedProjectBlueprint()"><div class="border-top pt-3">',
-        '<div class="border-top pt-3">',
-    ).replace("</div></template>", "</div>").replace(
-        '<template x-if="creativeWorkspace.project?.creation_mode !== \'original\'"><div class="imitation-brief-workspace">',
-        '<div class="imitation-brief-workspace">',
-    ).replace("</div>\n</template>\n</div>\n", "</div>\n</div>\n")
+    markup = re.sub(r"</?template\b[^>]*>", "", blueprint)
     fields = (
         ("creativeWorkspace.project.target_audience", 16),
         ("selectedProjectBlueprint().content.protagonist", 24),
@@ -217,7 +211,7 @@ def test_project_brief_long_text_controls_wrap_without_clipping():
         page = browser.new_page(viewport={"width": 1600, "height": 900})
         page.set_content(f"<style>{bootstrap_css}{workspace_css}</style>{markup}")
         for field, characters_per_line in fields:
-            control = page.locator(f'textarea[x-model="{field}"]')
+            control = page.locator(f'textarea[x-model="{field}"]').first
             rows = max(2, (len(value) + characters_per_line - 1) // characters_per_line)
             control.evaluate("(element, rows) => element.rows = rows", rows)
             control.fill(value)
@@ -270,17 +264,7 @@ def test_project_beats_long_text_controls_wrap_without_clipping():
     beats = _read("templates/common/workspace/project_beats.html")
     workspace_css = _read("static/css/workspaces.css")
     bootstrap_css = _read("static/css/bootstrap.min.css")
-    markup = re.sub(
-        r'<template x-if="selectedProjectBeats\(\)">\s*<div>',
-        "<div>",
-        beats,
-    )
-    markup = re.sub(
-        r'<template x-for="beat in selectedProjectBeats\(\)\.content\.beats" '
-        r':key="beat\.order">\s*<tr>',
-        "<tr>",
-        markup,
-    ).replace("</tr></template>", "</tr>").replace("</div></template>", "</div>")
+    markup = re.sub(r"</?template\b[^>]*>", "", beats)
     value = "主角在高压环境中做出艰难选择，关系与目标同时受到阻力。" * 3
 
     with sync_playwright() as playwright:

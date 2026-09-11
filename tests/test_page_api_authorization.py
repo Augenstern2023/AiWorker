@@ -602,6 +602,11 @@ def test_delivery_page_filters_records_to_the_principal_project_scope() -> None:
             return {principal.user_id}
 
     class FakeDeliveryService:
+        class creative_repository:
+            @staticmethod
+            def workflow_project_id(project_id):
+                return str(project_id)
+
         records = [
             {"id": "allowed", "project_id": "allowed-project"},
             {"id": "forbidden", "project_id": "other-project"},
@@ -685,6 +690,9 @@ def test_global_project_owner_generates_for_project_without_membership(
     workflow = object.__new__(WorkflowRepository)
     workflow.list_project_members = lambda project_id: []  # type: ignore[method-assign]
     workflow.link_task_job = lambda task_id, job_id: None  # type: ignore[method-assign]
+    workflow.resolve_creative_project_identity = (  # type: ignore[method-assign]
+        lambda **kwargs: kwargs["scoped_id"]
+    )
     monkeypatch.setattr(
         "creative.api.TransitionService.migrate_pending_creative_approvals",
         lambda self: [],

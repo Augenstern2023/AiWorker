@@ -240,7 +240,8 @@ def test_screenwriter_creates_project_with_team_and_pool_tasks_idempotently(
         assert first.status_code == 200, first.text
         assert repeated.status_code == 200, repeated.text
         project_id = str(first.json()["project"]["id"])
-        cleanup["project_id"] = project_id
+        workflow_project_id = creative.workflow_project_id(project_id)
+        cleanup["project_id"] = workflow_project_id
         assert str(repeated.json()["project"]["id"]) == project_id
         first_tasks = first.json()["tasks"]
         repeated_tasks = repeated.json()["tasks"]
@@ -260,10 +261,10 @@ def test_screenwriter_creates_project_with_team_and_pool_tasks_idempotently(
         with identity.connect() as connection:
             task_count = connection.exec_driver_sql(
                 "SELECT COUNT(*) FROM workflow_tasks WHERE workflow_id = %s",
-                (f"project:{project_id}",),
+                (f"project:{workflow_project_id}",),
             ).scalar_one()
         assert task_count == 5
-        members = workflow.list_project_members(project_id)
+        members = workflow.list_project_members(workflow_project_id)
         assert {
             (item["user_id"], item["project_role"], item["status"])
             for item in members
@@ -292,8 +293,11 @@ def test_screenwriter_creates_project_with_team_and_pool_tasks_idempotently(
             if item["id"] == topic["id"]
         )
         assert outsider_topic["can_open_project"] is True
-        assert permissions.can_read_project(outsider, project_id) is True
-        assert permissions.can_access_assigned_project(outsider, project_id) is False
+        assert permissions.can_read_project(outsider, workflow_project_id) is True
+        assert (
+            permissions.can_access_assigned_project(outsider, workflow_project_id)
+            is False
+        )
         outsider_project = client.get(f"/api/creative/projects/{project_id}")
         assert outsider_project.status_code == 200, outsider_project.text
         assert outsider_project.json()["preview_only"] is True
@@ -357,8 +361,8 @@ def test_screenwriter_creates_project_with_team_and_pool_tasks_idempotently(
         assert '@click="openTopicProject(topic)"' in creator_html
         assert '@click="openTopicProject(topic)"' in outsider_html
     finally:
-        if project_id is not None:
-            workflow.delete_project_data(project_id)
+        if cleanup["project_id"] is not None:
+            workflow.delete_project_data(str(cleanup["project_id"]))
         for user in (
             creator_user,
             planner_user,
@@ -756,9 +760,12 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
     workflow_ids: list[str] = []
 
     def cleanup_postgres() -> None:
-        creative_projects = CreativeRepository(runtime / "creative/creative.db").list_projects()
+        creative_repository = CreativeRepository(runtime / "creative/creative.db")
+        creative_projects = creative_repository.list_projects()
         for item in creative_projects:
-            workflow.delete_project_data(str(item["id"]))
+            workflow.delete_project_data(
+                creative_repository.workflow_project_id(item["id"])
+            )
         with identity.transaction() as connection:
             for workflow_id in workflow_ids:
                 connection.exec_driver_sql(
@@ -790,9 +797,10 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
     creative.update_topic(topic["id"], "adopted")
     breakdown = creative.create_breakdown(topic["id"], {"title": topic["title"]}, {}, [])
     creative.lock_breakdown(breakdown["id"])
+    topic_scope = creative.workflow_topic_id(topic["id"])
 
     foreign_task = workflow.create_task(
-        f"foreign-brief-{uuid.uuid4().hex}",
+        f"topic:{topic_scope}:foreign-brief-{uuid.uuid4().hex}",
         "brief",
         "screenwriter",
         topic_id=topic["id"],
@@ -802,7 +810,7 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
         foreign_task["id"], victim_user["id"], admin
     )
     own_task = workflow.create_task(
-        f"own-brief-{uuid.uuid4().hex}",
+        f"topic:{topic_scope}:own-brief-{uuid.uuid4().hex}",
         "brief",
         "screenwriter",
         topic_id=topic["id"],
@@ -810,7 +818,7 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
     )
     own_task = workflow.assign_task(own_task["id"], creator.user_id, admin)
     wrong_type_task = workflow.create_task(
-        f"wrong-type-{uuid.uuid4().hex}",
+        f"topic:{topic_scope}:wrong-type-{uuid.uuid4().hex}",
         "outline",
         "screenwriter",
         topic_id=topic["id"],
@@ -820,6 +828,7 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
         wrong_type_task["id"], creator.user_id, admin
     )
     wrong_topic_task = workflow.create_task(
+        f"topic:{creative.workflow_topic_id(topic['id'] + 1000)}:"
         f"wrong-topic-{uuid.uuid4().hex}",
         "brief",
         "screenwriter",
@@ -830,7 +839,7 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
         wrong_topic_task["id"], creator.user_id, admin
     )
     pool_task = workflow.create_task(
-        f"pool-brief-{uuid.uuid4().hex}",
+        f"topic:{topic_scope}:pool-brief-{uuid.uuid4().hex}",
         "brief",
         "screenwriter",
         topic_id=topic["id"],
@@ -899,10 +908,11 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
     assert pool_response.status_code == 409, pool_response.text
     assert own_response.status_code == 200, own_response.text
     project_id = str(own_response.json()["id"])
-    assert workflow.get_task(own_task["id"])["project_id"] == project_id
+    workflow_project_id = creative.workflow_project_id(project_id)
+    assert workflow.get_task(own_task["id"])["project_id"] == workflow_project_id
     assert {
         (member["user_id"], member["project_role"])
-        for member in workflow.list_project_members(project_id)
+        for member in workflow.list_project_members(workflow_project_id)
     } >= {
         (creator.user_id, "project_creator"),
         (creator.user_id, "screenwriter"),
@@ -910,7 +920,7 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
     tasks = [
         task
         for task in workflow.list_tasks(creator)
-        if str(task.get("project_id") or "") == project_id
+        if str(task.get("project_id") or "") == workflow_project_id
     ]
     assert {task["task_type"] for task in tasks} == {
         "brief",
@@ -924,11 +934,11 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
         connection.exec_driver_sql(
             "UPDATE project_members SET status = 'inactive' WHERE project_id = %s "
             "AND project_role = 'project_creator'",
-            (project_id,),
+            (workflow_project_id,),
         )
         connection.exec_driver_sql(
             "DELETE FROM workflow_instances WHERE id = %s",
-            (f"project:{project_id}",),
+            (f"project:{workflow_project_id}",),
         )
     replay = client.post(
         "/api/creative/projects",
@@ -940,7 +950,7 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
     )
 
     assert replay.status_code == 200, replay.text
-    replay_members = workflow.list_project_members(project_id)
+    replay_members = workflow.list_project_members(workflow_project_id)
     assert (creator.user_id, "project_creator", "inactive") in {
         (member["user_id"], member["project_role"], member["status"])
         for member in replay_members
@@ -948,26 +958,26 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
     replay_tasks = [
         task
         for task in workflow.list_tasks(creator)
-        if task.get("workflow_id") == f"project:{project_id}"
+        if task.get("workflow_id") == f"project:{workflow_project_id}"
     ]
     assert len(replay_tasks) == 5
 
     workflow.add_project_member(
-        project_id, victim_user["id"], "screenwriter", admin
+        workflow_project_id, victim_user["id"], "screenwriter", admin
     )
     reactivated_creator = workflow.add_project_member(
-        project_id, creator.user_id, "project_creator", admin
+        workflow_project_id, creator.user_id, "project_creator", admin
     )
     created_by = creative.get_project(int(project_id))["created_by"]
     app.dependency_overrides[creative_api_principal] = lambda: admin
     app.dependency_overrides[current_principal] = lambda: admin
     deactivated = client.delete(
-        f"/api/workflow/projects/{project_id}/members/"
+        f"/api/workflow/projects/{workflow_project_id}/members/"
         f"{reactivated_creator['id']}"
     )
     assert deactivated.status_code == 204, deactivated.text
 
-    members_after_deactivation = workflow.list_project_members(project_id)
+    members_after_deactivation = workflow.list_project_members(workflow_project_id)
     assert {
         (member["project_role"], member["status"])
         for member in members_after_deactivation

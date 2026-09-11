@@ -215,7 +215,7 @@ def _lock_brief_via_workflow(
     task = next(
         item
         for item in client.workflow.list_tasks(client.principal)
-        if item["project_id"] == str(project["id"])
+        if item["project_id"] == client.repository.workflow_project_id(project["id"])
         and item["task_type"] == "brief"
     )
     claimed = client.post(f"/api/workflow/tasks/{task['id']}/claim")

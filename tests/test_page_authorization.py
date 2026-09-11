@@ -185,6 +185,13 @@ def test_system_admin_role_code_bypasses_whitelist_but_wildcard_permission_does_
     assert 'href="/admin/users"' in administrator.get("/profile").text
 
 
+def test_system_administrator_gets_not_found_for_removed_team_management_pages(page_app):
+    administrator = _client(page_app, _principal(roles=("system_admin",)))
+
+    assert administrator.get("/review/users").status_code == 404
+    assert administrator.get("/review/roles").status_code == 404
+
+
 def test_project_owner_does_not_have_navigation_configuration_privilege(page_app):
     owner = _client(page_app, _principal(roles=("project_owner",)))
 

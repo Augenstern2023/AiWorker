@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import Text
 
-from identity.permission_catalog import NAVIGATION_CATALOG
+from identity.permission_catalog import NAVIGATION_CATALOG, PERMISSIONS
 from identity.schema import Principal
 from system_database.schema import SYSTEM_METADATA
 from web.page_access_service import PageAccessService
@@ -85,6 +85,27 @@ def test_system_administrator_navigation_keeps_system_backend_page():
 
     assert "/admin/jobs" in visible_routes
     assert navigation.can_open(_system_administrator(), "/admin/jobs") is True
+
+
+def test_team_management_routes_and_permissions_are_removed():
+    removed_routes = {"/review/users", "/review/roles"}
+    removed_permissions = {
+        "page.team_management",
+        "identity.user.read",
+        "identity.user.create",
+        "identity.user.manage_created",
+        "identity.role.read",
+        "identity.role.create",
+        "identity.role.manage_created",
+    }
+
+    assert removed_routes.isdisjoint({item[0] for item in PAGE_ROUTES})
+    assert removed_routes.isdisjoint({item["route"] for item in NAVIGATION_CATALOG})
+    assert removed_permissions.isdisjoint(PERMISSIONS)
+    assert all(
+        item["required_permission"] not in removed_permissions
+        for item in NAVIGATION_CATALOG
+    )
 
 
 def test_navigation_service_filters_configured_items_by_catalog_permissions():

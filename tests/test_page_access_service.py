@@ -370,7 +370,6 @@ def test_global_disable_precedes_whitelist_and_project_owner_navigation_privileg
         ),
         ("/admin/users", "GET", "/api/admin/departments"),
         ("/admin/users", "GET", "/api/admin/roles"),
-        ("/review/users", "GET", "/api/team/roles"),
         ("/review/scripts", "POST", "/api/script-reviews/review-1/optimizations"),
         ("/review/scripts", "GET", "/api/script-optimizations/optimization-1"),
         ("/review/scripts", "POST", "/api/script-optimization-drafts/draft-1/accept"),
@@ -557,6 +556,14 @@ def test_catalog_covers_all_registered_page_routes_once() -> None:
 
     assert catalog_routes == registered_routes
     assert len(catalog_routes) == len(set(catalog_routes))
+
+
+def test_page_api_catalog_has_no_team_management_paths() -> None:
+    assert all(
+        not api_path.startswith("/api/team/")
+        for entry in PAGE_ACCESS_CATALOG
+        for _, api_path in entry["api_routes"]
+    )
 
 
 def test_legacy_task_pages_are_explicitly_denied_without_page_grants() -> None:

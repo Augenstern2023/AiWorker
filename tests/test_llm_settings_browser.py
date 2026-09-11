@@ -87,6 +87,7 @@ def _llm_state() -> dict:
         "saving": False,
         "syncing": False,
         "testing": False,
+        "providerDeletingId": "",
         "modelSaving": False,
         "modelDeletingId": "",
         "defaultSavingId": "",
@@ -164,6 +165,14 @@ def _mount_llm_page(page: Page, payload: dict = SETTINGS_PAYLOAD) -> None:
                 }
                 return {ok: true, status: 200, async json() {
                   return {status: 'success', model_id: recordId};
+                }};
+              }
+              if (url.startsWith('/api/llm/providers/') && options.method === 'DELETE') {
+                const providerId = url.split('/').at(-1);
+                window.settingsPayload.providers = (window.settingsPayload.providers || [])
+                  .filter(provider => provider.id !== providerId);
+                return {ok: true, status: 200, async json() {
+                  return {status: 'success', provider_id: providerId};
                 }};
               }
               return {ok: true, status: 200, async json() {
@@ -493,7 +502,62 @@ def test_llm_non_default_model_can_be_deleted_after_confirmation() -> None:
         )
 
         assert not page.get_by_text("Broken Model", exact=True).is_visible()
-        assert page.get_by_text("模型 Broken Model 已删除", exact=True).is_visible()
+        page.get_by_text("模型 Broken Model 已删除", exact=True).wait_for()
+        browser.close()
+
+
+def test_llm_non_default_provider_can_be_deleted_after_confirmation() -> None:
+    payload = deepcopy(SETTINGS_PAYLOAD)
+    payload["providers"].append(
+        {
+            "id": "provider-2",
+            "name": "备用网关",
+            "preset": "custom",
+            "base_url": "https://backup.example.test/v1",
+            "wire_api": "chat_completions",
+            "has_api_key": True,
+            "is_enabled": True,
+            "is_default": False,
+            "models": [
+                {
+                    "id": "model-record-2",
+                    "provider_id": "provider-2",
+                    "model_id": "backup-model",
+                    "display_name": "Backup Model",
+                    "source": "manual",
+                    "is_enabled": True,
+                    "is_default": False,
+                }
+            ],
+        }
+    )
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        dialogs: list[str] = []
+
+        def accept_dialog(dialog) -> None:
+            dialogs.append(dialog.message)
+            dialog.accept()
+
+        page.on("dialog", accept_dialog)
+        _mount_llm_page(page, payload)
+        page.evaluate(
+            "document.querySelector('main')._x_dataStack[0].fetchLLMSettings()"
+        )
+
+        assert page.get_by_role(
+            "button", name="删除提供商 内部网关"
+        ).is_disabled()
+        page.get_by_text("备用网关", exact=True).click()
+        page.get_by_role("button", name="删除提供商 备用网关").click()
+        page.wait_for_function(
+            "window.requests.some(item => item.url === '/api/llm/providers/provider-2' && item.method === 'DELETE')"
+        )
+
+        assert "1 个模型" in dialogs[0]
+        page.get_by_text("提供商 备用网关 已删除", exact=True).wait_for()
+        assert not page.get_by_text("备用网关", exact=True).is_visible()
         browser.close()
 
 

@@ -1054,6 +1054,36 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
+                async deleteLLMProvider() {
+                    const state = this.llmSettings;
+                    const provider = this.selectedLLMProvider();
+                    if (!provider?.id || provider.is_default || state.providerDeletingId) return;
+                    const label = provider.name || provider.id;
+                    const modelCount = (provider.models || []).length;
+                    if (!window.confirm(
+                        `确认删除提供商「${label}」？这会同时删除 ${modelCount} 个模型和已保存的 API Key，且无法撤销。`
+                    )) return;
+                    state.providerDeletingId = provider.id;
+                    state.error = '';
+                    state.notice = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/llm/providers/${provider.id}`,
+                            {method: 'DELETE'}
+                        );
+                        let data = {};
+                        try { data = await response.json(); } catch (_) {}
+                        if (!response.ok) throw new Error(this.llmResponseMessage(data, '删除提供商失败'));
+                        const nextProvider = state.providers.find(item => item.id !== provider.id);
+                        await this.fetchLLMSettings({selectedProviderId: nextProvider?.id || ''});
+                        state.notice = `提供商 ${label} 已删除`;
+                    } catch (error) {
+                        state.error = error.message || '删除提供商失败';
+                    } finally {
+                        state.providerDeletingId = '';
+                    }
+                },
+
                 async syncLLMModels() {
                     const state = this.llmSettings;
                     const providerId = state.editor.id;

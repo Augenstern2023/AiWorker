@@ -351,6 +351,7 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
         ("GET", "/api/llm/settings"),
         ("POST", "/api/llm/providers"),
         ("PUT", "/api/llm/providers/{provider_id}"),
+        ("DELETE", "/api/llm/providers/{provider_id}"),
         ("POST", "/api/llm/providers/{provider_id}/models/sync"),
         ("POST", "/api/llm/providers/{provider_id}/models"),
         ("PUT", "/api/llm/models/{model_record_id}"),

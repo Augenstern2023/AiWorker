@@ -143,6 +143,7 @@
                     saving: false,
                     syncing: false,
                     testing: false,
+                    providerDeletingId: '',
                     modelSaving: false,
                     modelDeletingId: '',
                     defaultSavingId: '',

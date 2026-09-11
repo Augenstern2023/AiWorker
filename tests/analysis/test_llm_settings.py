@@ -447,6 +447,43 @@ def test_repository_deletes_a_non_default_model_and_protects_the_default():
         repository.delete_model(removable_model["id"])
 
 
+def test_repository_deletes_a_non_default_provider_and_all_of_its_models():
+    repository = _repository()
+    default_provider = repository.create_provider(
+        name="Default Provider",
+        preset="custom",
+        base_url="https://default.example.test/v1",
+        wire_api="chat_completions",
+        api_key="default-secret",
+    )
+    default_model = repository.create_model(
+        default_provider["id"], model_id="default-model"
+    )
+    repository.set_default_model(default_model["id"])
+    removable_provider = repository.create_provider(
+        name="Removable Provider",
+        preset="custom",
+        base_url="https://removable.example.test/v1",
+        wire_api="chat_completions",
+        api_key="removable-secret",
+    )
+    repository.create_model(removable_provider["id"], model_id="model-a")
+    repository.create_model(removable_provider["id"], model_id="model-b")
+
+    with pytest.raises(repository.conflict_error, match="默认模型"):
+        repository.delete_provider(default_provider["id"])
+
+    deleted = repository.delete_provider(removable_provider["id"])
+
+    assert deleted["id"] == removable_provider["id"]
+    settings = repository.settings_payload()
+    assert [provider["id"] for provider in settings["providers"]] == [
+        default_provider["id"]
+    ]
+    with pytest.raises(ValueError, match="提供商不存在"):
+        repository.delete_provider(removable_provider["id"])
+
+
 @pytest.mark.parametrize("api_key", ["", "   "])
 def test_repository_rejects_default_without_usable_credentials(api_key):
     """Would catch saving a global default that every runtime call must reject."""

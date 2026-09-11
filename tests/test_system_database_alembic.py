@@ -151,6 +151,17 @@ def test_baseline_users_structure_excludes_contact_profile():
     assert not {"uq_users_active_email", "uq_users_active_phone"} & baseline_indexes
 
 
+def test_baseline_audit_log_excludes_later_instance_identity_columns():
+    audit_logs = BASELINE_METADATA.tables["audit_logs"]
+
+    assert not {"service_instance_id", "creative_store_id"} & {
+        column.name for column in audit_logs.c
+    }
+    assert {"service_instance_id", "creative_store_id"} <= {
+        column.name for column in SYSTEM_METADATA.tables["audit_logs"].c
+    }
+
+
 def test_baseline_table_names_are_immutable():
     assert frozenset(BASELINE_METADATA.tables) == frozenset(
         {

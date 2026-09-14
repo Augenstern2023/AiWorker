@@ -1,0 +1,54 @@
+name: Alembic integrity
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify-migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: aiworker_test
+          POSTGRES_PASSWORD: aiworker_test
+          POSTGRES_DB: aiworker_migration_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aiworker_test -d aiworker_migration_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      AIWORKER_SYSTEM_DATABASE_URL: postgresql+psycopg://aiworker_test:aiworker_test@127.0.0.1:5432/aiworker_migration_test
+      AIWORKER_TEST_SYSTEM_DATABASE_URL: postgresql+psycopg://aiworker_test:aiworker_test@127.0.0.1:5432/aiworker_migration_test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run python tools/check_alembic_integrity.py repository
+      - name: Check pushed migration range
+        if: gitea.event_name == 'push'
+        run: >-
+          uv run python tools/check_alembic_integrity.py compare
+          --base "${{ gitea.event.before }}"
+          --tip "${{ gitea.sha }}"
+      - name: Check pull request migration range
+        if: gitea.event_name == 'pull_request'
+        run: >-
+          uv run python tools/check_alembic_integrity.py compare
+          --base "${{ gitea.event.pull_request.base.sha }}"
+          --tip "${{ gitea.event.pull_request.head.sha }}"
+      - run: uv run alembic upgrade head
+      - run: >-
+          uv run pytest tests/test_alembic_guard.py
+          tests/test_production_migration_guard.py
+          tests/test_alembic_guard_configuration.py
+          tests/test_system_database_alembic.py -q

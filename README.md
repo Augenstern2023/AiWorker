@@ -192,7 +192,32 @@ uv run playwright install
 
 # 提交前检查
 uv run pre-commit run --all-files
+
+# 首次检出后安装提交与推送保护
+uv run python tools/install_git_hooks.py
+
+# 手工检查 Alembic 迁移图
+uv run python tools/check_alembic_integrity.py repository
 ```
+
+Alembic 保护以 `manjuxuanpin` 为唯一主上游：数据库结构声明变化必须与新增迁移脚本
+一同提交，历史迁移不可修改或删除，推送时会再次校验提交范围。数据库结构提交不得
+使用 `--no-verify` 绕过本地检查；远端 CI 和分支保护仍是最终保障。
+
+生产数据库只能通过受控入口升级；该命令会先确认当前分支、干净工作树、数据库
+revision，以及当前 `HEAD` 已存在于 `manjuxuanpin/main`：
+
+```powershell
+uv run python tools/check_alembic_integrity.py production
+uv run python scripts/upgrade_production_database.py
+```
+
+`uv run alembic upgrade head` 仅用于隔离测试数据库，不作为生产升级入口。
+
+`manjuxuanpin` 使用 `.gitea/workflows/alembic-integrity.yml` 在干净 checkout 中复验
+提交范围、迁移图和 PostgreSQL 空库升级。仓库管理员必须启用 Gitea Actions，禁止
+直接推送 `main`，并把 `verify-migrations` 设置为合并请求的必需状态检查；工作流未
+实际运行时，不能把配置文件存在视为远端保护已经生效。
 
 ## 配置与凭证安全
 

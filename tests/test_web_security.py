@@ -26,7 +26,9 @@ from WebGUI import (
     app as production_app,
     configure_cors,
     install_security_middleware,
+    llm_settings_repository,
     resolve_backup_path,
+    system_database,
     _api_permission,
 )
 from audit.service import AuditService
@@ -251,6 +253,11 @@ def test_production_webgui_wires_shared_identity_security_and_routes():
     client = TestClient(production_app)
     assert client.get("/api/auth/me").status_code == 401
     assert client.get("/api/admin/audit").status_code == 401
+
+
+def test_production_webgui_uses_system_database_for_llm_settings():
+    assert llm_settings_repository.database is system_database
+    assert not hasattr(llm_settings_repository, "cipher")
 
 
 def test_backup_path_rejects_traversal_and_non_backup_names(tmp_path: Path):

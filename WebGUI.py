@@ -168,8 +168,8 @@ def resolve_backup_path(filename: str, backup_dir: str | Path = "backups") -> Pa
 
 def _api_permission(method: str, path: str) -> str | None:
     """Return the coarse permission for legacy routes without route dependencies."""
-    if path == "/api/profile":
-        # Profile access is owned by the authenticated session, not a role page grant.
+    if path in {"/api/profile", "/api/presence/heartbeat"}:
+        # Session-scoped APIs require authentication, not a role page grant.
         return None
     if path.startswith(
         ("/api/auth/", "/api/admin/", "/api/team/", "/api/workflow/", "/api/jobs")

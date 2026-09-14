@@ -16,6 +16,8 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from identity.api import build_identity_router
+from identity.presence_api import build_presence_router
+from identity.presence_service import PresenceService
 from identity.repository import IdentityRepository
 from identity.session_service import SessionService
 from identity.password_service import PasswordService
@@ -99,6 +101,61 @@ def test_authenticated_write_requires_matching_csrf_token(secured_app):
     assert missing.json() == {"detail": "CSRF 校验失败"}
     assert incorrect.status_code == 403
     assert accepted.status_code == 200
+
+
+def test_authenticated_non_admin_presence_heartbeat_requires_csrf_not_wildcard(
+    secured_app,
+):
+    app, session_service = secured_app
+    repository = session_service.repository
+    app.include_router(
+        build_presence_router(
+            PresenceService(repository),
+            session_service,
+            permission_service=app.state.identity_permission_service,
+        )
+    )
+    client = TestClient(app)
+    setup = client.post(
+        "/api/auth/setup",
+        json={
+            "username": "admin",
+            "display_name": "Admin",
+            "password": "Admin-Strong-123!",
+        },
+    )
+    assert setup.status_code == 201
+    writer = repository.create_user(
+        "heartbeat-writer",
+        "Heartbeat Writer",
+        PasswordService().hash("Writer-Strong-123!"),
+    )
+    login = client.post(
+        "/api/auth/login",
+        json={
+            "username": "heartbeat-writer",
+            "password": "Writer-Strong-123!",
+        },
+    )
+    assert login.status_code == 200
+    assert login.json()["user"]["id"] == writer["id"]
+    payload = {
+        "tab_id": "writer-tab",
+        "path": "/writing/projects",
+        "is_visible": True,
+        "idle_seconds": 0,
+    }
+
+    missing_csrf = client.post("/api/presence/heartbeat", json=payload)
+    accepted = client.post(
+        "/api/presence/heartbeat",
+        headers={"X-CSRF-Token": login.json()["csrf_token"]},
+        json=payload,
+    )
+
+    assert missing_csrf.status_code == 403
+    assert missing_csrf.json() == {"detail": "CSRF 校验失败"}
+    assert accepted.status_code == 204
 
 
 def test_login_and_first_run_setup_are_csrf_exempt(secured_app):

@@ -164,6 +164,22 @@ class PermissionService:
             ).mappings().first()
         return row is not None
 
+    def is_active_project_member(
+        self, principal: Principal, project_id: str
+    ) -> bool:
+        """Check active membership without applying a role data-scope floor."""
+        if principal.is_system_admin:
+            return True
+        with self.repository.connect() as connection:
+            row = connection.execute(
+                select(project_members.c.id).where(
+                    project_members.c.project_id == project_id,
+                    project_members.c.user_id == principal.user_id,
+                    project_members.c.status == "active",
+                )
+            ).first()
+        return row is not None
+
     def can_read_project(self, principal: Principal, project_id: str) -> bool:
         """Allow portfolio read access without granting assigned-project mutations."""
         if principal.data_scope == "all" or "project_owner" in principal.role_codes:

@@ -9,10 +9,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import update
+from sqlalchemy import create_engine, update
 
 from identity.api import build_identity_router
 from identity.permission_catalog import PERMISSIONS
@@ -20,6 +22,7 @@ from identity.dependencies import assigned_project_scope, require_permission
 from identity.password_service import PasswordService
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
+from identity.schema import Principal
 from identity.session_service import SessionService
 from system_database.schema import roles
 
@@ -227,3 +230,45 @@ def test_assigned_project_scope_queries_current_membership(
         )
 
     assert client.get("/projects/assigned-project").status_code == 200
+
+
+def test_active_project_membership_is_independent_of_data_scope() -> None:
+    """Reusing assigned-project scope here would reject task-scoped members."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE project_members (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                project_role TEXT NOT NULL,
+                status TEXT NOT NULL
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            INSERT INTO project_members
+                (id, project_id, user_id, project_role, status)
+            VALUES
+                ('active-review-member', 'project-1', 'member-1', 'writer', 'active'),
+                ('inactive-review-member', 'project-2', 'member-1', 'writer', 'inactive')
+            """
+        )
+    service = PermissionService(
+        SimpleNamespace(connect=engine.begin), SimpleNamespace()
+    )
+    principal = Principal(
+        user_id="member-1",
+        username="member-1",
+        display_name="项目成员",
+        role_codes=("screenwriter",),
+        permissions=frozenset(),
+        data_scope="task",
+        session_id="session-1",
+    )
+
+    assert service.is_active_project_member(principal, "project-1") is True
+    assert service.is_active_project_member(principal, "project-2") is False
+    assert service.is_active_project_member(principal, "project-3") is False

@@ -18,9 +18,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from analysis.llm import parse_chat_completion_text, parse_responses_text
 from analysis.llm_settings import (
+    LLMSecretError,
     LLMSettingsConflict,
     LLMSettingsError,
     LLMSettingsRepository,
+    environment_api_key,
     validate_llm_base_url,
 )
 from identity.dependencies import current_principal
@@ -40,7 +42,7 @@ async def require_system_administrator(
 
 
 class LLMSettingsRequest(BaseModel):
-    model_config = ConfigDict(protected_namespaces=())
+    model_config = ConfigDict(protected_namespaces=(), extra="forbid")
 
 
 class ProviderCreateRequest(LLMSettingsRequest):
@@ -48,7 +50,10 @@ class ProviderCreateRequest(LLMSettingsRequest):
     preset: PresetName
     base_url: str = Field(min_length=1, max_length=2048)
     wire_api: WireAPI
-    api_key: str = Field(default="", max_length=4096)
+    api_key_env_var: str = Field(default="", max_length=255)
+    api_key: str | None = Field(
+        default=None, max_length=4096, exclude=True, repr=False
+    )
     is_enabled: bool = True
 
 
@@ -57,8 +62,11 @@ class ProviderUpdateRequest(LLMSettingsRequest):
     preset: PresetName | None = None
     base_url: str | None = Field(default=None, min_length=1, max_length=2048)
     wire_api: WireAPI | None = None
-    api_key: str | None = Field(default=None, max_length=4096)
-    clear_api_key: bool = False
+    api_key_env_var: str | None = Field(default=None, max_length=255)
+    api_key: str | None = Field(
+        default=None, max_length=4096, exclude=True, repr=False
+    )
+    clear_api_key: bool | None = Field(default=None, exclude=True, repr=False)
     is_enabled: bool | None = None
 
 
@@ -81,9 +89,21 @@ class DefaultModelRequest(LLMSettingsRequest):
 class ConnectionTestRequest(LLMSettingsRequest):
     provider_id: str | None = Field(default=None, max_length=64)
     base_url: str | None = Field(default=None, max_length=2048)
-    api_key: str | None = Field(default=None, max_length=4096)
+    api_key_env_var: str | None = Field(default=None, max_length=255)
+    api_key: str | None = Field(
+        default=None, max_length=4096, exclude=True, repr=False
+    )
     model_id: str = Field(min_length=1, max_length=255)
     wire_api: WireAPI | None = None
+
+
+def reject_legacy_api_key_fields(payload: LLMSettingsRequest) -> None:
+    forbidden = {"api_key", "clear_api_key"} & payload.model_fields_set
+    if forbidden:
+        raise HTTPException(
+            status_code=400,
+            detail="不再接受 API Key；请配置 API Key 环境变量名称",
+        )
 
 
 class LLMSettingsService:
@@ -253,7 +273,7 @@ def build_llm_settings_router(
                     return model
         return None
 
-    def route_error(exc: LLMSettingsError) -> HTTPException:
+    def route_error(exc: LLMSettingsError | LLMSecretError) -> HTTPException:
         return HTTPException(
             status_code=409 if isinstance(exc, LLMSettingsConflict) else 400,
             detail=str(exc),
@@ -277,6 +297,7 @@ def build_llm_settings_router(
         request: Request,
         principal: Principal = Depends(administrator),
     ) -> dict[str, Any]:
+        reject_legacy_api_key_fields(payload)
         try:
             provider = service.repository.create_provider(
                 **payload.model_dump(), actor_id=principal.user_id
@@ -301,6 +322,7 @@ def build_llm_settings_router(
         request: Request,
         principal: Principal = Depends(administrator),
     ) -> dict[str, Any]:
+        reject_legacy_api_key_fields(payload)
         before = settings_provider(provider_id)
         try:
             provider = service.repository.update_provider(
@@ -468,24 +490,30 @@ def build_llm_settings_router(
         request: Request,
         principal: Principal = Depends(administrator),
     ) -> dict[str, Any]:
+        reject_legacy_api_key_fields(payload)
         stored: dict[str, Any] = {}
-        draft_api_key = str(payload.api_key or "").strip()
+        draft_env_var = str(payload.api_key_env_var or "").strip()
         if payload.provider_id:
             try:
                 stored = service.repository.provider_connection(
                     payload.provider_id,
-                    require_api_key=not bool(draft_api_key),
+                    require_api_key=not bool(draft_env_var),
                 )
             except LLMSettingsError as exc:
                 raise route_error(exc) from exc
         try:
+            api_key = (
+                environment_api_key(draft_env_var)
+                if draft_env_var
+                else str(stored.get("api_key") or "")
+            )
             result = await service.test_connection(
                 base_url=payload.base_url or str(stored.get("base_url") or ""),
-                api_key=draft_api_key or str(stored.get("api_key") or ""),
+                api_key=api_key,
                 model_id=payload.model_id,
                 wire_api=payload.wire_api or str(stored.get("wire_api") or ""),
             )
-        except LLMSettingsError as exc:
+        except (LLMSettingsError, LLMSecretError) as exc:
             raise route_error(exc) from exc
         record(
             principal,

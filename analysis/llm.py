@@ -372,14 +372,18 @@ def resolve_llm_settings(
     prefix: str = "LLM",
     *,
     settings_repository: Any | None = None,
+    database_default: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    if settings_repository is None:
-        settings_repository = _default_llm_settings_repository()
-    database_default = (
-        settings_repository.effective_default()
-        if settings_repository is not None
-        else None
-    ) or {}
+    if database_default is None:
+        if settings_repository is None:
+            settings_repository = _default_llm_settings_repository()
+        database_default = (
+            settings_repository.effective_default()
+            if settings_repository is not None
+            else None
+        ) or {}
+    else:
+        database_default = dict(database_default)
     scenario_prefix = prefix if prefix != "LLM" else ""
     scenario_provider = (
         getattr(config_module, f"{scenario_prefix}_PROVIDER", "")
@@ -534,12 +538,8 @@ def create_llm_provider_from_config(
     retry_callback: Callable[[int, int, str], None] | None = None,
 ) -> OpenAICompatibleLLMProvider:
     settings_repository = _default_llm_settings_repository()
-    settings = resolve_llm_settings(
-        config_module,
-        prefix=prefix,
-        settings_repository=settings_repository,
-    )
     selected_model_record_id = str(model_record_id or "").strip()
+    selected_settings: Dict[str, Any] | None = None
     if selected_model_record_id:
         if settings_repository is None:
             raise LLMError("模型配置存储不可用，无法使用所选模型")
@@ -549,6 +549,13 @@ def create_llm_provider_from_config(
             )
         except (ValueError, RuntimeError) as exc:
             raise LLMError(str(exc)) from exc
+    settings = resolve_llm_settings(
+        config_module,
+        prefix=prefix,
+        settings_repository=settings_repository,
+        database_default=selected_settings,
+    )
+    if selected_settings is not None:
         settings.update(selected_settings)
     provider = OpenAICompatibleLLMProvider(
         base_url=settings["base_url"],

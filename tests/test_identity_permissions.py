@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import update
 
 from identity.api import build_identity_router
 from identity.permission_catalog import PERMISSIONS
@@ -20,6 +21,7 @@ from identity.password_service import PasswordService
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.session_service import SessionService
+from system_database.schema import roles
 
 
 HASH = PasswordService().hash("Writer-Strong-123!")
@@ -88,7 +90,7 @@ def test_multiple_roles_union_permissions_and_choose_maximum_scope(
     assert principal.data_scope == "managed_projects"
 
 
-def test_wildcard_always_has_all_scope(
+def test_wildcard_permission_preserves_scope_without_granting_system_admin(
     repository: IdentityRepository, permission_service: PermissionService
 ):
     role = repository.create_role("operator_admin", "运维管理员", "")
@@ -101,7 +103,56 @@ def test_wildcard_always_has_all_scope(
     assert principal is not None
     assert principal.permissions == frozenset({"*"})
     assert principal.data_scope == "all"
-    assert principal.is_system_admin is True
+    assert principal.is_system_admin is False
+
+
+def test_system_admin_status_follows_enabled_assigned_role(
+    repository: IdentityRepository, permission_service: PermissionService
+):
+    system_admin = repository.get_role_by_code("system_admin")
+    assert system_admin is not None
+    user = repository.create_user("administrator", "管理员", HASH)
+    fallback_admin = repository.create_user("fallback-admin", "备用管理员", HASH)
+
+    repository.replace_user_roles(user["id"], [system_admin["id"]])
+    repository.replace_user_roles(fallback_admin["id"], [system_admin["id"]])
+    enabled_principal = permission_service.principal_for_user(user["id"], "session-1")
+    assert enabled_principal is not None
+    assert enabled_principal.is_system_admin is True
+
+    repository.replace_user_roles(user["id"], [])
+    missing_role_principal = permission_service.principal_for_user(
+        user["id"], "session-1"
+    )
+    assert missing_role_principal is not None
+    assert missing_role_principal.is_system_admin is False
+
+    with repository.connect() as connection:
+        connection.execute(
+            update(roles)
+            .where(roles.c.id == system_admin["id"])
+            .values(is_enabled=0)
+        )
+    repository.replace_user_roles(user["id"], [system_admin["id"]])
+    disabled_role_principal = permission_service.principal_for_user(
+        user["id"], "session-1"
+    )
+    assert disabled_role_principal is not None
+    assert disabled_role_principal.is_system_admin is False
+
+
+def test_wildcard_role_cannot_bypass_project_deletion_governance(
+    repository: IdentityRepository, permission_service: PermissionService
+):
+    role = repository.create_role("operator_admin", "运维管理员", "")
+    repository.replace_role_permissions(role["id"], [("*", "all")])
+    user = repository.create_user("operator", "运维", HASH)
+    repository.replace_user_roles(user["id"], [role["id"]])
+
+    principal = permission_service.principal_for_user(user["id"], "session-1")
+
+    assert principal is not None
+    assert permission_service.can_delete_project(principal, "project-without-membership") is False
 
 
 def test_role_changes_take_effect_for_an_existing_session(

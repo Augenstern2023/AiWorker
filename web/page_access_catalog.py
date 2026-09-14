@@ -47,25 +47,6 @@ _ADMIN_ROLES: tuple[ApiRoute, ...] = (
     ("GET", "/api/admin/permissions"),
 )
 
-_TEAM_USERS: tuple[ApiRoute, ...] = (
-    ("GET", "/api/team/users"),
-    ("GET", "/api/team/roles"),
-    ("POST", "/api/team/users"),
-    ("PATCH", "/api/team/users/{user_id}"),
-    ("DELETE", "/api/team/users/{user_id}"),
-    ("POST", "/api/team/users/{user_id}/reset-password"),
-    ("PUT", "/api/team/users/{user_id}/roles"),
-)
-
-_TEAM_ROLES: tuple[ApiRoute, ...] = (
-    ("GET", "/api/team/roles"),
-    ("GET", "/api/team/permissions"),
-    ("POST", "/api/team/roles"),
-    ("PATCH", "/api/team/roles/{role_id}"),
-    ("DELETE", "/api/team/roles/{role_id}"),
-    ("POST", "/api/team/roles/{role_id}/clone"),
-)
-
 _CREATIVE_TASK_SUPPORT: tuple[ApiRoute, ...] = (
     ("GET", "/api/workflow/tasks"),
     ("POST", "/api/workflow/tasks/{task_id}/claim"),
@@ -315,8 +296,6 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
     "/review/scripts": _SCRIPT_REVIEWS,
     "/review/writer-agent": _WRITER_AGENT,
     "/review/projects": _PROJECT_MANAGEMENT,
-    "/review/users": _TEAM_USERS,
-    "/review/roles": _TEAM_ROLES,
     "/review/projects/{project_id}/members": (
         ("GET", "/api/workflow/projects/{project_id}/members"),
         ("GET", "/api/workflow/projects/{project_id}/member-candidates"),

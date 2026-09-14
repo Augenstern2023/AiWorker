@@ -339,6 +339,116 @@ def test_last_admin_cannot_be_disabled_or_stripped_of_admin_role(app: FastAPI):
     assert client.get("/api/auth/me").status_code == 200
 
 
+def test_wildcard_permission_does_not_replace_system_admin_role(
+    app: FastAPI, repository: IdentityRepository
+):
+    client = TestClient(app)
+    csrf_token = setup_admin(client)
+    admin = client.get("/api/auth/me").json()["user"]
+    wildcard_user = repository.create_user(
+        "wildcard-user", "通配权限用户", PasswordService().hash("Wildcard-User-123!")
+    )
+    wildcard_role = repository.create_role("wildcard_role", "通配权限角色", "")
+    repository.replace_role_permissions(wildcard_role["id"], [("*", "all")])
+    repository.replace_user_roles(wildcard_user["id"], [wildcard_role["id"]])
+
+    assert repository.count_active_system_admins() == 1
+    disabled = client.patch(
+        f"/api/admin/users/{admin['id']}",
+        headers={"X-CSRF-Token": csrf_token},
+        json={"status": "disabled"},
+    )
+    stripped = client.put(
+        f"/api/admin/users/{admin['id']}/roles",
+        headers={"X-CSRF-Token": csrf_token},
+        json={"role_ids": []},
+    )
+
+    assert disabled.status_code == 409
+    assert stripped.status_code == 409
+
+
+def test_multiple_users_can_retain_system_admin_role_and_log_in(
+    app: FastAPI, repository: IdentityRepository
+):
+    client = TestClient(app)
+    csrf_token = setup_admin(client)
+    first_admin = client.get("/api/auth/me").json()["user"]
+    system_admin = repository.get_role_by_code("system_admin")
+    assert system_admin is not None
+    additional_admins = [
+        repository.create_user(
+            "second-admin", "第二管理员", PasswordService().hash("Second-Admin-123!")
+        ),
+        repository.create_user(
+            "third-admin", "第三管理员", PasswordService().hash("Third-Admin-123!")
+        ),
+    ]
+
+    for user in additional_admins:
+        response = client.put(
+            f"/api/admin/users/{user['id']}/roles",
+            headers={"X-CSRF-Token": csrf_token},
+            json={"role_ids": [system_admin["id"]]},
+        )
+        assert response.status_code == 200
+        assert response.json()["role_codes"] == ["system_admin"]
+
+    assert repository.count_active_system_admins() == 3
+    assert repository.get_user(first_admin["id"])["role_codes"] == ["system_admin"]
+    for user in additional_admins:
+        assert repository.get_user(user["id"])["role_codes"] == ["system_admin"]
+    for username, password in (
+        ("admin", "Admin-Strong-123!"),
+        ("second-admin", "Second-Admin-123!"),
+        ("third-admin", "Third-Admin-123!"),
+    ):
+        response = client.post(
+            "/api/auth/login", json={"username": username, "password": password}
+        )
+        assert response.status_code == 200
+
+
+def test_one_of_multiple_admins_can_be_disabled_but_not_the_last(
+    app: FastAPI, repository: IdentityRepository
+):
+    client = TestClient(app)
+    csrf_token = setup_admin(client)
+    first_admin = client.get("/api/auth/me").json()["user"]
+    system_admin = repository.get_role_by_code("system_admin")
+    assert system_admin is not None
+    second_admin = repository.create_user(
+        "second-admin", "第二管理员", PasswordService().hash("Second-Admin-123!")
+    )
+    assigned = client.put(
+        f"/api/admin/users/{second_admin['id']}/roles",
+        headers={"X-CSRF-Token": csrf_token},
+        json={"role_ids": [system_admin["id"]]},
+    )
+    assert assigned.status_code == 200
+
+    disabled = client.patch(
+        f"/api/admin/users/{first_admin['id']}",
+        headers={"X-CSRF-Token": csrf_token},
+        json={"status": "disabled"},
+    )
+    assert disabled.status_code == 200
+    assert repository.count_active_system_admins() == 1
+
+    login = client.post(
+        "/api/auth/login",
+        json={"username": "second-admin", "password": "Second-Admin-123!"},
+    )
+    assert login.status_code == 200
+    rejected = client.patch(
+        f"/api/admin/users/{second_admin['id']}",
+        headers={"X-CSRF-Token": login.json()["csrf_token"]},
+        json={"status": "disabled"},
+    )
+    assert rejected.status_code == 409
+    assert repository.count_active_system_admins() == 1
+
+
 def test_rejected_admin_patch_leaves_profile_roles_and_sessions_unchanged(
     app: FastAPI, repository: IdentityRepository
 ):

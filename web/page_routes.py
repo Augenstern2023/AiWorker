@@ -37,8 +37,6 @@ PAGE_ROUTES = (
     ("/review/scripts", "page.script_review", "剧本审核"),
     ("/review/writer-agent", "page.script_review", "编剧大师"),
     ("/review/projects", "page.review", "负责项目"),
-    ("/review/users", "page.team_management", "团队账号"),
-    ("/review/roles", "page.team_management", "角色授权"),
     ("/review/projects/{project_id}/members", "page.review", "项目成员"),
     ("/review/projects/{project_id}/versions", "page.review", "项目版本"),
     ("/admin/users", "*", "用户管理"),

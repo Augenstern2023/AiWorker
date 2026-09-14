@@ -36,7 +36,6 @@ from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.schema import Principal
 from identity.session_service import SessionService
-from identity.team_api import build_team_management_router
 from organization.service import DepartmentService
 from system_database import SystemDatabase, SystemDatabaseSettings
 from system_database.schema import project_members, roles, user_roles, users
@@ -911,69 +910,6 @@ def test_postgres_project_member_listing_uses_text_primary_key_tiebreaker(
     members = WorkflowRepository(identity_repository).list_project_members(project_id)
 
     assert [member["user_id"] for member in members] == [user["id"]]
-
-
-def test_postgres_team_user_list_resolves_creator_with_core_query(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    postgres_url = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
-    if not postgres_url:
-        pytest.skip("AIWORKER_TEST_SYSTEM_DATABASE_URL is required for PostgreSQL tests")
-    if make_url(postgres_url).database == "aiworker_system":
-        raise ValueError("tests must not run against the aiworker_system database")
-    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
-    command.upgrade(Config("alembic.ini"), "head")
-    database = SystemDatabase(SystemDatabaseSettings(postgres_url))
-    repository = IdentityRepository(database)
-    repository.seed_defaults()
-    password_service = PasswordService()
-    username = f"team-admin-{uuid.uuid4()}"
-    user = repository.create_user(
-        username,
-        "Team Administrator",
-        password_service.hash("StrongPassword-123!"),
-    )
-    system_admin = repository.get_role_by_code("system_admin")
-    assert system_admin is not None
-    repository.replace_user_roles(user["id"], [system_admin["id"]])
-    session_service = SessionService(repository)
-    app = FastAPI()
-    app.include_router(
-        build_identity_router(
-            repository,
-            session_service,
-            AuditService(repository),
-            password_service=password_service,
-        )
-    )
-    app.include_router(
-        build_team_management_router(
-            repository,
-            session_service,
-            AuditService(repository),
-            permission_service=PermissionService(repository, session_service),
-        )
-    )
-    client = TestClient(app)
-
-    assert client.post(
-        "/api/auth/login",
-        json={"username": username, "password": "StrongPassword-123!"},
-    ).status_code == 200
-    response = client.get("/api/team/users")
-
-    assert response.status_code == 200
-    assert any(item["id"] == user["id"] for item in response.json())
-    login = client.post(
-        "/api/auth/login",
-        json={"username": username, "password": "StrongPassword-123!"},
-    )
-    assert login.status_code == 200
-    client.headers["X-CSRF-Token"] = login.json()["csrf_token"]
-    assert client.post(
-        f"/api/team/users/{user['id']}/reset-password",
-        json={"password": "Replacement-Strong-123!"},
-    ).status_code == 204
 
 
 def test_postgres_audit_filter_options_list_distinct_select_values(

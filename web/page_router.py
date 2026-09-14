@@ -52,8 +52,6 @@ PAGE_TEMPLATES = {
     "/review/scripts": "review/scripts.html",
     "/review/writer-agent": "review/writer_agent.html",
     "/review/projects": "review/projects.html",
-    "/review/users": "admin/users.html",
-    "/review/roles": "admin/roles.html",
     "/review/projects/{project_id}/members": "review/projects.html",
     "/review/projects/{project_id}/versions": "review/versions.html",
     "/admin/users": "admin/users.html",

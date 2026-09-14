@@ -90,8 +90,19 @@ def build_script_review_router(
         service = getattr(request.app.state, "identity_permission_service", None)
         if not isinstance(service, PermissionService):
             return False
-        scoped_project_id = repository.workflow_project_id(project_id)
-        return service.is_active_project_member(principal, scoped_project_id)
+        workflow_identity = getattr(
+            request.app.state, "workflow_identity_resolver", None
+        )
+        resolver = getattr(workflow_identity, "project_id", None)
+        try:
+            workflow_project_id = (
+                str(resolver(project_id))
+                if callable(resolver)
+                else repository.workflow_project_id(project_id)
+            )
+        except (TypeError, ValueError):
+            workflow_project_id = repository.workflow_project_id(project_id)
+        return service.is_active_project_member(principal, workflow_project_id)
 
     def assert_project_access(
         request: Request, principal: Principal, project_id: int

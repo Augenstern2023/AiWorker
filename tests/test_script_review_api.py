@@ -179,6 +179,42 @@ def test_active_project_member_without_review_permission_can_create_and_read_rev
     assert jobs.payloads[0]["extra"]["project_id"] == project["id"]
 
 
+def test_historical_project_member_identity_can_create_project_review(tmp_path) -> None:
+    """Using only the current store ID would miss a proven legacy membership."""
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = _reviewable_project(repository)
+    principal = Principal(
+        user_id="member-1",
+        username="member-1",
+        display_name="项目成员",
+        role_codes=("screenwriter",),
+        permissions=frozenset(),
+        data_scope="task",
+        session_id="session-member",
+    )
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = lambda: principal
+    app.state.identity_permission_service = MembershipPermissionService(
+        {str(project["id"])}
+    )
+    app.state.workflow_identity_resolver = SimpleNamespace(
+        project_id=lambda _project_id: str(project["id"])
+    )
+    app.include_router(build_script_review_router(repository, FakeJobManager()))
+
+    created = TestClient(app).post(
+        "/api/script-reviews",
+        json={
+            "source_type": "project",
+            "mode": "single",
+            "project_id": project["id"],
+            "episode_numbers": [1],
+        },
+    )
+
+    assert created.status_code == 201
+
+
 def test_non_member_with_review_permission_cannot_create_project_review(
     tmp_path,
 ) -> None:

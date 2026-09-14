@@ -184,6 +184,42 @@ def test_resolver_uses_legacy_project_id_when_local_task_proves_ownership(
     assert resolved == legacy_id
 
 
+def test_resolver_uses_historical_scoped_id_when_local_task_proves_ownership(
+    tmp_path: Path,
+    isolated_system_database: SystemDatabase,
+) -> None:
+    store = CreativeRepository(tmp_path / "creative.db")
+    unrelated_store = CreativeRepository(tmp_path / "unrelated" / "creative.db")
+    workflow = _workflow(isolated_system_database)
+    project = _original_project(store)
+    unrelated_project = _original_project(unrelated_store)
+    assert unrelated_project["id"] == project["id"]
+    legacy_id = str(project["id"])
+    historical_scoped_id = (
+        f"creative:{uuid.uuid4()}:project:{project['id']}"
+    )
+    assert historical_scoped_id != store.workflow_project_id(project["id"])
+    task = workflow.ensure_project_task(legacy_id, None, actor=SYSTEM_ACTOR)
+    with workflow.identity_repository.transaction() as connection:
+        connection.exec_driver_sql(
+            "UPDATE workflow_tasks SET project_id = %s WHERE id = %s",
+            (historical_scoped_id, task["id"]),
+        )
+    _record_project_task(store, project["id"], task["id"])
+    task_before = workflow.get_task(task["id"])
+
+    resolved = WorkflowIdentityResolver(store, workflow).project_id(project["id"])
+    unrelated_resolved = WorkflowIdentityResolver(
+        unrelated_store, workflow
+    ).project_id(unrelated_project["id"])
+
+    assert resolved == historical_scoped_id
+    assert unrelated_resolved == unrelated_store.workflow_project_id(
+        unrelated_project["id"]
+    )
+    assert workflow.get_task(task["id"]) == task_before
+
+
 def test_resolver_requires_local_evidence_before_using_colliding_legacy_id(
     tmp_path: Path,
     isolated_system_database: SystemDatabase,

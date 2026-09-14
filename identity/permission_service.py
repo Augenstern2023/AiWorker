@@ -168,8 +168,6 @@ class PermissionService:
         self, principal: Principal, project_id: str
     ) -> bool:
         """Check active membership without applying a role data-scope floor."""
-        if principal.is_system_admin:
-            return True
         with self.repository.connect() as connection:
             row = connection.execute(
                 select(project_members.c.id).where(

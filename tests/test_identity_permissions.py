@@ -272,3 +272,34 @@ def test_active_project_membership_is_independent_of_data_scope() -> None:
     assert service.is_active_project_member(principal, "project-1") is True
     assert service.is_active_project_member(principal, "project-2") is False
     assert service.is_active_project_member(principal, "project-3") is False
+
+
+def test_system_admin_is_not_reported_as_project_member_without_membership() -> None:
+    """Admin bypass belongs to callers, not to the membership fact query."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE project_members (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                project_role TEXT NOT NULL,
+                status TEXT NOT NULL
+            )
+            """
+        )
+    service = PermissionService(
+        SimpleNamespace(connect=engine.begin), SimpleNamespace()
+    )
+    principal = Principal(
+        user_id="admin-1",
+        username="admin-1",
+        display_name="管理员",
+        role_codes=("system_admin",),
+        permissions=frozenset({"*"}),
+        data_scope="all",
+        session_id="session-admin",
+    )
+
+    assert service.is_active_project_member(principal, "project-1") is False

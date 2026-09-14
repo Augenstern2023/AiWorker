@@ -23,7 +23,7 @@
 - 修改：`identity/permission_service.py:145-204`
 - 测试：`tests/test_identity_permissions.py`
 
-- [ ] **步骤 1：编写失败的成员权限测试**
+- [x] **步骤 1：编写失败的成员权限测试**
 
 在 `tests/test_identity_permissions.py` 增加测试。它要抓住的破坏是：成员查询错误地复用了 `data_scope >= project` 门槛，导致 `data_scope="task"` 的有效成员被拒绝。
 
@@ -56,7 +56,7 @@ def test_active_project_membership_is_independent_of_data_scope(
     assert permission_service.is_active_project_member(principal, "project-3") is False
 ```
 
-- [ ] **步骤 2：运行测试并确认红灯**
+- [x] **步骤 2：运行测试并确认红灯**
 
 运行：
 
@@ -66,7 +66,7 @@ uv run pytest tests/test_identity_permissions.py::test_active_project_membership
 
 预期：FAIL，`PermissionService` 缺少 `is_active_project_member`。
 
-- [ ] **步骤 3：实现最小成员查询**
+- [x] **步骤 3：实现最小成员查询**
 
 在 `PermissionService` 中加入：
 
@@ -87,7 +87,7 @@ def is_active_project_member(self, principal: Principal, project_id: str) -> boo
 
 不调用 `can_access_assigned_project`，避免重新引入 `data_scope` 门槛。
 
-- [ ] **步骤 4：运行权限测试**
+- [x] **步骤 4：运行权限测试**
 
 运行：
 
@@ -97,7 +97,7 @@ uv run pytest tests/test_identity_permissions.py -q
 
 预期：配置 PostgreSQL 测试库时全部 PASS；未配置时数据库测试按既有规则 SKIP。
 
-- [ ] **步骤 5：提交任务 1**
+- [x] **步骤 5：提交任务 1**
 
 ```bash
 git add identity/permission_service.py tests/test_identity_permissions.py
@@ -110,7 +110,7 @@ git commit -m "feat(identity): expose active project membership"
 - 修改：`screenplay_review/api.py:76-112,205-232`
 - 测试：`tests/test_script_review_api.py`
 
-- [ ] **步骤 1：编写失败的项目审核 API 测试**
+- [x] **步骤 1：编写失败的项目审核 API 测试**
 
 新增一个 `PermissionService` 测试替身，真实运行 FastAPI 路由、创作仓库和审核记录写入，只替代外部 PostgreSQL 成员查询：
 
@@ -200,7 +200,7 @@ def test_active_project_member_without_review_generate_can_create_and_read_revie
 - 非成员即使具有 `script.review.generate` 也返回 403；
 - 无 `script.review.generate` 的账户提交文本审核仍返回 403。
 
-- [ ] **步骤 2：运行新增 API 测试并确认红灯**
+- [x] **步骤 2：运行新增 API 测试并确认红灯**
 
 运行：
 
@@ -210,7 +210,7 @@ uv run pytest tests/test_script_review_api.py -k "active_project_member or non_m
 
 预期：有效成员创建测试返回 403，证明旧的分配/管理项目判断和全局权限码仍在阻止请求。
 
-- [ ] **步骤 3：实现最小路由授权调整**
+- [x] **步骤 3：实现最小路由授权调整**
 
 将项目访问判断改为：
 
@@ -230,7 +230,7 @@ def can_access_project(request: Request, principal: Principal, project_id: int) 
 
 对列表、详情和导出读取接口使用现有 `can_read_review` 的资源级过滤；项目成员或文本审核创建者可以读取，确认和删除接口继续保留 `script.review.generate` 检查。
 
-- [ ] **步骤 4：运行剧本审核回归测试**
+- [x] **步骤 4：运行剧本审核回归测试**
 
 运行：
 
@@ -240,7 +240,7 @@ uv run pytest tests/test_script_review_api.py tests/test_script_reviews.py tests
 
 预期：全部 PASS。
 
-- [ ] **步骤 5：运行关联权限测试和格式检查**
+- [x] **步骤 5：运行关联权限测试和格式检查**
 
 运行：
 
@@ -252,7 +252,7 @@ git diff --check
 
 预期：测试通过或仅出现既有的未配置 PostgreSQL 测试跳过；pre-commit 与 diff 检查退出码为 0。
 
-- [ ] **步骤 6：提交任务 2**
+- [x] **步骤 6：提交任务 2**
 
 ```bash
 git add screenplay_review/api.py tests/test_script_review_api.py docs/superpowers/plans/2026-09-14-project-member-script-review.md

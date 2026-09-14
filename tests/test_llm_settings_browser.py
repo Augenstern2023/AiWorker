@@ -31,26 +31,31 @@ SETTINGS_PAYLOAD = {
             "label": "OpenAI",
             "base_url": "https://api.openai.com/v1",
             "wire_api": "responses",
+            "env_key": "OPENAI_API_KEY",
         },
         "deepseek": {
             "label": "DeepSeek",
             "base_url": "https://api.deepseek.com",
             "wire_api": "chat_completions",
+            "env_key": "DEEPSEEK_API_KEY",
         },
         "minimax": {
             "label": "MiniMax",
             "base_url": "https://api.minimax.io/v1",
             "wire_api": "chat_completions",
+            "env_key": "MINIMAX_API_KEY",
         },
         "sub2api": {
             "label": "Sub2API",
             "base_url": "",
             "wire_api": "responses",
+            "env_key": "SUB2API_KEY",
         },
         "custom": {
             "label": "自定义",
             "base_url": "",
             "wire_api": "chat_completions",
+            "env_key": "",
         },
     },
     "providers": [
@@ -60,6 +65,9 @@ SETTINGS_PAYLOAD = {
             "preset": "custom",
             "base_url": "http://models.example.test/v1",
             "wire_api": "chat_completions",
+            "api_key_env_var": "INTERNAL_GATEWAY_KEY",
+            "credential_status": "configured",
+            "credential_source": "environment",
             "has_api_key": True,
             "security_warning": "该端点使用公网或局域网 HTTP，API Key 和请求内容可能被明文传输。",
             "is_enabled": True,
@@ -103,10 +111,10 @@ def _llm_state() -> dict:
             "preset": "custom",
             "base_url": "",
             "wire_api": "chat_completions",
-            "api_key": "",
+            "api_key_env_var": "",
+            "credential_status": "missing",
             "has_api_key": False,
             "is_enabled": True,
-            "clear_api_key": False,
         },
         "modelDraft": {"model_id": "", "display_name": ""},
         "modelEditor": None,
@@ -176,7 +184,13 @@ def _mount_llm_page(page: Page, payload: dict = SETTINGS_PAYLOAD) -> None:
                 }};
               }
               return {ok: true, status: 200, async json() {
-                return {id: 'created-provider', has_api_key: Boolean(body?.api_key)};
+                return {
+                  id: 'created-provider',
+                  api_key_env_var: body?.api_key_env_var || '',
+                  credential_status: 'configured',
+                  credential_source: 'environment',
+                  has_api_key: true
+                };
               }};
             }
           };
@@ -200,8 +214,8 @@ def _mount_llm_page(page: Page, payload: dict = SETTINGS_PAYLOAD) -> None:
     page.add_script_tag(path=ALPINE_SCRIPT)
 
 
-def test_llm_settings_load_master_detail_without_rehydrating_secret() -> None:
-    """Would catch secret values being copied into the editor or a broken mobile layout."""
+def test_llm_settings_load_master_detail_with_environment_credential() -> None:
+    """Would catch variable names being hidden or a broken mobile layout."""
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -215,8 +229,13 @@ def test_llm_settings_load_master_detail_without_rehydrating_secret() -> None:
 
         assert page.get_by_text("内部网关", exact=True).is_visible()
         assert page.get_by_label("模型列表").get_by_text("Model A", exact=True).is_visible()
-        assert page.locator("#llm-provider-api-key").input_value() == ""
-        assert page.get_by_text("凭据已安全保存", exact=True).is_visible()
+        assert page.get_by_label("API Key 环境变量").input_value() == (
+            "INTERNAL_GATEWAY_KEY"
+        )
+        assert page.locator(
+            'section[aria-labelledby="llm-settings-title"] input[type="password"]'
+        ).count() == 0
+        assert page.get_by_text("环境凭据已配置", exact=True).is_visible()
         assert page.get_by_text("可能被明文传输", exact=False).is_visible()
         assert not page.locator("#llm-settings-error").is_visible()
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
@@ -243,11 +262,12 @@ def test_llm_settings_visibility_updates_do_not_raise_alpine_errors() -> None:
         browser.close()
 
 
-def test_llm_settings_requires_reentry_when_saved_key_cannot_be_decrypted() -> None:
-    """Would catch an unreadable credential being shown as ready for use."""
+def test_llm_settings_marks_missing_environment_credential() -> None:
+    """Would catch a missing environment value being shown as ready for use."""
 
     payload = deepcopy(SETTINGS_PAYLOAD)
-    payload["providers"][0]["credential_status"] = "unreadable"
+    payload["providers"][0]["credential_status"] = "missing"
+    payload["providers"][0]["has_api_key"] = False
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page()
@@ -256,13 +276,15 @@ def test_llm_settings_requires_reentry_when_saved_key_cannot_be_decrypted() -> N
             "document.querySelector('main')._x_dataStack[0].fetchLLMSettings()"
         )
 
-        assert page.get_by_text("密钥不可解密，请重新录入", exact=True).is_visible()
-        assert page.locator("#llm-provider-api-key").input_value() == ""
+        assert page.get_by_text("环境凭据缺失", exact=True).is_visible()
+        assert page.get_by_label("API Key 环境变量").input_value() == (
+            "INTERNAL_GATEWAY_KEY"
+        )
         browser.close()
 
 
-def test_llm_provider_preset_prefills_editable_fields_and_submits_secret_once() -> None:
-    """Would catch preset defaults being fixed or an API key omitted from provider creation."""
+def test_llm_provider_uses_environment_variable_instead_of_password() -> None:
+    """Would catch provider forms submitting plaintext credentials."""
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -276,10 +298,16 @@ def test_llm_provider_preset_prefills_editable_fields_and_submits_secret_once() 
         page.get_by_label("提供商预设").select_option("deepseek")
         assert page.get_by_label("Base URL").input_value() == "https://api.deepseek.com"
         assert page.get_by_label("调用协议").input_value() == "chat_completions"
+        assert page.get_by_label("API Key 环境变量").input_value() == (
+            "DEEPSEEK_API_KEY"
+        )
+        assert page.locator(
+            'section[aria-labelledby="llm-settings-title"] input[type="password"]'
+        ).count() == 0
 
         page.get_by_label("提供商名称").fill("备用 DeepSeek")
         page.get_by_label("Base URL").fill("https://gateway.example.test/v1")
-        page.locator("#llm-provider-api-key").fill("sk-draft-secret")
+        page.get_by_label("API Key 环境变量").fill("CUSTOM_LLM_KEY")
         page.get_by_role("button", name="保存提供商").click()
         page.wait_for_function(
             "window.requests.some(item => item.url === '/api/llm/providers')"
@@ -294,9 +322,11 @@ def test_llm_provider_preset_prefills_editable_fields_and_submits_secret_once() 
             "preset": "deepseek",
             "base_url": "https://gateway.example.test/v1",
             "wire_api": "chat_completions",
-            "api_key": "sk-draft-secret",
+            "api_key_env_var": "CUSTOM_LLM_KEY",
             "is_enabled": True,
         }
+        assert "api_key" not in request["body"]
+        assert "clear_api_key" not in request["body"]
         browser.close()
 
 
@@ -312,7 +342,7 @@ def test_llm_connection_test_uses_unsaved_fields_and_announces_result() -> None:
         )
 
         page.get_by_label("Base URL").fill("https://draft.example.test/v1")
-        page.locator("#llm-provider-api-key").fill("draft-secret")
+        page.get_by_label("API Key 环境变量").fill("DRAFT_API_KEY")
         page.get_by_label("测试模型 ID").fill("draft-model")
         test_button = page.get_by_role("button", name="测试连接")
         test_button.click()
@@ -326,7 +356,7 @@ def test_llm_connection_test_uses_unsaved_fields_and_announces_result() -> None:
         assert request["body"] == {
             "provider_id": "provider-1",
             "base_url": "https://draft.example.test/v1",
-            "api_key": "draft-secret",
+            "api_key_env_var": "DRAFT_API_KEY",
             "model_id": "draft-model",
             "wire_api": "chat_completions",
         }
@@ -382,7 +412,6 @@ def test_llm_default_items_cannot_be_disabled_before_switching_default() -> None
         )
 
         assert page.get_by_label("启用提供商").is_disabled()
-        assert page.get_by_label("保存时明确清除现有 API Key").is_disabled()
         page.get_by_role("button", name="编辑模型 Model A").click()
         assert page.get_by_label("启用", exact=True).is_disabled()
         assert page.get_by_label("模型列表").get_by_text(
@@ -391,8 +420,8 @@ def test_llm_default_items_cannot_be_disabled_before_switching_default() -> None
         browser.close()
 
 
-def test_llm_provider_update_explicitly_clears_key_without_sending_a_replacement() -> None:
-    """Would catch blank password fields implicitly clearing or re-sending credentials."""
+def test_llm_provider_update_submits_only_environment_variable_name() -> None:
+    """Would catch provider updates retaining legacy plaintext fields."""
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -406,7 +435,7 @@ def test_llm_provider_update_explicitly_clears_key_without_sending_a_replacement
             "document.querySelector('main')._x_dataStack[0].fetchLLMSettings()"
         )
 
-        page.get_by_label("保存时明确清除现有 API Key").check()
+        page.get_by_label("API Key 环境变量").fill("UPDATED_GATEWAY_KEY")
         page.get_by_role("button", name="保存提供商").click()
         page.wait_for_function(
             "window.requests.some(item => item.url === '/api/llm/providers/provider-1' && item.method === 'PUT')"
@@ -415,8 +444,9 @@ def test_llm_provider_update_explicitly_clears_key_without_sending_a_replacement
         request = page.evaluate(
             "window.requests.find(item => item.url === '/api/llm/providers/provider-1' && item.method === 'PUT')"
         )
-        assert request["body"]["clear_api_key"] is True
+        assert request["body"]["api_key_env_var"] == "UPDATED_GATEWAY_KEY"
         assert "api_key" not in request["body"]
+        assert "clear_api_key" not in request["body"]
         browser.close()
 
 
@@ -515,6 +545,9 @@ def test_llm_non_default_provider_can_be_deleted_after_confirmation() -> None:
             "preset": "custom",
             "base_url": "https://backup.example.test/v1",
             "wire_api": "chat_completions",
+            "api_key_env_var": "BACKUP_GATEWAY_KEY",
+            "credential_status": "configured",
+            "credential_source": "environment",
             "has_api_key": True,
             "is_enabled": True,
             "is_default": False,
@@ -591,7 +624,9 @@ def test_admin_config_initialization_fetches_llm_settings() -> None:
                     presets: {}, providers: [{
                       id: 'runtime-provider', name: 'Runtime', preset: 'custom',
                       base_url: 'https://runtime.example.test/v1',
-                      wire_api: 'chat_completions', has_api_key: false,
+                      wire_api: 'chat_completions', api_key_env_var: 'RUNTIME_KEY',
+                      credential_status: 'missing', credential_source: 'environment',
+                      has_api_key: false,
                       is_enabled: true, models: []
                     }], default_model_id: null
                   };

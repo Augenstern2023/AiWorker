@@ -54,6 +54,26 @@ def _workspace_source() -> str:
     )
 
 
+def test_llm_settings_uses_environment_variable_credentials_only():
+    html = _source(
+        "templates/admin/config.html",
+        "templates/common/workspace/free_creative_modals.html",
+    )
+    script = _source(
+        "static/js/common/tasks.js",
+        "static/js/admin/workspace.js",
+    )
+
+    assert "llm-provider-api-key-env-var" in html
+    assert "API Key 环境变量" in html
+    assert "服务与 Worker 从启动环境读取" in html
+    assert "llm-provider-api-key\"" not in html
+    assert "Fernet 加密保存" not in html
+    assert "保存时明确清除现有 API Key" not in html
+    assert "api_key_env_var" in script
+    assert "clear_api_key" not in script
+
+
 def test_webgui_registers_rag_routes():
     paths = {route.path for route in WebGUI.app.routes}
 

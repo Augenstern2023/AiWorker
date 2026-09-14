@@ -953,12 +953,11 @@ window.aiworkerModules.push(() => ({
                         preset: provider.preset || 'custom',
                         base_url: provider.base_url || '',
                         wire_api: provider.wire_api || 'chat_completions',
-                        api_key: '',
+                        api_key_env_var: provider.api_key_env_var || '',
                         has_api_key: Boolean(provider.has_api_key),
                         credential_status: provider.credential_status
                             || (provider.has_api_key ? 'configured' : 'missing'),
-                        is_enabled: provider.is_enabled !== false,
-                        clear_api_key: false
+                        is_enabled: provider.is_enabled !== false
                     };
                     state.modelDraft = {model_id: '', display_name: ''};
                     state.modelEditor = null;
@@ -983,11 +982,10 @@ window.aiworkerModules.push(() => ({
                         preset: state.presets[presetName] ? presetName : 'custom',
                         base_url: preset.base_url || '',
                         wire_api: preset.wire_api || 'chat_completions',
-                        api_key: '',
+                        api_key_env_var: preset.env_key || '',
                         has_api_key: false,
                         credential_status: 'missing',
-                        is_enabled: true,
-                        clear_api_key: false
+                        is_enabled: true
                     };
                     state.modelDraft = {model_id: '', display_name: ''};
                     state.modelEditor = null;
@@ -1004,14 +1002,17 @@ window.aiworkerModules.push(() => ({
                     if (!editor.id) editor.name = preset.label || editor.name;
                     editor.base_url = preset.base_url || '';
                     editor.wire_api = preset.wire_api || 'chat_completions';
+                    editor.api_key_env_var = preset.env_key || '';
+                    editor.credential_status = 'missing';
                     this.llmSettings.test.result = null;
                 },
 
                 async saveLLMProvider() {
                     const state = this.llmSettings;
                     const editor = state.editor;
-                    if (!String(editor.name || '').trim() || !String(editor.base_url || '').trim()) {
-                        state.error = '请填写提供商名称和 Base URL';
+                    if (!String(editor.name || '').trim() || !String(editor.base_url || '').trim()
+                        || !String(editor.api_key_env_var || '').trim()) {
+                        state.error = '请填写提供商名称、Base URL 和 API Key 环境变量';
                         return;
                     }
                     state.saving = true;
@@ -1022,14 +1023,9 @@ window.aiworkerModules.push(() => ({
                         preset: editor.preset,
                         base_url: String(editor.base_url).trim(),
                         wire_api: editor.wire_api,
+                        api_key_env_var: String(editor.api_key_env_var).trim(),
                         is_enabled: Boolean(editor.is_enabled)
                     };
-                    if (editor.id) {
-                        if (String(editor.api_key || '').trim()) payload.api_key = String(editor.api_key).trim();
-                        if (editor.clear_api_key) payload.clear_api_key = true;
-                    } else {
-                        payload.api_key = String(editor.api_key || '').trim();
-                    }
                     try {
                         const response = await aiworkerApi.request(
                             editor.id ? `/api/llm/providers/${editor.id}` : '/api/llm/providers',
@@ -1043,8 +1039,6 @@ window.aiworkerModules.push(() => ({
                         try { data = await response.json(); } catch (_) {}
                         if (!response.ok) throw new Error(this.llmResponseMessage(data, '保存提供商失败'));
                         const providerId = data.id || editor.id;
-                        editor.api_key = '';
-                        editor.clear_api_key = false;
                         state.notice = editor.id ? '提供商设置已更新' : '提供商已添加';
                         await this.fetchLLMSettings({selectedProviderId: providerId});
                     } catch (error) {
@@ -1061,7 +1055,7 @@ window.aiworkerModules.push(() => ({
                     const label = provider.name || provider.id;
                     const modelCount = (provider.models || []).length;
                     if (!window.confirm(
-                        `确认删除提供商「${label}」？这会同时删除 ${modelCount} 个模型和已保存的 API Key，且无法撤销。`
+                        `确认删除提供商「${label}」？这会同时删除 ${modelCount} 个模型和环境变量名称配置，但不会删除环境变量中的凭据，且无法撤销。`
                     )) return;
                     state.providerDeletingId = provider.id;
                     state.error = '';
@@ -1256,7 +1250,7 @@ window.aiworkerModules.push(() => ({
                     const payload = {
                         ...(editor.id ? {provider_id: editor.id} : {}),
                         base_url: String(editor.base_url).trim(),
-                        ...(String(editor.api_key || '').trim() ? {api_key: String(editor.api_key).trim()} : {}),
+                        api_key_env_var: String(editor.api_key_env_var || '').trim(),
                         model_id: modelId,
                         wire_api: editor.wire_api
                     };

@@ -9,12 +9,15 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from creative.repository import CreativeRepository
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from identity.dependencies import current_principal
+from identity.permission_service import PermissionService
 from identity.schema import Principal
 from screenplay_optimization.api import build_script_optimization_router
 from screenplay_optimization.service import content_fingerprint, validate_optimization_request
@@ -377,6 +380,44 @@ def test_episode_page_can_list_its_optimization_draft_entries(tmp_path) -> None:
 
     assert response.status_code == 200
     assert [item["id"] for item in response.json()["items"]] == [completed["drafts"][0]["id"]]
+
+
+def test_episode_drafts_use_historical_workflow_identity_for_project_access(
+    tmp_path,
+) -> None:
+    """Catch optimization-draft access bypassing the historical ID resolver."""
+
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, _review, _scripts = _project_with_review(repository)
+    principal = Principal(
+        user_id="writer-1",
+        username="writer",
+        display_name="编剧",
+        role_codes=("screenwriter",),
+        permissions=frozenset({"script.optimize.read"}),
+        data_scope="project",
+        session_id="session-writer",
+    )
+    historical_project_id = f"creative:historical-store:project:{project['id']}"
+    permission_service = object.__new__(PermissionService)
+    permission_service.can_access_assigned_project = (
+        lambda _principal, project_id: project_id == historical_project_id
+    )
+    permission_service.can_access_managed_project = lambda _principal, _project_id: False
+    app = FastAPI()
+    app.state.identity_permission_service = permission_service
+    app.state.workflow_identity_resolver = SimpleNamespace(
+        project_id=lambda _project_id: historical_project_id
+    )
+    app.dependency_overrides[current_principal] = lambda: principal
+    app.include_router(build_script_optimization_router(repository, object()))
+
+    response = TestClient(app).get(
+        f"/api/creative/projects/{project['id']}/episodes/1/optimization-drafts",
+        params={"stage": "beats"},
+    )
+
+    assert response.status_code == 200
 
 
 def test_applying_an_edited_script_draft_creates_a_locked_script_version(tmp_path) -> None:

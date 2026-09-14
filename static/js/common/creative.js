@@ -1297,7 +1297,7 @@ window.aiworkerModules.push(() => ({
                     return state.allEpisodes ? `下载全集（${count} 集）` : `下载已选 ${count} 集`;
                 },
 
-                downloadSelectedEpisodes() {
+                async downloadSelectedEpisodes() {
                     const state = this.creativeWorkspace.episodeDownload;
                     const selected = [...new Set((state.selectedEpisodes || []).map(Number))]
                         .filter(number => number > 0)
@@ -1308,10 +1308,38 @@ window.aiworkerModules.push(() => ({
                         episodes: state.allEpisodes ? 'all' : selected.join(','),
                         format: state.format,
                     });
+                    const modalElement = document.getElementById('creativeEpisodeDownloadModal');
+                    if (modalElement?.contains(document.activeElement)) {
+                        document.activeElement.blur();
+                    }
                     this.modal('creativeEpisodeDownloadModal')?.hide();
-                    window.location.assign(
-                        `/api/creative/projects/${this.creativeWorkspace.project.id}/episodes/download?${params.toString()}`
-                    );
+                    const downloadUrl = `/api/creative/projects/${this.creativeWorkspace.project.id}/episodes/download?${params.toString()}`;
+                    try {
+                        const response = await window.aiworkerApi.request(downloadUrl);
+                        if (!response.ok) {
+                            const payload = await response.json().catch(() => ({}));
+                            throw new Error(payload.detail || payload.message || '下载失败，请稍后重试');
+                        }
+                        const disposition = response.headers.get('content-disposition') || '';
+                        const encodedFilename = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+                        let filename = `${this.creativeStageLabel(state.stage)}.${state.format}`;
+                        if (encodedFilename) {
+                            try {
+                                filename = decodeURIComponent(encodedFilename);
+                            } catch (_) {}
+                        }
+                        const objectUrl = URL.createObjectURL(await response.blob());
+                        const link = document.createElement('a');
+                        link.href = objectUrl;
+                        link.download = filename;
+                        document.body.appendChild(link);
+                        link.click();
+                        link.remove();
+                        URL.revokeObjectURL(objectUrl);
+                    } catch (error) {
+                        if (window.aiworkerApi?.isAbortError?.(error)) return;
+                        this.showCreativeNotice(error.message || '下载失败，请稍后重试', 'error');
+                    }
                 },
 
                 scriptBlockDisplayText(block) {

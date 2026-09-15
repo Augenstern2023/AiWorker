@@ -1214,6 +1214,7 @@ window.aiworkerModules.push(() => ({
 
                 async saveLLMModel() {
                     const state = this.llmSettings;
+                    if (state.saving || state.testing) return;
                     const editor = state.modelEditor;
                     if (!editor || !String(editor.model_id || '').trim()) {
                         state.error = '模型 ID 不能为空';
@@ -1325,7 +1326,9 @@ window.aiworkerModules.push(() => ({
                         let data = {};
                         try { data = await response.json(); } catch (_) {}
                         if (!response.ok) throw new Error(this.llmResponseMessage(data, '模型连接测试失败'));
-                        state.test.result = data;
+                        state.test.result = hasApiKey
+                            ? {status: 'success', message: '使用新密钥测试成功'}
+                            : data;
                     } catch (error) {
                         const message = hasApiKey
                             ? '使用新密钥测试失败，请检查密钥或网络设置'

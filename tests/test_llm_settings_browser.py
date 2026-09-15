@@ -148,6 +148,7 @@ def _mount_llm_page(page: Page, payload: dict = SETTINGS_PAYLOAD) -> None:
           window.credentialPutFailure = null;
           window.credentialDeleteFailure = null;
           window.testFailure = null;
+          window.testSuccess = null;
           window.aiworkerApi = {
             async request(url, options = {}) {
               const body = options.body ? JSON.parse(options.body) : null;
@@ -162,7 +163,7 @@ def _mount_llm_page(page: Page, payload: dict = SETTINGS_PAYLOAD) -> None:
                 return await new Promise(resolve => {
                   window.resolveLLMTest = () => resolve({
                     ok: !window.testFailure, status: window.testFailure ? 400 : 200, async json() {
-                      return window.testFailure || {
+                      return window.testFailure || window.testSuccess || {
                         status: 'success', message: '模型连接测试成功',
                         latency_ms: 37, response_preview: 'OK'
                       };
@@ -399,10 +400,10 @@ def test_llm_connection_test_uses_unsaved_fields_and_announces_result() -> None:
         }
 
         page.evaluate("window.resolveLLMTest()")
-        page.get_by_text("模型连接测试成功", exact=True).wait_for()
+        page.get_by_text("使用新密钥测试成功", exact=True).wait_for()
         assert page.get_by_label("API Key", exact=True).input_value() == ""
-        assert page.get_by_text("37 ms", exact=False).is_visible()
-        assert page.get_by_text("OK", exact=True).is_visible()
+        assert not page.get_by_text("37 ms", exact=False).is_visible()
+        assert not page.get_by_text("OK", exact=True).is_visible()
         browser.close()
 
 
@@ -452,6 +453,7 @@ def test_llm_sensitive_request_errors_are_fixed_and_controls_lock_during_test() 
         )
 
         page.get_by_label("API Key", exact=True).fill("temporary-secret")
+        page.get_by_role("button", name="编辑模型 Model A").click()
         page.get_by_label("测试模型 ID").fill("model-a")
         page.get_by_role("button", name="测试连接").click()
         page.wait_for_function("window.resolveLLMTest !== null")
@@ -461,6 +463,11 @@ def test_llm_sensitive_request_errors_are_fixed_and_controls_lock_during_test() 
         assert page.get_by_role("button", name="清除页面密钥").is_disabled()
         assert page.get_by_label("提供商名称").is_disabled()
         assert page.get_by_label("API Key", exact=True).is_disabled()
+        assert page.locator("#llm-edit-model-id-model-record-1").is_disabled()
+        assert page.locator("#llm-edit-model-name-model-record-1").is_disabled()
+        assert page.get_by_label("启用", exact=True).is_disabled()
+        assert page.get_by_role("button", name="保存", exact=True).is_disabled()
+        assert page.get_by_role("button", name="取消", exact=True).is_disabled()
 
         page.evaluate(
             "window.testFailure = {detail: 'truncated key: temporar', message: 'encoded dGVtcG9yYXJ5LXNlY3JldA=='}; window.resolveLLMTest()"
@@ -478,6 +485,45 @@ def test_llm_sensitive_request_errors_are_fixed_and_controls_lock_during_test() 
         page.get_by_role("button", name="清除页面密钥").click()
         page.get_by_text("清除页面密钥失败，请重试", exact=True).wait_for()
         assert "dGVtcG9yYXJ5LXNlY3JldA==" not in page.locator("body").inner_text()
+        browser.close()
+
+
+def test_llm_temporary_key_success_discards_untrusted_response_data() -> None:
+    """Would catch a successful temporary-key test reflecting server-controlled secrets."""
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        _mount_llm_page(page)
+        page.evaluate(
+            "document.querySelector('main')._x_dataStack[0].fetchLLMSettings()"
+        )
+        page.evaluate(
+            "window.testSuccess = {status: 'success', message: 'temporary-secret', response_preview: 'temporary-secret%20truncated-temporar', latency_ms: 37, diagnostic: 'dGVtcG9yYXJ5LXNlY3JldA=='}"
+        )
+
+        page.get_by_label("API Key", exact=True).fill("temporary-secret")
+        page.get_by_label("测试模型 ID").fill("model-a")
+        page.get_by_role("button", name="测试连接").click()
+        page.wait_for_function("window.resolveLLMTest !== null")
+        page.evaluate("window.resolveLLMTest()")
+        page.get_by_text("使用新密钥测试成功", exact=True).wait_for()
+
+        body_text = page.locator("body").inner_text()
+        state_text = page.evaluate(
+            "JSON.stringify(document.querySelector('main')._x_dataStack[0].llmSettings.test.result)"
+        )
+        for forbidden in (
+            "temporary-secret",
+            "temporary-secret%20",
+            "truncated-temporar",
+            "dGVtcG9yYXJ5LXNlY3JldA==",
+            "response_preview",
+            "latency_ms",
+        ):
+            assert forbidden not in body_text
+            assert forbidden not in state_text
+        assert state_text == '{"status":"success","message":"使用新密钥测试成功"}'
         browser.close()
 
 

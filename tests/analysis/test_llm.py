@@ -30,6 +30,7 @@ from creative.prompt_templates import script_messages
 from screenplay_optimization.service import optimize_episode
 from screenplay_review.service import _review_messages
 from writer_agent.service import writer_messages
+from tests.analysis.test_llm_settings import MemoryCredentialStore, _repository
 from analysis.llm import (
     LLMError,
     LLMTimeoutError,
@@ -49,6 +50,85 @@ from analysis.llm import (
 
 def test_parse_json_object_handles_markdown_fence():
     assert parse_json_object('```json\n{"summary": "摘要"}\n```') == {"summary": "摘要"}
+
+
+def _running_rotation_client(monkeypatch, *, selected: bool, wire_api: str):
+    from analysis import llm as llm_module
+
+    vault = MemoryCredentialStore()
+    repository = _repository(credential_store=vault)
+    provider = repository.create_provider(
+        name="Running Worker", preset="custom",
+        base_url="https://llm.example.test/v1", wire_api=wire_api,
+    )
+    repository.replace_api_key(provider["id"], "rotation-before")
+    model = repository.create_model(provider["id"], model_id="rotation-model")
+    repository.set_default_model(model["id"])
+    monkeypatch.setattr(llm_module, "_CONFIGURED_LLM_SETTINGS_REPOSITORY", repository)
+    client = create_llm_provider_from_config(
+        type("Config", (), {}), model_record_id=model["id"] if selected else None,
+    )
+    client.retry_base_delay = 0
+    return client, repository, provider["id"]
+
+
+@pytest.mark.parametrize("selected", [False, True], ids=["default", "selected"])
+@pytest.mark.parametrize("wire_api", ["chat_completions", "responses"])
+@pytest.mark.asyncio
+async def test_running_client_reads_rotated_key_for_next_call(monkeypatch, selected, wire_api):
+    """Catch a real factory client freezing its credential for the whole Worker job."""
+    client, repository, provider_id = _running_rotation_client(
+        monkeypatch, selected=selected, wire_api=wire_api,
+    )
+    headers = []
+
+    def handler(request):
+        headers.append(request.headers["Authorization"])
+        return httpx.Response(200, json={
+            "output_text": "OK", "choices": [{"message": {"content": "OK"}}],
+        })
+
+    client.transport = httpx.MockTransport(handler)
+    assert await client.complete_text([{"role": "user", "content": "first"}]) == "OK"
+    repository.replace_api_key(provider_id, "rotation-after")
+    assert await client.complete_text([{"role": "user", "content": "next"}]) == "OK"
+    assert headers == ["Bearer rotation-before", "Bearer rotation-after"]
+
+
+@pytest.mark.parametrize("selected", [False, True], ids=["default", "selected"])
+@pytest.mark.parametrize("wire_api", ["chat_completions", "responses"])
+@pytest.mark.asyncio
+async def test_running_client_rotation_preserves_inflight_request_snapshot(monkeypatch, selected, wire_api):
+    """Catch concurrent calls or retries mutating another call's credential snapshot."""
+    client, repository, provider_id = _running_rotation_client(
+        monkeypatch, selected=selected, wire_api=wire_api,
+    )
+    first_sent = asyncio.Event()
+    release_first = asyncio.Event()
+    headers = []
+
+    async def handler(request):
+        headers.append(request.headers["Authorization"])
+        if len(headers) == 1:
+            first_sent.set()
+            await release_first.wait()
+            return httpx.Response(503, json={"error": "retry"})
+        return httpx.Response(200, json={
+            "output_text": "OK", "choices": [{"message": {"content": "OK"}}],
+        })
+
+    client.transport = httpx.MockTransport(handler)
+    first = asyncio.create_task(client.complete_text([{"role": "user", "content": "first"}]))
+    try:
+        await asyncio.wait_for(first_sent.wait(), 2)
+        repository.replace_api_key(provider_id, "rotation-after")
+        assert await client.complete_text([{"role": "user", "content": "next"}]) == "OK"
+    finally:
+        release_first.set()
+        assert await asyncio.wait_for(first, 2) == "OK"
+    assert headers == [
+        "Bearer rotation-before", "Bearer rotation-after", "Bearer rotation-before",
+    ]
 
 
 def test_parse_json_object_uses_last_valid_object_after_think_block():

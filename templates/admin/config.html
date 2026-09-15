@@ -101,7 +101,7 @@
                                 </div>
                                 <div class="col-12">
                                     <label class="form-label" for="llm-provider-api-key-env-var">API Key 环境变量</label>
-                                    <input id="llm-provider-api-key-env-var" class="form-control font-monospace" type="text" x-model.trim="llmSettings.editor.api_key_env_var" maxlength="255" required :disabled="llmSettings.saving || llmSettings.testing" placeholder="例如 CUSTOM_LLM_KEY" autocomplete="off" spellcheck="false">
+                                    <input id="llm-provider-api-key-env-var" class="form-control font-monospace" type="text" x-model.trim="llmSettings.editor.api_key_env_var" maxlength="255" :disabled="llmSettings.saving || llmSettings.testing" placeholder="可选兜底，例如 CUSTOM_LLM_KEY" autocomplete="off" spellcheck="false">
                                     <div class="small mt-1" :class="llmSettings.editor.credential_status === 'configured' ? 'text-muted' : 'text-warning'" x-text="llmSettings.editor.credential_source === 'credential_store' ? '页面密钥优先于环境变量；清除后将回退环境变量。' : (llmSettings.editor.credential_status === 'configured' ? '当前 Web 进程可以读取该变量；修改变量值后需要重启服务。' : '当前 Web 进程未读取到非空值，请先配置启动环境并重启服务。')"></div>
                                 </div>
                                 <div class="col-12">
@@ -119,7 +119,7 @@
                                     </button>
                                 </div>
                                 <span x-show="!llmSettings.editor.id"></span>
-                                <button type="submit" class="btn btn-primary" :disabled="llmSettings.saving || llmSettings.testing || !llmSettings.editor.name || !llmSettings.editor.base_url || !llmSettings.editor.api_key_env_var" :aria-busy="llmSettings.saving">
+                                <button type="submit" class="btn btn-primary" :disabled="llmSettings.saving || llmSettings.testing || !llmSettings.editor.name || !llmSettings.editor.base_url" :aria-busy="llmSettings.saving">
                                     <span x-show="!llmSettings.saving"><i class="bi bi-save me-1" aria-hidden="true"></i>保存提供商</span>
                                     <span x-show="llmSettings.saving">保存中…</span>
                                 </button>
@@ -173,7 +173,7 @@
 
                         <hr class="my-4">
                         <section aria-labelledby="llm-test-title">
-                            <div class="mb-3"><h5 class="mb-1" id="llm-test-title">连接测试</h5><div class="small text-muted">使用当前未保存的端点、协议和环境变量名称读取凭据后发起最小推理；测试响应正文不会写入审计。</div></div>
+                            <div class="mb-3"><h5 class="mb-1" id="llm-test-title">连接测试</h5><div class="small text-muted">使用当前端点和协议，优先测试输入的新密钥；留空时使用系统凭据库，环境变量为可选兜底。</div></div>
                             <form class="row g-2 align-items-end" @submit.prevent="testLLMConnection">
                                 <div class="col-12 col-md-8">
                                     <label class="form-label" for="llm-test-model-id">测试模型 ID</label>
@@ -181,7 +181,7 @@
                                     <datalist id="llm-model-options"><template x-for="model in (selectedLLMProvider()?.models || [])" :key="model.id"><option :value="model.model_id" x-text="model.display_name || model.model_id"></option></template></datalist>
                                 </div>
                                 <div class="col-12 col-md-4 d-grid">
-                                    <button type="submit" class="btn btn-outline-info" :disabled="llmSettings.saving || llmSettings.testing || !llmSettings.editor.base_url || !llmSettings.editor.api_key_env_var || !llmSettings.test.model_id" :aria-busy="llmSettings.testing" aria-label="测试连接">
+                                    <button type="submit" class="btn btn-outline-info" :disabled="llmSettings.saving || llmSettings.testing || !llmSettings.editor.base_url || !llmSettings.test.model_id" :aria-busy="llmSettings.testing" aria-label="测试连接">
                                         <span x-show="!llmSettings.testing"><i class="bi bi-plug me-1" aria-hidden="true"></i>测试连接</span>
                                         <span x-show="llmSettings.testing">测试中…</span>
                                     </button>
@@ -189,7 +189,7 @@
                             </form>
                             <div class="alert mt-3 mb-0" role="status" aria-live="polite" x-show="llmSettings.test.result" :class="llmSettings.test.result?.status === 'success' ? 'alert-success' : 'alert-danger'">
                                 <div class="fw-semibold" x-text="llmSettings.test.result?.message"></div>
-                                <div class="small mt-1" x-show="llmSettings.test.result?.latency_ms !== undefined"><span x-text="`${llmSettings.test.result?.latency_ms} ms`"></span><span class="mx-2">·</span><span class="text-break" x-text="llmSettings.test.result?.response_preview || '服务未返回文本摘要'"></span></div>
+                                <div class="small mt-1" x-show="llmSettings.test.result?.latency_ms !== undefined"><span x-text="`${llmSettings.test.result?.latency_ms} ms`"></span></div>
                             </div>
                         </section>
                     </div>

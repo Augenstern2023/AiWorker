@@ -1011,13 +1011,23 @@ window.aiworkerModules.push(() => ({
                     this.llmSettings.test.result = null;
                 },
 
+                llmSecretTransportAllowed() {
+                    return window.location.protocol === 'https:'
+                        || (window.location.protocol === 'http:'
+                            && ['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname.toLowerCase()));
+                },
+
                 async saveLLMProvider() {
                     const state = this.llmSettings;
                     if (state.saving || state.testing) return;
                     const editor = state.editor;
-                    if (!String(editor.name || '').trim() || !String(editor.base_url || '').trim()
-                        || !String(editor.api_key_env_var || '').trim()) {
-                        state.error = '请填写提供商名称、Base URL 和 API Key 环境变量';
+                    if (!String(editor.name || '').trim() || !String(editor.base_url || '').trim()) {
+                        state.error = '请填写提供商名称和 Base URL';
+                        return;
+                    }
+                    if (String(editor.api_key || '').trim() && !this.llmSecretTransportAllowed()) {
+                        state.error = 'API Key 只能通过本机页面或 HTTPS 提交';
+                        editor.api_key = '';
                         return;
                     }
                     state.saving = true;
@@ -1304,6 +1314,11 @@ window.aiworkerModules.push(() => ({
                         return;
                     }
                     if (state.saving || state.testing) return;
+                    if (String(editor.api_key || '').trim() && !this.llmSecretTransportAllowed()) {
+                        state.error = 'API Key 只能通过本机页面或 HTTPS 提交';
+                        editor.api_key = '';
+                        return;
+                    }
                     state.testing = true;
                     state.error = '';
                     state.test.result = null;

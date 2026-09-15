@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
@@ -25,6 +26,9 @@ from analysis.llm_credentials import (
     default_llm_credential_store,
 )
 from system_database.schema import llm_models, llm_providers, llm_settings
+
+
+logger = logging.getLogger(__name__)
 
 
 PROVIDER_PRESETS: dict[str, dict[str, str]] = {
@@ -74,6 +78,10 @@ class LLMSettingsError(ValueError):
 
 
 class LLMSettingsConflict(LLMSettingsError):
+    pass
+
+
+class LLMProviderNotFound(LLMSettingsError):
     pass
 
 
@@ -232,7 +240,7 @@ class LLMSettingsRepository:
         with self.database.connection() as connection:
             exists = self._provider_exists(connection, provider_id)
         if not exists:
-            raise LLMSettingsError("提供商不存在")
+            raise LLMProviderNotFound("提供商不存在")
 
     def _public_provider(self, provider: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -308,7 +316,7 @@ class LLMSettingsRepository:
                 )
             ).mappings().first()
             if current is None:
-                raise LLMSettingsError("提供商不存在")
+                raise LLMProviderNotFound("提供商不存在")
             if is_enabled is False and self._provider_has_default(connection, provider_id):
                 raise LLMSettingsConflict("请先切换默认模型，再停用该提供商")
             values: dict[str, Any] = {
@@ -372,7 +380,7 @@ class LLMSettingsRepository:
                 )
             ).mappings().first()
             if current is None:
-                raise LLMSettingsError("提供商不存在")
+                raise LLMProviderNotFound("提供商不存在")
             if self._provider_has_default(connection, provider_id):
                 raise LLMSettingsConflict("请先切换默认模型，再删除该提供商")
             connection.execute(
@@ -385,7 +393,7 @@ class LLMSettingsRepository:
             try:
                 self.credential_store.delete(provider_id)
             except LLMCredentialStoreError:
-                pass
+                logger.warning("Provider credential cleanup failed: provider_id=%s", provider_id)
         return self._public_provider(_provider_dict(current))
 
     def create_model(
@@ -406,7 +414,7 @@ class LLMSettingsRepository:
         try:
             with self.database.transaction() as connection:
                 if not self._provider_exists(connection, provider_id):
-                    raise LLMSettingsError("提供商不存在")
+                    raise LLMProviderNotFound("提供商不存在")
                 connection.execute(
                     llm_models.insert().values(
                         id=record_id,
@@ -793,7 +801,7 @@ class LLMSettingsRepository:
                 ).where(llm_providers.c.id == provider_id)
             ).mappings().first()
         if row is None:
-            raise LLMSettingsError("提供商不存在")
+            raise LLMProviderNotFound("提供商不存在")
         try:
             api_key, _ = self.resolve_provider_api_key(row)
         except (LLMSettingsError, LLMSecretError) as exc:

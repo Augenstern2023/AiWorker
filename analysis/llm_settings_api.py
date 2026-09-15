@@ -18,9 +18,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from analysis.llm import parse_chat_completion_text, parse_responses_text
+from analysis.llm import LLMError, parse_chat_completion_text, parse_responses_text
 from analysis.llm_credentials import LLMCredentialStoreError
 from analysis.llm_settings import (
+    LLMProviderNotFound,
     LLMSecretError,
     LLMSettingsConflict,
     LLMSettingsError,
@@ -150,13 +151,14 @@ class SecretSafeRequestValidationRoute(APIRoute):
             try:
                 return await route_handler(request)
             except RequestValidationError as exc:
+                # Any field or whole-body error can embed the original secret.
+                # Return fixed messages without inputs, nested contexts or links.
+                detail = "请求格式无效"
                 if any(
                     "api_key" in error.get("loc", ()) for error in exc.errors()
                 ):
-                    raise HTTPException(
-                        status_code=422, detail="API Key 格式无效"
-                    ) from exc
-                raise
+                    detail = "API Key 格式无效"
+                raise HTTPException(status_code=422, detail=detail) from None
 
         return secret_safe_handler
 
@@ -231,16 +233,18 @@ class LLMSettingsService:
         payload = await self._request_json(
             "POST", endpoint, api_key=normalized_key, json=body
         )
-        response_text = (
-            parse_responses_text(payload)
-            if wire_api == "responses"
-            else parse_chat_completion_text(payload)
-        )
+        try:
+            # Validate the protocol, but never return untrusted upstream text.
+            if wire_api == "responses":
+                parse_responses_text(payload)
+            else:
+                parse_chat_completion_text(payload)
+        except (LLMError, TypeError, ValueError, AttributeError):
+            raise LLMSettingsError("模型服务返回格式无效") from None
         return {
             "status": "success",
             "message": "模型连接测试成功",
             "latency_ms": max(0, round((time.perf_counter() - started) * 1000)),
-            "response_preview": response_text[:200],
         }
 
     async def _request_json(
@@ -337,6 +341,8 @@ def build_llm_settings_router(
     ) -> HTTPException:
         if isinstance(exc, LLMCredentialStoreError):
             return HTTPException(status_code=503, detail="系统凭据库不可用")
+        if isinstance(exc, LLMProviderNotFound):
+            return HTTPException(status_code=404, detail="提供商不存在")
         return HTTPException(
             status_code=409 if isinstance(exc, LLMSettingsConflict) else 400,
             detail=str(exc),
@@ -345,7 +351,7 @@ def build_llm_settings_router(
     def credential_summary(provider_id: str) -> dict[str, str]:
         provider = settings_provider(provider_id)
         if provider is None:
-            raise LLMSettingsError("提供商不存在")
+            raise LLMProviderNotFound("提供商不存在")
         return {
             "provider_id": provider_id,
             "credential_status": str(provider["credential_status"]),
@@ -621,10 +627,7 @@ def build_llm_settings_router(
         if payload.provider_id:
             try:
                 stored = service.repository.provider_connection(
-                    payload.provider_id,
-                    require_api_key=not (
-                        bool(draft_env_var) or has_transient_api_key
-                    ),
+                    payload.provider_id, require_api_key=False,
                 )
             except LLMSettingsError as exc:
                 raise route_error(exc) from exc
@@ -633,6 +636,11 @@ def build_llm_settings_router(
                 api_key = (
                     payload.api_key.get_secret_value() if payload.api_key else ""
                 )
+            elif stored:
+                credential_provider = dict(stored)
+                if draft_env_var:
+                    credential_provider["api_key_env_var"] = draft_env_var
+                api_key, _ = service.repository.resolve_provider_api_key(credential_provider)
             elif draft_env_var:
                 api_key = environment_api_key(draft_env_var)
             else:

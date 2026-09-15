@@ -86,6 +86,157 @@ def _loopback_test_client(app: FastAPI) -> TestClient:
     return TestClient(app, base_url="http://127.0.0.1")
 
 
+@pytest.mark.parametrize("case", ["credential-array", "test-missing-model", "nested-extra"])
+def test_secret_route_validation_never_reflects_any_request_input(case):
+    """Catch secrets reflected through whole-body or unrelated-field 422 inputs."""
+    module = _api_module()
+    repository = _repository(credential_store=MemoryCredentialStore())
+    provider = repository.create_provider(
+        name="Validation", preset="custom", base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+    )
+    app = FastAPI()
+    app.include_router(module.build_llm_settings_router(
+        module.LLMSettingsService(repository), _RecordingAudit(),
+        administrator_dependency=lambda: _admin(),
+    ))
+    client = _loopback_test_client(app)
+    secret = "validation-sentinel"
+    if case == "credential-array":
+        response = client.put(
+            f"/api/llm/providers/{provider['id']}/credential", json=[{"api_key": secret}],
+        )
+    elif case == "test-missing-model":
+        response = client.post("/api/llm/test", json={"api_key": secret})
+    else:
+        response = client.put(
+            f"/api/llm/providers/{provider['id']}/credential",
+            json={"api_key": secret, "extra": {"nested": {"api_key": secret}}},
+        )
+    assert response.status_code == 422
+    assert secret not in response.text
+    assert isinstance(response.json()["detail"], str)
+
+
+@pytest.mark.parametrize(("method", "suffix", "body"), [
+    ("PUT", "/credential", {"api_key": "missing-provider-sentinel"}),
+    ("DELETE", "/credential", None),
+    ("PUT", "", {"name": "Missing"}),
+    ("DELETE", "", None),
+    ("POST", "/models", {"model_id": "test-model"}),
+    ("POST", "/models/sync", None),
+    ("POST", "/test", {"model_id": "test-model"}),
+])
+def test_provider_routes_return_404_when_provider_is_missing(method, suffix, body):
+    """Catch missing resources being mapped to a generic bad-request response."""
+    module = _api_module()
+    app = FastAPI()
+    audit = _RecordingAudit()
+    app.include_router(module.build_llm_settings_router(
+        module.LLMSettingsService(_repository(credential_store=MemoryCredentialStore())),
+        audit, administrator_dependency=lambda: _admin(),
+    ))
+    provider_id = "10000000-0000-0000-0000-000000000000"
+    url = f"/api/llm/providers/{provider_id}{suffix}"
+    if suffix == "/test":
+        url = "/api/llm/test"
+        body = {**body, "provider_id": provider_id}
+    response = _loopback_test_client(app).request(method, url, json=body)
+    assert response.status_code == 404
+    assert "missing-provider-sentinel" not in response.text
+    assert audit.events == []
+
+
+@pytest.mark.parametrize("transient", [False, True], ids=["saved", "transient"])
+@pytest.mark.parametrize("wire_api", ["chat_completions", "responses"])
+def test_connection_api_discards_upstream_authorization_echo(transient, wire_api):
+    """Catch arbitrary upstream content exposing a saved or temporary credential."""
+    module = _api_module()
+    vault = MemoryCredentialStore()
+    repository = _repository(credential_store=vault)
+    provider = repository.create_provider(
+        name="Echo", preset="custom", base_url="https://llm.example.test/v1",
+        wire_api=wire_api,
+    )
+    repository.replace_api_key(provider["id"], "saved-echo-sentinel")
+
+    def handler(request):
+        echoed = request.headers["Authorization"]
+        return httpx.Response(200, json={
+            "output_text": echoed, "choices": [{"message": {"content": echoed}}],
+        })
+
+    audit = _RecordingAudit()
+    app = FastAPI()
+    app.include_router(module.build_llm_settings_router(
+        module.LLMSettingsService(repository, transport=httpx.MockTransport(handler)),
+        audit, administrator_dependency=lambda: _admin(),
+    ))
+    body = {"provider_id": provider["id"], "model_id": "test-model"}
+    if transient:
+        body["api_key"] = "transient-echo-sentinel"
+    response = _loopback_test_client(app).post("/api/llm/test", json=body)
+    assert response.status_code == 200
+    for secret in ("saved-echo-sentinel", "transient-echo-sentinel"):
+        assert secret not in response.text
+        assert secret not in repr(audit.events)
+    assert set(response.json()) == {"status", "message", "latency_ms"}
+    assert response.json()["status"] == "success"
+
+
+@pytest.mark.parametrize("environment_present", [False, True], ids=["missing-env", "old-env"])
+def test_connection_draft_environment_cannot_override_vault(monkeypatch, environment_present):
+    """Catch draft env taking priority over a saved vault value or blocking it."""
+    module = _api_module()
+    monkeypatch.delenv("DRAFT_FALLBACK_KEY", raising=False)
+    if environment_present:
+        monkeypatch.setenv("DRAFT_FALLBACK_KEY", "old-env-sentinel")
+    repository = _repository(credential_store=MemoryCredentialStore())
+    provider = repository.create_provider(
+        name="Vault Priority", preset="custom", base_url="https://llm.example.test/v1",
+        wire_api="chat_completions", api_key_env_var="DRAFT_FALLBACK_KEY",
+    )
+    repository.replace_api_key(provider["id"], "vault-priority-sentinel")
+    sent_headers = []
+
+    def handler(request):
+        sent_headers.append(request.headers["Authorization"])
+        return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+
+    app = FastAPI()
+    app.include_router(module.build_llm_settings_router(
+        module.LLMSettingsService(repository, transport=httpx.MockTransport(handler)),
+        _RecordingAudit(), administrator_dependency=lambda: _admin(),
+    ))
+    response = _loopback_test_client(app).post("/api/llm/test", json={
+        "provider_id": provider["id"], "model_id": "test-model",
+        "api_key_env_var": "DRAFT_FALLBACK_KEY",
+    })
+    assert response.status_code == 200
+    assert sent_headers == ["Bearer vault-priority-sentinel"]
+
+
+@pytest.mark.asyncio
+async def test_connection_malformed_response_uses_safe_error_without_cause():
+    """Catch upstream refusal details leaking through parser exception chains."""
+    module = _api_module()
+
+    def handler(request):
+        return httpx.Response(200, json={
+            "status": "incomplete",
+            "incomplete_details": {"reason": request.headers["Authorization"]},
+        })
+
+    service = module.LLMSettingsService(_repository(), transport=httpx.MockTransport(handler))
+    with pytest.raises(module.LLMSettingsError, match="模型服务返回格式无效") as caught:
+        await service.test_connection(
+            base_url="https://llm.example.test/v1", api_key="malformed-sentinel",
+            model_id="test-model", wire_api="responses",
+        )
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+
+
 @pytest.mark.asyncio
 async def test_model_sync_merges_openai_compatible_model_list(monkeypatch):
     """Would catch /models responses being ignored or local models being replaced."""
@@ -167,7 +318,7 @@ async def test_connection_uses_unsaved_draft_and_returns_latency_without_secret(
 
     assert requests[0].url.path == expected_path
     assert result["status"] == "success"
-    assert result["response_preview"] == "OK"
+    assert "response_preview" not in result
     assert result["latency_ms"] >= 0
     assert "draft-secret" not in repr(result)
 
@@ -189,7 +340,7 @@ async def test_connection_ignores_unreachable_system_proxy(
     )
 
     assert result["status"] == "success"
-    assert result["response_preview"] == "OK"
+    assert "response_preview" not in result
 
 
 @pytest.mark.asyncio
@@ -918,7 +1069,7 @@ def test_route_can_test_an_environment_variable_before_saving_provider_changes(
     )
 
     assert response.status_code == 200
-    assert response.json()["response_preview"] == "OK"
+    assert "response_preview" not in response.json()
 
 
 def test_route_uses_saved_provider_environment_variable(monkeypatch):

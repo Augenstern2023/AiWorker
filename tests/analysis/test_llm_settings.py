@@ -334,7 +334,7 @@ def test_runtime_credential_queries_do_not_select_legacy_ciphertext():
     assert all("api_key_encrypted" not in statement for statement in statements)
 
 
-def test_delete_provider_keeps_database_deletion_when_vault_cleanup_fails():
+def test_delete_provider_keeps_database_deletion_when_vault_cleanup_fails(caplog):
     """Would catch a keyring cleanup error rolling back an already-deleted provider."""
 
     module = _settings_module()
@@ -343,7 +343,7 @@ def test_delete_provider_keeps_database_deletion_when_vault_cleanup_fails():
     class FailingDeleteStore(MemoryCredentialStore):
         def delete(self, provider_id: str) -> None:
             deleted_provider_ids.append(provider_id)
-            raise module.LLMCredentialStoreError("系统凭据库不可用")
+            raise module.LLMCredentialStoreError("cleanup-sentinel")
 
     repository = _repository(credential_store=FailingDeleteStore())
     provider = repository.create_provider(
@@ -357,6 +357,12 @@ def test_delete_provider_keeps_database_deletion_when_vault_cleanup_fails():
 
     assert deleted["id"] == provider["id"]
     assert deleted_provider_ids == [provider["id"]]
+    warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert provider["id"] in warnings[0].getMessage()
+    assert warnings[0].exc_info is None
+    assert warnings[0].stack_info is None
+    assert "cleanup-sentinel" not in caplog.text
     with pytest.raises(module.LLMSettingsError, match="提供商不存在"):
         repository.provider_connection(provider["id"])
 

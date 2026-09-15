@@ -130,9 +130,11 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         retry_base_delay: float = 1.0,
         transport: httpx.AsyncBaseTransport | None = None,
         retry_callback: Callable[[int, int, str], Any] | None = None,
+        api_key_resolver: Callable[[], str] | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
+        self.api_key_resolver = api_key_resolver
         self.model = model
         self.fallback_model = fallback_model.strip()
         self.fallback_provider = fallback_provider
@@ -157,9 +159,11 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         return result
 
     async def complete_text(self, messages: List[Dict[str, str]], json_mode: bool = False) -> str:
+        # One snapshot per call, including its retries and protocol fallback.
+        api_key = self.api_key_resolver() if self.api_key_resolver else self.api_key
         if not self.base_url:
             raise LLMError("LLM_BASE_URL is required.")
-        if not self.api_key:
+        if not api_key:
             raise LLMError("LLM_API_KEY is required.")
         if (
             self.provider_name.lower() == "sub2api"
@@ -171,11 +175,11 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             )
 
         try:
-            return await self._complete_text_with_model(self.model, messages, json_mode)
+            return await self._complete_text_with_model(self.model, messages, json_mode, api_key)
         except Exception as exc:
             if self.fallback_model and self.fallback_model != self.model and is_model_unavailable_exception(exc):
                 try:
-                    return await self._complete_text_with_model(self.fallback_model, messages, json_mode)
+                    return await self._complete_text_with_model(self.fallback_model, messages, json_mode, api_key)
                 except Exception as fallback_exc:
                     if self.fallback_provider and is_model_unavailable_exception(fallback_exc):
                         return await self.fallback_provider.complete_text(messages, json_mode)
@@ -184,19 +188,19 @@ class OpenAICompatibleLLMProvider(LLMProvider):
                 return await self.fallback_provider.complete_text(messages, json_mode)
             raise
 
-    async def _complete_text_with_model(self, model: str, messages: List[Dict[str, str]], json_mode: bool) -> str:
+    async def _complete_text_with_model(self, model: str, messages: List[Dict[str, str]], json_mode: bool, api_key: str) -> str:
         if self.wire_api == "responses":
             try:
-                return await self._complete_responses_text(messages, json_mode, model)
+                return await self._complete_responses_text(messages, json_mode, model, api_key)
             except Exception as exc:
                 if not is_responses_api_unsupported_exception(exc):
                     raise
-                return await self._complete_chat_completions_text(messages, json_mode, model)
-        return await self._complete_chat_completions_text(messages, json_mode, model)
+                return await self._complete_chat_completions_text(messages, json_mode, model, api_key)
+        return await self._complete_chat_completions_text(messages, json_mode, model, api_key)
 
-    async def _complete_responses_text(self, messages: List[Dict[str, str]], json_mode: bool, model: str | None = None) -> str:
+    async def _complete_responses_text(self, messages: List[Dict[str, str]], json_mode: bool, model: str, api_key: str) -> str:
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         request_body = build_responses_request_body(
@@ -217,9 +221,9 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             ) from exc
         return parse_responses_text(payload)
 
-    async def _complete_chat_completions_text(self, messages: List[Dict[str, str]], json_mode: bool, model: str | None = None) -> str:
+    async def _complete_chat_completions_text(self, messages: List[Dict[str, str]], json_mode: bool, model: str, api_key: str) -> str:
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         request_body: Dict[str, Any] = {
@@ -459,6 +463,11 @@ def resolve_llm_settings(
     )
     return {
         "provider": provider,
+        "provider_id": (
+            str(database_default.get("provider_id") or "")
+            if database_default and not (scenario_api_key or scenario_environment_key)
+            else ""
+        ),
         "base_url": str(
             scenario_base_url
             or database_default.get("base_url")
@@ -557,6 +566,10 @@ def create_llm_provider_from_config(
     )
     if selected_settings is not None:
         settings.update(selected_settings)
+    provider_id = str(settings.get("provider_id") or "")
+    api_key_resolver = None
+    if settings_repository is not None and provider_id:
+        api_key_resolver = lambda: settings_repository.provider_connection(provider_id)["api_key"]
     provider = OpenAICompatibleLLMProvider(
         base_url=settings["base_url"],
         api_key=settings["api_key"],
@@ -571,6 +584,7 @@ def create_llm_provider_from_config(
         max_retries=settings["max_retries"],
         retry_base_delay=settings["retry_base_delay"],
         retry_callback=retry_callback,
+        api_key_resolver=api_key_resolver,
     )
     provider.provider_id = str(settings.get("provider_id") or "")
     provider.provider_display_name = str(

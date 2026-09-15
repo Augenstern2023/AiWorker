@@ -148,7 +148,7 @@ def test_credential_rotation_route_keeps_authenticated_csrf_protection(secured_a
     assert response.status_code == 403
     assert response.json() == {"detail": "CSRF 校验失败"}
     assert "csrf-protected-secret" not in response.text
-    assert accepted.status_code == 400
+    assert accepted.status_code == 404
     assert accepted.json() == {"detail": "提供商不存在"}
     assert "csrf-protected-secret" not in accepted.text
 

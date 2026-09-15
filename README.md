@@ -223,7 +223,8 @@ uv run python scripts/upgrade_production_database.py
 
 - 外部服务地址、激活码、Cookie、模型密钥等仅保存在本机配置或环境变量中。
 - Web GUI 的 LLM 页面密钥保存在当前 Windows 用户的 Windows Credential Manager；保存后，Web
-  进程和新启动的 Worker 在下一次模型调用时都会读取新密钥，无需重启。无法使用凭据库或尚未
+  进程和已经运行的 Worker 在下一次模型调用时都会读取新密钥，无需重启；已在途的请求继续使用
+  发出时的凭据。无法使用凭据库或尚未
   保存页面密钥时，系统继续使用该提供商配置的 API Key 环境变量作为兜底。
 - 远程 HTTP 页面不得提交 LLM 密钥。若通过 HTTPS 反向代理提供远程管理页面，代理必须受信任，
   并正确传递原始请求 scheme 和客户端地址；否则传输守卫会拒绝请求，以避免将密钥暴露在不可信

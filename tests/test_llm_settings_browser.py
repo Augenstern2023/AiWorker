@@ -13,7 +13,8 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 
-from playwright.sync_api import Page, sync_playwright
+import pytest
+from playwright.sync_api import Page, expect, sync_playwright
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +22,7 @@ ALPINE_SCRIPT = ROOT / "static/js/alpine.min.js"
 BOOTSTRAP_STYLE = ROOT / "static/css/bootstrap.min.css"
 WORKSPACE_STYLE = ROOT / "static/css/workspaces.css"
 ADMIN_SCRIPT = ROOT / "static/js/admin/workspace.js"
+API_SCRIPT = ROOT / "static/js/common/api.js"
 TASKS_SCRIPT = ROOT / "static/js/common/tasks.js"
 ADMIN_TEMPLATE = ROOT / "templates/admin/config.html"
 
@@ -124,8 +126,12 @@ def _llm_state() -> dict:
     }
 
 
-def _mount_llm_page(page: Page, payload: dict = SETTINGS_PAYLOAD) -> None:
+def _mount_llm_page(
+    page: Page, payload: dict = SETTINGS_PAYLOAD, *, origin: str = "http://127.0.0.1"
+) -> None:
     page.set_default_timeout(3_000)
+    page.route("**/admin/config", lambda route: route.fulfill(body="<html></html>"))
+    page.goto(f"{origin}/admin/config")
     template = ADMIN_TEMPLATE.read_text(encoding="utf-8")
     content = template.split("{% block content %}", 1)[1].split(
         '{% include "common/workspace/admin_config.html" %}', 1
@@ -227,6 +233,14 @@ def _mount_llm_page(page: Page, payload: dict = SETTINGS_PAYLOAD) -> None:
                   return {id: providerId};
                 }};
               }
+              if (url === '/api/llm/providers' && options.method === 'POST') {
+                const provider = {
+                  ...body, id: 'created-provider', models: [], is_default: false,
+                  has_api_key: false, credential_status: 'missing', credential_source: 'missing'
+                };
+                window.settingsPayload.providers.push(provider);
+                return {ok: true, status: 201, async json() { return structuredClone(provider); }};
+              }
               return {ok: true, status: 200, async json() {
                 return {
                   id: 'created-provider',
@@ -256,6 +270,98 @@ def _mount_llm_page(page: Page, payload: dict = SETTINGS_PAYLOAD) -> None:
         {"payload": payload, "llmState": _llm_state()},
     )
     page.add_script_tag(path=ALPINE_SCRIPT)
+
+
+@pytest.mark.parametrize(("origin", "allowed"), [
+    ("http://admin.example.test", False),
+    ("http://localhost.example.test", False),
+    ("https://admin.example.test", True),
+    ("http://127.0.0.1", True),
+    ("http://localhost", True),
+    ("http://[::1]", True),
+])
+@pytest.mark.parametrize("action", ["save", "test"])
+def test_llm_secret_transport_is_checked_before_network_request(origin, allowed, action):
+    """Catch browser-side secret submission over remote HTTP before server refusal."""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        _mount_llm_page(page, origin=origin)
+        page.evaluate("document.querySelector('main')._x_dataStack[0].fetchLLMSettings()")
+        # Use the production HTTP wrapper; observe actual browser network requests.
+        page.add_script_tag(path=API_SCRIPT)
+        sent = []
+        page.on("request", lambda request: sent.append(request)
+                if "/api/llm/" in request.url else None)
+
+        def respond(route):
+            if route.request.url.endswith("/settings"):
+                data = SETTINGS_PAYLOAD
+            elif route.request.url.endswith("/test"):
+                data = {"status": "success", "message": "模型连接测试成功", "latency_ms": 1}
+            else:
+                data = {"id": "provider-1", "credential_source": "credential_store"}
+            route.fulfill(status=200, json=data)
+
+        page.route("**/api/llm/**", respond)
+        page.get_by_label("API Key", exact=True).fill("transport-sentinel")
+        page.get_by_role("button", name="保存提供商" if action == "save" else "测试连接").click()
+        page.wait_for_function("""() => {
+          const state = document.querySelector('main')._x_dataStack[0].llmSettings;
+          return !state.saving && !state.testing && (state.error || state.notice || state.test.result);
+        }""")
+        secret_requests = [request for request in sent
+                           if "transport-sentinel" in (request.post_data or "")]
+        assert len(secret_requests) == (1 if allowed else 0)
+        if not allowed:
+            assert "HTTPS" in page.locator("#llm-settings-error").inner_text()
+        else:
+            assert secret_requests[0].method == ("PUT" if action == "save" else "POST")
+        browser.close()
+
+
+@pytest.mark.parametrize("case", ["new", "edit-new-key", "edit-vault-only"])
+def test_llm_vault_only_provider_can_test_and_save_without_environment(case):
+    """Catch required env fields blocking new or existing vault-only providers."""
+    payload = deepcopy(SETTINGS_PAYLOAD)
+    payload["providers"][0].update(api_key_env_var="", credential_source="credential_store")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        _mount_llm_page(page, payload)
+        page.evaluate("document.querySelector('main')._x_dataStack[0].fetchLLMSettings()")
+        if case == "new":
+            page.get_by_role("button", name="新增提供商").click()
+            page.get_by_label("提供商预设").select_option("custom")
+            page.get_by_label("提供商名称").fill("Vault Only")
+            page.get_by_label("Base URL").fill("https://llm.example.test/v1")
+        page.get_by_label("API Key 环境变量").fill("")
+        if case != "edit-vault-only":
+            page.get_by_label("API Key", exact=True).fill("vault-only-sentinel")
+        page.get_by_label("测试模型 ID").fill("model-a")
+        test_button = page.get_by_role("button", name="测试连接", exact=True)
+        save_button = page.get_by_role("button", name="保存提供商")
+        expect(test_button).to_be_enabled()
+        expect(save_button).to_be_enabled()
+        test_button.click()
+        page.wait_for_function("window.resolveLLMTest !== null")
+        test_body = page.evaluate("window.requests.find(item => item.url === '/api/llm/test').body")
+        assert test_body["api_key_env_var"] == ""
+        assert ("api_key" in test_body) == (case != "edit-vault-only")
+        page.evaluate("window.resolveLLMTest()")
+        page.wait_for_function("!document.querySelector('main')._x_dataStack[0].llmSettings.testing")
+        if case != "edit-vault-only":
+            page.get_by_label("API Key", exact=True).fill("vault-only-sentinel")
+        save_button.click()
+        page.wait_for_function("document.querySelector('main')._x_dataStack[0].llmSettings.notice")
+        expected_id = "created-provider" if case == "new" else "provider-1"
+        saved = page.evaluate("window.settingsPayload.providers").copy()
+        provider = next(item for item in saved if item["id"] == expected_id)
+        assert provider["api_key_env_var"] == ""
+        assert provider["credential_source"] == "credential_store"
+        assert page.get_by_label("API Key", exact=True).input_value() == ""
+        assert not page.locator("#llm-settings-error").is_visible()
+        browser.close()
 
 
 def test_llm_settings_load_master_detail_with_environment_credential() -> None:

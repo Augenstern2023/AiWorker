@@ -49,6 +49,8 @@ PAGE_TEMPLATES = {
     "/writing/projects/{project_id}/outlines": "writing/outlines.html",
     "/writing/projects/{project_id}/episodes/{episode_number}/beats": "writing/beats.html",
     "/writing/projects/{project_id}/episodes/{episode_number}/scripts": "writing/scripts.html",
+    "/projects/{project_id}/prompt-templates": "common/workspace/prompt_template_center.html",
+    "/projects/{project_id}/prompt-effects": "common/workspace/prompt_template_effects.html",
     "/review/scripts": "review/scripts.html",
     "/review/writer-agent": "review/writer_agent.html",
     "/review/projects": "review/projects.html",
@@ -89,9 +91,8 @@ def build_page_router(
         if not navigation_service.can_open(principal, request.url.path):
             raise HTTPException(status_code=403, detail="没有执行此操作的权限")
         project_id = request.path_params.get("project_id")
-        if (
-            project_id is not None
-            and request.url.path.startswith("/writing/projects/")
+        if project_id is not None and request.url.path.startswith(
+            ("/writing/projects/", "/projects/")
         ):
             service = getattr(
                 request.app.state, "identity_permission_service", None
@@ -276,10 +277,14 @@ def _page_response(
                 "selection/dashboard.html",
                 "writing/dashboard.html",
             },
-            workspace_page=(
-                "tasks"
-                if template_name in {"common/tasks.html", "common/my_tasks.html"}
-                else template_name.removesuffix(".html").replace("/", "-").replace("_", "-")
+            workspace_page={
+                "common/tasks.html": "tasks",
+                "common/my_tasks.html": "tasks",
+                "common/workspace/prompt_template_center.html": "prompt-template-center",
+                "common/workspace/prompt_template_effects.html": "prompt-template-effects",
+            }.get(
+                template_name,
+                template_name.removesuffix(".html").replace("/", "-").replace("_", "-"),
             ),
         ),
     )

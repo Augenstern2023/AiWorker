@@ -6,7 +6,7 @@
             <div class="small text-muted" x-text="`全剧草稿进度：${projectBeatsGenerationProgress().generated}/${projectBeatsGenerationProgress().required}；锁定：${lockedProjectBeatsProgress().locked}/${lockedProjectBeatsProgress().required}`"></div>
         </div>
         <div class="d-flex gap-2 align-items-end">
-            <button class="btn btn-outline-info btn-sm" type="button" @click="openPromptLibrary('beats')" title="选择 Beats 生成风格"><i class="bi bi-sliders me-1"></i>提示词模板</button>
+            <button class="btn btn-outline-info btn-sm" type="button" @click="openPromptLibrary('beats')" title="选择 Beats 生成模板"><i class="bi bi-sliders me-1"></i>选择生成模板</button>
             <div>
                 <label class="form-label small">集数</label>
                 <select class="form-select form-select-sm" style="width:170px" x-model.number="creativeWorkspace.selectedEpisode">

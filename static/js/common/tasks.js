@@ -230,6 +230,7 @@
                         importDraft: null, importWarnings: [], importSourceSummary: {},
                         importTitle: '', importDescription: '', importOwnerScope: 'user',
                         importParametersJson: '{}', importExamplesJson: '[]',
+                        personalOpen: false,
                         abOpen: false, abLoading: false, abStarting: false,
                         abTemplateAKey: '', abTemplateBKey: '', abModelOptions: [],
                         abModelRecordId: '', abBudgetAmount: 10,
@@ -245,6 +246,7 @@
                         },
                         abIterationDraft: null, abIterationLoading: false,
                         abIterationPublishing: false,
+                        effectsFocus: 'comparison',
                         governanceOpen: false, governanceLoading: false,
                         governanceSaving: false, governanceItems: [], governancePolicy: [],
                         governanceCanManage: false,
@@ -411,10 +413,19 @@
                     if (['selection-hits', 'selection-topics'].includes(this.page)) {
                         this.restoreLatestActiveDramaDownload?.();
                     }
-                    if (this.page.startsWith('planning-') || this.page.startsWith('writing-')) {
+                    if (
+                        this.page.startsWith('planning-')
+                        || this.page.startsWith('writing-')
+                        || this.page.startsWith('prompt-template-')
+                    ) {
                         const queryProjectId = new URLSearchParams(window.location.search).get('project_id');
                         const pathProjectId = window.location.pathname.match(/\/projects\/([^/]+)/)?.[1];
-                        await this.fetchCreativeProjects(queryProjectId || pathProjectId || null);
+                        const requestedProjectId = queryProjectId || pathProjectId || null;
+                        if (this.page.startsWith('prompt-template-') && requestedProjectId) {
+                            await this.selectCreativeProject(requestedProjectId);
+                        } else {
+                            await this.fetchCreativeProjects(requestedProjectId);
+                        }
                         const topicId = new URLSearchParams(window.location.search).get('topic_id');
                         if (this.page === 'planning-projects' && topicId) {
                             this.creativeWorkspace.create.topic_id = Number(topicId);
@@ -440,6 +451,9 @@
                             }
                         }
                         this.creativeWorkspace.selectedEpisode = creativeEpisodeView(this.page);
+                        if (this.page.startsWith('prompt-template-')) {
+                            await this.initializePromptWorkspacePage();
+                        }
                         if (
                             this.page === 'planning-brief'
                             && new URLSearchParams(window.location.search).get('task_setup') === '1'

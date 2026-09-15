@@ -294,6 +294,49 @@ def test_writer_project_pages_require_project_participation(page_app, route: str
     assert 'href="/writing/projects">项目列表</a>' in response.text
 
 
+@pytest.mark.parametrize(
+    ("route", "page_marker"),
+    (
+        ("/projects/project-9/prompt-templates", "模板中心"),
+        ("/projects/project-9/prompt-effects", "模板效果"),
+    ),
+)
+def test_prompt_workspace_pages_inherit_project_access_and_membership(
+    page_app, route: str, page_marker: str
+):
+    principal = _principal(roles=("screenwriter",))
+    page_app[1].access_by_route["/writing/projects"] = {principal.user_id}
+    client = _client(page_app, principal)
+
+    assert client.get(route).status_code == 403
+    page_app[0].state.identity_permission_service.participating_project_ids.add(
+        "project-9"
+    )
+
+    response = client.get(route)
+
+    assert response.status_code == 200
+    assert page_marker in response.text
+    assert 'src="/static/js/common/creative.js?v=' in response.text
+
+
+@pytest.mark.parametrize(
+    "grant_route", ("/planning/projects", "/review/projects")
+)
+def test_prompt_workspace_pages_accept_planning_and_managed_project_grants(
+    page_app, grant_route: str
+):
+    principal = _principal()
+    page_app[1].access_by_route[grant_route] = {principal.user_id}
+    page_app[0].state.identity_permission_service.participating_project_ids.add(
+        "project-9"
+    )
+    client = _client(page_app, principal)
+
+    assert client.get("/projects/project-9/prompt-templates").status_code == 200
+    assert client.get("/projects/project-9/prompt-effects").status_code == 200
+
+
 def test_writer_project_page_scopes_local_project_id_before_membership_check(page_app):
     principal = _principal(roles=("screenwriter",))
     page_app[1].access_by_route["/writing/projects"] = {principal.user_id}

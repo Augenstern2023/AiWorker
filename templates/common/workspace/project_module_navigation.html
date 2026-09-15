@@ -22,6 +22,10 @@
                 {% endif %}
                 {% endif %}
             </div>
+            <div class="d-flex flex-wrap align-items-center gap-2 border-start border-secondary-subtle ps-2" aria-label="提示词模板工具">
+                <a class="btn btn-sm {% if creative_module == 'prompt-center' %}btn-info{% else %}btn-outline-info{% endif %}" :href="promptWorkspaceUrl('center')">模板中心</a>
+                <a class="btn btn-sm {% if creative_module == 'prompt-effects' %}btn-info{% else %}btn-outline-info{% endif %}" :href="promptWorkspaceUrl('effects')">模板效果</a>
+            </div>
             <div class="d-flex align-items-center gap-2 ms-auto" x-show="!isFreeCreativeProject()">
                 <label class="small text-muted text-nowrap" for="sequential-generation-model">生成模型</label>
                 <select id="sequential-generation-model" class="form-select form-select-sm" style="width:240px"

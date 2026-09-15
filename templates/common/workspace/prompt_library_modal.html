@@ -1,10 +1,19 @@
-<div class="modal fade" id="promptLibraryModal" tabindex="-1" aria-labelledby="promptLibraryModalLabel" aria-hidden="true">
+{% set prompt_library_surface = prompt_library_surface|default('picker') %}
+<div class="modal fade" id="promptLibraryModal" tabindex="-1" aria-labelledby="promptLibraryModalLabel" aria-hidden="true" data-prompt-library-surface="{{ prompt_library_surface }}">
     <div class="modal-dialog modal-xl modal-dialog-scrollable">
         <div class="modal-content">
             <div class="modal-header">
                 <div>
-                    <h5 class="modal-title" id="promptLibraryModalLabel" x-text="`${promptStageLabel(creativeWorkspace.promptLibrary.stage)} · 提示词模板库`"></h5>
-                    <div class="small text-muted">系统输出契约保持锁定；这里只调整题材、故事引擎、节奏和表达风格。</div>
+                    {% if prompt_library_surface == 'picker' %}
+                    <h5 class="modal-title" id="promptLibraryModalLabel" x-text="`${promptStageLabel(creativeWorkspace.promptLibrary.stage)} · 选择生成模板`"></h5>
+                    <div class="small text-muted">这里只决定本次生成使用什么模板、补充要求和应用范围</div>
+                    {% elif prompt_library_surface == 'center' %}
+                    <h5 class="modal-title" id="promptLibraryModalLabel">模板中心</h5>
+                    <div class="small text-muted" x-text="`${promptStageLabel(creativeWorkspace.promptLibrary.stage)} · 创建、共享和安装模板`"></div>
+                    {% else %}
+                    <h5 class="modal-title" id="promptLibraryModalLabel">模板效果</h5>
+                    <div class="small text-muted" x-text="`${promptStageLabel(creativeWorkspace.promptLibrary.stage)} · 用真实结果验证和优化模板`"></div>
+                    {% endif %}
                 </div>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
             </div>
@@ -21,34 +30,88 @@
                     当前模板已有新版本。项目仍固定使用 v<span x-text="creativeWorkspace.promptLibrary.effective?.revision"></span>，不会自动合并或覆盖。
                 </div>
 
+                {% if prompt_library_surface == 'picker' %}
                 <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
                     <div class="small text-muted">模板按项目题材、平台、受众与创作素材的七维匹配度排序；推荐不会自动改变当前设置。</div>
-                    <div class="d-flex flex-wrap gap-2" x-show="!creativeWorkspace.promptLibrary.importOpen && !creativeWorkspace.promptLibrary.abOpen && !creativeWorkspace.promptLibrary.governanceOpen && !creativeWorkspace.promptLibrary.observabilityOpen && !creativeWorkspace.promptLibrary.marketplaceOpen">
-                        <button class="btn btn-outline-info btn-sm" type="button" @click="openPromptMarketplace">
-                            模板市场
-                        </button>
-                        <button class="btn btn-outline-dark btn-sm" type="button" @click="openPromptObservability">
-                            模板可观测性
-                        </button>
-                        <button class="btn btn-outline-secondary btn-sm" type="button" @click="openPromptGovernance">
-                            项目模板治理
-                        </button>
-                        <button class="btn btn-outline-primary btn-sm" type="button" @click="openPromptImport">
-                            导入外部提示词
-                        </button>
-                        <button class="btn btn-outline-success btn-sm" type="button" @click="openPromptAB" :disabled="!creativeWorkspace.promptLibrary.settings?.enabled || orderedPromptTemplates().length < 2">
-                            模板 A/B 对比
-                        </button>
+                    <div class="d-flex flex-wrap gap-2">
+                        <a class="btn btn-outline-info btn-sm" :href="promptWorkspaceUrl('center')">模板中心</a>
+                        <a class="btn btn-outline-info btn-sm" :href="promptWorkspaceUrl('effects')">模板效果</a>
                     </div>
                 </div>
+                {% elif prompt_library_surface == 'center' %}
+                <div class="d-flex flex-wrap gap-2 mb-3">
+                    <button class="btn btn-sm" :class="creativeWorkspace.promptLibrary.personalOpen || creativeWorkspace.promptLibrary.importOpen || creativeWorkspace.promptLibrary.editing ? 'btn-info' : 'btn-outline-info'" type="button" @click="openPromptWorkspacePanel('personal')">我的模板</button>
+                    <button class="btn btn-sm" :class="creativeWorkspace.promptLibrary.governanceOpen ? 'btn-primary' : 'btn-outline-primary'" type="button" @click="openPromptWorkspacePanel('project')">项目模板</button>
+                    <button class="btn btn-sm" :class="creativeWorkspace.promptLibrary.marketplaceOpen ? 'btn-warning' : 'btn-outline-warning'" type="button" @click="openPromptWorkspacePanel('marketplace')">模板市场</button>
+                </div>
+                {% else %}
+                <div class="d-flex flex-wrap gap-2 mb-3">
+                    <button class="btn btn-sm" :class="creativeWorkspace.promptLibrary.observabilityOpen ? 'btn-dark' : 'btn-outline-dark'" type="button" @click="openPromptWorkspacePanel('observability')">效果数据</button>
+                    <button class="btn btn-sm" :class="creativeWorkspace.promptLibrary.abOpen && creativeWorkspace.promptLibrary.effectsFocus === 'comparison' ? 'btn-success' : 'btn-outline-success'" type="button" @click="openPromptWorkspacePanel('comparison')">对比测试</button>
+                    <button class="btn btn-sm" :class="creativeWorkspace.promptLibrary.abOpen && creativeWorkspace.promptLibrary.effectsFocus === 'history' ? 'btn-primary' : 'btn-outline-primary'" type="button" @click="openPromptWorkspacePanel('history')">实验记录</button>
+                    <button class="btn btn-sm" :class="creativeWorkspace.promptLibrary.abOpen && creativeWorkspace.promptLibrary.effectsFocus === 'optimization' ? 'btn-warning' : 'btn-outline-warning'" type="button" @click="openPromptWorkspacePanel('optimization')">版本优化</button>
+                </div>
+                {% endif %}
+
+                {% if prompt_library_surface == 'center' %}
+                <section class="border border-secondary-subtle rounded p-3 mb-3" x-show="creativeWorkspace.promptLibrary.personalOpen && !creativeWorkspace.promptLibrary.editing" x-cloak>
+                    <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
+                        <div>
+                            <div class="fw-semibold">我的模板</div>
+                            <div class="small text-muted mt-1">个人模板只有你能编辑；保存新版本不会自动修改项目默认设置。</div>
+                        </div>
+                        <button class="btn btn-info btn-sm" type="button" @click="openPromptImport">导入外部提示词</button>
+                    </div>
+                    <div class="row g-2 mt-2 align-items-end">
+                        <div class="col-md-8">
+                            <label class="form-label small" for="prompt-copy-source">从现有模板创建个人副本</label>
+                            <select id="prompt-copy-source" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.selectedTemplateKey">
+                                <template x-for="template in orderedPromptTemplates()" :key="`copy-source-${template.id}`">
+                                    <option :value="template.template_key" x-text="`${template.title} · ${promptTemplateOwnerLabel(template.owner_scope)} · v${template.revision}`"></option>
+                                </template>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <button class="btn btn-outline-info btn-sm w-100" type="button" @click="copySelectedPromptTemplate('user')" :disabled="creativeWorkspace.promptLibrary.saving || !creativeWorkspace.promptLibrary.selectedTemplateKey">另存到我的模板</button>
+                        </div>
+                    </div>
+                    <div class="small text-muted py-3" x-show="!promptTemplatesByOwner('user').length">当前步骤还没有个人模板。可以导入提示词，或从现有模板创建副本。</div>
+                    <div class="row g-2 mt-1">
+                        <template x-for="template in promptTemplatesByOwner('user')" :key="`personal-template-${template.id}`">
+                            <div class="col-md-6">
+                                <article class="card h-100 border-secondary">
+                                    <div class="card-body p-3">
+                                        <div class="d-flex justify-content-between gap-2"><span class="fw-semibold" x-text="template.title"></span><span class="badge text-bg-info" x-text="`v${template.revision}`"></span></div>
+                                        <div class="small text-muted mt-1" x-text="template.description || '暂无说明'"></div>
+                                        <div class="d-flex flex-wrap gap-1 mt-2"><template x-for="value in promptTemplateDimensionValues(template)" :key="value"><span class="badge text-bg-secondary" x-text="value"></span></template></div>
+                                        <button class="btn btn-outline-primary btn-sm mt-3" type="button" @click="selectPromptTemplate(template); startPromptTemplateEdit()">编辑并发布新版本</button>
+                                    </div>
+                                </article>
+                            </div>
+                        </template>
+                    </div>
+                </section>
 
                 <section class="border border-secondary-subtle rounded p-3 mb-3" x-show="creativeWorkspace.promptLibrary.governanceOpen" x-cloak>
                     <div class="d-flex justify-content-between align-items-start gap-3">
                         <div>
-                            <div class="fw-semibold">项目模板治理</div>
-                            <div class="small text-muted mt-1">先查看使用影响，再执行审核、弃用或归档；任何操作都不会静默切换现有绑定。</div>
+                            <div class="fw-semibold">项目模板</div>
+                            <div class="small text-muted mt-1">项目成员在这里看共享模板状态；项目负责人审核、弃用或归档。任何操作都不会静默切换现有绑定。</div>
                         </div>
                         <button class="btn btn-sm btn-outline-secondary" type="button" @click="closePromptGovernance">关闭</button>
+                    </div>
+                    <div class="row g-2 mt-2 align-items-end" x-show="creativeWorkspace.promptLibrary.governanceCanManage" x-cloak>
+                        <div class="col-md-8">
+                            <label class="form-label small" for="prompt-project-copy-source">从现有模板创建项目共享副本</label>
+                            <select id="prompt-project-copy-source" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.selectedTemplateKey">
+                                <template x-for="template in orderedPromptTemplates()" :key="`project-copy-source-${template.id}`">
+                                    <option :value="template.template_key" x-text="`${template.title} · ${promptTemplateOwnerLabel(template.owner_scope)} · v${template.revision}`"></option>
+                                </template>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <button class="btn btn-outline-primary btn-sm w-100" type="button" @click="copySelectedPromptTemplate('project')" :disabled="creativeWorkspace.promptLibrary.saving || !creativeWorkspace.promptLibrary.selectedTemplateKey">另存为项目模板</button>
+                        </div>
                     </div>
                     <div class="text-center text-muted py-3" x-show="creativeWorkspace.promptLibrary.governanceLoading">正在分析模板使用情况…</div>
                     <div class="alert alert-light border py-2 mt-3" x-show="creativeWorkspace.promptLibrary.governancePolicy.length">
@@ -88,11 +151,13 @@
                         </template>
                     </div>
                 </section>
+                {% endif %}
 
+                {% if prompt_library_surface == 'effects' %}
                 <section class="border border-dark-subtle rounded p-3 mb-3" x-show="creativeWorkspace.promptLibrary.observabilityOpen" x-cloak>
                     <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
                         <div>
-                            <div class="fw-semibold">模板可观测性</div>
+                            <div class="fw-semibold">效果数据</div>
                             <div class="small text-muted mt-1">按模板版本汇总真实任务；Token 只读取供应商 usage，费用只使用任务创建时冻结的单价。</div>
                         </div>
                         <button class="btn btn-sm btn-outline-secondary" type="button" @click="closePromptObservability">关闭</button>
@@ -185,7 +250,9 @@
                         </div>
                     </template>
                 </section>
+                {% endif %}
 
+                {% if prompt_library_surface == 'center' %}
                 <section class="border border-info-subtle rounded p-3 mb-3" x-show="creativeWorkspace.promptLibrary.marketplaceOpen" x-cloak>
                     <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
                         <div>
@@ -227,6 +294,14 @@
                     <div class="border rounded p-3 mt-3">
                         <div class="fw-semibold">发布当前选中的个人模板</div>
                         <div class="small text-muted mt-1">提交时冻结当前版本；平台审核通过前不会公开。项目模板不能直接发布，防止项目资产被误公开。</div>
+                        <div class="mt-2" x-show="promptTemplatesByOwner('user').length" x-cloak>
+                            <label class="form-label small" for="promptMarketplacePersonalTemplate">要提交的个人模板</label>
+                            <select id="promptMarketplacePersonalTemplate" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.selectedTemplateKey">
+                                <template x-for="template in promptTemplatesByOwner('user')" :key="`market-personal-${template.id}`">
+                                    <option :value="template.template_key" x-text="`${template.title} · v${template.revision}`"></option>
+                                </template>
+                            </select>
+                        </div>
                         <div class="alert alert-warning py-2 mt-3 mb-0" x-show="selectedPromptTemplate()?.owner_scope !== 'user'">请先把当前模板“另存到我的模板”，再提交市场审核。</div>
                         <div x-show="selectedPromptTemplate()?.owner_scope === 'user'" x-cloak>
                             <div class="row g-2 mt-2">
@@ -400,16 +475,20 @@
                         </div>
                     </template>
                 </section>
+                {% endif %}
 
+                {% if prompt_library_surface == 'effects' %}
                 <section class="border border-success-subtle rounded p-3 mb-3" x-show="creativeWorkspace.promptLibrary.abOpen" x-cloak>
                     <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
                         <div>
-                            <div class="fw-semibold">模板 A/B 对比</div>
+                            <div class="fw-semibold" x-text="({comparison: '对比测试', history: '实验记录', optimization: '版本优化'})[creativeWorkspace.promptLibrary.effectsFocus]"></div>
                             <div class="small text-muted mt-1">两组使用同一份冻结输入和同一模型。生成结果只保存为候选草稿，不会自动替换当前版本，也不会自动选出胜者。</div>
                         </div>
                         <button class="btn btn-sm btn-outline-secondary" type="button" @click="closePromptAB">关闭</button>
                     </div>
 
+                    <div class="text-center text-muted py-3" x-show="creativeWorkspace.promptLibrary.abLoading">正在读取模板实验数据…</div>
+                    <div x-show="creativeWorkspace.promptLibrary.effectsFocus === 'comparison'" x-cloak>
                     <div class="text-center text-muted py-3" x-show="creativeWorkspace.promptLibrary.abLoading && !creativeWorkspace.promptLibrary.abModelOptions.length">正在读取 A/B 配置…</div>
                     <div class="row g-3 mt-1" x-show="creativeWorkspace.promptLibrary.abModelOptions.length">
                         <div class="col-md-6">
@@ -500,8 +579,10 @@
                             </div>
                         </div>
                     </template>
+                    </div>
 
-                    <div class="mt-4 border-top pt-3">
+                    <div x-show="creativeWorkspace.promptLibrary.effectsFocus === 'optimization'" x-cloak>
+                    <div class="mt-2">
                         <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
                             <div>
                                 <div class="fw-semibold">当前阶段效果汇总</div>
@@ -596,8 +677,10 @@
                             </button>
                         </div>
                     </section>
+                    </div>
 
-                    <div class="mt-4">
+                    <div x-show="creativeWorkspace.promptLibrary.effectsFocus === 'history'" x-cloak>
+                    <div class="mt-2">
                         <div class="fw-semibold mb-2">最近的 A/B 实验</div>
                         <div class="small text-muted" x-show="!creativeWorkspace.promptLibrary.abHistory.length">尚未运行 A/B 实验。</div>
                         <div class="vstack gap-2">
@@ -676,9 +759,12 @@
                             </button>
                         </div>
                     </section>
+                    </div>
                 </section>
+                {% endif %}
 
-                <div class="row g-3" x-show="creativeWorkspace.promptLibrary.settings?.enabled && !creativeWorkspace.promptLibrary.loading && !creativeWorkspace.promptLibrary.importOpen && !creativeWorkspace.promptLibrary.abOpen && !creativeWorkspace.promptLibrary.governanceOpen && !creativeWorkspace.promptLibrary.observabilityOpen && !creativeWorkspace.promptLibrary.marketplaceOpen" x-cloak>
+                {% if prompt_library_surface == 'picker' %}
+                <div class="row g-3" x-show="creativeWorkspace.promptLibrary.settings?.enabled && !creativeWorkspace.promptLibrary.loading" x-cloak>
                     <div class="col-lg-7">
                         <div class="row g-2">
                             <template x-for="template in orderedPromptTemplates()" :key="template.id">
@@ -736,11 +822,14 @@
                                     <div class="small text-muted mt-2" x-text="selectedPromptTemplate().content?.stage_rules?.[creativeWorkspace.promptLibrary.stage]?.single"></div>
                                 </details>
                             </template>
-                            <button class="btn btn-outline-secondary btn-sm mt-3" type="button" x-show="selectedPromptTemplateEditable() && !creativeWorkspace.promptLibrary.editing" @click="startPromptTemplateEdit">编辑模板内容</button>
                         </div>
                     </div>
                 </div>
-                <section class="border rounded p-3 mt-3" x-show="creativeWorkspace.promptLibrary.editing && !creativeWorkspace.promptLibrary.importOpen && !creativeWorkspace.promptLibrary.abOpen && !creativeWorkspace.promptLibrary.governanceOpen && !creativeWorkspace.promptLibrary.observabilityOpen && !creativeWorkspace.promptLibrary.marketplaceOpen" x-cloak>
+                {% endif %}
+
+                {% if prompt_library_surface == 'center' %}
+                <template x-if="creativeWorkspace.promptLibrary.editing">
+                <section class="border rounded p-3 mt-3">
                     <div class="d-flex justify-content-between align-items-center mb-3">
                         <div>
                             <div class="fw-semibold">高级模板编辑</div>
@@ -779,13 +868,15 @@
                         <button class="btn btn-primary" type="button" @click="savePromptTemplateRevision" :disabled="creativeWorkspace.promptLibrary.saving">保存为新版本</button>
                     </div>
                 </section>
+                </template>
+                {% endif %}
             </div>
             <div class="modal-footer">
-                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
-                <button type="button" class="btn btn-outline-info" x-show="creativeWorkspace.promptLibrary.settings?.enabled && !creativeWorkspace.promptLibrary.importOpen && !creativeWorkspace.promptLibrary.abOpen && !creativeWorkspace.promptLibrary.governanceOpen && !creativeWorkspace.promptLibrary.observabilityOpen" @click="copySelectedPromptTemplate('user')" :disabled="creativeWorkspace.promptLibrary.saving || !creativeWorkspace.promptLibrary.selectedTemplateKey">另存到我的模板</button>
-                <button type="button" class="btn btn-outline-info" x-show="creativeWorkspace.promptLibrary.settings?.enabled && !creativeWorkspace.promptLibrary.importOpen && !creativeWorkspace.promptLibrary.abOpen && !creativeWorkspace.promptLibrary.governanceOpen && !creativeWorkspace.promptLibrary.observabilityOpen" @click="copySelectedPromptTemplate('project')" :disabled="creativeWorkspace.promptLibrary.saving || !creativeWorkspace.promptLibrary.selectedTemplateKey">另存为项目模板</button>
-                <button type="button" class="btn btn-outline-primary" x-show="creativeWorkspace.promptLibrary.settings?.enabled && !creativeWorkspace.promptLibrary.importOpen && !creativeWorkspace.promptLibrary.abOpen && !creativeWorkspace.promptLibrary.governanceOpen && !creativeWorkspace.promptLibrary.observabilityOpen" @click="usePromptForNextGeneration" :disabled="!creativeWorkspace.promptLibrary.selectedTemplateKey">仅下次生成使用</button>
-                <button type="button" class="btn btn-primary" x-show="creativeWorkspace.promptLibrary.settings?.enabled && !creativeWorkspace.promptLibrary.importOpen && !creativeWorkspace.promptLibrary.abOpen && !creativeWorkspace.promptLibrary.governanceOpen && !creativeWorkspace.promptLibrary.observabilityOpen" @click="savePromptBinding" :disabled="creativeWorkspace.promptLibrary.saving || !creativeWorkspace.promptLibrary.selectedTemplateKey">保存默认设置</button>
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">关闭</button>
+                {% if prompt_library_surface == 'picker' %}
+                <button type="button" class="btn btn-outline-primary" x-show="creativeWorkspace.promptLibrary.settings?.enabled" @click="usePromptForNextGeneration" :disabled="!creativeWorkspace.promptLibrary.selectedTemplateKey">仅下次生成使用</button>
+                <button type="button" class="btn btn-primary" x-show="creativeWorkspace.promptLibrary.settings?.enabled" @click="savePromptBinding" :disabled="creativeWorkspace.promptLibrary.saving || !creativeWorkspace.promptLibrary.selectedTemplateKey">保存默认设置</button>
+                {% endif %}
             </div>
         </div>
     </div>

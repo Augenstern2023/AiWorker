@@ -6,7 +6,7 @@
             <div class="small text-muted" x-show="!isFreeCreativeProject()" x-text="projectScriptsSeriesBlockReason()"></div>
         </div>
         <div class="d-flex gap-2 align-items-end flex-wrap justify-content-end">
-            <button class="btn btn-outline-info btn-sm" type="button" @click="openPromptLibrary('script')" title="选择场次剧本生成风格"><i class="bi bi-sliders me-1"></i>提示词模板</button>
+            <button class="btn btn-outline-info btn-sm" type="button" @click="openPromptLibrary('script')" title="选择场次剧本生成模板"><i class="bi bi-sliders me-1"></i>选择生成模板</button>
             <div>
                 <label class="form-label small">集数</label>
                 <select class="form-select form-select-sm" style="width:150px" x-model.number="creativeWorkspace.selectedEpisode">

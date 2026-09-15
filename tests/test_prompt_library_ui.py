@@ -35,6 +35,33 @@ def test_all_enabled_generation_workspaces_expose_the_shared_prompt_library():
     assert 'include "common/workspace/prompt_library_modal.html"' in outlines
     assert 'include "common/workspace/prompt_library_modal.html"' in beats
     assert 'include "common/workspace/prompt_library_modal.html"' in scripts
+    for source in (brief, characters, outlines, beats, scripts):
+        assert "选择生成模板" in source
+
+
+def test_prompt_library_information_architecture_separates_daily_and_advanced_work():
+    modal = _read("templates/common/workspace/prompt_library_modal.html")
+    center = _read("templates/common/workspace/prompt_template_center.html")
+    effects = _read("templates/common/workspace/prompt_template_effects.html")
+    navigation = _read("templates/common/workspace/project_module_navigation.html")
+    routes = _read("web/page_routes.py")
+    router = _read("web/page_router.py")
+
+    assert "prompt_library_surface|default('picker')" in modal
+    assert "这里只决定本次生成使用什么模板" in modal
+    assert "我的模板" in center
+    assert "项目模板" in center
+    assert "模板市场" in center
+    assert "效果数据" in effects
+    assert "对比测试" in effects
+    assert "实验记录" in effects
+    assert "版本优化" in effects
+    assert "promptWorkspaceUrl('center')" in navigation
+    assert "promptWorkspaceUrl('effects')" in navigation
+    assert '"/projects/{project_id}/prompt-templates"' in routes
+    assert '"/projects/{project_id}/prompt-effects"' in routes
+    assert '"common/workspace/prompt_template_center.html"' in router
+    assert '"common/workspace/prompt_template_effects.html"' in router
 
 
 def test_prompt_library_ui_keeps_contract_locked_and_supports_all_mvp_scopes():
@@ -68,7 +95,7 @@ def test_prompt_library_ui_exposes_budgeted_candidate_only_ab_testing():
     modal = _read("templates/common/workspace/prompt_library_modal.html")
     script = _read("static/js/common/creative.js")
 
-    assert "模板 A/B 对比" in modal
+    assert "对比测试" in modal
     assert "两组使用同一份冻结输入和同一模型" in modal
     assert "本次最高预算" in modal
     assert "预估调用与费用" in modal
@@ -102,8 +129,8 @@ def test_prompt_library_ui_exposes_budgeted_candidate_only_ab_testing():
     assert "promptABExportUrl(experiment.id, 'json')" in modal
     assert "promptABExportUrl(experiment.id, 'md')" in modal
     assert "/export?format=${normalizedFormat}" in script
-    assert "项目模板治理" in modal
-    assert "先查看使用影响" in modal
+    assert "项目模板" in modal
+    assert "看共享模板状态" in modal
     assert "批准当前版本" in script
     assert "标记弃用" in script
     assert "恢复并送审" in script
@@ -117,7 +144,7 @@ def test_prompt_library_ui_exposes_real_usage_and_coverage_observability():
     script = _read("static/js/common/creative.js")
     state = _read("static/js/common/tasks.js")
 
-    assert "模板可观测性" in modal
+    assert "效果数据" in modal
     assert "Token 只读取供应商 usage" in modal
     assert "任务创建时冻结的单价" in modal
     assert "模板归因覆盖" in modal

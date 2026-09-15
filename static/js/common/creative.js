@@ -1407,6 +1407,122 @@ window.aiworkerModules.push(() => ({
                     }[stage] || stage || '';
                 },
 
+                promptWorkspaceUrl(kind) {
+                    const projectId = this.creativeWorkspace.project?.id || '';
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const path = kind === 'effects' ? 'prompt-effects' : 'prompt-templates';
+                    const params = new URLSearchParams({stage: state.stage || 'brief'});
+                    if (['beats', 'script'].includes(state.stage)) {
+                        params.set('episode', String(Number(this.creativeWorkspace.selectedEpisode || 1)));
+                    }
+                    return `/projects/${projectId}/${path}?${params.toString()}`;
+                },
+
+                async initializePromptWorkspacePage() {
+                    const params = new URLSearchParams(window.location.search);
+                    const allowedStages = ['brief', 'characters', 'outline', 'beats', 'script'];
+                    const requestedStage = String(params.get('stage') || 'brief');
+                    const stage = allowedStages.includes(requestedStage) ? requestedStage : 'brief';
+                    this.creativeWorkspace.promptLibrary.stage = stage;
+                    if (['beats', 'script'].includes(stage)) {
+                        const requestedEpisode = Number(params.get('episode') || 1);
+                        const episodeCount = Number(this.creativeWorkspace.project?.target_episode_count || 1);
+                        this.creativeWorkspace.selectedEpisode = Math.min(
+                            Math.max(1, Number.isFinite(requestedEpisode) ? requestedEpisode : 1),
+                            episodeCount
+                        );
+                    } else {
+                        this.creativeWorkspace.selectedEpisode = 0;
+                    }
+                    await this.loadProjectPromptModule(stage);
+                },
+
+                updatePromptWorkspaceLocation() {
+                    if (!this.page.startsWith('prompt-template-')) return;
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const params = new URLSearchParams(window.location.search);
+                    params.set('stage', state.stage || 'brief');
+                    if (['beats', 'script'].includes(state.stage)) {
+                        params.set('episode', String(Number(this.creativeWorkspace.selectedEpisode || 1)));
+                    } else {
+                        params.delete('episode');
+                    }
+                    window.history.replaceState(
+                        window.history.state,
+                        '',
+                        `${window.location.pathname}?${params.toString()}${window.location.hash}`
+                    );
+                },
+
+                async changePromptWorkspaceStage(stage) {
+                    const allowedStages = ['brief', 'characters', 'outline', 'beats', 'script'];
+                    const normalized = allowedStages.includes(stage) ? stage : 'brief';
+                    const state = this.creativeWorkspace.promptLibrary;
+                    state.stage = normalized;
+                    if (['beats', 'script'].includes(normalized)) {
+                        this.creativeWorkspace.selectedEpisode = Math.max(
+                            1,
+                            Number(this.creativeWorkspace.selectedEpisode || 1)
+                        );
+                    } else {
+                        this.creativeWorkspace.selectedEpisode = 0;
+                    }
+                    this.updatePromptWorkspaceLocation();
+                    await this.loadProjectPromptModule(normalized);
+                },
+
+                async changePromptWorkspaceEpisode(value) {
+                    const episodeCount = Number(this.creativeWorkspace.project?.target_episode_count || 1);
+                    this.creativeWorkspace.selectedEpisode = Math.min(
+                        Math.max(1, Number(value || 1)),
+                        episodeCount
+                    );
+                    this.updatePromptWorkspaceLocation();
+                    await this.loadProjectPromptModule(this.creativeWorkspace.promptLibrary.stage);
+                },
+
+                resetPromptWorkspacePanels() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    state.personalOpen = false;
+                    state.importOpen = false;
+                    state.abOpen = false;
+                    state.governanceOpen = false;
+                    state.observabilityOpen = false;
+                    state.marketplaceOpen = false;
+                    state.editing = false;
+                    state.error = '';
+                },
+
+                async openPromptWorkspacePanel(panel) {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const stage = state.stage || 'brief';
+                    this.resetPromptWorkspacePanels();
+                    this.promptLibraryModal = this.modal('promptLibraryModal');
+                    this.promptLibraryModal?.show();
+                    await this.loadProjectPromptModule(stage);
+                    if (panel === 'personal') {
+                        state.personalOpen = true;
+                        return;
+                    }
+                    if (panel === 'project') return this.openPromptGovernance();
+                    if (panel === 'marketplace') return this.openPromptMarketplace();
+                    if (panel === 'observability') return this.openPromptObservability();
+                    if (['comparison', 'history', 'optimization'].includes(panel)) {
+                        return this.openPromptAB(panel);
+                    }
+                },
+
+                promptTemplatesByOwner(ownerScope) {
+                    return this.orderedPromptTemplates().filter(
+                        template => template.owner_scope === ownerScope
+                    );
+                },
+
+                promptTemplateOwnerLabel(ownerScope) {
+                    return {system: '系统模板', user: '我的模板', project: '项目模板'}[ownerScope]
+                        || ownerScope || '-';
+                },
+
                 promptModeLabel(mode, stage = '') {
                     if (mode === 'single') return ['brief', 'characters', 'outline'].includes(stage) ? '单次生成' : '单集生成';
                     if (mode === 'series') return stage === 'brief' ? '多候选生成' : (stage === 'characters' ? '整批生成' : '批量生成');
@@ -1550,6 +1666,7 @@ window.aiworkerModules.push(() => ({
                     state.governanceOpen = false;
                     state.observabilityOpen = false;
                     state.marketplaceOpen = false;
+                    state.personalOpen = false;
                     state.abPreflight = null;
                     state.abEvaluationExperimentId = '';
                     state.abReport = null;
@@ -1609,6 +1726,7 @@ window.aiworkerModules.push(() => ({
 
                 async openPromptGovernance() {
                     const state = this.creativeWorkspace.promptLibrary;
+                    state.personalOpen = false;
                     state.governanceOpen = true;
                     state.importOpen = false;
                     state.abOpen = false;
@@ -1667,6 +1785,7 @@ window.aiworkerModules.push(() => ({
 
                 async openPromptObservability() {
                     const state = this.creativeWorkspace.promptLibrary;
+                    state.personalOpen = false;
                     state.observabilityOpen = true;
                     state.importOpen = false;
                     state.abOpen = false;
@@ -1741,6 +1860,11 @@ window.aiworkerModules.push(() => ({
 
                 async openPromptMarketplace() {
                     const state = this.creativeWorkspace.promptLibrary;
+                    state.personalOpen = false;
+                    const personalTemplates = this.promptTemplatesByOwner('user');
+                    if (this.selectedPromptTemplate()?.owner_scope !== 'user' && personalTemplates.length) {
+                        this.selectPromptTemplate(personalTemplates[0]);
+                    }
                     state.marketplaceOpen = true;
                     state.importOpen = false;
                     state.abOpen = false;
@@ -2016,7 +2140,7 @@ window.aiworkerModules.push(() => ({
                 },
 
                 promptRunSelection(stage) {
-                    return this.creativeWorkspace.promptLibrary.runSelections?.[stage] || null;
+                    return this.creativeWorkspace.promptLibrary?.runSelections?.[stage] || null;
                 },
 
                 promptGenerationPayload(stage, body = {}) {
@@ -2110,6 +2234,9 @@ window.aiworkerModules.push(() => ({
                         await this.loadProjectPromptModule(state.stage);
                         state.selectedTemplateKey = data.template_key;
                         state.selectedTemplateRevision = Number(data.revision || 1);
+                        if (ownerScope === 'project' && state.governanceOpen) {
+                            await this.loadPromptGovernance();
+                        }
                         this.showCreativeNotice(ownerScope === 'project' ? '项目模板已创建' : '个人模板已创建');
                     } catch (error) {
                         state.error = error.message || '创建模板失败';
@@ -2287,11 +2414,14 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
-                async openPromptAB() {
+                async openPromptAB(focus = 'comparison') {
                     const state = this.creativeWorkspace.promptLibrary;
                     const projectId = this.creativeWorkspace.project?.id;
                     if (!projectId || state.abLoading) return;
                     const ordered = this.orderedPromptTemplates();
+                    state.personalOpen = false;
+                    state.effectsFocus = ['comparison', 'history', 'optimization'].includes(focus)
+                        ? focus : 'comparison';
                     state.abOpen = true;
                     state.importOpen = false;
                     state.governanceOpen = false;
@@ -2507,6 +2637,7 @@ window.aiworkerModules.push(() => ({
 
                 openPromptImport() {
                     const state = this.creativeWorkspace.promptLibrary;
+                    state.personalOpen = false;
                     state.importOpen = true;
                     state.abOpen = false;
                     state.governanceOpen = false;
@@ -2521,6 +2652,7 @@ window.aiworkerModules.push(() => ({
                 closePromptImport() {
                     const state = this.creativeWorkspace.promptLibrary;
                     state.importOpen = false;
+                    if (this.page === 'prompt-template-center') state.personalOpen = true;
                     state.importDraft = null;
                     state.importWarnings = [];
                     state.importSourceSummary = {};

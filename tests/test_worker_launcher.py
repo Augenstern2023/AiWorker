@@ -24,12 +24,21 @@ import sys
 from runtime.worker_launcher import build_worker_command, build_worker_env
 
 
-def test_worker_runtime_repository_uses_default_credential_store(monkeypatch):
-    """Would catch worker runtime construction omitting the live credential store."""
+def test_web_and_worker_runtime_repositories_use_default_credential_store(monkeypatch):
+    """Would catch either runtime factory omitting the live credential store."""
 
     module = importlib.import_module("analysis.llm_settings")
     system_database = importlib.import_module("system_database")
-    credential_store = object()
+
+    class FakeKeyringCredentialStore:
+        def get(self, provider_id):
+            return None
+
+        def set(self, provider_id, api_key):
+            return None
+
+        def delete(self, provider_id):
+            return None
 
     class FakeSettings:
         @classmethod
@@ -45,16 +54,18 @@ def test_worker_runtime_repository_uses_default_credential_store(monkeypatch):
     monkeypatch.setattr(
         module,
         "default_llm_credential_store",
-        lambda: credential_store,
+        FakeKeyringCredentialStore,
     )
     monkeypatch.setattr(system_database, "SystemDatabase", FakeDatabase)
     monkeypatch.setattr(system_database, "SystemDatabaseSettings", FakeSettings)
 
-    repository = module.runtime_settings_repository()
+    web_repository = module.web_settings_repository(object())
+    worker_repository = module.runtime_settings_repository()
 
-    assert repository is not None
-    assert repository.credential_store is credential_store
-    assert isinstance(repository.database, FakeDatabase)
+    assert worker_repository is not None
+    assert isinstance(web_repository.credential_store, FakeKeyringCredentialStore)
+    assert isinstance(worker_repository.credential_store, FakeKeyringCredentialStore)
+    assert isinstance(worker_repository.database, FakeDatabase)
 
 
 def test_build_worker_command():

@@ -915,6 +915,14 @@ class LLMSettingsRepository:
         ).first() is not None
 
 
+def web_settings_repository(database: Any) -> LLMSettingsRepository:
+    """Build the Web runtime repository with the live credential store."""
+
+    return LLMSettingsRepository(
+        database, credential_store=default_llm_credential_store()
+    )
+
+
 def runtime_settings_repository() -> LLMSettingsRepository | None:
     global _RUNTIME_REPOSITORY
     if os.getenv("AIWORKER_LLM_DATABASE_CONFIG_ENABLED", "").strip() != "1":

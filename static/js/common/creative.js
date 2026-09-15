@@ -1536,7 +1536,6 @@ window.aiworkerModules.push(() => ({
                     const state = this.creativeWorkspace.promptLibrary;
                     state.personalOpen = false;
                     state.importOpen = false;
-                    state.abOpen = false;
                     state.governanceOpen = false;
                     state.observabilityOpen = false;
                     state.marketplaceOpen = false;
@@ -1558,9 +1557,6 @@ window.aiworkerModules.push(() => ({
                     if (panel === 'project') return this.openPromptGovernance();
                     if (panel === 'marketplace') return this.openPromptMarketplace();
                     if (panel === 'observability') return this.openPromptObservability();
-                    if (['comparison', 'history', 'optimization'].includes(panel)) {
-                        return this.openPromptAB(panel);
-                    }
                 },
 
                 promptTemplatesByOwner(ownerScope) {
@@ -1713,14 +1709,10 @@ window.aiworkerModules.push(() => ({
                     state.stage = stage;
                     state.error = '';
                     state.importOpen = false;
-                    state.abOpen = false;
                     state.governanceOpen = false;
                     state.observabilityOpen = false;
                     state.marketplaceOpen = false;
                     state.personalOpen = false;
-                    state.abPreflight = null;
-                    state.abEvaluationExperimentId = '';
-                    state.abReport = null;
                     this.promptLibraryModal = this.modal('promptLibraryModal');
                     this.promptLibraryModal?.show();
                     await this.loadProjectPromptModule(stage);
@@ -1780,7 +1772,6 @@ window.aiworkerModules.push(() => ({
                     state.personalOpen = false;
                     state.governanceOpen = true;
                     state.importOpen = false;
-                    state.abOpen = false;
                     state.observabilityOpen = false;
                     state.marketplaceOpen = false;
                     state.editing = false;
@@ -1802,12 +1793,6 @@ window.aiworkerModules.push(() => ({
                         minimumFractionDigits: digits,
                         maximumFractionDigits: digits,
                     });
-                },
-
-                promptCostSummary(version) {
-                    const items = version?.cost?.by_currency || [];
-                    if (!items.length) return '不可用';
-                    return items.map(item => `${this.promptMetricNumber(item.amount, 6)} ${item.currency}`).join(' / ');
                 },
 
                 async loadPromptObservability() {
@@ -1839,7 +1824,6 @@ window.aiworkerModules.push(() => ({
                     state.personalOpen = false;
                     state.observabilityOpen = true;
                     state.importOpen = false;
-                    state.abOpen = false;
                     state.governanceOpen = false;
                     state.marketplaceOpen = false;
                     state.editing = false;
@@ -1918,7 +1902,6 @@ window.aiworkerModules.push(() => ({
                     }
                     state.marketplaceOpen = true;
                     state.importOpen = false;
-                    state.abOpen = false;
                     state.governanceOpen = false;
                     state.observabilityOpen = false;
                     state.editing = false;
@@ -2361,401 +2344,10 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
-                promptABContextFieldAllowed(field) {
-                    const stage = this.creativeWorkspace.promptLibrary.stage;
-                    return {
-                        brief_id: ['characters', 'outline', 'beats', 'script'],
-                        character_batch_id: ['outline', 'beats', 'script'],
-                        outline_batch_id: ['beats', 'script'],
-                        beats_id: ['script'],
-                    }[field]?.includes(stage) || false;
-                },
-
-                promptABRequestPayload() {
-                    const state = this.creativeWorkspace.promptLibrary;
-                    const stage = state.stage;
-                    const episodeNumber = ['beats', 'script'].includes(stage)
-                        ? Number(this.creativeWorkspace.selectedEpisode || 1) : 0;
-                    const templateA = (state.templates || []).find(
-                        item => item.template_key === state.abTemplateAKey
-                    );
-                    const templateB = (state.templates || []).find(
-                        item => item.template_key === state.abTemplateBKey
-                    );
-                    const contextRefs = {};
-                    Object.entries(state.abContextRefs || {}).forEach(([key, value]) => {
-                        if (this.promptABContextFieldAllowed(key) && value !== null && value !== '') {
-                            contextRefs[key] = value;
-                        }
-                    });
-                    return {
-                        stage,
-                        template_a_key: state.abTemplateAKey,
-                        template_a_revision: Number(templateA?.revision || 1),
-                        template_b_key: state.abTemplateBKey,
-                        template_b_revision: Number(templateB?.revision || 1),
-                        llm_model_record_id: state.abModelRecordId,
-                        budget_amount: Number(state.abBudgetAmount || 0),
-                        episode_number: episodeNumber,
-                        generation_instruction: String(state.abGenerationInstruction || '').trim(),
-                        expected_head_revision: this.isFreeCreativeProject()
-                            ? this.creativeHeadRevision(stage, episodeNumber) : 0,
-                        context_refs: this.isFreeCreativeProject() ? contextRefs : {},
-                    };
-                },
-
-                async loadPromptABHistory() {
-                    const state = this.creativeWorkspace.promptLibrary;
-                    const projectId = this.creativeWorkspace.project?.id;
-                    if (!projectId) return;
-                    try {
-                        const response = await aiworkerApi.request(
-                            `/api/creative/projects/${projectId}/prompt-library/ab-tests?limit=10`
-                        );
-                        const data = await response.json();
-                        if (response.ok) state.abHistory = Array.isArray(data.items) ? data.items : [];
-                    } catch (_) {}
-                },
-
-                async loadPromptABReport() {
-                    const state = this.creativeWorkspace.promptLibrary;
-                    const projectId = this.creativeWorkspace.project?.id;
-                    if (!projectId || !state.stage || state.abReportLoading) return;
-                    state.abReportLoading = true;
-                    try {
-                        const response = await aiworkerApi.request(
-                            `/api/creative/projects/${projectId}/prompt-library/ab-tests/report?stage=${encodeURIComponent(state.stage)}`
-                        );
-                        const data = await response.json();
-                        if (!response.ok) throw new Error(data.detail || '读取 A/B 效果汇总失败');
-                        state.abReport = data;
-                    } catch (error) {
-                        state.abReport = null;
-                        state.error = error.message || '读取 A/B 效果汇总失败';
-                    } finally {
-                        state.abReportLoading = false;
-                    }
-                },
-
-                promptABExportUrl(experimentId, format) {
-                    const projectId = this.creativeWorkspace.project?.id;
-                    const normalizedFormat = format === 'md' ? 'md' : 'json';
-                    return `/api/creative/projects/${projectId}/prompt-library/ab-tests/${encodeURIComponent(experimentId)}/export?format=${normalizedFormat}`;
-                },
-
-                promptABReportTemplate(item) {
-                    return (this.creativeWorkspace.promptLibrary.templates || []).find(
-                        template => template.template_key === item?.template_key
-                    ) || null;
-                },
-
-                async createPromptIterationDraft(item) {
-                    const state = this.creativeWorkspace.promptLibrary;
-                    const projectId = this.creativeWorkspace.project?.id;
-                    const template = this.promptABReportTemplate(item);
-                    if (!projectId || !template || state.abIterationLoading) return;
-                    if (template.owner_scope === 'system') {
-                        state.error = '系统模板只读，请先另存到我的模板或另存为项目模板';
-                        return;
-                    }
-                    state.abIterationLoading = true;
-                    state.error = '';
-                    state.abIterationDraft = null;
-                    try {
-                        const operationId = globalThis.crypto?.randomUUID?.()
-                            || `prompt-iteration-${Date.now()}`;
-                        const response = await aiworkerApi.request(
-                            `/api/creative/projects/${projectId}/prompt-library/iteration-drafts`,
-                            {
-                                method: 'POST',
-                                headers: {'Content-Type': 'application/json'},
-                                body: JSON.stringify({
-                                    operation_id: operationId,
-                                    template_key: template.template_key,
-                                    expected_template_revision: Number(template.revision || 1),
-                                    stage: state.stage,
-                                    dimension_key: item.weakest_dimension?.key,
-                                }),
-                            }
-                        );
-                        const data = await response.json();
-                        if (!response.ok) throw new Error(
-                            typeof data.detail === 'string'
-                                ? data.detail : data.detail?.message || '创建迭代草稿失败'
-                        );
-                        state.abIterationDraft = data;
-                    } catch (error) {
-                        state.error = error.message || '创建迭代草稿失败';
-                    } finally {
-                        state.abIterationLoading = false;
-                    }
-                },
-
-                closePromptIterationDraft() {
-                    this.creativeWorkspace.promptLibrary.abIterationDraft = null;
-                },
-
-                async publishPromptIterationDraft() {
-                    const state = this.creativeWorkspace.promptLibrary;
-                    const projectId = this.creativeWorkspace.project?.id;
-                    const draft = state.abIterationDraft;
-                    if (!projectId || !draft?.id || state.abIterationPublishing) return;
-                    state.abIterationPublishing = true;
-                    state.error = '';
-                    try {
-                        const response = await aiworkerApi.request(
-                            `/api/creative/projects/${projectId}/prompt-library/iteration-drafts/${draft.id}/publish`,
-                            {
-                                method: 'POST',
-                                headers: {'Content-Type': 'application/json'},
-                                body: JSON.stringify({
-                                    expected_template_revision: Number(draft.base_revision),
-                                }),
-                            }
-                        );
-                        const data = await response.json();
-                        if (!response.ok) throw new Error(
-                            typeof data.detail === 'string'
-                                ? data.detail : data.detail?.message || '发布模板修订失败'
-                        );
-                        state.abIterationDraft = null;
-                        await this.loadProjectPromptModule(state.stage);
-                        this.showCreativeNotice(
-                            `模板 v${data.revision?.revision} 已发布；项目默认绑定保持不变`
-                        );
-                    } catch (error) {
-                        state.error = error.message || '发布模板修订失败';
-                    } finally {
-                        state.abIterationPublishing = false;
-                    }
-                },
-
-                async openPromptAB(focus = 'comparison') {
-                    const state = this.creativeWorkspace.promptLibrary;
-                    const projectId = this.creativeWorkspace.project?.id;
-                    if (!projectId || state.abLoading) return;
-                    const ordered = this.orderedPromptTemplates();
-                    state.personalOpen = false;
-                    state.effectsFocus = ['comparison', 'history', 'optimization'].includes(focus)
-                        ? focus : 'comparison';
-                    state.abOpen = true;
-                    state.importOpen = false;
-                    state.governanceOpen = false;
-                    state.observabilityOpen = false;
-                    state.marketplaceOpen = false;
-                    state.abPreflight = null;
-                    state.abEvaluationExperimentId = '';
-                    state.abReport = null;
-                    state.abIterationDraft = null;
-                    state.abTemplateAKey = state.selectedTemplateKey || ordered[0]?.template_key || '';
-                    state.abTemplateBKey = ordered.find(
-                        item => item.template_key !== state.abTemplateAKey
-                    )?.template_key || '';
-                    state.abLoading = true;
-                    state.error = '';
-                    try {
-                        const requests = [aiworkerApi.request('/api/llm/available-models')];
-                        if (this.isFreeCreativeProject()) {
-                            const query = ['beats', 'script'].includes(state.stage)
-                                ? `?episode_number=${Number(this.creativeWorkspace.selectedEpisode || 1)}` : '';
-                            requests.push(aiworkerApi.request(
-                                `/api/creative/projects/${projectId}/free/context-options${query}`
-                            ));
-                        }
-                        const responses = await Promise.all(requests);
-                        const payloads = await Promise.all(responses.map(response => response.json()));
-                        if (!responses[0].ok) throw new Error(payloads[0].detail || '读取可用模型失败');
-                        state.abModelOptions = Array.isArray(payloads[0].items) ? payloads[0].items : [];
-                        state.abModelRecordId = String(payloads[0].default_model_record_id || state.abModelOptions[0]?.id || '');
-                        if (this.isFreeCreativeProject()) {
-                            if (!responses[1].ok) throw new Error(payloads[1].detail || '读取可引用版本失败');
-                            state.abContextOptions = payloads[1] || {};
-                            state.abContextRefs = {
-                                brief_id: payloads[1]?.briefs?.[0]?.id ?? null,
-                                character_batch_id: payloads[1]?.character_batches?.[0]?.batch_id || '',
-                                outline_batch_id: payloads[1]?.outline_batches?.[0]?.batch_id || '',
-                                beats_id: payloads[1]?.beats?.[0]?.id ?? null,
-                            };
-                        }
-                        await Promise.all([
-                            this.loadPromptABHistory(),
-                            this.loadPromptABReport(),
-                        ]);
-                    } catch (error) {
-                        state.error = error.message || '读取 A/B 测试配置失败';
-                    } finally {
-                        state.abLoading = false;
-                    }
-                },
-
-                closePromptAB() {
-                    const state = this.creativeWorkspace.promptLibrary;
-                    state.abOpen = false;
-                    state.abPreflight = null;
-                    state.abEvaluationExperimentId = '';
-                    state.abIterationDraft = null;
-                },
-
-                async preflightPromptAB() {
-                    const state = this.creativeWorkspace.promptLibrary;
-                    const projectId = this.creativeWorkspace.project?.id;
-                    if (!projectId || state.abLoading) return;
-                    if (!state.abTemplateAKey || !state.abTemplateBKey || !state.abModelRecordId) {
-                        state.error = '请选择两个模板和一个模型';
-                        return;
-                    }
-                    state.abLoading = true;
-                    state.error = '';
-                    state.abPreflight = null;
-                    try {
-                        const response = await aiworkerApi.request(
-                            `/api/creative/projects/${projectId}/prompt-library/ab-tests/preflight`,
-                            {
-                                method: 'POST',
-                                headers: {'Content-Type': 'application/json'},
-                                body: JSON.stringify(this.promptABRequestPayload()),
-                            }
-                        );
-                        const data = await response.json();
-                        if (!response.ok) throw new Error(data.detail || 'A/B 预检失败');
-                        state.abPreflight = data;
-                    } catch (error) {
-                        state.error = error.message || 'A/B 预检失败';
-                    } finally {
-                        state.abLoading = false;
-                    }
-                },
-
-                async startPromptAB() {
-                    const state = this.creativeWorkspace.promptLibrary;
-                    const projectId = this.creativeWorkspace.project?.id;
-                    if (!projectId || !state.abPreflight?.can_start || state.abStarting) return;
-                    state.abStarting = true;
-                    state.error = '';
-                    try {
-                        const operationId = globalThis.crypto?.randomUUID?.() || `prompt-ab-${Date.now()}`;
-                        const response = await aiworkerApi.request(
-                            `/api/creative/projects/${projectId}/prompt-library/ab-tests`,
-                            {
-                                method: 'POST',
-                                headers: {'Content-Type': 'application/json'},
-                                body: JSON.stringify({
-                                    ...this.promptABRequestPayload(),
-                                    operation_id: operationId,
-                                    preflight_hash: state.abPreflight.preflight_hash,
-                                }),
-                            }
-                        );
-                        const data = await response.json();
-                        if (!response.ok) {
-                            const detail = data.detail;
-                            throw new Error(typeof detail === 'string'
-                                ? detail : (detail?.blockers || []).join('；') || detail?.message || '启动 A/B 测试失败');
-                        }
-                        state.abPreflight = null;
-                        await this.loadPromptABHistory();
-                        this.showCreativeNotice('A/B 两组任务已创建；生成结果不会自动成为当前版本');
-                    } catch (error) {
-                        state.error = error.message || '启动 A/B 测试失败';
-                    } finally {
-                        state.abStarting = false;
-                    }
-                },
-
-                promptABScoreDimensions() {
-                    return [
-                        {key: 'premise_fit', label: '命题契合'},
-                        {key: 'conflict_engine', label: '冲突引擎'},
-                        {key: 'character_drive', label: '人物驱动力'},
-                        {key: 'emotional_payoff', label: '情绪回报'},
-                        {key: 'pacing_hooks', label: '节奏与钩子'},
-                        {key: 'expression_quality', label: '表达完成度'},
-                        {key: 'production_feasibility', label: '制作可行性'},
-                    ];
-                },
-
-                promptABScorecard(source = {}) {
-                    const result = {};
-                    this.promptABScoreDimensions().forEach(({key}) => {
-                        const score = Number(source?.[key]);
-                        result[key] = score >= 1 && score <= 5 ? score : 3;
-                    });
-                    result.strengths = String(source?.strengths || '');
-                    result.risks = String(source?.risks || '');
-                    return result;
-                },
-
-                openPromptABEvaluation(experiment) {
-                    const state = this.creativeWorkspace.promptLibrary;
-                    const existing = experiment?.evaluation || {};
-                    state.abEvaluationExperimentId = String(experiment?.id || '');
-                    state.abEvaluation = {
-                        A: this.promptABScorecard(existing.A),
-                        B: this.promptABScorecard(existing.B),
-                        winner_arm: String(experiment?.winner_arm || ''),
-                        decision_note: String(experiment?.decision_note || ''),
-                        expected_evaluation_revision: Number(experiment?.evaluation_revision || 0),
-                    };
-                    state.error = '';
-                },
-
-                closePromptABEvaluation() {
-                    const state = this.creativeWorkspace.promptLibrary;
-                    state.abEvaluationExperimentId = '';
-                    state.abEvaluationSaving = false;
-                },
-
-                async savePromptABEvaluation() {
-                    const state = this.creativeWorkspace.promptLibrary;
-                    const projectId = this.creativeWorkspace.project?.id;
-                    const experimentId = state.abEvaluationExperimentId;
-                    if (!projectId || !experimentId || state.abEvaluationSaving) return;
-                    if (!['A', 'B', 'tie'].includes(state.abEvaluation.winner_arm)) {
-                        state.error = '请选择 A、B 或平局作为人工结论';
-                        return;
-                    }
-                    state.abEvaluationSaving = true;
-                    state.error = '';
-                    try {
-                        const response = await aiworkerApi.request(
-                            `/api/creative/projects/${projectId}/prompt-library/ab-tests/${experimentId}/evaluation`,
-                            {
-                                method: 'PUT',
-                                headers: {'Content-Type': 'application/json'},
-                                body: JSON.stringify({
-                                    arm_a: state.abEvaluation.A,
-                                    arm_b: state.abEvaluation.B,
-                                    winner_arm: state.abEvaluation.winner_arm,
-                                    decision_note: String(state.abEvaluation.decision_note || '').trim(),
-                                    expected_evaluation_revision: Number(
-                                        state.abEvaluation.expected_evaluation_revision || 0
-                                    ),
-                                }),
-                            }
-                        );
-                        const data = await response.json();
-                        if (!response.ok) {
-                            throw new Error(typeof data.detail === 'string'
-                                ? data.detail : data.detail?.message || '保存 A/B 评价失败');
-                        }
-                        state.abHistory = (state.abHistory || []).map(item =>
-                            item.id === data.id ? data : item
-                        );
-                        await this.loadPromptABReport();
-                        this.closePromptABEvaluation();
-                        this.showCreativeNotice('A/B 人工评价已保存；项目默认模板未改变');
-                    } catch (error) {
-                        state.error = error.message || '保存 A/B 评价失败';
-                    } finally {
-                        state.abEvaluationSaving = false;
-                    }
-                },
-
                 openPromptImport() {
                     const state = this.creativeWorkspace.promptLibrary;
                     state.personalOpen = false;
                     state.importOpen = true;
-                    state.abOpen = false;
                     state.governanceOpen = false;
                     state.observabilityOpen = false;
                     state.marketplaceOpen = false;
@@ -2951,35 +2543,71 @@ window.aiworkerModules.push(() => ({
                 async openFreeCreativeGeneration(stage, options = {}) {
                     if (!this.isFreeCreativeProject() || !this.freeStageCan(stage, 'can_generate')) return;
                     const state = this.creativeWorkspace.freeGeneration;
+                    const requestSequence = Number(state.requestSequence || 0) + 1;
                     Object.assign(state, {
                         stage, series: Boolean(options.series), instruction: '', contextOptions: {},
                         count: Number(this.creativeWorkspace.directionCount || 3),
                         modelOptions: [], modelRecordId: '',
                         contextRefs: {brief_id: null, character_batch_id: '', outline_batch_id: '', beats_id: null},
-                        loading: true, submitting: false, error: ''
+                        loading: true, submitting: false, error: '', requestSequence
                     });
                     this.freeCreativeGenerationModal?.show();
                     try {
                         const query = ['beats', 'script'].includes(stage) && !state.series
                             ? `?episode_number=${Number(this.creativeWorkspace.selectedEpisode || 1)}` : '';
-                        const [contextResponse, modelResponse] = await Promise.all([
-                            aiworkerApi.request(
-                                `/api/creative/projects/${this.creativeWorkspace.project.id}/free/context-options${query}`
-                            ),
-                            aiworkerApi.request('/api/llm/available-models'),
-                        ]);
-                        const [contextData, modelData] = await Promise.all([
-                            contextResponse.json(), modelResponse.json(),
-                        ]);
+                        const projectId = this.creativeWorkspace.project.id;
+                        const requestKey = `creative:free-generation-config:${projectId}`;
+                        const runRequest = window.aiworkerUi?.requestKey
+                            || (async (_key, factory) => factory());
+                        const [contextResponse, modelResponse, contextData, modelData] = await runRequest(
+                            requestKey,
+                            async (cancellationSignal) => {
+                                const controller = new AbortController();
+                                let timedOut = false;
+                                const cancel = () => controller.abort();
+                                if (cancellationSignal?.aborted) cancel();
+                                else cancellationSignal?.addEventListener('abort', cancel, {once: true});
+                                const timeoutId = globalThis.setTimeout(() => {
+                                    timedOut = true;
+                                    controller.abort();
+                                }, 10000);
+                                try {
+                                    const [contextResult, modelResult] = await Promise.all([
+                                        aiworkerApi.request(
+                                            `/api/creative/projects/${projectId}/free/context-options${query}`,
+                                            {signal: controller.signal}
+                                        ),
+                                        aiworkerApi.request('/api/llm/available-models', {
+                                            signal: controller.signal,
+                                        }),
+                                    ]);
+                                    const [contextPayload, modelPayload] = await Promise.all([
+                                        contextResult.json(), modelResult.json(),
+                                    ]);
+                                    return [contextResult, modelResult, contextPayload, modelPayload];
+                                } catch (error) {
+                                    if (timedOut && error?.name === 'AbortError') {
+                                        throw new Error('读取生成配置超时，请检查服务状态后重试');
+                                    }
+                                    throw error;
+                                } finally {
+                                    globalThis.clearTimeout(timeoutId);
+                                    cancellationSignal?.removeEventListener('abort', cancel);
+                                }
+                            }
+                        );
+                        if (requestSequence !== state.requestSequence) return;
                         if (!contextResponse.ok) throw new Error(contextData.detail || '读取可引用版本失败');
                         if (!modelResponse.ok) throw new Error(modelData.detail || '读取可用模型失败');
                         state.contextOptions = contextData;
                         state.modelOptions = Array.isArray(modelData.items) ? modelData.items : [];
                         state.modelRecordId = String(modelData.default_model_record_id || '');
                     } catch (error) {
+                        if (requestSequence !== state.requestSequence) return;
+                        if (error?.name === 'AbortError') return;
                         state.error = error.message || '读取生成配置失败';
                     } finally {
-                        state.loading = false;
+                        if (requestSequence === state.requestSequence) state.loading = false;
                     }
                 },
 
@@ -3161,17 +2789,56 @@ window.aiworkerModules.push(() => ({
                     const project = this.creativeWorkspace.project;
                     if (!project || project.workflow_mode !== 'sequential') return;
                     const state = this.creativeWorkspace.modeMigration;
-                    Object.assign(state, {preview: null, confirmed: false, loading: true, submitting: false, error: ''});
+                    this.cancelCreativeModeMigrationPreview();
+                    Object.assign(state, {preview: null, confirmed: false, submitting: false, error: ''});
                     this.creativeModeMigrationModal?.show();
+                    await this.loadCreativeModeMigrationPreview(project.id);
+                },
+
+                cancelCreativeModeMigrationPreview() {
+                    const state = this.creativeWorkspace.modeMigration;
+                    state.requestSequence = Number(state.requestSequence || 0) + 1;
+                    this.creativeModeMigrationPreviewController?.abort();
+                    this.creativeModeMigrationPreviewController = null;
+                    state.loading = false;
+                },
+
+                async retryCreativeModeMigrationPreview() {
+                    const project = this.creativeWorkspace.project;
+                    if (!project || project.workflow_mode !== 'sequential') return;
+                    await this.loadCreativeModeMigrationPreview(project.id);
+                },
+
+                async loadCreativeModeMigrationPreview(projectId) {
+                    const state = this.creativeWorkspace.modeMigration;
+                    this.cancelCreativeModeMigrationPreview();
+                    const requestSequence = Number(state.requestSequence || 0);
+                    const controller = new AbortController();
+                    this.creativeModeMigrationPreviewController = controller;
+                    Object.assign(state, {preview: null, confirmed: false, loading: true, error: ''});
+                    const timeoutId = window.setTimeout(() => controller.abort(), 10000);
                     try {
-                        const response = await aiworkerApi.request(`/api/creative/projects/${project.id}/mode-migration-preview`);
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/mode-migration-preview`,
+                            {signal: controller.signal}
+                        );
                         const data = await response.json();
                         if (!response.ok) throw new Error(data.detail || '读取迁移预检失败');
+                        if (Number(state.requestSequence || 0) !== requestSequence) return;
                         state.preview = data;
                     } catch (error) {
-                        state.error = error.message || '读取迁移预检失败';
+                        if (Number(state.requestSequence || 0) !== requestSequence) return;
+                        state.error = aiworkerApi.isAbortError(error)
+                            ? '迁移预检超时，请重试'
+                            : (error.message || '读取迁移预检失败');
                     } finally {
-                        state.loading = false;
+                        window.clearTimeout(timeoutId);
+                        if (Number(state.requestSequence || 0) === requestSequence) {
+                            state.loading = false;
+                            if (this.creativeModeMigrationPreviewController === controller) {
+                                this.creativeModeMigrationPreviewController = null;
+                            }
+                        }
                     }
                 },
 

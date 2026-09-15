@@ -148,44 +148,28 @@ def test_prompt_library_ui_explains_recommendations_and_requires_import_confirma
     assert "saveImportedPromptTemplate" in script
 
 
-def test_prompt_library_ui_exposes_budgeted_candidate_only_ab_testing():
+def test_prompt_library_ui_omits_ab_testing_and_pricing_workflows():
     modal = _read("templates/common/workspace/prompt_library_modal.html")
     script = _read("static/js/common/creative.js")
+    effects = _read("templates/common/workspace/prompt_template_effects.html")
 
-    assert "对比测试" in modal
-    assert "两组使用同一份冻结输入和同一模型" in modal
-    assert "本次最高预算" in modal
-    assert "预估调用与费用" in modal
-    assert "输入 Token" in modal
-    assert "输出 Token" in modal
-    assert "启动两组候选生成" in modal
-    assert "不会自动替换当前版本" in modal
-    assert "当前版本不支持 Beats/场次剧本的全剧批量 A/B" in modal
-    assert "/prompt-library/ab-tests/preflight" in script
-    assert "/prompt-library/ab-tests`" in script
-    assert "!state.abPreflight?.can_start" in script
-    assert "人工效果评价" in modal
-    assert "每项 1–5 分" in modal
-    assert "不会自动修改项目默认模板或锁定候选" in modal
-    assert "savePromptABEvaluation" in script
-    assert "/evaluation`" in script
-    assert "当前阶段效果汇总" in modal
-    assert "只统计已完成且已人工确认的评价" in modal
-    assert "iteration_suggestions" in modal
-    assert "loadPromptABReport" in script
-    assert "/ab-tests/report?stage=" in script
-    assert "根据短板创建迭代草稿" in modal
-    assert "受控模板迭代草稿" in modal
-    assert "修改前" in modal and "修改后" in modal
-    assert "确认发布只创建不可变的新模板版本" in modal
-    assert "createPromptIterationDraft" in script
-    assert "publishPromptIterationDraft" in script
-    assert "/prompt-library/iteration-drafts" in script
-    assert "导出 JSON" in modal
-    assert "导出 Markdown" in modal
-    assert "promptABExportUrl(experiment.id, 'json')" in modal
-    assert "promptABExportUrl(experiment.id, 'md')" in modal
-    assert "/export?format=${normalizedFormat}" in script
+    for removed in (
+        "对比测试",
+        "实验记录",
+        "A/B",
+        "本次最高预算",
+        "预计费用",
+        "受控模板迭代草稿",
+    ):
+        assert removed not in modal
+        assert removed not in effects
+    for removed in (
+        "/prompt-library/ab-tests",
+        "/prompt-library/iteration-drafts",
+        "openPromptAB",
+        "promptABExportUrl",
+    ):
+        assert removed not in script
     assert "项目模板" in modal
     assert "看共享模板状态" in modal
     assert "批准当前版本" in script
@@ -203,9 +187,10 @@ def test_prompt_library_ui_exposes_real_usage_and_coverage_observability():
 
     assert "效果数据" in modal
     assert "Token 只读取供应商 usage" in modal
-    assert "任务创建时冻结的单价" in modal
     assert "模板归因覆盖" in modal
-    assert "价格覆盖" in modal
+    assert "计算费用" not in modal
+    assert "价格覆盖" not in modal
+    assert "promptCostSummary" not in script
     assert "样本不足，继续观察" in modal
     assert "loadPromptObservability" in script
     assert "/prompt-library/observability?" in script

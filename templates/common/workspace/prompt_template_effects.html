@@ -20,7 +20,7 @@
         <div class="row g-3 align-items-end">
             <div class="col-lg-7">
                 <h5 id="prompt-effects-stage-title" class="mb-1">选择要分析的创作步骤</h5>
-                <div class="small text-muted">数据和对比实验都按步骤统计；Beats 与场次剧本还需要指定一集。</div>
+                <div class="small text-muted">真实任务数据按创作步骤统计；Beats 与场次剧本还需要指定一集。</div>
             </div>
             <div class="col-sm-7 col-lg-3">
                 <label class="form-label small" for="prompt-effects-stage">创作步骤</label>
@@ -45,22 +45,9 @@
 </section>
 
 <div class="row g-3" aria-label="模板效果功能">
-    <div class="col-md-6 col-xl-3">
-        <section class="card h-100"><div class="card-body d-flex flex-column"><h5>效果数据</h5><p class="small text-muted">查看真实调用量、采纳率、Token、费用和数据覆盖是否完整。</p><button class="btn btn-outline-dark mt-auto" type="button" @click="openPromptWorkspacePanel('observability')">查看效果数据</button></div></section>
+    <div class="col-lg-6">
+        <section class="card h-100"><div class="card-body d-flex flex-column"><h5>效果数据</h5><p class="small text-muted">查看真实调用量、成功率、采纳率、Token、耗时和数据覆盖情况。</p><button class="btn btn-outline-dark mt-auto" type="button" @click="openPromptWorkspacePanel('observability')">查看效果数据</button></div></section>
     </div>
-    <div class="col-md-6 col-xl-3">
-        <section class="card h-100"><div class="card-body d-flex flex-column"><h5>对比测试</h5><p class="small text-muted">让两个模板使用同一份输入和模型生成候选，公平比较结果。</p><button class="btn btn-outline-success mt-auto" type="button" @click="openPromptWorkspacePanel('comparison')">开始对比测试</button></div></section>
-    </div>
-    <div class="col-md-6 col-xl-3">
-        <section class="card h-100"><div class="card-body d-flex flex-column"><h5>实验记录</h5><p class="small text-muted">查看过去的 A/B 任务、导出结果，并补充或修改人工评价。</p><button class="btn btn-outline-primary mt-auto" type="button" @click="openPromptWorkspacePanel('history')">查看实验记录</button></div></section>
-    </div>
-    <div class="col-md-6 col-xl-3">
-        <section class="card h-100"><div class="card-body d-flex flex-column"><h5>版本优化</h5><p class="small text-muted">根据多次人工评价发现短板，创建草稿，确认后发布为新版本。</p><button class="btn btn-outline-warning mt-auto" type="button" @click="openPromptWorkspacePanel('optimization')">优化模板版本</button></div></section>
-    </div>
-</div>
-
-<div class="alert alert-light border mt-3 mb-0">
-    建议顺序：先看<strong>效果数据</strong>确认样本是否够，再做<strong>对比测试</strong>；完成人工评价后，最后进入<strong>版本优化</strong>。任何实验都不会自动替换项目默认模板。
 </div>
 
 {% set prompt_library_surface = "effects" %}

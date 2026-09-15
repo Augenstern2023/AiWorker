@@ -57,13 +57,6 @@ def _job(
     extra = {
         "project_id": project_id,
         "normalized_stage": "brief",
-        "llm_price_snapshot": {
-            "model_record_id": "model-1",
-            "input_price_per_million": 2,
-            "output_price_per_million": 8,
-            "price_currency": "CNY",
-            "complete": True,
-        },
     }
     if revision is not None:
         extra.update(
@@ -139,7 +132,7 @@ def _brief_signal(
         )
 
 
-def test_observability_uses_real_usage_frozen_prices_and_explains_regressions(tmp_path):
+def test_observability_uses_real_usage_and_explains_regressions(tmp_path):
     repository = CreativeRepository(tmp_path / "creative.db")
     PromptStore(repository.db_path)
     project_id = _project(repository)
@@ -213,7 +206,7 @@ def test_observability_uses_real_usage_frozen_prices_and_explains_regressions(tm
     assert versions[2]["jobs"]["failure_rate"] == 0.4
     assert versions[2]["tokens"]["average_total_tokens"] == 160
     assert versions[2]["tokens"]["observed"]["total_tokens"] == 800
-    assert versions[2]["cost"]["by_currency"][0]["currency"] == "CNY"
+    assert "cost" not in versions[2]
     assert versions[2]["adoption"]["rate"] == 0.3333
     assert versions[3]["tokens"]["average_total_tokens"] is None
     assert versions[3]["tokens"]["job_coverage"] == 0
@@ -222,7 +215,6 @@ def test_observability_uses_real_usage_frozen_prices_and_explains_regressions(tm
         "failure_rate",
         "adoption_rate",
         "average_total_tokens",
-        "average_cost",
         "p50_duration_seconds",
     } <= metrics
     assert report["watch_items"][0]["current_revision"] == 3

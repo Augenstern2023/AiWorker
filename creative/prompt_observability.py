@@ -6,7 +6,7 @@
 # GitHub: https://github.com/NanmiCoder
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
 
-"""Evidence-based prompt-template usage, cost, adoption, and regression metrics."""
+"""Evidence-based prompt-template usage, adoption, and regression metrics."""
 
 from __future__ import annotations
 
@@ -195,33 +195,6 @@ def _usage_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
     return normalized
 
 
-def _price_snapshot(extra: dict[str, Any], store: PromptStore) -> dict[str, Any]:
-    raw = extra.get("llm_price_snapshot")
-    if not isinstance(raw, dict) or not raw:
-        experiment_id = str(extra.get("prompt_ab_experiment_id") or "").strip()
-        experiment = store.get_ab_experiment(experiment_id) if experiment_id else None
-        estimate = dict((experiment or {}).get("estimate") or {})
-        prices = dict(estimate.get("price_snapshot") or {})
-        if prices:
-            raw = {
-                "model_record_id": (experiment or {}).get("model_record_id"),
-                "input_price_per_million": prices.get("input_price_per_million"),
-                "output_price_per_million": prices.get("output_price_per_million"),
-                "price_currency": (experiment or {}).get("price_currency"),
-            }
-    if not isinstance(raw, dict) or not raw:
-        return {}
-    input_price = _safe_float(raw.get("input_price_per_million"))
-    output_price = _safe_float(raw.get("output_price_per_million"))
-    return {
-        "model_record_id": str(raw.get("model_record_id") or ""),
-        "input_price_per_million": input_price,
-        "output_price_per_million": output_price,
-        "price_currency": str(raw.get("price_currency") or "CNY").upper(),
-        "complete": input_price is not None and output_price is not None,
-    }
-
-
 class PromptObservabilityService:
     def __init__(self, repository: Any, job_manager: Any) -> None:
         self.repository = repository
@@ -329,7 +302,6 @@ class PromptObservabilityService:
                     "created_at": _safe_float(full.get("created_at")) or 0.0,
                     "duration_seconds": duration,
                     "usage": usage,
-                    "price": _price_snapshot(extra, self.store),
                     "adoption_applicable": bool(
                         signal.get("adoption_applicable")
                     ),
@@ -374,9 +346,8 @@ class PromptObservabilityService:
             },
             "metric_contract": {
                 "tokens": "仅汇总供应商响应 usage；不会用字符数或预估 Token 回填",
-                "cost": "按真实 Token 与任务创建时冻结的配置单价计算，不代表供应商最终账单",
                 "adoption": "创作资源以锁定/批准或当前 Head 为准；优化以人工接受草稿为准；审核报告不适用",
-                "historical_data": "缺少 usage、价格快照、模板身份或采纳信号的历史任务只计覆盖缺口",
+                "historical_data": "缺少 usage、模板身份或采纳信号的历史任务只计覆盖缺口",
             },
             "versions": versions,
             "alerts": alerts,
@@ -572,26 +543,6 @@ class PromptObservabilityService:
         reported_calls = sum(
             int(usage["reported_call_count"]) for usage in usages
         )
-        costs: dict[str, list[float]] = {}
-        for record in records:
-            usage = record["usage"]
-            price = record["price"]
-            if not usage or not usage["complete"] or not price.get("complete"):
-                continue
-            amount = (
-                usage["input_tokens"] * price["input_price_per_million"]
-                + usage["output_tokens"] * price["output_price_per_million"]
-            ) / 1_000_000
-            costs.setdefault(price["price_currency"], []).append(amount)
-        cost_items = [
-            {
-                "currency": currency,
-                "job_count": len(values),
-                "amount": round(sum(values), 6),
-                "average_per_job": round(sum(values) / len(values), 6),
-            }
-            for currency, values in sorted(costs.items())
-        ]
         adoption_candidates = [
             record
             for record in records
@@ -639,14 +590,6 @@ class PromptObservabilityService:
                 "job_coverage": _ratio(len(complete_usages), len(records)),
                 "reported_call_coverage": _ratio(reported_calls, calls),
             },
-            "cost": {
-                "by_currency": cost_items,
-                "complete_job_count": sum(item["job_count"] for item in cost_items),
-                "job_coverage": _ratio(
-                    sum(item["job_count"] for item in cost_items), len(records)
-                ),
-                "calculation": "reported_tokens_x_frozen_configured_price",
-            },
             "adoption": {
                 "applicable_job_count": len(adoption_candidates),
                 "known_job_count": len(adoption_known),
@@ -667,11 +610,6 @@ class PromptObservabilityService:
                     ),
                     "token_complete": bool(
                         record["usage"] and record["usage"]["complete"]
-                    ),
-                    "cost_complete": bool(
-                        record["usage"]
-                        and record["usage"]["complete"]
-                        and record["price"].get("complete")
                     ),
                     "adoption": (
                         record["adopted"]
@@ -774,30 +712,6 @@ class PromptObservabilityService:
                     threshold=0.30,
                     direction="increase_relative",
                 )
-                baseline_costs = baseline["cost"]["by_currency"]
-                current_costs = current["cost"]["by_currency"]
-                if (
-                    len(baseline_costs) == 1
-                    and len(current_costs) == 1
-                    and baseline_costs[0]["currency"] == current_costs[0]["currency"]
-                ):
-                    self._append_delta_alert(
-                        alerts,
-                        template_key=template_key,
-                        stage=stage,
-                        metric="average_cost",
-                        label=f"平均费用（{baseline_costs[0]['currency']}）",
-                        baseline_revision=baseline_revision,
-                        current_revision=current_revision,
-                        baseline_value=baseline_costs[0]["average_per_job"],
-                        current_value=current_costs[0]["average_per_job"],
-                        baseline_sample=baseline_costs[0]["job_count"],
-                        current_sample=current_costs[0]["job_count"],
-                        threshold=0.30,
-                        direction="increase_relative",
-                        baseline_coverage=baseline["cost"]["job_coverage"],
-                        current_coverage=current["cost"]["job_coverage"],
-                    )
                 self._append_delta_alert(
                     alerts,
                     template_key=template_key,

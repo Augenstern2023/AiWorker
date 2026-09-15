@@ -86,9 +86,6 @@ def _install_workspace_runtime(page: Page) -> list[str]:
           if (url.includes('/governance')) return Promise.resolve({ok: true, json: async () => ({items: [], policy: [], can_manage: true})});
           if (url.includes('/observability')) return Promise.resolve({ok: true, json: async () => ({summary: {}, coverage: {}, versions: [], alerts: [], watch_items: []})});
           if (url.includes('/prompt-marketplace')) return Promise.resolve({ok: true, json: async () => ({items: [], own_submissions: [], moderation_queue: [], licenses: [], source_types: [], policy: [], can_review: false, can_install: true})});
-          if (url.includes('/available-models')) return Promise.resolve({ok: true, json: async () => ({items: [{id: 'model-1', label: '测试模型'}], default_model_record_id: 'model-1'})});
-          if (url.includes('/ab-tests/report')) return Promise.resolve({ok: true, json: async () => ({items: [], evaluated_experiment_count: 0, template_count: 0, methodology: []})});
-          if (url.includes('/ab-tests?')) return Promise.resolve({ok: true, json: async () => ({items: []})});
           return Promise.resolve({ok: true, json: async () => ({})});
         }};
         """
@@ -125,17 +122,13 @@ def test_prompt_center_and_effects_open_focused_panels_without_browser_errors():
             '<main x-data="appData()" '
             'x-init="creativeWorkspace.project = {id: 9, target_episode_count: 20}; '
             "creativeWorkspace.promptLibrary.stage = 'brief'\">"
-            '<button id="open-history" @click="openPromptWorkspacePanel(\'history\')">实验记录</button>'
-            '<button id="open-optimization" @click="openPromptWorkspacePanel(\'optimization\')">版本优化</button>'
+            '<button id="open-observability" @click="openPromptWorkspacePanel(\'observability\')">效果数据</button>'
             f"{_modal('effects')}</main>"
         )
         effects_errors = _install_workspace_runtime(effects_page)
-        effects_page.locator("#open-history").click()
-        effects_page.get_by_text("最近的 A/B 实验", exact=True).wait_for()
-        assert effects_page.get_by_text("本次最高预算", exact=True).is_hidden()
-        effects_page.locator("#open-optimization").click()
-        effects_page.get_by_text("当前阶段效果汇总", exact=True).wait_for()
-        assert effects_page.get_by_text("最近的 A/B 实验", exact=True).is_hidden()
+        effects_page.locator("#open-observability").click()
+        effects_page.get_by_text("按模板版本汇总真实任务", exact=False).wait_for()
+        effects_page.get_by_text("模板归因覆盖", exact=False).wait_for()
         assert effects_errors == [], "\n".join(effects_errors)
 
         browser.close()

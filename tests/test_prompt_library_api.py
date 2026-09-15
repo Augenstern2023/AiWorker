@@ -19,7 +19,6 @@ import pytest
 
 from creative.api import build_creative_router
 from creative.free_mode_service import FreeCreativeModeService
-from creative.prompt_ab_service import PromptABService
 from creative.prompt_registry import builtin_template
 from creative.prompt_store import PromptStore
 from creative.repository import CreativeRepository
@@ -28,12 +27,7 @@ from creative.schema import (
     ProjectCreateRequest,
     PromptBindingRequest,
     PromptGovernanceActionRequest,
-    PromptABEvaluationRequest,
-    PromptABPreflightRequest,
-    PromptABStartRequest,
     PromptImportPreviewRequest,
-    PromptIterationDraftRequest,
-    PromptIterationPublishRequest,
     PromptMarketplaceInstallRequest,
     PromptMarketplaceRatingRequest,
     PromptMarketplaceReviewRequest,
@@ -221,7 +215,7 @@ async def test_prompt_observability_api_returns_real_usage_coverage(tmp_path):
 
     assert result["summary"]["attribution_coverage"] == 1
     assert result["versions"][0]["tokens"]["observed"]["total_tokens"] == 30
-    assert result["versions"][0]["cost"]["by_currency"] == []
+    assert "cost" not in result["versions"][0]
     assert "预估" in result["metric_contract"]["tokens"]
 
 
@@ -564,20 +558,10 @@ async def test_generation_api_freezes_server_resolved_prompt_snapshot(
     assert context_after_change["context_snapshot"]["prompt_snapshot"] == frozen
 
 
-def _priced_model(_model_record_id: str):
-    return {
-        "id": "model-1",
-        "model_record_id": "model-1",
-        "input_price_per_million": 2,
-        "output_price_per_million": 8,
-        "price_currency": "CNY",
-    }
-
-
-def _ab_project(repository: CreativeRepository):
+def _prompt_project(repository: CreativeRepository):
     project = repository.create_original_project(
         seed_text="女主收到一条预警弹幕",
-        name="A/B 接口项目",
+        name="模板接口项目",
         target_episode_count=2,
         target_platform="抖音",
         genre="复仇",
@@ -585,7 +569,7 @@ def _ab_project(repository: CreativeRepository):
         constraints={},
         reference_refs=[],
         created_by="owner-1",
-        creation_request_id="prompt-ab-api-project",
+        creation_request_id="prompt-api-project",
         workflow_mode="free",
     )
     PromptStore(repository.db_path).enable_project(
@@ -594,451 +578,12 @@ def _ab_project(repository: CreativeRepository):
     return project
 
 
-def _ab_preflight_payload(**overrides):
-    values = {
-        "stage": "brief",
-        "template_a_key": "generic-vertical-short",
-        "template_b_key": "urban-identity-romcom",
-        "llm_model_record_id": "model-1",
-        "budget_amount": 10,
-    }
-    values.update(overrides)
-    return PromptABPreflightRequest(**values)
-
-
-@pytest.mark.asyncio
-async def test_prompt_ab_preflight_returns_cost_and_server_blockers(tmp_path):
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
-    project = _ab_project(repository)
-    router, _, _ = _router(
-        repository,
-        tmp_path,
-        llm_model_resolver=_priced_model,
-    )
-    endpoint = _endpoint(
-        router,
-        "/api/creative/projects/{project_id}/prompt-library/ab-tests/preflight",
-    )
-
-    allowed = await endpoint(
-        project_id=project["id"],
-        payload=_ab_preflight_payload(),
-        request=_request(FastAPI()),
-        principal=_principal("owner-1", admin=True),
-    )
-    blocked = await endpoint(
-        project_id=project["id"],
-        payload=_ab_preflight_payload(budget_amount=0.000001),
-        request=_request(FastAPI()),
-        principal=_principal("owner-1", admin=True),
-    )
-
-    assert allowed["can_start"] is True
-    assert allowed["estimate"]["calls"] == 2
-    assert allowed["estimate"]["estimated_cost"] > 0
-    assert "prompt_snapshots" not in allowed
-    assert "source_snapshot" not in allowed
-    assert blocked["can_start"] is False
-    assert any("预算不足" in item for item in blocked["blockers"])
-
-    with pytest.raises(HTTPException) as invalid_context:
-        await endpoint(
-            project_id=project["id"],
-            payload=_ab_preflight_payload(context_refs={"system_prompt": "越权"}),
-            request=_request(FastAPI()),
-            principal=_principal("owner-1", admin=True),
-        )
-    assert invalid_context.value.status_code == 409
-    assert "不支持的字段" in invalid_context.value.detail
-
-
-@pytest.mark.asyncio
-async def test_prompt_ab_start_revalidates_hash_and_creates_two_candidate_jobs(tmp_path):
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
-    project = _ab_project(repository)
-    jobs = []
-
-    def create_job(payload, **_kwargs):
-        jobs.append(payload)
-        job_id = f"ab-job-{len(jobs)}"
-        return SimpleNamespace(to_dict=lambda: {"job_id": job_id})
-
-    router, _, _ = _router(
-        repository,
-        tmp_path,
-        job_manager=SimpleNamespace(create_job=create_job),
-        llm_model_resolver=_priced_model,
-    )
-    preflight_endpoint = _endpoint(
-        router,
-        "/api/creative/projects/{project_id}/prompt-library/ab-tests/preflight",
-    )
-    start_endpoint = _endpoint(
-        router,
-        "/api/creative/projects/{project_id}/prompt-library/ab-tests",
-        "POST",
-    )
-    list_endpoint = _endpoint(
-        router,
-        "/api/creative/projects/{project_id}/prompt-library/ab-tests",
-        "GET",
-    )
-    payload = _ab_preflight_payload()
-    preflight = await preflight_endpoint(
-        project_id=project["id"],
-        payload=payload,
-        request=_request(FastAPI()),
-        principal=_principal("owner-1", admin=True),
-    )
-
-    with pytest.raises(HTTPException) as stale:
-        await start_endpoint(
-            project_id=project["id"],
-            payload=PromptABStartRequest(
-                **payload.model_dump(),
-                operation_id="ab-stale-operation",
-                preflight_hash="0" * 64,
-            ),
-            request=_request(FastAPI()),
-            principal=_principal("owner-1", admin=True),
-        )
-    assert stale.value.status_code == 409
-    assert jobs == []
-
-    started = await start_endpoint(
-        project_id=project["id"],
-        payload=PromptABStartRequest(
-            **payload.model_dump(),
-            operation_id="ab-success-operation",
-            preflight_hash=preflight["preflight_hash"],
-        ),
-        request=_request(FastAPI()),
-        principal=_principal("owner-1", admin=True),
-    )
-    history = await list_endpoint(
-        project_id=project["id"],
-        request=_request(FastAPI(), "GET"),
-        limit=10,
-        principal=_principal("owner-1", admin=True),
-    )
-
-    assert len(jobs) == 2
-    extras = [job["extra"] for job in jobs]
-    assert {item["prompt_ab_arm"] for item in extras} == {"A", "B"}
-    assert len({item["prompt_ab_experiment_id"] for item in extras}) == 1
-    assert len({item["prompt_ab_source_fingerprint"] for item in extras}) == 1
-    assert {item["prompt_template_key"] for item in extras} == {
-        "generic-vertical-short",
-        "urban-identity-romcom",
-    }
-    assert all(item["prompt_template_revision"] == 1 for item in extras)
-    assert all("llm_price_snapshot" not in item for item in extras)
-    assert started["status"] == "running"
-    assert {arm["job_id"] for arm in started["arms"]} == {"ab-job-1", "ab-job-2"}
-    assert history["items"][0]["id"] == started["id"]
-
-
-@pytest.mark.asyncio
-async def test_prompt_ab_evaluation_requires_completed_jobs_and_never_rebinds_template(
-    tmp_path,
-):
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
-    project = _ab_project(repository)
-    job_status = {"value": "pending"}
-    jobs = []
-
-    def create_job(payload, **_kwargs):
-        jobs.append(payload)
-        job_id = f"evaluation-job-{len(jobs)}"
-        return SimpleNamespace(to_dict=lambda: {"job_id": job_id})
-
-    def get_job(job_id):
-        return {
-            "job_id": job_id,
-            "status": job_status["value"],
-            "message": "",
-            "progress": {},
-        }
-
-    router, _, _ = _router(
-        repository,
-        tmp_path,
-        job_manager=SimpleNamespace(create_job=create_job, get_job=get_job),
-        llm_model_resolver=_priced_model,
-    )
-    preflight_endpoint = _endpoint(
-        router,
-        "/api/creative/projects/{project_id}/prompt-library/ab-tests/preflight",
-    )
-    start_endpoint = _endpoint(
-        router,
-        "/api/creative/projects/{project_id}/prompt-library/ab-tests",
-        "POST",
-    )
-    evaluation_endpoint = _endpoint(
-        router,
-        "/api/creative/projects/{project_id}/prompt-library/ab-tests/{experiment_id}/evaluation",
-        "PUT",
-    )
-    report_endpoint = _endpoint(
-        router,
-        "/api/creative/projects/{project_id}/prompt-library/ab-tests/report",
-        "GET",
-    )
-    base = _ab_preflight_payload()
-    preflight = await preflight_endpoint(
-        project_id=project["id"], payload=base,
-        request=_request(FastAPI()), principal=_principal("owner-1", admin=True),
-    )
-    experiment = await start_endpoint(
-        project_id=project["id"],
-        payload=PromptABStartRequest(
-            **base.model_dump(),
-            operation_id="ab-evaluation-operation",
-            preflight_hash=preflight["preflight_hash"],
-        ),
-        request=_request(FastAPI()),
-        principal=_principal("owner-1", admin=True),
-    )
-    scorecard = {
-        "premise_fit": 4,
-        "conflict_engine": 5,
-        "character_drive": 4,
-        "emotional_payoff": 4,
-        "pacing_hooks": 5,
-        "expression_quality": 4,
-        "production_feasibility": 3,
-        "strengths": "冲突清楚",
-        "risks": "场景略多",
-    }
-    evaluation = PromptABEvaluationRequest(
-        arm_a=scorecard,
-        arm_b={**scorecard, "conflict_engine": 3},
-        winner_arm="A",
-        decision_note="A 的冲突引擎更稳定",
-        expected_evaluation_revision=0,
-    )
-    store = PromptStore(repository.db_path)
-    binding_before = store.binding(project["id"], "brief", 0)
-
-    with pytest.raises(HTTPException) as unfinished:
-        await evaluation_endpoint(
-            project_id=project["id"], experiment_id=experiment["id"],
-            payload=evaluation, request=_request(FastAPI(), "PUT"),
-            principal=_principal("owner-1", admin=True),
-        )
-    assert unfinished.value.status_code == 409
-
-    job_status["value"] = "succeeded"
-    saved = await evaluation_endpoint(
-        project_id=project["id"], experiment_id=experiment["id"],
-        payload=evaluation, request=_request(FastAPI(), "PUT"),
-        principal=_principal("owner-1", admin=True),
-    )
-    report = await report_endpoint(
-        project_id=project["id"],
-        request=_request(FastAPI(), "GET"),
-        stage="brief",
-        principal=_principal("owner-1", admin=True),
-    )
-
-    assert saved["status"] == "completed"
-    assert saved["winner_arm"] == "A"
-    assert saved["evaluation_revision"] == 1
-    assert saved["evaluation"]["A"]["average_score"] == 4.14
-    assert store.binding(project["id"], "brief", 0) == binding_before
-    assert report["evaluated_experiment_count"] == 1
-    assert report["template_count"] == 2
-    assert all("iteration_suggestions" in item for item in report["items"])
-
-
-@pytest.mark.asyncio
-async def test_prompt_ab_history_hides_another_users_private_template_identity(tmp_path):
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
-    project = _ab_project(repository)
-    store = PromptStore(repository.db_path)
-    private = store.create_template(
-        title="所有者私人模板",
-        description="其他成员不可见",
-        content=builtin_template("generic-vertical-short"),
-        owner_scope="user",
-        owner_user_id="owner-1",
-    )
-    jobs = []
-
-    def create_job(payload, **_kwargs):
-        jobs.append(payload)
-        job_id = f"private-ab-job-{len(jobs)}"
-        return SimpleNamespace(to_dict=lambda: {"job_id": job_id})
-
-    router, _, _ = _router(
-        repository,
-        tmp_path,
-        job_manager=SimpleNamespace(create_job=create_job),
-        llm_model_resolver=_priced_model,
-    )
-    preflight_endpoint = _endpoint(
-        router,
-        "/api/creative/projects/{project_id}/prompt-library/ab-tests/preflight",
-    )
-    start_endpoint = _endpoint(
-        router,
-        "/api/creative/projects/{project_id}/prompt-library/ab-tests",
-        "POST",
-    )
-    list_endpoint = _endpoint(
-        router,
-        "/api/creative/projects/{project_id}/prompt-library/ab-tests",
-        "GET",
-    )
-    base = _ab_preflight_payload(template_a_key=private["template_key"])
-    preflight = await preflight_endpoint(
-        project_id=project["id"], payload=base,
-        request=_request(FastAPI()), principal=_principal("owner-1", admin=True),
-    )
-    await start_endpoint(
-        project_id=project["id"],
-        payload=PromptABStartRequest(
-            **base.model_dump(),
-            operation_id="private-ab-history",
-            preflight_hash=preflight["preflight_hash"],
-        ),
-        request=_request(FastAPI()),
-        principal=_principal("owner-1", admin=True),
-    )
-
-    history = await list_endpoint(
-        project_id=project["id"], request=_request(FastAPI(), "GET"), limit=10,
-        principal=_principal("member-2", admin=True),
-    )
-    arm_a = next(arm for arm in history["items"][0]["arms"] if arm["arm"] == "A")
-
-    assert arm_a["template_title"] == "私人模板（不可见）"
-    assert arm_a["template_key"] == ""
-    assert arm_a["prompt_content_hash"] is None
-    assert "所有者私人模板" not in repr(history)
-
-
-@pytest.mark.asyncio
-async def test_prompt_ab_audit_export_supports_json_markdown_and_safe_job_metadata(
-    tmp_path,
-):
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
-    project = _ab_project(repository)
-    service = PromptABService(repository)
-    snapshots = {
-        "A": service.store.resolve_snapshot(
-            project_id=project["id"], stage="brief", mode="single",
-            run_template_key="generic-vertical-short", actor_user_id="owner-1",
-        ),
-        "B": service.store.resolve_snapshot(
-            project_id=project["id"], stage="brief", mode="single",
-            run_template_key="urban-identity-romcom", actor_user_id="owner-1",
-        ),
-    }
-    preflight = service.preflight(
-        project_id=project["id"], stage="brief", episode_number=0,
-        prompt_snapshots=snapshots, model=_priced_model("model-1"),
-        budget_amount=10,
-    )
-    experiment = service.create_experiment(
-        operation_id="api-audit-export",
-        actor_user_id="owner-1",
-        preflight=preflight,
-    )
-    service.store.set_ab_arm_job(experiment["id"], "A", "export-job-a")
-    service.store.set_ab_arm_job(experiment["id"], "B", "export-job-b")
-
-    def get_job(job_id):
-        return {
-            "job_id": job_id,
-            "status": "succeeded",
-            "message": "候选已保存",
-            "created_at": 1.0,
-            "started_at": 2.0,
-            "finished_at": 3.0,
-            "events": [{"message": "不得导出的事件正文"}],
-            "artifacts": [{"content": "不得导出的生成正文"}],
-        }
-
-    router, _, _ = _router(
-        repository,
-        tmp_path,
-        job_manager=SimpleNamespace(get_job=get_job),
-    )
-    endpoint = _endpoint(
-        router,
-        "/api/creative/projects/{project_id}/prompt-library/ab-tests/{experiment_id}/export",
-        "GET",
-    )
-    json_response = await endpoint(
-        project_id=project["id"], experiment_id=experiment["id"],
-        request=_request(FastAPI(), "GET"), format="json",
-        principal=_principal("owner-1", admin=True),
-    )
-    markdown_response = await endpoint(
-        project_id=project["id"], experiment_id=experiment["id"],
-        request=_request(FastAPI(), "GET"), format="md",
-        principal=_principal("owner-1", admin=True),
-    )
-    payload = json.loads(json_response.body.decode("utf-8"))
-
-    assert json_response.media_type.startswith("application/json")
-    assert json_response.headers["content-disposition"].endswith(
-        f'prompt-ab-{experiment["id"]}.json"'
-    )
-    assert payload["arms"][0]["job_status"] == "succeeded"
-    assert payload["arms"][0]["job_finished_at"] == 3.0
-    assert "events" not in repr(payload)
-    assert "artifacts" not in repr(payload)
-    assert "不得导出的生成正文" not in repr(payload)
-    assert markdown_response.media_type.startswith("text/markdown")
-    assert "输入、模板与模型配置可追溯" in markdown_response.body.decode("utf-8")
-    assert markdown_response.headers["content-disposition"].endswith(
-        f'prompt-ab-{experiment["id"]}.md"'
-    )
-
-    with pytest.raises(HTTPException) as unsupported:
-        await endpoint(
-            project_id=project["id"], experiment_id=experiment["id"],
-            request=_request(FastAPI(), "GET"), format="csv",
-            principal=_principal("owner-1", admin=True),
-        )
-    assert unsupported.value.status_code == 400
-
-
-@pytest.mark.asyncio
-async def test_prompt_ab_audit_export_requires_project_read_access(tmp_path):
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
-    project = _ab_project(repository)
-    router, workflow, _ = _router(repository, tmp_path)
-    workflow.is_active_project_member.return_value = False
-    endpoint = _endpoint(
-        router,
-        "/api/creative/projects/{project_id}/prompt-library/ab-tests/{experiment_id}/export",
-        "GET",
-    )
-    app = FastAPI()
-    permission_service = PermissionService(Mock(), Mock())
-    permission_service.can_read_project = Mock(return_value=False)
-    app.state.identity_permission_service = permission_service
-
-    with pytest.raises(HTTPException) as forbidden:
-        await endpoint(
-            project_id=project["id"], experiment_id="missing",
-            request=_request(app, "GET"), format="json",
-            principal=_principal("outsider"),
-        )
-
-    assert forbidden.value.status_code == 403
-
-
 @pytest.mark.asyncio
 async def test_project_template_governance_api_exposes_impact_and_approves_revision(
     tmp_path,
 ):
     repository = CreativeRepository(tmp_path / "creative.sqlite3")
-    project = _ab_project(repository)
+    project = _prompt_project(repository)
     store = PromptStore(repository.db_path)
     template = store.create_template(
         title="API 治理模板",
@@ -1113,7 +658,7 @@ async def test_project_template_governance_api_exposes_impact_and_approves_revis
 @pytest.mark.asyncio
 async def test_project_template_governance_mutation_requires_project_manager(tmp_path):
     repository = CreativeRepository(tmp_path / "creative.sqlite3")
-    project = _ab_project(repository)
+    project = _prompt_project(repository)
     store = PromptStore(repository.db_path)
     template = store.create_template(
         title="只有负责人可治理",
@@ -1153,90 +698,9 @@ async def test_project_template_governance_mutation_requires_project_manager(tmp
 
 
 @pytest.mark.asyncio
-async def test_prompt_iteration_api_requires_preview_before_explicit_publish(tmp_path):
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
-    project = _ab_project(repository)
-    service = PromptABService(repository)
-    custom = service.store.create_template(
-        title="API 可迭代模板",
-        description="",
-        content=builtin_template("generic-vertical-short"),
-        owner_scope="user",
-        owner_user_id="owner-1",
-    )
-    snapshots = {
-        "A": service.store.resolve_snapshot(
-            project_id=project["id"], stage="outline", mode="series",
-            run_template_key=custom["template_key"], actor_user_id="owner-1",
-        ),
-        "B": service.store.resolve_snapshot(
-            project_id=project["id"], stage="outline", mode="series",
-            run_template_key="urban-identity-romcom", actor_user_id="owner-1",
-        ),
-    }
-    preflight = service.preflight(
-        project_id=project["id"], stage="outline", episode_number=0,
-        prompt_snapshots=snapshots, model=_priced_model("model-1"),
-        budget_amount=10,
-    )
-    experiment = service.create_experiment(
-        operation_id="api-iteration-evidence",
-        actor_user_id="owner-1",
-        preflight=preflight,
-    )
-    score = {
-        "premise_fit": 4, "conflict_engine": 4, "character_drive": 4,
-        "emotional_payoff": 4, "pacing_hooks": 4,
-        "expression_quality": 4, "production_feasibility": 2,
-        "average_score": 3.71, "strengths": "结构稳定", "risks": "成本偏高",
-    }
-    service.store.save_ab_evaluation(
-        experiment["id"], evaluation={"A": score, "B": {**score, "production_feasibility": 3}},
-        winner_arm="A", decision_note="降低制作成本",
-        expected_revision=0, actor_user_id="owner-1",
-    )
-    router, _, _ = _router(repository, tmp_path)
-    create_endpoint = _endpoint(
-        router,
-        "/api/creative/projects/{project_id}/prompt-library/iteration-drafts",
-    )
-    publish_endpoint = _endpoint(
-        router,
-        "/api/creative/projects/{project_id}/prompt-library/iteration-drafts/{draft_id}/publish",
-    )
-    binding_before = service.store.binding(project["id"], "outline", 0)
-
-    draft = await create_endpoint(
-        project_id=project["id"],
-        payload=PromptIterationDraftRequest(
-            operation_id="api-iteration-draft",
-            template_key=custom["template_key"],
-            expected_template_revision=1,
-            stage="outline",
-            dimension_key="production_feasibility",
-        ),
-        request=_request(FastAPI()),
-        principal=_principal("owner-1", admin=True),
-    )
-    assert service.store.get_revision(custom["id"])["revision"] == 1
-
-    published = await publish_endpoint(
-        project_id=project["id"],
-        draft_id=draft["id"],
-        payload=PromptIterationPublishRequest(expected_template_revision=1),
-        request=_request(FastAPI()),
-        principal=_principal("owner-1", admin=True),
-    )
-
-    assert published["revision"]["revision"] == 2
-    assert published["draft"]["status"] == "published"
-    assert service.store.binding(project["id"], "outline", 0) == binding_before
-
-
-@pytest.mark.asyncio
 async def test_prompt_marketplace_api_requires_review_and_installs_without_binding(tmp_path):
     repository = CreativeRepository(tmp_path / "creative.sqlite3")
-    project = _ab_project(repository)
+    project = _prompt_project(repository)
     store = PromptStore(repository.db_path)
     personal = store.create_template(
         title="待发布个人模板",

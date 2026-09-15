@@ -43,13 +43,6 @@
                     <button class="btn btn-sm" :class="creativeWorkspace.promptLibrary.governanceOpen ? 'btn-primary' : 'btn-outline-primary'" type="button" @click="openPromptWorkspacePanel('project')">项目模板</button>
                     <button class="btn btn-sm" :class="creativeWorkspace.promptLibrary.marketplaceOpen ? 'btn-warning' : 'btn-outline-warning'" type="button" @click="openPromptWorkspacePanel('marketplace')">模板市场</button>
                 </div>
-                {% else %}
-                <div class="d-flex flex-wrap gap-2 mb-3">
-                    <button class="btn btn-sm" :class="creativeWorkspace.promptLibrary.observabilityOpen ? 'btn-dark' : 'btn-outline-dark'" type="button" @click="openPromptWorkspacePanel('observability')">效果数据</button>
-                    <button class="btn btn-sm" :class="creativeWorkspace.promptLibrary.abOpen && creativeWorkspace.promptLibrary.effectsFocus === 'comparison' ? 'btn-success' : 'btn-outline-success'" type="button" @click="openPromptWorkspacePanel('comparison')">对比测试</button>
-                    <button class="btn btn-sm" :class="creativeWorkspace.promptLibrary.abOpen && creativeWorkspace.promptLibrary.effectsFocus === 'history' ? 'btn-primary' : 'btn-outline-primary'" type="button" @click="openPromptWorkspacePanel('history')">实验记录</button>
-                    <button class="btn btn-sm" :class="creativeWorkspace.promptLibrary.abOpen && creativeWorkspace.promptLibrary.effectsFocus === 'optimization' ? 'btn-warning' : 'btn-outline-warning'" type="button" @click="openPromptWorkspacePanel('optimization')">版本优化</button>
-                </div>
                 {% endif %}
 
                 {% if prompt_library_surface == 'center' %}
@@ -131,7 +124,6 @@
                                 <div class="row g-2 mt-2 small">
                                     <div class="col-6 col-md-3"><span class="text-muted">已批准版本</span><div x-text="item.approved_revision ? `v${item.approved_revision}` : '无'"></div></div>
                                     <div class="col-6 col-md-3"><span class="text-muted">当前绑定</span><div x-text="item.impact?.active_binding_count || 0"></div></div>
-                                    <div class="col-6 col-md-3"><span class="text-muted">A/B 历史引用</span><div x-text="item.impact?.historical_references?.ab_arms?.length || 0"></div></div>
                                     <div class="col-6 col-md-3"><span class="text-muted">生成资源引用</span><div x-text="item.impact?.historical_references?.resource_reference_count || 0"></div></div>
                                 </div>
                                 <div class="alert alert-warning py-2 mt-3 mb-0" x-show="item.impact?.archive_blockers?.length" x-text="item.impact?.archive_blockers?.[0]"></div>
@@ -157,7 +149,7 @@
                     <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
                         <div>
                             <div class="fw-semibold">效果数据</div>
-                            <div class="small text-muted mt-1">按模板版本汇总真实任务；Token 只读取供应商 usage，费用只使用任务创建时冻结的单价。</div>
+                            <div class="small text-muted mt-1">按模板版本汇总真实任务；Token 只读取供应商 usage。</div>
                         </div>
                         <button class="btn btn-sm btn-outline-secondary" type="button" @click="closePromptObservability">关闭</button>
                     </div>
@@ -229,14 +221,13 @@
                                             <div class="col-6 col-lg-2"><div class="text-muted">成功率</div><div class="fw-semibold" x-text="promptMetricPercent(version.jobs?.success_rate)"></div><div class="text-muted" x-text="`${version.jobs?.succeeded || 0} 成功 / ${version.jobs?.failed || 0} 失败`"></div></div>
                                             <div class="col-6 col-lg-2"><div class="text-muted">真实 Token</div><div class="fw-semibold" x-text="promptMetricNumber(version.tokens?.observed?.total_tokens)"></div><div class="text-muted" x-text="`完整覆盖 ${promptMetricPercent(version.tokens?.job_coverage)}`"></div></div>
                                             <div class="col-6 col-lg-2"><div class="text-muted">平均 Token</div><div class="fw-semibold" x-text="promptMetricNumber(version.tokens?.average_total_tokens)"></div><div class="text-muted" x-text="`${version.tokens?.complete_job_count || 0} 个完整任务`"></div></div>
-                                            <div class="col-6 col-lg-2"><div class="text-muted">计算费用</div><div class="fw-semibold" x-text="promptCostSummary(version)"></div><div class="text-muted" x-text="`价格覆盖 ${promptMetricPercent(version.cost?.job_coverage)}`"></div></div>
                                             <div class="col-6 col-lg-2"><div class="text-muted">人工采纳率</div><div class="fw-semibold" x-text="promptMetricPercent(version.adoption?.rate)"></div><div class="text-muted" x-text="`信号覆盖 ${promptMetricPercent(version.adoption?.coverage)}`"></div></div>
                                             <div class="col-6 col-lg-2"><div class="text-muted">P50 耗时</div><div class="fw-semibold" x-text="version.duration?.p50_seconds === null ? '不可用' : `${promptMetricNumber(version.duration?.p50_seconds, 1)} 秒`"></div><div class="text-muted" x-text="`覆盖 ${promptMetricPercent(version.duration?.coverage)}`"></div></div>
                                         </div>
                                         <details class="mt-3">
                                             <summary class="small">查看最近任务与覆盖缺口</summary>
                                             <template x-for="job in (version.recent_jobs || [])" :key="job.job_id">
-                                                <div class="small text-muted mt-1" x-text="`${new Date(Number(job.created_at || 0) * 1000).toLocaleString()} · ${promptStageLabel(job.stage)} · ${job.status} · Token ${job.token_complete ? '完整' : '缺失/不完整'} · 价格 ${job.cost_complete ? '完整' : '缺失/不完整'} · 采纳 ${job.adoption === null ? '不适用/未知' : (job.adoption ? '是' : '否')}`"></div>
+                                                <div class="small text-muted mt-1" x-text="`${new Date(Number(job.created_at || 0) * 1000).toLocaleString()} · ${promptStageLabel(job.stage)} · ${job.status} · Token ${job.token_complete ? '完整' : '缺失/不完整'} · 采纳 ${job.adoption === null ? '不适用/未知' : (job.adoption ? '是' : '否')}`"></div>
                                             </template>
                                         </details>
                                     </div>
@@ -486,291 +477,6 @@
                 </section>
                 {% endif %}
 
-                {% if prompt_library_surface == 'effects' %}
-                <section class="border border-success-subtle rounded p-3 mb-3" x-show="creativeWorkspace.promptLibrary.abOpen" x-cloak>
-                    <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
-                        <div>
-                            <div class="fw-semibold" x-text="({comparison: '对比测试', history: '实验记录', optimization: '版本优化'})[creativeWorkspace.promptLibrary.effectsFocus]"></div>
-                            <div class="small text-muted mt-1">两组使用同一份冻结输入和同一模型。生成结果只保存为候选草稿，不会自动替换当前版本，也不会自动选出胜者。</div>
-                        </div>
-                        <button class="btn btn-sm btn-outline-secondary" type="button" @click="closePromptAB">关闭</button>
-                    </div>
-
-                    <div class="text-center text-muted py-3" x-show="creativeWorkspace.promptLibrary.abLoading">正在读取模板实验数据…</div>
-                    <div x-show="creativeWorkspace.promptLibrary.effectsFocus === 'comparison'" x-cloak>
-                    <div class="text-center text-muted py-3" x-show="creativeWorkspace.promptLibrary.abLoading && !creativeWorkspace.promptLibrary.abModelOptions.length">正在读取 A/B 配置…</div>
-                    <div class="row g-3 mt-1" x-show="creativeWorkspace.promptLibrary.abModelOptions.length">
-                        <div class="col-md-6">
-                            <label class="form-label small" for="promptABTemplateA">模板 A</label>
-                            <select id="promptABTemplateA" class="form-select" x-model="creativeWorkspace.promptLibrary.abTemplateAKey" @change="creativeWorkspace.promptLibrary.abPreflight = null">
-                                <option value="">请选择模板</option>
-                                <template x-for="template in orderedPromptTemplates()" :key="`prompt-ab-a-${template.id}`">
-                                    <option :value="template.template_key" x-text="`${template.title} · v${template.revision}`"></option>
-                                </template>
-                            </select>
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label small" for="promptABTemplateB">模板 B</label>
-                            <select id="promptABTemplateB" class="form-select" x-model="creativeWorkspace.promptLibrary.abTemplateBKey" @change="creativeWorkspace.promptLibrary.abPreflight = null">
-                                <option value="">请选择模板</option>
-                                <template x-for="template in orderedPromptTemplates()" :key="`prompt-ab-b-${template.id}`">
-                                    <option :value="template.template_key" x-text="`${template.title} · v${template.revision}`"></option>
-                                </template>
-                            </select>
-                        </div>
-                        <div class="col-md-8">
-                            <label class="form-label small" for="promptABModel">生成模型</label>
-                            <select id="promptABModel" class="form-select" x-model="creativeWorkspace.promptLibrary.abModelRecordId" @change="creativeWorkspace.promptLibrary.abPreflight = null">
-                                <option value="">请选择模型</option>
-                                <template x-for="model in creativeWorkspace.promptLibrary.abModelOptions" :key="model.id">
-                                    <option :value="model.id" x-text="model.label || model.display_name || model.model_id"></option>
-                                </template>
-                            </select>
-                        </div>
-                        <div class="col-md-4">
-                            <label class="form-label small" for="promptABBudget">本次最高预算</label>
-                            <div class="input-group">
-                                <input id="promptABBudget" class="form-control" type="number" min="0.000001" max="1000000" step="0.01" x-model.number="creativeWorkspace.promptLibrary.abBudgetAmount" @input="creativeWorkspace.promptLibrary.abPreflight = null">
-                                <span class="input-group-text" x-text="creativeWorkspace.promptLibrary.abPreflight?.price_currency || '按模型币种'"></span>
-                            </div>
-                        </div>
-
-                        <template x-if="isFreeCreativeProject()">
-                            <div class="col-12">
-                                <div class="small fw-semibold mb-2">冻结引用版本</div>
-                                <div class="row g-2">
-                                    <template x-if="promptABContextFieldAllowed('brief_id')"><div class="col-md-6"><label class="form-label small">Brief</label><select class="form-select form-select-sm" x-model.number="creativeWorkspace.promptLibrary.abContextRefs.brief_id" @change="creativeWorkspace.promptLibrary.abPreflight = null"><option :value="null">不引用</option><template x-for="item in (creativeWorkspace.promptLibrary.abContextOptions.briefs || [])" :key="`ab-context-brief-${item.id}`"><option :value="item.id" x-text="`v${item.version} · ${item.content?.title || 'Brief'}`"></option></template></select></div></template>
-                                    <template x-if="promptABContextFieldAllowed('character_batch_id')"><div class="col-md-6"><label class="form-label small">人物版本</label><select class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.abContextRefs.character_batch_id" @change="creativeWorkspace.promptLibrary.abPreflight = null"><option value="">不引用</option><template x-for="item in (creativeWorkspace.promptLibrary.abContextOptions.character_batches || [])" :key="`ab-context-characters-${item.batch_id}`"><option :value="item.batch_id" x-text="`v${item.version} · ${(item.characters || []).map(value => value.content?.name).filter(Boolean).slice(0, 3).join('、') || '人物版本'}`"></option></template></select></div></template>
-                                    <template x-if="promptABContextFieldAllowed('outline_batch_id')"><div class="col-md-6"><label class="form-label small">全剧大纲</label><select class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.abContextRefs.outline_batch_id" @change="creativeWorkspace.promptLibrary.abPreflight = null"><option value="">不引用</option><template x-for="item in (creativeWorkspace.promptLibrary.abContextOptions.outline_batches || [])" :key="`ab-context-outline-${item.batch_id}`"><option :value="item.batch_id" x-text="`v${item.version} · ${item.episodes?.length || 0} 集`"></option></template></select></div></template>
-                                    <template x-if="promptABContextFieldAllowed('beats_id')"><div class="col-md-6"><label class="form-label small">当前集 Beats</label><select class="form-select form-select-sm" x-model.number="creativeWorkspace.promptLibrary.abContextRefs.beats_id" @change="creativeWorkspace.promptLibrary.abPreflight = null"><option :value="null">不引用</option><template x-for="item in (creativeWorkspace.promptLibrary.abContextOptions.beats || [])" :key="`ab-context-beats-${item.id}`"><option :value="item.id" x-text="`第 ${item.episode_number} 集 · v${item.version}`"></option></template></select></div></template>
-                                </div>
-                            </div>
-                        </template>
-
-                        <div class="col-12" x-show="['beats','script'].includes(creativeWorkspace.promptLibrary.stage)">
-                            <div class="small text-muted" x-text="`本次只对比第 ${Number(creativeWorkspace.selectedEpisode || 1)} 集；当前版本不支持 Beats/场次剧本的全剧批量 A/B。`"></div>
-                        </div>
-                        <div class="col-12">
-                            <label class="form-label small" for="promptABInstruction">两组共同的补充生成要求</label>
-                            <textarea id="promptABInstruction" class="form-control" rows="3" maxlength="2000" x-model="creativeWorkspace.promptLibrary.abGenerationInstruction" @input="creativeWorkspace.promptLibrary.abPreflight = null" placeholder="可留空；填写后会作为冻结输入同时提供给 A、B 两组。"></textarea>
-                        </div>
-                    </div>
-
-                    <div class="d-flex justify-content-end mt-3" x-show="creativeWorkspace.promptLibrary.abModelOptions.length">
-                        <button class="btn btn-outline-success" type="button" @click="preflightPromptAB" :disabled="creativeWorkspace.promptLibrary.abLoading || creativeWorkspace.promptLibrary.abStarting">
-                            <span x-show="!creativeWorkspace.promptLibrary.abLoading">预估调用与费用</span>
-                            <span x-show="creativeWorkspace.promptLibrary.abLoading">正在预估…</span>
-                        </button>
-                    </div>
-
-                    <template x-if="creativeWorkspace.promptLibrary.abPreflight">
-                        <div class="border rounded p-3 mt-3">
-                            <div class="d-flex flex-wrap justify-content-between gap-2">
-                                <div class="fw-semibold">启动前预检</div>
-                                <span class="badge" :class="creativeWorkspace.promptLibrary.abPreflight.can_start ? 'text-bg-success' : 'text-bg-danger'" x-text="creativeWorkspace.promptLibrary.abPreflight.can_start ? '可以启动' : '已阻止启动'"></span>
-                            </div>
-                            <div class="row g-2 mt-1 small">
-                                <div class="col-6 col-md"><span class="text-muted">调用次数</span><div class="fw-semibold" x-text="creativeWorkspace.promptLibrary.abPreflight.estimate?.calls ?? '-' "></div></div>
-                                <div class="col-6 col-md"><span class="text-muted">输入 Token</span><div class="fw-semibold" x-text="Number(creativeWorkspace.promptLibrary.abPreflight.estimate?.estimated_input_tokens || 0).toLocaleString()"></div></div>
-                                <div class="col-6 col-md"><span class="text-muted">输出 Token</span><div class="fw-semibold" x-text="Number(creativeWorkspace.promptLibrary.abPreflight.estimate?.estimated_output_tokens || 0).toLocaleString()"></div></div>
-                                <div class="col-6 col-md"><span class="text-muted">总 Token</span><div class="fw-semibold" x-text="Number(creativeWorkspace.promptLibrary.abPreflight.estimate?.estimated_total_tokens || 0).toLocaleString()"></div></div>
-                                <div class="col-12 col-md"><span class="text-muted">预计费用</span><div class="fw-semibold" x-text="creativeWorkspace.promptLibrary.abPreflight.estimate?.estimated_cost === null ? '价格未配置' : `${creativeWorkspace.promptLibrary.abPreflight.estimate?.estimated_cost} ${creativeWorkspace.promptLibrary.abPreflight.price_currency}`"></div></div>
-                            </div>
-                            <div class="alert alert-danger py-2 mt-3 mb-0" x-show="creativeWorkspace.promptLibrary.abPreflight.blockers?.length">
-                                <template x-for="blocker in (creativeWorkspace.promptLibrary.abPreflight.blockers || [])" :key="blocker"><div class="small" x-text="blocker"></div></template>
-                            </div>
-                            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-3">
-                                <div class="small text-muted">启动时服务端会重新计算预检；输入、模板版本或价格变化后必须重新估算。</div>
-                                <button class="btn btn-success" type="button" @click="startPromptAB" :disabled="!creativeWorkspace.promptLibrary.abPreflight.can_start || creativeWorkspace.promptLibrary.abStarting">
-                                    <span x-show="!creativeWorkspace.promptLibrary.abStarting">启动两组候选生成</span>
-                                    <span x-show="creativeWorkspace.promptLibrary.abStarting">正在创建任务…</span>
-                                </button>
-                            </div>
-                        </div>
-                    </template>
-                    </div>
-
-                    <div x-show="creativeWorkspace.promptLibrary.effectsFocus === 'optimization'" x-cloak>
-                    <div class="mt-2">
-                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
-                            <div>
-                                <div class="fw-semibold">当前阶段效果汇总</div>
-                                <div class="small text-muted">只统计已完成且已人工确认的评价；个人模板仅对其所有者显示。</div>
-                            </div>
-                            <button class="btn btn-sm btn-outline-secondary" type="button" @click="loadPromptABReport" :disabled="creativeWorkspace.promptLibrary.abReportLoading">
-                                <span x-show="!creativeWorkspace.promptLibrary.abReportLoading">刷新汇总</span>
-                                <span x-show="creativeWorkspace.promptLibrary.abReportLoading">汇总中…</span>
-                            </button>
-                        </div>
-                        <div class="small text-muted py-2" x-show="creativeWorkspace.promptLibrary.abReportLoading && !creativeWorkspace.promptLibrary.abReport">正在汇总历史人工评价…</div>
-                        <template x-if="creativeWorkspace.promptLibrary.abReport">
-                            <div>
-                                <div class="small text-muted mb-2" x-text="`已评价实验 ${creativeWorkspace.promptLibrary.abReport.evaluated_experiment_count} 次 · 涉及模板 ${creativeWorkspace.promptLibrary.abReport.template_count} 个`"></div>
-                                <div class="alert alert-light border py-2" x-show="!creativeWorkspace.promptLibrary.abReport.items?.length">当前阶段还没有可汇总的人工评价。</div>
-                                <div class="vstack gap-2">
-                                    <template x-for="item in (creativeWorkspace.promptLibrary.abReport.items || [])" :key="`ab-report-${item.template_key}-v${item.template_revision}`">
-                                        <div class="border rounded p-3">
-                                            <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
-                                                <div>
-                                                    <div class="fw-semibold" x-text="`${item.template_title} · v${item.template_revision}`"></div>
-                                                    <div class="small text-muted mt-1" x-text="`${item.evaluation_count} 次评价 · ${item.wins} 胜 / ${item.losses} 负 / ${item.ties} 平`"></div>
-                                                </div>
-                                                <div class="text-end"><div class="fs-5 fw-semibold" x-text="item.average_score"></div><div class="small text-muted">七项均分 / 5</div></div>
-                                            </div>
-                                            <div class="d-flex flex-wrap gap-1 mt-2">
-                                                <template x-for="dimension in promptABScoreDimensions()" :key="`${item.template_key}-${dimension.key}`">
-                                                    <span class="badge text-bg-light border" x-text="`${dimension.label} ${item.dimension_scores?.[dimension.key]}`"></span>
-                                                </template>
-                                            </div>
-                                            <div class="small mt-2">
-                                                <span class="text-success" x-text="`优势：${item.best_dimension.label} ${item.best_dimension.score}`"></span>
-                                                <span class="text-warning ms-3" x-text="`短板：${item.weakest_dimension.label} ${item.weakest_dimension.score}`"></span>
-                                            </div>
-                                            <div class="mt-2">
-                                                <template x-for="suggestion in item.iteration_suggestions" :key="suggestion"><div class="small text-primary" x-text="`建议：${suggestion}`"></div></template>
-                                            </div>
-                                            <div class="d-flex justify-content-end mt-2">
-                                                <button class="btn btn-sm btn-outline-primary" type="button" x-show="promptABReportTemplate(item) && promptABReportTemplate(item)?.owner_scope !== 'system' && Number(promptABReportTemplate(item)?.revision) === Number(item.template_revision)" @click="createPromptIterationDraft(item)" :disabled="creativeWorkspace.promptLibrary.abIterationLoading">
-                                                    根据短板创建迭代草稿
-                                                </button>
-                                                <span class="small text-muted" x-show="promptABReportTemplate(item)?.owner_scope === 'system'">系统模板只读；另存后才能迭代</span>
-                                                <span class="small text-muted" x-show="promptABReportTemplate(item)?.owner_scope !== 'system' && Number(promptABReportTemplate(item)?.revision) !== Number(item.template_revision)">这是历史版本评价，请先测试当前版本</span>
-                                            </div>
-                                            <details class="mt-2" x-show="item.recent_strengths?.length || item.recent_risks?.length">
-                                                <summary class="small">查看近期人工证据</summary>
-                                                <template x-for="note in item.recent_strengths" :key="`strength-${note}`"><div class="small text-success mt-1" x-text="`优势记录：${note}`"></div></template>
-                                                <template x-for="note in item.recent_risks" :key="`risk-${note}`"><div class="small text-warning mt-1" x-text="`风险记录：${note}`"></div></template>
-                                            </details>
-                                        </div>
-                                    </template>
-                                </div>
-                                <details class="mt-2" x-show="creativeWorkspace.promptLibrary.abReport.methodology?.length">
-                                    <summary class="small text-muted">汇总口径</summary>
-                                    <template x-for="note in creativeWorkspace.promptLibrary.abReport.methodology" :key="note"><div class="small text-muted mt-1" x-text="note"></div></template>
-                                </details>
-                            </div>
-                        </template>
-                    </div>
-
-                    <section class="border border-primary-subtle rounded p-3 mt-3" x-show="creativeWorkspace.promptLibrary.abIterationDraft" x-cloak>
-                        <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
-                            <div>
-                                <div class="fw-semibold">受控模板迭代草稿</div>
-                                <div class="small text-muted mt-1" x-text="`基础版本 v${creativeWorkspace.promptLibrary.abIterationDraft?.base_revision} · 发布后生成 v${Number(creativeWorkspace.promptLibrary.abIterationDraft?.base_revision || 0) + 1}`"></div>
-                            </div>
-                            <button class="btn btn-sm btn-outline-secondary" type="button" @click="closePromptIterationDraft">关闭</button>
-                        </div>
-                        <div class="alert alert-warning py-2 mt-3" x-show="creativeWorkspace.promptLibrary.abIterationDraft?.warnings?.length">
-                            <template x-for="warning in (creativeWorkspace.promptLibrary.abIterationDraft?.warnings || [])" :key="warning"><div class="small" x-text="warning"></div></template>
-                        </div>
-                        <div class="small mt-2">
-                            <span class="text-muted">评价证据：</span>
-                            <span x-text="`${creativeWorkspace.promptLibrary.abIterationDraft?.report_snapshot?.evaluation_count} 次评价 · 七项均分 ${creativeWorkspace.promptLibrary.abIterationDraft?.report_snapshot?.average_score} · 最低项 ${creativeWorkspace.promptLibrary.abIterationDraft?.report_snapshot?.weakest_dimension?.label} ${creativeWorkspace.promptLibrary.abIterationDraft?.report_snapshot?.weakest_dimension?.score}`"></span>
-                        </div>
-                        <div class="mt-3">
-                            <template x-for="change in (creativeWorkspace.promptLibrary.abIterationDraft?.changes || [])" :key="change.path">
-                                <div class="border rounded p-2 mb-2">
-                                    <div class="small fw-semibold" x-text="change.label"></div>
-                                    <div class="row g-2 mt-1">
-                                        <div class="col-md-6"><div class="small text-muted mb-1">修改前</div><pre class="small bg-body-tertiary border rounded p-2 mb-0 text-wrap" x-text="change.before"></pre></div>
-                                        <div class="col-md-6"><div class="small text-muted mb-1">修改后</div><pre class="small bg-body-tertiary border border-primary-subtle rounded p-2 mb-0 text-wrap" x-text="change.after"></pre></div>
-                                    </div>
-                                </div>
-                            </template>
-                        </div>
-                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-3">
-                            <div class="small text-muted">确认发布只创建不可变的新模板版本；当前项目绑定仍固定在原版本。</div>
-                            <button class="btn btn-primary" type="button" @click="publishPromptIterationDraft" :disabled="creativeWorkspace.promptLibrary.abIterationPublishing">
-                                <span x-show="!creativeWorkspace.promptLibrary.abIterationPublishing" x-text="`确认发布为 v${Number(creativeWorkspace.promptLibrary.abIterationDraft?.base_revision || 0) + 1}`"></span>
-                                <span x-show="creativeWorkspace.promptLibrary.abIterationPublishing">正在发布…</span>
-                            </button>
-                        </div>
-                    </section>
-                    </div>
-
-                    <div x-show="creativeWorkspace.promptLibrary.effectsFocus === 'history'" x-cloak>
-                    <div class="mt-2">
-                        <div class="fw-semibold mb-2">最近的 A/B 实验</div>
-                        <div class="small text-muted" x-show="!creativeWorkspace.promptLibrary.abHistory.length">尚未运行 A/B 实验。</div>
-                        <div class="vstack gap-2">
-                            <template x-for="experiment in creativeWorkspace.promptLibrary.abHistory" :key="experiment.id">
-                                <div class="border rounded p-2">
-                                    <div class="d-flex flex-wrap justify-content-between gap-2 small">
-                                        <span x-text="`${promptStageLabel(experiment.stage)}${experiment.episode_number ? ` · 第 ${experiment.episode_number} 集` : ''}`"></span>
-                                        <span class="badge text-bg-secondary" x-text="experiment.status"></span>
-                                    </div>
-                                    <div class="small text-muted mt-1" x-text="`${new Date(Number(experiment.created_at || 0) * 1000).toLocaleString()} · 预算 ${experiment.budget_amount} ${experiment.price_currency}`"></div>
-                                    <div class="row g-2 mt-1">
-                                        <template x-for="arm in (experiment.arms || [])" :key="`${experiment.id}-${arm.arm}`">
-                                            <div class="col-md-6"><div class="bg-body-tertiary rounded p-2 small"><span class="fw-semibold" x-text="`${arm.arm} · ${arm.template_title || arm.template_key}`"></span><div class="text-muted mt-1" x-text="arm.job ? `任务 ${arm.job.status} · ${arm.job.message || ''}` : '任务尚未创建'"></div></div></div>
-                                        </template>
-                                    </div>
-                                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-2">
-                                        <div class="small" x-show="experiment.winner_arm">
-                                            人工结论：<span class="fw-semibold" x-text="experiment.winner_arm === 'tie' ? '平局' : `模板 ${experiment.winner_arm} 胜出`"></span>
-                                            <span class="text-muted ms-1" x-show="experiment.evaluation?.A" x-text="`A ${experiment.evaluation?.A?.average_score} / B ${experiment.evaluation?.B?.average_score}`"></span>
-                                        </div>
-                                        <div class="d-flex flex-wrap gap-2 ms-auto">
-                                            <a class="btn btn-sm btn-outline-secondary" :href="promptABExportUrl(experiment.id, 'json')">导出 JSON</a>
-                                            <a class="btn btn-sm btn-outline-secondary" :href="promptABExportUrl(experiment.id, 'md')">导出 Markdown</a>
-                                            <button class="btn btn-sm btn-outline-primary" type="button" x-show="experiment.status === 'completed'" @click="openPromptABEvaluation(experiment)" x-text="experiment.evaluation_revision ? '修改人工评价' : '填写人工评价'"></button>
-                                        </div>
-                                    </div>
-                                </div>
-                            </template>
-                        </div>
-                    </div>
-
-                    <section class="border rounded p-3 mt-3" x-show="creativeWorkspace.promptLibrary.abEvaluationExperimentId" x-cloak>
-                        <div class="d-flex justify-content-between align-items-start gap-3">
-                            <div>
-                                <div class="fw-semibold">人工效果评价</div>
-                                <div class="small text-muted mt-1">每项 1–5 分。评分和胜者只记录在本次实验中，不会自动修改项目默认模板或锁定候选。</div>
-                            </div>
-                            <button class="btn btn-sm btn-outline-secondary" type="button" @click="closePromptABEvaluation">收起</button>
-                        </div>
-                        <div class="row g-3 mt-1">
-                            <template x-for="arm in ['A','B']" :key="`ab-evaluation-${arm}`">
-                                <div class="col-lg-6">
-                                    <div class="border rounded p-3 h-100">
-                                        <div class="fw-semibold mb-2" x-text="`模板 ${arm}`"></div>
-                                        <template x-for="dimension in promptABScoreDimensions()" :key="`${arm}-${dimension.key}`">
-                                            <div class="row align-items-center g-2 mb-2">
-                                                <label class="col-7 col-form-label col-form-label-sm" x-text="dimension.label"></label>
-                                                <div class="col-5"><select class="form-select form-select-sm" x-model.number="creativeWorkspace.promptLibrary.abEvaluation[arm][dimension.key]"><template x-for="score in [1,2,3,4,5]" :key="score"><option :value="score" x-text="score"></option></template></select></div>
-                                            </div>
-                                        </template>
-                                        <label class="form-label small mt-2">主要优势</label>
-                                        <textarea class="form-control form-control-sm" rows="2" maxlength="1000" x-model="creativeWorkspace.promptLibrary.abEvaluation[arm].strengths"></textarea>
-                                        <label class="form-label small mt-2">风险与不足</label>
-                                        <textarea class="form-control form-control-sm" rows="2" maxlength="1000" x-model="creativeWorkspace.promptLibrary.abEvaluation[arm].risks"></textarea>
-                                    </div>
-                                </div>
-                            </template>
-                            <div class="col-md-4">
-                                <label class="form-label small" for="promptABWinner">人工结论</label>
-                                <select id="promptABWinner" class="form-select" x-model="creativeWorkspace.promptLibrary.abEvaluation.winner_arm">
-                                    <option value="">请选择</option>
-                                    <option value="A">模板 A 胜出</option>
-                                    <option value="B">模板 B 胜出</option>
-                                    <option value="tie">平局</option>
-                                </select>
-                            </div>
-                            <div class="col-md-8">
-                                <label class="form-label small" for="promptABDecisionNote">判断依据</label>
-                                <textarea id="promptABDecisionNote" class="form-control" rows="2" maxlength="2000" x-model="creativeWorkspace.promptLibrary.abEvaluation.decision_note" placeholder="记录胜出的原因、适用场景或下一轮应验证的问题。"></textarea>
-                            </div>
-                        </div>
-                        <div class="d-flex justify-content-end mt-3">
-                            <button class="btn btn-primary" type="button" @click="savePromptABEvaluation" :disabled="creativeWorkspace.promptLibrary.abEvaluationSaving || !creativeWorkspace.promptLibrary.abEvaluation.winner_arm">
-                                <span x-show="!creativeWorkspace.promptLibrary.abEvaluationSaving">保存人工评价</span>
-                                <span x-show="creativeWorkspace.promptLibrary.abEvaluationSaving">正在保存…</span>
-                            </button>
-                        </div>
-                    </section>
-                    </div>
-                </section>
-                {% endif %}
 
                 {% if prompt_library_surface == 'picker' %}
                 <div class="row g-3" x-show="creativeWorkspace.promptLibrary.settings?.enabled && !creativeWorkspace.promptLibrary.loading" x-cloak>

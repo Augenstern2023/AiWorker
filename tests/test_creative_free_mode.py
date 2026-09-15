@@ -135,6 +135,59 @@ def test_free_candidate_generation_can_preserve_the_current_head(tmp_path):
     assert head_after == current["head"]
 
 
+def test_free_generation_context_options_do_not_hydrate_the_whole_project(
+    tmp_path, monkeypatch
+):
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = create_free_project(repository)
+    service = FreeCreativeModeService(repository)
+    brief = service.create_brief(
+        project["id"],
+        {"title": "可引用 Brief"},
+        expected_head_revision=0,
+        actor_user_id="owner-1",
+    )
+    service.lock_resource(
+        project_id=project["id"],
+        stage="brief",
+        resource_ref=str(brief["resource"]["id"]),
+        expected_head_revision=brief["head"]["revision"],
+        actor_user_id="owner-1",
+    )
+    for episode_number in (1, 2):
+        beats = service.create_episode_resource(
+            project["id"],
+            "beats",
+            episode_number,
+            {"beats": [{"summary": f"第 {episode_number} 集"}]},
+            expected_head_revision=0,
+            actor_user_id="owner-1",
+        )
+        service.lock_resource(
+            project_id=project["id"],
+            stage="beats",
+            resource_ref=str(beats["resource"]["id"]),
+            expected_head_revision=beats["head"]["revision"],
+            actor_user_id="owner-1",
+            episode_number=episode_number,
+        )
+
+    def fail_if_full_project_is_loaded(_project_id):
+        raise AssertionError("context options must not hydrate every generated resource")
+
+    monkeypatch.setattr(repository, "get_project", fail_if_full_project_is_loaded)
+
+    options = service.context_options(project["id"], episode_number=1)
+
+    assert [item["content"]["title"] for item in options["briefs"]] == [
+        "可引用 Brief"
+    ]
+    assert options["character_batches"] == []
+    assert options["outline_batches"] == []
+    assert [item["episode_number"] for item in options["beats"]] == [1]
+    assert len(options["heads"]) == 3
+
+
 def create_free_outline_for_rewrite(
     repository: CreativeRepository, *, locked: bool
 ) -> tuple[dict, dict, dict]:
@@ -947,6 +1000,61 @@ async def test_empty_project_preview_ignores_started_task_without_resources(tmp_
     assert migrated["project"]["id"] != project["id"]
     assert migrated["project"]["workflow_mode"] == "free"
     workflow.cancel_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mode_migration_preview_returns_timeout_instead_of_hanging(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from fastapi import HTTPException
+
+    import creative.api as creative_api
+
+    repository = CreativeRepository(tmp_path / "slow-preview.sqlite3")
+    project = repository.create_original_project(
+        seed_text="迁移预检超时测试",
+        name="慢预检项目",
+        target_episode_count=3,
+        created_by="owner-1",
+        creation_request_id="slow-preview-project",
+    )
+    project = repository.mark_project_bootstrap_status(project["id"], "ready")
+    workflow = Mock()
+    workflow.list_tasks.return_value = []
+    workflow.list_project_members.return_value = []
+    slow_jobs = SimpleNamespace(
+        list_jobs=lambda: (time.sleep(0.05) or [])
+    )
+    monkeypatch.setattr(
+        creative_api, "_MODE_MIGRATION_PREVIEW_TIMEOUT_SECONDS", 0.005
+    )
+    router = creative_api.build_creative_router(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        repository=repository,
+        workflow_repository=workflow,
+        application_service=Mock(),
+        job_manager=slow_jobs,
+    )
+    endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if route.path
+        == "/api/creative/projects/{project_id}/mode-migration-preview"
+    )
+
+    with pytest.raises(HTTPException) as timeout:
+        await endpoint(
+            project_id=project["id"],
+            request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())),
+            principal=SimpleNamespace(is_system_admin=True, user_id="owner-1"),
+        )
+
+    assert timeout.value.status_code == 503
+    assert timeout.value.detail == "迁移预检超时，请稍后重试"
 
 
 @pytest.mark.asyncio

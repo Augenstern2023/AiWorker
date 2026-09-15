@@ -173,8 +173,7 @@
                         credential_status: 'missing'
                     },
                     modelDraft: {
-                        model_id: '', display_name: '', input_price_per_million: '',
-                        output_price_per_million: '', price_currency: 'CNY'
+                        model_id: '', display_name: ''
                     },
                     modelEditor: null,
                     test: {model_id: '', result: null}
@@ -231,22 +230,6 @@
                         importTitle: '', importDescription: '', importOwnerScope: 'user',
                         importParametersJson: '{}', importExamplesJson: '[]',
                         personalOpen: false,
-                        abOpen: false, abLoading: false, abStarting: false,
-                        abTemplateAKey: '', abTemplateBKey: '', abModelOptions: [],
-                        abModelRecordId: '', abBudgetAmount: 10,
-                        abGenerationInstruction: '', abPreflight: null,
-                        abContextOptions: {},
-                        abContextRefs: {brief_id: null, character_batch_id: '', outline_batch_id: '', beats_id: null},
-                        abHistory: [], abReport: null, abReportLoading: false,
-                        abEvaluationExperimentId: '',
-                        abEvaluationSaving: false,
-                        abEvaluation: {
-                            A: {}, B: {}, winner_arm: '', decision_note: '',
-                            expected_evaluation_revision: 0
-                        },
-                        abIterationDraft: null, abIterationLoading: false,
-                        abIterationPublishing: false,
-                        effectsFocus: 'comparison',
                         governanceOpen: false, governanceLoading: false,
                         governanceSaving: false, governanceItems: [], governancePolicy: [],
                         governanceCanManage: false,
@@ -272,9 +255,9 @@
                         stage: '', series: false, instruction: '', contextOptions: {},
                         modelOptions: [], modelRecordId: '',
                         contextRefs: {brief_id: null, character_batch_id: '', outline_batch_id: '', beats_id: null},
-                        loading: false, submitting: false, error: ''
+                        loading: false, submitting: false, error: '', requestSequence: 0
                     },
-                    modeMigration: {preview: null, confirmed: false, loading: false, submitting: false, error: ''}
+                    modeMigration: {preview: null, confirmed: false, loading: false, submitting: false, error: '', requestSequence: 0}
                 },
                 dramaDownload: {title: '', topic: null, source: 'hongguo', fallbackReason: '', candidates: [], providers: [], captureCandidates: [], thirdPartyError: '', captureError: '', selectedCandidate: null, selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], relatedVideos: [], missingEpisodes: [], seriesRangeLabel: '', seriesWarnings: [], selectedEpisodes: [], allEpisodes: false, episodesExpanded: true, searching: false, episodesLoading: false, starting: false, error: '', jobId: '', jobStatus: '', progress: {}, progressMessage: '', paused: false, finished: false, background: false, showFiles: false, logs: [], logCount: 0, videoPreviewPath: '', videoPreviewUrl: '', videoPreviewError: ''},
                 dramaReviews: {topic: null, title: '', platform: 'hg', limit: 100, allReviews: false, format: 'csv', jobId: '', status: '', reviewCount: 0, sourceTotal: 0, items: [], loading: false, polling: false, error: ''},
@@ -387,6 +370,9 @@
                     });
                     this.freeCreativeGenerationModal = this.modal('freeCreativeGenerationModal');
                     this.creativeModeMigrationModal = this.modal('creativeModeMigrationModal');
+                    document.getElementById('creativeModeMigrationModal')?.addEventListener('hidden.bs.modal', () => {
+                        this.cancelCreativeModeMigrationPreview?.();
+                    });
                     this.planningAssignmentModal = this.modal('planningAssignmentModal');
                     this.adoptionNoticeModal = this.modal('adoptionNoticeModal');
 

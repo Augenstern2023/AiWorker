@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 from datetime import datetime
 from io import BytesIO, StringIO
@@ -40,7 +41,6 @@ from creative.original_direction_service import validate_original_direction_cont
 from creative.original_project_service import OriginalProjectService
 from creative.outline_fields import OUTLINE_TEXT_FIELDS, outline_field_source_fingerprint
 from creative.outline_overview import SERIES_OVERVIEW_FIELD_LABELS, read_series_overview
-from creative.prompt_ab_service import PromptABService, prompt_ab_audit_markdown
 from creative.prompt_marketplace import PromptMarketplaceService
 from creative.prompt_observability import PromptObservabilityService
 from creative.project_prompt_service import ProjectPromptService
@@ -79,14 +79,9 @@ from creative.schema import (
     OutlineOverviewRequest,
     OriginalProjectCreateRequest,
     PlanningAssignmentRequest,
-    PromptABEvaluationRequest,
-    PromptABPreflightRequest,
-    PromptABStartRequest,
     PromptBindingRequest,
     PromptGovernanceActionRequest,
     PromptImportPreviewRequest,
-    PromptIterationDraftRequest,
-    PromptIterationPublishRequest,
     PromptMarketplaceInstallRequest,
     PromptMarketplaceRatingRequest,
     PromptMarketplaceReviewRequest,
@@ -125,6 +120,8 @@ from workflow.transition_service import TransitionService
 
 
 logger = logging.getLogger("aiworker.creative")
+
+_MODE_MIGRATION_PREVIEW_TIMEOUT_SECONDS = 8.0
 
 
 class TopicGenerateRequest(BaseModel):
@@ -1067,7 +1064,6 @@ def build_creative_router(
     prompt_marketplace_service = PromptMarketplaceService(
         repository, project_prompt_service.store
     )
-    prompt_ab_service = PromptABService(repository)
     prompt_observability_service = (
         PromptObservabilityService(repository, job_manager)
         if job_manager is not None
@@ -1832,184 +1828,6 @@ def build_creative_router(
             return
         raise HTTPException(403, "只有项目负责人或当前阶段负责人可以修改模板")
 
-    def build_prompt_ab_preflight(
-        project_id: int,
-        payload: PromptABPreflightRequest,
-        principal: Principal,
-    ) -> dict[str, Any]:
-        if llm_model_resolver is None:
-            raise HTTPException(503, "模型配置服务不可用")
-        try:
-            model = llm_model_resolver(payload.llm_model_record_id)
-        except (ValueError, RuntimeError) as exc:
-            raise HTTPException(409, str(exc)) from exc
-        episode_number = (
-            int(payload.episode_number)
-            if payload.stage in {"beats", "script"}
-            else 0
-        )
-        try:
-            raw_context_refs = dict(payload.context_refs or {})
-            unknown_context_refs = sorted(
-                set(raw_context_refs) - set(FreeCreativeContextRefs.model_fields)
-            )
-            if unknown_context_refs:
-                raise ValueError(
-                    "A/B 上下文包含不支持的字段："
-                    + "、".join(unknown_context_refs)
-                )
-            normalized_context_refs = FreeCreativeContextRefs(
-                **raw_context_refs
-            ).model_dump()
-            allowed_context_refs = {
-                "brief_id": {"characters", "outline", "beats", "script"},
-                "character_batch_id": {"outline", "beats", "script"},
-                "outline_batch_id": {"beats", "script"},
-                "beats_id": {"script"},
-            }
-            incompatible_context_refs = sorted(
-                key
-                for key, value in normalized_context_refs.items()
-                if value not in {None, ""}
-                and payload.stage not in allowed_context_refs[key]
-            )
-            if incompatible_context_refs:
-                raise ValueError(
-                    "当前阶段不支持这些 A/B 上下文："
-                    + "、".join(incompatible_context_refs)
-                )
-            normalized_context_refs = {
-                key: value
-                for key, value in normalized_context_refs.items()
-                if value not in {None, ""}
-            }
-            snapshots = {
-                "A": project_prompt_service.resolve_generation_snapshot(
-                    project_id=project_id,
-                    stage=payload.stage,
-                    series=payload.stage == "outline",
-                    episode_number=episode_number,
-                    template_key=payload.template_a_key,
-                    template_revision=payload.template_a_revision,
-                    run_override=None,
-                    actor_user_id=principal.user_id,
-                ),
-                "B": project_prompt_service.resolve_generation_snapshot(
-                    project_id=project_id,
-                    stage=payload.stage,
-                    series=payload.stage == "outline",
-                    episode_number=episode_number,
-                    template_key=payload.template_b_key,
-                    template_revision=payload.template_b_revision,
-                    run_override=None,
-                    actor_user_id=principal.user_id,
-                ),
-            }
-            if not all(isinstance(snapshot, dict) for snapshot in snapshots.values()):
-                raise ValueError("项目尚未启用提示词模板库")
-            return prompt_ab_service.preflight(
-                project_id=project_id,
-                stage=payload.stage,
-                episode_number=episode_number,
-                prompt_snapshots=snapshots,
-                model=dict(model or {}),
-                budget_amount=float(payload.budget_amount),
-                run_context={
-                    "generation_instruction": payload.generation_instruction,
-                    "workflow_task_id": payload.workflow_task_id,
-                    "expected_head_revision": int(payload.expected_head_revision),
-                    "context_refs": normalized_context_refs,
-                },
-            )
-        except PermissionError as exc:
-            raise HTTPException(403, str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
-
-    def public_prompt_ab_experiment(
-        experiment: dict[str, Any], actor_user_id: str = ""
-    ) -> dict[str, Any]:
-        result = dict(experiment)
-        result.pop("source_snapshot", None)
-        public_arms: list[dict[str, Any]] = []
-        statuses: list[str] = []
-        hidden_arms: set[str] = set()
-
-        def private_template_hidden(template_key: str) -> bool:
-            template = prompt_ab_service.store.get_template_by_key(template_key)
-            if template is None:
-                return template_key.startswith("user-")
-            return bool(
-                template.get("owner_scope") == "user"
-                and str(template.get("owner_user_id") or "")
-                != str(actor_user_id or "")
-            )
-
-        for stored_arm in experiment.get("arms") or []:
-            arm = dict(stored_arm)
-            snapshot = dict(arm.pop("prompt_snapshot", {}) or {})
-            template_key = str(
-                snapshot.get("template_key") or arm.get("template_key") or ""
-            )
-            private_hidden = private_template_hidden(template_key)
-            if private_hidden:
-                hidden_arms.add(str(arm.get("arm") or ""))
-                arm["template_key"] = ""
-                arm["template_revision"] = 0
-                arm["template_title"] = "私人模板（不可见）"
-                arm["prompt_content_hash"] = None
-            else:
-                arm["template_title"] = snapshot.get("title")
-                arm["prompt_content_hash"] = snapshot.get("content_hash")
-            job_id = str(arm.get("job_id") or "")
-            job = None
-            if job_id and job_manager is not None and callable(
-                getattr(job_manager, "get_job", None)
-            ):
-                try:
-                    job = job_manager.get_job(job_id)
-                except JobNotFoundError:
-                    job = {"job_id": job_id, "status": "unknown"}
-            if job is not None:
-                arm["job"] = {
-                    key: job.get(key)
-                    for key in (
-                        "job_id", "status", "message", "progress",
-                        "created_at", "started_at", "finished_at",
-                    )
-                }
-                statuses.append(str(job.get("status") or "unknown"))
-            elif job_id:
-                statuses.append("submitted")
-            public_arms.append(arm)
-        estimate = dict(result.get("estimate") or {})
-        estimate_arms: list[dict[str, Any]] = []
-        for stored_estimate_arm in estimate.get("arms") or []:
-            estimate_arm = dict(stored_estimate_arm)
-            if str(estimate_arm.get("arm") or "") in hidden_arms:
-                estimate_arm["template_key"] = ""
-                estimate_arm["template_title"] = "私人模板（不可见）"
-                estimate_arm["template_revision"] = 0
-            estimate_arms.append(estimate_arm)
-        estimate["arms"] = estimate_arms
-        result["estimate"] = estimate
-        if hidden_arms:
-            result["evaluation"] = {}
-            result["winner_arm"] = ""
-            result["decision_note"] = ""
-            result["evaluated_by"] = ""
-            result["evaluated_at"] = None
-        if statuses and all(status in {"succeeded", "completed"} for status in statuses):
-            result["status"] = "completed"
-        elif any(status in {"failed", "cancelled"} for status in statuses):
-            result["status"] = "failed"
-        elif statuses:
-            result["status"] = "running"
-        else:
-            result["status"] = "created"
-        result["arms"] = public_arms
-        return result
-
     @router.get("/projects/{project_id}/prompt-marketplace")
     async def get_project_prompt_marketplace(
         project_id: int,
@@ -2234,352 +2052,6 @@ def build_creative_router(
         except Exception as exc:
             logger.exception("Prompt template import preview failed")
             raise HTTPException(502, "外部提示词分析失败") from exc
-
-    @router.post("/projects/{project_id}/prompt-library/ab-tests/preflight")
-    async def preflight_project_prompt_ab_test(
-        project_id: int,
-        payload: PromptABPreflightRequest,
-        request: Request,
-        principal: Principal = Depends(current_principal),
-    ):
-        project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
-        preflight = build_prompt_ab_preflight(project_id, payload, principal)
-        return {
-            key: value
-            for key, value in preflight.items()
-            if key not in {"prompt_snapshots", "source_snapshot"}
-        }
-
-    @router.post("/projects/{project_id}/prompt-library/ab-tests")
-    async def start_project_prompt_ab_test(
-        project_id: int,
-        payload: PromptABStartRequest,
-        request: Request,
-        principal: Principal = Depends(current_principal),
-    ):
-        project = project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
-        try:
-            application_service.assert_stage_write_access(
-                project_id, payload.stage, principal
-            )
-        except PermissionError as exc:
-            raise HTTPException(403, str(exc)) from exc
-        preflight = build_prompt_ab_preflight(project_id, payload, principal)
-        if preflight["preflight_hash"] != payload.preflight_hash:
-            raise HTTPException(409, "A/B 预检已失效，请重新估算")
-        if not preflight["can_start"]:
-            raise HTTPException(
-                409,
-                {
-                    "code": "prompt_ab_preflight_blocked",
-                    "message": "A/B 测试未通过预检",
-                    "blockers": preflight["blockers"],
-                },
-            )
-        experiment = prompt_ab_service.create_experiment(
-            operation_id=payload.operation_id,
-            actor_user_id=principal.user_id,
-            preflight=preflight,
-        )
-        if all(str(arm.get("job_id") or "") for arm in experiment["arms"]):
-            return public_prompt_ab_experiment(experiment, principal.user_id)
-        common_snapshot_id = (
-            f"prompt-ab-{experiment['id']}-{preflight['source_fingerprint']}"
-        )
-        common_source_snapshot = {
-            "snapshot_id": common_snapshot_id,
-            "stage": payload.stage,
-            "project": project,
-            "prompt_ab_source_fingerprint": preflight["source_fingerprint"],
-        }
-        for arm_name, template_key, template_revision in (
-            ("A", payload.template_a_key, payload.template_a_revision),
-            ("B", payload.template_b_key, payload.template_b_revision),
-        ):
-            stored_arm = next(
-                arm for arm in experiment["arms"] if arm["arm"] == arm_name
-            )
-            if str(stored_arm.get("job_id") or ""):
-                continue
-            arm_operation_id = f"{payload.operation_id[:196]}:{arm_name.lower()}"
-            if project.get("workflow_mode") == "free":
-                free_payload = FreeCreativeGenerateRequest(
-                    operation_id=arm_operation_id,
-                    expected_head_revision=payload.expected_head_revision,
-                    count=1,
-                    llm_model_record_id=payload.llm_model_record_id,
-                    generation_instruction=payload.generation_instruction,
-                    context_refs=FreeCreativeContextRefs(**payload.context_refs),
-                    prompt_template_key=template_key,
-                    prompt_template_revision=template_revision,
-                )
-                started = start_free_generation_job(
-                    project_id=project_id,
-                    stage=payload.stage,
-                    episode_number=(
-                        payload.episode_number
-                        if payload.stage in {"beats", "script"}
-                        else None
-                    ),
-                    payload=free_payload,
-                    principal=principal,
-                    prompt_ab_experiment_id=experiment["id"],
-                    prompt_ab_arm=arm_name,
-                    prompt_ab_source_fingerprint=preflight["source_fingerprint"],
-                )
-            else:
-                action = {
-                    "brief": "blueprints",
-                    "characters": "characters",
-                    "outline": "outlines",
-                    "beats": "beats",
-                    "script": "script",
-                }[payload.stage]
-                started = create_generation_job(
-                    project_id,
-                    action,
-                    principal,
-                    request,
-                    workflow_task_id=payload.workflow_task_id,
-                    operation_id=arm_operation_id,
-                    generation_instruction=payload.generation_instruction,
-                    source_snapshot_id=common_snapshot_id,
-                    source_snapshot=common_source_snapshot,
-                    llm_model_record_id=payload.llm_model_record_id,
-                    prompt_template_key=template_key,
-                    prompt_template_revision=template_revision,
-                    prompt_mode=("series" if payload.stage == "outline" else "single"),
-                    episode_number=(
-                        payload.episode_number
-                        if payload.stage in {"beats", "script"}
-                        else None
-                    ),
-                    count=1,
-                    prompt_ab_experiment_id=experiment["id"],
-                    prompt_ab_arm=arm_name,
-                    prompt_ab_source_fingerprint=preflight["source_fingerprint"],
-                )
-            experiment = prompt_ab_service.store.set_ab_arm_job(
-                experiment["id"], arm_name, started["job"]["job_id"]
-            )
-        return public_prompt_ab_experiment(experiment, principal.user_id)
-
-    @router.get("/projects/{project_id}/prompt-library/ab-tests")
-    async def list_project_prompt_ab_tests(
-        project_id: int,
-        request: Request,
-        limit: int = Query(20, ge=1, le=100),
-        principal: Principal = Depends(current_principal),
-    ):
-        project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
-        return {
-            "items": [
-                public_prompt_ab_experiment(item, principal.user_id)
-                for item in prompt_ab_service.store.list_ab_experiments(
-                    project_id, limit=limit
-                )
-            ]
-        }
-
-    @router.get("/projects/{project_id}/prompt-library/ab-tests/report")
-    async def get_project_prompt_ab_report(
-        project_id: int,
-        request: Request,
-        stage: str | None = Query(None),
-        principal: Principal = Depends(current_principal),
-    ):
-        project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
-        try:
-            return prompt_ab_service.performance_report(
-                project_id=project_id,
-                actor_user_id=principal.user_id,
-                stage=stage,
-            )
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-
-    @router.get(
-        "/projects/{project_id}/prompt-library/ab-tests/{experiment_id}/export"
-    )
-    async def export_project_prompt_ab_test(
-        project_id: int,
-        experiment_id: str,
-        request: Request,
-        format: str = Query("json"),
-        principal: Principal = Depends(current_principal),
-    ):
-        project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
-        normalized_format = str(format or "").strip().lower()
-        if normalized_format not in {"json", "md"}:
-            raise HTTPException(400, "A/B 审计报告只支持 json 或 md 格式")
-        try:
-            report = prompt_ab_service.audit_report(
-                project_id=project_id,
-                experiment_id=experiment_id,
-                actor_user_id=principal.user_id,
-            )
-        except ValueError as exc:
-            raise HTTPException(404, str(exc)) from exc
-
-        for arm in report.get("arms") or []:
-            job_id = str(arm.get("job_id") or "")
-            job: dict[str, Any] | None = None
-            if job_id and job_manager is not None and callable(
-                getattr(job_manager, "get_job", None)
-            ):
-                try:
-                    job = job_manager.get_job(job_id)
-                except JobNotFoundError:
-                    job = None
-            arm.update(
-                {
-                    "job_status": (
-                        str(job.get("status") or "unknown") if job else "unknown"
-                    ),
-                    "job_message": str(job.get("message") or "") if job else "",
-                    "job_created_at": job.get("created_at") if job else None,
-                    "job_started_at": job.get("started_at") if job else None,
-                    "job_finished_at": job.get("finished_at") if job else None,
-                }
-            )
-
-        filename = f"prompt-ab-{experiment_id}.{normalized_format}"
-        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
-        if normalized_format == "md":
-            return Response(
-                content=prompt_ab_audit_markdown(report),
-                media_type="text/markdown; charset=utf-8",
-                headers=headers,
-            )
-        return Response(
-            content=json.dumps(report, ensure_ascii=False, indent=2),
-            media_type="application/json; charset=utf-8",
-            headers=headers,
-        )
-
-    @router.post("/projects/{project_id}/prompt-library/iteration-drafts")
-    async def create_project_prompt_iteration_draft(
-        project_id: int,
-        payload: PromptIterationDraftRequest,
-        request: Request,
-        principal: Principal = Depends(current_principal),
-    ):
-        project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
-        template = prompt_ab_service.store.get_template_by_key(
-            payload.template_key
-        )
-        if template and template.get("owner_scope") == "project":
-            assert_prompt_project_manager(request, project_id, principal)
-        try:
-            return prompt_ab_service.create_iteration_draft(
-                operation_id=payload.operation_id,
-                project_id=project_id,
-                actor_user_id=principal.user_id,
-                template_key=payload.template_key,
-                expected_template_revision=payload.expected_template_revision,
-                stage=payload.stage,
-                dimension_key=payload.dimension_key,
-            )
-        except PermissionError as exc:
-            raise HTTPException(403, str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
-
-    @router.post(
-        "/projects/{project_id}/prompt-library/iteration-drafts/{draft_id}/publish"
-    )
-    async def publish_project_prompt_iteration_draft(
-        project_id: int,
-        draft_id: str,
-        payload: PromptIterationPublishRequest,
-        request: Request,
-        principal: Principal = Depends(current_principal),
-    ):
-        project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
-        draft = prompt_ab_service.store.get_iteration_draft(draft_id)
-        if draft is None or int(draft["project_id"]) != int(project_id):
-            raise HTTPException(404, "模板迭代草稿不存在")
-        template = prompt_ab_service.store.get_template(
-            str(draft["template_id"])
-        )
-        if template and template.get("owner_scope") == "project":
-            assert_prompt_project_manager(request, project_id, principal)
-        try:
-            return prompt_ab_service.publish_iteration_draft(
-                draft_id=draft_id,
-                project_id=project_id,
-                actor_user_id=principal.user_id,
-                expected_template_revision=payload.expected_template_revision,
-            )
-        except PermissionError as exc:
-            raise HTTPException(403, str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
-
-    @router.put(
-        "/projects/{project_id}/prompt-library/ab-tests/{experiment_id}/evaluation"
-    )
-    async def evaluate_project_prompt_ab_test(
-        project_id: int,
-        experiment_id: str,
-        payload: PromptABEvaluationRequest,
-        request: Request,
-        principal: Principal = Depends(current_principal),
-    ):
-        project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
-        experiment = prompt_ab_service.store.get_ab_experiment(experiment_id)
-        if experiment is None or int(experiment["project_id"]) != int(project_id):
-            raise HTTPException(404, "A/B 实验不存在")
-        try:
-            application_service.assert_stage_write_access(
-                project_id, str(experiment["stage"]), principal
-            )
-        except PermissionError as exc:
-            raise HTTPException(403, str(exc)) from exc
-        public_experiment = public_prompt_ab_experiment(
-            experiment, principal.user_id
-        )
-        if public_experiment["status"] != "completed":
-            raise HTTPException(409, "A/B 两组任务完成后才能保存评价")
-
-        score_fields = (
-            "premise_fit",
-            "conflict_engine",
-            "character_drive",
-            "emotional_payoff",
-            "pacing_hooks",
-            "expression_quality",
-            "production_feasibility",
-        )
-        evaluation: dict[str, Any] = {}
-        for arm, scorecard in (("A", payload.arm_a), ("B", payload.arm_b)):
-            values = scorecard.model_dump()
-            values["average_score"] = round(
-                sum(int(values[field]) for field in score_fields)
-                / len(score_fields),
-                2,
-            )
-            evaluation[arm] = values
-        try:
-            saved = prompt_ab_service.store.save_ab_evaluation(
-                experiment_id,
-                evaluation=evaluation,
-                winner_arm=payload.winner_arm,
-                decision_note=payload.decision_note,
-                expected_revision=payload.expected_evaluation_revision,
-                actor_user_id=principal.user_id,
-            )
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
-        return public_prompt_ab_experiment(saved, principal.user_id)
 
     @router.post("/projects/{project_id}/prompt-system/enable")
     async def enable_project_prompt_library(
@@ -4082,9 +3554,19 @@ def build_creative_router(
         assert_project_read_access(request, project_id, principal)
         project = project_or_404(project_id)
         assert_mode_member(project, principal)
-        preview = free_mode_service.migration_preview(project_id)
-        tasks = project_creative_tasks(project_id, principal)
-        active_jobs = active_project_job_labels(project_id)
+        try:
+            preview, tasks, active_jobs = await asyncio.wait_for(
+                asyncio.gather(
+                    asyncio.to_thread(free_mode_service.migration_preview, project_id),
+                    asyncio.to_thread(
+                        project_creative_tasks, project_id, principal
+                    ),
+                    asyncio.to_thread(active_project_job_labels, project_id),
+                ),
+                timeout=_MODE_MIGRATION_PREVIEW_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as exc:
+            raise HTTPException(503, "迁移预检超时，请稍后重试") from exc
         blockers = list(preview["blockers"])
         if active_jobs:
             blockers.append("项目存在运行中的后台任务")
@@ -4448,9 +3930,6 @@ def build_creative_router(
         episode_number: int | None,
         payload: FreeCreativeGenerateRequest,
         principal: Principal,
-        prompt_ab_experiment_id: str = "",
-        prompt_ab_arm: str = "",
-        prompt_ab_source_fingerprint: str = "",
     ) -> dict[str, Any]:
         if job_manager is None:
             raise HTTPException(503, "creative job manager is unavailable")
@@ -4535,9 +4014,6 @@ def build_creative_router(
                     "count": payload.count if stage == "brief" else 1,
                     "llm_model_record_id": llm_model_record_id,
                     **prompt_job_identity(prompt_snapshot),
-                    "prompt_ab_experiment_id": prompt_ab_experiment_id,
-                    "prompt_ab_arm": prompt_ab_arm,
-                    "prompt_ab_source_fingerprint": prompt_ab_source_fingerprint,
                     "db_path": str(repository.db_path.resolve()),
                     "runtime_dir": str(Path(runtime_dir).resolve()),
                 },

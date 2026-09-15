@@ -1186,14 +1186,55 @@ class FreeCreativeModeService:
         return self._context_row(dict(row))
 
     def context_options(self, project_id: int, episode_number: int | None = None) -> dict[str, Any]:
-        self.assert_free_project(project_id)
-        project = self.repository.get_project(project_id) or {}
-        locked = LOCKED_STATUSES
-        briefs = [item for item in project.get("blueprints", []) if item.get("status") in locked]
+        locked = tuple(sorted(LOCKED_STATUSES))
+        placeholders = ", ".join("?" for _ in locked)
+        with self.repository._connect() as conn:
+            project = self._raw_project(conn, project_id)
+            if str(project.get("workflow_mode") or SEQUENTIAL_SCOPE) != FREE_SCOPE:
+                raise ValueError("该操作仅支持自由创作项目")
+            briefs = [
+                self.repository._blueprint(dict(row))
+                for row in conn.execute(
+                    "SELECT * FROM creative_blueprints WHERE project_id = ? "
+                    f"AND resource_scope = 'free' AND status IN ({placeholders}) "
+                    "ORDER BY id",
+                    (int(project_id), *locked),
+                ).fetchall()
+            ]
+            characters = [
+                self.repository._creative_item(dict(row))
+                for row in conn.execute(
+                    "SELECT * FROM creative_characters WHERE project_id = ? "
+                    f"AND resource_scope = 'free' AND status IN ({placeholders}) "
+                    "ORDER BY version, id",
+                    (int(project_id), *locked),
+                ).fetchall()
+            ]
+            episode_params: list[Any] = [int(project_id), *locked]
+            episode_filter = ""
+            if episode_number is not None:
+                episode_filter = " AND (stage = 'outline' OR episode_number = ?)"
+                episode_params.append(int(episode_number))
+            episodes = [
+                self.repository._episode(dict(row))
+                for row in conn.execute(
+                    "SELECT * FROM creative_episodes WHERE project_id = ? "
+                    f"AND resource_scope = 'free' AND status IN ({placeholders}) "
+                    "AND stage IN ('outline', 'beats')"
+                    f"{episode_filter} ORDER BY stage, episode_number, version",
+                    tuple(episode_params),
+                ).fetchall()
+            ]
+            heads = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM creative_resource_heads WHERE project_id = ? "
+                    "AND resource_scope = 'free' ORDER BY stage, episode_number",
+                    (int(project_id),),
+                ).fetchall()
+            ]
         character_batches: dict[str, dict[str, Any]] = {}
-        for item in project.get("characters", []):
-            if item.get("status") not in locked:
-                continue
+        for item in characters:
             batch = character_batches.setdefault(
                 str(item["batch_id"]),
                 {"batch_id": str(item["batch_id"]), "version": int(item.get("version") or 1), "characters": []},
@@ -1201,9 +1242,7 @@ class FreeCreativeModeService:
             batch["characters"].append(item)
         outline_batches: dict[str, dict[str, Any]] = {}
         beats: list[dict[str, Any]] = []
-        for item in project.get("episodes", []):
-            if item.get("status") not in locked:
-                continue
+        for item in episodes:
             if item.get("stage") == "outline":
                 batch = outline_batches.setdefault(
                     str(item["batch_id"]),
@@ -1219,7 +1258,7 @@ class FreeCreativeModeService:
             "character_batches": list(character_batches.values()),
             "outline_batches": list(outline_batches.values()),
             "beats": beats,
-            "heads": self.list_heads(project_id),
+            "heads": heads,
         }
 
     def _automatic_seed_text_conn(

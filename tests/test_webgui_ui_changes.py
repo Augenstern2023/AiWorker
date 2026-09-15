@@ -74,6 +74,35 @@ def test_llm_settings_uses_environment_variable_credentials_only():
     assert "clear_api_key" not in script
 
 
+def test_llm_model_settings_omit_pricing_and_prompt_ab_controls():
+    html = _source("templates/admin/config.html")
+    script = _source(
+        "static/js/common/tasks.js",
+        "static/js/admin/workspace.js",
+    )
+
+    for removed in (
+        "输入/百万 Token",
+        "输出/百万 Token",
+        "未配置 Token 单价",
+        "llm-manual-model-currency",
+    ):
+        assert removed not in html
+    for removed in (
+        "input_price_per_million",
+        "output_price_per_million",
+        "price_currency",
+    ):
+        assert removed not in script
+
+
+def test_webgui_does_not_register_prompt_ab_or_iteration_routes():
+    paths = {route.path for route in WebGUI.app.routes}
+
+    assert not any("/prompt-library/ab-tests" in path for path in paths)
+    assert not any("/prompt-library/iteration-drafts" in path for path in paths)
+
+
 def test_webgui_registers_rag_routes():
     paths = {route.path for route in WebGUI.app.routes}
 
@@ -971,6 +1000,72 @@ def test_mode_switch_does_not_request_a_creative_seed():
     assert "仅复制已保存内容" in migration_modal
     assert "原标准流程项目和任务保持不变" in migration_modal
     assert "await this.selectCreativeProject(data.project.id)" in method
+    assert "new AbortController()" in method
+    assert "controller.abort(), 10000" in method
+    assert "aiworkerApi.isAbortError(error)" in method
+    assert "迁移预检超时，请重试" in method
+    assert "retryCreativeModeMigrationPreview" in method
+    assert "重试预检" in migration_modal
+    assert "cancelCreativeModeMigrationPreview" in tasks
+    assert 'x-show.important="creativeWorkspace.modeMigration.loading"' in migration_modal
+    assert 'x-show="creativeWorkspace.modeMigration.loading"' not in migration_modal
+    assert 'x-show.important="creativeWorkspace.freeGeneration.loading"' in modal
+
+
+def test_mode_migration_preview_loading_has_a_bounded_wait():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the browser module")
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert/strict');
+const nativeSetTimeout = global.setTimeout;
+global.window = {
+  aiworkerModules: [],
+  setTimeout: (callback, _delay, ...args) => nativeSetTimeout(callback, 5, ...args),
+  clearTimeout: global.clearTimeout,
+};
+global.aiworkerApi = {
+  isAbortError: error => error?.name === 'AbortError',
+  request: async (_url, options = {}) => new Promise((_resolve, reject) => {
+    options.signal?.addEventListener('abort', () => {
+      const error = new Error('aborted');
+      error.name = 'AbortError';
+      reject(error);
+    }, {once: true});
+  }),
+};
+vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
+const component = window.aiworkerModules[0]();
+Object.assign(component, {
+  creativeWorkspace: {
+    project: {id: 4, workflow_mode: 'sequential'},
+    modeMigration: {
+      preview: null, confirmed: false, loading: false,
+      submitting: false, error: '', requestSequence: 0,
+    },
+  },
+  creativeModeMigrationModal: {show() {}, hide() {}},
+});
+(async () => {
+  const verdict = await Promise.race([
+    component.openCreativeModeMigration().then(() => 'settled'),
+    new Promise(resolve => nativeSetTimeout(() => resolve('still-loading'), 100)),
+  ]);
+  assert.equal(verdict, 'settled', 'migration preview remained loading after its request deadline');
+  assert.equal(component.creativeWorkspace.modeMigration.loading, false);
+  assert.match(component.creativeWorkspace.modeMigration.error, /超时/);
+})().catch(error => { console.error(error); process.exit(1); });
+'''
+    result = subprocess.run(
+        [node, "-e", script, "static/js/common/creative.js"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_draft_breakdowns_are_visible_but_not_project_eligible():
@@ -1644,6 +1739,55 @@ Object.assign(component, {
     result = subprocess.run(
         [node, "-e", script, "static/js/common/creative.js"],
         capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_free_generation_config_loading_has_a_bounded_wait():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the browser module")
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert/strict');
+const nativeSetTimeout = global.setTimeout;
+global.window = {aiworkerModules: []};
+global.setTimeout = (callback, _delay, ...args) => nativeSetTimeout(callback, 5, ...args);
+global.aiworkerApi = {
+  request: async (_url, options = {}) => new Promise((_resolve, reject) => {
+    options.signal?.addEventListener('abort', () => {
+      const error = new Error('aborted');
+      error.name = 'AbortError';
+      reject(error);
+    }, {once: true});
+  }),
+};
+vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
+const component = window.aiworkerModules[0]();
+Object.assign(component, {
+  creativeWorkspace: {
+    project: {id: 4, workflow_mode: 'free'},
+    directionCount: 3,
+    selectedEpisode: 1,
+    freeGeneration: {},
+    moduleCapabilities: {brief: {can_generate: true}},
+  },
+  freeCreativeGenerationModal: {show() {}, hide() {}},
+});
+(async () => {
+  const verdict = await Promise.race([
+    component.openFreeCreativeGeneration('brief').then(() => 'settled'),
+    new Promise(resolve => nativeSetTimeout(() => resolve('still-loading'), 100)),
+  ]);
+  assert.equal(verdict, 'settled', 'generation config remained loading after its request deadline');
+  assert.equal(component.creativeWorkspace.freeGeneration.loading, false);
+  assert.match(component.creativeWorkspace.freeGeneration.error, /超时/);
+})().catch(error => { console.error(error); process.exit(1); });
+'''
+    result = subprocess.run(
+        [node, "-e", script, "static/js/common/creative.js"],
+        capture_output=True, text=True, encoding="utf-8", check=False,
     )
     assert result.returncode == 0, result.stderr
 

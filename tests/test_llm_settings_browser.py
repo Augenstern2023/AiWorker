@@ -119,9 +119,6 @@ def _llm_state() -> dict:
         "modelDraft": {
             "model_id": "",
             "display_name": "",
-            "input_price_per_million": "",
-            "output_price_per_million": "",
-            "price_currency": "CNY",
         },
         "modelEditor": None,
         "test": {"model_id": "", "result": None},
@@ -401,9 +398,6 @@ def test_llm_sync_failure_keeps_manual_model_fallback_available() -> None:
         assert request["body"] == {
             "model_id": "manual-fallback",
             "display_name": "Manual Fallback",
-            "input_price_per_million": None,
-            "output_price_per_million": None,
-            "price_currency": "CNY",
             "is_enabled": True,
         }
         browser.close()
@@ -496,9 +490,6 @@ def test_llm_model_can_be_edited_and_selected_as_global_default() -> None:
         assert update_request["body"] == {
             "model_id": "model-b",
             "display_name": "Model B Updated",
-            "input_price_per_million": None,
-            "output_price_per_million": None,
-            "price_currency": "CNY",
             "is_enabled": True,
         }
 

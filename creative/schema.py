@@ -281,66 +281,6 @@ class PromptImportPreviewRequest(BaseModel):
     ] | None = None
 
 
-class PromptABPreflightRequest(BaseModel):
-    stage: Literal["brief", "characters", "outline", "beats", "script"]
-    template_a_key: str = Field(min_length=1, max_length=120)
-    template_a_revision: int | None = Field(None, ge=1)
-    template_b_key: str = Field(min_length=1, max_length=120)
-    template_b_revision: int | None = Field(None, ge=1)
-    llm_model_record_id: str = Field(min_length=1, max_length=64)
-    budget_amount: float = Field(gt=0, le=1_000_000)
-    episode_number: int = Field(0, ge=0, le=100)
-    generation_instruction: str = Field("", max_length=2000)
-    workflow_task_id: str | None = Field(None, max_length=200)
-    expected_head_revision: int = Field(0, ge=0)
-    context_refs: dict[str, Any] = Field(default_factory=dict)
-
-
-class PromptABStartRequest(PromptABPreflightRequest):
-    operation_id: str = Field(min_length=1, max_length=200)
-    preflight_hash: str = Field(min_length=64, max_length=64)
-
-
-class PromptABScorecard(BaseModel):
-    premise_fit: int = Field(ge=1, le=5)
-    conflict_engine: int = Field(ge=1, le=5)
-    character_drive: int = Field(ge=1, le=5)
-    emotional_payoff: int = Field(ge=1, le=5)
-    pacing_hooks: int = Field(ge=1, le=5)
-    expression_quality: int = Field(ge=1, le=5)
-    production_feasibility: int = Field(ge=1, le=5)
-    strengths: str = Field("", max_length=1000)
-    risks: str = Field("", max_length=1000)
-
-
-class PromptABEvaluationRequest(BaseModel):
-    arm_a: PromptABScorecard
-    arm_b: PromptABScorecard
-    winner_arm: Literal["A", "B", "tie"]
-    decision_note: str = Field("", max_length=2000)
-    expected_evaluation_revision: int = Field(ge=0)
-
-
-class PromptIterationDraftRequest(BaseModel):
-    operation_id: str = Field(min_length=1, max_length=200)
-    template_key: str = Field(min_length=1, max_length=120)
-    expected_template_revision: int = Field(ge=1)
-    stage: Literal["brief", "characters", "outline", "beats", "script"]
-    dimension_key: Literal[
-        "premise_fit",
-        "conflict_engine",
-        "character_drive",
-        "emotional_payoff",
-        "pacing_hooks",
-        "expression_quality",
-        "production_feasibility",
-    ]
-
-
-class PromptIterationPublishRequest(BaseModel):
-    expected_template_revision: int = Field(ge=1)
-
-
 class CreativeLockRequest(BaseModel):
     workflow_task_id: str = Field(min_length=1)
     operation_id: str | None = Field(None, max_length=200)

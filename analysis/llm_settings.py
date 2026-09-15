@@ -13,12 +13,13 @@ import re
 import threading
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
+from analysis.llm_credentials import LLMCredentialStore, LLMCredentialStoreError
 from system_database.schema import llm_models, llm_providers, llm_settings
 
 
@@ -94,7 +95,7 @@ def _provider_env_var(preset: str, value: str = "") -> str:
     if normalized:
         return normalized
     default = PROVIDER_PRESETS[preset]["env_key"]
-    return validate_api_key_env_var(default)
+    return validate_api_key_env_var(default, required=bool(default))
 
 
 def _credential_status(provider: dict[str, Any]) -> str:
@@ -114,15 +115,21 @@ def endpoint_security_warning(base_url: str) -> str:
     return "该端点使用公网或局域网 HTTP，API Key 和请求内容可能被明文传输。"
 
 
-def public_provider(provider: dict[str, Any]) -> dict[str, Any]:
+def public_provider(
+    provider: dict[str, Any],
+    *,
+    credential_status: str | None = None,
+    credential_source: str = "environment",
+) -> dict[str, Any]:
     public = {
         key: value
         for key, value in provider.items()
         if key not in {"api_key", "api_key_encrypted"}
     }
-    credential_status = _credential_status(provider)
+    if credential_status is None:
+        credential_status = _credential_status(provider)
     public["credential_status"] = credential_status
-    public["credential_source"] = "environment"
+    public["credential_source"] = credential_source
     public["has_api_key"] = credential_status == "configured"
     public["security_warning"] = endpoint_security_warning(
         str(provider.get("base_url") or "")
@@ -172,8 +179,54 @@ def _model_dict(row: Any) -> dict[str, Any]:
 class LLMSettingsRepository:
     conflict_error = LLMSettingsConflict
 
-    def __init__(self, database: Any) -> None:
+    def __init__(
+        self, database: Any, credential_store: LLMCredentialStore | None = None
+    ) -> None:
         self.database = database
+        self.credential_store = credential_store
+
+    def resolve_provider_api_key(
+        self, provider: Mapping[str, Any]
+    ) -> tuple[str, str]:
+        provider_id = str(provider["id"])
+        stored = self.credential_store.get(provider_id) if self.credential_store else None
+        if stored:
+            return stored, "credential_store"
+        variable = validate_api_key_env_var(
+            str(provider.get("api_key_env_var", "")), required=False
+        )
+        if variable:
+            return environment_api_key(variable), "environment"
+        raise LLMSecretError("该提供商尚未配置 API Key")
+
+    def replace_api_key(self, provider_id: str, api_key: str) -> None:
+        self._require_provider(provider_id)
+        if self.credential_store is None:
+            raise LLMCredentialStoreError("系统凭据库不可用")
+        self.credential_store.set(provider_id, api_key)
+
+    def clear_api_key(self, provider_id: str) -> None:
+        self._require_provider(provider_id)
+        if self.credential_store is None:
+            raise LLMCredentialStoreError("系统凭据库不可用")
+        self.credential_store.delete(provider_id)
+
+    def _require_provider(self, provider_id: str) -> None:
+        with self.database.connection() as connection:
+            exists = self._provider_exists(connection, provider_id)
+        if not exists:
+            raise LLMSettingsError("提供商不存在")
+
+    def _public_provider(self, provider: dict[str, Any]) -> dict[str, Any]:
+        try:
+            _, source = self.resolve_provider_api_key(provider)
+        except (LLMSettingsError, LLMSecretError):
+            return public_provider(
+                provider, credential_status="missing", credential_source="missing"
+            )
+        return public_provider(
+            provider, credential_status="configured", credential_source=source
+        )
 
     def create_provider(
         self,
@@ -215,7 +268,7 @@ class LLMSettingsRepository:
                 ).mappings().one()
         except IntegrityError as exc:
             raise LLMSettingsConflict("提供商名称已存在") from exc
-        return public_provider(_provider_dict(row))
+        return self._public_provider(_provider_dict(row))
 
     def update_provider(
         self,
@@ -263,8 +316,10 @@ class LLMSettingsRepository:
                 )
                 if self._provider_has_default(connection, provider_id):
                     try:
-                        environment_api_key(normalized_env_var)
-                    except LLMSecretError as exc:
+                        provider_for_validation = _provider_dict(current)
+                        provider_for_validation["api_key_env_var"] = normalized_env_var
+                        self.resolve_provider_api_key(provider_for_validation)
+                    except (LLMSettingsError, LLMSecretError) as exc:
                         raise LLMSettingsConflict(str(exc)) from exc
                 values["api_key_env_var"] = normalized_env_var
             values["api_key_encrypted"] = None
@@ -281,7 +336,7 @@ class LLMSettingsRepository:
             row = connection.execute(
                 select(llm_providers).where(llm_providers.c.id == provider_id)
             ).mappings().one()
-        return public_provider(_provider_dict(row))
+        return self._public_provider(_provider_dict(row))
 
     def delete_provider(self, provider_id: str) -> dict[str, Any]:
         with self.database.transaction() as connection:
@@ -298,7 +353,7 @@ class LLMSettingsRepository:
             connection.execute(
                 llm_providers.delete().where(llm_providers.c.id == provider_id)
             )
-        return public_provider(_provider_dict(current))
+        return self._public_provider(_provider_dict(current))
 
     def create_model(
         self,
@@ -438,9 +493,8 @@ class LLMSettingsRepository:
         with self.database.transaction() as connection:
             row = connection.execute(
                 select(
-                    llm_models.c.is_enabled,
-                    llm_providers.c.is_enabled,
-                    llm_providers.c.api_key_env_var,
+                    llm_models.c.is_enabled.label("model_is_enabled"),
+                    llm_providers,
                 )
                 .select_from(
                     llm_models.join(
@@ -449,13 +503,13 @@ class LLMSettingsRepository:
                     )
                 )
                 .where(llm_models.c.id == model_record_id)
-            ).first()
+            ).mappings().first()
             if row is None:
                 raise LLMSettingsError("模型不存在")
-            if not bool(row[0]) or not bool(row[1]):
+            if not bool(row["model_is_enabled"]) or not bool(row["is_enabled"]):
                 raise LLMSettingsConflict("只能将启用的模型设为默认")
             try:
-                environment_api_key(str(row[2] or ""))
+                self.resolve_provider_api_key(_provider_dict(row))
             except (LLMSettingsError, LLMSecretError) as exc:
                 raise LLMSettingsConflict(str(exc)) from exc
             current = connection.execute(
@@ -496,7 +550,7 @@ class LLMSettingsRepository:
         providers: list[dict[str, Any]] = []
         for row in provider_rows:
             stored_provider = _provider_dict(row)
-            provider = public_provider(stored_provider)
+            provider = self._public_provider(stored_provider)
             provider["models"] = models_by_provider.get(provider["id"], [])
             provider["is_default"] = any(
                 model["is_default"] for model in provider["models"]
@@ -547,7 +601,12 @@ class LLMSettingsRepository:
             ):
                 continue
             try:
-                environment_api_key(str(row["api_key_env_var"] or ""))
+                self.resolve_provider_api_key(
+                    {
+                        "id": str(row["provider_id"]),
+                        "api_key_env_var": str(row["api_key_env_var"] or ""),
+                    }
+                )
             except (LLMSettingsError, LLMSecretError):
                 continue
             display_name = str(row["display_name"] or row["model_id"])
@@ -602,11 +661,17 @@ class LLMSettingsRepository:
             ).mappings().first()
         if row is None:
             return None
+        api_key, _ = self.resolve_provider_api_key(
+            {
+                "id": str(row["provider_id"]),
+                "api_key_env_var": str(row["api_key_env_var"] or ""),
+            }
+        )
         return {
             "provider": str(row["preset"]),
             "provider_id": str(row["provider_id"]),
             "base_url": str(row["base_url"]),
-            "api_key": environment_api_key(str(row["api_key_env_var"] or "")),
+            "api_key": api_key,
             "model": str(row["model_id"]),
             "wire_api": str(row["wire_api"]),
             "allow_insecure_http": urlsplit(str(row["base_url"])).scheme.lower() == "http",
@@ -644,7 +709,12 @@ class LLMSettingsRepository:
         if not bool(row["provider_is_enabled"]):
             raise LLMSettingsConflict("所选模型的提供商已停用")
         try:
-            api_key = environment_api_key(str(row["api_key_env_var"] or ""))
+            api_key, _ = self.resolve_provider_api_key(
+                {
+                    "id": str(row["provider_id"]),
+                    "api_key_env_var": str(row["api_key_env_var"] or ""),
+                }
+            )
         except (LLMSettingsError, LLMSecretError) as exc:
             raise LLMSettingsConflict(str(exc)) from exc
         return {
@@ -675,7 +745,7 @@ class LLMSettingsRepository:
             raise LLMSettingsError("提供商不存在")
         provider = _provider_dict(row)
         try:
-            api_key = environment_api_key(provider["api_key_env_var"])
+            api_key, _ = self.resolve_provider_api_key(provider)
         except (LLMSettingsError, LLMSecretError) as exc:
             if require_api_key:
                 raise LLMSettingsError(str(exc)) from exc
@@ -753,14 +823,18 @@ class LLMSettingsRepository:
                 )
         except IntegrityError:
             return {"imported": False, "reason": "already_configured"}
+        try:
+            self.resolve_provider_api_key(
+                {"id": provider_id, "api_key_env_var": api_key_env_var}
+            )
+            has_api_key = True
+        except (LLMSettingsError, LLMSecretError):
+            has_api_key = False
         return {
             "imported": True,
             "provider_id": provider_id,
             "model_id": model_record_id,
-            "has_api_key": _credential_status(
-                {"api_key_env_var": api_key_env_var}
-            )
-            == "configured",
+            "has_api_key": has_api_key,
         }
 
     @staticmethod

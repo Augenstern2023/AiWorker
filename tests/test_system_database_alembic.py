@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import BigInteger, DateTime, Numeric, Text, create_engine, inspect, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import make_url
@@ -43,6 +44,34 @@ def run_alembic_upgrade(postgres_url: str, monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", postgres_url)
     config = Config(str(PROJECT_ROOT / "alembic.ini"))
     command.upgrade(config, "head")
+
+
+def test_prompt_pricing_migration_extends_deployed_system_head():
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    revisions = ScriptDirectory.from_config(config)
+
+    assert revisions.get_current_head() == "0023_llm_model_pricing"
+    assert (
+        revisions.get_revision("0023_llm_model_pricing").down_revision
+        == "0022_remove_team_management"
+    )
+    assert (
+        revisions.get_revision("0022_remove_team_management").down_revision
+        == "0021_llm_local_api_keys"
+    )
+    assert (
+        revisions.get_revision("0021_llm_local_api_keys").down_revision
+        == "0020_user_presence"
+    )
+
+
+def test_llm_provider_schema_declares_local_api_key_reference():
+    columns = SYSTEM_METADATA.tables["llm_providers"].c
+
+    assert "api_key_env_var" in columns
+    assert isinstance(columns.api_key_env_var.type, Text)
+    assert columns.api_key_env_var.nullable is False
+    assert str(columns.api_key_env_var.server_default.arg) == "''"
 
 
 def test_system_schema_declares_all_shared_tables():

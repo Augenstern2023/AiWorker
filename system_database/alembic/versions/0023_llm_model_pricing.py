@@ -14,8 +14,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0021_llm_model_pricing"
-down_revision = "0020_user_presence"
+revision = "0023_llm_model_pricing"
+down_revision = "0022_remove_team_management"
 branch_labels = None
 depends_on = None
 

@@ -26,9 +26,8 @@
 
     const editor = bootstrap.Modal.getOrCreateInstance(document.getElementById('role-editor-modal'));
     const pagesEditor = bootstrap.Modal.getOrCreateInstance(document.getElementById('role-pages-modal'));
-    const teamMode = window.location.pathname.startsWith('/review/');
-    const rolesApi = teamMode ? '/api/team/roles' : '/api/admin/roles';
-    const permissionsApi = teamMode ? '/api/team/permissions' : '/api/admin/permissions';
+    const rolesApi = '/api/admin/roles';
+    const permissionsApi = '/api/admin/permissions';
     let roles = [];
     let permissionCatalog = [];
     let pageCatalog = [];
@@ -178,7 +177,7 @@
         if (!roles.length) {
             const row = document.createElement('tr');
             const cell = document.createElement('td');
-            cell.colSpan = teamMode ? 5 : 7;
+            cell.colSpan = 7;
             cell.className = 'text-center text-muted py-4';
             cell.textContent = '暂无符合条件的角色';
             row.appendChild(cell);
@@ -187,9 +186,7 @@
         }
         elements.body.replaceChildren(...roles.map((role) => {
             const row = document.createElement('tr');
-            const values = teamMode
-                ? [role.name, role.code, String((role.permissions || []).length), role.is_enabled ? '启用' : '停用']
-                : [role.name, role.code, role.description || '-', String((role.permissions || []).length), role.is_enabled ? '启用' : '停用', formatDate(role.created_at)];
+            const values = [role.name, role.code, role.description || '-', String((role.permissions || []).length), role.is_enabled ? '启用' : '停用', formatDate(role.created_at)];
             for (const value of values) {
                 const cell = document.createElement('td');
                 cell.textContent = value;
@@ -202,7 +199,7 @@
             if (role.can_edit !== false) {
                 group.append(
                     actionButton('bi-pencil', '编辑权限', 'btn-outline-light', () => openRoleEditor(role)),
-                    ...(!teamMode ? [actionButton('bi-window-stack', '页面授权', 'btn-outline-info', () => openRolePages(role))] : []),
+                    actionButton('bi-window-stack', '页面授权', 'btn-outline-info', () => openRolePages(role)),
                     actionButton(
                         role.is_system ? 'bi-lock' : (role.is_enabled ? 'bi-toggle-off' : 'bi-toggle-on'),
                         role.is_system ? '系统角色不可停用' : (role.is_enabled ? '停用角色' : '启用角色'),
@@ -227,19 +224,19 @@
     async function loadRolesAndPermissions() {
         showError(elements.error);
         try {
-            const roleListUrl = teamMode ? rolesApi : `${rolesApi}?${filterParameters().toString()}`;
+            const roleListUrl = `${rolesApi}?${filterParameters().toString()}`;
             const requests = [
                 window.aiworkerApi.request(roleListUrl),
                 window.aiworkerApi.request(permissionsApi),
+                window.aiworkerApi.request('/api/admin/roles/page-catalog'),
             ];
-            if (!teamMode) requests.push(window.aiworkerApi.request('/api/admin/roles/page-catalog'));
             const [rolesResponse, permissionsResponse, pagesResponse] = await Promise.all(requests);
             if (!rolesResponse.ok) throw new Error(await responseError(rolesResponse, '角色加载失败'));
             if (!permissionsResponse.ok) throw new Error(await responseError(permissionsResponse, '权限目录加载失败'));
-            if (!teamMode && !pagesResponse.ok) throw new Error(await responseError(pagesResponse, '页面目录加载失败'));
+            if (!pagesResponse.ok) throw new Error(await responseError(pagesResponse, '页面目录加载失败'));
             roles = await rolesResponse.json();
             permissionCatalog = await permissionsResponse.json();
-            pageCatalog = teamMode ? [] : await pagesResponse.json();
+            pageCatalog = await pagesResponse.json();
             renderRoles();
         } catch (error) {
             showError(elements.error, error.message || '角色加载失败');

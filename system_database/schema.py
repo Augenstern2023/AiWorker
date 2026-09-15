@@ -300,6 +300,7 @@ llm_providers = Table(
     Column("base_url", Text, nullable=False),
     Column("wire_api", Text, nullable=False),
     Column("api_key_encrypted", Text),
+    Column("api_key_env_var", Text, nullable=False, server_default=text("''")),
     Column("is_enabled", Boolean, nullable=False, server_default=text("true")),
     Column("created_by_user_id", Text, ForeignKey("users.id", ondelete="SET NULL")),
     Column("updated_by_user_id", Text, ForeignKey("users.id", ondelete="SET NULL")),

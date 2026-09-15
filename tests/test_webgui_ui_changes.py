@@ -107,6 +107,22 @@ def test_user_list_normalizes_datetime_values_with_short_timezone_suffix():
     assert r"/(?:Z|[+-]\d\d(?::?\d\d)?)$/" in source
 
 
+def test_system_admin_resources_do_not_include_team_mode_branches():
+    users_template = _source("templates/admin/users.html")
+    roles_template = _source("templates/admin/roles.html")
+    users_script = _source("static/js/admin/users.js")
+    roles_script = _source("static/js/admin/roles.js")
+
+    for source in (users_template, roles_template, users_script, roles_script):
+        assert "team_mode" not in source
+        assert "teamMode" not in source
+        assert "/api/team/" not in source
+
+    assert "/api/admin/users" in users_script
+    assert "/api/admin/roles" in roles_script
+    assert "页面授权" in roles_template
+
+
 def test_douyin_today_rank_uses_switchable_rank_and_heat_boards():
     script = _source("static/js/selection/ranks.js")
     template = _source("templates/common/workspace/selection_ranks.html")

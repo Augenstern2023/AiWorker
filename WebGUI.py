@@ -107,7 +107,6 @@ from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.schema import Principal
 from identity.session_service import SessionService
-from identity.team_api import build_team_management_router
 from organization.api import build_organization_router
 from organization.service import DepartmentService
 from agents.douyin_analysis_agent import AnalyzeOptions as DouyinAnalyzeOptions
@@ -172,7 +171,7 @@ def _api_permission(method: str, path: str) -> str | None:
         # Session-scoped APIs require authentication, not a role page grant.
         return None
     if path.startswith(
-        ("/api/auth/", "/api/admin/", "/api/team/", "/api/workflow/", "/api/jobs")
+        ("/api/auth/", "/api/admin/", "/api/workflow/", "/api/jobs")
     ):
         return None
     if path.startswith("/api/creative/"):
@@ -719,14 +718,6 @@ app.include_router(
     build_presence_router(
         presence_service,
         identity_session_service,
-        permission_service=identity_permission_service,
-    )
-)
-app.include_router(
-    build_team_management_router(
-        identity_repository,
-        identity_session_service,
-        audit_service,
         permission_service=identity_permission_service,
     )
 )

@@ -32,6 +32,8 @@ from WebGUI import (
     _api_permission,
 )
 from audit.service import AuditService
+from analysis.llm_settings_api import LLMSettingsService, build_llm_settings_router
+from tests.analysis.test_llm_settings import _repository
 
 
 def _secured_app(repository: IdentityRepository) -> tuple[FastAPI, SessionService]:
@@ -103,6 +105,51 @@ def test_authenticated_write_requires_matching_csrf_token(secured_app):
     assert missing.json() == {"detail": "CSRF 校验失败"}
     assert incorrect.status_code == 403
     assert accepted.status_code == 200
+
+
+def test_credential_rotation_route_keeps_authenticated_csrf_protection(secured_app):
+    """Would catch the secret-rotation route bypassing the global CSRF middleware."""
+
+    app, _ = secured_app
+
+    @app.middleware("http")
+    async def represent_loopback_client(request: Request, call_next):
+        request.scope["client"] = ("127.0.0.1", 50000)
+        return await call_next(request)
+
+    app.include_router(
+        build_llm_settings_router(
+            LLMSettingsService(_repository()),
+            audit_service=object(),
+        )
+    )
+    client = TestClient(app, base_url="http://127.0.0.1")
+    setup = client.post(
+        "/api/auth/setup",
+        json={
+            "username": "admin",
+            "display_name": "Admin",
+            "password": "Admin-Strong-123!",
+        },
+    )
+
+    response = client.put(
+        "/api/llm/providers/not-a-provider/credential",
+        json={"api_key": "csrf-protected-secret"},
+    )
+    accepted = client.put(
+        "/api/llm/providers/not-a-provider/credential",
+        headers={"X-CSRF-Token": setup.json()["csrf_token"]},
+        json={"api_key": "csrf-protected-secret"},
+    )
+
+    assert setup.status_code == 201
+    assert response.status_code == 403
+    assert response.json() == {"detail": "CSRF 校验失败"}
+    assert "csrf-protected-secret" not in response.text
+    assert accepted.status_code == 400
+    assert accepted.json() == {"detail": "提供商不存在"}
+    assert "csrf-protected-secret" not in accepted.text
 
 
 def test_authenticated_non_admin_presence_heartbeat_requires_csrf_not_wildcard(

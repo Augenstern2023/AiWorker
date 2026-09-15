@@ -14,9 +14,12 @@ from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from analysis.llm import parse_chat_completion_text, parse_responses_text
+from analysis.llm_credentials import LLMCredentialStoreError
 from analysis.llm_settings import (
     LLMSecretError,
     LLMSettingsConflict,
@@ -86,15 +89,33 @@ class DefaultModelRequest(LLMSettingsRequest):
     model_id: str = Field(min_length=1, max_length=64)
 
 
+class ProviderCredentialRequest(LLMSettingsRequest):
+    api_key: SecretStr = Field(min_length=1, max_length=4096)
+
+    @field_validator("api_key")
+    @classmethod
+    def reject_blank_api_key(cls, value: SecretStr) -> SecretStr:
+        if not value.get_secret_value().strip():
+            raise ValueError("API Key 不能为空")
+        return value
+
+
 class ConnectionTestRequest(LLMSettingsRequest):
     provider_id: str | None = Field(default=None, max_length=64)
     base_url: str | None = Field(default=None, max_length=2048)
     api_key_env_var: str | None = Field(default=None, max_length=255)
-    api_key: str | None = Field(
-        default=None, max_length=4096, exclude=True, repr=False
+    api_key: SecretStr | None = Field(
+        default=None, min_length=1, max_length=4096, exclude=True, repr=False
     )
     model_id: str = Field(min_length=1, max_length=255)
     wire_api: WireAPI | None = None
+
+    @field_validator("api_key")
+    @classmethod
+    def reject_blank_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not value.get_secret_value().strip():
+            raise ValueError("API Key 不能为空")
+        return value
 
 
 def reject_legacy_api_key_fields(payload: LLMSettingsRequest) -> None:
@@ -104,6 +125,40 @@ def reject_legacy_api_key_fields(payload: LLMSettingsRequest) -> None:
             status_code=400,
             detail="不再接受 API Key；请配置 API Key 环境变量名称",
         )
+
+
+def require_secure_secret_transport(request: Request) -> None:
+    host = request.client.host if request.client else ""
+    if request.url.scheme != "https" and host not in {
+        "127.0.0.1",
+        "::1",
+        "localhost",
+    }:
+        raise HTTPException(
+            status_code=400,
+            detail="API Key 只能通过本机或 HTTPS 提交",
+        )
+
+
+class SecretSafeRequestValidationRoute(APIRoute):
+    """Avoid reflecting submitted secrets in FastAPI validation responses."""
+
+    def get_route_handler(self) -> Callable[..., Any]:
+        route_handler = super().get_route_handler()
+
+        async def secret_safe_handler(request: Request) -> Any:
+            try:
+                return await route_handler(request)
+            except RequestValidationError as exc:
+                if any(
+                    "api_key" in error.get("loc", ()) for error in exc.errors()
+                ):
+                    raise HTTPException(
+                        status_code=422, detail="API Key 格式无效"
+                    ) from exc
+                raise
+
+        return secret_safe_handler
 
 
 class LLMSettingsService:
@@ -232,7 +287,11 @@ def build_llm_settings_router(
     *,
     administrator_dependency: Callable[..., Any] | None = None,
 ) -> APIRouter:
-    router = APIRouter(prefix="/api/llm", tags=["llm-settings"])
+    router = APIRouter(
+        prefix="/api/llm",
+        tags=["llm-settings"],
+        route_class=SecretSafeRequestValidationRoute,
+    )
     administrator = administrator_dependency or require_system_administrator
 
     def record(
@@ -273,11 +332,25 @@ def build_llm_settings_router(
                     return model
         return None
 
-    def route_error(exc: LLMSettingsError | LLMSecretError) -> HTTPException:
+    def route_error(
+        exc: LLMSettingsError | LLMSecretError | LLMCredentialStoreError,
+    ) -> HTTPException:
+        if isinstance(exc, LLMCredentialStoreError):
+            return HTTPException(status_code=503, detail="系统凭据库不可用")
         return HTTPException(
             status_code=409 if isinstance(exc, LLMSettingsConflict) else 400,
             detail=str(exc),
         )
+
+    def credential_summary(provider_id: str) -> dict[str, str]:
+        provider = settings_provider(provider_id)
+        if provider is None:
+            raise LLMSettingsError("提供商不存在")
+        return {
+            "provider_id": provider_id,
+            "credential_status": str(provider["credential_status"]),
+            "credential_source": str(provider["credential_source"]),
+        }
 
     @router.get("/available-models")
     def get_available_models(
@@ -342,6 +415,56 @@ def build_llm_settings_router(
             provider,
         )
         return provider
+
+    @router.put("/providers/{provider_id}/credential")
+    def replace_provider_credential(
+        provider_id: str,
+        payload: ProviderCredentialRequest,
+        request: Request,
+        principal: Principal = Depends(administrator),
+    ) -> dict[str, str]:
+        require_secure_secret_transport(request)
+        try:
+            before = credential_summary(provider_id)
+            service.repository.replace_api_key(
+                provider_id, payload.api_key.get_secret_value()
+            )
+            result = credential_summary(provider_id)
+        except (LLMSettingsError, LLMSecretError, LLMCredentialStoreError) as exc:
+            raise route_error(exc) from exc
+        record(
+            principal,
+            request,
+            "llm.provider.credential.replace",
+            "llm_provider",
+            provider_id,
+            before,
+            result,
+        )
+        return result
+
+    @router.delete("/providers/{provider_id}/credential")
+    def clear_provider_credential(
+        provider_id: str,
+        request: Request,
+        principal: Principal = Depends(administrator),
+    ) -> dict[str, str]:
+        try:
+            before = credential_summary(provider_id)
+            service.repository.clear_api_key(provider_id)
+            result = credential_summary(provider_id)
+        except (LLMSettingsError, LLMSecretError, LLMCredentialStoreError) as exc:
+            raise route_error(exc) from exc
+        record(
+            principal,
+            request,
+            "llm.provider.credential.clear",
+            "llm_provider",
+            provider_id,
+            before,
+            result,
+        )
+        return result
 
     @router.delete("/providers/{provider_id}")
     def delete_provider(
@@ -490,23 +613,30 @@ def build_llm_settings_router(
         request: Request,
         principal: Principal = Depends(administrator),
     ) -> dict[str, Any]:
-        reject_legacy_api_key_fields(payload)
         stored: dict[str, Any] = {}
         draft_env_var = str(payload.api_key_env_var or "").strip()
+        has_transient_api_key = "api_key" in payload.model_fields_set
+        if has_transient_api_key:
+            require_secure_secret_transport(request)
         if payload.provider_id:
             try:
                 stored = service.repository.provider_connection(
                     payload.provider_id,
-                    require_api_key=not bool(draft_env_var),
+                    require_api_key=not (
+                        bool(draft_env_var) or has_transient_api_key
+                    ),
                 )
             except LLMSettingsError as exc:
                 raise route_error(exc) from exc
         try:
-            api_key = (
-                environment_api_key(draft_env_var)
-                if draft_env_var
-                else str(stored.get("api_key") or "")
-            )
+            if has_transient_api_key:
+                api_key = (
+                    payload.api_key.get_secret_value() if payload.api_key else ""
+                )
+            elif draft_env_var:
+                api_key = environment_api_key(draft_env_var)
+            else:
+                api_key = str(stored.get("api_key") or "")
             result = await service.test_connection(
                 base_url=payload.base_url or str(stored.get("base_url") or ""),
                 api_key=api_key,

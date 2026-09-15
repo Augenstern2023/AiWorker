@@ -8,6 +8,10 @@
     const fileWrap = document.getElementById('script-review-file-wrap');
     const scriptFile = document.getElementById('script-review-file');
     const episodes = document.getElementById('script-review-episodes');
+    const reviewPromptWrap = document.getElementById('script-review-prompt-wrap');
+    const reviewPromptTemplate = document.getElementById('script-review-prompt-template');
+    const reviewPromptRequirements = document.getElementById('script-review-prompt-requirements');
+    const reviewPromptDescription = document.getElementById('script-review-prompt-description');
     const submit = document.getElementById('script-review-submit');
     const result = document.getElementById('script-review-result');
     const history = document.getElementById('script-review-history');
@@ -315,9 +319,16 @@
     async function loadSelectedProject() {
         const id = Number(project.value || 0);
         selectedProject = null;
-        if (!id) return renderEpisodes();
+        if (reviewPromptRequirements) reviewPromptRequirements.value = '';
+        if (!id) {
+            resetPromptSelector(reviewPromptTemplate, reviewPromptDescription);
+            return renderEpisodes();
+        }
         try {
             selectedProject = await readJson(await aiworkerApi.request(`/api/creative/projects/${id}`));
+            await loadPromptSelector(
+                id, 'review', reviewPromptTemplate, reviewPromptDescription,
+            );
         } catch (requestError) {
             showError(requestError.message);
         }
@@ -334,6 +345,7 @@
             option.textContent = '暂无已锁定分集大纲的项目';
             project.append(option);
             selectedProject = null;
+            resetPromptSelector(reviewPromptTemplate, reviewPromptDescription);
             renderEpisodes();
             return;
         }
@@ -350,6 +362,7 @@
         const uploading = source.value === 'text';
         projectWrap.classList.toggle('d-none', uploading);
         fileWrap.classList.toggle('d-none', !uploading);
+        reviewPromptWrap?.classList.toggle('d-none', uploading);
         episodes.classList.toggle('d-none', uploading || mode.value === 'collection');
         mode.disabled = uploading;
         if (uploading) mode.value = 'single';
@@ -362,6 +375,62 @@
         return [...episodes.querySelectorAll('input:checked')].map((input) => Number(input.value));
     }
 
+    function resetPromptSelector(select, description, message = '选择项目后读取模板库') {
+        if (select) {
+            select.replaceChildren(new Option(message, ''));
+            select.disabled = true;
+        }
+        if (description) description.textContent = message;
+    }
+
+    function templateDimensionText(template) {
+        const dimensions = template?.content?.dimensions || {};
+        return [...new Set(Object.values(dimensions).map((value) => String(value || '').trim()).filter(Boolean))].join(' · ');
+    }
+
+    async function loadPromptSelector(projectId, stage, select, description) {
+        if (!select || !projectId) return resetPromptSelector(select, description);
+        resetPromptSelector(select, description, '正在读取项目模板…');
+        const response = await aiworkerApi.request(`/api/creative/projects/${projectId}/prompt-modules/${stage}?episode_number=0`);
+        const data = await readJson(response);
+        if (!data.settings?.enabled) {
+            resetPromptSelector(select, description, '项目尚未启用模板库，将沿用经典提示词');
+            return data;
+        }
+        const templates = (data.templates || []).filter((item) => !Array.isArray(item.supported_stages) || item.supported_stages.includes(stage));
+        select.replaceChildren();
+        const effectiveTitle = data.effective?.title || '项目默认模板';
+        select.append(new Option(`使用项目默认（${effectiveTitle}）`, ''));
+        templates.forEach((template) => {
+            const option = new Option(`${template.title} · ${templateDimensionText(template)}`, template.template_key);
+            option.dataset.revision = String(template.revision || 1);
+            option.dataset.description = template.description || '';
+            select.append(option);
+        });
+        select.disabled = false;
+        const updateDescription = () => {
+            const selected = select.selectedOptions[0];
+            description.textContent = selected?.dataset.description
+                || `当前默认：${effectiveTitle}。模板不得覆盖系统输出契约和流程阻断。`;
+        };
+        select.onchange = updateDescription;
+        updateDescription();
+        return data;
+    }
+
+    function promptSelectionPayload(select, requirements) {
+        if (!select || select.disabled) return {};
+        const selected = select.selectedOptions[0];
+        const customRequirements = String(requirements?.value || '').trim();
+        return {
+            ...(select.value ? {
+                prompt_template_key: select.value,
+                prompt_template_revision: Number(selected?.dataset.revision || 1),
+            } : {}),
+            ...(customRequirements ? { prompt_override: { custom_requirements: customRequirements } } : {}),
+        };
+    }
+
     async function createReview() {
         showError();
         const file = source.value === 'text' ? scriptFile.files?.[0] : null;
@@ -372,7 +441,11 @@
         submit.disabled = true;
         const payload = source.value === 'text'
             ? { source_type: 'text', mode: 'single' }
-            : { source_type: 'project', mode: mode.value, project_id: Number(project.value), episode_numbers: selectedEpisodes() };
+            : {
+                source_type: 'project', mode: mode.value, project_id: Number(project.value),
+                episode_numbers: selectedEpisodes(),
+                ...promptSelectionPayload(reviewPromptTemplate, reviewPromptRequirements),
+            };
         showReviewProgress(reviewScope(payload));
         try {
             const response = source.value === 'text'
@@ -516,6 +589,22 @@
         modeSelect.className = 'form-select form-select-sm mb-3';
         modeSelect.innerHTML = '<option value="direct">直接优化场次剧本</option><option value="structure">结构优化（Beats + 场次剧本）</option>';
         section.append(modeSelect);
+        const promptPanel = document.createElement('div');
+        promptPanel.className = 'border rounded p-3 mb-3';
+        const promptSelect = document.createElement('select');
+        promptSelect.className = 'form-select form-select-sm mb-2';
+        promptSelect.setAttribute('aria-label', '优化模板');
+        const promptRequirements = document.createElement('textarea');
+        promptRequirements.className = 'form-control form-control-sm';
+        promptRequirements.rows = 2;
+        promptRequirements.maxLength = 4000;
+        promptRequirements.placeholder = '本次优化补充要求，例如：减少解释性台词，保留冷幽默。';
+        const promptDescription = document.createElement('div');
+        promptDescription.className = 'form-text';
+        promptPanel.append(promptSelect, promptRequirements, promptDescription);
+        section.append(promptPanel);
+        loadPromptSelector(review.project_id, 'optimization', promptSelect, promptDescription)
+            .catch((requestError) => resetPromptSelector(promptSelect, promptDescription, requestError.message));
         const findingRows = optimizationFindings(review.report || {});
         const selectedFindings = document.createElement('div');
         findingRows.forEach(({ ref, item, cross }) => {
@@ -594,7 +683,11 @@
             try {
                 const created = await readJson(await aiworkerApi.request(`/api/script-reviews/${review.id}/optimizations`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ mode: modeSelect.value, findings }),
+                    body: JSON.stringify({
+                        mode: modeSelect.value,
+                        findings,
+                        ...promptSelectionPayload(promptSelect, promptRequirements),
+                    }),
                 }));
                 optimizationProgress.optimizationId = created.optimization.id;
                 updateOptimizationProgress(created.optimization);

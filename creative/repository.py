@@ -65,6 +65,14 @@ _WRITER_PROJECT_DELETION_TABLES = (
     "script_optimization_drafts",
     "creative_deliveries",
     "creative_production_exports",
+    "creative_project_prompt_settings",
+    "creative_project_prompt_bindings",
+    "creative_prompt_templates",
+    "creative_prompt_ab_experiments",
+    "creative_prompt_iteration_drafts",
+    "creative_prompt_governance_events",
+    "creative_prompt_market_installations",
+    "creative_prompt_market_ratings",
 )
 _WRITER_PROJECT_EXTERNAL_TABLES = (
     "creative_stage_exports",
@@ -806,6 +814,7 @@ class CreativeRepository:
                     source_fingerprint TEXT NOT NULL,
                     selected_findings_json TEXT NOT NULL,
                     target_episode_numbers_json TEXT NOT NULL,
+                    prompt_snapshot_json TEXT NOT NULL DEFAULT '{}',
                     status TEXT NOT NULL DEFAULT 'queued',
                     created_by TEXT NOT NULL,
                     job_id TEXT NOT NULL DEFAULT '',
@@ -836,6 +845,15 @@ class CreativeRepository:
                 CREATE INDEX IF NOT EXISTS idx_script_optimization_drafts_task
                 ON script_optimization_drafts(optimization_id, episode_number, kind);
             """)
+            optimization_columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(script_optimizations)").fetchall()
+            }
+            if "prompt_snapshot_json" not in optimization_columns:
+                conn.execute(
+                    "ALTER TABLE script_optimizations ADD COLUMN "
+                    "prompt_snapshot_json TEXT NOT NULL DEFAULT '{}'"
+                )
             for table in (
                 "creative_projects",
                 "creative_breakdowns",
@@ -2857,6 +2875,48 @@ class CreativeRepository:
                     (project_id,),
                 ).fetchall()
             ]
+        prompt_template_ids = [
+            str(row["id"])
+            for row in tables.get("creative_prompt_templates", [])
+        ]
+        prompt_revision_table = "creative_prompt_template_revisions"
+        prompt_revision_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (prompt_revision_table,),
+        ).fetchone()
+        if prompt_revision_exists is None or not prompt_template_ids:
+            tables[prompt_revision_table] = []
+        else:
+            placeholders = ",".join("?" for _ in prompt_template_ids)
+            tables[prompt_revision_table] = [
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT * FROM {prompt_revision_table} "
+                    f"WHERE template_id IN ({placeholders}) ORDER BY rowid",
+                    prompt_template_ids,
+                ).fetchall()
+            ]
+        experiment_ids = [
+            str(row["id"])
+            for row in tables.get("creative_prompt_ab_experiments", [])
+        ]
+        prompt_ab_arms_table = "creative_prompt_ab_arms"
+        prompt_ab_arms_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (prompt_ab_arms_table,),
+        ).fetchone()
+        if prompt_ab_arms_exists is None or not experiment_ids:
+            tables[prompt_ab_arms_table] = []
+        else:
+            placeholders = ",".join("?" for _ in experiment_ids)
+            tables[prompt_ab_arms_table] = [
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT * FROM {prompt_ab_arms_table} "
+                    f"WHERE experiment_id IN ({placeholders}) ORDER BY rowid",
+                    experiment_ids,
+                ).fetchall()
+            ]
         payload = {"project_id": int(project_id), "tables": tables}
         return {**payload, "fingerprint": canonical_request_hash(payload)}
 
@@ -3322,6 +3382,46 @@ class CreativeRepository:
             conn.execute("DELETE FROM creative_generation_contexts WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_resource_heads WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_mode_migrations WHERE project_id = ?", (project_id,))
+            prompt_tables = {
+                str(row["name"])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND "
+                    "name LIKE 'creative_%prompt%'"
+                ).fetchall()
+            }
+            if "creative_project_prompt_bindings" in prompt_tables:
+                conn.execute(
+                    "DELETE FROM creative_project_prompt_bindings WHERE project_id = ?",
+                    (project_id,),
+                )
+            if "creative_project_prompt_settings" in prompt_tables:
+                conn.execute(
+                    "DELETE FROM creative_project_prompt_settings WHERE project_id = ?",
+                    (project_id,),
+                )
+            if {
+                "creative_prompt_templates",
+                "creative_prompt_template_revisions",
+            }.issubset(prompt_tables):
+                project_template_ids = [
+                    str(row["id"])
+                    for row in conn.execute(
+                        "SELECT id FROM creative_prompt_templates WHERE project_id = ?",
+                        (project_id,),
+                    ).fetchall()
+                ]
+                if project_template_ids:
+                    placeholders = ",".join("?" for _ in project_template_ids)
+                    conn.execute(
+                        f"DELETE FROM creative_prompt_template_revisions "
+                        f"WHERE template_id IN ({placeholders})",
+                        project_template_ids,
+                    )
+                    conn.execute(
+                        f"DELETE FROM creative_prompt_templates "
+                        f"WHERE id IN ({placeholders})",
+                        project_template_ids,
+                    )
             conn.execute("DELETE FROM creative_episodes WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_relationships WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_characters WHERE project_id = ?", (project_id,))
@@ -6099,6 +6199,7 @@ class CreativeRepository:
         selected_findings: list[dict[str, Any]],
         target_episode_numbers: list[int],
         created_by: str,
+        prompt_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         now = time.time()
         with self._connect() as conn:
@@ -6107,8 +6208,8 @@ class CreativeRepository:
                 INSERT INTO script_optimizations (
                     review_id, project_id, mode, source_fingerprint,
                     selected_findings_json, target_episode_numbers_json,
-                    created_by, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    prompt_snapshot_json, created_by, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     review_id,
@@ -6117,6 +6218,7 @@ class CreativeRepository:
                     source_fingerprint,
                     json.dumps(selected_findings, ensure_ascii=False),
                     json.dumps(target_episode_numbers, ensure_ascii=False),
+                    json.dumps(prompt_snapshot or {}, ensure_ascii=False),
                     created_by,
                     now,
                     now,
@@ -6516,6 +6618,7 @@ class CreativeRepository:
         row["target_episode_numbers"] = json.loads(
             row.pop("target_episode_numbers_json") or "[]"
         )
+        row["prompt_snapshot"] = json.loads(row.pop("prompt_snapshot_json", "{}") or "{}")
         return row
 
     @staticmethod

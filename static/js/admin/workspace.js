@@ -960,7 +960,10 @@ window.aiworkerModules.push(() => ({
                         is_enabled: provider.is_enabled !== false,
                         clear_api_key: false
                     };
-                    state.modelDraft = {model_id: '', display_name: ''};
+                    state.modelDraft = {
+                        model_id: '', display_name: '', input_price_per_million: '',
+                        output_price_per_million: '', price_currency: 'CNY'
+                    };
                     state.modelEditor = null;
                     state.test = {
                         model_id: (provider.models || []).find(model => model.is_default)?.model_id
@@ -989,7 +992,10 @@ window.aiworkerModules.push(() => ({
                         is_enabled: true,
                         clear_api_key: false
                     };
-                    state.modelDraft = {model_id: '', display_name: ''};
+                    state.modelDraft = {
+                        model_id: '', display_name: '', input_price_per_million: '',
+                        output_price_per_million: '', price_currency: 'CNY'
+                    };
                     state.modelEditor = null;
                     state.test = {model_id: '', result: null};
                     state.error = '';
@@ -1131,6 +1137,11 @@ window.aiworkerModules.push(() => ({
                                 body: JSON.stringify({
                                     model_id: modelId,
                                     display_name: String(state.modelDraft.display_name || '').trim(),
+                                    input_price_per_million: state.modelDraft.input_price_per_million === ''
+                                        ? null : Number(state.modelDraft.input_price_per_million),
+                                    output_price_per_million: state.modelDraft.output_price_per_million === ''
+                                        ? null : Number(state.modelDraft.output_price_per_million),
+                                    price_currency: state.modelDraft.price_currency || 'CNY',
                                     is_enabled: true
                                 })
                             }
@@ -1138,7 +1149,10 @@ window.aiworkerModules.push(() => ({
                         let data = {};
                         try { data = await response.json(); } catch (_) {}
                         if (!response.ok) throw new Error(this.llmResponseMessage(data, '添加模型失败'));
-                        state.modelDraft = {model_id: '', display_name: ''};
+                        state.modelDraft = {
+                            model_id: '', display_name: '', input_price_per_million: '',
+                            output_price_per_million: '', price_currency: 'CNY'
+                        };
                         state.notice = '模型已添加';
                         await this.fetchLLMSettings({selectedProviderId: providerId});
                     } catch (error) {
@@ -1153,6 +1167,9 @@ window.aiworkerModules.push(() => ({
                         id: model.id,
                         model_id: model.model_id || '',
                         display_name: model.display_name || '',
+                        input_price_per_million: model.input_price_per_million ?? '',
+                        output_price_per_million: model.output_price_per_million ?? '',
+                        price_currency: model.price_currency || 'CNY',
                         is_enabled: model.is_enabled !== false,
                         is_default: Boolean(model.is_default)
                     };
@@ -1176,6 +1193,11 @@ window.aiworkerModules.push(() => ({
                             body: JSON.stringify({
                                 model_id: String(editor.model_id).trim(),
                                 display_name: String(editor.display_name || '').trim(),
+                                input_price_per_million: editor.input_price_per_million === ''
+                                    ? null : Number(editor.input_price_per_million),
+                                output_price_per_million: editor.output_price_per_million === ''
+                                    ? null : Number(editor.output_price_per_million),
+                                price_currency: editor.price_currency || 'CNY',
                                 is_enabled: Boolean(editor.is_enabled)
                             })
                         });

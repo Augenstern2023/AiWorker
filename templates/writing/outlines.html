@@ -6,9 +6,10 @@
         <h3 class="mb-1">全剧大纲</h3>
         <div class="small text-muted">项目 {{ project_id }} · 全剧阶段弧线与分集大纲</div>
     </div>
-    <a class="btn btn-outline-light btn-sm flex-shrink-0" x-show="!isFreeCreativeProject()" x-cloak href="/planning/projects/{{ project_id }}/characters" title="返回人物关系" aria-label="返回人物关系">
-        <i class="bi bi-arrow-left me-1" aria-hidden="true"></i>返回人物关系
-    </a>
+    <div class="d-flex gap-2">
+        {% include "common/workspace/project_list_back_link.html" %}
+        <button class="btn btn-outline-info btn-sm" type="button" @click="openPromptLibrary('outline')" title="选择全剧大纲生成风格"><i class="bi bi-sliders me-1"></i>提示词模板</button>
+    </div>
 </div>
 {% endblock %}
 
@@ -21,6 +22,7 @@
 {% include "common/workspace/free_creative_modals.html" %}
 {% include "common/workspace/outline_field_rewrite_modal.html" %}
 {% include "common/workspace/creative_episode_download_modal.html" %}
+{% include "common/workspace/prompt_library_modal.html" %}
 <div class="modal fade" id="outlineEpisodeUpdatesModal" tabindex="-1" aria-labelledby="outlineEpisodeUpdatesModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
         <div class="modal-content">

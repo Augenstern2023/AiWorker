@@ -262,6 +262,7 @@ def test_writer_can_open_read_only_planning_pages_from_a_project(page_app):
     assert response.status_code == 200
     assert 'href="/writing/projects">项目列表</a>' in response.text
     assert characters_response.status_code == 200
+    assert 'href="/writing/projects">项目列表</a>' in characters_response.text
 
 
 @pytest.mark.parametrize(
@@ -281,7 +282,9 @@ def test_writer_project_pages_require_project_participation(page_app, route: str
     page_app[0].state.identity_permission_service.participating_project_ids.add(
         "project-9"
     )
-    assert client.get(route).status_code == 200
+    response = client.get(route)
+    assert response.status_code == 200
+    assert 'href="/writing/projects">项目列表</a>' in response.text
 
 
 def test_writer_project_page_scopes_local_project_id_before_membership_check(page_app):

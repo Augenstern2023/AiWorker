@@ -9,21 +9,32 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from creative.repository import CreativeRepository
+from creative.prompt_store import PromptStore
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from identity.dependencies import current_principal
 from identity.schema import Principal
 from screenplay_optimization.api import build_script_optimization_router
-from screenplay_optimization.service import content_fingerprint, validate_optimization_request
+from screenplay_optimization.service import (
+    content_fingerprint,
+    optimize_episode,
+    validate_optimization_request,
+)
 from screenplay_optimization import worker as optimization_worker
 from screenplay_review.service import build_project_source
 from core.job import CrawlJob
 
 
-def _project_with_review(repository: CreativeRepository, episode_count: int = 1) -> tuple[dict, dict, list[dict]]:
+def _project_with_review(
+    repository: CreativeRepository,
+    episode_count: int = 1,
+    change_route: str = "script_only",
+) -> tuple[dict, dict, list[dict]]:
     topic = repository.upsert_topics([{"platform": "hg", "job_id": "job-1", "source_path": "rank.json", "captured_at": "2026-08-03", "title": "优化剧", "score": 90, "confidence": "high", "score_details": {}, "recommendation": "adopt", "evidence": []}])[0]
     repository.update_topic(topic["id"], "adopted")
     breakdown = repository.create_breakdown(topic["id"], {"title": "优化剧"}, {}, [])
@@ -45,7 +56,7 @@ def _project_with_review(repository: CreativeRepository, episode_count: int = 1)
     mode = "single" if episode_count == 1 else "multiple"
     source = build_project_source(project, mode, list(range(1, episode_count + 1)))
     review = repository.create_script_review(source_type="project", mode=mode, project_id=project["id"], episode_numbers=list(range(1, episode_count + 1)), source_fingerprint=source["fingerprint"], source_payload=source, created_by="admin-1")
-    repository.complete_script_review(review["id"], {"ai_verdict": "建议修改", "summary": "", "core_findings": [{"title": "节奏"}], "episode_reviews": [], "cross_episode_findings": []})
+    repository.complete_script_review(review["id"], {"ai_verdict": "建议修改", "summary": "", "core_findings": [{"title": "节奏", "change_route": change_route}], "episode_reviews": [], "cross_episode_findings": []})
     review = repository.confirm_script_review(review["id"], "建议修改", "", "admin-1", source["fingerprint"])
     return project, review, scripts
 
@@ -58,6 +69,70 @@ def _admin_client(repository: CreativeRepository) -> TestClient:
     )
     app.include_router(build_script_optimization_router(repository, object()))
     return TestClient(app)
+
+
+@pytest.mark.parametrize(
+    ("optimization_mode", "change_route", "prompt_mode"),
+    [("direct", "script_only", "single"), ("structure", "beats_then_script", "series")],
+)
+def test_optimization_api_maps_mode_and_freezes_selected_template(
+    tmp_path, optimization_mode: str, change_route: str, prompt_mode: str
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, _ = _project_with_review(
+        repository, change_route=change_route
+    )
+    store = PromptStore(repository.db_path)
+    store.enable_project(project["id"], actor_user_id="admin-1")
+
+    class FakeJobManager:
+        def __init__(self) -> None:
+            self.payloads = []
+
+        def create_job(self, payload):
+            self.payloads.append(payload)
+            return SimpleNamespace(job_id="optimization-prompt-job")
+
+    jobs = FakeJobManager()
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = lambda: Principal(
+        user_id="admin-1", username="admin", display_name="管理员",
+        role_codes=("system_admin",), permissions=frozenset({"*"}),
+        data_scope="all", session_id="session-admin",
+    )
+    app.include_router(build_script_optimization_router(repository, jobs))
+
+    response = TestClient(app).post(
+        f"/api/script-reviews/{review['id']}/optimizations",
+        json={
+            "mode": optimization_mode,
+            "findings": [{"ref": "core:0", "episode_numbers": [1]}],
+            "prompt_template_key": "urban-identity-romcom",
+            "prompt_override": {"custom_requirements": "减少解释性台词。"},
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    optimization_id = response.json()["optimization"]["id"]
+    frozen = repository.get_script_optimization(optimization_id)["prompt_snapshot"]
+    assert frozen["stage"] == "optimization"
+    assert frozen["mode"] == prompt_mode
+    assert frozen["template_key"] == "urban-identity-romcom"
+    assert "减少解释性台词" in frozen["effective_instruction"]
+    assert jobs.payloads[0]["extra"]["prompt_snapshot"] == frozen
+
+    generic = store.get_template_by_key("generic-vertical-short")
+    generic_revision = store.get_revision(generic["id"])
+    store.set_binding(
+        project_id=project["id"],
+        stage="optimization",
+        episode_number=0,
+        template_id=generic["id"],
+        template_revision=generic_revision["revision"],
+        override={},
+        actor_user_id="admin-1",
+    )
+    assert repository.get_script_optimization(optimization_id)["prompt_snapshot"] == frozen
 
 
 def test_optimization_task_keeps_generated_drafts_outside_project_versions(tmp_path) -> None:
@@ -169,6 +244,36 @@ def test_optimization_request_rejects_a_finding_that_requires_outline_revision()
 
     with pytest.raises(ValueError, match="需要先修订并锁定分集大纲"):
         validate_optimization_request(review, "direct", [{"ref": "core:0"}])
+
+
+@pytest.mark.asyncio
+async def test_optimization_template_cannot_replace_output_or_outline_guards() -> None:
+    class FakeProvider:
+        async def complete_json(self, messages):
+            system = messages[0]["content"]
+            assert "用更快进入冲突修复" in system
+            assert "script 必须是完整场次剧本 JSON" in system
+            assert "不得擅自改写" in system
+            assert "不得覆盖前述输出契约" in system
+            return {"script": {"episode_title": "优化稿", "scenes": []}}
+
+    result = await optimize_episode(
+        FakeProvider(),
+        mode="direct",
+        episode_number=1,
+        script_content={"episode_title": "原稿", "scenes": []},
+        beats_content=None,
+        review_context={},
+        findings=[{"title": "冲突过慢"}],
+        summaries=[],
+        prompt_snapshot={
+            "stage": "optimization",
+            "mode": "single",
+            "effective_instruction": "用更快进入冲突修复。",
+        },
+    )
+
+    assert result["script"]["episode_title"] == "优化稿"
 
 
 def test_text_review_cannot_create_an_optimization_task(tmp_path) -> None:

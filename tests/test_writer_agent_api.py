@@ -27,6 +27,7 @@ import pytest
 
 from identity.dependencies import current_principal
 from identity.schema import Principal
+from creative.prompt_store import PromptStore
 from writer_agent import api as writer_agent_api
 from writer_agent.action_service import ActionService, persist_proposed_actions
 from writer_agent.project_review import long_project_review_scope
@@ -787,6 +788,37 @@ def test_project_review_preview_create_is_idempotent_and_session_owner_can_read_
     exported = client.get(f"{base}/{review_id}/export")
     assert exported.status_code == 200
     assert "完整项目审核报告" in exported.text
+
+
+def test_project_review_freezes_selected_series_review_template(tmp_path) -> None:
+    client, repository, store, session, _permissions, jobs, _current = (
+        _project_review_api_context(tmp_path, principal=_admin_principal())
+    )
+    project_id = store.get(session["id"], "writer-1")["project_id"]
+    prompt_store = PromptStore(repository.db_path)
+    prompt_store.enable_project(project_id, actor_user_id="admin-1")
+    base = f"/api/writer-agent/sessions/{session['id']}/project-reviews"
+    preview = client.post(f"{base}/preview", json={"audit_scope": "project"}).json()
+
+    created = client.post(
+        base,
+        json={
+            "audit_scope": "project",
+            "expected_fingerprint": preview["fingerprint"],
+            "client_request_id": "project-review-prompt-freeze",
+            "prompt_template_key": "oriental-rule-mystery",
+            "prompt_override": {"custom_requirements": "重点核对规则代价。"},
+        },
+    )
+
+    assert created.status_code == 201, created.text
+    review_id = created.json()["review"]["id"]
+    frozen = repository.get_script_review(review_id)["source_payload"]["prompt_snapshot"]
+    assert frozen["stage"] == "review"
+    assert frozen["mode"] == "series"
+    assert frozen["template_key"] == "oriental-rule-mystery"
+    assert "规则代价" in frozen["effective_instruction"]
+    assert jobs.calls[0][1]["extra"]["prompt_snapshot"] == frozen
 
 
 def test_turn_rollback_is_blocked_after_project_review_was_created(

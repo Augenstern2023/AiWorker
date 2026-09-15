@@ -17,7 +17,7 @@ from typing import Any
 
 import config
 
-from analysis.llm import create_llm_provider_from_config
+from analysis.llm import create_llm_provider_from_config, llm_usage_snapshot
 from core.events import emit_event
 from core.job import CrawlJob
 from creative.repository import CreativeRepository
@@ -32,6 +32,15 @@ def create_provider() -> Any:
 
 def emit(job: CrawlJob, event: str, message: str, level: str = "info", payload: dict[str, Any] | None = None) -> None:
     emit_event(event, job.job_id, "screenplay-optimization-worker", "creative", level, message, payload or {})
+
+
+def _usage_payload(job: CrawlJob, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        **dict(payload or {}),
+        "llm_usage": llm_usage_snapshot(
+            getattr(job, "_llm_usage_provider", None)
+        ),
+    }
 
 
 def _latest(project: dict[str, Any], stage: str, episode_number: int) -> dict[str, Any] | None:
@@ -58,6 +67,14 @@ async def run(job: CrawlJob) -> None:
     repository.start_script_optimization(optimization_id)
     emit(job, "job_started", "开始生成剧本优化草稿")
     try:
+        prompt_snapshot = dict(optimization.get("prompt_snapshot") or {})
+        if prompt_snapshot:
+            expected_mode = "series" if optimization["mode"] == "structure" else "single"
+            if (
+                prompt_snapshot.get("stage") != "optimization"
+                or prompt_snapshot.get("mode") != expected_mode
+            ):
+                raise ValueError("优化提示词快照与任务模式不匹配")
         current_source = build_project_source(
             project,
             str(review["mode"]),
@@ -86,6 +103,7 @@ async def run(job: CrawlJob) -> None:
     total = len(optimization["target_episode_numbers"])
     try:
         provider = create_provider()
+        setattr(job, "_llm_usage_provider", provider)
         for index, episode_number in enumerate(optimization["target_episode_numbers"], start=1):
             episode_context = context_by_episode.get(int(episode_number))
             if not episode_context:
@@ -110,6 +128,7 @@ async def run(job: CrawlJob) -> None:
                 },
                 findings=selected_by_episode.get(int(episode_number), []),
                 summaries=summaries,
+                prompt_snapshot=prompt_snapshot or None,
             )
             if optimization["mode"] == "structure":
                 generated_drafts.append(
@@ -146,7 +165,12 @@ async def run(job: CrawlJob) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(completed, ensure_ascii=False, indent=2), encoding="utf-8")
     emit(job, "artifact", "剧本优化草稿", payload={"path": str(target), "artifact_type": "json"})
-    emit(job, "job_finished", "剧本优化草稿生成完成", payload={"optimization_id": optimization_id})
+    emit(
+        job,
+        "job_finished",
+        "剧本优化草稿生成完成",
+        payload=_usage_payload(job, {"optimization_id": optimization_id}),
+    )
 
 
 def main() -> int:
@@ -156,7 +180,7 @@ def main() -> int:
     try:
         asyncio.run(run(job))
     except Exception as exc:
-        emit(job, "job_failed", str(exc), "error")
+        emit(job, "job_failed", str(exc), "error", _usage_payload(job))
         return 1
     return 0
 

@@ -1,5 +1,5 @@
 <div class="modal fade" id="creativeEpisodeDownloadModal" tabindex="-1" aria-labelledby="creativeEpisodeDownloadModalLabel" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-scrollable">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
         <div class="modal-content">
             <div class="modal-header">
                 <div>
@@ -9,17 +9,17 @@
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button>
             </div>
             <div class="modal-body">
-                <label class="form-check border border-secondary rounded p-3 mb-3">
-                    <input class="form-check-input me-2" type="checkbox" x-model="creativeWorkspace.episodeDownload.allEpisodes" @change="toggleEpisodeDownloadAll">
+                <label class="form-check border border-secondary rounded p-3 mb-3 d-flex align-items-center gap-2">
+                    <input class="form-check-input m-0 flex-shrink-0" type="checkbox" x-model="creativeWorkspace.episodeDownload.allEpisodes" @change="toggleEpisodeDownloadAll">
                     <span class="fw-semibold">全集</span>
-                    <span class="small text-muted ms-1" x-text="`（已生成 ${episodeDownloadAvailableNumbers().length} 集）`"></span>
+                    <span class="small text-muted" x-text="`（已生成 ${episodeDownloadAvailableNumbers().length} 集）`"></span>
                 </label>
-                <div class="row row-cols-3 row-cols-sm-4 g-2">
+                <div class="row row-cols-2 row-cols-sm-3 row-cols-md-4 g-2">
                     <template x-for="episodeNumber in episodeDownloadAvailableNumbers()" :key="`download-episode-${episodeNumber}`">
                         <div class="col">
-                            <label class="form-check border border-secondary rounded p-2 h-100">
-                                <input class="form-check-input me-1" type="checkbox" :value="episodeNumber" x-model.number="creativeWorkspace.episodeDownload.selectedEpisodes" @change="syncEpisodeDownloadAll">
-                                <span x-text="`第 ${episodeNumber} 集`"></span>
+                            <label class="form-check border border-secondary rounded p-2 h-100 d-flex align-items-center gap-2">
+                                <input class="form-check-input m-0 flex-shrink-0" type="checkbox" :value="episodeNumber" x-model.number="creativeWorkspace.episodeDownload.selectedEpisodes" @change="syncEpisodeDownloadAll">
+                                <span class="text-nowrap" x-text="`第 ${episodeNumber} 集`"></span>
                             </label>
                         </div>
                     </template>

@@ -82,18 +82,33 @@ async def test_free_generation_works_without_upstream_resources_and_updates_head
         instruction="突出主角主动选择",
         context_refs={},
         actor_user_id="owner-1",
+        prompt_snapshot=(
+            {
+                "template_id": f"system:test-{stage}",
+                "template_key": f"test-{stage}",
+                "revision": 1,
+                "stage": stage,
+                "mode": "series" if stage == "outline" else "single",
+                "content_hash": f"{stage}-snapshot-hash",
+                "effective_instruction": f"强化{stage}创作选择。",
+            }
+            if stage in {"characters", "outline"}
+            else None
+        ),
     )
 
     async def generate_brief(*_args, **_kwargs):
         return [{"content": {"title": "谎言回声", "logline": "女孩追查谎言"}}], {"model": "fake"}
 
-    async def generate_characters(*_args, **_kwargs):
+    async def generate_characters(*_args, **kwargs):
+        assert kwargs["prompt_snapshot"]["stage"] == "characters"
         return {
             "characters": [{"name": "林真", "role": "主角"}],
             "relationships": [],
         }, {"model": "fake"}
 
     async def generate_outline(*_args, **kwargs):
+        assert kwargs["prompt_snapshot"]["stage"] == "outline"
         progress = kwargs.get("on_progress")
         if progress:
             progress(3, 3)
@@ -263,7 +278,16 @@ async def test_free_brief_generation_preserves_requested_direction_count(tmp_pat
         actor_user_id="owner-1",
     )
 
-    async def generate_brief(_provider, _project, _seed, _sources, _existing, count):
+    async def generate_brief(
+        _provider,
+        _project,
+        _seed,
+        _sources,
+        _existing,
+        count,
+        prompt_snapshot=None,
+    ):
+        assert prompt_snapshot is None
         return [
             {"content": {"title": f"方向 {number}", "logline": f"故事 {number}"}}
             for number in range(1, count + 1)
@@ -381,7 +405,13 @@ async def test_free_generation_api_validates_and_hashes_selected_model(tmp_path)
 
     def resolve_model(model_record_id):
         resolved.append(model_record_id)
-        return {"model_record_id": model_record_id}
+        return {
+            "model_record_id": model_record_id,
+            "model": f"provider-{model_record_id}",
+            "input_price_per_million": 2,
+            "output_price_per_million": 8,
+            "price_currency": "CNY",
+        }
 
     router = build_creative_router(
         root=tmp_path,
@@ -412,6 +442,14 @@ async def test_free_generation_api_validates_and_hashes_selected_model(tmp_path)
     assert [job["extra"]["llm_model_record_id"] for job in jobs] == [
         "model-a", "model-b"
     ]
+    assert jobs[0]["extra"]["llm_price_snapshot"] == {
+        "model_record_id": "model-a",
+        "model_id": "provider-model-a",
+        "input_price_per_million": 2.0,
+        "output_price_per_million": 8.0,
+        "price_currency": "CNY",
+        "complete": True,
+    }
     assert jobs[0]["extra"]["generation_request_hash"] != (
         jobs[1]["extra"]["generation_request_hash"]
     )

@@ -1364,6 +1364,10 @@ window.aiworkerModules.push(() => ({
                         });
                         const data = await res.json();
                         if (!res.ok || data.status === 'error') throw new Error(data.detail || data.message || '创建生成任务失败');
+                        const promptStage = this.promptStageForGenerationAction(action);
+                        if (promptStage && body.prompt_template_key) {
+                            delete this.creativeWorkspace.promptLibrary.runSelections[promptStage];
+                        }
                         this.creativeWorkspace.jobId = data.job.job_id;
                         this.creativeWorkspace.jobStatus = data.job.status;
                         this.creativeWorkspace.jobMessage = this.creativeGenerationStartedMessage(action);
@@ -1393,6 +1397,1307 @@ window.aiworkerModules.push(() => ({
                 cloneCreativeJson(value, fallback = {}) {
                     const source = value === null || value === undefined ? fallback : value;
                     return JSON.parse(JSON.stringify(source));
+                },
+
+                promptStageLabel(stage) {
+                    return {
+                        brief: 'Brief', characters: '人物关系', outline: '全剧大纲',
+                        beats: 'Beats', script: '场次剧本', review: '剧本审核',
+                        optimization: '剧本优化'
+                    }[stage] || stage || '';
+                },
+
+                promptModeLabel(mode, stage = '') {
+                    if (mode === 'single') return ['brief', 'characters', 'outline'].includes(stage) ? '单次生成' : '单集生成';
+                    if (mode === 'series') return stage === 'brief' ? '多候选生成' : (stage === 'characters' ? '整批生成' : '批量生成');
+                    return {rewrite: '局部重写', repair: '结构修复'}[mode] || mode;
+                },
+
+                promptStageForGenerationAction(action) {
+                    return {
+                        blueprints: 'brief', blueprint_variant: 'brief',
+                        characters: 'characters',
+                        outlines: 'outline', outline_overview: 'outline',
+                        beats: 'beats', script: 'script'
+                    }[action] || '';
+                },
+
+                promptTemplateDimensionValues(template) {
+                    const dimensions = template?.content?.dimensions || {};
+                    return [...new Set(Object.values(dimensions).map(value => String(value || '').trim()).filter(Boolean))];
+                },
+
+                promptRecommendation(template) {
+                    const key = String(template?.template_key || '');
+                    return (this.creativeWorkspace.promptLibrary.recommendations || [])
+                        .find(item => item.template_key === key) || null;
+                },
+
+                orderedPromptTemplates() {
+                    const templates = [...(this.creativeWorkspace.promptLibrary.templates || [])];
+                    return templates.sort((left, right) => {
+                        const leftScore = Number(this.promptRecommendation(left)?.score || 0);
+                        const rightScore = Number(this.promptRecommendation(right)?.score || 0);
+                        if (leftScore !== rightScore) return rightScore - leftScore;
+                        return String(left.title || '').localeCompare(String(right.title || ''), 'zh-CN');
+                    });
+                },
+
+                promptRecommendationLabel(template) {
+                    const recommendation = this.promptRecommendation(template);
+                    if (!recommendation) return '';
+                    const score = Number(recommendation.score || 0);
+                    if (score >= 60) return `高度匹配 ${score}`;
+                    if (score >= 35) return `可能匹配 ${score}`;
+                    return `信号较少 ${score}`;
+                },
+
+                selectedPromptTemplate() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    return (state.templates || []).find(item => item.template_key === state.selectedTemplateKey) || null;
+                },
+
+                selectPromptTemplate(template) {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    state.selectedTemplateKey = String(template?.template_key || '');
+                    state.selectedTemplateRevision = Number(template?.revision || 1);
+                    state.editing = false;
+                    state.editContent = {};
+                },
+
+                promptDimensionLabel(key) {
+                    return {
+                        format: '载体', genre: '题材', audience: '受众',
+                        story_engine: '故事引擎', emotion: '情绪体验',
+                        pacing: '节奏', expression: '表达风格'
+                    }[key] || key;
+                },
+
+                selectedPromptTemplateEditable() {
+                    return ['user', 'project'].includes(this.selectedPromptTemplate()?.owner_scope);
+                },
+
+                startPromptTemplateEdit() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const template = this.selectedPromptTemplate();
+                    if (!template || !this.selectedPromptTemplateEditable()) return;
+                    state.editContent = this.cloneCreativeJson(template.content || {});
+                    state.editParametersJson = JSON.stringify(state.editContent.parameters || {}, null, 2);
+                    state.editExamplesJson = JSON.stringify(state.editContent.examples || [], null, 2);
+                    state.editing = true;
+                },
+
+                async loadPromptRecommendations(stage) {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId || !stage) return;
+                    state.recommendationLoading = true;
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/recommendations?stage=${encodeURIComponent(stage)}`
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '读取模板推荐失败');
+                        state.recommendations = Array.isArray(data.items) ? data.items : [];
+                    } catch (_) {
+                        state.recommendations = [];
+                    } finally {
+                        state.recommendationLoading = false;
+                    }
+                },
+
+                async loadProjectPromptModule(stage) {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId || !['brief', 'characters', 'outline', 'beats', 'script'].includes(stage)) return;
+                    const episode = ['brief', 'characters', 'outline'].includes(stage)
+                        ? 0 : Number(this.creativeWorkspace.selectedEpisode || 0);
+                    state.loading = true;
+                    state.error = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-modules/${stage}?episode_number=${Math.max(0, episode)}`
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '读取提示词模板失败');
+                        state.settings = data.settings || {enabled: false};
+                        state.templates = (Array.isArray(data.templates) ? data.templates : [])
+                            .filter(template => !Array.isArray(template.supported_stages)
+                                || template.supported_stages.includes(stage));
+                        state.effective = data.effective || null;
+                        const selectedKey = data.effective?.template_key || state.templates[0]?.template_key || '';
+                        const selected = state.templates.find(item => item.template_key === selectedKey) || state.templates[0];
+                        state.selectedTemplateKey = String(selected?.template_key || selectedKey);
+                        state.selectedTemplateRevision = Number(selected?.revision || data.effective?.revision || 1);
+                        const activeBinding = episode > 0 && data.episode_binding
+                            ? data.episode_binding : data.stage_binding;
+                        state.customRequirements = String(activeBinding?.override?.custom_requirements || '');
+                        state.scope = episode > 0 && data.episode_binding ? 'episode' : 'stage';
+                        await this.loadPromptRecommendations(stage);
+                    } catch (error) {
+                        state.error = error.message || '读取提示词模板失败';
+                    } finally {
+                        state.loading = false;
+                    }
+                },
+
+                async openPromptLibrary(stage) {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    state.stage = stage;
+                    state.error = '';
+                    state.importOpen = false;
+                    state.abOpen = false;
+                    state.governanceOpen = false;
+                    state.observabilityOpen = false;
+                    state.marketplaceOpen = false;
+                    state.abPreflight = null;
+                    state.abEvaluationExperimentId = '';
+                    state.abReport = null;
+                    this.promptLibraryModal = this.modal('promptLibraryModal');
+                    this.promptLibraryModal?.show();
+                    await this.loadProjectPromptModule(stage);
+                },
+
+                promptGovernanceStatusLabel(status) {
+                    return {
+                        pending_review: '待审核', approved: '已批准',
+                        deprecated: '已弃用', archived: '已归档'
+                    }[status] || status || '-';
+                },
+
+                promptGovernanceActions(item) {
+                    return {
+                        pending_review: [
+                            {key: 'approve', label: '批准当前版本', style: 'btn-success'},
+                            {key: 'archive', label: '驳回并归档', style: 'btn-outline-danger'},
+                        ],
+                        approved: [
+                            {key: 'request_review', label: '重新送审', style: 'btn-outline-primary'},
+                            {key: 'deprecate', label: '标记弃用', style: 'btn-outline-warning'},
+                        ],
+                        deprecated: [
+                            {key: 'restore', label: '恢复使用', style: 'btn-outline-success'},
+                            {key: 'archive', label: '归档', style: 'btn-outline-danger'},
+                        ],
+                        archived: [
+                            {key: 'restore', label: '恢复并送审', style: 'btn-outline-primary'},
+                        ],
+                    }[item?.governance_status] || [];
+                },
+
+                async loadPromptGovernance() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId || state.governanceLoading) return;
+                    state.governanceLoading = true;
+                    state.error = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/governance`
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '读取模板治理状态失败');
+                        state.governanceItems = Array.isArray(data.items) ? data.items : [];
+                        state.governancePolicy = Array.isArray(data.policy) ? data.policy : [];
+                        state.governanceCanManage = Boolean(data.can_manage);
+                    } catch (error) {
+                        state.error = error.message || '读取模板治理状态失败';
+                    } finally {
+                        state.governanceLoading = false;
+                    }
+                },
+
+                async openPromptGovernance() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    state.governanceOpen = true;
+                    state.importOpen = false;
+                    state.abOpen = false;
+                    state.observabilityOpen = false;
+                    state.marketplaceOpen = false;
+                    state.editing = false;
+                    await this.loadPromptGovernance();
+                },
+
+                closePromptGovernance() {
+                    this.creativeWorkspace.promptLibrary.governanceOpen = false;
+                },
+
+                promptMetricPercent(value) {
+                    if (value === null || value === undefined) return '不可用';
+                    return `${(Number(value) * 100).toFixed(1)}%`;
+                },
+
+                promptMetricNumber(value, digits = 0) {
+                    if (value === null || value === undefined) return '不可用';
+                    return Number(value).toLocaleString('zh-CN', {
+                        minimumFractionDigits: digits,
+                        maximumFractionDigits: digits,
+                    });
+                },
+
+                promptCostSummary(version) {
+                    const items = version?.cost?.by_currency || [];
+                    if (!items.length) return '不可用';
+                    return items.map(item => `${this.promptMetricNumber(item.amount, 6)} ${item.currency}`).join(' / ');
+                },
+
+                async loadPromptObservability() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId || state.observabilityLoading) return;
+                    state.observabilityLoading = true;
+                    state.error = '';
+                    try {
+                        const params = new URLSearchParams({limit: '500'});
+                        if (state.observabilityStage) params.set('stage', state.observabilityStage);
+                        if (state.observabilityTemplateKey) params.set('template_key', state.observabilityTemplateKey);
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/observability?${params.toString()}`
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '读取模板可观测性失败');
+                        state.observabilityReport = data;
+                    } catch (error) {
+                        state.observabilityReport = null;
+                        state.error = error.message || '读取模板可观测性失败';
+                    } finally {
+                        state.observabilityLoading = false;
+                    }
+                },
+
+                async openPromptObservability() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    state.observabilityOpen = true;
+                    state.importOpen = false;
+                    state.abOpen = false;
+                    state.governanceOpen = false;
+                    state.marketplaceOpen = false;
+                    state.editing = false;
+                    state.observabilityStage = state.stage || '';
+                    state.observabilityTemplateKey = '';
+                    await this.loadPromptObservability();
+                },
+
+                closePromptObservability() {
+                    this.creativeWorkspace.promptLibrary.observabilityOpen = false;
+                },
+
+                promptMarketplaceStatusLabel(status) {
+                    return {
+                        pending: '待平台审核', approved: '已上架', rejected: '已驳回',
+                        withdrawn: '作者已撤回', removed: '平台已下架'
+                    }[status] || status || '-';
+                },
+
+                promptMarketplaceLicenseLabel(code) {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    return (state.marketplaceLicenses || []).find(item => item.code === code)?.label
+                        || code || '-';
+                },
+
+                promptMarketplaceError(data, fallback) {
+                    const detail = data?.detail;
+                    if (typeof detail === 'string') return detail;
+                    return detail?.message || fallback;
+                },
+
+                async loadPromptMarketplace() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId || state.marketplaceLoading) return;
+                    state.marketplaceLoading = true;
+                    state.error = '';
+                    try {
+                        const params = new URLSearchParams({limit: '200'});
+                        if (String(state.marketplaceQuery || '').trim()) {
+                            params.set('q', String(state.marketplaceQuery).trim());
+                        }
+                        if (state.marketplaceStage) params.set('stage', state.marketplaceStage);
+                        if (state.marketplaceLicense) params.set('license', state.marketplaceLicense);
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-marketplace?${params.toString()}`
+                        );
+                        const data = await response.json();
+                        if (!response.ok) {
+                            throw new Error(this.promptMarketplaceError(data, '读取模板市场失败'));
+                        }
+                        state.marketplaceItems = Array.isArray(data.items) ? data.items : [];
+                        state.marketplaceOwnSubmissions = Array.isArray(data.own_submissions)
+                            ? data.own_submissions : [];
+                        state.marketplaceModerationQueue = Array.isArray(data.moderation_queue)
+                            ? data.moderation_queue : [];
+                        state.marketplaceLicenses = Array.isArray(data.licenses) ? data.licenses : [];
+                        state.marketplaceSourceTypes = Array.isArray(data.source_types)
+                            ? data.source_types : [];
+                        state.marketplacePolicy = Array.isArray(data.policy) ? data.policy : [];
+                        state.marketplaceCanReview = Boolean(data.can_review);
+                        state.marketplaceCanInstall = Boolean(data.can_install);
+                    } catch (error) {
+                        state.error = error.message || '读取模板市场失败';
+                    } finally {
+                        state.marketplaceLoading = false;
+                    }
+                },
+
+                async openPromptMarketplace() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    state.marketplaceOpen = true;
+                    state.importOpen = false;
+                    state.abOpen = false;
+                    state.governanceOpen = false;
+                    state.observabilityOpen = false;
+                    state.editing = false;
+                    state.marketplaceStage = state.stage || '';
+                    state.marketplaceLicense = '';
+                    await this.loadPromptMarketplace();
+                },
+
+                closePromptMarketplace() {
+                    this.creativeWorkspace.promptLibrary.marketplaceOpen = false;
+                },
+
+                async submitSelectedPromptToMarketplace() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    const template = this.selectedPromptTemplate();
+                    if (!projectId || !template || state.marketplaceSaving) return;
+                    if (template.owner_scope !== 'user') {
+                        state.error = '模板市场只接受个人模板；请先另存到我的模板';
+                        return;
+                    }
+                    if (!state.marketplacePublicationConfirmed || !state.marketplaceRightsConfirmed) {
+                        state.error = '请确认公开发布范围和来源权利声明';
+                        return;
+                    }
+                    state.marketplaceSaving = true;
+                    state.error = '';
+                    try {
+                        const operationId = globalThis.crypto?.randomUUID?.()
+                            || `prompt-market-submit-${Date.now()}`;
+                        const tags = String(state.marketplaceTags || '').split(/[,，\n]/)
+                            .map(item => item.trim()).filter(Boolean);
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/templates/${template.id}/marketplace-submissions`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    operation_id: operationId,
+                                    expected_template_revision: Number(template.revision || 1),
+                                    title: String(template.title || '').trim(),
+                                    description: String(template.description || '').trim(),
+                                    tags,
+                                    attribution_name: String(state.marketplaceAttributionName || '').trim(),
+                                    license_code: state.marketplaceLicenseCode,
+                                    source_type: state.marketplaceSourceType,
+                                    source_url: String(state.marketplaceSourceUrl || '').trim(),
+                                    rights_statement: String(state.marketplaceRightsStatement || '').trim(),
+                                    publication_confirmed: true,
+                                    rights_confirmed: true,
+                                }),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) {
+                            throw new Error(this.promptMarketplaceError(data, '提交市场审核失败'));
+                        }
+                        state.marketplacePublicationConfirmed = false;
+                        state.marketplaceRightsConfirmed = false;
+                        await this.loadPromptMarketplace();
+                        this.showCreativeNotice('模板冻结版本已提交市场审核；审核前不会公开');
+                    } catch (error) {
+                        state.error = error.message || '提交市场审核失败';
+                    } finally {
+                        state.marketplaceSaving = false;
+                    }
+                },
+
+                async reviewPromptMarketplaceSubmission(item, action) {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId || !item?.id || state.marketplaceSaving) return;
+                    const label = {
+                        approve: '批准上架', reject: '驳回', remove: '下架', withdraw: '撤回'
+                    }[action] || action;
+                    const note = window.prompt(`请填写“${label}”原因`);
+                    if (!String(note || '').trim()) return;
+                    if (['remove', 'withdraw'].includes(action)
+                        && !window.confirm(`${label}只影响后续安装，现有项目副本将保留。确认继续？`)) return;
+                    state.marketplaceSaving = true;
+                    state.error = '';
+                    try {
+                        const operationId = globalThis.crypto?.randomUUID?.()
+                            || `prompt-market-review-${Date.now()}`;
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-marketplace/submissions/${item.id}/review`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    operation_id: operationId,
+                                    action,
+                                    expected_review_revision: Number(item.review_revision || 0),
+                                    note: String(note).trim(),
+                                }),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) {
+                            throw new Error(this.promptMarketplaceError(data, '市场状态更新失败'));
+                        }
+                        await this.loadPromptMarketplace();
+                        this.showCreativeNotice(`${item.title}：${label}已记录`);
+                    } catch (error) {
+                        state.error = error.message || '市场状态更新失败';
+                    } finally {
+                        state.marketplaceSaving = false;
+                    }
+                },
+
+                async installPromptMarketplaceListing(item) {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId || !item?.id || state.marketplaceSaving || item.installation) return;
+                    if (!state.marketplaceCanInstall) {
+                        state.error = '只有项目负责人可以安装市场模板';
+                        return;
+                    }
+                    const license = this.promptMarketplaceLicenseLabel(item.license_code);
+                    if (!window.confirm(
+                        `确认按 ${license} 安装“${item.title}”并保留署名 ${item.attribution_name}？`
+                    )) return;
+                    state.marketplaceSaving = true;
+                    state.error = '';
+                    try {
+                        const operationId = globalThis.crypto?.randomUUID?.()
+                            || `prompt-market-install-${Date.now()}`;
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-marketplace/listings/${item.id}/install`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    operation_id: operationId,
+                                    license_accepted: true,
+                                }),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) {
+                            throw new Error(this.promptMarketplaceError(data, '安装市场模板失败'));
+                        }
+                        await Promise.all([
+                            this.loadPromptMarketplace(),
+                            this.loadProjectPromptModule(state.stage),
+                        ]);
+                        this.showCreativeNotice('模板已作为项目独立副本安装，尚未自动绑定');
+                    } catch (error) {
+                        state.error = error.message || '安装市场模板失败';
+                    } finally {
+                        state.marketplaceSaving = false;
+                    }
+                },
+
+                async ratePromptMarketplaceListing(item) {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId || !item?.id || !item.installation || item.is_owner
+                        || state.marketplaceSaving) return;
+                    const existingScore = Number(item.my_rating?.score || 5);
+                    const rawScore = window.prompt('请评分（1–5 分）', String(existingScore));
+                    if (rawScore === null) return;
+                    const score = Number(rawScore);
+                    if (!Number.isInteger(score) || score < 1 || score > 5) {
+                        state.error = '评分必须是 1 到 5 的整数';
+                        return;
+                    }
+                    const review = window.prompt(
+                        '可选：写下实际使用依据', String(item.my_rating?.review_text || '')
+                    );
+                    if (review === null) return;
+                    state.marketplaceSaving = true;
+                    state.error = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-marketplace/listings/${item.id}/rating`,
+                            {
+                                method: 'PUT',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    score,
+                                    review_text: String(review || '').trim(),
+                                    expected_revision: Number(item.my_rating?.revision || 0),
+                                }),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) {
+                            throw new Error(this.promptMarketplaceError(data, '保存市场评分失败'));
+                        }
+                        await this.loadPromptMarketplace();
+                        this.showCreativeNotice('已保存一人一票的安装用户评分');
+                    } catch (error) {
+                        state.error = error.message || '保存市场评分失败';
+                    } finally {
+                        state.marketplaceSaving = false;
+                    }
+                },
+
+                async governPromptTemplate(item, action) {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId || !item?.id || state.governanceSaving) return;
+                    if (action === 'archive' && !item.impact?.can_archive) {
+                        state.error = item.impact?.archive_blockers?.[0] || '模板仍被使用，不能归档';
+                        return;
+                    }
+                    const actionLabel = this.promptGovernanceActions(item)
+                        .find(value => value.key === action)?.label || action;
+                    const note = window.prompt(`请填写“${actionLabel}”的原因`);
+                    if (!String(note || '').trim()) return;
+                    if (['deprecate', 'archive'].includes(action)
+                        && !window.confirm(`${actionLabel}不会自动修改现有绑定，确认继续？`)) return;
+                    state.governanceSaving = true;
+                    state.error = '';
+                    try {
+                        const operationId = globalThis.crypto?.randomUUID?.()
+                            || `prompt-governance-${Date.now()}`;
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/templates/${item.id}/governance`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    operation_id: operationId,
+                                    action,
+                                    expected_governance_revision: Number(item.governance_revision || 0),
+                                    note: String(note).trim(),
+                                }),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '模板治理操作失败');
+                        await Promise.all([
+                            this.loadPromptGovernance(),
+                            this.loadProjectPromptModule(state.stage),
+                        ]);
+                        this.showCreativeNotice(`${item.title}：${actionLabel}已记录`);
+                    } catch (error) {
+                        state.error = error.message || '模板治理操作失败';
+                    } finally {
+                        state.governanceSaving = false;
+                    }
+                },
+
+                async enableCurrentProjectPromptLibrary() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId || state.saving) return;
+                    state.saving = true;
+                    state.error = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-system/enable`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({template_key: 'classic-compatible'}),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '升级模板系统失败');
+                        await this.loadProjectPromptModule(state.stage);
+                        this.showCreativeNotice('项目已升级到提示词模板系统');
+                    } catch (error) {
+                        state.error = error.message || '升级模板系统失败';
+                    } finally {
+                        state.saving = false;
+                    }
+                },
+
+                promptRunSelection(stage) {
+                    return this.creativeWorkspace.promptLibrary.runSelections?.[stage] || null;
+                },
+
+                promptGenerationPayload(stage, body = {}) {
+                    const selection = this.promptRunSelection(stage);
+                    if (!selection) return body;
+                    return {
+                        ...body,
+                        prompt_template_key: selection.templateKey,
+                        prompt_template_revision: selection.revision,
+                        prompt_override: {custom_requirements: selection.customRequirements || ''},
+                    };
+                },
+
+                usePromptForNextGeneration() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const template = this.selectedPromptTemplate();
+                    if (!template || !state.stage) return;
+                    state.runSelections[state.stage] = {
+                        templateKey: template.template_key,
+                        revision: Number(template.revision || 1),
+                        customRequirements: String(state.customRequirements || '').trim(),
+                    };
+                    this.promptLibraryModal?.hide();
+                    this.showCreativeNotice(`${template.title}将在下次${this.promptStageLabel(state.stage)}生成中使用`);
+                },
+
+                async savePromptBinding() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    const template = this.selectedPromptTemplate();
+                    if (!projectId || !template || state.saving) return;
+                    const episodeNumber = ['beats', 'script'].includes(state.stage) && state.scope === 'episode'
+                        ? Number(this.creativeWorkspace.selectedEpisode || 0) : 0;
+                    state.saving = true;
+                    state.error = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-modules/${state.stage}`,
+                            {
+                                method: 'PUT',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    template_key: template.template_key,
+                                    template_revision: Number(template.revision || 1),
+                                    episode_number: episodeNumber,
+                                    override: {custom_requirements: String(state.customRequirements || '').trim()},
+                                }),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '保存提示词模板失败');
+                        state.effective = data.effective || state.effective;
+                        this.promptLibraryModal?.hide();
+                        this.showCreativeNotice('提示词模板设置已保存');
+                    } catch (error) {
+                        state.error = error.message || '保存提示词模板失败';
+                    } finally {
+                        state.saving = false;
+                    }
+                },
+
+                async copySelectedPromptTemplate(ownerScope = 'user') {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    const template = this.selectedPromptTemplate();
+                    if (!projectId || !template || state.saving) return;
+                    const suggested = `${template.title}·自定义`;
+                    const title = window.prompt('请输入新模板名称', suggested);
+                    if (!String(title || '').trim()) return;
+                    const content = this.cloneCreativeJson(template.content || {});
+                    const custom = String(state.customRequirements || '').trim();
+                    if (custom) content.shared_dna = `${String(content.shared_dna || '').trim()}\n${custom}`.trim();
+                    state.saving = true;
+                    state.error = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/templates`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    title: String(title).trim(),
+                                    description: `基于“${template.title}”创建`,
+                                    owner_scope: ownerScope,
+                                    content,
+                                }),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '创建模板失败');
+                        await this.loadProjectPromptModule(state.stage);
+                        state.selectedTemplateKey = data.template_key;
+                        state.selectedTemplateRevision = Number(data.revision || 1);
+                        this.showCreativeNotice(ownerScope === 'project' ? '项目模板已创建' : '个人模板已创建');
+                    } catch (error) {
+                        state.error = error.message || '创建模板失败';
+                    } finally {
+                        state.saving = false;
+                    }
+                },
+
+                promptABContextFieldAllowed(field) {
+                    const stage = this.creativeWorkspace.promptLibrary.stage;
+                    return {
+                        brief_id: ['characters', 'outline', 'beats', 'script'],
+                        character_batch_id: ['outline', 'beats', 'script'],
+                        outline_batch_id: ['beats', 'script'],
+                        beats_id: ['script'],
+                    }[field]?.includes(stage) || false;
+                },
+
+                promptABRequestPayload() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const stage = state.stage;
+                    const episodeNumber = ['beats', 'script'].includes(stage)
+                        ? Number(this.creativeWorkspace.selectedEpisode || 1) : 0;
+                    const templateA = (state.templates || []).find(
+                        item => item.template_key === state.abTemplateAKey
+                    );
+                    const templateB = (state.templates || []).find(
+                        item => item.template_key === state.abTemplateBKey
+                    );
+                    const contextRefs = {};
+                    Object.entries(state.abContextRefs || {}).forEach(([key, value]) => {
+                        if (this.promptABContextFieldAllowed(key) && value !== null && value !== '') {
+                            contextRefs[key] = value;
+                        }
+                    });
+                    return {
+                        stage,
+                        template_a_key: state.abTemplateAKey,
+                        template_a_revision: Number(templateA?.revision || 1),
+                        template_b_key: state.abTemplateBKey,
+                        template_b_revision: Number(templateB?.revision || 1),
+                        llm_model_record_id: state.abModelRecordId,
+                        budget_amount: Number(state.abBudgetAmount || 0),
+                        episode_number: episodeNumber,
+                        generation_instruction: String(state.abGenerationInstruction || '').trim(),
+                        expected_head_revision: this.isFreeCreativeProject()
+                            ? this.creativeHeadRevision(stage, episodeNumber) : 0,
+                        context_refs: this.isFreeCreativeProject() ? contextRefs : {},
+                    };
+                },
+
+                async loadPromptABHistory() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId) return;
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/ab-tests?limit=10`
+                        );
+                        const data = await response.json();
+                        if (response.ok) state.abHistory = Array.isArray(data.items) ? data.items : [];
+                    } catch (_) {}
+                },
+
+                async loadPromptABReport() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId || !state.stage || state.abReportLoading) return;
+                    state.abReportLoading = true;
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/ab-tests/report?stage=${encodeURIComponent(state.stage)}`
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '读取 A/B 效果汇总失败');
+                        state.abReport = data;
+                    } catch (error) {
+                        state.abReport = null;
+                        state.error = error.message || '读取 A/B 效果汇总失败';
+                    } finally {
+                        state.abReportLoading = false;
+                    }
+                },
+
+                promptABExportUrl(experimentId, format) {
+                    const projectId = this.creativeWorkspace.project?.id;
+                    const normalizedFormat = format === 'md' ? 'md' : 'json';
+                    return `/api/creative/projects/${projectId}/prompt-library/ab-tests/${encodeURIComponent(experimentId)}/export?format=${normalizedFormat}`;
+                },
+
+                promptABReportTemplate(item) {
+                    return (this.creativeWorkspace.promptLibrary.templates || []).find(
+                        template => template.template_key === item?.template_key
+                    ) || null;
+                },
+
+                async createPromptIterationDraft(item) {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    const template = this.promptABReportTemplate(item);
+                    if (!projectId || !template || state.abIterationLoading) return;
+                    if (template.owner_scope === 'system') {
+                        state.error = '系统模板只读，请先另存到我的模板或另存为项目模板';
+                        return;
+                    }
+                    state.abIterationLoading = true;
+                    state.error = '';
+                    state.abIterationDraft = null;
+                    try {
+                        const operationId = globalThis.crypto?.randomUUID?.()
+                            || `prompt-iteration-${Date.now()}`;
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/iteration-drafts`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    operation_id: operationId,
+                                    template_key: template.template_key,
+                                    expected_template_revision: Number(template.revision || 1),
+                                    stage: state.stage,
+                                    dimension_key: item.weakest_dimension?.key,
+                                }),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(
+                            typeof data.detail === 'string'
+                                ? data.detail : data.detail?.message || '创建迭代草稿失败'
+                        );
+                        state.abIterationDraft = data;
+                    } catch (error) {
+                        state.error = error.message || '创建迭代草稿失败';
+                    } finally {
+                        state.abIterationLoading = false;
+                    }
+                },
+
+                closePromptIterationDraft() {
+                    this.creativeWorkspace.promptLibrary.abIterationDraft = null;
+                },
+
+                async publishPromptIterationDraft() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    const draft = state.abIterationDraft;
+                    if (!projectId || !draft?.id || state.abIterationPublishing) return;
+                    state.abIterationPublishing = true;
+                    state.error = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/iteration-drafts/${draft.id}/publish`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    expected_template_revision: Number(draft.base_revision),
+                                }),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(
+                            typeof data.detail === 'string'
+                                ? data.detail : data.detail?.message || '发布模板修订失败'
+                        );
+                        state.abIterationDraft = null;
+                        await this.loadProjectPromptModule(state.stage);
+                        this.showCreativeNotice(
+                            `模板 v${data.revision?.revision} 已发布；项目默认绑定保持不变`
+                        );
+                    } catch (error) {
+                        state.error = error.message || '发布模板修订失败';
+                    } finally {
+                        state.abIterationPublishing = false;
+                    }
+                },
+
+                async openPromptAB() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId || state.abLoading) return;
+                    const ordered = this.orderedPromptTemplates();
+                    state.abOpen = true;
+                    state.importOpen = false;
+                    state.governanceOpen = false;
+                    state.observabilityOpen = false;
+                    state.marketplaceOpen = false;
+                    state.abPreflight = null;
+                    state.abEvaluationExperimentId = '';
+                    state.abReport = null;
+                    state.abIterationDraft = null;
+                    state.abTemplateAKey = state.selectedTemplateKey || ordered[0]?.template_key || '';
+                    state.abTemplateBKey = ordered.find(
+                        item => item.template_key !== state.abTemplateAKey
+                    )?.template_key || '';
+                    state.abLoading = true;
+                    state.error = '';
+                    try {
+                        const requests = [aiworkerApi.request('/api/llm/available-models')];
+                        if (this.isFreeCreativeProject()) {
+                            const query = ['beats', 'script'].includes(state.stage)
+                                ? `?episode_number=${Number(this.creativeWorkspace.selectedEpisode || 1)}` : '';
+                            requests.push(aiworkerApi.request(
+                                `/api/creative/projects/${projectId}/free/context-options${query}`
+                            ));
+                        }
+                        const responses = await Promise.all(requests);
+                        const payloads = await Promise.all(responses.map(response => response.json()));
+                        if (!responses[0].ok) throw new Error(payloads[0].detail || '读取可用模型失败');
+                        state.abModelOptions = Array.isArray(payloads[0].items) ? payloads[0].items : [];
+                        state.abModelRecordId = String(payloads[0].default_model_record_id || state.abModelOptions[0]?.id || '');
+                        if (this.isFreeCreativeProject()) {
+                            if (!responses[1].ok) throw new Error(payloads[1].detail || '读取可引用版本失败');
+                            state.abContextOptions = payloads[1] || {};
+                            state.abContextRefs = {
+                                brief_id: payloads[1]?.briefs?.[0]?.id ?? null,
+                                character_batch_id: payloads[1]?.character_batches?.[0]?.batch_id || '',
+                                outline_batch_id: payloads[1]?.outline_batches?.[0]?.batch_id || '',
+                                beats_id: payloads[1]?.beats?.[0]?.id ?? null,
+                            };
+                        }
+                        await Promise.all([
+                            this.loadPromptABHistory(),
+                            this.loadPromptABReport(),
+                        ]);
+                    } catch (error) {
+                        state.error = error.message || '读取 A/B 测试配置失败';
+                    } finally {
+                        state.abLoading = false;
+                    }
+                },
+
+                closePromptAB() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    state.abOpen = false;
+                    state.abPreflight = null;
+                    state.abEvaluationExperimentId = '';
+                    state.abIterationDraft = null;
+                },
+
+                async preflightPromptAB() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId || state.abLoading) return;
+                    if (!state.abTemplateAKey || !state.abTemplateBKey || !state.abModelRecordId) {
+                        state.error = '请选择两个模板和一个模型';
+                        return;
+                    }
+                    state.abLoading = true;
+                    state.error = '';
+                    state.abPreflight = null;
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/ab-tests/preflight`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify(this.promptABRequestPayload()),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || 'A/B 预检失败');
+                        state.abPreflight = data;
+                    } catch (error) {
+                        state.error = error.message || 'A/B 预检失败';
+                    } finally {
+                        state.abLoading = false;
+                    }
+                },
+
+                async startPromptAB() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId || !state.abPreflight?.can_start || state.abStarting) return;
+                    state.abStarting = true;
+                    state.error = '';
+                    try {
+                        const operationId = globalThis.crypto?.randomUUID?.() || `prompt-ab-${Date.now()}`;
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/ab-tests`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    ...this.promptABRequestPayload(),
+                                    operation_id: operationId,
+                                    preflight_hash: state.abPreflight.preflight_hash,
+                                }),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) {
+                            const detail = data.detail;
+                            throw new Error(typeof detail === 'string'
+                                ? detail : (detail?.blockers || []).join('；') || detail?.message || '启动 A/B 测试失败');
+                        }
+                        state.abPreflight = null;
+                        await this.loadPromptABHistory();
+                        this.showCreativeNotice('A/B 两组任务已创建；生成结果不会自动成为当前版本');
+                    } catch (error) {
+                        state.error = error.message || '启动 A/B 测试失败';
+                    } finally {
+                        state.abStarting = false;
+                    }
+                },
+
+                promptABScoreDimensions() {
+                    return [
+                        {key: 'premise_fit', label: '命题契合'},
+                        {key: 'conflict_engine', label: '冲突引擎'},
+                        {key: 'character_drive', label: '人物驱动力'},
+                        {key: 'emotional_payoff', label: '情绪回报'},
+                        {key: 'pacing_hooks', label: '节奏与钩子'},
+                        {key: 'expression_quality', label: '表达完成度'},
+                        {key: 'production_feasibility', label: '制作可行性'},
+                    ];
+                },
+
+                promptABScorecard(source = {}) {
+                    const result = {};
+                    this.promptABScoreDimensions().forEach(({key}) => {
+                        const score = Number(source?.[key]);
+                        result[key] = score >= 1 && score <= 5 ? score : 3;
+                    });
+                    result.strengths = String(source?.strengths || '');
+                    result.risks = String(source?.risks || '');
+                    return result;
+                },
+
+                openPromptABEvaluation(experiment) {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const existing = experiment?.evaluation || {};
+                    state.abEvaluationExperimentId = String(experiment?.id || '');
+                    state.abEvaluation = {
+                        A: this.promptABScorecard(existing.A),
+                        B: this.promptABScorecard(existing.B),
+                        winner_arm: String(experiment?.winner_arm || ''),
+                        decision_note: String(experiment?.decision_note || ''),
+                        expected_evaluation_revision: Number(experiment?.evaluation_revision || 0),
+                    };
+                    state.error = '';
+                },
+
+                closePromptABEvaluation() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    state.abEvaluationExperimentId = '';
+                    state.abEvaluationSaving = false;
+                },
+
+                async savePromptABEvaluation() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    const experimentId = state.abEvaluationExperimentId;
+                    if (!projectId || !experimentId || state.abEvaluationSaving) return;
+                    if (!['A', 'B', 'tie'].includes(state.abEvaluation.winner_arm)) {
+                        state.error = '请选择 A、B 或平局作为人工结论';
+                        return;
+                    }
+                    state.abEvaluationSaving = true;
+                    state.error = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/ab-tests/${experimentId}/evaluation`,
+                            {
+                                method: 'PUT',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    arm_a: state.abEvaluation.A,
+                                    arm_b: state.abEvaluation.B,
+                                    winner_arm: state.abEvaluation.winner_arm,
+                                    decision_note: String(state.abEvaluation.decision_note || '').trim(),
+                                    expected_evaluation_revision: Number(
+                                        state.abEvaluation.expected_evaluation_revision || 0
+                                    ),
+                                }),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) {
+                            throw new Error(typeof data.detail === 'string'
+                                ? data.detail : data.detail?.message || '保存 A/B 评价失败');
+                        }
+                        state.abHistory = (state.abHistory || []).map(item =>
+                            item.id === data.id ? data : item
+                        );
+                        await this.loadPromptABReport();
+                        this.closePromptABEvaluation();
+                        this.showCreativeNotice('A/B 人工评价已保存；项目默认模板未改变');
+                    } catch (error) {
+                        state.error = error.message || '保存 A/B 评价失败';
+                    } finally {
+                        state.abEvaluationSaving = false;
+                    }
+                },
+
+                openPromptImport() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    state.importOpen = true;
+                    state.abOpen = false;
+                    state.governanceOpen = false;
+                    state.observabilityOpen = false;
+                    state.marketplaceOpen = false;
+                    state.importDraft = null;
+                    state.importWarnings = [];
+                    state.importSourceSummary = {};
+                    state.error = '';
+                },
+
+                closePromptImport() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    state.importOpen = false;
+                    state.importDraft = null;
+                    state.importWarnings = [];
+                    state.importSourceSummary = {};
+                },
+
+                async loadPromptImportFile(event) {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const file = event?.target?.files?.[0];
+                    if (!file) return;
+                    const name = String(file.name || '').toLowerCase();
+                    if (!name.endsWith('.md') && !name.endsWith('.txt')) {
+                        state.error = '只支持 .md 或 .txt 文件';
+                        event.target.value = '';
+                        return;
+                    }
+                    try {
+                        const text = await file.text();
+                        if (text.length > 50000) throw new Error('外部提示词不能超过 50000 字符');
+                        state.importSourceText = text;
+                        state.error = '';
+                    } catch (error) {
+                        state.error = error.message || '读取提示词文件失败';
+                    } finally {
+                        event.target.value = '';
+                    }
+                },
+
+                async previewPromptImport() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    const sourceText = String(state.importSourceText || '').trim();
+                    if (!projectId || state.importLoading) return;
+                    if (!sourceText) {
+                        state.error = '请粘贴外部提示词或选择文件';
+                        return;
+                    }
+                    state.importLoading = true;
+                    state.error = '';
+                    state.importDraft = null;
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/import-preview`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    source_text: sourceText,
+                                    target_stage: state.stage || null,
+                                }),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '整理外部提示词失败');
+                        state.importDraft = this.cloneCreativeJson(data.draft || null, null);
+                        state.importWarnings = Array.isArray(data.warnings) ? data.warnings : [];
+                        state.importSourceSummary = data.source_summary || {};
+                        state.importTitle = String(data.draft?.title || '');
+                        state.importDescription = String(data.draft?.description || '');
+                        state.importParametersJson = JSON.stringify(data.draft?.content?.parameters || {}, null, 2);
+                        state.importExamplesJson = JSON.stringify(data.draft?.content?.examples || [], null, 2);
+                    } catch (error) {
+                        state.error = error.message || '整理外部提示词失败';
+                    } finally {
+                        state.importLoading = false;
+                    }
+                },
+
+                async saveImportedPromptTemplate() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    if (!projectId || !state.importDraft || state.saving) return;
+                    const title = String(state.importTitle || '').trim();
+                    if (!title) {
+                        state.error = '模板名称不能为空';
+                        return;
+                    }
+                    let content;
+                    try {
+                        const parameters = JSON.parse(String(state.importParametersJson || '{}'));
+                        const examples = JSON.parse(String(state.importExamplesJson || '[]'));
+                        if (!parameters || Array.isArray(parameters) || typeof parameters !== 'object') {
+                            throw new Error('模板参数必须是 JSON 对象');
+                        }
+                        if (!Array.isArray(examples)) throw new Error('模板示例必须是 JSON 数组');
+                        content = this.cloneCreativeJson(state.importDraft.content || {});
+                        content.parameters = parameters;
+                        content.examples = examples.map(example => ({
+                            ...example,
+                            include_in_context: Boolean(example?.include_in_context),
+                        }));
+                    } catch (error) {
+                        state.error = error.message || '导入草稿 JSON 格式不正确';
+                        return;
+                    }
+                    state.saving = true;
+                    state.error = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/templates`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    title,
+                                    description: String(state.importDescription || '').trim(),
+                                    owner_scope: state.importOwnerScope,
+                                    content,
+                                }),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '保存导入模板失败');
+                        this.closePromptImport();
+                        await this.loadProjectPromptModule(state.stage);
+                        state.selectedTemplateKey = data.template_key;
+                        state.selectedTemplateRevision = Number(data.revision || 1);
+                        this.showCreativeNotice('导入草稿已保存为模板；尚未绑定或启用');
+                    } catch (error) {
+                        state.error = error.message || '保存导入模板失败';
+                    } finally {
+                        state.saving = false;
+                    }
+                },
+
+                async savePromptTemplateRevision() {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    const projectId = this.creativeWorkspace.project?.id;
+                    const template = this.selectedPromptTemplate();
+                    if (!projectId || !template || !state.editing || state.saving) return;
+                    let content;
+                    try {
+                        const parameters = JSON.parse(String(state.editParametersJson || '{}'));
+                        const examples = JSON.parse(String(state.editExamplesJson || '[]'));
+                        if (!parameters || Array.isArray(parameters) || typeof parameters !== 'object') {
+                            throw new Error('模板参数必须是 JSON 对象');
+                        }
+                        if (!Array.isArray(examples)) throw new Error('模板示例必须是 JSON 数组');
+                        content = this.cloneCreativeJson(state.editContent || {});
+                        content.parameters = parameters;
+                        content.examples = examples;
+                    } catch (error) {
+                        state.error = error.message || '高级模板 JSON 格式不正确';
+                        return;
+                    }
+                    state.saving = true;
+                    state.error = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/prompt-library/templates/${template.id}/revisions`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({
+                                    expected_revision: Number(template.revision || 1),
+                                    content,
+                                }),
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '保存模板版本失败');
+                        const selectedKey = template.template_key;
+                        await this.loadProjectPromptModule(state.stage);
+                        const updated = state.templates.find(item => item.template_key === selectedKey);
+                        if (updated) this.selectPromptTemplate(updated);
+                        if (template.owner_scope === 'project') {
+                            state.editing = false;
+                            state.governanceOpen = true;
+                            await this.loadPromptGovernance();
+                            this.showCreativeNotice(`项目模板 v${data.revision} 已保存并进入待审核`);
+                        } else {
+                            this.showCreativeNotice(`模板新版本 v${data.revision} 已保存`);
+                        }
+                    } catch (error) {
+                        state.error = error.message || '保存模板版本失败';
+                    } finally {
+                        state.saving = false;
+                    }
                 },
 
                 async openFreeCreativeGeneration(stage, options = {}) {
@@ -1464,6 +2769,7 @@ window.aiworkerModules.push(() => ({
                             generation_instruction: String(state.instruction || '').trim(),
                             context_refs: refs,
                         };
+                        Object.assign(payload, this.promptGenerationPayload(stage));
                         const modelRecordId = String(state.modelRecordId || '').trim();
                         if (modelRecordId) payload.llm_model_record_id = modelRecordId;
                         if (stage === 'brief') payload.count = Number(state.count || 3);
@@ -1652,7 +2958,10 @@ window.aiworkerModules.push(() => ({
                     if (this.isFreeCreativeProject()) return this.openFreeCreativeGeneration('brief');
                     try {
                         const task = await this.resolveCreativeWorkflowTask('brief', this.creativeWorkspace.project.id);
-                        const body = {count: Number(this.creativeWorkspace.directionCount || 3), workflow_task_id: task.id};
+                        const body = this.promptGenerationPayload('brief', {
+                            count: Number(this.creativeWorkspace.directionCount || 3),
+                            workflow_task_id: task.id,
+                        });
                         if (this.creativeWorkspace.project.creation_mode === 'original') {
                             body.preserve_blueprint_ids = [...this.creativeWorkspace.preservedBlueprintIds];
                         }
@@ -1675,7 +2984,9 @@ window.aiworkerModules.push(() => ({
                         const task = await this.resolveCreativeWorkflowTask('brief', this.creativeWorkspace.project.id);
                         return this.startCreativeGeneration(
                             `/api/creative/blueprints/${parent.id}/derive`,
-                            {instruction, workflow_task_id: task.id},
+                            this.promptGenerationPayload('brief', {
+                                instruction, workflow_task_id: task.id,
+                            }),
                             'blueprint_variant'
                         );
                     } catch (e) {
@@ -1687,7 +2998,11 @@ window.aiworkerModules.push(() => ({
                     if (this.isFreeCreativeProject()) return this.openFreeCreativeGeneration('characters');
                     try {
                         const task = await this.resolveCreativeWorkflowTask('characters', this.creativeWorkspace.project.id);
-                        return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/characters/generate`, {workflow_task_id: task.id}, 'characters');
+                        return this.startCreativeGeneration(
+                            `/api/creative/projects/${this.creativeWorkspace.project.id}/characters/generate`,
+                            this.promptGenerationPayload('characters', {workflow_task_id: task.id}),
+                            'characters'
+                        );
                     } catch (e) {
                         window.dispatchEvent(new CustomEvent('aiworker:toast', {detail: {message: e.message, type: 'error'}}));
                     }
@@ -1697,7 +3012,11 @@ window.aiworkerModules.push(() => ({
                     if (this.isFreeCreativeProject()) return this.openFreeCreativeGeneration('outline');
                     try {
                         const task = await this.resolveCreativeWorkflowTask('outline', this.creativeWorkspace.project.id);
-                        return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/outlines/generate`, {workflow_task_id: task.id}, 'outlines');
+                        return this.startCreativeGeneration(
+                            `/api/creative/projects/${this.creativeWorkspace.project.id}/outlines/generate`,
+                            this.promptGenerationPayload('outline', {workflow_task_id: task.id}),
+                            'outlines'
+                        );
                     } catch (e) {
                         window.dispatchEvent(new CustomEvent('aiworker:toast', {detail: {message: e.message, type: 'error'}}));
                     }
@@ -1708,7 +3027,11 @@ window.aiworkerModules.push(() => ({
                     try {
                         const episode = Number(this.creativeWorkspace.selectedEpisode || 0);
                         const task = await this.resolveCreativeWorkflowTask('beats', this.creativeWorkspace.project.id);
-                        return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/episodes/${episode}/beats/generate`, {workflow_task_id: task.id}, 'beats');
+                        return this.startCreativeGeneration(
+                            `/api/creative/projects/${this.creativeWorkspace.project.id}/episodes/${episode}/beats/generate`,
+                            this.promptGenerationPayload('beats', {workflow_task_id: task.id}),
+                            'beats'
+                        );
                     } catch (e) {
                         window.dispatchEvent(new CustomEvent('aiworker:toast', {detail: {message: e.message, type: 'error'}}));
                     }
@@ -1758,7 +3081,7 @@ window.aiworkerModules.push(() => ({
                         const task = await this.resolveCreativeWorkflowTask('beats', this.creativeWorkspace.project.id);
                         return this.startCreativeGeneration(
                             `/api/creative/projects/${this.creativeWorkspace.project.id}/beats/generate-series`,
-                            {workflow_task_id: task.id}, 'beats', {series: true}
+                            this.promptGenerationPayload('beats', {workflow_task_id: task.id}), 'beats', {series: true}
                         );
                     } catch (e) {
                         window.dispatchEvent(new CustomEvent('aiworker:toast', {detail: {message: e.message, type: 'error'}}));
@@ -1773,7 +3096,11 @@ window.aiworkerModules.push(() => ({
                         }
                         const episode = Number(this.creativeWorkspace.selectedEpisode || 0);
                         const task = await this.resolveCreativeWorkflowTask('script', this.creativeWorkspace.project.id);
-                        return this.startCreativeGeneration(`/api/creative/projects/${this.creativeWorkspace.project.id}/episodes/${episode}/scripts/generate`, {workflow_task_id: task.id}, 'script');
+                        return this.startCreativeGeneration(
+                            `/api/creative/projects/${this.creativeWorkspace.project.id}/episodes/${episode}/scripts/generate`,
+                            this.promptGenerationPayload('script', {workflow_task_id: task.id}),
+                            'script'
+                        );
                     } catch (e) {
                         window.dispatchEvent(new CustomEvent('aiworker:toast', {detail: {message: e.message, type: 'error'}}));
                     }
@@ -1822,7 +3149,7 @@ window.aiworkerModules.push(() => ({
                         const task = await this.resolveCreativeWorkflowTask('script', this.creativeWorkspace.project.id);
                         return this.startCreativeGeneration(
                             `/api/creative/projects/${this.creativeWorkspace.project.id}/scripts/generate-series`,
-                            {workflow_task_id: task.id}, 'script', {series: true}
+                            this.promptGenerationPayload('script', {workflow_task_id: task.id}), 'script', {series: true}
                         );
                     } catch (e) {
                         window.dispatchEvent(new CustomEvent('aiworker:toast', {detail: {message: e.message, type: 'error'}}));

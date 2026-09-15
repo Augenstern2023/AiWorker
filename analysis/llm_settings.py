@@ -270,11 +270,31 @@ def _model_dict(row: Any) -> dict[str, Any]:
         "provider_id": str(row["provider_id"]),
         "model_id": str(row["model_id"]),
         "display_name": str(row["display_name"] or ""),
+        "input_price_per_million": (
+            float(row["input_price_per_million"])
+            if row["input_price_per_million"] is not None
+            else None
+        ),
+        "output_price_per_million": (
+            float(row["output_price_per_million"])
+            if row["output_price_per_million"] is not None
+            else None
+        ),
+        "price_currency": str(row["price_currency"] or "CNY"),
         "source": str(row["source"]),
         "is_enabled": bool(row["is_enabled"]),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def _normalized_model_price(value: float | None) -> float | None:
+    if value is None:
+        return None
+    normalized = float(value)
+    if normalized < 0 or normalized > 1_000_000:
+        raise LLMSettingsError("模型 Token 单价必须在 0 到 1000000 之间")
+    return normalized
 
 
 class LLMSettingsRepository:
@@ -409,6 +429,9 @@ class LLMSettingsRepository:
         *,
         model_id: str,
         display_name: str = "",
+        input_price_per_million: float | None = None,
+        output_price_per_million: float | None = None,
+        price_currency: str = "CNY",
         source: str = "manual",
         is_enabled: bool = True,
     ) -> dict[str, Any]:
@@ -417,6 +440,9 @@ class LLMSettingsRepository:
             raise LLMSettingsError("模型 ID 不能为空")
         if source not in {"manual", "synced", "imported"}:
             raise LLMSettingsError("不支持的模型来源")
+        currency = str(price_currency or "CNY").strip().upper()
+        if currency not in {"CNY", "USD"}:
+            raise LLMSettingsError("模型价格币种只支持 CNY 或 USD")
         record_id = str(uuid.uuid4())
         try:
             with self.database.transaction() as connection:
@@ -428,6 +454,13 @@ class LLMSettingsRepository:
                         provider_id=provider_id,
                         model_id=normalized_id,
                         display_name=str(display_name or "").strip(),
+                        input_price_per_million=_normalized_model_price(
+                            input_price_per_million
+                        ),
+                        output_price_per_million=_normalized_model_price(
+                            output_price_per_million
+                        ),
+                        price_currency=currency,
                         source=source,
                         is_enabled=bool(is_enabled),
                     )
@@ -445,6 +478,9 @@ class LLMSettingsRepository:
         *,
         model_id: str | None = None,
         display_name: str | None = None,
+        input_price_per_million: float | None = None,
+        output_price_per_million: float | None = None,
+        price_currency: str | None = None,
         is_enabled: bool | None = None,
     ) -> dict[str, Any]:
         with self.database.transaction() as connection:
@@ -463,6 +499,19 @@ class LLMSettingsRepository:
                 values["model_id"] = normalized
             if display_name is not None:
                 values["display_name"] = str(display_name).strip()
+            if input_price_per_million is not None:
+                values["input_price_per_million"] = _normalized_model_price(
+                    input_price_per_million
+                )
+            if output_price_per_million is not None:
+                values["output_price_per_million"] = _normalized_model_price(
+                    output_price_per_million
+                )
+            if price_currency is not None:
+                currency = str(price_currency).strip().upper()
+                if currency not in {"CNY", "USD"}:
+                    raise LLMSettingsError("模型价格币种只支持 CNY 或 USD")
+                values["price_currency"] = currency
             if is_enabled is not None:
                 values["is_enabled"] = bool(is_enabled)
             try:
@@ -634,6 +683,9 @@ class LLMSettingsRepository:
                     llm_models.c.id,
                     llm_models.c.model_id,
                     llm_models.c.display_name,
+                    llm_models.c.input_price_per_million,
+                    llm_models.c.output_price_per_million,
+                    llm_models.c.price_currency,
                     llm_models.c.is_enabled.label("model_is_enabled"),
                     llm_providers.c.id.label("provider_id"),
                     llm_providers.c.name.label("provider_name"),
@@ -681,6 +733,17 @@ class LLMSettingsRepository:
                     "provider_name": provider_name,
                     "model_id": str(row["model_id"]),
                     "display_name": display_name,
+                    "input_price_per_million": (
+                        float(row["input_price_per_million"])
+                        if row["input_price_per_million"] is not None
+                        else None
+                    ),
+                    "output_price_per_million": (
+                        float(row["output_price_per_million"])
+                        if row["output_price_per_million"] is not None
+                        else None
+                    ),
+                    "price_currency": str(row["price_currency"] or "CNY"),
                     "label": f"{provider_name} / {display_name}",
                     "is_default": str(row["id"]) == str(default_model_id or ""),
                 }
@@ -706,6 +769,9 @@ class LLMSettingsRepository:
                     llm_providers.c.wire_api,
                     llm_providers.c.api_key_encrypted,
                     llm_models.c.model_id,
+                    llm_models.c.input_price_per_million,
+                    llm_models.c.output_price_per_million,
+                    llm_models.c.price_currency,
                 )
                 .select_from(
                     llm_settings.join(
@@ -730,6 +796,17 @@ class LLMSettingsRepository:
             "base_url": str(row["base_url"]),
             "api_key": self.cipher.decrypt(str(row["api_key_encrypted"] or "")),
             "model": str(row["model_id"]),
+            "input_price_per_million": (
+                float(row["input_price_per_million"])
+                if row["input_price_per_million"] is not None
+                else None
+            ),
+            "output_price_per_million": (
+                float(row["output_price_per_million"])
+                if row["output_price_per_million"] is not None
+                else None
+            ),
+            "price_currency": str(row["price_currency"] or "CNY"),
             "wire_api": str(row["wire_api"]),
             "allow_insecure_http": urlsplit(str(row["base_url"])).scheme.lower() == "http",
         }
@@ -742,6 +819,9 @@ class LLMSettingsRepository:
                     llm_models.c.id.label("model_record_id"),
                     llm_models.c.model_id,
                     llm_models.c.display_name,
+                    llm_models.c.input_price_per_million,
+                    llm_models.c.output_price_per_million,
+                    llm_models.c.price_currency,
                     llm_models.c.is_enabled.label("model_is_enabled"),
                     llm_providers.c.id.label("provider_id"),
                     llm_providers.c.name.label("provider_name"),
@@ -788,6 +868,17 @@ class LLMSettingsRepository:
             "model_display_name": str(
                 row["display_name"] or row["model_id"]
             ),
+            "input_price_per_million": (
+                float(row["input_price_per_million"])
+                if row["input_price_per_million"] is not None
+                else None
+            ),
+            "output_price_per_million": (
+                float(row["output_price_per_million"])
+                if row["output_price_per_million"] is not None
+                else None
+            ),
+            "price_currency": str(row["price_currency"] or "CNY"),
             "wire_api": str(row["wire_api"]),
             "allow_insecure_http": (
                 urlsplit(str(row["base_url"])).scheme.lower() == "http"

@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 import config
 
-from analysis.llm import create_llm_provider_from_config
+from analysis.llm import create_llm_provider_from_config, llm_usage_snapshot
 from core.events import emit_event
 from core.job import CrawlJob
 from creative.repository import CreativeRepository
@@ -54,6 +54,15 @@ def emit(
         message,
         payload or {},
     )
+
+
+def _usage_payload(job: CrawlJob, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        **dict(payload or {}),
+        "llm_usage": llm_usage_snapshot(
+            getattr(job, "_llm_usage_provider", None)
+        ),
+    }
 
 
 class _ObservedProvider:
@@ -153,6 +162,12 @@ async def run(job: CrawlJob) -> None:
         source = review.get("source_payload")
         if not isinstance(source, dict) or not source.get("audit_scope"):
             raise ValueError("完整项目审核缺少冻结来源快照")
+        prompt_snapshot = dict(source.get("prompt_snapshot") or {})
+        if prompt_snapshot and (
+            prompt_snapshot.get("stage") != "review"
+            or prompt_snapshot.get("mode") != "series"
+        ):
+            raise ValueError("完整项目审核提示词快照与任务范围不匹配")
 
         repository.start_script_review(review_id)
         emit(
@@ -183,6 +198,7 @@ async def run(job: CrawlJob) -> None:
             )
 
         provider = create_provider(retry_callback=observed.retry_callback)
+        setattr(job, "_llm_usage_provider", provider)
         observed.bind(provider)
         report = await review_project_source(
             observed,
@@ -190,6 +206,7 @@ async def run(job: CrawlJob) -> None:
             on_checkpoint=checkpoint,
             on_request=observed.set_request,
             initial_report=review.get("report") or None,
+            prompt_snapshot=prompt_snapshot or None,
         )
         target_dir = Path("data") / "project_reviews" / job.job_id
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -221,11 +238,14 @@ async def run(job: CrawlJob) -> None:
         job,
         "job_finished",
         "完整项目审核完成",
-        payload={
-            "review_id": review_id,
-            "audit_scope": str(source.get("audit_scope") or ""),
-            "ai_verdict": str(report.get("ai_verdict") or ""),
-        },
+        payload=_usage_payload(
+            job,
+            {
+                "review_id": review_id,
+                "audit_scope": str(source.get("audit_scope") or ""),
+                "ai_verdict": str(report.get("ai_verdict") or ""),
+            },
+        ),
     )
 
 
@@ -347,7 +367,13 @@ def main() -> int:
     try:
         asyncio.run(run(job))
     except Exception:
-        emit(job, "job_failed", "完整项目审核失败", "error")
+        emit(
+            job,
+            "job_failed",
+            "完整项目审核失败",
+            "error",
+            _usage_payload(job),
+        )
         return 1
     return 0
 

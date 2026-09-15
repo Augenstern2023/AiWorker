@@ -24,6 +24,7 @@
         link.title = '返回审核';
         link.setAttribute('aria-label', '返回审核');
         label.textContent = '返回审核';
+        link.hidden = false;
     }
 
     function reviewPageUrl() {

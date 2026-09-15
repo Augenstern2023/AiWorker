@@ -32,13 +32,16 @@ from screenplay_review.service import _review_messages
 from writer_agent.service import writer_messages
 from analysis.llm import (
     LLMError,
+    LLMIncompleteResponseError,
     LLMTimeoutError,
     OpenAICompatibleLLMProvider,
     build_responses_request_body,
     build_video_analysis_messages,
     create_llm_provider_from_config,
+    llm_usage_snapshot,
     normalize_llm_analysis,
     parse_chat_completion_json,
+    parse_chat_completion_text,
     parse_json_object,
     parse_responses_text,
     resolve_reasoning_effort,
@@ -118,6 +121,20 @@ def test_normalize_llm_analysis_stabilizes_fields():
     assert result["tags"] == ["旅行"]
     assert result["risk_flags"] == ["隐私"]
     assert result["provider"] == "minimax"
+
+
+def test_parse_chat_completion_text_rejects_output_truncated_by_token_limit():
+    payload = {
+        "choices": [
+            {
+                "finish_reason": "length",
+                "message": {"content": '{"episodes":[{"episode":1}'},
+            }
+        ]
+    }
+
+    with pytest.raises(LLMIncompleteResponseError, match="max_output_tokens"):
+        parse_chat_completion_text(payload)
 
 
 def test_build_video_analysis_messages_contains_json_payload():
@@ -260,6 +277,97 @@ def test_parse_responses_text_reads_output_text():
     payload = {"output": [{"content": [{"type": "output_text", "text": "{\"summary\":\"ok\"}"}]}]}
 
     assert parse_responses_text(payload) == "{\"summary\":\"ok\"}"
+
+
+def test_chat_provider_accumulates_only_reported_usage_and_exposes_coverage():
+    responses = iter(
+        [
+            {
+                "choices": [{"message": {"content": "first"}}],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 5,
+                    "total_tokens": 17,
+                    "prompt_tokens_details": {"cached_tokens": 3},
+                    "completion_tokens_details": {"reasoning_tokens": 2},
+                },
+            },
+            {"choices": [{"message": {"content": "second"}}]},
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, json=next(responses))
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://example.test/v1",
+        api_key="key",
+        model="test-model",
+        transport=httpx.MockTransport(handler),
+    )
+    asyncio.run(provider.complete_text([{"role": "user", "content": "one"}]))
+    asyncio.run(provider.complete_text([{"role": "user", "content": "two"}]))
+
+    assert provider.usage_snapshot() == {
+        "call_count": 2,
+        "reported_call_count": 1,
+        "input_reported_call_count": 1,
+        "output_reported_call_count": 1,
+        "total_reported_call_count": 1,
+        "input_tokens": 12,
+        "output_tokens": 5,
+        "total_tokens": 17,
+        "cached_tokens": 3,
+        "reasoning_tokens": 2,
+        "complete": False,
+    }
+
+
+def test_responses_provider_normalizes_reported_usage():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "output_text": "ok",
+                "usage": {
+                    "input_tokens": 20,
+                    "output_tokens": 8,
+                    "input_tokens_details": {"cached_tokens": 7},
+                    "output_tokens_details": {"reasoning_tokens": 4},
+                },
+            },
+        )
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://example.test/v1",
+        api_key="key",
+        model="test-model",
+        wire_api="responses",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert asyncio.run(
+        provider.complete_text([{"role": "user", "content": "test"}])
+    ) == "ok"
+    assert provider.usage_snapshot()["total_tokens"] == 28
+    assert provider.usage_snapshot()["complete"] is True
+
+
+def test_usage_helper_does_not_invent_usage_for_legacy_provider():
+    assert llm_usage_snapshot(object()) == {
+        "call_count": 0,
+        "reported_call_count": 0,
+        "input_reported_call_count": 0,
+        "output_reported_call_count": 0,
+        "total_reported_call_count": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "complete": False,
+    }
 
 
 def test_responses_provider_falls_back_to_chat_completions_when_gateway_returns_no_json():
@@ -981,15 +1089,9 @@ def test_provider_factory_uses_explicit_model_record_instead_of_global_default()
     class SettingsRepository:
         @staticmethod
         def effective_default():
-            return {
-                "provider": "minimax",
-                "provider_id": "provider-default",
-                "base_url": "https://api.minimax.io/v1",
-                "api_key": "default-key",
-                "model": "MiniMax-M3",
-                "wire_api": "chat_completions",
-                "allow_insecure_http": False,
-            }
+            raise AssertionError(
+                "explicit model resolution must not read the global default"
+            )
 
         @staticmethod
         def effective_model(model_record_id):

@@ -183,7 +183,12 @@ def test_open_show_check_and_generate(page: Page) -> None:
     """Generate button is only enabled when all checks pass; download fires after."""
     preview = {"project": {"id": "3", "name": "寻找真相", "target_episode_count": 2},
                "ready": True, "fingerprint": "abc" * 8,
-               "stages": [_stage()], "issues": []}
+               "stages": [
+                   {"stage": "breakdown", "episode_number": None,
+                    "state": "ready", "versions": [{"id": 4, "version": 2}],
+                    "message": "检查通过"},
+                   _stage(),
+               ], "issues": []}
     history = {"items": [], "total": 0, "page": 1, "page_size": 20}
     export = {"id": "e1", "project_id": "3", "fingerprint": preview["fingerprint"],
               "contract_version": "1.0", "created_by": "owner", "created_by_name": "负责人",
@@ -202,6 +207,7 @@ def test_open_show_check_and_generate(page: Page) -> None:
         "() => document.querySelector('#production-export-check-status').textContent.includes('全部检查通过')"
     )
     assert page.locator("#production-export-check-status").inner_text() == "全部检查通过，可生成锁定版本的生产包。"
+    assert "剧目拆解" in page.locator("#production-export-stages").inner_text()
 
     generate = page.locator("#production-export-generate")
     assert not generate.is_disabled()

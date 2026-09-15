@@ -131,6 +131,25 @@ def test_formal_review_prompt_requires_an_independent_beats_audit() -> None:
     assert "beats_then_script" in messages[0]["content"]
 
 
+def test_review_template_changes_focus_without_replacing_report_contract() -> None:
+    snapshot = {
+        "stage": "review",
+        "mode": "single",
+        "effective_instruction": "优先检查身份信息差是否清楚。",
+    }
+
+    messages = _review_messages(
+        {"formal": True, "episode_numbers": [1], "episodes": [{}]},
+        snapshot,
+    )
+
+    system = messages[0]["content"]
+    assert "优先检查身份信息差是否清楚" in system
+    assert "ai_verdict、summary、core_findings" in system
+    assert "outline_revision_required" in system
+    assert "不得覆盖前述 JSON 契约" in system
+
+
 def test_uploaded_script_text_accepts_markdown_and_common_chinese_encoding() -> None:
     filename, text = decode_script_upload("第一集.markdown", "# 第一集\n主角登场".encode("gb18030"))
 

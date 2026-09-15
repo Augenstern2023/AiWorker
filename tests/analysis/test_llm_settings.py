@@ -340,7 +340,12 @@ def test_repository_sets_an_enabled_model_as_effective_default():
         api_key="sk-runtime-secret",
     )
     model = repository.create_model(
-        provider["id"], model_id="gpt-5.6-sol", display_name="GPT 5.6"
+        provider["id"],
+        model_id="gpt-5.6-sol",
+        display_name="GPT 5.6",
+        input_price_per_million=8.5,
+        output_price_per_million=34,
+        price_currency="USD",
     )
 
     repository.set_default_model(model["id"])
@@ -354,6 +359,9 @@ def test_repository_sets_an_enabled_model_as_effective_default():
         "model": "gpt-5.6-sol",
         "wire_api": "responses",
         "allow_insecure_http": False,
+        "input_price_per_million": 8.5,
+        "output_price_per_million": 34.0,
+        "price_currency": "USD",
     }
 
 
@@ -367,7 +375,11 @@ def test_repository_lists_and_resolves_enabled_models_without_exposing_secrets()
         api_key="creative-secret",
     )
     selected = repository.create_model(
-        provider["id"], model_id="screenwriter-a", display_name="编剧模型 A"
+        provider["id"],
+        model_id="screenwriter-a",
+        display_name="编剧模型 A",
+        input_price_per_million=2,
+        output_price_per_million=6,
     )
     disabled = repository.create_model(
         provider["id"], model_id="screenwriter-b", display_name="编剧模型 B"
@@ -389,6 +401,9 @@ def test_repository_lists_and_resolves_enabled_models_without_exposing_secrets()
                 "display_name": "编剧模型 A",
                 "label": "Creative Gateway / 编剧模型 A",
                 "is_default": True,
+                "input_price_per_million": 2.0,
+                "output_price_per_million": 6.0,
+                "price_currency": "CNY",
             }
         ],
     }
@@ -398,6 +413,9 @@ def test_repository_lists_and_resolves_enabled_models_without_exposing_secrets()
     assert effective["model_record_id"] == selected["id"]
     assert effective["model"] == "screenwriter-a"
     assert effective["provider_display_name"] == "Creative Gateway"
+    assert effective["input_price_per_million"] == 2.0
+    assert effective["output_price_per_million"] == 6.0
+    assert effective["price_currency"] == "CNY"
     with pytest.raises(repository.conflict_error, match="模型已停用"):
         repository.effective_model(disabled["id"])
 

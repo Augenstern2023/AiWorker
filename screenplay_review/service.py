@@ -136,7 +136,11 @@ def build_text_source(text: str, *, source_filename: str = "") -> dict[str, Any]
 
 def source_fingerprint(source: dict[str, Any]) -> str:
     value = json.dumps(
-        {key: value for key, value in source.items() if key != "fingerprint"},
+        {
+            key: value
+            for key, value in source.items()
+            if key not in {"fingerprint", "prompt_snapshot"}
+        },
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -407,6 +411,7 @@ async def review_source(
     on_progress: Any = None,
     on_checkpoint: Any = None,
     initial_episode_reviews: list[dict[str, Any]] | None = None,
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Ask the configured LLM for a bounded, evidence-based review report."""
     episodes = list(source.get("episodes") or [])
@@ -414,7 +419,7 @@ async def review_source(
         raise ValueError("审核来源没有可用剧本")
     if len(episodes) == 1:
         report = normalize_review_report(
-            await provider.complete_json(_review_messages(source))
+            await provider.complete_json(_review_messages(source, prompt_snapshot))
         )
         await _report_progress(on_progress, 1, 1)
         return report
@@ -442,7 +447,7 @@ async def review_source(
             "episodes": [episode],
         }
         episode_report = normalize_review_report(
-            await provider.complete_json(_review_messages(episode_source))
+            await provider.complete_json(_review_messages(episode_source, prompt_snapshot))
         )
         completed = {
             "episode_number": episode_number,
@@ -469,7 +474,7 @@ async def review_source(
         ],
     }
     report = normalize_review_report(
-        await provider.complete_json(_summary_messages(combined))
+        await provider.complete_json(_summary_messages(combined, prompt_snapshot))
     )
     await _report_progress(on_progress, total, total)
     return report
@@ -494,7 +499,23 @@ def build_partial_review_report(
     }
 
 
-def _review_messages(source: dict[str, Any]) -> list[dict[str, str]]:
+def _with_review_style(
+    system: str, prompt_snapshot: dict[str, Any] | None
+) -> str:
+    if not prompt_snapshot:
+        return system
+    instruction = str(prompt_snapshot.get("effective_instruction") or "").strip()
+    if not instruction:
+        return system
+    return (
+        f"{system}\n\n当前项目审核侧重点（不得覆盖前述 JSON 契约、固定规则包、"
+        f"证据要求、修改路径或人工确认机制）：\n{instruction}"
+    )
+
+
+def _review_messages(
+    source: dict[str, Any], prompt_snapshot: dict[str, Any] | None = None
+) -> list[dict[str, str]]:
     episode_numbers = {int(number) for number in source.get("episode_numbers") or []}
     checks = [
         "检查剧情逻辑、人物执行、台词与 OS、爽点、节奏和结尾钩子。",
@@ -514,7 +535,7 @@ def _review_messages(source: dict[str, Any]) -> list[dict[str, str]]:
     return [
         {
             "role": "system",
-            "content": (
+            "content": _with_review_style((
                 "你是短剧编剧审稿助手。AI 建议结论只能是“通过”或“建议修改”，"
                 "不得代写剧本。输出 JSON：ai_verdict、summary、core_findings、"
                 "episode_reviews、cross_episode_findings。episode_reviews 每项必须有 "
@@ -526,17 +547,19 @@ def _review_messages(source: dict[str, Any]) -> list[dict[str, str]]:
                 "必须标记 outline_revision_required。\n"
                 f"固定规则包：{RULE_PACKAGE}，覆盖{RULES}。\n"
                 + "\n".join(checks)
-            ),
+            ), prompt_snapshot),
         },
         {"role": "user", "content": json.dumps(source, ensure_ascii=False)},
     ]
 
 
-def _summary_messages(source: dict[str, Any]) -> list[dict[str, str]]:
+def _summary_messages(
+    source: dict[str, Any], prompt_snapshot: dict[str, Any] | None = None
+) -> list[dict[str, str]]:
     return [
         {
             "role": "system",
-            "content": (
+            "content": _with_review_style((
                 "你是短剧编剧审稿助手。根据逐集审核和剧本，汇总多集或合集审核报告。"
                 "结论只能是“通过”或“建议修改”。重点检查跨集剧情承接、人物状态、"
                 "设定一致性、前三集信息前置和重复拖沓；无法确认的内容标记证据不足。"
@@ -547,7 +570,7 @@ def _summary_messages(source: dict[str, Any]) -> list[dict[str, str]]:
                 "汇总时保留逐集对 Beats 的归因：Beats 本身需要调整才标记 beats_then_script，"
                 "仅场次细节问题标记 script_only。"
                 f"core_findings 最多 5 条。固定规则包：{RULE_PACKAGE}，覆盖{RULES}。"
-            ),
+            ), prompt_snapshot),
         },
         {"role": "user", "content": json.dumps(source, ensure_ascii=False)},
     ]

@@ -1,0 +1,792 @@
+<div class="modal fade" id="promptLibraryModal" tabindex="-1" aria-labelledby="promptLibraryModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <h5 class="modal-title" id="promptLibraryModalLabel" x-text="`${promptStageLabel(creativeWorkspace.promptLibrary.stage)} · 提示词模板库`"></h5>
+                    <div class="small text-muted">系统输出契约保持锁定；这里只调整题材、故事引擎、节奏和表达风格。</div>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-warning" x-show="!creativeWorkspace.promptLibrary.settings?.enabled" x-cloak>
+                    <div class="fw-semibold">这是旧项目，仍在使用原有硬编码提示词。</div>
+                    <div class="small mt-1">主动升级后会先使用经典兼容模板，已有内容不会被重新生成。</div>
+                    <button class="btn btn-warning btn-sm mt-2" type="button" @click="enableCurrentProjectPromptLibrary" :disabled="creativeWorkspace.promptLibrary.saving">升级到模板系统</button>
+                </div>
+
+                <div class="text-center text-muted py-4" x-show="creativeWorkspace.promptLibrary.loading">正在读取模板库…</div>
+                <div class="alert alert-danger" x-show="creativeWorkspace.promptLibrary.error" x-text="creativeWorkspace.promptLibrary.error"></div>
+                <div class="alert alert-info" x-show="creativeWorkspace.promptLibrary.effective?.update_available" x-cloak>
+                    当前模板已有新版本。项目仍固定使用 v<span x-text="creativeWorkspace.promptLibrary.effective?.revision"></span>，不会自动合并或覆盖。
+                </div>
+
+                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                    <div class="small text-muted">模板按项目题材、平台、受众与创作素材的七维匹配度排序；推荐不会自动改变当前设置。</div>
+                    <div class="d-flex flex-wrap gap-2" x-show="!creativeWorkspace.promptLibrary.importOpen && !creativeWorkspace.promptLibrary.abOpen && !creativeWorkspace.promptLibrary.governanceOpen && !creativeWorkspace.promptLibrary.observabilityOpen && !creativeWorkspace.promptLibrary.marketplaceOpen">
+                        <button class="btn btn-outline-info btn-sm" type="button" @click="openPromptMarketplace">
+                            模板市场
+                        </button>
+                        <button class="btn btn-outline-dark btn-sm" type="button" @click="openPromptObservability">
+                            模板可观测性
+                        </button>
+                        <button class="btn btn-outline-secondary btn-sm" type="button" @click="openPromptGovernance">
+                            项目模板治理
+                        </button>
+                        <button class="btn btn-outline-primary btn-sm" type="button" @click="openPromptImport">
+                            导入外部提示词
+                        </button>
+                        <button class="btn btn-outline-success btn-sm" type="button" @click="openPromptAB" :disabled="!creativeWorkspace.promptLibrary.settings?.enabled || orderedPromptTemplates().length < 2">
+                            模板 A/B 对比
+                        </button>
+                    </div>
+                </div>
+
+                <section class="border border-secondary-subtle rounded p-3 mb-3" x-show="creativeWorkspace.promptLibrary.governanceOpen" x-cloak>
+                    <div class="d-flex justify-content-between align-items-start gap-3">
+                        <div>
+                            <div class="fw-semibold">项目模板治理</div>
+                            <div class="small text-muted mt-1">先查看使用影响，再执行审核、弃用或归档；任何操作都不会静默切换现有绑定。</div>
+                        </div>
+                        <button class="btn btn-sm btn-outline-secondary" type="button" @click="closePromptGovernance">关闭</button>
+                    </div>
+                    <div class="text-center text-muted py-3" x-show="creativeWorkspace.promptLibrary.governanceLoading">正在分析模板使用情况…</div>
+                    <div class="alert alert-light border py-2 mt-3" x-show="creativeWorkspace.promptLibrary.governancePolicy.length">
+                        <template x-for="policy in creativeWorkspace.promptLibrary.governancePolicy" :key="policy"><div class="small" x-text="`· ${policy}`"></div></template>
+                    </div>
+                    <div class="small text-muted mt-3" x-show="!creativeWorkspace.promptLibrary.governanceLoading && !creativeWorkspace.promptLibrary.governanceItems.length">当前项目还没有项目模板。</div>
+                    <div class="alert alert-info py-2 mt-3" x-show="!creativeWorkspace.promptLibrary.governanceLoading && !creativeWorkspace.promptLibrary.governanceCanManage">你可以查看模板状态和使用影响；治理操作仅限项目负责人。</div>
+                    <div class="vstack gap-3 mt-3">
+                        <template x-for="item in creativeWorkspace.promptLibrary.governanceItems" :key="`prompt-governance-${item.id}`">
+                            <div class="border rounded p-3">
+                                <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
+                                    <div>
+                                        <div class="fw-semibold"><span x-text="item.title"></span><span class="text-muted ms-1" x-text="`v${item.revision}`"></span></div>
+                                        <div class="small text-muted mt-1" x-text="item.description || '无模板说明'"></div>
+                                    </div>
+                                    <span class="badge" :class="item.governance_status === 'approved' ? 'text-bg-success' : item.governance_status === 'pending_review' ? 'text-bg-primary' : item.governance_status === 'deprecated' ? 'text-bg-warning' : 'text-bg-secondary'" x-text="promptGovernanceStatusLabel(item.governance_status)"></span>
+                                </div>
+                                <div class="row g-2 mt-2 small">
+                                    <div class="col-6 col-md-3"><span class="text-muted">已批准版本</span><div x-text="item.approved_revision ? `v${item.approved_revision}` : '无'"></div></div>
+                                    <div class="col-6 col-md-3"><span class="text-muted">当前绑定</span><div x-text="item.impact?.active_binding_count || 0"></div></div>
+                                    <div class="col-6 col-md-3"><span class="text-muted">A/B 历史引用</span><div x-text="item.impact?.historical_references?.ab_arms?.length || 0"></div></div>
+                                    <div class="col-6 col-md-3"><span class="text-muted">生成资源引用</span><div x-text="item.impact?.historical_references?.resource_reference_count || 0"></div></div>
+                                </div>
+                                <div class="alert alert-warning py-2 mt-3 mb-0" x-show="item.impact?.archive_blockers?.length" x-text="item.impact?.archive_blockers?.[0]"></div>
+                                <details class="mt-3" x-show="item.governance_events?.length">
+                                    <summary class="small fw-semibold">治理记录</summary>
+                                    <template x-for="event in (item.governance_events || []).slice(0, 5)" :key="event.id">
+                                        <div class="small text-muted mt-1" x-text="`${new Date(Number(event.created_at || 0) * 1000).toLocaleString()} · ${promptGovernanceStatusLabel(event.from_status)} → ${promptGovernanceStatusLabel(event.to_status)} · ${event.note}`"></div>
+                                    </template>
+                                </details>
+                                <div class="d-flex flex-wrap justify-content-end gap-2 mt-3" x-show="creativeWorkspace.promptLibrary.governanceCanManage">
+                                    <template x-for="action in promptGovernanceActions(item)" :key="`${item.id}-${action.key}`">
+                                        <button class="btn btn-sm" :class="action.style" type="button" @click="governPromptTemplate(item, action.key)" :disabled="creativeWorkspace.promptLibrary.governanceSaving || (action.key === 'archive' && !item.impact?.can_archive)" x-text="action.label"></button>
+                                    </template>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </section>
+
+                <section class="border border-dark-subtle rounded p-3 mb-3" x-show="creativeWorkspace.promptLibrary.observabilityOpen" x-cloak>
+                    <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
+                        <div>
+                            <div class="fw-semibold">模板可观测性</div>
+                            <div class="small text-muted mt-1">按模板版本汇总真实任务；Token 只读取供应商 usage，费用只使用任务创建时冻结的单价。</div>
+                        </div>
+                        <button class="btn btn-sm btn-outline-secondary" type="button" @click="closePromptObservability">关闭</button>
+                    </div>
+                    <div class="row g-2 mt-2">
+                        <div class="col-md-4">
+                            <label class="form-label small" for="promptObservabilityStage">生成阶段</label>
+                            <select id="promptObservabilityStage" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.observabilityStage" @change="loadPromptObservability">
+                                <option value="">全部阶段</option>
+                                <template x-for="stage in ['brief','characters','outline','beats','script','review','optimization']" :key="`observability-${stage}`">
+                                    <option :value="stage" x-text="promptStageLabel(stage)"></option>
+                                </template>
+                            </select>
+                        </div>
+                        <div class="col-md-5">
+                            <label class="form-label small" for="promptObservabilityTemplate">模板</label>
+                            <select id="promptObservabilityTemplate" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.observabilityTemplateKey" @change="loadPromptObservability">
+                                <option value="">全部可见模板</option>
+                                <template x-for="template in orderedPromptTemplates()" :key="`observability-template-${template.id}`">
+                                    <option :value="template.template_key" x-text="template.title"></option>
+                                </template>
+                            </select>
+                        </div>
+                        <div class="col-md-3 d-flex align-items-end">
+                            <button class="btn btn-outline-primary btn-sm w-100" type="button" @click="loadPromptObservability" :disabled="creativeWorkspace.promptLibrary.observabilityLoading">刷新真实任务数据</button>
+                        </div>
+                    </div>
+                    <div class="text-center text-muted py-4" x-show="creativeWorkspace.promptLibrary.observabilityLoading">正在汇总任务事件与采纳状态…</div>
+                    <template x-if="creativeWorkspace.promptLibrary.observabilityReport">
+                        <div class="mt-3">
+                            <div class="alert alert-light border py-2 mb-3">
+                                <div class="d-flex flex-wrap gap-3 small">
+                                    <span>扫描终态任务 <strong x-text="creativeWorkspace.promptLibrary.observabilityReport.summary?.terminal_jobs_scanned || 0"></strong></span>
+                                    <span>模板归因覆盖 <strong x-text="promptMetricPercent(creativeWorkspace.promptLibrary.observabilityReport.summary?.attribution_coverage)"></strong></span>
+                                    <span>无法归因 <strong x-text="creativeWorkspace.promptLibrary.observabilityReport.summary?.unattributed_jobs || 0"></strong></span>
+                                    <span x-show="creativeWorkspace.promptLibrary.observabilityReport.summary?.privacy_hidden_jobs">隐私隐藏 <strong x-text="creativeWorkspace.promptLibrary.observabilityReport.summary?.privacy_hidden_jobs"></strong></span>
+                                </div>
+                                <div class="small text-warning mt-1" x-show="creativeWorkspace.promptLibrary.observabilityReport.summary?.truncated">结果已按最近 500 个终态任务截断。</div>
+                            </div>
+
+                            <div class="alert alert-danger py-2" x-show="creativeWorkspace.promptLibrary.observabilityReport.alerts?.length">
+                                <div class="fw-semibold small">检测到可解释的版本回归</div>
+                                <template x-for="alert in (creativeWorkspace.promptLibrary.observabilityReport.alerts || [])" :key="`${alert.template_key}-${alert.stage}-${alert.current_revision}-${alert.metric}`">
+                                    <div class="small mt-1">
+                                        <span x-text="`${promptStageLabel(alert.stage)} · ${alert.metric_label}：v${alert.baseline_revision} → v${alert.current_revision}`"></span>
+                                        <span class="text-muted" x-text="`（样本 ${alert.sample_size.baseline}/${alert.sample_size.current}，覆盖 ${promptMetricPercent(alert.coverage.baseline)}/${promptMetricPercent(alert.coverage.current)}）`"></span>
+                                    </div>
+                                </template>
+                            </div>
+                            <div class="alert alert-info py-2" x-show="creativeWorkspace.promptLibrary.observabilityReport.watch_items?.length">
+                                <div class="fw-semibold small">样本不足，继续观察</div>
+                                <template x-for="item in (creativeWorkspace.promptLibrary.observabilityReport.watch_items || [])" :key="`${item.template_key}-${item.stage}-${item.current_revision}`">
+                                    <div class="small mt-1" x-text="`${promptStageLabel(item.stage)} · v${item.baseline_revision} / v${item.current_revision}：终态样本 ${item.baseline_sample_count}/${item.current_sample_count}，至少各需 ${item.required_sample_count}`"></div>
+                                </template>
+                            </div>
+
+                            <div class="small text-muted py-3" x-show="!creativeWorkspace.promptLibrary.observabilityReport.versions?.length">当前筛选条件下没有可归因的终态任务。</div>
+                            <div class="vstack gap-3">
+                                <template x-for="version in (creativeWorkspace.promptLibrary.observabilityReport.versions || [])" :key="`${version.template_key}-${version.template_revision}`">
+                                    <div class="border rounded p-3">
+                                        <div class="d-flex flex-wrap justify-content-between gap-2">
+                                            <div>
+                                                <span class="fw-semibold" x-text="version.template_title"></span>
+                                                <span class="text-muted ms-1" x-text="`v${version.template_revision}`"></span>
+                                                <div class="small text-muted mt-1" x-text="(version.stages || []).map(stage => promptStageLabel(stage)).join('、')"></div>
+                                            </div>
+                                            <span class="badge text-bg-secondary" x-text="`${version.jobs?.terminal || 0} 个终态任务`"></span>
+                                        </div>
+                                        <div class="row g-2 mt-2 small">
+                                            <div class="col-6 col-lg-2"><div class="text-muted">成功率</div><div class="fw-semibold" x-text="promptMetricPercent(version.jobs?.success_rate)"></div><div class="text-muted" x-text="`${version.jobs?.succeeded || 0} 成功 / ${version.jobs?.failed || 0} 失败`"></div></div>
+                                            <div class="col-6 col-lg-2"><div class="text-muted">真实 Token</div><div class="fw-semibold" x-text="promptMetricNumber(version.tokens?.observed?.total_tokens)"></div><div class="text-muted" x-text="`完整覆盖 ${promptMetricPercent(version.tokens?.job_coverage)}`"></div></div>
+                                            <div class="col-6 col-lg-2"><div class="text-muted">平均 Token</div><div class="fw-semibold" x-text="promptMetricNumber(version.tokens?.average_total_tokens)"></div><div class="text-muted" x-text="`${version.tokens?.complete_job_count || 0} 个完整任务`"></div></div>
+                                            <div class="col-6 col-lg-2"><div class="text-muted">计算费用</div><div class="fw-semibold" x-text="promptCostSummary(version)"></div><div class="text-muted" x-text="`价格覆盖 ${promptMetricPercent(version.cost?.job_coverage)}`"></div></div>
+                                            <div class="col-6 col-lg-2"><div class="text-muted">人工采纳率</div><div class="fw-semibold" x-text="promptMetricPercent(version.adoption?.rate)"></div><div class="text-muted" x-text="`信号覆盖 ${promptMetricPercent(version.adoption?.coverage)}`"></div></div>
+                                            <div class="col-6 col-lg-2"><div class="text-muted">P50 耗时</div><div class="fw-semibold" x-text="version.duration?.p50_seconds === null ? '不可用' : `${promptMetricNumber(version.duration?.p50_seconds, 1)} 秒`"></div><div class="text-muted" x-text="`覆盖 ${promptMetricPercent(version.duration?.coverage)}`"></div></div>
+                                        </div>
+                                        <details class="mt-3">
+                                            <summary class="small">查看最近任务与覆盖缺口</summary>
+                                            <template x-for="job in (version.recent_jobs || [])" :key="job.job_id">
+                                                <div class="small text-muted mt-1" x-text="`${new Date(Number(job.created_at || 0) * 1000).toLocaleString()} · ${promptStageLabel(job.stage)} · ${job.status} · Token ${job.token_complete ? '完整' : '缺失/不完整'} · 价格 ${job.cost_complete ? '完整' : '缺失/不完整'} · 采纳 ${job.adoption === null ? '不适用/未知' : (job.adoption ? '是' : '否')}`"></div>
+                                            </template>
+                                        </details>
+                                    </div>
+                                </template>
+                            </div>
+                            <details class="mt-3">
+                                <summary class="small text-muted">统计口径</summary>
+                                <template x-for="note in Object.values(creativeWorkspace.promptLibrary.observabilityReport.metric_contract || {})" :key="note"><div class="small text-muted mt-1" x-text="`· ${note}`"></div></template>
+                            </details>
+                        </div>
+                    </template>
+                </section>
+
+                <section class="border border-info-subtle rounded p-3 mb-3" x-show="creativeWorkspace.promptLibrary.marketplaceOpen" x-cloak>
+                    <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
+                        <div>
+                            <div class="fw-semibold">模板市场</div>
+                            <div class="small text-muted mt-1">发现审核通过的模板，安装为当前项目的独立副本；市场不会自动绑定模板或跟随来源更新。</div>
+                        </div>
+                        <button class="btn btn-sm btn-outline-secondary" type="button" @click="closePromptMarketplace">关闭</button>
+                    </div>
+
+                    <div class="alert alert-light border py-2 mt-3" x-show="creativeWorkspace.promptLibrary.marketplacePolicy.length">
+                        <template x-for="policy in creativeWorkspace.promptLibrary.marketplacePolicy" :key="policy"><div class="small" x-text="`· ${policy}`"></div></template>
+                    </div>
+                    <div class="row g-2 mt-1">
+                        <div class="col-md-5">
+                            <label class="form-label small" for="promptMarketplaceQuery">搜索</label>
+                            <input id="promptMarketplaceQuery" class="form-control form-control-sm" maxlength="120" x-model="creativeWorkspace.promptLibrary.marketplaceQuery" @keydown.enter.prevent="loadPromptMarketplace" placeholder="名称、标签或公开署名">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small" for="promptMarketplaceStage">兼容阶段</label>
+                            <select id="promptMarketplaceStage" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.marketplaceStage" @change="loadPromptMarketplace">
+                                <option value="">全部阶段</option>
+                                <template x-for="stage in ['brief','characters','outline','beats','script','review','optimization']" :key="`market-stage-${stage}`"><option :value="stage" x-text="promptStageLabel(stage)"></option></template>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small" for="promptMarketplaceLicense">许可</label>
+                            <select id="promptMarketplaceLicense" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.marketplaceLicense" @change="loadPromptMarketplace">
+                                <option value="">全部许可</option>
+                                <template x-for="license in creativeWorkspace.promptLibrary.marketplaceLicenses" :key="license.code"><option :value="license.code" x-text="license.label"></option></template>
+                            </select>
+                        </div>
+                        <div class="col-md-1 d-flex align-items-end">
+                            <button class="btn btn-outline-info btn-sm w-100" type="button" @click="loadPromptMarketplace" :disabled="creativeWorkspace.promptLibrary.marketplaceLoading" aria-label="刷新模板市场"><i class="bi bi-arrow-clockwise"></i></button>
+                        </div>
+                    </div>
+
+                    <div class="text-center text-muted py-3" x-show="creativeWorkspace.promptLibrary.marketplaceLoading">正在读取市场、许可和审核状态…</div>
+
+                    <div class="border rounded p-3 mt-3">
+                        <div class="fw-semibold">发布当前选中的个人模板</div>
+                        <div class="small text-muted mt-1">提交时冻结当前版本；平台审核通过前不会公开。项目模板不能直接发布，防止项目资产被误公开。</div>
+                        <div class="alert alert-warning py-2 mt-3 mb-0" x-show="selectedPromptTemplate()?.owner_scope !== 'user'">请先把当前模板“另存到我的模板”，再提交市场审核。</div>
+                        <div x-show="selectedPromptTemplate()?.owner_scope === 'user'" x-cloak>
+                            <div class="row g-2 mt-2">
+                                <div class="col-md-6">
+                                    <label class="form-label small" for="promptMarketplaceAttribution">公开署名</label>
+                                    <input id="promptMarketplaceAttribution" class="form-control form-control-sm" maxlength="80" x-model="creativeWorkspace.promptLibrary.marketplaceAttributionName" placeholder="会随模板和许可公开展示">
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small" for="promptMarketplaceTags">标签</label>
+                                    <input id="promptMarketplaceTags" class="form-control form-control-sm" x-model="creativeWorkspace.promptLibrary.marketplaceTags" placeholder="竖屏、甜宠、强钩子（最多 10 个）">
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small" for="promptMarketplaceSubmitLicense">授权许可</label>
+                                    <select id="promptMarketplaceSubmitLicense" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.marketplaceLicenseCode">
+                                        <template x-for="license in creativeWorkspace.promptLibrary.marketplaceLicenses" :key="`submit-${license.code}`"><option :value="license.code" x-text="license.label"></option></template>
+                                    </select>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small" for="promptMarketplaceSourceType">来源类型</label>
+                                    <select id="promptMarketplaceSourceType" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.marketplaceSourceType">
+                                        <template x-for="source in creativeWorkspace.promptLibrary.marketplaceSourceTypes" :key="source.code"><option :value="source.code" x-text="source.label"></option></template>
+                                    </select>
+                                </div>
+                                <div class="col-12" x-show="creativeWorkspace.promptLibrary.marketplaceSourceType !== 'original'">
+                                    <label class="form-label small" for="promptMarketplaceSourceUrl">可核验来源链接</label>
+                                    <input id="promptMarketplaceSourceUrl" class="form-control form-control-sm" type="url" maxlength="1000" x-model="creativeWorkspace.promptLibrary.marketplaceSourceUrl" placeholder="https://">
+                                </div>
+                                <div class="col-12">
+                                    <label class="form-label small" for="promptMarketplaceRights">来源与权利说明</label>
+                                    <textarea id="promptMarketplaceRights" class="form-control" rows="2" minlength="10" maxlength="2000" x-model="creativeWorkspace.promptLibrary.marketplaceRightsStatement" placeholder="说明原创情况、授权范围或开放许可依据。"></textarea>
+                                </div>
+                            </div>
+                            <div class="form-check mt-3">
+                                <input id="promptMarketplacePublicConfirm" class="form-check-input" type="checkbox" x-model="creativeWorkspace.promptLibrary.marketplacePublicationConfirmed">
+                                <label class="form-check-label small" for="promptMarketplacePublicConfirm">我确认完整模板冻结版本会公开展示，并允许其他项目按所选许可安装。</label>
+                            </div>
+                            <div class="form-check mt-2">
+                                <input id="promptMarketplaceRightsConfirm" class="form-check-input" type="checkbox" x-model="creativeWorkspace.promptLibrary.marketplaceRightsConfirmed">
+                                <label class="form-check-label small" for="promptMarketplaceRightsConfirm">我确认拥有发布和授权所需权利，并愿意接受平台审核。</label>
+                            </div>
+                            <div class="d-flex justify-content-end mt-3">
+                                <button class="btn btn-info btn-sm" type="button" @click="submitSelectedPromptToMarketplace" :disabled="creativeWorkspace.promptLibrary.marketplaceSaving || !creativeWorkspace.promptLibrary.marketplaceAttributionName.trim() || creativeWorkspace.promptLibrary.marketplaceRightsStatement.trim().length < 10 || !creativeWorkspace.promptLibrary.marketplacePublicationConfirmed || !creativeWorkspace.promptLibrary.marketplaceRightsConfirmed">提交市场审核</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <details class="border rounded p-3 mt-3" x-show="creativeWorkspace.promptLibrary.marketplaceOwnSubmissions.length">
+                        <summary class="fw-semibold">我的发布申请（<span x-text="creativeWorkspace.promptLibrary.marketplaceOwnSubmissions.length"></span>）</summary>
+                        <template x-for="item in creativeWorkspace.promptLibrary.marketplaceOwnSubmissions" :key="`own-market-${item.id}`">
+                            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 border-top pt-2 mt-2">
+                                <div><span class="fw-semibold" x-text="item.title"></span><span class="small text-muted ms-2" x-text="`源模板 v${item.template_revision}`"></span><div class="small text-muted" x-text="item.review_note || '等待平台审核'"></div></div>
+                                <div class="d-flex align-items-center gap-2"><span class="badge text-bg-secondary" x-text="promptMarketplaceStatusLabel(item.status)"></span><button class="btn btn-sm btn-outline-danger" type="button" x-show="['pending','approved'].includes(item.status)" @click="reviewPromptMarketplaceSubmission(item, 'withdraw')" :disabled="creativeWorkspace.promptLibrary.marketplaceSaving">撤回</button></div>
+                            </div>
+                        </template>
+                    </details>
+
+                    <section class="border border-warning-subtle rounded p-3 mt-3" x-show="creativeWorkspace.promptLibrary.marketplaceCanReview" x-cloak>
+                        <div class="fw-semibold">平台审核队列</div>
+                        <div class="small text-muted" x-show="!creativeWorkspace.promptLibrary.marketplaceModerationQueue.length">当前没有待审核申请。</div>
+                        <template x-for="item in creativeWorkspace.promptLibrary.marketplaceModerationQueue" :key="`market-review-${item.id}`">
+                            <div class="border-top pt-2 mt-2">
+                                <div class="d-flex flex-wrap justify-content-between gap-2"><div><span class="fw-semibold" x-text="item.title"></span><span class="small text-muted ms-2" x-text="`${item.attribution_name} · ${promptMarketplaceLicenseLabel(item.license_code)}`"></span></div><div class="d-flex gap-2"><button class="btn btn-success btn-sm" type="button" @click="reviewPromptMarketplaceSubmission(item, 'approve')">批准上架</button><button class="btn btn-outline-danger btn-sm" type="button" @click="reviewPromptMarketplaceSubmission(item, 'reject')">驳回</button></div></div>
+                                <div class="small mt-1" x-text="item.rights_statement"></div>
+                                <a class="small" x-show="item.source_url" :href="item.source_url" target="_blank" rel="noopener noreferrer">核验来源</a>
+                                <details class="mt-2"><summary class="small">检查冻结模板内容与兼容性</summary><div class="small text-muted mt-1" x-text="`契约 ${item.compatibility?.schema_version} · 哈希 ${item.template_content_hash}`"></div><div class="small mt-1" x-text="item.content?.shared_dna"></div></details>
+                            </div>
+                        </template>
+                    </section>
+
+                    <div class="d-flex justify-content-between align-items-center mt-4"><div class="fw-semibold">已审核上架</div><div class="small text-muted">评分仅来自已安装用户；发布者不能自评。</div></div>
+                    <div class="alert alert-info py-2 mt-2" x-show="!creativeWorkspace.promptLibrary.marketplaceCanInstall">只有项目负责人可以安装模板；项目成员仍可浏览，并可评价项目已安装的模板。</div>
+                    <div class="small text-muted py-3" x-show="!creativeWorkspace.promptLibrary.marketplaceLoading && !creativeWorkspace.promptLibrary.marketplaceItems.length">当前筛选条件下没有已上架模板。</div>
+                    <div class="row g-3 mt-0">
+                        <template x-for="item in creativeWorkspace.promptLibrary.marketplaceItems" :key="`market-listing-${item.id}`">
+                            <div class="col-lg-6">
+                                <div class="card h-100 border-info-subtle">
+                                    <div class="card-body">
+                                        <div class="d-flex justify-content-between gap-2"><div><div class="fw-semibold" x-text="item.title"></div><div class="small text-muted" x-text="item.description || '无模板说明'"></div></div><a class="badge text-bg-info align-self-start text-decoration-none" :href="item.license_url" target="_blank" rel="noopener noreferrer" x-text="promptMarketplaceLicenseLabel(item.license_code)" title="查看许可原文"></a></div>
+                                        <div class="d-flex flex-wrap gap-1 mt-2"><template x-for="tag in item.tags" :key="tag"><span class="badge text-bg-secondary" x-text="tag"></span></template></div>
+                                        <div class="row g-2 small mt-2"><div class="col-6"><span class="text-muted">公开署名</span><div x-text="item.attribution_name"></div></div><div class="col-3"><span class="text-muted">安装</span><div x-text="item.install_count || 0"></div></div><div class="col-3"><span class="text-muted">评分</span><div x-text="item.rating?.average === null ? '暂无' : `${item.rating.average} / 5（${item.rating.count}）`"></div></div></div>
+                                        <details class="mt-3"><summary class="small">查看公开模板与兼容性</summary><div class="small text-muted mt-1" x-text="`兼容：${(item.compatibility?.supported_stages || []).map(stage => promptStageLabel(stage)).join('、')}`"></div><div class="small mt-2" x-text="item.content?.shared_dna"></div><a class="small" x-show="item.source_url" :href="item.source_url" target="_blank" rel="noopener noreferrer">查看声明来源</a></details>
+                                    </div>
+                                    <div class="card-footer d-flex flex-wrap justify-content-end gap-2">
+                                        <span class="small text-success me-auto align-self-center" x-show="item.installation">已安装为项目独立副本</span>
+                                        <button class="btn btn-outline-info btn-sm" type="button" x-show="!item.installation" @click="installPromptMarketplaceListing(item)" :disabled="creativeWorkspace.promptLibrary.marketplaceSaving || !creativeWorkspace.promptLibrary.marketplaceCanInstall">接受许可并安装</button>
+                                        <button class="btn btn-outline-warning btn-sm" type="button" x-show="item.installation && !item.is_owner" @click="ratePromptMarketplaceListing(item)" :disabled="creativeWorkspace.promptLibrary.marketplaceSaving" x-text="item.my_rating ? '更新我的评分' : '评价已安装模板'"></button>
+                                        <button class="btn btn-outline-danger btn-sm" type="button" x-show="creativeWorkspace.promptLibrary.marketplaceCanReview" @click="reviewPromptMarketplaceSubmission(item, 'remove')" :disabled="creativeWorkspace.promptLibrary.marketplaceSaving">平台下架</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </section>
+
+                <section class="border border-primary-subtle rounded p-3 mb-3" x-show="creativeWorkspace.promptLibrary.importOpen" x-cloak>
+                    <div class="d-flex justify-content-between align-items-start gap-3">
+                        <div>
+                            <div class="fw-semibold">导入外部提示词</div>
+                            <div class="small text-muted mt-1">外部内容只会被当作不可信资料整理成草稿，不会自动执行、保存、绑定或启用。</div>
+                        </div>
+                        <button class="btn btn-sm btn-outline-secondary" type="button" @click="closePromptImport">关闭</button>
+                    </div>
+                    <template x-if="!creativeWorkspace.promptLibrary.importDraft">
+                        <div class="mt-3">
+                            <label class="form-label" for="promptImportSource">粘贴提示词内容</label>
+                            <textarea id="promptImportSource" class="form-control font-monospace" rows="9" maxlength="50000" x-model="creativeWorkspace.promptLibrary.importSourceText" placeholder="可粘贴系统提示词、创作方法说明，或选择 .md/.txt 文件。"></textarea>
+                            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-2">
+                                <input class="form-control form-control-sm" style="max-width:22rem" type="file" accept=".md,.txt,text/markdown,text/plain" @change="loadPromptImportFile($event)">
+                                <button class="btn btn-primary btn-sm" type="button" @click="previewPromptImport" :disabled="creativeWorkspace.promptLibrary.importLoading || !String(creativeWorkspace.promptLibrary.importSourceText || '').trim()">
+                                    <span x-show="!creativeWorkspace.promptLibrary.importLoading">整理为待审阅草稿</span>
+                                    <span x-show="creativeWorkspace.promptLibrary.importLoading">正在整理…</span>
+                                </button>
+                            </div>
+                        </div>
+                    </template>
+                    <template x-if="creativeWorkspace.promptLibrary.importDraft">
+                        <div class="mt-3">
+                            <div class="alert alert-warning py-2">
+                                <div class="fw-semibold small">请逐项确认后再保存</div>
+                                <template x-for="warning in creativeWorkspace.promptLibrary.importWarnings" :key="warning">
+                                    <div class="small mt-1" x-text="warning"></div>
+                                </template>
+                            </div>
+                            <div class="row g-2">
+                                <div class="col-md-6">
+                                    <label class="form-label small">模板名称</label>
+                                    <input class="form-control" maxlength="120" x-model="creativeWorkspace.promptLibrary.importTitle">
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small">保存范围</label>
+                                    <select class="form-select" x-model="creativeWorkspace.promptLibrary.importOwnerScope">
+                                        <option value="user">我的模板（仅自己可见）</option>
+                                        <option value="project">项目模板（项目成员可见）</option>
+                                    </select>
+                                </div>
+                                <div class="col-12">
+                                    <label class="form-label small">模板说明</label>
+                                    <input class="form-control" maxlength="500" x-model="creativeWorkspace.promptLibrary.importDescription">
+                                </div>
+                                <template x-for="key in ['format','genre','audience','story_engine','emotion','pacing','expression']" :key="key">
+                                    <div class="col-md-4">
+                                        <label class="form-label small" x-text="promptDimensionLabel(key)"></label>
+                                        <input class="form-control form-control-sm" maxlength="120" x-model="creativeWorkspace.promptLibrary.importDraft.content.dimensions[key]">
+                                    </div>
+                                </template>
+                                <div class="col-12">
+                                    <label class="form-label small">共享作品 DNA</label>
+                                    <textarea class="form-control" rows="4" maxlength="12000" x-model="creativeWorkspace.promptLibrary.importDraft.content.shared_dna"></textarea>
+                                </div>
+                                <template x-for="mode in ['single','series','rewrite','repair']" :key="mode">
+                                    <div class="col-md-6">
+                                        <label class="form-label small" x-text="promptModeLabel(mode, creativeWorkspace.promptLibrary.stage)"></label>
+                                        <textarea class="form-control" rows="3" maxlength="12000" x-model="creativeWorkspace.promptLibrary.importDraft.content.stage_rules[creativeWorkspace.promptLibrary.stage][mode]"></textarea>
+                                    </div>
+                                </template>
+                                <div class="col-md-6">
+                                    <label class="form-label small">模板参数（JSON 对象）</label>
+                                    <textarea class="form-control font-monospace" rows="7" maxlength="4000" x-model="creativeWorkspace.promptLibrary.importParametersJson"></textarea>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label small">模板示例（JSON 数组）</label>
+                                    <textarea class="form-control font-monospace" rows="7" maxlength="42000" x-model="creativeWorkspace.promptLibrary.importExamplesJson"></textarea>
+                                    <div class="form-text">导入时示例默认不进入模型上下文；只有你审阅并把 include_in_context 改为 true 后才会使用。</div>
+                                </div>
+                            </div>
+                            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-3">
+                                <button class="btn btn-outline-secondary btn-sm" type="button" @click="creativeWorkspace.promptLibrary.importDraft = null">返回修改原文</button>
+                                <button class="btn btn-primary" type="button" @click="saveImportedPromptTemplate" :disabled="creativeWorkspace.promptLibrary.saving">确认并保存为模板</button>
+                            </div>
+                            <div class="small text-muted mt-2">保存后仍不会设为默认模板；如需使用，请再单独选择“仅下次生成使用”或“保存默认设置”。</div>
+                        </div>
+                    </template>
+                </section>
+
+                <section class="border border-success-subtle rounded p-3 mb-3" x-show="creativeWorkspace.promptLibrary.abOpen" x-cloak>
+                    <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
+                        <div>
+                            <div class="fw-semibold">模板 A/B 对比</div>
+                            <div class="small text-muted mt-1">两组使用同一份冻结输入和同一模型。生成结果只保存为候选草稿，不会自动替换当前版本，也不会自动选出胜者。</div>
+                        </div>
+                        <button class="btn btn-sm btn-outline-secondary" type="button" @click="closePromptAB">关闭</button>
+                    </div>
+
+                    <div class="text-center text-muted py-3" x-show="creativeWorkspace.promptLibrary.abLoading && !creativeWorkspace.promptLibrary.abModelOptions.length">正在读取 A/B 配置…</div>
+                    <div class="row g-3 mt-1" x-show="creativeWorkspace.promptLibrary.abModelOptions.length">
+                        <div class="col-md-6">
+                            <label class="form-label small" for="promptABTemplateA">模板 A</label>
+                            <select id="promptABTemplateA" class="form-select" x-model="creativeWorkspace.promptLibrary.abTemplateAKey" @change="creativeWorkspace.promptLibrary.abPreflight = null">
+                                <option value="">请选择模板</option>
+                                <template x-for="template in orderedPromptTemplates()" :key="`prompt-ab-a-${template.id}`">
+                                    <option :value="template.template_key" x-text="`${template.title} · v${template.revision}`"></option>
+                                </template>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small" for="promptABTemplateB">模板 B</label>
+                            <select id="promptABTemplateB" class="form-select" x-model="creativeWorkspace.promptLibrary.abTemplateBKey" @change="creativeWorkspace.promptLibrary.abPreflight = null">
+                                <option value="">请选择模板</option>
+                                <template x-for="template in orderedPromptTemplates()" :key="`prompt-ab-b-${template.id}`">
+                                    <option :value="template.template_key" x-text="`${template.title} · v${template.revision}`"></option>
+                                </template>
+                            </select>
+                        </div>
+                        <div class="col-md-8">
+                            <label class="form-label small" for="promptABModel">生成模型</label>
+                            <select id="promptABModel" class="form-select" x-model="creativeWorkspace.promptLibrary.abModelRecordId" @change="creativeWorkspace.promptLibrary.abPreflight = null">
+                                <option value="">请选择模型</option>
+                                <template x-for="model in creativeWorkspace.promptLibrary.abModelOptions" :key="model.id">
+                                    <option :value="model.id" x-text="model.label || model.display_name || model.model_id"></option>
+                                </template>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small" for="promptABBudget">本次最高预算</label>
+                            <div class="input-group">
+                                <input id="promptABBudget" class="form-control" type="number" min="0.000001" max="1000000" step="0.01" x-model.number="creativeWorkspace.promptLibrary.abBudgetAmount" @input="creativeWorkspace.promptLibrary.abPreflight = null">
+                                <span class="input-group-text" x-text="creativeWorkspace.promptLibrary.abPreflight?.price_currency || '按模型币种'"></span>
+                            </div>
+                        </div>
+
+                        <template x-if="isFreeCreativeProject()">
+                            <div class="col-12">
+                                <div class="small fw-semibold mb-2">冻结引用版本</div>
+                                <div class="row g-2">
+                                    <template x-if="promptABContextFieldAllowed('brief_id')"><div class="col-md-6"><label class="form-label small">Brief</label><select class="form-select form-select-sm" x-model.number="creativeWorkspace.promptLibrary.abContextRefs.brief_id" @change="creativeWorkspace.promptLibrary.abPreflight = null"><option :value="null">不引用</option><template x-for="item in (creativeWorkspace.promptLibrary.abContextOptions.briefs || [])" :key="`ab-context-brief-${item.id}`"><option :value="item.id" x-text="`v${item.version} · ${item.content?.title || 'Brief'}`"></option></template></select></div></template>
+                                    <template x-if="promptABContextFieldAllowed('character_batch_id')"><div class="col-md-6"><label class="form-label small">人物版本</label><select class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.abContextRefs.character_batch_id" @change="creativeWorkspace.promptLibrary.abPreflight = null"><option value="">不引用</option><template x-for="item in (creativeWorkspace.promptLibrary.abContextOptions.character_batches || [])" :key="`ab-context-characters-${item.batch_id}`"><option :value="item.batch_id" x-text="`v${item.version} · ${(item.characters || []).map(value => value.content?.name).filter(Boolean).slice(0, 3).join('、') || '人物版本'}`"></option></template></select></div></template>
+                                    <template x-if="promptABContextFieldAllowed('outline_batch_id')"><div class="col-md-6"><label class="form-label small">全剧大纲</label><select class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.abContextRefs.outline_batch_id" @change="creativeWorkspace.promptLibrary.abPreflight = null"><option value="">不引用</option><template x-for="item in (creativeWorkspace.promptLibrary.abContextOptions.outline_batches || [])" :key="`ab-context-outline-${item.batch_id}`"><option :value="item.batch_id" x-text="`v${item.version} · ${item.episodes?.length || 0} 集`"></option></template></select></div></template>
+                                    <template x-if="promptABContextFieldAllowed('beats_id')"><div class="col-md-6"><label class="form-label small">当前集 Beats</label><select class="form-select form-select-sm" x-model.number="creativeWorkspace.promptLibrary.abContextRefs.beats_id" @change="creativeWorkspace.promptLibrary.abPreflight = null"><option :value="null">不引用</option><template x-for="item in (creativeWorkspace.promptLibrary.abContextOptions.beats || [])" :key="`ab-context-beats-${item.id}`"><option :value="item.id" x-text="`第 ${item.episode_number} 集 · v${item.version}`"></option></template></select></div></template>
+                                </div>
+                            </div>
+                        </template>
+
+                        <div class="col-12" x-show="['beats','script'].includes(creativeWorkspace.promptLibrary.stage)">
+                            <div class="small text-muted" x-text="`本次只对比第 ${Number(creativeWorkspace.selectedEpisode || 1)} 集；当前版本不支持 Beats/场次剧本的全剧批量 A/B。`"></div>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label small" for="promptABInstruction">两组共同的补充生成要求</label>
+                            <textarea id="promptABInstruction" class="form-control" rows="3" maxlength="2000" x-model="creativeWorkspace.promptLibrary.abGenerationInstruction" @input="creativeWorkspace.promptLibrary.abPreflight = null" placeholder="可留空；填写后会作为冻结输入同时提供给 A、B 两组。"></textarea>
+                        </div>
+                    </div>
+
+                    <div class="d-flex justify-content-end mt-3" x-show="creativeWorkspace.promptLibrary.abModelOptions.length">
+                        <button class="btn btn-outline-success" type="button" @click="preflightPromptAB" :disabled="creativeWorkspace.promptLibrary.abLoading || creativeWorkspace.promptLibrary.abStarting">
+                            <span x-show="!creativeWorkspace.promptLibrary.abLoading">预估调用与费用</span>
+                            <span x-show="creativeWorkspace.promptLibrary.abLoading">正在预估…</span>
+                        </button>
+                    </div>
+
+                    <template x-if="creativeWorkspace.promptLibrary.abPreflight">
+                        <div class="border rounded p-3 mt-3">
+                            <div class="d-flex flex-wrap justify-content-between gap-2">
+                                <div class="fw-semibold">启动前预检</div>
+                                <span class="badge" :class="creativeWorkspace.promptLibrary.abPreflight.can_start ? 'text-bg-success' : 'text-bg-danger'" x-text="creativeWorkspace.promptLibrary.abPreflight.can_start ? '可以启动' : '已阻止启动'"></span>
+                            </div>
+                            <div class="row g-2 mt-1 small">
+                                <div class="col-6 col-md"><span class="text-muted">调用次数</span><div class="fw-semibold" x-text="creativeWorkspace.promptLibrary.abPreflight.estimate?.calls ?? '-' "></div></div>
+                                <div class="col-6 col-md"><span class="text-muted">输入 Token</span><div class="fw-semibold" x-text="Number(creativeWorkspace.promptLibrary.abPreflight.estimate?.estimated_input_tokens || 0).toLocaleString()"></div></div>
+                                <div class="col-6 col-md"><span class="text-muted">输出 Token</span><div class="fw-semibold" x-text="Number(creativeWorkspace.promptLibrary.abPreflight.estimate?.estimated_output_tokens || 0).toLocaleString()"></div></div>
+                                <div class="col-6 col-md"><span class="text-muted">总 Token</span><div class="fw-semibold" x-text="Number(creativeWorkspace.promptLibrary.abPreflight.estimate?.estimated_total_tokens || 0).toLocaleString()"></div></div>
+                                <div class="col-12 col-md"><span class="text-muted">预计费用</span><div class="fw-semibold" x-text="creativeWorkspace.promptLibrary.abPreflight.estimate?.estimated_cost === null ? '价格未配置' : `${creativeWorkspace.promptLibrary.abPreflight.estimate?.estimated_cost} ${creativeWorkspace.promptLibrary.abPreflight.price_currency}`"></div></div>
+                            </div>
+                            <div class="alert alert-danger py-2 mt-3 mb-0" x-show="creativeWorkspace.promptLibrary.abPreflight.blockers?.length">
+                                <template x-for="blocker in (creativeWorkspace.promptLibrary.abPreflight.blockers || [])" :key="blocker"><div class="small" x-text="blocker"></div></template>
+                            </div>
+                            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-3">
+                                <div class="small text-muted">启动时服务端会重新计算预检；输入、模板版本或价格变化后必须重新估算。</div>
+                                <button class="btn btn-success" type="button" @click="startPromptAB" :disabled="!creativeWorkspace.promptLibrary.abPreflight.can_start || creativeWorkspace.promptLibrary.abStarting">
+                                    <span x-show="!creativeWorkspace.promptLibrary.abStarting">启动两组候选生成</span>
+                                    <span x-show="creativeWorkspace.promptLibrary.abStarting">正在创建任务…</span>
+                                </button>
+                            </div>
+                        </div>
+                    </template>
+
+                    <div class="mt-4 border-top pt-3">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                            <div>
+                                <div class="fw-semibold">当前阶段效果汇总</div>
+                                <div class="small text-muted">只统计已完成且已人工确认的评价；个人模板仅对其所有者显示。</div>
+                            </div>
+                            <button class="btn btn-sm btn-outline-secondary" type="button" @click="loadPromptABReport" :disabled="creativeWorkspace.promptLibrary.abReportLoading">
+                                <span x-show="!creativeWorkspace.promptLibrary.abReportLoading">刷新汇总</span>
+                                <span x-show="creativeWorkspace.promptLibrary.abReportLoading">汇总中…</span>
+                            </button>
+                        </div>
+                        <div class="small text-muted py-2" x-show="creativeWorkspace.promptLibrary.abReportLoading && !creativeWorkspace.promptLibrary.abReport">正在汇总历史人工评价…</div>
+                        <template x-if="creativeWorkspace.promptLibrary.abReport">
+                            <div>
+                                <div class="small text-muted mb-2" x-text="`已评价实验 ${creativeWorkspace.promptLibrary.abReport.evaluated_experiment_count} 次 · 涉及模板 ${creativeWorkspace.promptLibrary.abReport.template_count} 个`"></div>
+                                <div class="alert alert-light border py-2" x-show="!creativeWorkspace.promptLibrary.abReport.items?.length">当前阶段还没有可汇总的人工评价。</div>
+                                <div class="vstack gap-2">
+                                    <template x-for="item in (creativeWorkspace.promptLibrary.abReport.items || [])" :key="`ab-report-${item.template_key}-v${item.template_revision}`">
+                                        <div class="border rounded p-3">
+                                            <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
+                                                <div>
+                                                    <div class="fw-semibold" x-text="`${item.template_title} · v${item.template_revision}`"></div>
+                                                    <div class="small text-muted mt-1" x-text="`${item.evaluation_count} 次评价 · ${item.wins} 胜 / ${item.losses} 负 / ${item.ties} 平`"></div>
+                                                </div>
+                                                <div class="text-end"><div class="fs-5 fw-semibold" x-text="item.average_score"></div><div class="small text-muted">七项均分 / 5</div></div>
+                                            </div>
+                                            <div class="d-flex flex-wrap gap-1 mt-2">
+                                                <template x-for="dimension in promptABScoreDimensions()" :key="`${item.template_key}-${dimension.key}`">
+                                                    <span class="badge text-bg-light border" x-text="`${dimension.label} ${item.dimension_scores?.[dimension.key]}`"></span>
+                                                </template>
+                                            </div>
+                                            <div class="small mt-2">
+                                                <span class="text-success" x-text="`优势：${item.best_dimension.label} ${item.best_dimension.score}`"></span>
+                                                <span class="text-warning ms-3" x-text="`短板：${item.weakest_dimension.label} ${item.weakest_dimension.score}`"></span>
+                                            </div>
+                                            <div class="mt-2">
+                                                <template x-for="suggestion in item.iteration_suggestions" :key="suggestion"><div class="small text-primary" x-text="`建议：${suggestion}`"></div></template>
+                                            </div>
+                                            <div class="d-flex justify-content-end mt-2">
+                                                <button class="btn btn-sm btn-outline-primary" type="button" x-show="promptABReportTemplate(item) && promptABReportTemplate(item)?.owner_scope !== 'system' && Number(promptABReportTemplate(item)?.revision) === Number(item.template_revision)" @click="createPromptIterationDraft(item)" :disabled="creativeWorkspace.promptLibrary.abIterationLoading">
+                                                    根据短板创建迭代草稿
+                                                </button>
+                                                <span class="small text-muted" x-show="promptABReportTemplate(item)?.owner_scope === 'system'">系统模板只读；另存后才能迭代</span>
+                                                <span class="small text-muted" x-show="promptABReportTemplate(item)?.owner_scope !== 'system' && Number(promptABReportTemplate(item)?.revision) !== Number(item.template_revision)">这是历史版本评价，请先测试当前版本</span>
+                                            </div>
+                                            <details class="mt-2" x-show="item.recent_strengths?.length || item.recent_risks?.length">
+                                                <summary class="small">查看近期人工证据</summary>
+                                                <template x-for="note in item.recent_strengths" :key="`strength-${note}`"><div class="small text-success mt-1" x-text="`优势记录：${note}`"></div></template>
+                                                <template x-for="note in item.recent_risks" :key="`risk-${note}`"><div class="small text-warning mt-1" x-text="`风险记录：${note}`"></div></template>
+                                            </details>
+                                        </div>
+                                    </template>
+                                </div>
+                                <details class="mt-2" x-show="creativeWorkspace.promptLibrary.abReport.methodology?.length">
+                                    <summary class="small text-muted">汇总口径</summary>
+                                    <template x-for="note in creativeWorkspace.promptLibrary.abReport.methodology" :key="note"><div class="small text-muted mt-1" x-text="note"></div></template>
+                                </details>
+                            </div>
+                        </template>
+                    </div>
+
+                    <section class="border border-primary-subtle rounded p-3 mt-3" x-show="creativeWorkspace.promptLibrary.abIterationDraft" x-cloak>
+                        <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
+                            <div>
+                                <div class="fw-semibold">受控模板迭代草稿</div>
+                                <div class="small text-muted mt-1" x-text="`基础版本 v${creativeWorkspace.promptLibrary.abIterationDraft?.base_revision} · 发布后生成 v${Number(creativeWorkspace.promptLibrary.abIterationDraft?.base_revision || 0) + 1}`"></div>
+                            </div>
+                            <button class="btn btn-sm btn-outline-secondary" type="button" @click="closePromptIterationDraft">关闭</button>
+                        </div>
+                        <div class="alert alert-warning py-2 mt-3" x-show="creativeWorkspace.promptLibrary.abIterationDraft?.warnings?.length">
+                            <template x-for="warning in (creativeWorkspace.promptLibrary.abIterationDraft?.warnings || [])" :key="warning"><div class="small" x-text="warning"></div></template>
+                        </div>
+                        <div class="small mt-2">
+                            <span class="text-muted">评价证据：</span>
+                            <span x-text="`${creativeWorkspace.promptLibrary.abIterationDraft?.report_snapshot?.evaluation_count} 次评价 · 七项均分 ${creativeWorkspace.promptLibrary.abIterationDraft?.report_snapshot?.average_score} · 最低项 ${creativeWorkspace.promptLibrary.abIterationDraft?.report_snapshot?.weakest_dimension?.label} ${creativeWorkspace.promptLibrary.abIterationDraft?.report_snapshot?.weakest_dimension?.score}`"></span>
+                        </div>
+                        <div class="mt-3">
+                            <template x-for="change in (creativeWorkspace.promptLibrary.abIterationDraft?.changes || [])" :key="change.path">
+                                <div class="border rounded p-2 mb-2">
+                                    <div class="small fw-semibold" x-text="change.label"></div>
+                                    <div class="row g-2 mt-1">
+                                        <div class="col-md-6"><div class="small text-muted mb-1">修改前</div><pre class="small bg-body-tertiary border rounded p-2 mb-0 text-wrap" x-text="change.before"></pre></div>
+                                        <div class="col-md-6"><div class="small text-muted mb-1">修改后</div><pre class="small bg-body-tertiary border border-primary-subtle rounded p-2 mb-0 text-wrap" x-text="change.after"></pre></div>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-3">
+                            <div class="small text-muted">确认发布只创建不可变的新模板版本；当前项目绑定仍固定在原版本。</div>
+                            <button class="btn btn-primary" type="button" @click="publishPromptIterationDraft" :disabled="creativeWorkspace.promptLibrary.abIterationPublishing">
+                                <span x-show="!creativeWorkspace.promptLibrary.abIterationPublishing" x-text="`确认发布为 v${Number(creativeWorkspace.promptLibrary.abIterationDraft?.base_revision || 0) + 1}`"></span>
+                                <span x-show="creativeWorkspace.promptLibrary.abIterationPublishing">正在发布…</span>
+                            </button>
+                        </div>
+                    </section>
+
+                    <div class="mt-4">
+                        <div class="fw-semibold mb-2">最近的 A/B 实验</div>
+                        <div class="small text-muted" x-show="!creativeWorkspace.promptLibrary.abHistory.length">尚未运行 A/B 实验。</div>
+                        <div class="vstack gap-2">
+                            <template x-for="experiment in creativeWorkspace.promptLibrary.abHistory" :key="experiment.id">
+                                <div class="border rounded p-2">
+                                    <div class="d-flex flex-wrap justify-content-between gap-2 small">
+                                        <span x-text="`${promptStageLabel(experiment.stage)}${experiment.episode_number ? ` · 第 ${experiment.episode_number} 集` : ''}`"></span>
+                                        <span class="badge text-bg-secondary" x-text="experiment.status"></span>
+                                    </div>
+                                    <div class="small text-muted mt-1" x-text="`${new Date(Number(experiment.created_at || 0) * 1000).toLocaleString()} · 预算 ${experiment.budget_amount} ${experiment.price_currency}`"></div>
+                                    <div class="row g-2 mt-1">
+                                        <template x-for="arm in (experiment.arms || [])" :key="`${experiment.id}-${arm.arm}`">
+                                            <div class="col-md-6"><div class="bg-body-tertiary rounded p-2 small"><span class="fw-semibold" x-text="`${arm.arm} · ${arm.template_title || arm.template_key}`"></span><div class="text-muted mt-1" x-text="arm.job ? `任务 ${arm.job.status} · ${arm.job.message || ''}` : '任务尚未创建'"></div></div></div>
+                                        </template>
+                                    </div>
+                                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-2">
+                                        <div class="small" x-show="experiment.winner_arm">
+                                            人工结论：<span class="fw-semibold" x-text="experiment.winner_arm === 'tie' ? '平局' : `模板 ${experiment.winner_arm} 胜出`"></span>
+                                            <span class="text-muted ms-1" x-show="experiment.evaluation?.A" x-text="`A ${experiment.evaluation?.A?.average_score} / B ${experiment.evaluation?.B?.average_score}`"></span>
+                                        </div>
+                                        <div class="d-flex flex-wrap gap-2 ms-auto">
+                                            <a class="btn btn-sm btn-outline-secondary" :href="promptABExportUrl(experiment.id, 'json')">导出 JSON</a>
+                                            <a class="btn btn-sm btn-outline-secondary" :href="promptABExportUrl(experiment.id, 'md')">导出 Markdown</a>
+                                            <button class="btn btn-sm btn-outline-primary" type="button" x-show="experiment.status === 'completed'" @click="openPromptABEvaluation(experiment)" x-text="experiment.evaluation_revision ? '修改人工评价' : '填写人工评价'"></button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+
+                    <section class="border rounded p-3 mt-3" x-show="creativeWorkspace.promptLibrary.abEvaluationExperimentId" x-cloak>
+                        <div class="d-flex justify-content-between align-items-start gap-3">
+                            <div>
+                                <div class="fw-semibold">人工效果评价</div>
+                                <div class="small text-muted mt-1">每项 1–5 分。评分和胜者只记录在本次实验中，不会自动修改项目默认模板或锁定候选。</div>
+                            </div>
+                            <button class="btn btn-sm btn-outline-secondary" type="button" @click="closePromptABEvaluation">收起</button>
+                        </div>
+                        <div class="row g-3 mt-1">
+                            <template x-for="arm in ['A','B']" :key="`ab-evaluation-${arm}`">
+                                <div class="col-lg-6">
+                                    <div class="border rounded p-3 h-100">
+                                        <div class="fw-semibold mb-2" x-text="`模板 ${arm}`"></div>
+                                        <template x-for="dimension in promptABScoreDimensions()" :key="`${arm}-${dimension.key}`">
+                                            <div class="row align-items-center g-2 mb-2">
+                                                <label class="col-7 col-form-label col-form-label-sm" x-text="dimension.label"></label>
+                                                <div class="col-5"><select class="form-select form-select-sm" x-model.number="creativeWorkspace.promptLibrary.abEvaluation[arm][dimension.key]"><template x-for="score in [1,2,3,4,5]" :key="score"><option :value="score" x-text="score"></option></template></select></div>
+                                            </div>
+                                        </template>
+                                        <label class="form-label small mt-2">主要优势</label>
+                                        <textarea class="form-control form-control-sm" rows="2" maxlength="1000" x-model="creativeWorkspace.promptLibrary.abEvaluation[arm].strengths"></textarea>
+                                        <label class="form-label small mt-2">风险与不足</label>
+                                        <textarea class="form-control form-control-sm" rows="2" maxlength="1000" x-model="creativeWorkspace.promptLibrary.abEvaluation[arm].risks"></textarea>
+                                    </div>
+                                </div>
+                            </template>
+                            <div class="col-md-4">
+                                <label class="form-label small" for="promptABWinner">人工结论</label>
+                                <select id="promptABWinner" class="form-select" x-model="creativeWorkspace.promptLibrary.abEvaluation.winner_arm">
+                                    <option value="">请选择</option>
+                                    <option value="A">模板 A 胜出</option>
+                                    <option value="B">模板 B 胜出</option>
+                                    <option value="tie">平局</option>
+                                </select>
+                            </div>
+                            <div class="col-md-8">
+                                <label class="form-label small" for="promptABDecisionNote">判断依据</label>
+                                <textarea id="promptABDecisionNote" class="form-control" rows="2" maxlength="2000" x-model="creativeWorkspace.promptLibrary.abEvaluation.decision_note" placeholder="记录胜出的原因、适用场景或下一轮应验证的问题。"></textarea>
+                            </div>
+                        </div>
+                        <div class="d-flex justify-content-end mt-3">
+                            <button class="btn btn-primary" type="button" @click="savePromptABEvaluation" :disabled="creativeWorkspace.promptLibrary.abEvaluationSaving || !creativeWorkspace.promptLibrary.abEvaluation.winner_arm">
+                                <span x-show="!creativeWorkspace.promptLibrary.abEvaluationSaving">保存人工评价</span>
+                                <span x-show="creativeWorkspace.promptLibrary.abEvaluationSaving">正在保存…</span>
+                            </button>
+                        </div>
+                    </section>
+                </section>
+
+                <div class="row g-3" x-show="creativeWorkspace.promptLibrary.settings?.enabled && !creativeWorkspace.promptLibrary.loading && !creativeWorkspace.promptLibrary.importOpen && !creativeWorkspace.promptLibrary.abOpen && !creativeWorkspace.promptLibrary.governanceOpen && !creativeWorkspace.promptLibrary.observabilityOpen && !creativeWorkspace.promptLibrary.marketplaceOpen" x-cloak>
+                    <div class="col-lg-7">
+                        <div class="row g-2">
+                            <template x-for="template in orderedPromptTemplates()" :key="template.id">
+                                <div class="col-md-6">
+                                    <label class="card h-100 prompt-template-card" :class="creativeWorkspace.promptLibrary.selectedTemplateKey === template.template_key ? 'border-primary' : 'border-secondary'">
+                                        <div class="card-body p-3">
+                                            <div class="d-flex gap-2 align-items-start">
+                                                <input class="form-check-input mt-1" type="radio" name="prompt-template" :value="template.template_key" x-model="creativeWorkspace.promptLibrary.selectedTemplateKey" @change="selectPromptTemplate(template)">
+                                                <div>
+                                                    <div class="d-flex flex-wrap align-items-center gap-1">
+                                                        <span class="fw-semibold" x-text="template.title"></span>
+                                                        <span class="badge text-bg-primary" x-show="promptRecommendation(template)" x-text="promptRecommendationLabel(template)"></span>
+                                                    </div>
+                                                    <div class="small text-muted mt-1" x-text="template.description"></div>
+                                                </div>
+                                            </div>
+                                            <div class="d-flex flex-wrap gap-1 mt-2">
+                                                <template x-for="value in promptTemplateDimensionValues(template)" :key="value">
+                                                    <span class="badge text-bg-secondary" x-text="value"></span>
+                                                </template>
+                                            </div>
+                                            <template x-if="promptRecommendation(template)">
+                                                <div class="mt-2">
+                                                    <div class="small text-success" x-text="(promptRecommendation(template).reasons || []).slice(0, 2).join('；')"></div>
+                                                    <div class="small text-warning" x-show="promptRecommendation(template).warnings?.length" x-text="promptRecommendation(template).warnings?.[0]"></div>
+                                                </div>
+                                            </template>
+                                        </div>
+                                    </label>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                    <div class="col-lg-5">
+                        <div class="border rounded p-3 sticky-lg-top" style="top:1rem">
+                            <div class="small text-muted">当前有效模板</div>
+                            <div class="fw-semibold" x-text="creativeWorkspace.promptLibrary.effective?.title || '尚未选择'"></div>
+                            <hr>
+                            <label class="form-label fw-semibold">应用范围</label>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" id="promptScopeStage" value="stage" x-model="creativeWorkspace.promptLibrary.scope">
+                                <label class="form-check-label" for="promptScopeStage">作为当前阶段默认模板</label>
+                            </div>
+                            <div class="form-check" x-show="['beats','script'].includes(creativeWorkspace.promptLibrary.stage) && Number(creativeWorkspace.selectedEpisode || 0) > 0">
+                                <input class="form-check-input" type="radio" id="promptScopeEpisode" value="episode" x-model="creativeWorkspace.promptLibrary.scope">
+                                <label class="form-check-label" for="promptScopeEpisode" x-text="`仅第 ${creativeWorkspace.selectedEpisode} 集默认使用`"></label>
+                            </div>
+                            <label class="form-label fw-semibold mt-3" for="promptCustomRequirements">自定义创作要求</label>
+                            <textarea id="promptCustomRequirements" class="form-control" rows="5" maxlength="4000" x-model="creativeWorkspace.promptLibrary.customRequirements" placeholder="例如：强化高压选择的代价；减少内心独白。"></textarea>
+                            <div class="small text-muted mt-2">单次使用不会修改项目或阶段默认设置。</div>
+                            <template x-if="selectedPromptTemplate()">
+                                <details class="mt-3">
+                                    <summary class="small fw-semibold">查看模板说明</summary>
+                                    <div class="small mt-2" x-text="selectedPromptTemplate().content?.shared_dna"></div>
+                                    <div class="small text-muted mt-2" x-text="selectedPromptTemplate().content?.stage_rules?.[creativeWorkspace.promptLibrary.stage]?.single"></div>
+                                </details>
+                            </template>
+                            <button class="btn btn-outline-secondary btn-sm mt-3" type="button" x-show="selectedPromptTemplateEditable() && !creativeWorkspace.promptLibrary.editing" @click="startPromptTemplateEdit">编辑模板内容</button>
+                        </div>
+                    </div>
+                </div>
+                <section class="border rounded p-3 mt-3" x-show="creativeWorkspace.promptLibrary.editing && !creativeWorkspace.promptLibrary.importOpen && !creativeWorkspace.promptLibrary.abOpen && !creativeWorkspace.promptLibrary.governanceOpen && !creativeWorkspace.promptLibrary.observabilityOpen && !creativeWorkspace.promptLibrary.marketplaceOpen" x-cloak>
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div>
+                            <div class="fw-semibold">高级模板编辑</div>
+                            <div class="small text-muted">输出字段、JSON 契约和运行变量由系统锁定，不在此处开放。</div>
+                        </div>
+                        <button class="btn btn-sm btn-outline-secondary" type="button" @click="creativeWorkspace.promptLibrary.editing = false">收起</button>
+                    </div>
+                    <div class="row g-2">
+                        <template x-for="key in ['format','genre','audience','story_engine','emotion','pacing','expression']" :key="key">
+                            <div class="col-md-4">
+                                <label class="form-label small" x-text="promptDimensionLabel(key)"></label>
+                                <input class="form-control form-control-sm" maxlength="120" x-model="creativeWorkspace.promptLibrary.editContent.dimensions[key]">
+                            </div>
+                        </template>
+                        <div class="col-12">
+                            <label class="form-label small">共享作品 DNA</label>
+                            <textarea class="form-control" rows="4" maxlength="12000" x-model="creativeWorkspace.promptLibrary.editContent.shared_dna"></textarea>
+                        </div>
+                        <template x-for="mode in ['single','series','rewrite','repair']" :key="mode">
+                            <div class="col-md-6">
+                                <label class="form-label small" x-text="promptModeLabel(mode, creativeWorkspace.promptLibrary.stage)"></label>
+                                <textarea class="form-control" rows="3" maxlength="12000" x-model="creativeWorkspace.promptLibrary.editContent.stage_rules[creativeWorkspace.promptLibrary.stage][mode]"></textarea>
+                            </div>
+                        </template>
+                        <div class="col-md-6">
+                            <label class="form-label small">模板参数（JSON 对象）</label>
+                            <textarea class="form-control font-monospace" rows="7" maxlength="4000" x-model="creativeWorkspace.promptLibrary.editParametersJson"></textarea>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small">模板示例（JSON 数组，最多 10 条）</label>
+                            <textarea class="form-control font-monospace" rows="7" maxlength="42000" x-model="creativeWorkspace.promptLibrary.editExamplesJson"></textarea>
+                            <div class="form-text">每条可包含 label、text、include_in_context；只有 include_in_context=true 才送入模型。</div>
+                        </div>
+                    </div>
+                    <div class="d-flex justify-content-end mt-3">
+                        <button class="btn btn-primary" type="button" @click="savePromptTemplateRevision" :disabled="creativeWorkspace.promptLibrary.saving">保存为新版本</button>
+                    </div>
+                </section>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-outline-info" x-show="creativeWorkspace.promptLibrary.settings?.enabled && !creativeWorkspace.promptLibrary.importOpen && !creativeWorkspace.promptLibrary.abOpen && !creativeWorkspace.promptLibrary.governanceOpen && !creativeWorkspace.promptLibrary.observabilityOpen" @click="copySelectedPromptTemplate('user')" :disabled="creativeWorkspace.promptLibrary.saving || !creativeWorkspace.promptLibrary.selectedTemplateKey">另存到我的模板</button>
+                <button type="button" class="btn btn-outline-info" x-show="creativeWorkspace.promptLibrary.settings?.enabled && !creativeWorkspace.promptLibrary.importOpen && !creativeWorkspace.promptLibrary.abOpen && !creativeWorkspace.promptLibrary.governanceOpen && !creativeWorkspace.promptLibrary.observabilityOpen" @click="copySelectedPromptTemplate('project')" :disabled="creativeWorkspace.promptLibrary.saving || !creativeWorkspace.promptLibrary.selectedTemplateKey">另存为项目模板</button>
+                <button type="button" class="btn btn-outline-primary" x-show="creativeWorkspace.promptLibrary.settings?.enabled && !creativeWorkspace.promptLibrary.importOpen && !creativeWorkspace.promptLibrary.abOpen && !creativeWorkspace.promptLibrary.governanceOpen && !creativeWorkspace.promptLibrary.observabilityOpen" @click="usePromptForNextGeneration" :disabled="!creativeWorkspace.promptLibrary.selectedTemplateKey">仅下次生成使用</button>
+                <button type="button" class="btn btn-primary" x-show="creativeWorkspace.promptLibrary.settings?.enabled && !creativeWorkspace.promptLibrary.importOpen && !creativeWorkspace.promptLibrary.abOpen && !creativeWorkspace.promptLibrary.governanceOpen && !creativeWorkspace.promptLibrary.observabilityOpen" @click="savePromptBinding" :disabled="creativeWorkspace.promptLibrary.saving || !creativeWorkspace.promptLibrary.selectedTemplateKey">保存默认设置</button>
+            </div>
+        </div>
+    </div>
+</div>

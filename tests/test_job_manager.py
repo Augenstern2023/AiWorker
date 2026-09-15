@@ -460,6 +460,92 @@ def test_job_manager_rejects_duplicate_creative_generation_job(
         )
 
 
+def test_job_manager_allows_only_opposite_arms_of_same_prompt_ab_experiment(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "runtime.job_manager.launch_worker", lambda *_args, **_kwargs: FakeProcess()
+    )
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    common = {
+        "project_id": 1,
+        "action": "beats",
+        "episode_number": 1,
+        "prompt_ab_experiment_id": "experiment-1",
+    }
+    first = CrawlJob(
+        job_id="prompt-ab-a",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={**common, "prompt_ab_arm": "A"},
+    )
+    manager.jobs[first.job_id] = JobState(job=first, status="running")
+    manager.processes[first.job_id] = FakeProcess()
+
+    second = manager.start_job(
+        CrawlJob(
+            job_id="prompt-ab-b",
+            platform="creative",
+            crawler_type="phase4_generate",
+            extra={**common, "prompt_ab_arm": "B"},
+        )
+    )
+
+    assert second.job_id == "prompt-ab-b"
+
+
+@pytest.mark.parametrize(
+    "duplicate_extra",
+    [
+        {
+            "project_id": 1,
+            "action": "beats",
+            "episode_number": 1,
+            "prompt_ab_experiment_id": "experiment-1",
+            "prompt_ab_arm": "A",
+        },
+        {
+            "project_id": 1,
+            "action": "beats",
+            "episode_number": 1,
+            "prompt_ab_experiment_id": "experiment-2",
+            "prompt_ab_arm": "B",
+        },
+    ],
+)
+def test_job_manager_keeps_prompt_ab_concurrency_exception_narrow(
+    monkeypatch, tmp_path, duplicate_extra
+):
+    monkeypatch.setattr(
+        "runtime.job_manager.launch_worker", lambda *_args, **_kwargs: FakeProcess()
+    )
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    first = CrawlJob(
+        job_id="prompt-ab-existing",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "project_id": 1,
+            "action": "beats",
+            "episode_number": 1,
+            "prompt_ab_experiment_id": "experiment-1",
+            "prompt_ab_arm": "A",
+        },
+    )
+    manager.jobs[first.job_id] = JobState(job=first, status="running")
+    manager.processes[first.job_id] = FakeProcess()
+
+    with pytest.raises(JobConflictError, match="platform 'creative'"):
+        manager.start_job(
+            CrawlJob(
+                job_id="prompt-ab-rejected",
+                platform="creative",
+                crawler_type="phase4_generate",
+                extra=duplicate_extra,
+            )
+        )
+
+
 @pytest.mark.parametrize(
     ("existing_extra", "independent_extra"),
     [

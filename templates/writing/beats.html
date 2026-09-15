@@ -6,9 +6,7 @@
         <h3 class="mb-1">单集节拍表</h3>
         <div class="small text-muted" x-text="creativeWorkspace.selectedEpisode === 0 ? '项目 {{ project_id }} · 全集 · 场景目标、阻力、情绪变化与转折' : `项目 {{ project_id }} · 第 ${creativeWorkspace.selectedEpisode} 集 · 场景目标、阻力、情绪变化与转折`">项目 {{ project_id }} · 第 {{ episode_number }} 集 · 场景目标、阻力、情绪变化与转折</div>
     </div>
-    <a class="btn btn-outline-light btn-sm flex-shrink-0" x-show="!isFreeCreativeProject()" x-cloak href="/writing/projects/{{ project_id }}/outlines" :href="creativeModuleUrl('outline')" title="返回全剧大纲" aria-label="返回全剧大纲">
-        <i class="bi bi-arrow-left me-1" aria-hidden="true"></i>返回全剧大纲
-    </a>
+    {% include "common/workspace/project_list_back_link.html" %}
 </div>
 {% endblock %}
 

@@ -111,8 +111,10 @@ class _Provider:
     def __init__(self, *, fail_episode: int | None = None) -> None:
         self.fail_episode = fail_episode
         self.requests: list[dict] = []
+        self.system_prompts: list[str] = []
 
     async def complete_json(self, messages: list[dict[str, str]]) -> dict:
+        self.system_prompts.append(messages[0]["content"])
         payload = json.loads(messages[-1]["content"])
         self.requests.append(payload)
         if payload["request_kind"] == "unit_review":
@@ -139,6 +141,29 @@ class _Provider:
             "summary": "最终汇总",
             "core_findings": [{"severity": "invalid", "evidence": "跨集证据"}],
         }
+
+
+@pytest.mark.asyncio
+async def test_series_review_template_applies_to_every_request_without_replacing_protocols() -> None:
+    source = build_project_review_source(_project(1), audit_scope="outline")
+    provider = _Provider()
+
+    await review_project_source(
+        provider,
+        source,
+        prompt_snapshot={
+            "stage": "review",
+            "mode": "series",
+            "effective_instruction": "优先核对跨集身份信息差。",
+        },
+    )
+
+    assert len(provider.system_prompts) == 3
+    assert all("优先核对跨集身份信息差" in item for item in provider.system_prompts)
+    assert any("resource_id" in item for item in provider.system_prompts)
+    assert any("批次摘要" in item for item in provider.system_prompts)
+    assert any("ai_verdict" in item for item in provider.system_prompts)
+    assert all("不得覆盖前述只读边界" in item for item in provider.system_prompts)
 
 
 @pytest.mark.asyncio

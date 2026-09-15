@@ -109,6 +109,32 @@ def test_existing_projects_default_to_sequential_mode(tmp_path):
     assert project["resource_heads"] == []
 
 
+def test_free_candidate_generation_can_preserve_the_current_head(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = create_free_project(repository)
+    service = FreeCreativeModeService(repository)
+    current = service.create_briefs(
+        project["id"],
+        [{"title": "当前 Brief", "logline": "当前版本"}],
+        expected_head_revision=0,
+        actor_user_id="owner-1",
+    )
+
+    candidate = service.create_briefs(
+        project["id"],
+        [{"title": "A/B 候选", "logline": "不自动成为当前版本"}],
+        expected_head_revision=current["head"]["revision"],
+        actor_user_id="owner-1",
+        generation_meta={"prompt_ab_experiment_id": "experiment-1", "prompt_ab_arm": "A"},
+        select_as_head=False,
+    )
+    head_after = service.get_head(project["id"], "brief")
+
+    assert candidate["head"] is None
+    assert candidate["resources"][0]["status"] == "draft"
+    assert head_after == current["head"]
+
+
 def create_free_outline_for_rewrite(
     repository: CreativeRepository, *, locked: bool
 ) -> tuple[dict, dict, dict]:
@@ -722,6 +748,117 @@ def test_empty_project_can_switch_mode_but_content_project_cannot(tmp_path):
         )
 
 
+@pytest.mark.asyncio
+async def test_active_project_member_can_change_mode_and_free_copy_inherits_team(
+    tmp_path,
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from creative.api import (
+        build_creative_router,
+        uses_project_member_stage_authorization,
+    )
+    from creative.schema import CreativeModeChangeRequest, CreativeModeMigrationRequest
+    from identity.permission_service import PermissionService
+
+    repository = CreativeRepository(tmp_path / "member-mode.sqlite3")
+    switch_project = repository.create_original_project(
+        seed_text="switch seed",
+        name="switch project",
+        target_episode_count=3,
+        created_by="planner-1",
+        creation_request_id="member-mode-switch",
+    )
+    switch_project = repository.mark_project_bootstrap_status(
+        switch_project["id"], "ready"
+    )
+    migration_project = repository.create_original_project(
+        seed_text="migration seed",
+        name="migration project",
+        target_episode_count=3,
+        created_by="planner-1",
+        creation_request_id="member-mode-migration",
+    )
+    migration_project = repository.mark_project_bootstrap_status(
+        migration_project["id"], "ready"
+    )
+    workflow = Mock()
+    workflow.resolve_creative_project_identity = None
+    workflow.is_active_project_member.return_value = True
+    workflow.list_tasks.return_value = [
+        {
+            "id": "pending-brief",
+            "project_id": repository.workflow_project_id(switch_project["id"]),
+            "task_type": "brief",
+            "status": "pool",
+        }
+    ]
+    router = build_creative_router(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        repository=repository,
+        workflow_repository=workflow,
+        application_service=Mock(),
+    )
+    permission_service = object.__new__(PermissionService)
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(identity_permission_service=permission_service)
+        )
+    )
+    principal = SimpleNamespace(
+        is_system_admin=False,
+        user_id="writer-1",
+        role_codes=("screenwriter",),
+        permissions=frozenset(),
+    )
+
+    assert uses_project_member_stage_authorization(
+        f"/projects/{switch_project['id']}/workflow-mode", "PATCH"
+    )
+    assert uses_project_member_stage_authorization(
+        f"/projects/{migration_project['id']}/migrate-to-free", "POST"
+    )
+    switch_endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if route.path == "/api/creative/projects/{project_id}/workflow-mode"
+    )
+    switched = await switch_endpoint(
+        project_id=switch_project["id"],
+        payload=CreativeModeChangeRequest(
+            workflow_mode="free", expected_mode_revision=0
+        ),
+        request=request,
+        principal=principal,
+    )
+    assert switched["workflow_mode"] == "free"
+    workflow.cancel_task_for_mode_change.assert_called_once_with(
+        "pending-brief", principal
+    )
+
+    migrate_endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if route.path == "/api/creative/projects/{project_id}/migrate-to-free"
+    )
+    migrated = await migrate_endpoint(
+        project_id=migration_project["id"],
+        payload=CreativeModeMigrationRequest(
+            expected_mode_revision=0,
+            operation_id="member-created-free-copy",
+        ),
+        request=request,
+        principal=principal,
+    )
+    source_id = repository.workflow_project_id(migration_project["id"])
+    target_id = repository.workflow_project_id(migrated["project"]["id"])
+    workflow.copy_active_project_members.assert_called_once_with(
+        source_id, target_id, principal
+    )
+
+
 def test_topic_project_can_switch_to_free_without_manual_seed(tmp_path):
     db_path = tmp_path / "switch-topic-project-without-seed.sqlite3"
     create_legacy_workflow_mode_database(db_path)
@@ -771,6 +908,7 @@ async def test_empty_project_preview_ignores_started_task_without_resources(tmp_
         "task_type": "brief",
         "status": "in_progress",
     }]
+    workflow.list_project_members.return_value = []
     router = build_creative_router(
         root=tmp_path,
         runtime_dir=tmp_path / ".runtime",
@@ -848,6 +986,7 @@ async def test_content_project_migration_creates_free_copy_and_preserves_source(
             "status": "returned",
         },
     ]
+    workflow.list_project_members.return_value = []
     router = build_creative_router(
         root=tmp_path,
         runtime_dir=tmp_path / ".runtime",

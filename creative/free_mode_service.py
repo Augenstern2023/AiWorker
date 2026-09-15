@@ -324,6 +324,7 @@ class FreeCreativeModeService:
         actor_user_id: str,
         source_refs: dict[str, Any] | None = None,
         generation_meta: dict[str, Any] | None = None,
+        select_as_head: bool = True,
     ) -> dict[str, Any]:
         """Save independent directions atomically and select the first as current."""
         if not 1 <= len(contents) <= 5:
@@ -345,15 +346,19 @@ class FreeCreativeModeService:
                 for content in contents
             ]
             resource_id, version = resources[0]
-            head = self._set_head_conn(
-                conn,
-                project_id=project_id,
-                stage="brief",
-                episode_number=0,
-                resource_ref=str(resource_id),
-                resource_version=version,
-                expected_revision=expected_head_revision,
-                actor_user_id=actor_user_id,
+            head = (
+                self._set_head_conn(
+                    conn,
+                    project_id=project_id,
+                    stage="brief",
+                    episode_number=0,
+                    resource_ref=str(resource_id),
+                    resource_version=version,
+                    expected_revision=expected_head_revision,
+                    actor_user_id=actor_user_id,
+                )
+                if select_as_head
+                else None
             )
         return {
             "resources": [self.repository.get_blueprint(item_id) for item_id, _ in resources],
@@ -370,6 +375,7 @@ class FreeCreativeModeService:
         actor_user_id: str,
         source_refs: dict[str, Any] | None = None,
         generation_meta: dict[str, Any] | None = None,
+        select_as_head: bool = True,
     ) -> dict[str, Any]:
         if not characters:
             characters = [{"name": "", "role": ""}]
@@ -451,15 +457,19 @@ class FreeCreativeModeService:
                         refs_json, meta_json, now, now,
                     ),
                 )
-            head = self._set_head_conn(
-                conn,
-                project_id=project_id,
-                stage="characters",
-                episode_number=0,
-                resource_ref=batch_id,
-                resource_version=version,
-                expected_revision=expected_head_revision,
-                actor_user_id=actor_user_id,
+            head = (
+                self._set_head_conn(
+                    conn,
+                    project_id=project_id,
+                    stage="characters",
+                    episode_number=0,
+                    resource_ref=batch_id,
+                    resource_version=version,
+                    expected_revision=expected_head_revision,
+                    actor_user_id=actor_user_id,
+                )
+                if select_as_head
+                else None
             )
         return {"resource": self.repository.get_character_batch(project_id, batch_id), "head": head}
 
@@ -487,6 +497,7 @@ class FreeCreativeModeService:
         actor_user_id: str,
         source_refs: dict[str, Any] | None = None,
         generation_meta: dict[str, Any] | None = None,
+        select_as_head: bool = True,
     ) -> dict[str, Any]:
         with self.repository._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -544,15 +555,19 @@ class FreeCreativeModeService:
                         json.dumps(content, ensure_ascii=False), refs_json, meta_json, now, now,
                     ),
                 )
-            head = self._set_head_conn(
-                conn,
-                project_id=project_id,
-                stage="outline",
-                episode_number=0,
-                resource_ref=batch_id,
-                resource_version=version,
-                expected_revision=expected_head_revision,
-                actor_user_id=actor_user_id,
+            head = (
+                self._set_head_conn(
+                    conn,
+                    project_id=project_id,
+                    stage="outline",
+                    episode_number=0,
+                    resource_ref=batch_id,
+                    resource_version=version,
+                    expected_revision=expected_head_revision,
+                    actor_user_id=actor_user_id,
+                )
+                if select_as_head
+                else None
             )
         return {"resource": self.repository.get_outline_batch(project_id, batch_id), "head": head}
 
@@ -567,6 +582,7 @@ class FreeCreativeModeService:
         actor_user_id: str,
         source_refs: dict[str, Any] | None = None,
         generation_meta: dict[str, Any] | None = None,
+        select_as_head: bool = True,
     ) -> dict[str, Any]:
         stage = self._assert_stage(stage)
         if stage not in {"beats", "script"}:
@@ -608,15 +624,19 @@ class FreeCreativeModeService:
                 ),
             )
             resource_id = int(cursor.lastrowid)
-            head = self._set_head_conn(
-                conn,
-                project_id=project_id,
-                stage=stage,
-                episode_number=number,
-                resource_ref=str(resource_id),
-                resource_version=version,
-                expected_revision=expected_head_revision,
-                actor_user_id=actor_user_id,
+            head = (
+                self._set_head_conn(
+                    conn,
+                    project_id=project_id,
+                    stage=stage,
+                    episode_number=number,
+                    resource_ref=str(resource_id),
+                    resource_version=version,
+                    expected_revision=expected_head_revision,
+                    actor_user_id=actor_user_id,
+                )
+                if select_as_head
+                else None
             )
         return {"resource": self.repository.get_episode(resource_id), "head": head}
 
@@ -999,6 +1019,7 @@ class FreeCreativeModeService:
         instruction: str,
         context_refs: dict[str, Any],
         actor_user_id: str,
+        prompt_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         stage = self._assert_stage(stage)
         supplied = {key for key, value in context_refs.items() if value not in {None, ""}}
@@ -1030,6 +1051,8 @@ class FreeCreativeModeService:
                 },
                 "instruction": str(instruction or "").strip(),
             }
+            if prompt_snapshot:
+                snapshot["prompt_snapshot"] = dict(prompt_snapshot)
             manifest: dict[str, Any] = {}
             brief_id = context_refs.get("brief_id")
             if brief_id:
@@ -1132,7 +1155,12 @@ class FreeCreativeModeService:
                     int(seed["id"]), str(instruction or "").strip(),
                     json.dumps(manifest, ensure_ascii=False),
                     json.dumps(snapshot, ensure_ascii=False), context_hash,
-                    PROMPT_TEMPLATE_VERSION, actor_user_id, time.time(),
+                    str(
+                        (prompt_snapshot or {}).get("schema_version")
+                        or PROMPT_TEMPLATE_VERSION
+                    ),
+                    actor_user_id,
+                    time.time(),
                 ),
             )
             row = conn.execute(

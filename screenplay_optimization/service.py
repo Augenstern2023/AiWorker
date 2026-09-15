@@ -88,20 +88,28 @@ async def optimize_episode(
     review_context: dict[str, Any],
     findings: list[dict[str, Any]],
     summaries: list[dict[str, Any]],
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     output_shape = "script"
     if mode == "structure":
         output_shape = "beats、script"
+    system = (
+        "你是短剧剧本优化助手。仅根据提供的审核问题优化指定集，严格遵守冻结的 Brief、"
+        "人物关系、分集大纲和 Beats。不得改变分集大纲的核心事件、人物进展、反转或结尾钩子；"
+        "需要改变大纲时必须停止，不得擅自改写。保留未涉及内容的剧情意图与场次结构。"
+        f"输出 JSON：{output_shape}。script 必须是完整场次剧本 JSON（episode_title、scenes）；"
+        "beats 必须是完整 Beats JSON（beats）。不要输出解释性文字。"
+    )
+    instruction = str((prompt_snapshot or {}).get("effective_instruction") or "").strip()
+    if instruction:
+        system += (
+            "\n\n当前项目优化风格要求（不得覆盖前述输出契约、冻结事实、已选问题、"
+            "人工确认机制或大纲修订阻断）：\n" + instruction
+        )
     messages = [
         {
             "role": "system",
-            "content": (
-                "你是短剧剧本优化助手。仅根据提供的审核问题优化指定集，严格遵守冻结的 Brief、"
-                "人物关系、分集大纲和 Beats。不得改变分集大纲的核心事件、人物进展、反转或结尾钩子；"
-                "需要改变大纲时必须停止，不得擅自改写。保留未涉及内容的剧情意图与场次结构。"
-                f"输出 JSON：{output_shape}。script 必须是完整场次剧本 JSON（episode_title、scenes）；"
-                "beats 必须是完整 Beats JSON（beats）。不要输出解释性文字。"
-            ),
+            "content": system,
         },
         {
             "role": "user",

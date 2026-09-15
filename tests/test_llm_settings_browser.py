@@ -108,7 +108,13 @@ def _llm_state() -> dict:
             "is_enabled": True,
             "clear_api_key": False,
         },
-        "modelDraft": {"model_id": "", "display_name": ""},
+        "modelDraft": {
+            "model_id": "",
+            "display_name": "",
+            "input_price_per_million": "",
+            "output_price_per_million": "",
+            "price_currency": "CNY",
+        },
         "modelEditor": None,
         "test": {"model_id": "", "result": None},
     }
@@ -213,7 +219,7 @@ def test_llm_settings_load_master_detail_without_rehydrating_secret() -> None:
         )
         page.get_by_role("heading", name="LLM 模型管理").wait_for()
 
-        assert page.get_by_text("内部网关", exact=True).is_visible()
+        page.get_by_text("内部网关", exact=True).wait_for(state="visible")
         assert page.get_by_label("模型列表").get_by_text("Model A", exact=True).is_visible()
         assert page.locator("#llm-provider-api-key").input_value() == ""
         assert page.get_by_text("凭据已安全保存", exact=True).is_visible()
@@ -318,7 +324,7 @@ def test_llm_connection_test_uses_unsaved_fields_and_announces_result() -> None:
         test_button.click()
         page.wait_for_function("window.resolveLLMTest !== null")
         assert test_button.is_disabled()
-        assert page.get_by_text("测试中…", exact=True).is_visible()
+        page.get_by_text("测试中…", exact=True).wait_for(state="visible")
 
         request = page.evaluate(
             "window.requests.find(item => item.url === '/api/llm/test')"
@@ -365,6 +371,9 @@ def test_llm_sync_failure_keeps_manual_model_fallback_available() -> None:
         assert request["body"] == {
             "model_id": "manual-fallback",
             "display_name": "Manual Fallback",
+            "input_price_per_million": None,
+            "output_price_per_million": None,
+            "price_currency": "CNY",
             "is_enabled": True,
         }
         browser.close()
@@ -445,7 +454,7 @@ def test_llm_model_can_be_edited_and_selected_as_global_default() -> None:
 
         page.get_by_role("button", name="编辑模型 Model B").click()
         page.locator("#llm-edit-model-name-model-record-2").wait_for()
-        assert not page.get_by_role("button", name="编辑模型 Model B").is_visible()
+        page.get_by_role("button", name="编辑模型 Model B").wait_for(state="hidden")
         page.locator("#llm-edit-model-name-model-record-2").fill("Model B Updated")
         page.locator("#llm-edit-model-name-model-record-2").press("Enter")
         page.wait_for_function(
@@ -457,6 +466,9 @@ def test_llm_model_can_be_edited_and_selected_as_global_default() -> None:
         assert update_request["body"] == {
             "model_id": "model-b",
             "display_name": "Model B Updated",
+            "input_price_per_million": None,
+            "output_price_per_million": None,
+            "price_currency": "CNY",
             "is_enabled": True,
         }
 

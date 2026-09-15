@@ -71,6 +71,50 @@
         if (url) { const link = document.createElement('a'); link.className = 'small d-inline-block mt-2'; link.href = url; link.textContent = '打开源内容'; details.append(link); }
         parent.append(details);
     }
+    function templateDimensionText(template) {
+        const dimensions = template?.content?.dimensions || {};
+        return [...new Set(Object.values(dimensions).map((value) => String(value || '').trim()).filter(Boolean))].join(' · ');
+    }
+    function promptPayload(controls) {
+        const select = controls?.select;
+        if (!select || select.disabled) return {};
+        const selected = select.selectedOptions[0];
+        const customRequirements = String(controls.requirements?.value || '').trim();
+        return {
+            ...(select.value ? {
+                prompt_template_key: select.value,
+                prompt_template_revision: number(selected?.dataset.revision) || 1,
+            } : {}),
+            ...(customRequirements ? {prompt_override: {custom_requirements: customRequirements}} : {}),
+        };
+    }
+    function loadPromptTemplates(data, controls) {
+        data = data || {};
+        const select = controls.select;
+        if (!data.settings?.enabled) {
+            select.replaceChildren(new Option('项目未启用模板库，沿用经典提示词', ''));
+            controls.description.textContent = '可在项目创作工作区主动升级模板库。';
+            select.disabled = true;
+            controls.requirements.disabled = true;
+            return;
+        }
+        const templates = (data.templates || []).filter((item) => !Array.isArray(item.supported_stages) || item.supported_stages.includes('review'));
+        select.replaceChildren(new Option(`使用项目默认（${data.effective?.title || '审核模板'}）`, ''));
+        templates.forEach((template) => {
+            const option = new Option(`${template.title} · ${templateDimensionText(template)}`, template.template_key);
+            option.dataset.revision = String(template.revision || 1);
+            option.dataset.description = template.description || '';
+            select.append(option);
+        });
+        select.disabled = false;
+        controls.requirements.disabled = false;
+        const describe = () => {
+            controls.description.textContent = select.selectedOptions[0]?.dataset.description
+                || '模板只调整审核关注点和证据表达，不改变只读边界与检查点协议。';
+        };
+        select.onchange = describe;
+        describe();
+    }
     function renderPreview(preview) {
         const host = content(); if (!host) return;
         host.replaceChildren();
@@ -96,6 +140,14 @@
         if ((manifest.missing_episode_numbers || []).length) addText(notice, 'small mt-2', `缺失集：${manifest.missing_episode_numbers.join('、')}`);
         if ((manifest.upstream_mismatches || []).length) addText(notice, 'small mt-2', `发现 ${manifest.upstream_mismatches.length} 项上下游引用待核对`);
         host.append(notice);
+        const promptSection = document.createElement('section'); promptSection.className = 'writer-project-review-section';
+        addText(promptSection, 'fw-semibold', '审核模板');
+        const promptSelect = document.createElement('select'); promptSelect.className = 'form-select form-select-sm mt-2'; promptSelect.disabled = true; promptSelect.append(new Option('正在读取项目模板…', ''));
+        const promptRequirements = document.createElement('textarea'); promptRequirements.className = 'form-control form-control-sm mt-2'; promptRequirements.rows = 2; promptRequirements.maxLength = 4000; promptRequirements.placeholder = '本次审核补充要求，例如：重点检查跨集身份信息差是否失速。'; promptRequirements.disabled = true;
+        const promptDescription = addText(promptSection, 'small text-muted mt-2', '正在读取项目模板…');
+        promptSection.insertBefore(promptSelect, promptDescription); promptSection.insertBefore(promptRequirements, promptDescription); host.append(promptSection);
+        preview.promptControls = {select: promptSelect, requirements: promptRequirements, description: promptDescription};
+        loadPromptTemplates(preview.prompt_module, preview.promptControls);
         const actions = document.createElement('div'); actions.className = 'writer-project-review-actions';
         const confirm = document.createElement('button'); confirm.type = 'button'; confirm.className = 'btn btn-primary writer-session-mutation'; confirm.textContent = '确认并开始完整审核';
         confirm.addEventListener('click', () => createReview(preview, confirm));
@@ -202,10 +254,11 @@
     async function createReview(preview, button) {
         if (!currentSession?.id) return;
         button.disabled = true;
-        const requestKey = `${currentSession.id}:${preview.audit_scope}:${preview.fingerprint}`;
+        const selectedPrompt = promptPayload(preview.promptControls);
+        const requestKey = `${currentSession.id}:${preview.audit_scope}:${preview.fingerprint}:${JSON.stringify(selectedPrompt)}`;
         const clientRequestId = createRequestIds.get(requestKey) || requestId();
         createRequestIds.set(requestKey, clientRequestId);
-        try { const payload = await json(await window.aiworkerApi.request(api(currentSession.id), {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({audit_scope: preview.audit_scope, expected_fingerprint: preview.fingerprint, client_request_id: clientRequestId})})); recordCreatedReview(payload.review || {}); startPolling(currentSession.id, payload.review?.id, false); renderReview(payload.review || {}); }
+        try { const payload = await json(await window.aiworkerApi.request(api(currentSession.id), {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({audit_scope: preview.audit_scope, expected_fingerprint: preview.fingerprint, client_request_id: clientRequestId, ...selectedPrompt})})); recordCreatedReview(payload.review || {}); startPolling(currentSession.id, payload.review?.id, false); renderReview(payload.review || {}); }
         catch (error) { renderError(error.message, () => previewReview(currentSession, preview.audit_scope)); }
     }
     async function resumeReview(review, button) {

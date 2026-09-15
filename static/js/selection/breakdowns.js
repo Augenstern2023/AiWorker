@@ -102,6 +102,43 @@ window.aiworkerModules.push(() => ({
                     return {script: '剧本转写', transcript: '语音转写', text: '文本转写'}[source] || '剧目转写';
                 },
 
+                breakdownModelStorageKey() {
+                    return 'creative:breakdown-generation-model';
+                },
+
+                selectBreakdownGenerationModel(value) {
+                    const selected = String(value || '');
+                    this.breakdownGeneration.modelRecordId = selected;
+                    try {
+                        sessionStorage.setItem(this.breakdownModelStorageKey(), selected);
+                    } catch (_) {}
+                },
+
+                async loadBreakdownGenerationModels() {
+                    const state = this.breakdownGeneration;
+                    state.modelsLoading = true;
+                    try {
+                        const response = await aiworkerApi.request('/api/llm/available-models');
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '读取可用模型失败');
+                        state.modelOptions = Array.isArray(data.items) ? data.items : [];
+                        let saved = null;
+                        try {
+                            saved = sessionStorage.getItem(this.breakdownModelStorageKey());
+                        } catch (_) {}
+                        const validIds = new Set(state.modelOptions.map(item => String(item.id)));
+                        state.modelRecordId = saved !== null && (saved === '' || validIds.has(saved))
+                            ? saved
+                            : String(data.default_model_record_id || '');
+                    } catch (error) {
+                        state.modelOptions = [];
+                        state.modelRecordId = '';
+                        state.error = `${error.message || '读取可用模型失败'}，可继续使用全局默认模型。`;
+                    } finally {
+                        state.modelsLoading = false;
+                    }
+                },
+
                 async startTranscriptBreakdown(topic, source, forceRegenerate = false) {
                     if (!topic?.id) return;
                     if (source === 'topic-library') this.topicLibrary.error = '';
@@ -109,9 +146,10 @@ window.aiworkerModules.push(() => ({
                     this.breakdownGeneration = {
                         topic,
                         source,
+                        forceRegenerate: Boolean(forceRegenerate),
                         jobId: '',
-                        status: 'pending',
-                        message: '正在检查已下载的剧目脚本',
+                        status: 'configuring',
+                        message: '请选择本次生成使用的模型',
                         progress: {completed: 0, total: 1},
                         coverage: [],
                         requiresTranscription: false,
@@ -121,20 +159,43 @@ window.aiworkerModules.push(() => ({
                         elapsedSeconds: 0,
                         logs: [],
                         logCount: 0,
-                        showLogs: false
+                        showLogs: false,
+                        modelOptions: [],
+                        modelRecordId: '',
+                        modelsLoading: true
                     };
+                    this.breakdownGenerationProgressModal.show();
+                    await this.loadBreakdownGenerationModels();
+                },
+
+                async submitTranscriptBreakdown() {
+                    const state = this.breakdownGeneration;
+                    const topic = state.topic;
+                    const source = state.source;
+                    if (!topic?.id || state.modelsLoading || this.breakdownGenerationRunning()) return;
+                    state.status = 'pending';
+                    state.message = '正在检查已下载的剧目脚本';
+                    state.error = '';
+                    state.startedAt = Date.now();
+                    const body = {
+                        topic_id: topic.id,
+                        force_regenerate: Boolean(state.forceRegenerate)
+                    };
+                    const modelRecordId = String(state.modelRecordId || '').trim();
+                    if (modelRecordId) body.llm_model_record_id = modelRecordId;
                     try {
                         const res = await aiworkerApi.request('/api/creative/breakdowns', {
                             method: 'POST',
                             headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({topic_id: topic.id, force_regenerate: forceRegenerate})
+                            body: JSON.stringify(body)
                         });
                         const data = await res.json();
                         const detail = data.detail;
                         if (res.status === 409 && detail?.code === 'transcript_required') {
                             this.breakdownGeneration.status = 'blocked';
                             this.breakdownGeneration.message = detail.message;
-                            this.transcriptRequiredModal.show();
+                            this.breakdownGenerationProgressModal.hide();
+                            setTimeout(() => this.transcriptRequiredModal.show(), 200);
                             return;
                         }
                         if (!res.ok || data.status === 'error') {
@@ -146,7 +207,8 @@ window.aiworkerModules.push(() => ({
                             this.breakdownGeneration.startedAt = 0;
                             if (source === 'topic-library') this.topicLibrary.breakdown = data.breakdown;
                             else this.creative.breakdown = data.breakdown;
-                            this.openBreakdownEditor(source, topic.title, data.breakdown);
+                            this.breakdownGenerationProgressModal.hide();
+                            setTimeout(() => this.openBreakdownEditor(source, topic.title, data.breakdown), 200);
                             return;
                         }
                         this.breakdownGeneration.jobId = data.job.job_id;
@@ -166,7 +228,6 @@ window.aiworkerModules.push(() => ({
                             notifiedStatus: ''
                         };
                         this.breakdownJobStatuses[data.job.job_id] = this.breakdownGeneration.status;
-                        this.breakdownGenerationProgressModal.show();
                         if (source === 'topic-library') await this.fetchTopicLibrary();
                         if (source === 'creative') await this.fetchCreativeTopics();
                         await this.fetchJobs();
@@ -177,7 +238,6 @@ window.aiworkerModules.push(() => ({
                         this.breakdownGeneration.error = message;
                         if (source === 'topic-library') this.topicLibrary.error = message;
                         else this.creative.error = message;
-                        this.breakdownGenerationProgressModal.show();
                     }
                 },
 

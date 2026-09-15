@@ -9,10 +9,26 @@
                     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button>
                 </div>
                 <div class="modal-body">
-                    <div class="small text-info mb-2" x-show="breakdownGeneration.coverage.length" x-text="breakdownGeneration.requiresTranscription ? `已发现第 ${breakdownGeneration.coverage.join('、')} 集下载视频` : `已加载第 ${breakdownGeneration.coverage.join('、')} 集剧目脚本`"></div>
-                    <div class="d-flex justify-content-between small mb-1"><span x-text="breakdownGeneration.message || '正在创建生成任务'"></span><strong x-text="breakdownGenerationProgressLabel()"></strong></div>
-                    <div class="progress" role="progressbar" aria-label="拆解生成进度">
-                        <div class="progress-bar progress-bar-striped" :class="{'progress-bar-animated': breakdownGenerationRunning(), 'bg-danger': breakdownGeneration.status === 'failed'}" :style="`width: ${breakdownGenerationIndeterminate() ? 100 : breakdownGenerationProgressPercent()}%`"></div>
+                    <div class="mb-3">
+                        <label class="form-label" for="breakdown-generation-model">本次使用模型</label>
+                        <select id="breakdown-generation-model" class="form-select"
+                                x-model="breakdownGeneration.modelRecordId"
+                                @change="selectBreakdownGenerationModel($event.target.value)"
+                                :disabled="breakdownGeneration.modelsLoading || breakdownGenerationRunning()">
+                            <option value="">使用全局默认模型</option>
+                            <template x-for="item in (breakdownGeneration.modelOptions || [])" :key="`breakdown-model-${item.id}`">
+                                <option :value="item.id" x-text="item.is_default ? `${item.label}（全局默认）` : item.label"></option>
+                            </template>
+                        </select>
+                        <div class="form-text" x-show="breakdownGeneration.modelsLoading">正在读取可用模型…</div>
+                        <div class="form-text" x-show="!breakdownGeneration.modelsLoading">模型使用管理员已保存的提供商 API Key，本次切换无需重新输入。</div>
+                    </div>
+                    <div x-show="breakdownGeneration.status !== 'configuring'">
+                        <div class="small text-info mb-2" x-show="breakdownGeneration.coverage.length" x-text="breakdownGeneration.requiresTranscription ? `已发现第 ${breakdownGeneration.coverage.join('、')} 集下载视频` : `已加载第 ${breakdownGeneration.coverage.join('、')} 集剧目脚本`"></div>
+                        <div class="d-flex justify-content-between small mb-1"><span x-text="breakdownGeneration.message || '正在创建生成任务'"></span><strong x-text="breakdownGenerationProgressLabel()"></strong></div>
+                        <div class="progress" role="progressbar" aria-label="拆解生成进度">
+                            <div class="progress-bar progress-bar-striped" :class="{'progress-bar-animated': breakdownGenerationRunning(), 'bg-danger': breakdownGeneration.status === 'failed'}" :style="`width: ${breakdownGenerationIndeterminate() ? 100 : breakdownGenerationProgressPercent()}%`"></div>
+                        </div>
                     </div>
                     <div class="mt-3 border-top border-secondary pt-3" x-show="breakdownGeneration.showLogs" x-cloak>
                         <div class="d-flex align-items-center justify-content-between mb-1">
@@ -29,8 +45,9 @@
                     <div class="alert alert-danger py-2 mt-3 mb-0" x-show="breakdownGeneration.error" x-text="breakdownGeneration.error"></div>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">后台运行</button>
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" x-text="breakdownGenerationRunning() ? '后台运行' : '关闭'"></button>
                     <button type="button" class="btn btn-outline-light" x-show="breakdownGeneration.jobId" @click="openBreakdownTaskLog"><i class="bi bi-list-ul me-1"></i>任务日志</button>
+                    <button type="button" class="btn btn-primary" x-show="breakdownGeneration.status === 'configuring'" @click="submitTranscriptBreakdown" :disabled="breakdownGeneration.modelsLoading"><i class="bi bi-play-fill me-1"></i>开始生成</button>
                     <button type="button" class="btn btn-primary" x-show="breakdownGenerationRetryable()" @click="startTranscriptBreakdown(breakdownGeneration.topic, breakdownGeneration.source)"><i class="bi bi-arrow-clockwise me-1"></i>重试</button>
                 </div>
             </div>

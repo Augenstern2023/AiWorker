@@ -135,6 +135,7 @@ async def generate_blueprints(
     topic: dict[str, Any],
     breakdown: dict[str, Any],
     count: int = 3,
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not 3 <= int(count) <= 5:
         raise ValueError("仿制方向数量必须在 3-5 之间")
@@ -146,7 +147,7 @@ async def generate_blueprints(
     }
     items, meta = await complete_with_one_repair(
         provider,
-        blueprint_messages(payload, int(count)),
+        blueprint_messages(payload, int(count), prompt_snapshot),
         lambda result: _validate_blueprints(result, int(count)),
     )
     result: list[dict[str, Any]] = []

@@ -531,6 +531,21 @@ class JobManager:
             incoming_scope = creative_job_scope(incoming)
             if existing_scope is None or incoming_scope is None:
                 return False
+            existing_experiment = str(
+                existing_extra.get("prompt_ab_experiment_id") or ""
+            ).strip()
+            incoming_experiment = str(
+                incoming_extra.get("prompt_ab_experiment_id") or ""
+            ).strip()
+            existing_arm = str(existing_extra.get("prompt_ab_arm") or "").strip()
+            incoming_arm = str(incoming_extra.get("prompt_ab_arm") or "").strip()
+            if (
+                existing_experiment
+                and existing_experiment == incoming_experiment
+                and {existing_arm, incoming_arm} == {"A", "B"}
+                and existing_scope == incoming_scope
+            ):
+                return True
             if existing_scope[:2] != incoming_scope[:2]:
                 return True
             existing_range, incoming_range = existing_scope[2], incoming_scope[2]

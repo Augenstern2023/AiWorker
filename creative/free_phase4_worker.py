@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 import config
 
-from analysis.llm import create_llm_provider_from_config
+from analysis.llm import create_llm_provider_from_config, llm_usage_snapshot
 from core.job import CrawlJob
 from creative.free_mode_service import FreeCreativeModeService
 from creative.original_direction_service import generate_original_directions
@@ -57,6 +57,15 @@ def _llm_generation_meta(
         ),
     }
     return {key: value for key, value in values.items() if value}
+
+
+def _usage_payload(job: CrawlJob, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **payload,
+        "llm_usage": llm_usage_snapshot(
+            getattr(job, "_llm_usage_provider", None)
+        ),
+    }
 
 
 def _prompt_inputs(
@@ -167,6 +176,7 @@ async def _run_free_episode_series(
         contexts[episode_number] = context
 
     provider = _create_generation_provider(extra)
+    setattr(job, "_llm_usage_provider", provider)
     llm_meta = _llm_generation_meta(
         provider, str(extra.get("llm_model_record_id") or "")
     )
@@ -181,6 +191,12 @@ async def _run_free_episode_series(
     for episode_number in range(1, total + 1):
         context = contexts[episode_number]
         snapshot = dict(context["context_snapshot"])
+        prompt_snapshot = snapshot.get("prompt_snapshot")
+        prompt_kwargs = (
+            {"prompt_snapshot": dict(prompt_snapshot)}
+            if isinstance(prompt_snapshot, dict)
+            else {}
+        )
         episode_project = dict(project)
         episode_project.update(snapshot.get("project") or {})
         brief, characters, relationships, outline, beats = _prompt_inputs(
@@ -195,6 +211,7 @@ async def _run_free_episode_series(
                 episode_number,
                 brief=brief,
                 relationships=relationships,
+                **prompt_kwargs,
             )
         else:
             generated, meta = await generate_episode_script(
@@ -206,6 +223,7 @@ async def _run_free_episode_series(
                 episode_number,
                 brief=brief,
                 relationships=relationships,
+                **prompt_kwargs,
             )
         result = service.create_episode_resource(
             project_id,
@@ -225,6 +243,25 @@ async def _run_free_episode_series(
                 "prompt_template_version": context.get("prompt_schema_version") or "",
                 "resource_scope": "free",
                 "series_generation": True,
+                **(
+                    {
+                        "prompt_snapshot": prompt_snapshot,
+                        "prompt_template_id": str(
+                            prompt_snapshot.get("template_id") or ""
+                        ),
+                        "prompt_template_key": str(
+                            prompt_snapshot.get("template_key") or ""
+                        ),
+                        "prompt_template_revision": int(
+                            prompt_snapshot.get("revision") or 0
+                        ),
+                        "prompt_content_hash": str(
+                            prompt_snapshot.get("content_hash") or ""
+                        ),
+                    }
+                    if isinstance(prompt_snapshot, dict)
+                    else {}
+                ),
             },
         )
         episode_ids.append(int(result["resource"]["id"]))
@@ -244,10 +281,15 @@ async def _run_free_episode_series(
         "job_finished",
         f"自由创作全部集{resource_label}生成完成",
         payload={
-            "action": stage,
-            "series_generation": True,
-            "episode_count": total,
-            "episode_ids": episode_ids,
+            **_usage_payload(
+                job,
+                {
+                    "action": stage,
+                    "series_generation": True,
+                    "episode_count": total,
+                    "episode_ids": episode_ids,
+                },
+            )
         },
     )
 
@@ -306,8 +348,23 @@ async def run_free_generation(
         raise ValueError("自由创作任务集数与上下文不匹配")
     project = repository.get_project(project_id) or {}
     snapshot = dict(context["context_snapshot"])
+    prompt_snapshot = snapshot.get("prompt_snapshot")
+    prompt_ab_experiment_id = str(
+        extra.get("prompt_ab_experiment_id") or ""
+    ).strip()
+    prompt_ab_arm = str(extra.get("prompt_ab_arm") or "").strip()
+    prompt_ab_source_fingerprint = str(
+        extra.get("prompt_ab_source_fingerprint") or ""
+    ).strip()
+    select_as_head = not bool(prompt_ab_experiment_id)
+    prompt_kwargs = (
+        {"prompt_snapshot": dict(prompt_snapshot)}
+        if isinstance(prompt_snapshot, dict)
+        else {}
+    )
     project.update(snapshot.get("project") or {})
     provider = _create_generation_provider(extra)
+    setattr(job, "_llm_usage_provider", provider)
     meta_base = {
         **_llm_generation_meta(
             provider, str(extra.get("llm_model_record_id") or "")
@@ -318,6 +375,20 @@ async def run_free_generation(
         "generation_context_hash": context["context_hash"],
         "prompt_template_version": context.get("prompt_schema_version") or "",
         "resource_scope": "free",
+        "prompt_ab_experiment_id": prompt_ab_experiment_id,
+        "prompt_ab_arm": prompt_ab_arm,
+        "prompt_ab_source_fingerprint": prompt_ab_source_fingerprint,
+        **(
+            {
+                "prompt_snapshot": prompt_snapshot,
+                "prompt_template_id": str(prompt_snapshot.get("template_id") or ""),
+                "prompt_template_key": str(prompt_snapshot.get("template_key") or ""),
+                "prompt_template_revision": int(prompt_snapshot.get("revision") or 0),
+                "prompt_content_hash": str(prompt_snapshot.get("content_hash") or ""),
+            }
+            if isinstance(prompt_snapshot, dict)
+            else {}
+        ),
     }
     source_refs = dict(context.get("context_manifest") or {})
     emit(job, "job_started", f"开始自由创作：{stage}")
@@ -333,7 +404,17 @@ async def run_free_generation(
             "generation_instruction": str(snapshot.get("instruction") or ""),
         }
         generated, meta = await generate_original_directions(
-            provider, project, seed, [], [], count
+            provider,
+            project,
+            seed,
+            [],
+            [],
+            count,
+            prompt_snapshot=(
+                dict(prompt_snapshot)
+                if isinstance(prompt_snapshot, dict)
+                else None
+            ),
         )
         if len(generated) != count:
             raise ValueError(f"自由 Brief 生成数量不足或超出请求：期望 {count}，实际 {len(generated)}")
@@ -344,6 +425,7 @@ async def run_free_generation(
             actor_user_id=actor_user_id,
             source_refs=source_refs,
             generation_meta={**meta, **meta_base},
+            select_as_head=select_as_head,
         )
         result_payload = {
             "action": action,
@@ -355,7 +437,9 @@ async def run_free_generation(
             context, episode_number
         )
         if stage == "characters":
-            generated, meta = await generate_character_bundle(provider, project, brief)
+            generated, meta = await generate_character_bundle(
+                provider, project, brief, **prompt_kwargs
+            )
             result = service.create_characters(
                 project_id,
                 generated["characters"],
@@ -364,6 +448,7 @@ async def run_free_generation(
                 actor_user_id=actor_user_id,
                 source_refs=source_refs,
                 generation_meta={**meta, **meta_base},
+                select_as_head=select_as_head,
             )
             result_payload = {"action": action, "batch_id": result["resource"]["batch_id"]}
         elif stage == "outline":
@@ -383,6 +468,7 @@ async def run_free_generation(
                 relationships,
                 on_progress=progress,
                 reasoning_effort="high",
+                **prompt_kwargs,
             )
             result = service.create_outline(
                 project_id,
@@ -393,6 +479,7 @@ async def run_free_generation(
                 actor_user_id=actor_user_id,
                 source_refs=source_refs,
                 generation_meta={**meta, **meta_base, "stages": generated.get("stages", [])},
+                select_as_head=select_as_head,
             )
             result_payload = {
                 "action": action,
@@ -410,6 +497,7 @@ async def run_free_generation(
                 episode_number,
                 brief=brief,
                 relationships=relationships,
+                **prompt_kwargs,
             )
             result = service.create_episode_resource(
                 project_id,
@@ -420,6 +508,7 @@ async def run_free_generation(
                 actor_user_id=actor_user_id,
                 source_refs=source_refs,
                 generation_meta={**meta, **meta_base},
+                select_as_head=select_as_head,
             )
             result_payload = {"action": action, "episode_id": result["resource"]["id"], "episode_number": episode_number}
         else:
@@ -434,6 +523,7 @@ async def run_free_generation(
                 episode_number,
                 brief=brief,
                 relationships=relationships,
+                **prompt_kwargs,
             )
             result = service.create_episode_resource(
                 project_id,
@@ -444,8 +534,14 @@ async def run_free_generation(
                 actor_user_id=actor_user_id,
                 source_refs=source_refs,
                 generation_meta={**meta, **meta_base},
+                select_as_head=select_as_head,
             )
             result_payload = {"action": action, "episode_id": result["resource"]["id"], "episode_number": episode_number}
 
     emit(job, "progress", "自由创作生成完成", payload={"stage": stage, "completed": 1, "total": 1})
-    emit(job, "job_finished", "自由创作内容生成完成", payload=result_payload)
+    emit(
+        job,
+        "job_finished",
+        "自由创作内容生成完成",
+        payload=_usage_payload(job, result_payload),
+    )

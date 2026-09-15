@@ -90,6 +90,9 @@ class BlueprintGenerateRequest(BaseModel):
     generation_instruction: str = Field("", max_length=2000)
     source_snapshot_id: str | None = Field(None, max_length=200)
     source_snapshot: dict[str, Any] | None = None
+    prompt_template_key: str | None = Field(None, min_length=1, max_length=120)
+    prompt_template_revision: int | None = Field(None, ge=1)
+    prompt_override: dict[str, Any] = Field(default_factory=dict)
 
 
 class BlueprintCreateRequest(BaseModel):
@@ -107,6 +110,9 @@ class BlueprintDeriveRequest(BaseModel):
     operation_id: str | None = Field(None, max_length=200)
     source_snapshot_id: str | None = Field(None, max_length=200)
     source_snapshot: dict[str, Any] | None = None
+    prompt_template_key: str | None = Field(None, min_length=1, max_length=120)
+    prompt_template_revision: int | None = Field(None, ge=1)
+    prompt_override: dict[str, Any] = Field(default_factory=dict)
 
 
 class BlueprintUpdateRequest(BaseModel):
@@ -186,6 +192,153 @@ class WorkflowLinkRequest(BaseModel):
     source_snapshot_id: str | None = Field(None, max_length=200)
     source_snapshot: dict[str, Any] | None = None
     expected_project_revision: int | None = Field(None, ge=0)
+    prompt_template_key: str | None = Field(None, min_length=1, max_length=120)
+    prompt_template_revision: int | None = Field(None, ge=1)
+    prompt_override: dict[str, Any] = Field(default_factory=dict)
+
+
+class PromptProjectEnableRequest(BaseModel):
+    template_key: str = Field("classic-compatible", min_length=1, max_length=120)
+
+
+class PromptBindingRequest(BaseModel):
+    template_key: str = Field(min_length=1, max_length=120)
+    template_revision: int | None = Field(None, ge=1)
+    episode_number: int = Field(0, ge=0, le=100)
+    override: dict[str, Any] = Field(default_factory=dict)
+
+
+class PromptTemplateCreateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    description: str = Field("", max_length=500)
+    owner_scope: Literal["user", "project"] = "user"
+    content: dict[str, Any]
+
+
+class PromptTemplateRevisionRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+    content: dict[str, Any]
+
+
+class PromptMarketplaceSubmissionRequest(BaseModel):
+    operation_id: str = Field(min_length=1, max_length=200)
+    expected_template_revision: int = Field(ge=1)
+    title: str = Field(min_length=1, max_length=120)
+    description: str = Field("", max_length=1000)
+    tags: list[str] = Field(default_factory=list, max_length=10)
+    attribution_name: str = Field(min_length=1, max_length=80)
+    license_code: Literal[
+        "CC-BY-4.0",
+        "CC-BY-NC-4.0",
+        "CC0-1.0",
+    ]
+    source_type: Literal[
+        "original", "authorized", "open_license", "public_domain"
+    ]
+    source_url: str = Field("", max_length=1000)
+    rights_statement: str = Field(min_length=10, max_length=2000)
+    publication_confirmed: bool = False
+    rights_confirmed: bool = False
+
+
+class PromptMarketplaceReviewRequest(BaseModel):
+    operation_id: str = Field(min_length=1, max_length=200)
+    action: Literal["approve", "reject", "remove", "withdraw"]
+    expected_review_revision: int = Field(ge=0)
+    note: str = Field(min_length=1, max_length=2000)
+
+
+class PromptMarketplaceInstallRequest(BaseModel):
+    operation_id: str = Field(min_length=1, max_length=200)
+    license_accepted: bool = False
+
+
+class PromptMarketplaceRatingRequest(BaseModel):
+    score: int = Field(ge=1, le=5)
+    review_text: str = Field("", max_length=1000)
+    expected_revision: int = Field(0, ge=0)
+
+
+class PromptGovernanceActionRequest(BaseModel):
+    operation_id: str = Field(min_length=1, max_length=200)
+    action: Literal[
+        "request_review", "approve", "deprecate", "archive", "restore"
+    ]
+    expected_governance_revision: int = Field(ge=0)
+    note: str = Field(min_length=1, max_length=2000)
+
+
+class PromptImportPreviewRequest(BaseModel):
+    source_text: str = Field(min_length=1, max_length=50_000)
+    target_stage: Literal[
+        "brief",
+        "characters",
+        "outline",
+        "beats",
+        "script",
+        "review",
+        "optimization",
+    ] | None = None
+
+
+class PromptABPreflightRequest(BaseModel):
+    stage: Literal["brief", "characters", "outline", "beats", "script"]
+    template_a_key: str = Field(min_length=1, max_length=120)
+    template_a_revision: int | None = Field(None, ge=1)
+    template_b_key: str = Field(min_length=1, max_length=120)
+    template_b_revision: int | None = Field(None, ge=1)
+    llm_model_record_id: str = Field(min_length=1, max_length=64)
+    budget_amount: float = Field(gt=0, le=1_000_000)
+    episode_number: int = Field(0, ge=0, le=100)
+    generation_instruction: str = Field("", max_length=2000)
+    workflow_task_id: str | None = Field(None, max_length=200)
+    expected_head_revision: int = Field(0, ge=0)
+    context_refs: dict[str, Any] = Field(default_factory=dict)
+
+
+class PromptABStartRequest(PromptABPreflightRequest):
+    operation_id: str = Field(min_length=1, max_length=200)
+    preflight_hash: str = Field(min_length=64, max_length=64)
+
+
+class PromptABScorecard(BaseModel):
+    premise_fit: int = Field(ge=1, le=5)
+    conflict_engine: int = Field(ge=1, le=5)
+    character_drive: int = Field(ge=1, le=5)
+    emotional_payoff: int = Field(ge=1, le=5)
+    pacing_hooks: int = Field(ge=1, le=5)
+    expression_quality: int = Field(ge=1, le=5)
+    production_feasibility: int = Field(ge=1, le=5)
+    strengths: str = Field("", max_length=1000)
+    risks: str = Field("", max_length=1000)
+
+
+class PromptABEvaluationRequest(BaseModel):
+    arm_a: PromptABScorecard
+    arm_b: PromptABScorecard
+    winner_arm: Literal["A", "B", "tie"]
+    decision_note: str = Field("", max_length=2000)
+    expected_evaluation_revision: int = Field(ge=0)
+
+
+class PromptIterationDraftRequest(BaseModel):
+    operation_id: str = Field(min_length=1, max_length=200)
+    template_key: str = Field(min_length=1, max_length=120)
+    expected_template_revision: int = Field(ge=1)
+    stage: Literal["brief", "characters", "outline", "beats", "script"]
+    dimension_key: Literal[
+        "premise_fit",
+        "conflict_engine",
+        "character_drive",
+        "emotional_payoff",
+        "pacing_hooks",
+        "expression_quality",
+        "production_feasibility",
+    ]
+
+
+class PromptIterationPublishRequest(BaseModel):
+    expected_template_revision: int = Field(ge=1)
 
 
 class CreativeLockRequest(BaseModel):
@@ -220,6 +373,9 @@ class FreeCreativeGenerateRequest(BaseModel):
     llm_model_record_id: str | None = Field(None, min_length=1, max_length=64)
     generation_instruction: str = Field("", max_length=2000)
     context_refs: FreeCreativeContextRefs = Field(default_factory=FreeCreativeContextRefs)
+    prompt_template_key: str | None = Field(None, min_length=1, max_length=120)
+    prompt_template_revision: int | None = Field(None, ge=1)
+    prompt_override: dict[str, Any] = Field(default_factory=dict)
 
 
 class FreeCreativeSeriesGenerateRequest(BaseModel):
@@ -228,6 +384,9 @@ class FreeCreativeSeriesGenerateRequest(BaseModel):
     llm_model_record_id: str | None = Field(None, min_length=1, max_length=64)
     generation_instruction: str = Field("", max_length=2000)
     context_refs: FreeCreativeContextRefs = Field(default_factory=FreeCreativeContextRefs)
+    prompt_template_key: str | None = Field(None, min_length=1, max_length=120)
+    prompt_template_revision: int | None = Field(None, ge=1)
+    prompt_override: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("expected_head_revisions")
     @classmethod

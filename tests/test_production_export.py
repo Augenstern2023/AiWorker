@@ -42,8 +42,11 @@ def insert(conn, table, **row):
 def db(tmp_path):
     path = tmp_path / "creative # 测试.sqlite"
     tree = ast.parse((Path(__file__).parents[1] / "creative/repository.py").read_text(encoding="utf-8"))
-    tables = {"creative_projects", "creative_blueprints", "creative_characters",
-              "creative_relationships", "creative_episodes"}
+    tables = {
+        "creative_topics", "creative_breakdowns", "creative_projects",
+        "creative_blueprints", "creative_characters",
+        "creative_relationships", "creative_episodes",
+    }
     with sqlite3.connect(path) as conn:
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -83,6 +86,52 @@ def db(tmp_path):
                    batch_id=f"script-{number}", content_json=json.dumps({"scenes": [{"blocks": [{"type": "action", "text": "开门"}]}]}),
                    upstream_refs_json=json.dumps(refs))
     return path
+
+
+@pytest.fixture
+def imitation_db(db):
+    with sqlite3.connect(db) as conn:
+        insert(
+            conn,
+            "creative_topics",
+            id=1,
+            platform="hg",
+            job_id="rank-1",
+            source_path="rank.json",
+            captured_at="2026-09-14",
+            title="原剧",
+            description="原剧简介",
+            category="都市",
+            rank_type="热播榜",
+            rank_source="全部热播榜",
+            status="adopted",
+            score=90,
+            confidence="high",
+            score_details_json="{}",
+            recommendation="建议仿写",
+            evidence_json="[]",
+            created_at=5,
+            updated_at=5,
+        )
+        insert(
+            conn,
+            "creative_breakdowns",
+            id=1,
+            topic_id=1,
+            version=2,
+            status="locked",
+            content_json=json.dumps({"core_conflict": "原剧主角逆境翻盘"}),
+            field_sources_json=json.dumps({"core_conflict": [{"episode_number": 1}]}),
+            risks_json=json.dumps(["仅参考结构，不复刻表达"]),
+            created_at=6,
+            updated_at=6,
+            locked_at=6,
+        )
+        conn.execute(
+            "UPDATE creative_projects SET topic_id=1, breakdown_id=1, "
+            "creation_mode='imitation' WHERE id=1"
+        )
+    return db
 
 
 @pytest.fixture
@@ -182,6 +231,29 @@ def test_complete_package_preserves_source_rows_and_parsed_content(db):
     }
     assert len(package["fingerprint"]) == 64
     assert package == export(db, 1)
+
+
+def test_standard_imitation_package_includes_locked_source_breakdown(imitation_db):
+    package = export(imitation_db, 1)
+
+    assert package["breakdown"]["id"] == 1
+    assert package["breakdown"]["version"] == 2
+    assert package["breakdown"]["content"]["core_conflict"] == "原剧主角逆境翻盘"
+    assert package["breakdown"]["field_sources"]["core_conflict"] == [
+        {"episode_number": 1}
+    ]
+    assert package["breakdown"]["risks"] == ["仅参考结构，不复刻表达"]
+    assert package["provenance"]["breakdown_id"] == 1
+    assert package["provenance"]["breakdown_version"] == 2
+    assert package["version_manifest"]["breakdown"] == {
+        "resource_ref": "1",
+        "version": 2,
+    }
+
+    custom = export(
+        imitation_db, 1, version_manifest=package["version_manifest"]
+    )
+    assert custom["breakdown"] == package["breakdown"]
 
 
 def test_free_project_exports_complete_package_from_locked_resource_heads(free_db):

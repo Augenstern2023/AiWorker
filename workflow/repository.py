@@ -1975,6 +1975,50 @@ class WorkflowRepository:
             cancelled = self._require_task(connection, task_id)
         return cancelled
 
+    def cancel_task_for_mode_change(
+        self, task_id: str, actor: Principal | dict[str, Any]
+    ) -> dict[str, Any]:
+        """Cancel a task when an active project member changes workflow mode."""
+
+        actor_id = self._actor_id(actor)
+        with self.identity_repository.transaction() as connection:
+            task = self._lock_task_project_write(connection, task_id)
+            live_actor = self._live_actor(connection, actor_id)
+            project_id = task.get("project_id")
+            if project_id is None or (
+                not live_actor["is_system_admin"]
+                and not self._is_active_project_member(
+                    connection, str(project_id), actor_id
+                )
+            ):
+                raise PermissionError(
+                    "only an active project member may change project workflow mode"
+                )
+            transition_actor = dict(live_actor)
+            transition_actor["can_manage_task"] = True
+            to_status = self.state_machine.transition(
+                task, "cancel", transition_actor
+            )
+            cursor = connection.exec_driver_sql(
+                """
+                UPDATE workflow_tasks SET status = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND status = %s
+                """,
+                (to_status, task_id, task["status"]),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("task state changed concurrently")
+            self._record_event(
+                connection,
+                task_id,
+                "cancel_for_project_mode_change",
+                actor_id,
+                task["status"],
+                to_status,
+            )
+            cancelled = self._require_task(connection, task_id)
+        return cancelled
+
     def list_role_assignment_candidates(
         self,
         role_code: str,
@@ -2128,6 +2172,99 @@ class WorkflowRepository:
                 dict(member),
             )
         return dict(member)
+
+    def copy_active_project_members(
+        self,
+        source_project_id: str,
+        target_project_id: str,
+        actor: Principal | dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Copy the source team to a derived project after member authorization."""
+
+        source_id = str(source_project_id)
+        target_id = str(target_project_id)
+        if source_id == target_id:
+            raise ValueError("source and target projects must be different")
+        actor_id = self._actor_id(actor)
+        copied: list[dict[str, Any]] = []
+        with self.identity_repository.transaction() as connection:
+            for project_id in sorted((source_id, target_id)):
+                self._lock_project_write(connection, project_id)
+            live_actor = self._live_actor(connection, actor_id)
+            if (
+                not live_actor["is_system_admin"]
+                and not self._is_active_project_member(
+                    connection, source_id, actor_id
+                )
+            ):
+                raise PermissionError(
+                    "only an active project member may copy the project team"
+                )
+            source_members = connection.exec_driver_sql(
+                """
+                SELECT pm.*
+                FROM project_members AS pm
+                JOIN users AS u ON u.id = pm.user_id
+                WHERE pm.project_id = %s AND pm.status = 'active'
+                  AND u.status = 'active' AND u.is_deleted = 0
+                ORDER BY pm.created_at, pm.id
+                """,
+                (source_id,),
+            ).mappings().fetchall()
+            for source_member in source_members:
+                existing = connection.exec_driver_sql(
+                    """
+                    SELECT * FROM project_members
+                    WHERE project_id = %s AND user_id = %s AND project_role = %s
+                    """,
+                    (
+                        target_id,
+                        source_member["user_id"],
+                        source_member["project_role"],
+                    ),
+                ).mappings().fetchone()
+                if existing is not None and existing["status"] == "active":
+                    copied.append(dict(existing))
+                    continue
+                membership_id = (
+                    str(existing["id"])
+                    if existing is not None
+                    else str(uuid.uuid4())
+                )
+                connection.exec_driver_sql(
+                    """
+                    INSERT INTO project_members
+                        (id, project_id, user_id, project_role, status, added_by)
+                    VALUES (%s, %s, %s, %s, 'active', %s)
+                    ON CONFLICT(project_id, user_id, project_role) DO UPDATE SET
+                        status = 'active',
+                        added_by = excluded.added_by,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (
+                        membership_id,
+                        target_id,
+                        source_member["user_id"],
+                        source_member["project_role"],
+                        actor_id,
+                    ),
+                )
+                member = connection.exec_driver_sql(
+                    "SELECT * FROM project_members WHERE id = %s",
+                    (membership_id,),
+                ).mappings().fetchone()
+                assert member is not None
+                self._record_project_member_event(
+                    connection,
+                    target_id,
+                    membership_id,
+                    "project_member.update" if existing else "project_member.add",
+                    actor_id,
+                    dict(existing) if existing else None,
+                    dict(member),
+                )
+                copied.append(dict(member))
+        return copied
 
     def ensure_project_creator(
         self, project_id: str, creator_user_id: str, actor: Principal | dict[str, Any]

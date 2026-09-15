@@ -15,7 +15,9 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from analysis.llm import current_llm_price_snapshot
 from creative.repository import CreativeRepository
+from creative.project_prompt_service import ProjectPromptService
 from identity.dependencies import current_principal
 from identity.permission_service import PermissionService
 from identity.schema import Principal
@@ -33,6 +35,9 @@ class OptimizationFindingRequest(BaseModel):
 class OptimizationCreateRequest(BaseModel):
     mode: str
     findings: list[OptimizationFindingRequest] = Field(default_factory=list)
+    prompt_template_key: str | None = Field(None, min_length=1, max_length=120)
+    prompt_template_revision: int | None = Field(None, ge=1)
+    prompt_override: dict[str, Any] = Field(default_factory=dict)
 
 
 class OptimizationRejectRequest(BaseModel):
@@ -108,6 +113,25 @@ def build_script_optimization_router(
             default=None,
         )
 
+    def accepted_generation_meta(
+        optimization: dict[str, Any], draft_id: int
+    ) -> dict[str, Any]:
+        meta: dict[str, Any] = {
+            "source": "script_optimization",
+            "optimization_id": optimization["id"],
+            "draft_id": draft_id,
+        }
+        snapshot = dict(optimization.get("prompt_snapshot") or {})
+        if snapshot:
+            meta.update({
+                "prompt_snapshot": snapshot,
+                "prompt_template_id": str(snapshot.get("template_id") or ""),
+                "prompt_template_key": str(snapshot.get("template_key") or ""),
+                "prompt_template_revision": int(snapshot.get("revision") or 0),
+                "prompt_content_hash": str(snapshot.get("content_hash") or ""),
+            })
+        return meta
+
     @router.post("/api/script-reviews/{review_id}/optimizations", status_code=201)
     async def create_optimization(
         review_id: int,
@@ -124,6 +148,21 @@ def build_script_optimization_router(
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         project = assert_fresh_review(review)
+        try:
+            prompt_snapshot = ProjectPromptService(repository).resolve_generation_snapshot(
+                project_id=int(project["id"]),
+                stage="optimization",
+                series=request_data["mode"] == "structure",
+                episode_number=None,
+                template_key=payload.prompt_template_key,
+                template_revision=payload.prompt_template_revision,
+                run_override=payload.prompt_override,
+                actor_user_id=principal.user_id,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
         optimization = repository.create_script_optimization(
             review_id=review_id,
             project_id=int(project["id"]),
@@ -132,6 +171,7 @@ def build_script_optimization_router(
             selected_findings=request_data["selected_findings"],
             target_episode_numbers=request_data["target_episode_numbers"],
             created_by=principal.user_id,
+            prompt_snapshot=prompt_snapshot,
         )
         job_payload = {
             "platform": "creative",
@@ -147,6 +187,20 @@ def build_script_optimization_router(
                 "created_by_user_id": principal.user_id,
                 "db_path": str(repository.db_path.resolve()),
                 "runtime_dir": str(Path(runtime_dir).resolve()),
+                "prompt_snapshot": prompt_snapshot,
+                "prompt_template_id": str(
+                    (prompt_snapshot or {}).get("template_id") or ""
+                ),
+                "prompt_template_key": str(
+                    (prompt_snapshot or {}).get("template_key") or ""
+                ),
+                "prompt_template_revision": int(
+                    (prompt_snapshot or {}).get("revision") or 0
+                ),
+                "prompt_content_hash": str(
+                    (prompt_snapshot or {}).get("content_hash") or ""
+                ),
+                "llm_price_snapshot": current_llm_price_snapshot(),
             },
         }
         try:
@@ -258,7 +312,7 @@ def build_script_optimization_router(
                     raise ValueError("来源 Beats 已更新，请重新生成优化草稿")
                 created = repository.create_episode_beats(
                     int(project["id"]), int(draft["episode_number"]), accepted_content,
-                    generation_meta={"source": "script_optimization", "optimization_id": optimization["id"], "draft_id": draft_id},
+                    generation_meta=accepted_generation_meta(optimization, draft_id),
                     update_project_status=False,
                 )
             else:
@@ -282,7 +336,7 @@ def build_script_optimization_router(
                         raise ValueError("来源场次剧本已更新，请重新生成优化草稿")
                 created = repository.create_episode_script(
                     int(project["id"]), int(draft["episode_number"]), accepted_content,
-                    generation_meta={"source": "script_optimization", "optimization_id": optimization["id"], "draft_id": draft_id},
+                    generation_meta=accepted_generation_meta(optimization, draft_id),
                     update_project_status=False,
                 )
             if payload and payload.lock_after_accept:

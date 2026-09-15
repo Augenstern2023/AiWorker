@@ -17,7 +17,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
+from analysis.llm import current_llm_price_snapshot
 from creative.repository import CreativeRepository
+from creative.project_prompt_service import ProjectPromptService
 from identity.dependencies import current_principal
 from identity.permission_service import PermissionService
 from identity.schema import Principal
@@ -38,6 +40,9 @@ class ScriptReviewCreateRequest(BaseModel):
     project_id: int | None = None
     episode_numbers: list[int] = Field(default_factory=list)
     text: str = ""
+    prompt_template_key: str | None = Field(None, min_length=1, max_length=120)
+    prompt_template_revision: int | None = Field(None, ge=1)
+    prompt_override: dict[str, Any] = Field(default_factory=dict)
 
 
 class ScriptReviewConfirmRequest(BaseModel):
@@ -164,8 +169,28 @@ def build_script_review_router(
         return refresh_staleness(refresh_runtime_status(review))
 
     def queue_review(
-        source_type: str, source: dict[str, Any], principal: Principal
+        source_type: str,
+        source: dict[str, Any],
+        principal: Principal,
+        *,
+        prompt_template_key: str | None = None,
+        prompt_template_revision: int | None = None,
+        prompt_override: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        source = dict(source)
+        if source_type == "project":
+            prompt_snapshot = ProjectPromptService(repository).resolve_generation_snapshot(
+                project_id=int(source["project_id"]),
+                stage="review",
+                series=str(source["mode"]) != "single",
+                episode_number=None,
+                template_key=prompt_template_key,
+                template_revision=prompt_template_revision,
+                run_override=prompt_override,
+                actor_user_id=principal.user_id,
+            )
+            if prompt_snapshot is not None:
+                source["prompt_snapshot"] = prompt_snapshot
         review = repository.create_script_review(
             source_type=source_type,
             mode=str(source["mode"]),
@@ -188,6 +213,24 @@ def build_script_review_router(
                 "created_by_user_id": principal.user_id,
                 "db_path": str(repository.db_path.resolve()),
                 "runtime_dir": str(Path(runtime_dir).resolve()),
+                "prompt_snapshot": source.get("prompt_snapshot"),
+                "prompt_template_id": str(
+                    dict(source.get("prompt_snapshot") or {}).get("template_id")
+                    or ""
+                ),
+                "prompt_template_key": str(
+                    dict(source.get("prompt_snapshot") or {}).get("template_key")
+                    or ""
+                ),
+                "prompt_template_revision": int(
+                    dict(source.get("prompt_snapshot") or {}).get("revision")
+                    or 0
+                ),
+                "prompt_content_hash": str(
+                    dict(source.get("prompt_snapshot") or {}).get("content_hash")
+                    or ""
+                ),
+                "llm_price_snapshot": current_llm_price_snapshot(),
             },
         }
         try:
@@ -228,7 +271,19 @@ def build_script_review_router(
             except ValueError as exc:
                 raise HTTPException(409, str(exc)) from exc
 
-        return queue_review(data["source_type"], source, principal)
+        try:
+            return queue_review(
+                data["source_type"],
+                source,
+                principal,
+                prompt_template_key=payload.prompt_template_key,
+                prompt_template_revision=payload.prompt_template_revision,
+                prompt_override=payload.prompt_override,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @router.post("/file", status_code=201)
     async def create_file_review(

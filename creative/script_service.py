@@ -15,6 +15,7 @@ import re
 import time
 from typing import Any, Callable
 
+from analysis.llm import LLMError, is_retryable_llm_exception
 from creative.imitation_service import complete_with_one_repair
 from creative.outline_fields import OUTLINE_FIELD_LABELS, OUTLINE_TEXT_FIELDS
 from creative.outline_overview import normalize_series_overview
@@ -195,6 +196,7 @@ async def _repair_outline_fields(
     arc: dict[str, Any],
     episodes: list[dict[str, Any]],
     missing_fields: dict[int, list[str]],
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     fallback_fields = []
     for index, episode in enumerate(episodes):
@@ -212,7 +214,7 @@ async def _repair_outline_fields(
         try:
             repaired, _ = await complete_with_one_repair(
                 provider,
-                outline_field_repair_messages(payload),
+                outline_field_repair_messages(payload, prompt_snapshot),
                 lambda result, required=fields: _validate_outline_field_repair(result, required),
                 max_attempts=3,
             )
@@ -368,10 +370,14 @@ async def generate_character_bundle(
     provider: Any,
     project: dict[str, Any],
     brief: dict[str, Any],
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     bundle, meta = await complete_with_one_repair(
         provider,
-        character_messages({"project": _project_context(project), "locked_brief": brief}),
+        character_messages(
+            {"project": _project_context(project), "locked_brief": brief},
+            prompt_snapshot,
+        ),
         _validate_character_bundle,
     )
     meta["prompt_template_version"] = PROMPT_TEMPLATE_VERSION
@@ -540,26 +546,39 @@ async def rewrite_outline_field(
     next_episode: dict[str, Any] | None,
     field: str,
     instruction: str = "",
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     if field not in OUTLINE_TEXT_FIELDS:
         raise ValueError("不支持的大纲字段")
-    messages = outline_field_rewrite_messages({
-        "project": _project_context(project),
-        "locked_brief": brief,
-        "characters": characters,
-        "relationships": relationships,
-        "current_episode": episode,
-        "previous_episode": previous_episode,
-        "next_episode": next_episode,
-        "target_field": field,
-        "instruction": str(instruction or "").strip(),
-    })
+    messages = outline_field_rewrite_messages(
+        {
+            "project": _project_context(project),
+            "locked_brief": brief,
+            "characters": characters,
+            "relationships": relationships,
+            "current_episode": episode,
+            "previous_episode": previous_episode,
+            "next_episode": next_episode,
+            "target_field": field,
+            "instruction": str(instruction or "").strip(),
+        },
+        prompt_snapshot,
+    )
     payload = await provider.complete_json(messages)
     value = _validate_outline_field_rewrite(payload)
-    return value, {
+    meta = {
         "provider": str(payload.get("provider") or getattr(provider, "provider_name", "")),
         "prompt_template_version": OUTLINE_FIELD_REWRITE_PROMPT_VERSION,
     }
+    if isinstance(prompt_snapshot, dict):
+        meta.update(
+            {
+                "prompt_template_id": str(prompt_snapshot.get("template_id") or ""),
+                "prompt_template_revision": int(prompt_snapshot.get("revision") or 0),
+                "prompt_content_hash": str(prompt_snapshot.get("content_hash") or ""),
+            }
+        )
+    return value, meta
 
 
 async def generate_outline_bundle(
@@ -578,6 +597,7 @@ async def generate_outline_bundle(
     resume_stages: list[Any] | None = None,
     resume_series_overview: dict[str, Any] | None = None,
     reasoning_effort: str = "high",
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     total = int(project.get("target_episode_count") or 0)
     if not 1 <= total <= 100:
@@ -614,7 +634,7 @@ async def generate_outline_bundle(
         await _checkpoint(checkpoint)
         arc, meta = await _complete_outline_request(
             provider,
-            series_arc_messages(base),
+            series_arc_messages(base, prompt_snapshot),
             _validate_series_arc,
             request_kind="series_arc",
             batch_start=None,
@@ -632,6 +652,7 @@ async def generate_outline_bundle(
                 {**base, "series_arc": arc, "history_context": build_outline_history_context(episodes)},
                 start,
                 end,
+                prompt_snapshot,
             ),
             lambda payload, chunk_start=start, chunk_end=end: _normalize_outline_chunk(
                 payload,
@@ -659,7 +680,7 @@ async def generate_outline_bundle(
             if inspect.isawaitable(result):
                 await result
     fallback_fields = await _repair_outline_fields(
-        provider, base, arc, episodes, missing_fields
+        provider, base, arc, episodes, missing_fields, prompt_snapshot
     )
     if missing_fields:
         meta["field_repair_count"] = sum(len(fields) for fields in missing_fields.values())
@@ -671,7 +692,11 @@ async def generate_outline_bundle(
     if arc.get("series_overview") is None:
         await _checkpoint(checkpoint)
         overview, overview_meta = await generate_series_overview(
-            provider, project, episodes, arc["series_arc"]
+            provider,
+            project,
+            episodes,
+            arc["series_arc"],
+            prompt_snapshot=prompt_snapshot,
         )
         arc["series_overview"] = overview
         meta.update({key: value for key, value in overview_meta.items() if value})
@@ -693,6 +718,7 @@ async def generate_series_overview(
     project: dict[str, Any],
     episodes: list[dict[str, Any]],
     series_arc: str,
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     """Summarize an existing draft outline without changing episode content."""
 
@@ -707,7 +733,8 @@ async def generate_series_overview(
                 "project": _project_context(project),
                 "series_arc": str(series_arc or "").strip(),
                 "episodes": ordered_episodes,
-            }
+            },
+            prompt_snapshot,
         ),
         lambda payload: normalize_series_overview(payload.get("series_overview")),
     )
@@ -725,6 +752,7 @@ async def generate_episode_beats(
     *,
     brief: dict[str, Any] | None = None,
     relationships: list[dict[str, Any]] | None = None,
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     payload = {
         "project": _project_context(project),
@@ -737,7 +765,7 @@ async def generate_episode_beats(
     }
     beats, meta = await complete_with_one_repair(
         provider,
-        beats_messages(payload, int(episode_number)),
+        beats_messages(payload, int(episode_number), prompt_snapshot),
         validate_beats,
     )
     meta["prompt_template_version"] = PROMPT_TEMPLATE_VERSION
@@ -755,9 +783,34 @@ def _normalize_episode_generation_chunk(
     if not isinstance(payload, dict) or not isinstance(payload.get("episodes"), list):
         raise ValueError(f"{label}批量结果必须包含 episodes 数组")
     rows = payload["episodes"]
-    numbers = [int(item.get("episode") or 0) for item in rows if isinstance(item, dict)]
+    numbers: list[int] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        try:
+            numbers.append(int(item.get("episode") or 0))
+        except (TypeError, ValueError):
+            numbers.append(0)
     if len(rows) != len(episode_numbers) or sorted(numbers) != episode_numbers:
-        raise ValueError(f"{label}批量结果必须完整覆盖第 {episode_numbers[0]}-{episode_numbers[-1]} 集")
+        expected = set(episode_numbers)
+        actual = [number for number in numbers if number > 0]
+        missing = [number for number in episode_numbers if number not in actual]
+        duplicates = sorted(
+            number for number in set(actual) if actual.count(number) > 1
+        )
+        unexpected = sorted(number for number in set(actual) if number not in expected)
+        details = [
+            f"实际集数：{'、'.join(map(str, actual)) or '无'}",
+            f"缺失集数：{'、'.join(map(str, missing)) or '无'}",
+        ]
+        if duplicates:
+            details.append(f"重复集数：{'、'.join(map(str, duplicates))}")
+        if unexpected:
+            details.append(f"非预期集数：{'、'.join(map(str, unexpected))}")
+        raise ValueError(
+            f"{label}批量结果必须完整覆盖第 {episode_numbers[0]}-{episode_numbers[-1]} 集；"
+            + "；".join(details)
+        )
     normalized: list[tuple[int, dict[str, Any]]] = []
     for item in rows:
         if not isinstance(item, dict):
@@ -784,6 +837,7 @@ async def generate_episode_beats_chunk(
     relationships: list[dict[str, Any]],
     *,
     continuity_ledger: list[dict[str, Any]] | None = None,
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> tuple[list[tuple[int, dict[str, Any]]], dict[str, Any]]:
     episode_numbers = _episode_chunk_numbers(outlines)
     payload = {
@@ -799,7 +853,9 @@ async def generate_episode_beats_chunk(
     }
     generated, meta = await complete_with_one_repair(
         provider,
-        beats_chunk_messages(payload, episode_numbers[0], episode_numbers[-1]),
+        beats_chunk_messages(
+            payload, episode_numbers[0], episode_numbers[-1], prompt_snapshot
+        ),
         lambda result: _normalize_episode_generation_chunk(
             result, episode_numbers, validate_beats, "Beats"
         ),
@@ -819,6 +875,7 @@ async def generate_episode_script(
     *,
     brief: dict[str, Any] | None = None,
     relationships: list[dict[str, Any]] | None = None,
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     payload = {
         "project": _project_context(project), "locked_brief": brief or {}, "locked_outline": outline,
@@ -827,7 +884,9 @@ async def generate_episode_script(
         "episode_number": int(episode_number), "continuity_ledger": continuity_ledger or [],
     }
     script, meta = await complete_with_one_repair(
-        provider, script_messages(payload, int(episode_number)), validate_script
+        provider,
+        script_messages(payload, int(episode_number), prompt_snapshot),
+        validate_script,
     )
     meta["prompt_template_version"] = PROMPT_TEMPLATE_VERSION
     return script, meta
@@ -843,6 +902,7 @@ async def generate_episode_script_chunk(
     beats_by_episode: dict[int, dict[str, Any]],
     *,
     continuity_ledger: list[dict[str, Any]] | None = None,
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> tuple[list[tuple[int, dict[str, Any]]], dict[str, Any]]:
     episode_numbers = _episode_chunk_numbers(outlines)
     if sorted(beats_by_episode) != episode_numbers:
@@ -862,12 +922,110 @@ async def generate_episode_script_chunk(
         ],
         "continuity_ledger": continuity_ledger or [],
     }
-    generated, meta = await complete_with_one_repair(
-        provider,
-        script_chunk_messages(payload, episode_numbers[0], episode_numbers[-1]),
-        lambda result: _normalize_episode_generation_chunk(
-            result, episode_numbers, validate_script, "场次剧本"
-        ),
+    accepted: dict[int, dict[str, Any]] = {}
+    last_error: Exception | None = None
+    provider_name = str(getattr(provider, "provider_name", "") or "")
+
+    def collect(result: Any, requested: list[int]) -> None:
+        nonlocal last_error, provider_name
+        if isinstance(result, dict):
+            provider_name = str(result.get("provider") or provider_name)
+        try:
+            rows = result if isinstance(result, list) else result.get("episodes")
+            if not isinstance(rows, list):
+                raise ValueError("场次剧本批量结果必须包含 episodes 数组")
+            counts: dict[int, int] = {}
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    number = int(item.get("episode") or 0)
+                except (TypeError, ValueError):
+                    continue
+                counts[number] = counts.get(number, 0) + 1
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    number = int(item.get("episode") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if number not in requested or counts.get(number) != 1:
+                    continue
+                content = {key: value for key, value in item.items() if key != "episode"}
+                try:
+                    accepted[number] = validate_script(content)
+                except (TypeError, ValueError) as exc:
+                    last_error = exc
+            missing = [number for number in requested if number not in accepted]
+            if missing:
+                _normalize_episode_generation_chunk(
+                    result, requested, validate_script, "场次剧本"
+                )
+        except Exception as exc:
+            last_error = exc
+
+    messages = script_chunk_messages(
+        payload, episode_numbers[0], episode_numbers[-1], prompt_snapshot
     )
+    try:
+        collect(await provider.complete_json(messages), episode_numbers)
+    except Exception as exc:
+        if is_retryable_llm_exception(exc):
+            raise
+        last_error = exc
+
+    missing = [number for number in episode_numbers if number not in accepted]
+    repair_attempted = bool(missing)
+    if missing:
+        repair_payload = {
+            **payload,
+            "locked_outlines": [
+                item
+                for item in payload["locked_outlines"]
+                if int(item["episode_number"]) in missing
+            ],
+            "locked_beats": [
+                item
+                for item in payload["locked_beats"]
+                if int(item["episode_number"]) in missing
+            ],
+        }
+        repair_request = script_chunk_messages(
+            repair_payload,
+            missing[0],
+            missing[-1],
+            prompt_snapshot,
+            requested_episode_numbers=missing,
+        )
+        repair_request.append(
+            {
+                "role": "user",
+                "content": (
+                    "上一批响应不完整。只生成本次输入中列出的缺失集，"
+                    "不要重复已经成功的集数。"
+                ),
+            }
+        )
+        try:
+            collect(await provider.complete_json(repair_request), missing)
+        except Exception as exc:
+            if is_retryable_llm_exception(exc):
+                raise
+            last_error = exc
+
+    missing = [number for number in episode_numbers if number not in accepted]
+    if missing:
+        detail = str(last_error or "模型未返回有效场次剧本")
+        raise LLMError(
+            "LLM 返回内容无法通过结构校验："
+            f"{detail}；最终缺失集数：{'、'.join(map(str, missing))}"
+        ) from last_error
+
+    generated = sorted(accepted.items())
+    meta = {
+        "provider": provider_name,
+        "repair_attempted": repair_attempted,
+    }
     meta.update({"prompt_template_version": PROMPT_TEMPLATE_VERSION, "chunk_size": len(episode_numbers)})
     return generated, meta

@@ -138,7 +138,11 @@ def build_project_review_source(
 def project_review_fingerprint(source: dict[str, object]) -> str:
     """Hash canonical JSON while excluding the existing fingerprint field."""
     canonical = json.dumps(
-        {key: value for key, value in source.items() if key != "fingerprint"},
+        {
+            key: value
+            for key, value in source.items()
+            if key not in {"fingerprint", "prompt_snapshot"}
+        },
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

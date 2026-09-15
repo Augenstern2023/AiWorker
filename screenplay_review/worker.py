@@ -17,7 +17,7 @@ from typing import Any
 
 import config
 
-from analysis.llm import create_llm_provider_from_config
+from analysis.llm import create_llm_provider_from_config, llm_usage_snapshot
 from core.events import emit_event
 from core.job import CrawlJob
 from creative.repository import CreativeRepository
@@ -45,6 +45,15 @@ def emit(
         message,
         payload or {},
     )
+
+
+def _usage_payload(job: CrawlJob, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        **dict(payload or {}),
+        "llm_usage": llm_usage_snapshot(
+            getattr(job, "_llm_usage_provider", None)
+        ),
+    }
 
 
 async def run(job: CrawlJob) -> None:
@@ -79,12 +88,23 @@ async def run(job: CrawlJob) -> None:
             if prior_report.get("partial") is True
             else None
         )
+        prompt_snapshot = dict(review["source_payload"].get("prompt_snapshot") or {})
+        if prompt_snapshot:
+            expected_mode = "single" if review["mode"] == "single" else "series"
+            if (
+                prompt_snapshot.get("stage") != "review"
+                or prompt_snapshot.get("mode") != expected_mode
+            ):
+                raise ValueError("审核提示词快照与任务范围不匹配")
+        provider = create_provider()
+        setattr(job, "_llm_usage_provider", provider)
         report = await review_source(
-            create_provider(),
+            provider,
             review["source_payload"],
             on_progress=progress,
             on_checkpoint=checkpoint,
             initial_episode_reviews=completed_episodes,
+            prompt_snapshot=prompt_snapshot or None,
         )
         completed = repository.complete_script_review(review_id, report)
     except Exception as exc:
@@ -116,7 +136,10 @@ async def run(job: CrawlJob) -> None:
         job,
         "job_finished",
         "剧本审核完成，等待人工确认",
-        payload={"review_id": review_id, "ai_verdict": report["ai_verdict"]},
+        payload=_usage_payload(
+            job,
+            {"review_id": review_id, "ai_verdict": report["ai_verdict"]},
+        ),
     )
 
 
@@ -131,7 +154,7 @@ def main() -> int:
     try:
         asyncio.run(run(job))
     except Exception as exc:
-        emit(job, "job_failed", str(exc), "error")
+        emit(job, "job_failed", str(exc), "error", _usage_payload(job))
         return 1
     return 0
 

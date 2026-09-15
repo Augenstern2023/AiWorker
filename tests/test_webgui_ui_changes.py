@@ -1330,25 +1330,24 @@ def test_creative_progress_modal_blurs_the_close_button_before_it_is_hidden():
     assert "document.activeElement?.blur();" in tasks
 
 
-def test_scene_script_workspace_links_back_to_its_source_beats():
-    page = _source("templates/writing/scripts.html")
+@pytest.mark.parametrize(
+    ("template_name", "redundant_label"),
+    (
+        ("templates/planning/brief.html", "人物关系"),
+        ("templates/planning/characters.html", "返回 Brief"),
+        ("templates/writing/outlines.html", "返回人物关系"),
+        ("templates/writing/beats.html", "返回全剧大纲"),
+        ("templates/writing/scripts.html", "返回 Beats"),
+    ),
+)
+def test_project_stage_pages_use_project_list_instead_of_redundant_stage_links(
+    template_name: str,
+    redundant_label: str,
+):
+    page = _source(template_name)
 
-    assert 'href="/writing/projects/{{ project_id }}/episodes/{{ episode_number }}/beats"' in page
-    assert "返回 Beats" in page
-
-
-def test_beats_workspace_links_back_to_episode_outlines():
-    page = _source("templates/writing/beats.html")
-
-    assert 'href="/writing/projects/{{ project_id }}/outlines"' in page
-    assert "返回全剧大纲" in page
-
-
-def test_outlines_workspace_links_back_to_characters():
-    page = _source("templates/writing/outlines.html")
-
-    assert 'href="/planning/projects/{{ project_id }}/characters"' in page
-    assert "返回人物关系" in page
+    assert '{% include "common/workspace/project_list_back_link.html" %}' in page
+    assert redundant_label not in page
 
 
 def test_outline_rows_show_a_link_when_the_episode_script_exists():
@@ -1933,7 +1932,9 @@ def test_existing_breakdown_opens_without_generation_and_regeneration_is_explici
     assert "this.breakdownGeneration.status = 'existing'" in html
     assert "openBreakdownEditor(source, topic.title, data.breakdown)" in html
     assert "regenerateCurrentBreakdown" in html
-    assert "force_regenerate: forceRegenerate" in html
+    assert "force_regenerate: Boolean(state.forceRegenerate)" in html
+    assert 'id="breakdown-generation-model"' in html
+    assert "llm_model_record_id" in html
     assert "startTranscriptBreakdown(topic, source, true)" in html
     assert "Boolean(topic?.locked_breakdown_id)" not in html
     assert "return this.startTranscriptBreakdown(\n                        topic,\n                        'topic-library'\n                    );" in html

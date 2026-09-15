@@ -65,12 +65,18 @@ class ProviderUpdateRequest(LLMSettingsRequest):
 class ModelCreateRequest(LLMSettingsRequest):
     model_id: str = Field(min_length=1, max_length=255)
     display_name: str = Field(default="", max_length=255)
+    input_price_per_million: float | None = Field(default=None, ge=0, le=1_000_000)
+    output_price_per_million: float | None = Field(default=None, ge=0, le=1_000_000)
+    price_currency: Literal["CNY", "USD"] = "CNY"
     is_enabled: bool = True
 
 
 class ModelUpdateRequest(LLMSettingsRequest):
     model_id: str | None = Field(default=None, min_length=1, max_length=255)
     display_name: str | None = Field(default=None, max_length=255)
+    input_price_per_million: float | None = Field(default=None, ge=0, le=1_000_000)
+    output_price_per_million: float | None = Field(default=None, ge=0, le=1_000_000)
+    price_currency: Literal["CNY", "USD"] | None = None
     is_enabled: bool | None = None
 
 

@@ -1002,7 +1002,7 @@ class CreativeApplicationService:
             blocked_terms=blocked_terms,
             reference_snapshot=reference_snapshot,
             llm_model_record_id=llm_model_record_id,
-            chunk_size=10,
+            chunk_size=2 if stage == "script" and series else 10,
             expected_context=expected_context,
             retry_failed_operation=retry_failed_operation,
         )

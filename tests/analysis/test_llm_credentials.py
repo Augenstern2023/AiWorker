@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from analysis.llm_credentials import (
@@ -105,3 +107,44 @@ def test_keyring_store_sanitizes_delete_failures() -> None:
 
     with pytest.raises(LLMCredentialStoreError, match="系统凭据库不可用"):
         store.delete("provider-1")
+
+
+def test_default_store_uses_windows_credential_manager() -> None:
+    if sys.platform != "win32":
+        pytest.skip("Windows backend is platform-specific")
+    from keyring.backends.Windows import WinVaultKeyring
+
+    store = KeyringLLMCredentialStore()
+
+    assert isinstance(store._backend, WinVaultKeyring)
+
+
+def test_keyring_store_does_not_chain_secret_bearing_backend_errors() -> None:
+    class FailingKeyring:
+        def set_password(self, service: str, username: str, password: str) -> None:
+            raise RuntimeError(f"backend rejected {password}")
+
+    store = KeyringLLMCredentialStore(FailingKeyring())
+
+    with pytest.raises(LLMCredentialStoreError) as error:
+        store.set("provider-1", "secret-that-must-not-leak")
+
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert "secret-that-must-not-leak" not in repr(error.value)
+
+
+@pytest.mark.parametrize("operation", ["get", "set", "delete"])
+def test_keyring_store_rejects_empty_provider_id_before_backend_call(operation: str) -> None:
+    backend = RecordingKeyring()
+    store = KeyringLLMCredentialStore(backend)
+
+    with pytest.raises(ValueError, match="provider_id"):
+        if operation == "get":
+            store.get("")
+        elif operation == "set":
+            store.set("", "secret")
+        else:
+            store.delete("")
+
+    assert backend.last_service is None

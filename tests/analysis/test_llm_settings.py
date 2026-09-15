@@ -13,7 +13,7 @@ import importlib.util
 from contextlib import contextmanager
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.pool import StaticPool
 
 
@@ -291,6 +291,74 @@ def test_custom_provider_allows_empty_environment_variable_when_vault_exists():
     repository.replace_api_key(provider["id"], "vault-secret")
 
     assert repository.provider_connection(provider["id"])["api_key"] == "vault-secret"
+
+
+def test_runtime_credential_queries_do_not_select_legacy_ciphertext():
+    """Would catch runtime credential paths loading api_key_encrypted from PostgreSQL."""
+
+    module = _settings_module()
+    vault = MemoryCredentialStore()
+    repository = _repository(credential_store=vault)
+    provider = repository.create_provider(
+        name="Minimal columns",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+    )
+    model = repository.create_model(provider["id"], model_id="model-a")
+    vault.set(provider["id"], "vault-secret")
+    with repository.database.transaction() as connection:
+        connection.execute(
+            module.llm_providers.update()
+            .where(module.llm_providers.c.id == provider["id"])
+            .values(api_key_encrypted="legacy-unreadable-value")
+        )
+
+    statements: list[str] = []
+
+    def capture_select(_connection, _cursor, statement, _parameters, _context, _many):
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(repository.database.engine, "before_cursor_execute", capture_select)
+    try:
+        repository.set_default_model(model["id"])
+        repository.provider_connection(provider["id"])
+        repository.effective_default()
+        repository.effective_model(model["id"])
+        repository.settings_payload()
+    finally:
+        event.remove(repository.database.engine, "before_cursor_execute", capture_select)
+
+    assert statements
+    assert all("api_key_encrypted" not in statement for statement in statements)
+
+
+def test_delete_provider_keeps_database_deletion_when_vault_cleanup_fails():
+    """Would catch a keyring cleanup error rolling back an already-deleted provider."""
+
+    module = _settings_module()
+    deleted_provider_ids: list[str] = []
+
+    class FailingDeleteStore(MemoryCredentialStore):
+        def delete(self, provider_id: str) -> None:
+            deleted_provider_ids.append(provider_id)
+            raise module.LLMCredentialStoreError("系统凭据库不可用")
+
+    repository = _repository(credential_store=FailingDeleteStore())
+    provider = repository.create_provider(
+        name="Cleanup failure",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+    )
+
+    deleted = repository.delete_provider(provider["id"])
+
+    assert deleted["id"] == provider["id"]
+    assert deleted_provider_ids == [provider["id"]]
+    with pytest.raises(module.LLMSettingsError, match="提供商不存在"):
+        repository.provider_connection(provider["id"])
 
 
 def test_repository_returns_environment_credential_status(monkeypatch):

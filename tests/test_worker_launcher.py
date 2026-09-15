@@ -18,9 +18,43 @@
 
 """Tests for worker command generation."""
 
+import importlib
 import sys
 
 from runtime.worker_launcher import build_worker_command, build_worker_env
+
+
+def test_worker_runtime_repository_uses_default_credential_store(monkeypatch):
+    """Would catch worker runtime construction omitting the live credential store."""
+
+    module = importlib.import_module("analysis.llm_settings")
+    system_database = importlib.import_module("system_database")
+    credential_store = object()
+
+    class FakeSettings:
+        @classmethod
+        def from_environment(cls):
+            return cls()
+
+    class FakeDatabase:
+        def __init__(self, settings):
+            self.settings = settings
+
+    monkeypatch.setenv("AIWORKER_LLM_DATABASE_CONFIG_ENABLED", "1")
+    monkeypatch.setattr(module, "_RUNTIME_REPOSITORY", None)
+    monkeypatch.setattr(
+        module,
+        "default_llm_credential_store",
+        lambda: credential_store,
+    )
+    monkeypatch.setattr(system_database, "SystemDatabase", FakeDatabase)
+    monkeypatch.setattr(system_database, "SystemDatabaseSettings", FakeSettings)
+
+    repository = module.runtime_settings_repository()
+
+    assert repository is not None
+    assert repository.credential_store is credential_store
+    assert isinstance(repository.database, FakeDatabase)
 
 
 def test_build_worker_command():

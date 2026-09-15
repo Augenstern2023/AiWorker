@@ -101,3 +101,9 @@ class KeyringLLMCredentialStore:
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(service_name={self.service_name!r})"
+
+
+def default_llm_credential_store() -> LLMCredentialStore:
+    """Create the credential store used by live Web and Worker processes."""
+
+    return KeyringLLMCredentialStore()

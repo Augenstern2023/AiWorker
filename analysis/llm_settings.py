@@ -19,7 +19,11 @@ from urllib.parse import urlsplit
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from analysis.llm_credentials import LLMCredentialStore, LLMCredentialStoreError
+from analysis.llm_credentials import (
+    LLMCredentialStore,
+    LLMCredentialStoreError,
+    default_llm_credential_store,
+)
 from system_database.schema import llm_models, llm_providers, llm_settings
 
 
@@ -163,6 +167,19 @@ def _provider_dict(row: Any) -> dict[str, Any]:
     }
 
 
+_PROVIDER_READ_COLUMNS = (
+    llm_providers.c.id,
+    llm_providers.c.name,
+    llm_providers.c.preset,
+    llm_providers.c.base_url,
+    llm_providers.c.wire_api,
+    llm_providers.c.api_key_env_var,
+    llm_providers.c.is_enabled,
+    llm_providers.c.created_at,
+    llm_providers.c.updated_at,
+)
+
+
 def _model_dict(row: Any) -> dict[str, Any]:
     return {
         "id": str(row["id"]),
@@ -264,7 +281,9 @@ class LLMSettingsRepository:
             with self.database.transaction() as connection:
                 connection.execute(llm_providers.insert().values(**values))
                 row = connection.execute(
-                    select(llm_providers).where(llm_providers.c.id == provider_id)
+                    select(*_PROVIDER_READ_COLUMNS).where(
+                        llm_providers.c.id == provider_id
+                    )
                 ).mappings().one()
         except IntegrityError as exc:
             raise LLMSettingsConflict("提供商名称已存在") from exc
@@ -284,7 +303,9 @@ class LLMSettingsRepository:
     ) -> dict[str, Any]:
         with self.database.transaction() as connection:
             current = connection.execute(
-                select(llm_providers).where(llm_providers.c.id == provider_id)
+                select(llm_providers.c.id, llm_providers.c.preset).where(
+                    llm_providers.c.id == provider_id
+                )
             ).mappings().first()
             if current is None:
                 raise LLMSettingsError("提供商不存在")
@@ -316,9 +337,12 @@ class LLMSettingsRepository:
                 )
                 if self._provider_has_default(connection, provider_id):
                     try:
-                        provider_for_validation = _provider_dict(current)
-                        provider_for_validation["api_key_env_var"] = normalized_env_var
-                        self.resolve_provider_api_key(provider_for_validation)
+                        self.resolve_provider_api_key(
+                            {
+                                "id": str(current["id"]),
+                                "api_key_env_var": normalized_env_var,
+                            }
+                        )
                     except (LLMSettingsError, LLMSecretError) as exc:
                         raise LLMSettingsConflict(str(exc)) from exc
                 values["api_key_env_var"] = normalized_env_var
@@ -334,14 +358,18 @@ class LLMSettingsRepository:
             except IntegrityError as exc:
                 raise LLMSettingsConflict("提供商名称已存在") from exc
             row = connection.execute(
-                select(llm_providers).where(llm_providers.c.id == provider_id)
+                select(*_PROVIDER_READ_COLUMNS).where(
+                    llm_providers.c.id == provider_id
+                )
             ).mappings().one()
         return self._public_provider(_provider_dict(row))
 
     def delete_provider(self, provider_id: str) -> dict[str, Any]:
         with self.database.transaction() as connection:
             current = connection.execute(
-                select(llm_providers).where(llm_providers.c.id == provider_id)
+                select(*_PROVIDER_READ_COLUMNS).where(
+                    llm_providers.c.id == provider_id
+                )
             ).mappings().first()
             if current is None:
                 raise LLMSettingsError("提供商不存在")
@@ -353,6 +381,11 @@ class LLMSettingsRepository:
             connection.execute(
                 llm_providers.delete().where(llm_providers.c.id == provider_id)
             )
+        if self.credential_store is not None:
+            try:
+                self.credential_store.delete(provider_id)
+            except LLMCredentialStoreError:
+                pass
         return self._public_provider(_provider_dict(current))
 
     def create_model(
@@ -494,7 +527,9 @@ class LLMSettingsRepository:
             row = connection.execute(
                 select(
                     llm_models.c.is_enabled.label("model_is_enabled"),
-                    llm_providers,
+                    llm_providers.c.id.label("provider_id"),
+                    llm_providers.c.api_key_env_var,
+                    llm_providers.c.is_enabled.label("provider_is_enabled"),
                 )
                 .select_from(
                     llm_models.join(
@@ -506,10 +541,17 @@ class LLMSettingsRepository:
             ).mappings().first()
             if row is None:
                 raise LLMSettingsError("模型不存在")
-            if not bool(row["model_is_enabled"]) or not bool(row["is_enabled"]):
+            if not bool(row["model_is_enabled"]) or not bool(
+                row["provider_is_enabled"]
+            ):
                 raise LLMSettingsConflict("只能将启用的模型设为默认")
             try:
-                self.resolve_provider_api_key(_provider_dict(row))
+                self.resolve_provider_api_key(
+                    {
+                        "id": str(row["provider_id"]),
+                        "api_key_env_var": str(row["api_key_env_var"] or ""),
+                    }
+                )
             except (LLMSettingsError, LLMSecretError) as exc:
                 raise LLMSettingsConflict(str(exc)) from exc
             current = connection.execute(
@@ -532,7 +574,9 @@ class LLMSettingsRepository:
     def settings_payload(self) -> dict[str, Any]:
         with self.database.connection() as connection:
             provider_rows = connection.execute(
-                select(llm_providers).order_by(llm_providers.c.name, llm_providers.c.id)
+                select(*_PROVIDER_READ_COLUMNS).order_by(
+                    llm_providers.c.name, llm_providers.c.id
+                )
             ).mappings().all()
             model_rows = connection.execute(
                 select(llm_models).order_by(llm_models.c.model_id, llm_models.c.id)
@@ -739,13 +783,19 @@ class LLMSettingsRepository:
     ) -> dict[str, Any]:
         with self.database.connection() as connection:
             row = connection.execute(
-                select(llm_providers).where(llm_providers.c.id == provider_id)
+                select(
+                    llm_providers.c.id,
+                    llm_providers.c.preset,
+                    llm_providers.c.base_url,
+                    llm_providers.c.wire_api,
+                    llm_providers.c.api_key_env_var,
+                    llm_providers.c.is_enabled,
+                ).where(llm_providers.c.id == provider_id)
             ).mappings().first()
         if row is None:
             raise LLMSettingsError("提供商不存在")
-        provider = _provider_dict(row)
         try:
-            api_key, _ = self.resolve_provider_api_key(provider)
+            api_key, _ = self.resolve_provider_api_key(row)
         except (LLMSettingsError, LLMSecretError) as exc:
             if require_api_key:
                 raise LLMSettingsError(str(exc)) from exc
@@ -753,13 +803,13 @@ class LLMSettingsRepository:
         if require_api_key and not api_key:
             raise LLMSettingsError("请先配置提供商 API Key")
         return {
-            "id": provider["id"],
-            "preset": provider["preset"],
-            "base_url": provider["base_url"],
-            "wire_api": provider["wire_api"],
-            "api_key_env_var": provider["api_key_env_var"],
+            "id": str(row["id"]),
+            "preset": str(row["preset"]),
+            "base_url": str(row["base_url"]),
+            "wire_api": str(row["wire_api"]),
+            "api_key_env_var": str(row["api_key_env_var"] or ""),
             "api_key": api_key,
-            "is_enabled": provider["is_enabled"],
+            "is_enabled": bool(row["is_enabled"]),
         }
 
     def import_legacy(self, config_module: Any) -> dict[str, Any]:
@@ -877,5 +927,7 @@ def runtime_settings_repository() -> LLMSettingsRepository | None:
         from system_database import SystemDatabase, SystemDatabaseSettings
 
         database = SystemDatabase(SystemDatabaseSettings.from_environment())
-        _RUNTIME_REPOSITORY = LLMSettingsRepository(database)
+        _RUNTIME_REPOSITORY = LLMSettingsRepository(
+            database, credential_store=default_llm_credential_store()
+        )
     return _RUNTIME_REPOSITORY

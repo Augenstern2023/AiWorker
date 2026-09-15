@@ -949,7 +949,7 @@ class WorkflowRepository:
         task_ids: set[str],
         creator_user_id: str,
     ) -> str:
-        """Choose a legacy project key only when local read-only evidence proves it."""
+        """Choose a historical project key only when local read-only evidence proves it."""
 
         scoped_workflow_id = f"project:{scoped_id}"
         legacy_workflow_id = f"project:{legacy_id}"
@@ -980,19 +980,32 @@ class WorkflowRepository:
             if scoped_exists:
                 return scoped_id
             if task_ids:
-                task_evidence = connection.execute(
-                    select(workflow_tasks.c.id)
-                    .where(
-                        workflow_tasks.c.id.in_(sorted(task_ids)),
-                        or_(
-                            workflow_tasks.c.project_id == legacy_id,
-                            workflow_tasks.c.workflow_id == legacy_workflow_id,
-                        ),
-                    )
-                    .limit(1)
-                ).first()
-                if task_evidence is not None:
-                    return legacy_id
+                task_rows = connection.execute(
+                    select(
+                        workflow_tasks.c.project_id,
+                        workflow_tasks.c.workflow_id,
+                    ).where(workflow_tasks.c.id.in_(sorted(task_ids)))
+                ).mappings().all()
+                task_project_ids: set[str] = set()
+                for row in task_rows:
+                    task_project_id = str(row["project_id"] or "").strip()
+                    if task_project_id:
+                        scoped_match = re.fullmatch(
+                            r"creative:[0-9a-fA-F-]{36}:project:(\d+)",
+                            task_project_id,
+                        )
+                        if task_project_id == legacy_id or (
+                            scoped_match is not None
+                            and scoped_match.group(1) == legacy_id
+                        ):
+                            task_project_ids.add(task_project_id)
+                        continue
+                    if str(row["workflow_id"] or "") == legacy_workflow_id:
+                        task_project_ids.add(legacy_id)
+                if len(task_project_ids) == 1:
+                    return next(iter(task_project_ids))
+                if len(task_project_ids) > 1:
+                    return scoped_id
             if creator_user_id:
                 creator_evidence = connection.execute(
                     select(project_members.c.id)

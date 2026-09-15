@@ -151,6 +151,16 @@ def test_build_worker_env_enables_database_llm_settings(monkeypatch):
     assert build_worker_env()["AIWORKER_LLM_DATABASE_CONFIG_ENABLED"] == "1"
 
 
+def test_worker_env_inherits_provider_key_without_fernet_key(monkeypatch):
+    monkeypatch.setenv("SUB2API_KEY", "worker-secret")
+    monkeypatch.delenv("AIWORKER_LLM_CONFIG_KEY", raising=False)
+
+    environment = build_worker_env()
+
+    assert environment["SUB2API_KEY"] == "worker-secret"
+    assert "AIWORKER_LLM_CONFIG_KEY" not in environment
+
+
 def test_build_worker_env_removes_playwright_incompatible_node_proxy_option(monkeypatch):
     monkeypatch.setenv("NODE_OPTIONS", "--max-old-space-size=4096 --use-env-proxy")
 

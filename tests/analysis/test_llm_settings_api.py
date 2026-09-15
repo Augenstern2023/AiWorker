@@ -76,16 +76,17 @@ def _api_module():
 
 
 @pytest.mark.asyncio
-async def test_model_sync_merges_openai_compatible_model_list():
+async def test_model_sync_merges_openai_compatible_model_list(monkeypatch):
     """Would catch /models responses being ignored or local models being replaced."""
 
+    monkeypatch.setenv("SYNC_API_KEY", "sync-secret")
     repository = _repository()
     provider = repository.create_provider(
         name="Model Catalog",
         preset="custom",
         base_url="https://llm.example.test/v1",
         wire_api="chat_completions",
-        api_key="sync-secret",
+        api_key_env_var="SYNC_API_KEY",
     )
     repository.create_model(provider["id"], model_id="manual-model")
 
@@ -257,7 +258,10 @@ def test_llm_routes_reject_non_admin_even_when_config_page_is_granted():
     assert response.status_code == 403
 
 
-def test_available_models_route_allows_authenticated_creator_without_secrets():
+def test_available_models_route_allows_authenticated_creator_without_secrets(
+    monkeypatch,
+):
+    monkeypatch.setenv("CATALOG_API_KEY", "catalog-secret")
     module = _api_module()
     repository = _repository()
     provider = repository.create_provider(
@@ -265,7 +269,7 @@ def test_available_models_route_allows_authenticated_creator_without_secrets():
         preset="custom",
         base_url="https://creative.example.test/v1",
         wire_api="chat_completions",
-        api_key="catalog-secret",
+        api_key_env_var="CATALOG_API_KEY",
     )
     model = repository.create_model(
         provider["id"], model_id="creative-model", display_name="创作模型"
@@ -290,9 +294,12 @@ def test_available_models_route_allows_authenticated_creator_without_secrets():
     assert "creative.example.test" not in response.text
 
 
-def test_provider_and_model_routes_never_return_or_audit_api_key():
-    """Would catch a management route leaking the submitted credential."""
+def test_provider_routes_accept_environment_variable_and_reject_plaintext_key(
+    monkeypatch,
+):
+    """Would catch plaintext credentials being accepted, echoed, or audited."""
 
+    monkeypatch.setenv("ROUTE_LLM_KEY", "route-secret")
     module = _api_module()
     repository = _repository()
     service = module.LLMSettingsService(repository)
@@ -314,7 +321,7 @@ def test_provider_and_model_routes_never_return_or_audit_api_key():
             "preset": "custom",
             "base_url": "https://llm.example.test/v1",
             "wire_api": "chat_completions",
-            "api_key": "route-secret",
+            "api_key_env_var": "ROUTE_LLM_KEY",
             "is_enabled": True,
         },
     )
@@ -326,13 +333,26 @@ def test_provider_and_model_routes_never_return_or_audit_api_key():
     default_response = client.put(
         "/api/llm/default-model", json={"model_id": model_response.json()["id"]}
     )
+    rejected = client.post(
+        "/api/llm/providers",
+        json={
+            "name": "Legacy",
+            "preset": "custom",
+            "base_url": "https://llm.example.test/v1",
+            "wire_api": "chat_completions",
+            "api_key": "must-not-be-accepted",
+        },
+    )
 
     assert provider_response.status_code == 201
     assert model_response.status_code == 201
     assert default_response.status_code == 200
+    assert rejected.status_code == 400
     assert provider["has_api_key"] is True
+    assert provider["api_key_env_var"] == "ROUTE_LLM_KEY"
     assert "route-secret" not in repr(provider)
     assert "route-secret" not in repr(audit.events)
+    assert "must-not-be-accepted" not in rejected.text
     assert [event["action"] for event in audit.events] == [
         "llm.provider.create",
         "llm.model.create",
@@ -340,7 +360,8 @@ def test_provider_and_model_routes_never_return_or_audit_api_key():
     ]
 
 
-def test_model_delete_route_removes_non_default_and_rejects_default():
+def test_model_delete_route_removes_non_default_and_rejects_default(monkeypatch):
+    monkeypatch.setenv("DELETE_API_KEY", "delete-secret")
     module = _api_module()
     repository = _repository()
     provider = repository.create_provider(
@@ -348,7 +369,7 @@ def test_model_delete_route_removes_non_default_and_rejects_default():
         preset="custom",
         base_url="https://llm.example.test/v1",
         wire_api="chat_completions",
-        api_key="secret",
+        api_key_env_var="DELETE_API_KEY",
     )
     default_model = repository.create_model(provider["id"], model_id="model-a")
     removable_model = repository.create_model(provider["id"], model_id="model-b")
@@ -384,7 +405,9 @@ def test_model_delete_route_removes_non_default_and_rejects_default():
     assert remaining_ids == {default_model["id"]}
 
 
-def test_provider_delete_route_removes_non_default_and_rejects_default():
+def test_provider_delete_route_removes_non_default_and_rejects_default(monkeypatch):
+    monkeypatch.setenv("DEFAULT_API_KEY", "default-secret")
+    monkeypatch.setenv("REMOVABLE_API_KEY", "removable-secret")
     module = _api_module()
     repository = _repository()
     default_provider = repository.create_provider(
@@ -392,7 +415,7 @@ def test_provider_delete_route_removes_non_default_and_rejects_default():
         preset="custom",
         base_url="https://default.example.test/v1",
         wire_api="chat_completions",
-        api_key="secret",
+        api_key_env_var="DEFAULT_API_KEY",
     )
     default_model = repository.create_model(
         default_provider["id"], model_id="default-model"
@@ -403,7 +426,7 @@ def test_provider_delete_route_removes_non_default_and_rejects_default():
         preset="custom",
         base_url="https://delete.example.test/v1",
         wire_api="chat_completions",
-        api_key="delete-secret",
+        api_key_env_var="REMOVABLE_API_KEY",
     )
     repository.create_model(removable_provider["id"], model_id="unused-model")
     audit = _RecordingAudit()
@@ -441,9 +464,10 @@ def test_provider_delete_route_removes_non_default_and_rejects_default():
     assert remaining_ids == {default_provider["id"]}
 
 
-def test_settings_route_exposes_presets_and_current_default():
+def test_settings_route_exposes_presets_and_current_default(monkeypatch):
     """Would catch the UI loading without enough data to render its master-detail state."""
 
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
     module = _api_module()
     repository = _repository()
     provider = repository.create_provider(
@@ -451,7 +475,6 @@ def test_settings_route_exposes_presets_and_current_default():
         preset="openai",
         base_url="https://api.openai.com/v1",
         wire_api="responses",
-        api_key="secret",
     )
     model = repository.create_model(provider["id"], model_id="gpt-test")
     repository.set_default_model(model["id"])
@@ -471,9 +494,13 @@ def test_settings_route_exposes_presets_and_current_default():
     assert response.json()["presets"]["minimax"]["wire_api"] == "chat_completions"
 
 
-def test_route_can_test_a_new_key_before_saving_it_to_an_existing_provider():
-    """Would catch stored-key lookup blocking an explicitly supplied draft key."""
+def test_route_can_test_an_environment_variable_before_saving_provider_changes(
+    monkeypatch,
+):
+    """Would catch draft connection tests reading stored or submitted plaintext."""
 
+    monkeypatch.delenv("MISSING_CREDENTIAL_KEY", raising=False)
+    monkeypatch.setenv("DRAFT_API_KEY", "draft-key")
     module = _api_module()
     repository = _repository()
     provider = repository.create_provider(
@@ -481,6 +508,7 @@ def test_route_can_test_a_new_key_before_saving_it_to_an_existing_provider():
         preset="custom",
         base_url="https://saved.example.test/v1",
         wire_api="chat_completions",
+        api_key_env_var="MISSING_CREDENTIAL_KEY",
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -508,7 +536,7 @@ def test_route_can_test_a_new_key_before_saving_it_to_an_existing_provider():
         json={
             "provider_id": provider["id"],
             "base_url": "https://draft.example.test/v1",
-            "api_key": "draft-key",
+            "api_key_env_var": "DRAFT_API_KEY",
             "model_id": "draft-model",
             "wire_api": "chat_completions",
         },
@@ -518,9 +546,10 @@ def test_route_can_test_a_new_key_before_saving_it_to_an_existing_provider():
     assert response.json()["response_preview"] == "OK"
 
 
-def test_route_treats_a_whitespace_test_key_as_omitted():
-    """Would catch direct API callers losing the saved key to whitespace input."""
+def test_route_uses_saved_provider_environment_variable(monkeypatch):
+    """Would catch saved-provider tests bypassing repository credential resolution."""
 
+    monkeypatch.setenv("STORED_API_KEY", "stored-key")
     module = _api_module()
     repository = _repository()
     provider = repository.create_provider(
@@ -528,7 +557,7 @@ def test_route_treats_a_whitespace_test_key_as_omitted():
         preset="custom",
         base_url="https://saved.example.test/v1",
         wire_api="chat_completions",
-        api_key="stored-key",
+        api_key_env_var="STORED_API_KEY",
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -552,7 +581,6 @@ def test_route_treats_a_whitespace_test_key_as_omitted():
         "/api/llm/test",
         json={
             "provider_id": provider["id"],
-            "api_key": "   ",
             "model_id": "saved-model",
         },
     )

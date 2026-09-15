@@ -95,16 +95,25 @@ def build_script_review_router(
         service = getattr(request.app.state, "identity_permission_service", None)
         if not isinstance(service, PermissionService):
             return False
-        scoped_project_id = repository.workflow_project_id(project_id)
-        return service.can_access_assigned_project(
-            principal, scoped_project_id
-        ) or service.can_access_managed_project(principal, scoped_project_id)
+        workflow_identity = getattr(
+            request.app.state, "workflow_identity_resolver", None
+        )
+        resolver = getattr(workflow_identity, "project_id", None)
+        try:
+            workflow_project_id = (
+                str(resolver(project_id))
+                if callable(resolver)
+                else repository.workflow_project_id(project_id)
+            )
+        except (TypeError, ValueError):
+            workflow_project_id = repository.workflow_project_id(project_id)
+        return service.is_active_project_member(principal, workflow_project_id)
 
     def assert_project_access(
         request: Request, principal: Principal, project_id: int
     ) -> None:
         if not can_access_project(request, principal, project_id):
-            raise HTTPException(403, "只能访问当前分配或管理的项目")
+            raise HTTPException(403, "只有有效项目成员可以发起或访问审核")
 
     def can_read_review(
         request: Request, principal: Principal, review: dict[str, Any]
@@ -250,12 +259,12 @@ def build_script_review_router(
         request: Request,
         principal: Principal = Depends(current_principal),
     ) -> dict[str, Any]:
-        assert_permission(principal, "script.review.generate")
         try:
             data = validate_review_request(payload.model_dump())
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         if data["source_type"] == "text":
+            assert_permission(principal, "script.review.generate")
             source = build_text_source(data["text"])
         else:
             project = repository.get_project(int(data["project_id"]))
@@ -304,7 +313,6 @@ def build_script_review_router(
         request: Request,
         principal: Principal = Depends(current_principal),
     ) -> dict[str, list[dict[str, Any]]]:
-        assert_permission(principal, "script.review.read")
         candidates = repository.list_script_reviews()
         items = [
             refresh_review(review)
@@ -320,7 +328,6 @@ def build_script_review_router(
         request: Request,
         principal: Principal = Depends(current_principal),
     ) -> PlainTextResponse:
-        assert_permission(principal, "script.review.read")
         review = repository.get_script_review(review_id)
         if not review:
             raise HTTPException(404, "审核记录不存在")
@@ -343,7 +350,6 @@ def build_script_review_router(
         request: Request,
         principal: Principal = Depends(current_principal),
     ) -> dict[str, Any]:
-        assert_permission(principal, "script.review.read")
         review = repository.get_script_review(review_id)
         if not review:
             raise HTTPException(404, "审核记录不存在")

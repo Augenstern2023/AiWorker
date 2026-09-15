@@ -65,7 +65,18 @@ def build_script_optimization_router(
         if principal.is_system_admin:
             return True
         service = getattr(request.app.state, "identity_permission_service", None)
-        scoped_project_id = repository.workflow_project_id(project_id)
+        workflow_identity = getattr(
+            request.app.state, "workflow_identity_resolver", None
+        )
+        resolver = getattr(workflow_identity, "project_id", None)
+        try:
+            scoped_project_id = (
+                str(resolver(project_id))
+                if callable(resolver)
+                else repository.workflow_project_id(project_id)
+            )
+        except (TypeError, ValueError):
+            scoped_project_id = repository.workflow_project_id(project_id)
         return isinstance(service, PermissionService) and (
             service.can_access_assigned_project(principal, scoped_project_id)
             or service.can_access_managed_project(principal, scoped_project_id)

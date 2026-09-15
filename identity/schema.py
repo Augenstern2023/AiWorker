@@ -33,7 +33,7 @@ class Principal:
 
     @property
     def is_system_admin(self) -> bool:
-        return "system_admin" in self.role_codes or "*" in self.permissions
+        return "system_admin" in self.role_codes
 
 
 class RolePermissionRequest(BaseModel):

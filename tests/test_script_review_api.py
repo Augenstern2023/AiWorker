@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from creative.repository import CreativeRepository
 from creative.prompt_store import PromptStore
 from identity.dependencies import current_principal
+from identity.permission_service import PermissionService
 from identity.schema import Principal
 from runtime.job_manager import JobNotFoundError
 from screenplay_review.api import build_script_review_router
@@ -32,6 +33,89 @@ class FakeJobManager:
     def create_job(self, payload: dict):
         self.payloads.append(payload)
         return SimpleNamespace(job_id="review-job-1")
+
+
+class MembershipPermissionService(PermissionService):
+    def __init__(self, active_project_ids: set[str]) -> None:
+        self.active_project_ids = active_project_ids
+
+    def is_active_project_member(
+        self, principal: Principal, project_id: str
+    ) -> bool:
+        return project_id in self.active_project_ids
+
+    def can_access_assigned_project(
+        self, principal: Principal, project_id: str
+    ) -> bool:
+        return self.is_active_project_member(principal, project_id)
+
+    def can_access_managed_project(
+        self, principal: Principal, project_id: str
+    ) -> bool:
+        return False
+
+
+def _reviewable_project(repository: CreativeRepository) -> dict:
+    topic = repository.upsert_topics(
+        [
+            {
+                "platform": "hg",
+                "job_id": "member-review",
+                "source_path": "member.json",
+                "captured_at": "2026-09-14",
+                "title": "成员审核项目",
+                "description": "测试",
+                "category": "都市",
+                "rank_type": "热播榜",
+                "score": 80,
+                "confidence": "high",
+                "score_details": {},
+                "recommendation": "值得拆解",
+                "evidence": [],
+            }
+        ]
+    )[0]
+    topic = repository.update_topic(topic["id"], "adopted")
+    breakdown = repository.create_breakdown(
+        topic["id"],
+        {
+            "protagonist": "主角",
+            "core_conflict": "主角反击",
+            "hooks": ["反转"],
+        },
+        {},
+        [],
+    )
+    breakdown = repository.lock_breakdown(breakdown["id"])
+    project = repository.create_project(
+        topic["id"],
+        breakdown["id"],
+        "成员审核项目",
+        1,
+        created_by="owner-1",
+    )
+    brief = repository.create_blueprints(
+        project["id"], [{"content": {"title": "方向"}}]
+    )[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(
+        project["id"], [{"name": "主角"}], [{"relation": "对手"}]
+    )
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(
+        project["id"],
+        [{"episode": 1, "summary": "主角反击"}],
+        "单集弧线",
+    )
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    beats = repository.create_episode_beats(
+        project["id"], 1, {"beats": [{"order": 1, "goal": "反击"}]}
+    )
+    repository.lock_episode_beats(beats["id"])
+    repository.create_episode_script(
+        project["id"], 1, {"episode_title": "第 1 集", "scenes": []}
+    )
+    return repository.get_project(project["id"])
 
 
 def _principal() -> Principal:
@@ -56,6 +140,132 @@ def _admin_principal() -> Principal:
         data_scope="all",
         session_id="session-admin",
     )
+
+
+def test_active_project_member_without_review_permission_can_create_and_read_review(
+    tmp_path,
+) -> None:
+    """Requiring an assigned/managed scope would reject a valid task-scoped member."""
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = _reviewable_project(repository)
+    jobs = FakeJobManager()
+    principal = Principal(
+        user_id="member-1",
+        username="member-1",
+        display_name="项目成员",
+        role_codes=("screenwriter",),
+        permissions=frozenset(),
+        data_scope="task",
+        session_id="session-member",
+    )
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = lambda: principal
+    app.state.identity_permission_service = MembershipPermissionService(
+        {repository.workflow_project_id(project["id"])}
+    )
+    app.include_router(build_script_review_router(repository, jobs))
+    client = TestClient(app)
+
+    created = client.post(
+        "/api/script-reviews",
+        json={
+            "source_type": "project",
+            "mode": "single",
+            "project_id": project["id"],
+            "episode_numbers": [1],
+        },
+    )
+
+    assert created.status_code == 201
+    review_id = created.json()["review"]["id"]
+    assert client.get(f"/api/script-reviews/{review_id}").status_code == 200
+    assert jobs.payloads[0]["extra"]["project_id"] == project["id"]
+
+
+def test_historical_project_member_identity_can_create_project_review(tmp_path) -> None:
+    """Using only the current store ID would miss a proven legacy membership."""
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = _reviewable_project(repository)
+    principal = Principal(
+        user_id="member-1",
+        username="member-1",
+        display_name="项目成员",
+        role_codes=("screenwriter",),
+        permissions=frozenset(),
+        data_scope="task",
+        session_id="session-member",
+    )
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = lambda: principal
+    app.state.identity_permission_service = MembershipPermissionService(
+        {str(project["id"])}
+    )
+    app.state.workflow_identity_resolver = SimpleNamespace(
+        project_id=lambda _project_id: str(project["id"])
+    )
+    app.include_router(build_script_review_router(repository, FakeJobManager()))
+
+    created = TestClient(app).post(
+        "/api/script-reviews",
+        json={
+            "source_type": "project",
+            "mode": "single",
+            "project_id": project["id"],
+            "episode_numbers": [1],
+        },
+    )
+
+    assert created.status_code == 201
+
+
+def test_non_member_with_review_permission_cannot_create_project_review(
+    tmp_path,
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = _reviewable_project(repository)
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = _principal
+    app.state.identity_permission_service = MembershipPermissionService(set())
+    app.include_router(build_script_review_router(repository, FakeJobManager()))
+    client = TestClient(app)
+
+    created = client.post(
+        "/api/script-reviews",
+        json={
+            "source_type": "project",
+            "mode": "single",
+            "project_id": project["id"],
+            "episode_numbers": [1],
+        },
+    )
+
+    assert created.status_code == 403
+    assert "项目成员" in created.json()["detail"]
+
+
+def test_text_review_still_requires_review_generate_permission(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    principal = Principal(
+        user_id="member-1",
+        username="member-1",
+        display_name="项目成员",
+        role_codes=("screenwriter",),
+        permissions=frozenset(),
+        data_scope="task",
+        session_id="session-member",
+    )
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = lambda: principal
+    app.include_router(build_script_review_router(repository, FakeJobManager()))
+    client = TestClient(app)
+
+    created = client.post(
+        "/api/script-reviews",
+        json={"source_type": "text", "mode": "single", "text": "主角反击。"},
+    )
+
+    assert created.status_code == 403
+    assert created.json()["detail"] == "没有执行此操作的权限"
 
 
 def test_text_review_is_created_as_an_unconfirmable_quick_diagnosis(tmp_path) -> None:

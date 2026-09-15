@@ -168,9 +168,9 @@
                     selectedProviderId: '',
                     editor: {
                         id: '', name: '', preset: 'custom', base_url: '',
-                        wire_api: 'chat_completions', api_key: '',
+                        wire_api: 'chat_completions', api_key_env_var: '',
                         has_api_key: false, is_enabled: true,
-                        clear_api_key: false, credential_status: 'missing'
+                        credential_status: 'missing'
                     },
                     modelDraft: {
                         model_id: '', display_name: '', input_price_per_million: '',

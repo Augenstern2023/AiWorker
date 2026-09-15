@@ -229,3 +229,96 @@ def test_episode_workspace_all_view_and_multi_download_modal(
         )
         assert not errors
         browser.close()
+
+
+def test_episode_download_moves_focus_and_uses_blob_download() -> None:
+    """Catch modal focus being hidden and HTTP navigation-based downloads."""
+
+    creative_script = ROOT / "static/js/common/creative.js"
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            """
+            <main>
+              <button id="outside">下载入口</button>
+              <div id="creativeEpisodeDownloadModal" aria-hidden="false">
+                <button id="confirm">下载全集</button>
+              </div>
+            </main>
+            """
+        )
+        page.evaluate("window.aiworkerModules = []")
+        page.add_script_tag(path=creative_script)
+        result = page.evaluate(
+            """
+            async () => {
+              const methods = window.aiworkerModules.at(-1)();
+              const modal = document.getElementById('creativeEpisodeDownloadModal');
+              const notices = [];
+              const state = Object.assign({}, methods, {
+                creativeWorkspace: {
+                  project: {id: 15},
+                  episodeDownload: {
+                    stage: 'script',
+                    selectedEpisodes: [5],
+                    allEpisodes: true,
+                    format: 'txt'
+                  }
+                },
+                modal() {
+                  return {
+                    hide() {
+                      window.focusWasInsideWhenHidden = modal.contains(document.activeElement);
+                      modal.setAttribute('aria-hidden', 'true');
+                    }
+                  };
+                },
+                showCreativeNotice(message, kind) { notices.push({message, kind}); }
+              });
+              let requestUrl = '';
+              window.aiworkerApi = {
+                async request(url) {
+                  requestUrl = url;
+                  return new Response(new Blob(['scene script']), {
+                    status: 200,
+                    headers: {
+                      'content-disposition': "attachment; filename*=UTF-8''%E7%AC%AC5%E9%9B%86.txt"
+                    }
+                  });
+                }
+              };
+              let downloaded = null;
+              const originalClick = HTMLAnchorElement.prototype.click;
+              HTMLAnchorElement.prototype.click = function () {
+                downloaded = {href: this.href, filename: this.download};
+              };
+              document.getElementById('confirm').focus();
+              try {
+                await state.downloadSelectedEpisodes();
+              } catch (error) {
+                notices.push({message: error.message, kind: 'exception'});
+              } finally {
+                HTMLAnchorElement.prototype.click = originalClick;
+              }
+              return {
+                focusWasInsideWhenHidden: window.focusWasInsideWhenHidden,
+                activeElementId: document.activeElement.id,
+                requestUrl,
+                downloaded,
+                notices
+              };
+            }
+            """
+        )
+
+        assert result["focusWasInsideWhenHidden"] is False
+        assert result["activeElementId"] != "confirm"
+        assert result["requestUrl"] == (
+            "/api/creative/projects/15/episodes/download?"
+            "stage=script&episodes=all&format=txt"
+        )
+        assert result["downloaded"]["href"].startswith("blob:")
+        assert result["downloaded"]["filename"] == "第5集.txt"
+        assert result["notices"] == []
+        browser.close()

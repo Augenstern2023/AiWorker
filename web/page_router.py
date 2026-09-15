@@ -71,6 +71,13 @@ PAGE_TEMPLATES = {
 
 
 def _workflow_project_id(request: Request, project_id: str) -> str:
+    workflow_identity = getattr(request.app.state, "workflow_identity_resolver", None)
+    resolver = getattr(workflow_identity, "project_id", None)
+    if callable(resolver):
+        try:
+            return str(resolver(project_id))
+        except (TypeError, ValueError):
+            pass
     repository = getattr(request.app.state, "creative_repository", None)
     resolver = getattr(repository, "workflow_project_id", None)
     if not callable(resolver):

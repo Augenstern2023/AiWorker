@@ -145,16 +145,6 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         self.retry_base_delay = max(0.0, float(retry_base_delay))
         self.transport = transport
         self.retry_callback = retry_callback
-        self._usage_call_count = 0
-        self._usage_reported_call_count = 0
-        self._usage_input_reported_call_count = 0
-        self._usage_output_reported_call_count = 0
-        self._usage_total_reported_call_count = 0
-        self._usage_input_tokens = 0
-        self._usage_output_tokens = 0
-        self._usage_total_tokens = 0
-        self._usage_cached_tokens = 0
-        self._usage_reasoning_tokens = 0
 
     async def analyze_video(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         result = await self.complete_json(build_video_analysis_messages(payload))
@@ -225,7 +215,6 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             raise ResponsesAPIUnsupportedError(
                 "Responses API returned an empty or non-JSON response."
             ) from exc
-        self._record_usage(payload, wire_api="responses")
         return parse_responses_text(payload)
 
     async def _complete_chat_completions_text(self, messages: List[Dict[str, str]], json_mode: bool, model: str | None = None) -> str:
@@ -248,102 +237,7 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             request_body["response_format"] = {"type": "json_object"}
         endpoint = f"{self.base_url}/chat/completions"
         response = await self._post_with_retry(endpoint, headers, request_body)
-        payload = response.json()
-        self._record_usage(payload, wire_api="chat_completions")
-        return parse_chat_completion_text(payload)
-
-    @staticmethod
-    def _usage_integer(value: Any) -> int | None:
-        if isinstance(value, bool):
-            return None
-        try:
-            normalized = int(value)
-        except (TypeError, ValueError):
-            return None
-        return normalized if normalized >= 0 else None
-
-    def _record_usage(self, payload: Any, *, wire_api: str) -> None:
-        """Accumulate only token counts explicitly reported by the provider."""
-
-        self._usage_call_count += 1
-        usage = payload.get("usage") if isinstance(payload, dict) else None
-        if not isinstance(usage, dict):
-            return
-        if wire_api == "responses":
-            input_value = usage.get("input_tokens")
-            output_value = usage.get("output_tokens")
-            input_details = usage.get("input_tokens_details")
-            output_details = usage.get("output_tokens_details")
-        else:
-            input_value = usage.get("prompt_tokens")
-            output_value = usage.get("completion_tokens")
-            input_details = usage.get("prompt_tokens_details")
-            output_details = usage.get("completion_tokens_details")
-        input_tokens = self._usage_integer(input_value)
-        output_tokens = self._usage_integer(output_value)
-        total_tokens = self._usage_integer(usage.get("total_tokens"))
-        if total_tokens is None and input_tokens is not None and output_tokens is not None:
-            total_tokens = input_tokens + output_tokens
-
-        if input_tokens is not None:
-            self._usage_input_tokens += input_tokens
-            self._usage_input_reported_call_count += 1
-        if output_tokens is not None:
-            self._usage_output_tokens += output_tokens
-            self._usage_output_reported_call_count += 1
-        if total_tokens is not None:
-            self._usage_total_tokens += total_tokens
-            self._usage_total_reported_call_count += 1
-        if input_tokens is not None and output_tokens is not None:
-            self._usage_reported_call_count += 1
-
-        input_details = input_details if isinstance(input_details, dict) else {}
-        output_details = output_details if isinstance(output_details, dict) else {}
-        cached_tokens = self._usage_integer(input_details.get("cached_tokens"))
-        reasoning_tokens = self._usage_integer(
-            output_details.get("reasoning_tokens")
-        )
-        if cached_tokens is not None:
-            self._usage_cached_tokens += cached_tokens
-        if reasoning_tokens is not None:
-            self._usage_reasoning_tokens += reasoning_tokens
-
-    def usage_snapshot(self) -> Dict[str, Any]:
-        snapshot: Dict[str, Any] = {
-            "call_count": self._usage_call_count,
-            "reported_call_count": self._usage_reported_call_count,
-            "input_reported_call_count": self._usage_input_reported_call_count,
-            "output_reported_call_count": self._usage_output_reported_call_count,
-            "total_reported_call_count": self._usage_total_reported_call_count,
-            "input_tokens": self._usage_input_tokens,
-            "output_tokens": self._usage_output_tokens,
-            "total_tokens": self._usage_total_tokens,
-            "cached_tokens": self._usage_cached_tokens,
-            "reasoning_tokens": self._usage_reasoning_tokens,
-        }
-        fallback_snapshot = (
-            llm_usage_snapshot(self.fallback_provider)
-            if self.fallback_provider is not self
-            else {}
-        )
-        if fallback_snapshot.get("call_count"):
-            for key in (
-                "call_count",
-                "reported_call_count",
-                "input_reported_call_count",
-                "output_reported_call_count",
-                "total_reported_call_count",
-                "input_tokens",
-                "output_tokens",
-                "total_tokens",
-                "cached_tokens",
-                "reasoning_tokens",
-            ):
-                snapshot[key] += fallback_snapshot[key]
-        snapshot["complete"] = (
-            snapshot["reported_call_count"] == snapshot["call_count"]
-        )
-        return snapshot
+        return parse_chat_completion_text(response.json())
 
     async def _post_with_retry(
         self,
@@ -381,87 +275,6 @@ class OpenAICompatibleLLMProvider(LLMProvider):
                     if delay:
                         await asyncio.sleep(delay)
         raise LLMError("LLM request retry loop exited unexpectedly.")
-
-
-def llm_usage_snapshot(provider: Any) -> Dict[str, Any]:
-    """Return a stable usage shape without estimating missing provider data."""
-
-    empty: Dict[str, Any] = {
-        "call_count": 0,
-        "reported_call_count": 0,
-        "input_reported_call_count": 0,
-        "output_reported_call_count": 0,
-        "total_reported_call_count": 0,
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "total_tokens": 0,
-        "cached_tokens": 0,
-        "reasoning_tokens": 0,
-        "complete": False,
-    }
-    snapshotter = getattr(provider, "usage_snapshot", None)
-    if not callable(snapshotter):
-        return empty
-    try:
-        snapshot = snapshotter()
-    except Exception:
-        return empty
-    if not isinstance(snapshot, dict):
-        return empty
-    normalized = dict(empty)
-    for key in empty:
-        if key == "complete":
-            continue
-        value = OpenAICompatibleLLMProvider._usage_integer(snapshot.get(key))
-        normalized[key] = value if value is not None else 0
-    normalized["complete"] = bool(snapshot.get("complete")) and (
-        normalized["reported_call_count"] == normalized["call_count"]
-    )
-    return normalized
-
-
-def build_llm_price_snapshot(settings: Any) -> Dict[str, Any]:
-    """Keep only immutable pricing fields; never copy credentials into a job."""
-
-    if not isinstance(settings, dict):
-        return {}
-    input_price = settings.get("input_price_per_million")
-    output_price = settings.get("output_price_per_million")
-    try:
-        normalized_input = None if input_price is None else float(input_price)
-        normalized_output = None if output_price is None else float(output_price)
-    except (TypeError, ValueError):
-        normalized_input = None
-        normalized_output = None
-    if normalized_input is not None and normalized_input < 0:
-        normalized_input = None
-    if normalized_output is not None and normalized_output < 0:
-        normalized_output = None
-    return {
-        "model_record_id": str(settings.get("model_record_id") or ""),
-        "model_id": str(settings.get("model") or settings.get("model_id") or ""),
-        "input_price_per_million": normalized_input,
-        "output_price_per_million": normalized_output,
-        "price_currency": str(settings.get("price_currency") or "CNY").upper(),
-        "complete": normalized_input is not None and normalized_output is not None,
-    }
-
-
-def current_llm_price_snapshot(model_record_id: str = "") -> Dict[str, Any]:
-    """Resolve current pricing once so callers can freeze it into a new job."""
-
-    repository = _default_llm_settings_repository()
-    if repository is None:
-        return {}
-    try:
-        settings = (
-            repository.effective_model(model_record_id)
-            if str(model_record_id or "").strip()
-            else repository.effective_default()
-        )
-    except Exception:
-        return {}
-    return build_llm_price_snapshot(settings)
 
 
 def is_retryable_llm_exception(exc: Exception) -> bool:
@@ -559,15 +372,18 @@ def resolve_llm_settings(
     prefix: str = "LLM",
     *,
     settings_repository: Any | None = None,
-    use_database_default: bool = True,
+    database_default: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    if settings_repository is None and use_database_default:
-        settings_repository = _default_llm_settings_repository()
-    database_default = (
-        settings_repository.effective_default()
-        if settings_repository is not None and use_database_default
-        else None
-    ) or {}
+    if database_default is None:
+        if settings_repository is None:
+            settings_repository = _default_llm_settings_repository()
+        database_default = (
+            settings_repository.effective_default()
+            if settings_repository is not None
+            else None
+        ) or {}
+    else:
+        database_default = dict(database_default)
     scenario_prefix = prefix if prefix != "LLM" else ""
     scenario_provider = (
         getattr(config_module, f"{scenario_prefix}_PROVIDER", "")
@@ -737,7 +553,7 @@ def create_llm_provider_from_config(
         config_module,
         prefix=prefix,
         settings_repository=settings_repository,
-        use_database_default=not bool(selected_model_record_id),
+        database_default=selected_settings,
     )
     if selected_settings is not None:
         settings.update(selected_settings)
@@ -812,14 +628,7 @@ def parse_chat_completion_text(response_json: Dict[str, Any]) -> str:
     if not choices:
         raise LLMError("LLM response has no choices.")
 
-    choice = choices[0]
-    finish_reason = str(choice.get("finish_reason") or "").strip().lower()
-    if finish_reason in {"length", "max_tokens", "max_output_tokens"}:
-        raise LLMIncompleteResponseError(
-            "Chat Completions response is incomplete: max_output_tokens."
-        )
-
-    message = choice.get("message") or {}
+    message = choices[0].get("message") or {}
     content = message.get("content", "")
     if isinstance(content, list):
         content = "".join(item.get("text", "") if isinstance(item, dict) else str(item) for item in content)

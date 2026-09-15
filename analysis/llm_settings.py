@@ -9,15 +9,13 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
-import time
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
@@ -29,31 +27,37 @@ PROVIDER_PRESETS: dict[str, dict[str, str]] = {
         "label": "OpenAI",
         "base_url": "https://api.openai.com/v1",
         "wire_api": "responses",
+        "env_key": "OPENAI_API_KEY",
     },
     "deepseek": {
         "label": "DeepSeek",
         "base_url": "https://api.deepseek.com",
         "wire_api": "chat_completions",
+        "env_key": "DEEPSEEK_API_KEY",
     },
     "minimax": {
         "label": "MiniMax",
         "base_url": "https://api.minimax.io/v1",
         "wire_api": "chat_completions",
+        "env_key": "MINIMAX_API_KEY",
     },
     "sub2api": {
         "label": "Sub2API",
         "base_url": "",
         "wire_api": "chat_completions",
+        "env_key": "SUB2API_KEY",
     },
     "custom": {
         "label": "自定义",
         "base_url": "",
         "wire_api": "chat_completions",
+        "env_key": "",
     },
 }
 
 _RUNTIME_REPOSITORY: "LLMSettingsRepository | None" = None
 _RUNTIME_REPOSITORY_LOCK = threading.Lock()
+_ENV_VAR_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class LLMSecretError(RuntimeError):
@@ -68,152 +72,37 @@ class LLMSettingsConflict(LLMSettingsError):
     pass
 
 
-class LLMSecretCipher:
-    def __init__(self, key: bytes) -> None:
-        try:
-            self._fernet = Fernet(key)
-        except (TypeError, ValueError) as exc:
-            raise LLMSecretError("AIWORKER_LLM_CONFIG_KEY must be a Fernet key") from exc
+def validate_api_key_env_var(value: str, *, required: bool = True) -> str:
+    normalized = str(value or "").strip()
+    if not normalized and not required:
+        return ""
+    if not _ENV_VAR_NAME.fullmatch(normalized):
+        raise LLMSettingsError("API Key 环境变量名称无效")
+    return normalized
 
-    @classmethod
-    def from_environment(cls, runtime_dir: str | Path) -> "LLMSecretCipher":
-        configured = os.getenv("AIWORKER_LLM_CONFIG_KEY", "").strip()
-        if configured:
-            return cls(configured.encode("ascii"))
 
-        runtime_path = Path(runtime_dir)
-        runtime_path.mkdir(parents=True, exist_ok=True)
-        runtime_key_path = runtime_path / "llm_config.key"
-        common_git_dir = cls._find_git_common_dir(runtime_path.parent)
-        key_path = (
-            common_git_dir / "aiworker" / "llm_config.key"
-            if common_git_dir is not None
-            else runtime_key_path
-        )
-        key_path.parent.mkdir(parents=True, exist_ok=True)
-        if key_path.exists():
-            return cls._read_key_after_concurrent_write(key_path)
+def environment_api_key(variable_name: str) -> str:
+    normalized = validate_api_key_env_var(variable_name)
+    api_key = os.getenv(normalized, "").strip()
+    if not api_key:
+        raise LLMSecretError(f"环境变量 {normalized} 未配置或为空")
+    return api_key
 
-        legacy_key_paths: list[Path] = []
-        if common_git_dir is not None and common_git_dir.name == ".git":
-            legacy_key_paths.append(
-                common_git_dir.parent / ".runtime" / "llm_config.key"
-            )
-        if runtime_key_path not in legacy_key_paths:
-            legacy_key_paths.append(runtime_key_path)
-        existing_key_path = next(
-            (candidate for candidate in legacy_key_paths if candidate.exists()),
-            None,
-        )
-        key = (
-            cls._read_key_material_after_concurrent_write(existing_key_path)
-            if existing_key_path is not None
-            else Fernet.generate_key()
-        )
-        return cls._publish_key(key_path, key)
 
-    @classmethod
-    def _publish_key(cls, key_path: Path, key: bytes) -> "LLMSecretCipher":
-        cipher = cls(key)
-        temporary_path = key_path.parent / (
-            f".{key_path.name}.{uuid.uuid4().hex}.tmp"
-        )
-        descriptor: int | None = None
-        try:
-            descriptor = os.open(
-                temporary_path,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                0o600,
-            )
-            with os.fdopen(descriptor, "wb") as key_file:
-                descriptor = None
-                key_file.write(key + b"\n")
-                key_file.flush()
-                os.fsync(key_file.fileno())
-            try:
-                os.chmod(temporary_path, 0o600)
-            except OSError:
-                pass
-            try:
-                os.link(temporary_path, key_path)
-            except FileExistsError:
-                return cls._read_key_after_concurrent_write(key_path)
-            return cipher
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-            temporary_path.unlink(missing_ok=True)
+def _provider_env_var(preset: str, value: str = "") -> str:
+    normalized = validate_api_key_env_var(value, required=False)
+    if normalized:
+        return normalized
+    default = PROVIDER_PRESETS[preset]["env_key"]
+    return validate_api_key_env_var(default)
 
-    @staticmethod
-    def _find_git_common_dir(start: Path) -> Path | None:
-        for repository_root in (start, *start.parents):
-            marker = repository_root / ".git"
-            if marker.is_dir():
-                return marker.resolve()
-            if not marker.is_file():
-                continue
-            try:
-                prefix, separator, value = marker.read_text(
-                    encoding="utf-8"
-                ).strip().partition(":")
-                if separator != ":" or prefix.strip().casefold() != "gitdir":
-                    return None
-                git_dir = Path(value.strip())
-                if not git_dir.is_absolute():
-                    git_dir = marker.parent / git_dir
-                git_dir = git_dir.resolve()
-                common_marker = git_dir / "commondir"
-                if not common_marker.is_file():
-                    return git_dir
-                common_dir = Path(
-                    common_marker.read_text(encoding="utf-8").strip()
-                )
-                if not common_dir.is_absolute():
-                    common_dir = git_dir / common_dir
-                return common_dir.resolve()
-            except (OSError, UnicodeError, RuntimeError):
-                return None
-        return None
 
-    @classmethod
-    def _read_key_material_after_concurrent_write(
-        cls, key_path: Path
-    ) -> bytes:
-        last_error: Exception | None = None
-        for attempt in range(50):
-            try:
-                stored_key = key_path.read_bytes().strip()
-                if stored_key:
-                    cls(stored_key)
-                    return stored_key
-            except (OSError, LLMSecretError) as exc:
-                last_error = exc
-            if attempt < 49:
-                time.sleep(0.01)
-        raise LLMSecretError(
-            "LLM encryption key file is empty or invalid"
-        ) from last_error
-
-    @classmethod
-    def _read_key_after_concurrent_write(
-        cls, key_path: Path
-    ) -> "LLMSecretCipher":
-        return cls(cls._read_key_material_after_concurrent_write(key_path))
-
-    def encrypt(self, plaintext: str) -> str:
-        value = str(plaintext or "")
-        if not value:
-            return ""
-        return self._fernet.encrypt(value.encode("utf-8")).decode("ascii")
-
-    def decrypt(self, ciphertext: str) -> str:
-        value = str(ciphertext or "")
-        if not value:
-            return ""
-        try:
-            return self._fernet.decrypt(value.encode("ascii")).decode("utf-8")
-        except (InvalidToken, UnicodeError, ValueError) as exc:
-            raise LLMSecretError("Stored LLM API key cannot be decrypted") from exc
+def _credential_status(provider: dict[str, Any]) -> str:
+    try:
+        environment_api_key(str(provider.get("api_key_env_var") or ""))
+    except (LLMSettingsError, LLMSecretError):
+        return "missing"
+    return "configured"
 
 
 def endpoint_security_warning(base_url: str) -> str:
@@ -231,7 +120,10 @@ def public_provider(provider: dict[str, Any]) -> dict[str, Any]:
         for key, value in provider.items()
         if key not in {"api_key", "api_key_encrypted"}
     }
-    public["has_api_key"] = bool(provider.get("api_key_encrypted"))
+    credential_status = _credential_status(provider)
+    public["credential_status"] = credential_status
+    public["credential_source"] = "environment"
+    public["has_api_key"] = credential_status == "configured"
     public["security_warning"] = endpoint_security_warning(
         str(provider.get("base_url") or "")
     )
@@ -257,7 +149,7 @@ def _provider_dict(row: Any) -> dict[str, Any]:
         "preset": str(row["preset"]),
         "base_url": str(row["base_url"]),
         "wire_api": str(row["wire_api"]),
-        "api_key_encrypted": str(row["api_key_encrypted"] or ""),
+        "api_key_env_var": str(row["api_key_env_var"] or ""),
         "is_enabled": bool(row["is_enabled"]),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -300,9 +192,8 @@ def _normalized_model_price(value: float | None) -> float | None:
 class LLMSettingsRepository:
     conflict_error = LLMSettingsConflict
 
-    def __init__(self, database: Any, cipher: LLMSecretCipher) -> None:
+    def __init__(self, database: Any) -> None:
         self.database = database
-        self.cipher = cipher
 
     def create_provider(
         self,
@@ -311,7 +202,7 @@ class LLMSettingsRepository:
         preset: str,
         base_url: str,
         wire_api: str,
-        api_key: str = "",
+        api_key_env_var: str = "",
         is_enabled: bool = True,
         actor_id: str | None = None,
     ) -> dict[str, Any]:
@@ -330,7 +221,8 @@ class LLMSettingsRepository:
             "preset": preset,
             "base_url": validate_llm_base_url(base_url),
             "wire_api": wire_api,
-            "api_key_encrypted": self.cipher.encrypt(str(api_key or "").strip()),
+            "api_key_env_var": _provider_env_var(preset, api_key_env_var),
+            "api_key_encrypted": None,
             "is_enabled": bool(is_enabled),
             "created_by_user_id": actor_id,
             "updated_by_user_id": actor_id,
@@ -353,8 +245,7 @@ class LLMSettingsRepository:
         preset: str | None = None,
         base_url: str | None = None,
         wire_api: str | None = None,
-        api_key: str | None = None,
-        clear_api_key: bool = False,
+        api_key_env_var: str | None = None,
         is_enabled: bool | None = None,
         actor_id: str | None = None,
     ) -> dict[str, Any]:
@@ -366,8 +257,6 @@ class LLMSettingsRepository:
                 raise LLMSettingsError("提供商不存在")
             if is_enabled is False and self._provider_has_default(connection, provider_id):
                 raise LLMSettingsConflict("请先切换默认模型，再停用该提供商")
-            if clear_api_key and self._provider_has_default(connection, provider_id):
-                raise LLMSettingsConflict("请先切换默认模型，再清除该提供商 API Key")
             values: dict[str, Any] = {
                 "updated_at": func.now(),
                 "updated_by_user_id": actor_id,
@@ -387,10 +276,18 @@ class LLMSettingsRepository:
                 if wire_api not in {"responses", "chat_completions"}:
                     raise LLMSettingsError("不支持的调用协议")
                 values["wire_api"] = wire_api
-            if clear_api_key:
-                values["api_key_encrypted"] = None
-            elif api_key is not None and str(api_key).strip():
-                values["api_key_encrypted"] = self.cipher.encrypt(str(api_key).strip())
+            if api_key_env_var is not None:
+                effective_preset = str(preset or current["preset"])
+                normalized_env_var = _provider_env_var(
+                    effective_preset, api_key_env_var
+                )
+                if self._provider_has_default(connection, provider_id):
+                    try:
+                        environment_api_key(normalized_env_var)
+                    except LLMSecretError as exc:
+                        raise LLMSettingsConflict(str(exc)) from exc
+                values["api_key_env_var"] = normalized_env_var
+            values["api_key_encrypted"] = None
             if is_enabled is not None:
                 values["is_enabled"] = bool(is_enabled)
             try:
@@ -592,7 +489,7 @@ class LLMSettingsRepository:
                 select(
                     llm_models.c.is_enabled,
                     llm_providers.c.is_enabled,
-                    llm_providers.c.api_key_encrypted,
+                    llm_providers.c.api_key_env_var,
                 )
                 .select_from(
                     llm_models.join(
@@ -607,13 +504,9 @@ class LLMSettingsRepository:
             if not bool(row[0]) or not bool(row[1]):
                 raise LLMSettingsConflict("只能将启用的模型设为默认")
             try:
-                api_key = self.cipher.decrypt(str(row[2] or "")).strip()
-            except LLMSecretError as exc:
-                raise LLMSettingsConflict(
-                    "提供商 API Key 无法解密，请重新录入后再设为默认"
-                ) from exc
-            if not api_key:
-                raise LLMSettingsConflict("请先配置提供商 API Key，再设为默认")
+                environment_api_key(str(row[2] or ""))
+            except (LLMSettingsError, LLMSecretError) as exc:
+                raise LLMSettingsConflict(str(exc)) from exc
             current = connection.execute(
                 select(llm_settings.c.id).where(llm_settings.c.id == "global")
             ).first()
@@ -653,17 +546,6 @@ class LLMSettingsRepository:
         for row in provider_rows:
             stored_provider = _provider_dict(row)
             provider = public_provider(stored_provider)
-            encrypted_key = stored_provider["api_key_encrypted"]
-            if not encrypted_key:
-                provider["credential_status"] = "missing"
-            else:
-                try:
-                    decrypted_key = self.cipher.decrypt(encrypted_key).strip()
-                    provider["credential_status"] = (
-                        "configured" if decrypted_key else "missing"
-                    )
-                except LLMSecretError:
-                    provider["credential_status"] = "unreadable"
             provider["models"] = models_by_provider.get(provider["id"], [])
             provider["is_default"] = any(
                 model["is_default"] for model in provider["models"]
@@ -689,7 +571,7 @@ class LLMSettingsRepository:
                     llm_models.c.is_enabled.label("model_is_enabled"),
                     llm_providers.c.id.label("provider_id"),
                     llm_providers.c.name.label("provider_name"),
-                    llm_providers.c.api_key_encrypted,
+                    llm_providers.c.api_key_env_var,
                     llm_providers.c.is_enabled.label("provider_is_enabled"),
                 )
                 .select_from(
@@ -717,12 +599,8 @@ class LLMSettingsRepository:
             ):
                 continue
             try:
-                api_key = self.cipher.decrypt(
-                    str(row["api_key_encrypted"] or "")
-                ).strip()
-            except LLMSecretError:
-                continue
-            if not api_key:
+                environment_api_key(str(row["api_key_env_var"] or ""))
+            except (LLMSettingsError, LLMSecretError):
                 continue
             display_name = str(row["display_name"] or row["model_id"])
             provider_name = str(row["provider_name"])
@@ -767,7 +645,7 @@ class LLMSettingsRepository:
                     llm_providers.c.preset,
                     llm_providers.c.base_url,
                     llm_providers.c.wire_api,
-                    llm_providers.c.api_key_encrypted,
+                    llm_providers.c.api_key_env_var,
                     llm_models.c.model_id,
                     llm_models.c.input_price_per_million,
                     llm_models.c.output_price_per_million,
@@ -794,7 +672,7 @@ class LLMSettingsRepository:
             "provider": str(row["preset"]),
             "provider_id": str(row["provider_id"]),
             "base_url": str(row["base_url"]),
-            "api_key": self.cipher.decrypt(str(row["api_key_encrypted"] or "")),
+            "api_key": environment_api_key(str(row["api_key_env_var"] or "")),
             "model": str(row["model_id"]),
             "input_price_per_million": (
                 float(row["input_price_per_million"])
@@ -828,7 +706,7 @@ class LLMSettingsRepository:
                     llm_providers.c.preset,
                     llm_providers.c.base_url,
                     llm_providers.c.wire_api,
-                    llm_providers.c.api_key_encrypted,
+                    llm_providers.c.api_key_env_var,
                     llm_providers.c.is_enabled.label("provider_is_enabled"),
                 )
                 .select_from(
@@ -846,17 +724,9 @@ class LLMSettingsRepository:
         if not bool(row["provider_is_enabled"]):
             raise LLMSettingsConflict("所选模型的提供商已停用")
         try:
-            api_key = self.cipher.decrypt(
-                str(row["api_key_encrypted"] or "")
-            ).strip()
-        except LLMSecretError as exc:
-            raise LLMSettingsConflict(
-                "所选模型的提供商 API Key 无法解密，请联系管理员重新录入"
-            ) from exc
-        if not api_key:
-            raise LLMSettingsConflict(
-                "所选模型的提供商尚未配置 API Key"
-            )
+            api_key = environment_api_key(str(row["api_key_env_var"] or ""))
+        except (LLMSettingsError, LLMSecretError) as exc:
+            raise LLMSettingsConflict(str(exc)) from exc
         return {
             "provider": str(row["preset"]),
             "provider_id": str(row["provider_id"]),
@@ -896,10 +766,10 @@ class LLMSettingsRepository:
             raise LLMSettingsError("提供商不存在")
         provider = _provider_dict(row)
         try:
-            api_key = self.cipher.decrypt(provider["api_key_encrypted"]).strip()
-        except LLMSecretError as exc:
+            api_key = environment_api_key(provider["api_key_env_var"])
+        except (LLMSettingsError, LLMSecretError) as exc:
             if require_api_key:
-                raise LLMSettingsError("已保存的 API Key 无法解密，请重新录入") from exc
+                raise LLMSettingsError(str(exc)) from exc
             api_key = ""
         if require_api_key and not api_key:
             raise LLMSettingsError("请先配置提供商 API Key")
@@ -908,6 +778,7 @@ class LLMSettingsRepository:
             "preset": provider["preset"],
             "base_url": provider["base_url"],
             "wire_api": provider["wire_api"],
+            "api_key_env_var": provider["api_key_env_var"],
             "api_key": api_key,
             "is_enabled": provider["is_enabled"],
         }
@@ -925,7 +796,13 @@ class LLMSettingsRepository:
         ).strip()
         if wire_api not in {"responses", "chat_completions"}:
             wire_api = PROVIDER_PRESETS[preset]["wire_api"]
-        api_key = str(getattr(config_module, "LLM_API_KEY", "") or "").strip()
+        configured_env_var = str(
+            getattr(config_module, "LLM_ENV_KEY", "") or ""
+        ).strip()
+        try:
+            api_key_env_var = _provider_env_var(preset, configured_env_var)
+        except LLMSettingsError:
+            return {"imported": False, "reason": "missing_environment_variable"}
         now = datetime.now(timezone.utc)
         provider_id = str(uuid.uuid4())
         model_record_id = str(uuid.uuid4())
@@ -943,7 +820,8 @@ class LLMSettingsRepository:
                         preset=preset,
                         base_url=validate_llm_base_url(base_url),
                         wire_api=wire_api,
-                        api_key_encrypted=self.cipher.encrypt(api_key),
+                        api_key_env_var=api_key_env_var,
+                        api_key_encrypted=None,
                         is_enabled=True,
                     )
                 )
@@ -970,7 +848,10 @@ class LLMSettingsRepository:
             "imported": True,
             "provider_id": provider_id,
             "model_id": model_record_id,
-            "has_api_key": bool(api_key),
+            "has_api_key": _credential_status(
+                {"api_key_env_var": api_key_env_var}
+            )
+            == "configured",
         }
 
     @staticmethod
@@ -1013,8 +894,5 @@ def runtime_settings_repository() -> LLMSettingsRepository | None:
         from system_database import SystemDatabase, SystemDatabaseSettings
 
         database = SystemDatabase(SystemDatabaseSettings.from_environment())
-        runtime_dir = Path(__file__).resolve().parents[1] / ".runtime"
-        _RUNTIME_REPOSITORY = LLMSettingsRepository(
-            database, LLMSecretCipher.from_environment(runtime_dir)
-        )
+        _RUNTIME_REPOSITORY = LLMSettingsRepository(database)
     return _RUNTIME_REPOSITORY

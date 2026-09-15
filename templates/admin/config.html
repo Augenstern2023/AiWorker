@@ -63,9 +63,9 @@
                         <div class="d-flex align-items-start justify-content-between gap-3 mb-3 flex-wrap">
                             <div>
                                 <h4 class="h5 mb-1" x-text="llmSettings.editor.id ? '编辑提供商' : '新增提供商'"></h4>
-                                <div class="small text-muted">API Key 使用 Fernet 加密保存，读取页面时不会回显。</div>
+                                <div class="small text-muted">服务与 Worker 从启动环境读取凭据；这里只保存环境变量名称，不保存 API Key。</div>
                             </div>
-                            <span class="badge" :class="llmSettings.editor.credential_status === 'unreadable' ? 'text-bg-danger' : (llmSettings.editor.has_api_key ? 'text-bg-success' : 'text-bg-warning')" x-text="llmSettings.editor.credential_status === 'unreadable' ? '密钥不可解密，请重新录入' : (llmSettings.editor.has_api_key ? '凭据已安全保存' : '尚未保存凭据')"></span>
+                            <span class="badge" :class="llmSettings.editor.credential_status === 'configured' ? 'text-bg-success' : 'text-bg-warning'" x-text="llmSettings.editor.credential_status === 'configured' ? '环境凭据已配置' : '环境凭据缺失'"></span>
                         </div>
 
                         <form @submit.prevent="saveLLMProvider" novalidate>
@@ -100,25 +100,18 @@
                                     </div>
                                 </div>
                                 <div class="col-12">
-                                    <label class="form-label" for="llm-provider-api-key">API Key</label>
-                                    <input id="llm-provider-api-key" class="form-control" type="password" x-model="llmSettings.editor.api_key" maxlength="4096" :placeholder="llmSettings.editor.credential_status === 'unreadable' ? '请重新输入 API Key' : (llmSettings.editor.has_api_key ? '留空则保留已保存的密钥' : '输入 API Key')" :disabled="llmSettings.saving || llmSettings.editor.clear_api_key" autocomplete="new-password">
-                                    <div class="small mt-1" :class="llmSettings.editor.credential_status === 'unreadable' ? 'text-danger' : 'text-muted'" x-text="llmSettings.editor.credential_status === 'unreadable' ? '本机加密密钥无法解密该凭据，请输入新 API Key 后保存。' : (llmSettings.editor.has_api_key ? '已安全保存；输入新值会覆盖，留空会保留。' : '尚未保存 API Key。')"></div>
-                                </div>
-                                <div class="col-12" x-show="llmSettings.editor.id && llmSettings.editor.has_api_key">
-                                    <div class="form-check">
-                                        <input id="llm-provider-clear-api-key" class="form-check-input" type="checkbox" x-model="llmSettings.editor.clear_api_key" :disabled="llmSettings.saving || selectedLLMProvider()?.is_default">
-                                        <label class="form-check-label text-danger" for="llm-provider-clear-api-key">保存时明确清除现有 API Key</label>
-                                        <div class="small text-muted" x-show="selectedLLMProvider()?.is_default">请先切换全局默认模型</div>
-                                    </div>
+                                    <label class="form-label" for="llm-provider-api-key-env-var">API Key 环境变量</label>
+                                    <input id="llm-provider-api-key-env-var" class="form-control font-monospace" type="text" x-model.trim="llmSettings.editor.api_key_env_var" maxlength="255" required :disabled="llmSettings.saving" placeholder="例如 CUSTOM_LLM_KEY" autocomplete="off" spellcheck="false">
+                                    <div class="small mt-1" :class="llmSettings.editor.credential_status === 'configured' ? 'text-muted' : 'text-warning'" x-text="llmSettings.editor.credential_status === 'configured' ? '当前 Web 进程可以读取该变量；修改变量值后需要重启服务。' : '当前 Web 进程未读取到非空值，请先配置启动环境并重启服务。'"></div>
                                 </div>
                             </div>
                             <div class="d-flex justify-content-between align-items-center gap-2 mt-3 flex-wrap">
-                                <button type="button" class="btn btn-outline-danger" x-show="llmSettings.editor.id" @click="deleteLLMProvider" :disabled="selectedLLMProvider()?.is_default || llmSettings.saving || Boolean(llmSettings.providerDeletingId)" :title="selectedLLMProvider()?.is_default ? '请先切换全局默认模型' : '删除提供商及其所有模型和凭据'" :aria-label="`删除提供商 ${selectedLLMProvider()?.name || ''}`">
+                                <button type="button" class="btn btn-outline-danger" x-show="llmSettings.editor.id" @click="deleteLLMProvider" :disabled="selectedLLMProvider()?.is_default || llmSettings.saving || Boolean(llmSettings.providerDeletingId)" :title="selectedLLMProvider()?.is_default ? '请先切换全局默认模型' : '删除提供商及其所有模型；不会删除环境变量中的凭据'" :aria-label="`删除提供商 ${selectedLLMProvider()?.name || ''}`">
                                     <span x-show="llmSettings.providerDeletingId !== llmSettings.editor.id"><i class="bi bi-trash me-1" aria-hidden="true"></i>删除提供商</span>
                                     <span x-show="llmSettings.providerDeletingId === llmSettings.editor.id">删除中…</span>
                                 </button>
                                 <span x-show="!llmSettings.editor.id"></span>
-                                <button type="submit" class="btn btn-primary" :disabled="llmSettings.saving || !llmSettings.editor.name || !llmSettings.editor.base_url" :aria-busy="llmSettings.saving">
+                                <button type="submit" class="btn btn-primary" :disabled="llmSettings.saving || !llmSettings.editor.name || !llmSettings.editor.base_url || !llmSettings.editor.api_key_env_var" :aria-busy="llmSettings.saving">
                                     <span x-show="!llmSettings.saving"><i class="bi bi-save me-1" aria-hidden="true"></i>保存提供商</span>
                                     <span x-show="llmSettings.saving">保存中…</span>
                                 </button>
@@ -180,7 +173,7 @@
 
                         <hr class="my-4">
                         <section aria-labelledby="llm-test-title">
-                            <div class="mb-3"><h5 class="mb-1" id="llm-test-title">连接测试</h5><div class="small text-muted">使用当前未保存的端点、协议和新输入的 API Key 发起最小推理；测试响应正文不会写入审计。</div></div>
+                            <div class="mb-3"><h5 class="mb-1" id="llm-test-title">连接测试</h5><div class="small text-muted">使用当前未保存的端点、协议和环境变量名称读取凭据后发起最小推理；测试响应正文不会写入审计。</div></div>
                             <form class="row g-2 align-items-end" @submit.prevent="testLLMConnection">
                                 <div class="col-12 col-md-8">
                                     <label class="form-label" for="llm-test-model-id">测试模型 ID</label>
@@ -188,7 +181,7 @@
                                     <datalist id="llm-model-options"><template x-for="model in (selectedLLMProvider()?.models || [])" :key="model.id"><option :value="model.model_id" x-text="model.display_name || model.model_id"></option></template></datalist>
                                 </div>
                                 <div class="col-12 col-md-4 d-grid">
-                                    <button type="submit" class="btn btn-outline-info" :disabled="llmSettings.testing || !llmSettings.editor.base_url || !llmSettings.test.model_id" :aria-busy="llmSettings.testing" aria-label="测试连接">
+                                    <button type="submit" class="btn btn-outline-info" :disabled="llmSettings.testing || !llmSettings.editor.base_url || !llmSettings.editor.api_key_env_var || !llmSettings.test.model_id" :aria-busy="llmSettings.testing" aria-label="测试连接">
                                         <span x-show="!llmSettings.testing"><i class="bi bi-plug me-1" aria-hidden="true"></i>测试连接</span>
                                         <span x-show="llmSettings.testing">测试中…</span>
                                     </button>

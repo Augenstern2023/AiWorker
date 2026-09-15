@@ -1126,3 +1126,45 @@ def test_provider_factory_uses_explicit_model_record_instead_of_global_default()
     assert provider.model_record_id == "model-selected"
     assert provider.model_display_name == "GPT Selected"
     assert provider.api_key == "selected-key"
+
+
+def test_provider_factory_does_not_decrypt_unrelated_default_for_explicit_model():
+    """Catch a broken global credential blocking a separately selected model."""
+
+    class DummyConfig:
+        LLM_REASONING_EFFORT = "auto"
+
+    class SettingsRepository:
+        @staticmethod
+        def effective_default():
+            raise RuntimeError("Stored LLM API key cannot be decrypted")
+
+        @staticmethod
+        def effective_model(model_record_id):
+            assert model_record_id == "burncloud-model"
+            return {
+                "provider": "custom",
+                "provider_id": "burncloud-provider",
+                "provider_display_name": "Burncloud",
+                "base_url": "https://ai.burncloud.com/v1",
+                "api_key": "burncloud-key",
+                "model": "gemini-3.5-flash",
+                "model_record_id": "burncloud-model",
+                "model_display_name": "gemini-3.5-flash",
+                "wire_api": "chat_completions",
+                "allow_insecure_http": False,
+            }
+
+    from analysis import llm as llm_module
+
+    llm_module.configure_llm_settings_repository(SettingsRepository())
+    try:
+        provider = create_llm_provider_from_config(
+            DummyConfig, model_record_id="burncloud-model"
+        )
+    finally:
+        llm_module.configure_llm_settings_repository(None)
+
+    assert provider.provider_id == "burncloud-provider"
+    assert provider.model == "gemini-3.5-flash"
+    assert provider.api_key == "burncloud-key"

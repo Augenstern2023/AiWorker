@@ -32,6 +32,7 @@ from WebGUI import (
     _api_permission,
 )
 from audit.service import AuditService
+from analysis.llm_credentials import KeyringLLMCredentialStore
 from analysis.llm_settings_api import LLMSettingsService, build_llm_settings_router
 from tests.analysis.test_llm_settings import _repository
 
@@ -305,6 +306,14 @@ def test_production_webgui_wires_shared_identity_security_and_routes():
 def test_production_webgui_uses_system_database_for_llm_settings():
     assert llm_settings_repository.database is system_database
     assert not hasattr(llm_settings_repository, "cipher")
+
+
+def test_production_webgui_uses_live_keyring_for_llm_settings():
+    """Would catch WebGUI bypassing its live credential-store factory."""
+
+    assert isinstance(
+        llm_settings_repository.credential_store, KeyringLLMCredentialStore
+    )
 
 
 def test_backup_path_rejects_traversal_and_non_backup_names(tmp_path: Path):

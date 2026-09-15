@@ -231,6 +231,19 @@ uv run python scripts/upgrade_production_database.py
 - 不要将包含真实凭证的 `data.json`、`.env`、浏览器数据或运行日志提交到 Git。
 - 榜单快照、评论和转写存在来源限制；拆解页面会保留证据与风险说明，不应将推断内容表述为平台事实。
 
+### HTTPS 反向代理与 LLM 密钥
+
+默认 `uv run WebGUI.py` 直接监听 8899，不适合让远程客户端提交 LLM 密钥。远程管理必须先在
+受控边缘代理终止 HTTPS，再只允许固定反代地址向 Uvicorn 传递 forwarded headers。本机反代可用：
+
+```powershell
+uv run uvicorn WebGUI:app --host 127.0.0.1 --port 8899 --proxy-headers --forwarded-allow-ips 127.0.0.1
+```
+
+将 `--forwarded-allow-ips` 替换为实际的固定反代 IP；严禁使用 `*`。边缘代理必须先剥离客户端
+自带的 `Forwarded` 和 `X-Forwarded-*` headers，再重写由代理可信计算的 scheme 与 client 地址。
+只有这条受信任链路可以让应用的 HTTPS/loopback 密钥传输守卫安全地判定请求来源。
+
 ## 项目结构
 
 ```text

@@ -38,6 +38,7 @@
                     <span class="fw-semibold" x-text="`第 ${item.episode_number} 集 · v${item.version} · ${creativeWorkflowStatusLabel(item.status)}`"></span>
                     <a class="btn btn-outline-primary btn-sm" :href="creativeModuleUrl('beats', item.episode_number)">打开单集编辑</a>
                 </div>
+                <div class="small text-muted mb-2" data-template-provenance x-text="creativeTemplateProvenance(item)"></div>
                 <div class="table-responsive">
                     <table class="table table-sm align-middle mb-0">
                         <thead><tr><th style="width:55px">序号</th><th>场景</th><th>人物</th><th>行动目标</th><th>阻力</th><th>情绪变化</th><th>局面变化</th><th>代价</th><th>对抗策略</th><th>转折</th><th>结尾钩子</th></tr></thead>
@@ -60,6 +61,7 @@
                     <span class="small text-muted">草稿 · 已完成 · 已替代</span>
                 </div>
             </div>
+            <div class="small text-muted mb-2" data-template-provenance x-text="creativeTemplateProvenance(selectedProjectBeats())"></div>
 
             <div class="table-responsive">
                 <table class="table table-sm align-middle">

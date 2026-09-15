@@ -275,6 +275,25 @@ def test_project_brief_settings_are_editable_until_brief_is_locked(tmp_path: Pat
         repository.update_project(project["id"], {"target_episode_count": 40})
 
 
+def test_manual_brief_version_keeps_template_provenance_but_marks_revision(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "模板来源", 20)
+    first = repository.create_blueprints(
+        project["id"], [{"content": {"title": "方向"}}],
+        generation_meta={
+            "job_id": "original-job",
+            "prompt_snapshot": {"template_key": "frozen", "title": "原模板", "revision": 2},
+        },
+    )[0]
+
+    second = repository.create_blueprint_version(first["id"])
+    assert second["generation_meta"]["prompt_snapshot"] == first["generation_meta"]["prompt_snapshot"]
+    assert second["generation_meta"]["manual_revision"] is True
+    assert second["generation_meta"]["revision_source_id"] == first["id"]
+    assert first["generation_meta"].get("manual_revision") is None
+
+
 def test_successor_brief_draft_can_update_and_freeze_new_project_settings(tmp_path: Path):
     repository = CreativeRepository(tmp_path / "creative.db")
     topic, breakdown = seed_adopted_topic(repository)

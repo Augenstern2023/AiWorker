@@ -24,19 +24,6 @@
             </div>
             <div class="d-flex flex-wrap align-items-center gap-2 border-start border-secondary-subtle ps-2" aria-label="提示词模板工具">
                 <a class="btn btn-sm {% if creative_module == 'prompt-center' %}btn-info{% else %}btn-outline-info{% endif %}" :href="promptWorkspaceUrl('center')">模板中心</a>
-                <a class="btn btn-sm {% if creative_module == 'prompt-effects' %}btn-info{% else %}btn-outline-info{% endif %}" :href="promptWorkspaceUrl('effects')">模板效果</a>
-            </div>
-            <div class="d-flex align-items-center gap-2 ms-auto" x-show="!isFreeCreativeProject()">
-                <label class="small text-muted text-nowrap" for="sequential-generation-model">生成模型</label>
-                <select id="sequential-generation-model" class="form-select form-select-sm" style="width:240px"
-                        :value="creativeWorkspace.sequentialGeneration.modelRecordId"
-                        @change="selectSequentialGenerationModel($event.target.value)"
-                        :disabled="creativeWorkspace.sequentialGeneration.loading">
-                    <option value="">使用全局默认模型</option>
-                    <template x-for="item in (creativeWorkspace.sequentialGeneration.modelOptions || [])" :key="`sequential-model-${item.id}`">
-                        <option :value="item.id" x-text="item.is_default ? `${item.label}（全局默认）` : item.label"></option>
-                    </template>
-                </select>
             </div>
             <template x-if="isFreeCreativeProject() && freeStageVersionOptions('{{ creative_module }}', ['beats', 'script'].includes('{{ creative_module }}') ? creativeWorkspace.selectedEpisode : 0).length">
                 <div class="d-flex align-items-center gap-2 ms-auto">
@@ -56,6 +43,5 @@
         </div>
         <div class="small text-muted mt-2" x-show="isFreeCreativeProject()">模块可独立创建和生成；引用上下文默认不选择，锁定不会推进其他模块。</div>
         <div class="small text-muted mt-2" x-show="!isFreeCreativeProject()">所有模块入口均可直接进入；生成与锁定仍按标准流程校验上游内容。</div>
-        <div class="small text-danger mt-2" x-show="!isFreeCreativeProject() && creativeWorkspace.sequentialGeneration.error" x-text="creativeWorkspace.sequentialGeneration.error"></div>
     </div>
 </section>

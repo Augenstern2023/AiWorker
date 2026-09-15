@@ -1,3 +1,28 @@
+<div class="modal fade" id="sequentialGenerationModelModal" tabindex="-1" aria-labelledby="sequentialGenerationModelModalLabel" aria-hidden="true">
+    <div class="modal-dialog"><div class="modal-content">
+        <div class="modal-header">
+            <h5 class="modal-title" id="sequentialGenerationModelModalLabel" x-text="`${creativeActionLabel(creativeWorkspace.sequentialGeneration.pending?.action)} · 本次生成`"></h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button>
+        </div>
+        <div class="modal-body">
+            <label class="form-label" for="sequentialGenerationRunModel">本次使用模型</label>
+            <select id="sequentialGenerationRunModel" class="form-select" x-model="creativeWorkspace.sequentialGeneration.modelRecordId" :disabled="creativeWorkspace.sequentialGeneration.loading">
+                <option value="">使用全局默认模型</option>
+                <template x-for="item in (creativeWorkspace.sequentialGeneration.modelOptions || [])" :key="`run-model-${item.id}`">
+                    <option :value="item.id" x-text="item.is_default ? `${item.label}（全局默认）` : item.label"></option>
+                </template>
+            </select>
+            <div class="small text-muted mt-2">仅影响这次生成，下次仍由你选择。</div>
+            <div class="small text-muted mt-2" x-show="creativeWorkspace.sequentialGeneration.loading">正在读取可用模型…</div>
+            <div class="small text-danger mt-2" role="alert" x-show="creativeWorkspace.sequentialGeneration.error" x-text="creativeWorkspace.sequentialGeneration.error"></div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+            <button type="button" class="btn btn-primary" @click="submitSequentialGeneration" :disabled="creativeWorkspace.sequentialGeneration.loading || !creativeWorkspace.sequentialGeneration.pending">开始生成</button>
+        </div>
+    </div></div>
+</div>
+
 <div class="modal fade" id="freeCreativeGenerationModal" tabindex="-1" aria-labelledby="freeCreativeGenerationModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
         <div class="modal-content">

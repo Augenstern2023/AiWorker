@@ -14,7 +14,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from analysis.llm import current_llm_price_snapshot
 from project_review.source import build_project_review_source
 from creative.project_prompt_service import ProjectPromptService
 
@@ -299,7 +298,6 @@ class ProjectReviewCoordinator:
                 "prompt_content_hash": str(
                     prompt_snapshot.get("content_hash") or ""
                 ),
-                "llm_price_snapshot": current_llm_price_snapshot(),
             },
         }
         try:

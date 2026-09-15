@@ -230,6 +230,17 @@ def build_page_router(
             f"/planning/projects/{project_id}/brief", status_code=307
         )
 
+    @router.get("/projects/{project_id}/prompt-effects", include_in_schema=False)
+    def legacy_prompt_effects_page(
+        project_id: str,
+        request: Request,
+        principal: Principal = Depends(require_page_access),
+    ) -> RedirectResponse:
+        query = f"?{request.url.query}" if request.url.query else ""
+        return RedirectResponse(
+            f"/projects/{project_id}/prompt-templates{query}", status_code=307
+        )
+
     @router.get("/planning/projects", response_class=HTMLResponse)
     def planning_projects_page(
         request: Request,
@@ -249,7 +260,10 @@ def build_page_router(
         raise HTTPException(status_code=403, detail="没有执行此操作的权限")
 
     for route, permission, title in PAGE_ROUTES:
-        if route in {"/admin/audit", "/planning/projects"}:
+        if route in {
+            "/admin/audit", "/planning/projects",
+            "/projects/{project_id}/prompt-effects",
+        }:
             continue
         router.add_api_route(
             route,

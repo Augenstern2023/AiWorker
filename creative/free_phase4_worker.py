@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 import config
 
-from analysis.llm import create_llm_provider_from_config, llm_usage_snapshot
+from analysis.llm import create_llm_provider_from_config
 from core.job import CrawlJob
 from creative.free_mode_service import FreeCreativeModeService
 from creative.original_direction_service import generate_original_directions
@@ -60,12 +60,7 @@ def _llm_generation_meta(
 
 
 def _usage_payload(job: CrawlJob, payload: dict[str, Any]) -> dict[str, Any]:
-    return {
-        **payload,
-        "llm_usage": llm_usage_snapshot(
-            getattr(job, "_llm_usage_provider", None)
-        ),
-    }
+    return dict(payload)
 
 
 def _prompt_inputs(
@@ -176,7 +171,6 @@ async def _run_free_episode_series(
         contexts[episode_number] = context
 
     provider = _create_generation_provider(extra)
-    setattr(job, "_llm_usage_provider", provider)
     llm_meta = _llm_generation_meta(
         provider, str(extra.get("llm_model_record_id") or "")
     )
@@ -243,6 +237,7 @@ async def _run_free_episode_series(
                 "prompt_template_version": context.get("prompt_schema_version") or "",
                 "resource_scope": "free",
                 "series_generation": True,
+                "prompt_source": "template" if isinstance(prompt_snapshot, dict) else "system",
                 **(
                     {
                         "prompt_snapshot": prompt_snapshot,
@@ -364,7 +359,6 @@ async def run_free_generation(
     )
     project.update(snapshot.get("project") or {})
     provider = _create_generation_provider(extra)
-    setattr(job, "_llm_usage_provider", provider)
     meta_base = {
         **_llm_generation_meta(
             provider, str(extra.get("llm_model_record_id") or "")
@@ -375,6 +369,7 @@ async def run_free_generation(
         "generation_context_hash": context["context_hash"],
         "prompt_template_version": context.get("prompt_schema_version") or "",
         "resource_scope": "free",
+        "prompt_source": "template" if isinstance(prompt_snapshot, dict) else "system",
         "prompt_ab_experiment_id": prompt_ab_experiment_id,
         "prompt_ab_arm": prompt_ab_arm,
         "prompt_ab_source_fingerprint": prompt_ab_source_fingerprint,

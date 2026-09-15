@@ -361,9 +361,6 @@ window.aiworkerModules.push(() => ({
                         if (!res.ok) throw new Error(data.detail || '读取项目失败');
                         this.creativeWorkspace.project = data;
                         await this.loadCreativeModuleCapabilities(data.id);
-                        if (data.workflow_mode === 'sequential') {
-                            await this.loadSequentialGenerationModels(data.id);
-                        }
                         this.creativeWorkspace.selectedSeedId = data.seed?.id || null;
                         this.creativeWorkspace.preservedBlueprintIds = [];
                         this.reconcileCreativeGenerationState(data);
@@ -413,14 +410,8 @@ window.aiworkerModules.push(() => ({
                     return this.creativeWorkspace.project?.workflow_mode === 'free';
                 },
 
-                sequentialModelStorageKey(projectId = null) {
-                    const id = projectId || this.creativeWorkspace.project?.id || '';
-                    return `creative:sequential-model:${id}`;
-                },
-
-                async loadSequentialGenerationModels(projectId) {
+                async loadSequentialGenerationModels() {
                     const state = this.creativeWorkspace.sequentialGeneration;
-                    if (state.loaded || state.loading) return;
                     state.loading = true;
                     state.error = '';
                     try {
@@ -428,27 +419,35 @@ window.aiworkerModules.push(() => ({
                         const data = await response.json();
                         if (!response.ok) throw new Error(data.detail || '读取可用模型失败');
                         state.modelOptions = Array.isArray(data.items) ? data.items : [];
-                        let saved = null;
-                        try {
-                            saved = sessionStorage.getItem(this.sequentialModelStorageKey(projectId));
-                        } catch (_) {}
-                        const validIds = new Set(state.modelOptions.map(item => String(item.id)));
-                        state.modelRecordId = saved !== null && (saved === '' || validIds.has(saved))
-                            ? saved : String(data.default_model_record_id || '');
-                        state.loaded = true;
                     } catch (error) {
-                        state.error = error.message || '读取可用模型失败';
+                        state.error = `${error.message || '读取可用模型失败'}；可继续使用全局默认模型`;
                     } finally {
                         state.loading = false;
                     }
                 },
 
-                selectSequentialGenerationModel(value) {
-                    const selected = String(value || '');
-                    this.creativeWorkspace.sequentialGeneration.modelRecordId = selected;
-                    try {
-                        sessionStorage.setItem(this.sequentialModelStorageKey(), selected);
-                    } catch (_) {}
+                async openSequentialGenerationModel(url, body, action, options) {
+                    const state = this.creativeWorkspace.sequentialGeneration;
+                    Object.assign(state, {
+                        pending: {url, body, action, options}, modelRecordId: '',
+                        modelOptions: [], error: '', loading: true,
+                    });
+                    this.sequentialGenerationModelModal?.show();
+                    await this.loadSequentialGenerationModels();
+                },
+
+                async submitSequentialGeneration() {
+                    const state = this.creativeWorkspace.sequentialGeneration;
+                    const pending = state.pending;
+                    if (!pending || state.loading) return;
+                    state.pending = null;
+                    this.sequentialGenerationModelModal?.hide();
+                    const modelRecordId = String(state.modelRecordId || '').trim();
+                    const body = modelRecordId
+                        ? {...pending.body, llm_model_record_id: modelRecordId} : pending.body;
+                    return this.startCreativeGeneration(
+                        pending.url, body, pending.action, {...pending.options, modelConfirmed: true}
+                    );
                 },
 
                 creativeHead(stage, episodeNumber = 0) {
@@ -471,6 +470,33 @@ window.aiworkerModules.push(() => ({
                     ).trim();
                     if (provider && model && provider !== model) return `${provider} / ${model}`;
                     return model || provider;
+                },
+
+                creativeTemplateProvenance(item) {
+                    if (!item) return '';
+                    const meta = item.generation_meta || {};
+                    // The resource's frozen snapshot is authoritative; current project bindings can change.
+                    const snapshot = meta.prompt_snapshot && typeof meta.prompt_snapshot === 'object'
+                        ? meta.prompt_snapshot : {};
+                    const key = String(snapshot.template_key || meta.prompt_template_key || '').trim();
+                    const revision = Number(snapshot.revision || meta.prompt_template_revision || 0);
+                    if (key && revision > 0) {
+                        const title = String(snapshot.title || key).trim();
+                        const prefix = meta.manual_revision || (item.direction_type && item.parent_version_id)
+                            ? '基于模板版本修订' : '模板生成';
+                        return `${prefix}：${title} · 模板 v${revision}`;
+                    }
+                    if (meta.manual_revision || (item.direction_type && item.parent_version_id && meta.job_id)) {
+                        return meta.prompt_source === 'system'
+                            ? '基于系统提示词版本修订 · 未使用模板库'
+                            : '手动修订 · 原模板来源未记录';
+                    }
+                    if (meta.origin === 'manual') return '手动创建/修订 · 未按生成模板生成';
+                    if (meta.prompt_source === 'system') return '系统提示词生成 · 未使用模板库';
+                    if (meta.job_id || meta.generation_context_id || meta.source === 'outline_field_rewrite') {
+                        return '历史生成 · 模板记录缺失';
+                    }
+                    return '模板来源未记录';
                 },
 
                 freeStageVersionOptions(stage, episodeNumber = 0) {
@@ -1355,11 +1381,8 @@ window.aiworkerModules.push(() => ({
                 },
 
                 async startCreativeGeneration(url, body = {}, action = '', options = {}) {
-                    if (!this.isFreeCreativeProject()) {
-                        const modelRecordId = String(
-                            this.creativeWorkspace.sequentialGeneration?.modelRecordId || ''
-                        ).trim();
-                        if (modelRecordId) body = {...body, llm_model_record_id: modelRecordId};
+                    if (!this.isFreeCreativeProject() && !options.modelConfirmed) {
+                        return this.openSequentialGenerationModel(url, body, action, options);
                     }
                     this.creativeWorkspace.error = '';
                     this.creativeWorkspace.startingAction = action;
@@ -1438,7 +1461,7 @@ window.aiworkerModules.push(() => ({
                 promptWorkspaceUrl(kind) {
                     const projectId = this.creativeWorkspace.project?.id || '';
                     const state = this.creativeWorkspace.promptLibrary;
-                    const path = kind === 'effects' ? 'prompt-effects' : 'prompt-templates';
+                    const path = 'prompt-templates';
                     const params = new URLSearchParams({stage: state.stage || 'brief'});
                     if (['beats', 'script'].includes(state.stage)) {
                         params.set('episode', String(Number(this.creativeWorkspace.selectedEpisode || 1)));
@@ -1908,17 +1931,84 @@ window.aiworkerModules.push(() => ({
                     this.creativeWorkspace.promptLibrary.marketplaceOpen = false;
                 },
 
+                clearPromptMarketplaceFieldError(field) {
+                    const state = this.creativeWorkspace.promptLibrary;
+                    if (!state.marketplaceFieldErrors?.[field]) return;
+                    const errors = {...state.marketplaceFieldErrors};
+                    delete errors[field];
+                    state.marketplaceFieldErrors = errors;
+                },
+
                 async submitSelectedPromptToMarketplace() {
                     const state = this.creativeWorkspace.promptLibrary;
                     const projectId = this.creativeWorkspace.project?.id;
                     const template = this.selectedPromptTemplate();
-                    if (!projectId || !template || state.marketplaceSaving) return;
-                    if (template.owner_scope !== 'user') {
-                        state.error = '模板市场只接受个人模板；请先另存到我的模板';
+                    if (state.marketplaceSaving) return;
+                    if (!projectId) {
+                        state.error = '项目未加载，请刷新页面后重试';
                         return;
                     }
-                    if (!state.marketplacePublicationConfirmed || !state.marketplaceRightsConfirmed) {
-                        state.error = '请确认公开发布范围和来源权利声明';
+                    state.error = '';
+                    const errors = {};
+                    const fields = {
+                        template: 'promptMarketplacePersonalTemplate',
+                        attribution: 'promptMarketplaceAttribution',
+                        tags: 'promptMarketplaceTags',
+                        license: 'promptMarketplaceSubmitLicense',
+                        sourceType: 'promptMarketplaceSourceType',
+                        sourceUrl: 'promptMarketplaceSourceUrl',
+                        rights: 'promptMarketplaceRights',
+                        publication: 'promptMarketplacePublicConfirm',
+                        rightsConfirmed: 'promptMarketplaceRightsConfirm',
+                    };
+                    if (!template || template.owner_scope !== 'user') {
+                        errors.template = '请先把模板“另存到我的模板”，再选择个人模板提交';
+                    } else if (!String(template.title || '').trim()) {
+                        errors.template = '个人模板名称未填写，请到“我的模板”补充名称';
+                    }
+                    const attribution = String(state.marketplaceAttributionName || '').trim();
+                    if (!attribution) errors.attribution = '公开署名未填写';
+                    const tags = String(state.marketplaceTags || '').split(/[,，\n]/)
+                        .map(item => item.trim()).filter(Boolean);
+                    if (tags.length > 10) errors.tags = '标签最多填写 10 个，请删减';
+                    if (!(state.marketplaceLicenses || []).some(
+                        item => item.code === state.marketplaceLicenseCode
+                    )) errors.license = '授权许可未选择，请选择一种许可';
+                    if (!(state.marketplaceSourceTypes || []).some(
+                        item => item.code === state.marketplaceSourceType
+                    )) errors.sourceType = '来源类型未选择，请选择模板来源';
+                    const sourceUrl = state.marketplaceSourceType === 'original'
+                        ? '' : String(state.marketplaceSourceUrl || '').trim();
+                    if (state.marketplaceSourceType !== 'original' && !sourceUrl) {
+                        errors.sourceUrl = '非原创模板的可核验来源链接未填写';
+                    } else if (sourceUrl) {
+                        try {
+                            const parsed = new URL(sourceUrl);
+                            if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.host) {
+                                errors.sourceUrl = '来源链接需填写有效的 HTTP 或 HTTPS 地址';
+                            }
+                        } catch (_) {
+                            errors.sourceUrl = '来源链接需填写有效的 HTTP 或 HTTPS 地址';
+                        }
+                    }
+                    const rights = String(state.marketplaceRightsStatement || '').trim();
+                    if (!rights) errors.rights = '来源与权利说明未填写';
+                    else if (rights.length < 10) {
+                        errors.rights = `来源与权利说明至少填写 10 字（当前 ${rights.length} 字）`;
+                    }
+                    if (!state.marketplacePublicationConfirmed) {
+                        errors.publication = '请确认模板会公开展示并可被安装';
+                    }
+                    if (!state.marketplaceRightsConfirmed) {
+                        errors.rightsConfirmed = '请确认拥有发布和授权所需权利';
+                    }
+                    state.marketplaceFieldErrors = errors;
+                    if (Object.keys(errors).length) {
+                        const first = Object.keys(errors)[0];
+                        setTimeout(() => {
+                            const target = document.getElementById(fields[first]);
+                            (target?.offsetParent ? target : document.getElementById('promptMarketplaceSubmit'))?.focus();
+                        }, 0);
                         return;
                     }
                     state.marketplaceSaving = true;
@@ -1926,8 +2016,6 @@ window.aiworkerModules.push(() => ({
                     try {
                         const operationId = globalThis.crypto?.randomUUID?.()
                             || `prompt-market-submit-${Date.now()}`;
-                        const tags = String(state.marketplaceTags || '').split(/[,，\n]/)
-                            .map(item => item.trim()).filter(Boolean);
                         const response = await aiworkerApi.request(
                             `/api/creative/projects/${projectId}/prompt-library/templates/${template.id}/marketplace-submissions`,
                             {
@@ -1939,11 +2027,11 @@ window.aiworkerModules.push(() => ({
                                     title: String(template.title || '').trim(),
                                     description: String(template.description || '').trim(),
                                     tags,
-                                    attribution_name: String(state.marketplaceAttributionName || '').trim(),
+                                    attribution_name: attribution,
                                     license_code: state.marketplaceLicenseCode,
                                     source_type: state.marketplaceSourceType,
-                                    source_url: String(state.marketplaceSourceUrl || '').trim(),
-                                    rights_statement: String(state.marketplaceRightsStatement || '').trim(),
+                                    source_url: sourceUrl,
+                                    rights_statement: rights,
                                     publication_confirmed: true,
                                     rights_confirmed: true,
                                 }),
@@ -3334,7 +3422,8 @@ window.aiworkerModules.push(() => ({
 
                 creativeActionLabel(action) {
                     return {
-                        blueprints: '仿制方向', characters: '人物关系', outlines: '分集大纲',
+                        blueprints: this.creativeWorkspace.project?.creation_mode === 'original' ? '原创方向' : '仿制方向',
+                        blueprint_variant: '派生方向', characters: '人物关系', outlines: '分集大纲',
                         outline_overview: '全集剧情概览', beats: 'Beats 脚本', script: '场次剧本'
                     }[action] || '创作内容';
                 },

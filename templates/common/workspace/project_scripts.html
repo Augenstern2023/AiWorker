@@ -31,6 +31,7 @@
                     <div><span class="fw-semibold" x-text="`第 ${item.episode_number} 集 · ${item.content?.episode_title || '未命名'} `"></span><span class="small text-muted" x-text="`v${item.version} · ${creativeWorkflowStatusLabel(item.status)}`"></span></div>
                     <a class="btn btn-outline-primary btn-sm" :href="creativeModuleUrl('script', item.episode_number)">打开单集编辑</a>
                 </div>
+                <div class="small text-muted mb-2" data-template-provenance x-text="creativeTemplateProvenance(item)"></div>
                 <template x-for="scene in (item.content?.scenes || [])" :key="`all-scene-${item.id}-${scene.sequence_no}-${scene.scene_no}`">
                     <div class="border-top py-3">
                         <div class="small fw-semibold mb-2" x-text="`[${scene.sequence_no}]-[${scene.scene_no}] [${scene.time_of_day || ''}] [${scene.interior_exterior || ''}] [${scene.location || ''}]`"></div>
@@ -58,6 +59,7 @@
                     <a class="btn btn-outline-secondary btn-sm" :href="`/api/creative/projects/${creativeWorkspace.project.id}/generated-content/download?stage=script&resource_id=${selectedProjectScript().id}&format=txt`" title="下载本集 TXT"><i class="bi bi-download me-1"></i>本集下载</a>
                 </div>
             </div>
+            <div class="small text-muted mb-2" data-template-provenance x-text="creativeTemplateProvenance(selectedProjectScript())"></div>
             <div class="mb-3"><label class="form-label small">集标题</label><input class="form-control form-control-sm" x-model="selectedProjectScript().content.episode_title" :disabled="!creativeResourceEditable(selectedProjectScript())"></div>
             <template x-for="scene in selectedProjectScript().content.scenes" :key="`${scene.sequence_no}-${scene.scene_no}`">
                 <div class="border-top py-3">

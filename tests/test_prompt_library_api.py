@@ -732,11 +732,7 @@ async def test_prompt_ab_start_revalidates_hash_and_creates_two_candidate_jobs(t
         "urban-identity-romcom",
     }
     assert all(item["prompt_template_revision"] == 1 for item in extras)
-    assert all(item["llm_price_snapshot"]["complete"] is True for item in extras)
-    assert all(
-        item["llm_price_snapshot"]["input_price_per_million"] == 2.0
-        for item in extras
-    )
+    assert all("llm_price_snapshot" not in item for item in extras)
     assert started["status"] == "running"
     assert {arm["job_id"] for arm in started["arms"]} == {"ab-job-1", "ab-job-2"}
     assert history["items"][0]["id"] == started["id"]

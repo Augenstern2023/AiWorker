@@ -17,7 +17,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
-from analysis.llm import current_llm_price_snapshot
 from creative.repository import CreativeRepository
 from creative.project_prompt_service import ProjectPromptService
 from identity.dependencies import current_principal
@@ -239,7 +238,6 @@ def build_script_review_router(
                     dict(source.get("prompt_snapshot") or {}).get("content_hash")
                     or ""
                 ),
-                "llm_price_snapshot": current_llm_price_snapshot(),
             },
         }
         try:

@@ -8,7 +8,12 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import shutil
+import subprocess
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +21,62 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _read(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
+
+
+def test_creative_results_show_frozen_template_provenance_in_every_stage():
+    script = _read("static/js/common/creative.js")
+    stages = {
+        "project_blueprints.html": "selectedProjectBlueprint()",
+        "project_characters.html": "currentProjectCharacters()[0]",
+        "project_outlines.html": "item",
+        "project_beats.html": "selectedProjectBeats()",
+        "project_scripts.html": "selectedProjectScript()",
+    }
+    assert "creativeTemplateProvenance(item)" in script
+    assert "meta.prompt_snapshot" in script
+    for filename, resource in stages.items():
+        html = _read(f"templates/common/workspace/{filename}")
+        assert f"creativeTemplateProvenance({resource})" in html
+        assert 'data-template-provenance' in html
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_creative_template_provenance_does_not_guess_from_current_binding():
+    cases = [
+        [{"generation_meta": {"prompt_snapshot": {"template_key": "private-key", "title": "冻结标题", "revision": 3, "content_hash": "hash"}, "job_id": "job-1"}}, "模板生成：冻结标题 · 模板 v3"],
+        [{"generation_meta": {"prompt_snapshot": {"template_key": "private-key", "title": "冻结标题", "revision": 3}, "manual_revision": True}}, "基于模板版本修订：冻结标题 · 模板 v3"],
+        [{"direction_type": "original", "parent_version_id": 12, "generation_meta": {"prompt_snapshot": {"template_key": "private-key", "title": "冻结标题", "revision": 3}, "job_id": "old-job"}}, "基于模板版本修订：冻结标题 · 模板 v3"],
+        [{"generation_meta": {"origin": "manual"}}, "手动创建/修订 · 未按生成模板生成"],
+        [{"generation_meta": {"manual_revision": True, "job_id": "old-job"}}, "手动修订 · 原模板来源未记录"],
+        [{"generation_meta": {"manual_revision": True, "prompt_source": "system"}}, "基于系统提示词版本修订 · 未使用模板库"],
+        [{"generation_meta": {"job_id": "new-job", "prompt_source": "system"}}, "系统提示词生成 · 未使用模板库"],
+        [{"generation_meta": {"job_id": "legacy-job"}}, "历史生成 · 模板记录缺失"],
+        [{"generation_meta": {}}, "模板来源未记录"],
+    ]
+    program = (
+        "global.window = {aiworkerModules: []}; "
+        "require('./static/js/common/creative.js'); "
+        "const component = window.aiworkerModules[0](); "
+        f"const cases = {json.dumps(cases, ensure_ascii=False)}; "
+        "for (const [item, expected] of cases) { "
+        "const actual = component.creativeTemplateProvenance(item); "
+        "if (actual !== expected) throw new Error(`${actual} != ${expected}`); "
+        "}"
+    )
+    result = subprocess.run(
+        ["node", "-e", program], cwd=ROOT, capture_output=True, text=True,
+        encoding="utf-8", check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_new_generations_freeze_system_prompt_origin_without_template_snapshot():
+    standard = _read("creative/phase4_worker.py")
+    free = _read("creative/free_phase4_worker.py")
+    api = _read("creative/api.py")
+    assert '"prompt_source": "template" if isinstance(prompt_snapshot, dict) else "system"' in standard
+    assert free.count('"prompt_source": "template" if isinstance(prompt_snapshot, dict) else "system"') == 2
+    assert api.count('generation_meta={"origin": "manual"}') == 4
 
 
 def test_all_enabled_generation_workspaces_expose_the_shared_prompt_library():
@@ -42,7 +103,6 @@ def test_all_enabled_generation_workspaces_expose_the_shared_prompt_library():
 def test_prompt_library_information_architecture_separates_daily_and_advanced_work():
     modal = _read("templates/common/workspace/prompt_library_modal.html")
     center = _read("templates/common/workspace/prompt_template_center.html")
-    effects = _read("templates/common/workspace/prompt_template_effects.html")
     navigation = _read("templates/common/workspace/project_module_navigation.html")
     routes = _read("web/page_routes.py")
     router = _read("web/page_router.py")
@@ -52,16 +112,13 @@ def test_prompt_library_information_architecture_separates_daily_and_advanced_wo
     assert "我的模板" in center
     assert "项目模板" in center
     assert "模板市场" in center
-    assert "效果数据" in effects
-    assert "对比测试" in effects
-    assert "实验记录" in effects
-    assert "版本优化" in effects
     assert "promptWorkspaceUrl('center')" in navigation
-    assert "promptWorkspaceUrl('effects')" in navigation
+    assert "promptWorkspaceUrl('effects')" not in navigation
+    assert "promptWorkspaceUrl('effects')" not in modal
     assert '"/projects/{project_id}/prompt-templates"' in routes
     assert '"/projects/{project_id}/prompt-effects"' in routes
     assert '"common/workspace/prompt_template_center.html"' in router
-    assert '"common/workspace/prompt_template_effects.html"' in router
+    assert "legacy_prompt_effects_page" in router
 
 
 def test_prompt_library_ui_keeps_contract_locked_and_supports_all_mvp_scopes():

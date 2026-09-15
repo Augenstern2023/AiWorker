@@ -104,6 +104,7 @@ def test_marketplace_panel_installs_and_rates_through_rendered_ui():
             content="""
             window.__marketInstalled = false;
             window.__marketRated = false;
+            window.__marketSubmitted = false;
             window.__marketRequests = [];
             window.bootstrap = {
               Modal: {getOrCreateInstance: () => ({show() {}, hide() {}})},
@@ -126,6 +127,10 @@ def test_marketplace_panel_installs_and_rates_through_rendered_ui():
                     ok: true,
                     json: async () => ({rating: {revision: 1}, summary: {average: 5, count: 1}})
                   });
+                }
+                if (url.includes('/marketplace-submissions')) {
+                  window.__marketSubmitted = true;
+                  return Promise.resolve({ok: true, json: async () => ({id: 'submission-1'})});
                 }
                 if (url.includes('/prompt-modules/')) {
                   return Promise.resolve({
@@ -154,7 +159,10 @@ def test_marketplace_panel_installs_and_rates_through_rendered_ui():
                     items: [item], own_submissions: [], moderation_queue: [],
                     installations: item.installation ? [item.installation] : [],
                     licenses: [{code: 'CC-BY-NC-4.0', label: 'CC BY-NC 4.0'}],
-                    source_types: [{code: 'original', label: '原创'}],
+                    source_types: [
+                      {code: 'original', label: '原创'},
+                      {code: 'authorized', label: '授权改编'}
+                    ],
                     policy: ['安装生成独立副本'], can_review: false, can_install: true
                   })
                 });
@@ -168,6 +176,57 @@ def test_marketplace_panel_installs_and_rates_through_rendered_ui():
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(500)
         assert page_errors == [], "\n".join(page_errors)
+
+        submit_button = page.get_by_role("button", name="提交市场审核")
+        assert submit_button.is_enabled()
+        submit_button.click()
+        page.get_by_text("公开署名未填写", exact=True).wait_for()
+        assert page.locator("#promptMarketplaceAttribution").evaluate(
+            "element => document.activeElement === element"
+        )
+        page.get_by_text("来源与权利说明未填写", exact=True).wait_for()
+        page.get_by_text("请确认模板会公开展示并可被安装", exact=True).wait_for()
+        page.get_by_text("请确认拥有发布和授权所需权利", exact=True).wait_for()
+        assert not page.evaluate("window.__marketSubmitted")
+
+        page.locator("#promptMarketplaceAttribution").fill("我的署名")
+        page.locator("#promptMarketplaceRights").fill("tttt")
+        submit_button.click()
+        page.get_by_text("来源与权利说明至少填写 10 字（当前 4 字）", exact=True).wait_for()
+        assert not page.evaluate("window.__marketSubmitted")
+
+        page.locator("#promptMarketplaceSourceType").select_option("authorized")
+        submit_button.click()
+        page.get_by_text("非原创模板的可核验来源链接未填写", exact=True).wait_for()
+        page.locator("#promptMarketplaceSourceUrl").fill("not-a-link")
+        submit_button.click()
+        page.get_by_text("来源链接需填写有效的 HTTP 或 HTTPS 地址", exact=True).wait_for()
+        assert not page.evaluate("window.__marketSubmitted")
+
+        page.locator("#promptMarketplaceSourceUrl").fill("https://example.com/source")
+        page.locator("#promptMarketplaceRights").fill("已取得原作者授权，可按所选许可公开使用。")
+        page.locator("#promptMarketplacePublicConfirm").check()
+        page.locator("#promptMarketplaceRightsConfirm").check()
+        submit_button.click()
+        page.wait_for_function("window.__marketSubmitted")
+        submission = page.evaluate(
+            "window.__marketRequests.find(item => item.url.includes('/marketplace-submissions'))"
+        )
+        assert submission["method"] == "POST"
+        assert submission["body"]["source_url"] == "https://example.com/source"
+
+        page.evaluate(
+            "Alpine.$data(document.querySelector('main')).creativeWorkspace."
+            "promptLibrary.templates[0].owner_scope = 'project'"
+        )
+        assert submit_button.is_enabled()
+        submit_button.click()
+        page.get_by_text(
+            '请先把模板“另存到我的模板”，再选择个人模板提交', exact=True
+        ).wait_for()
+        assert page.evaluate(
+            "window.__marketRequests.filter(item => item.url.includes('/marketplace-submissions')).length"
+        ) == 1
 
         install_button = page.get_by_role("button", name="接受许可并安装")
         install_button.wait_for()

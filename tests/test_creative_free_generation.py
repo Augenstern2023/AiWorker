@@ -442,14 +442,7 @@ async def test_free_generation_api_validates_and_hashes_selected_model(tmp_path)
     assert [job["extra"]["llm_model_record_id"] for job in jobs] == [
         "model-a", "model-b"
     ]
-    assert jobs[0]["extra"]["llm_price_snapshot"] == {
-        "model_record_id": "model-a",
-        "model_id": "provider-model-a",
-        "input_price_per_million": 2.0,
-        "output_price_per_million": 8.0,
-        "price_currency": "CNY",
-        "complete": True,
-    }
+    assert "llm_price_snapshot" not in jobs[0]["extra"]
     assert jobs[0]["extra"]["generation_request_hash"] != (
         jobs[1]["extra"]["generation_request_hash"]
     )

@@ -35,7 +35,6 @@
                     <div class="small text-muted">模板按项目题材、平台、受众与创作素材的七维匹配度排序；推荐不会自动改变当前设置。</div>
                     <div class="d-flex flex-wrap gap-2">
                         <a class="btn btn-outline-info btn-sm" :href="promptWorkspaceUrl('center')">模板中心</a>
-                        <a class="btn btn-outline-info btn-sm" :href="promptWorkspaceUrl('effects')">模板效果</a>
                     </div>
                 </div>
                 {% elif prompt_library_surface == 'center' %}
@@ -296,55 +295,65 @@
                         <div class="small text-muted mt-1">提交时冻结当前版本；平台审核通过前不会公开。项目模板不能直接发布，防止项目资产被误公开。</div>
                         <div class="mt-2" x-show="promptTemplatesByOwner('user').length" x-cloak>
                             <label class="form-label small" for="promptMarketplacePersonalTemplate">要提交的个人模板</label>
-                            <select id="promptMarketplacePersonalTemplate" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.selectedTemplateKey">
+                            <select id="promptMarketplacePersonalTemplate" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.selectedTemplateKey" @change="clearPromptMarketplaceFieldError('template')">
                                 <template x-for="template in promptTemplatesByOwner('user')" :key="`market-personal-${template.id}`">
                                     <option :value="template.template_key" x-text="`${template.title} · v${template.revision}`"></option>
                                 </template>
                             </select>
                         </div>
                         <div class="alert alert-warning py-2 mt-3 mb-0" x-show="selectedPromptTemplate()?.owner_scope !== 'user'">请先把当前模板“另存到我的模板”，再提交市场审核。</div>
+                        <div class="small text-danger mt-1" role="alert" x-show="creativeWorkspace.promptLibrary.marketplaceFieldErrors.template" x-text="creativeWorkspace.promptLibrary.marketplaceFieldErrors.template"></div>
                         <div x-show="selectedPromptTemplate()?.owner_scope === 'user'" x-cloak>
                             <div class="row g-2 mt-2">
                                 <div class="col-md-6">
                                     <label class="form-label small" for="promptMarketplaceAttribution">公开署名</label>
-                                    <input id="promptMarketplaceAttribution" class="form-control form-control-sm" maxlength="80" x-model="creativeWorkspace.promptLibrary.marketplaceAttributionName" placeholder="会随模板和许可公开展示">
+                                    <input id="promptMarketplaceAttribution" class="form-control form-control-sm" maxlength="80" x-model="creativeWorkspace.promptLibrary.marketplaceAttributionName" @input="clearPromptMarketplaceFieldError('attribution')" :aria-invalid="Boolean(creativeWorkspace.promptLibrary.marketplaceFieldErrors.attribution)" placeholder="会随模板和许可公开展示">
+                                    <div class="small text-danger mt-1" role="alert" x-show="creativeWorkspace.promptLibrary.marketplaceFieldErrors.attribution" x-text="creativeWorkspace.promptLibrary.marketplaceFieldErrors.attribution"></div>
                                 </div>
                                 <div class="col-md-6">
                                     <label class="form-label small" for="promptMarketplaceTags">标签</label>
-                                    <input id="promptMarketplaceTags" class="form-control form-control-sm" x-model="creativeWorkspace.promptLibrary.marketplaceTags" placeholder="竖屏、甜宠、强钩子（最多 10 个）">
+                                    <input id="promptMarketplaceTags" class="form-control form-control-sm" x-model="creativeWorkspace.promptLibrary.marketplaceTags" @input="clearPromptMarketplaceFieldError('tags')" placeholder="竖屏、甜宠、强钩子（最多 10 个）">
+                                    <div class="small text-danger mt-1" role="alert" x-show="creativeWorkspace.promptLibrary.marketplaceFieldErrors.tags" x-text="creativeWorkspace.promptLibrary.marketplaceFieldErrors.tags"></div>
                                 </div>
                                 <div class="col-md-6">
                                     <label class="form-label small" for="promptMarketplaceSubmitLicense">授权许可</label>
-                                    <select id="promptMarketplaceSubmitLicense" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.marketplaceLicenseCode">
+                                    <select id="promptMarketplaceSubmitLicense" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.marketplaceLicenseCode" @change="clearPromptMarketplaceFieldError('license')">
                                         <template x-for="license in creativeWorkspace.promptLibrary.marketplaceLicenses" :key="`submit-${license.code}`"><option :value="license.code" x-text="license.label"></option></template>
                                     </select>
+                                    <div class="small text-danger mt-1" role="alert" x-show="creativeWorkspace.promptLibrary.marketplaceFieldErrors.license" x-text="creativeWorkspace.promptLibrary.marketplaceFieldErrors.license"></div>
                                 </div>
                                 <div class="col-md-6">
                                     <label class="form-label small" for="promptMarketplaceSourceType">来源类型</label>
-                                    <select id="promptMarketplaceSourceType" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.marketplaceSourceType">
+                                    <select id="promptMarketplaceSourceType" class="form-select form-select-sm" x-model="creativeWorkspace.promptLibrary.marketplaceSourceType" @change="clearPromptMarketplaceFieldError('sourceType'); clearPromptMarketplaceFieldError('sourceUrl')">
                                         <template x-for="source in creativeWorkspace.promptLibrary.marketplaceSourceTypes" :key="source.code"><option :value="source.code" x-text="source.label"></option></template>
                                     </select>
+                                    <div class="small text-danger mt-1" role="alert" x-show="creativeWorkspace.promptLibrary.marketplaceFieldErrors.sourceType" x-text="creativeWorkspace.promptLibrary.marketplaceFieldErrors.sourceType"></div>
                                 </div>
                                 <div class="col-12" x-show="creativeWorkspace.promptLibrary.marketplaceSourceType !== 'original'">
                                     <label class="form-label small" for="promptMarketplaceSourceUrl">可核验来源链接</label>
-                                    <input id="promptMarketplaceSourceUrl" class="form-control form-control-sm" type="url" maxlength="1000" x-model="creativeWorkspace.promptLibrary.marketplaceSourceUrl" placeholder="https://">
+                                    <input id="promptMarketplaceSourceUrl" class="form-control form-control-sm" type="url" maxlength="1000" x-model="creativeWorkspace.promptLibrary.marketplaceSourceUrl" @input="clearPromptMarketplaceFieldError('sourceUrl')" placeholder="https://">
+                                    <div class="small text-danger mt-1" role="alert" x-show="creativeWorkspace.promptLibrary.marketplaceFieldErrors.sourceUrl" x-text="creativeWorkspace.promptLibrary.marketplaceFieldErrors.sourceUrl"></div>
                                 </div>
                                 <div class="col-12">
                                     <label class="form-label small" for="promptMarketplaceRights">来源与权利说明</label>
-                                    <textarea id="promptMarketplaceRights" class="form-control" rows="2" minlength="10" maxlength="2000" x-model="creativeWorkspace.promptLibrary.marketplaceRightsStatement" placeholder="说明原创情况、授权范围或开放许可依据。"></textarea>
+                                    <textarea id="promptMarketplaceRights" class="form-control" rows="2" minlength="10" maxlength="2000" x-model="creativeWorkspace.promptLibrary.marketplaceRightsStatement" @input="clearPromptMarketplaceFieldError('rights')" :aria-invalid="Boolean(creativeWorkspace.promptLibrary.marketplaceFieldErrors.rights)" placeholder="说明原创情况、授权范围或开放许可依据。"></textarea>
+                                    <div class="small text-danger mt-1" role="alert" x-show="creativeWorkspace.promptLibrary.marketplaceFieldErrors.rights" x-text="creativeWorkspace.promptLibrary.marketplaceFieldErrors.rights"></div>
                                 </div>
                             </div>
                             <div class="form-check mt-3">
-                                <input id="promptMarketplacePublicConfirm" class="form-check-input" type="checkbox" x-model="creativeWorkspace.promptLibrary.marketplacePublicationConfirmed">
+                                <input id="promptMarketplacePublicConfirm" class="form-check-input" type="checkbox" x-model="creativeWorkspace.promptLibrary.marketplacePublicationConfirmed" @change="clearPromptMarketplaceFieldError('publication')">
                                 <label class="form-check-label small" for="promptMarketplacePublicConfirm">我确认完整模板冻结版本会公开展示，并允许其他项目按所选许可安装。</label>
+                                <div class="small text-danger" role="alert" x-show="creativeWorkspace.promptLibrary.marketplaceFieldErrors.publication" x-text="creativeWorkspace.promptLibrary.marketplaceFieldErrors.publication"></div>
                             </div>
                             <div class="form-check mt-2">
-                                <input id="promptMarketplaceRightsConfirm" class="form-check-input" type="checkbox" x-model="creativeWorkspace.promptLibrary.marketplaceRightsConfirmed">
+                                <input id="promptMarketplaceRightsConfirm" class="form-check-input" type="checkbox" x-model="creativeWorkspace.promptLibrary.marketplaceRightsConfirmed" @change="clearPromptMarketplaceFieldError('rightsConfirmed')">
                                 <label class="form-check-label small" for="promptMarketplaceRightsConfirm">我确认拥有发布和授权所需权利，并愿意接受平台审核。</label>
+                                <div class="small text-danger" role="alert" x-show="creativeWorkspace.promptLibrary.marketplaceFieldErrors.rightsConfirmed" x-text="creativeWorkspace.promptLibrary.marketplaceFieldErrors.rightsConfirmed"></div>
                             </div>
-                            <div class="d-flex justify-content-end mt-3">
-                                <button class="btn btn-info btn-sm" type="button" @click="submitSelectedPromptToMarketplace" :disabled="creativeWorkspace.promptLibrary.marketplaceSaving || !creativeWorkspace.promptLibrary.marketplaceAttributionName.trim() || creativeWorkspace.promptLibrary.marketplaceRightsStatement.trim().length < 10 || !creativeWorkspace.promptLibrary.marketplacePublicationConfirmed || !creativeWorkspace.promptLibrary.marketplaceRightsConfirmed">提交市场审核</button>
-                            </div>
+                        </div>
+                        <div class="small text-danger mt-3" role="status" x-show="Object.keys(creativeWorkspace.promptLibrary.marketplaceFieldErrors).length">请按上方提示补充信息后再提交。</div>
+                        <div class="d-flex justify-content-end mt-2">
+                            <button id="promptMarketplaceSubmit" class="btn btn-info btn-sm" type="button" @click="submitSelectedPromptToMarketplace" x-text="creativeWorkspace.promptLibrary.marketplaceSaving ? '提交中…' : '提交市场审核'"></button>
                         </div>
                     </div>
 

@@ -628,7 +628,14 @@ def parse_chat_completion_text(response_json: Dict[str, Any]) -> str:
     if not choices:
         raise LLMError("LLM response has no choices.")
 
-    message = choices[0].get("message") or {}
+    choice = choices[0]
+    finish_reason = str(choice.get("finish_reason") or "").strip().lower()
+    if finish_reason in {"length", "max_tokens", "max_output_tokens"}:
+        raise LLMIncompleteResponseError(
+            "Chat Completions response is incomplete: max_output_tokens."
+        )
+
+    message = choice.get("message") or {}
     content = message.get("content", "")
     if isinstance(content, list):
         content = "".join(item.get("text", "") if isinstance(item, dict) else str(item) for item in content)

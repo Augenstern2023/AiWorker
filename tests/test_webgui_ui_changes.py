@@ -1485,16 +1485,70 @@ def test_all_creative_module_links_are_clickable_before_upstream_locking():
     assert "五个创作模块入口始终可直接进入" in project_list
 
 
-def test_sequential_workflow_exposes_and_submits_selected_model():
+def test_sequential_workflow_selects_model_only_when_starting_generation():
     navigation = _source("templates/common/workspace/project_module_navigation.html")
+    modal = _source("templates/common/workspace/free_creative_modals.html")
     creative = _source("static/js/common/creative.js")
     tasks = _source("static/js/common/tasks.js")
 
-    assert 'id="sequential-generation-model"' in navigation
-    assert "creativeWorkspace.sequentialGeneration.modelRecordId" in navigation
-    assert "loadSequentialGenerationModels(data.id)" in creative
+    assert 'id="sequential-generation-model"' not in navigation
+    assert 'id="sequentialGenerationModelModal"' in modal
+    assert 'x-model="creativeWorkspace.sequentialGeneration.modelRecordId"' in modal
+    assert "openSequentialGenerationModel" in creative
+    assert "submitSequentialGeneration" in creative
     assert "llm_model_record_id: modelRecordId" in creative
     assert "sequentialGeneration:" in tasks
+
+
+def test_standard_generate_opens_model_dialog_before_sending_job():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the browser module")
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert/strict');
+global.window = {aiworkerModules: []};
+vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
+const component = window.aiworkerModules[0]();
+const calls = [];
+Object.assign(component, {
+  creativeWorkspace: {
+    project: {id: 4, workflow_mode: 'sequential'},
+    sequentialGeneration: {modelOptions: [], modelRecordId: '', loading: false, error: '', pending: null},
+  },
+  sequentialGenerationModelModal: {show: () => calls.push('show'), hide: () => calls.push('hide')},
+  loadSequentialGenerationModels: async () => {
+    calls.push('load');
+    component.creativeWorkspace.sequentialGeneration.loading = false;
+  },
+});
+(async () => {
+  await component.startCreativeGeneration('/api/creative/projects/4/blueprints/generate', {count: 3}, 'blueprints');
+  assert.deepEqual(calls, ['show', 'load']);
+  assert.equal(component.creativeWorkspace.sequentialGeneration.pending.body.count, 3);
+  component.creativeWorkspace.sequentialGeneration.modelRecordId = 'chosen-model';
+  component.startCreativeGeneration = async (...args) => calls.push(args);
+  await component.submitSequentialGeneration();
+  assert.equal(calls[2], 'hide');
+  assert.equal(calls[3][1].llm_model_record_id, 'chosen-model');
+  assert.equal(calls[3][3].modelConfirmed, true);
+  assert.equal(component.creativeWorkspace.sequentialGeneration.pending, null);
+  component.creativeWorkspace.sequentialGeneration.pending = {
+    url: '/api/creative/projects/4/characters/generate', body: {}, action: 'characters', options: {},
+  };
+  component.creativeWorkspace.sequentialGeneration.modelRecordId = '';
+  component.creativeWorkspace.sequentialGeneration.error = '模型列表暂时不可用';
+  await component.submitSequentialGeneration();
+  assert.equal(calls[5][1].llm_model_record_id, undefined);
+  assert.equal(calls[5][3].modelConfirmed, true);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''
+    result = subprocess.run(
+        [node, "-e", script, "static/js/common/creative.js"],
+        capture_output=True, text=True, encoding="utf-8", check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_free_outline_keeps_field_level_ai_rewrite_and_head_conflict_guard():

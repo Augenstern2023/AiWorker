@@ -514,6 +514,9 @@ def test_original_brief_query_starts_direction_generation_once() -> None:
                 if (url === '/api/creative/projects/9/workflow-tasks/brief/ensure') {
                   return {ok: true, json: async () => ({id: 'brief-9', status: 'in_progress'})};
                 }
+                if (url === '/api/llm/available-models') {
+                  return {ok: true, json: async () => ({items: []})};
+                }
                 if (url === '/api/creative/projects/9/blueprints/generate') {
                   window.__originalDirectionRequests.push({url, options});
                   return {ok: true, json: async () => ({job: {job_id: 'original-9', status: 'queued'}})};
@@ -533,15 +536,19 @@ def test_original_brief_query_starts_direction_generation_once() -> None:
                 workspace.initTooltips = () => {};
                 workspace.initBeforeUnload = () => {};
                 await workspace.init();
+                const modelChoiceOpened = Boolean(workspace.creativeWorkspace.sequentialGeneration.pending);
+                await workspace.submitSequentialGeneration();
                 await workspace.init();
                 return {
                   requests: window.__originalDirectionRequests,
                   search: window.location.search,
+                  modelChoiceOpened,
                 };
             }"""
         )
         browser.close()
 
+    assert result["modelChoiceOpened"] is True
     assert len(result["requests"]) == 1
     assert result["requests"][0]["url"] == "/api/creative/projects/9/blueprints/generate"
     assert "generate_original" not in result["search"]

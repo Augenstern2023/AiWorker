@@ -3971,7 +3971,10 @@ class CreativeRepository:
                     current["risk_score"], current["risk_level"], current["difference_note"],
                     json.dumps(current["source_refs"], ensure_ascii=False),
                     current["direction_type"],
-                    json.dumps(current["generation_meta"], ensure_ascii=False),
+                    json.dumps(
+                        {**current["generation_meta"], "manual_revision": True,
+                         "revision_source_id": blueprint_id}, ensure_ascii=False
+                    ),
                     workflow_task_id or current.get("workflow_task_id"), now, now,
                 ),
             )
@@ -4046,7 +4049,11 @@ class CreativeRepository:
                     source["difference_note"],
                     source["source_refs_json"],
                     source["direction_type"],
-                    source["generation_meta_json"],
+                    json.dumps(
+                        {**json.loads(source["generation_meta_json"] or "{}"),
+                         "manual_revision": True, "revision_source_id": blueprint_id},
+                        ensure_ascii=False,
+                    ),
                     workflow_task_id or source["workflow_task_id"],
                     now,
                     now,

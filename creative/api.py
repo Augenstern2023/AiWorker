@@ -25,7 +25,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from openpyxl import Workbook
 from pydantic import BaseModel, Field
 
-from analysis.llm import build_llm_price_snapshot, current_llm_price_snapshot
 from creative.hit_breakdown import breakdown_field_guide, personalize_breakdown_field_guide
 from creative.application_service import (
     CreativeApplicationService,
@@ -1640,7 +1639,7 @@ def build_creative_router(
             raise HTTPException(403, "没有创建此机器任务的权限")
         assert_project_generation_access(project_id, principal)
         workflow_task_id = str(extra.pop("workflow_task_id", "") or "") or None
-        llm_model_record_id, llm_price_snapshot = validate_llm_model_with_price(
+        llm_model_record_id = validate_llm_model(
             extra.pop("llm_model_record_id", None)
         )
         normalized_stage = {
@@ -1713,10 +1712,7 @@ def build_creative_router(
             raise HTTPException(409, str(exc)) from exc
         if prompt_snapshot is not None:
             source_snapshot["prompt_snapshot"] = prompt_snapshot
-        job_observability = {
-            **prompt_job_identity(prompt_snapshot),
-            "llm_price_snapshot": llm_price_snapshot,
-        }
+        job_observability = prompt_job_identity(prompt_snapshot)
         try:
             state = application_service.start_generation_compat(
                 project_id=project_id,
@@ -4231,6 +4227,7 @@ def build_creative_router(
                 content,
                 expected_head_revision=payload.expected_head_revision,
                 actor_user_id=principal.user_id,
+                generation_meta={"origin": "manual"},
             )
         except PermissionError as exc:
             raise HTTPException(403, str(exc)) from exc
@@ -4251,6 +4248,7 @@ def build_creative_router(
                 payload.relationships,
                 expected_head_revision=payload.expected_head_revision,
                 actor_user_id=principal.user_id,
+                generation_meta={"origin": "manual"},
             )
         except PermissionError as exc:
             raise HTTPException(403, str(exc)) from exc
@@ -4272,6 +4270,7 @@ def build_creative_router(
                 series_overview=payload.series_overview,
                 expected_head_revision=payload.expected_head_revision,
                 actor_user_id=principal.user_id,
+                generation_meta={"origin": "manual"},
             )
         except PermissionError as exc:
             raise HTTPException(403, str(exc)) from exc
@@ -4303,6 +4302,7 @@ def build_creative_router(
                 payload.content or default_content,
                 expected_head_revision=payload.expected_head_revision,
                 actor_user_id=principal.user_id,
+                generation_meta={"origin": "manual"},
             )
         except PermissionError as exc:
             raise HTTPException(403, str(exc)) from exc
@@ -4420,21 +4420,16 @@ def build_creative_router(
             raise HTTPException(409, str(exc)) from exc
 
     def validate_llm_model(model_record_id: str | None) -> str:
-        return validate_llm_model_with_price(model_record_id)[0]
-
-    def validate_llm_model_with_price(
-        model_record_id: str | None,
-    ) -> tuple[str, dict[str, Any]]:
         normalized = str(model_record_id or "").strip()
         if not normalized:
-            return "", current_llm_price_snapshot()
+            return ""
         if llm_model_resolver is None:
             raise HTTPException(503, "模型配置服务不可用")
         try:
-            model = llm_model_resolver(normalized)
+            llm_model_resolver(normalized)
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(409, str(exc)) from exc
-        return normalized, build_llm_price_snapshot(model)
+        return normalized
 
     def prompt_job_identity(snapshot: dict[str, Any] | None) -> dict[str, Any]:
         if not isinstance(snapshot, dict) or not snapshot:
@@ -4459,7 +4454,7 @@ def build_creative_router(
     ) -> dict[str, Any]:
         if job_manager is None:
             raise HTTPException(503, "creative job manager is unavailable")
-        llm_model_record_id, llm_price_snapshot = validate_llm_model_with_price(
+        llm_model_record_id = validate_llm_model(
             payload.llm_model_record_id
         )
         try:
@@ -4539,7 +4534,6 @@ def build_creative_router(
                     "expected_head_revision": payload.expected_head_revision,
                     "count": payload.count if stage == "brief" else 1,
                     "llm_model_record_id": llm_model_record_id,
-                    "llm_price_snapshot": llm_price_snapshot,
                     **prompt_job_identity(prompt_snapshot),
                     "prompt_ab_experiment_id": prompt_ab_experiment_id,
                     "prompt_ab_arm": prompt_ab_arm,
@@ -4564,7 +4558,7 @@ def build_creative_router(
             raise HTTPException(503, "creative job manager is unavailable")
         if stage not in {"beats", "script"}:
             raise HTTPException(404, "unsupported creative stage")
-        llm_model_record_id, llm_price_snapshot = validate_llm_model_with_price(
+        llm_model_record_id = validate_llm_model(
             payload.llm_model_record_id
         )
         context_refs = payload.context_refs.model_dump()
@@ -4652,7 +4646,6 @@ def build_creative_router(
                         for number, revision in expected_head_revisions.items()
                     },
                     "llm_model_record_id": llm_model_record_id,
-                    "llm_price_snapshot": llm_price_snapshot,
                     **prompt_job_identity(
                         dict(next(iter(contexts.values()))["context_snapshot"]).get(
                             "prompt_snapshot"

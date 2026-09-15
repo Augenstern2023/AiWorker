@@ -38,7 +38,6 @@ from analysis.llm import (
     build_responses_request_body,
     build_video_analysis_messages,
     create_llm_provider_from_config,
-    llm_usage_snapshot,
     normalize_llm_analysis,
     parse_chat_completion_json,
     parse_chat_completion_text,
@@ -277,97 +276,6 @@ def test_parse_responses_text_reads_output_text():
     payload = {"output": [{"content": [{"type": "output_text", "text": "{\"summary\":\"ok\"}"}]}]}
 
     assert parse_responses_text(payload) == "{\"summary\":\"ok\"}"
-
-
-def test_chat_provider_accumulates_only_reported_usage_and_exposes_coverage():
-    responses = iter(
-        [
-            {
-                "choices": [{"message": {"content": "first"}}],
-                "usage": {
-                    "prompt_tokens": 12,
-                    "completion_tokens": 5,
-                    "total_tokens": 17,
-                    "prompt_tokens_details": {"cached_tokens": 3},
-                    "completion_tokens_details": {"reasoning_tokens": 2},
-                },
-            },
-            {"choices": [{"message": {"content": "second"}}]},
-        ]
-    )
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, request=request, json=next(responses))
-
-    provider = OpenAICompatibleLLMProvider(
-        base_url="https://example.test/v1",
-        api_key="key",
-        model="test-model",
-        transport=httpx.MockTransport(handler),
-    )
-    asyncio.run(provider.complete_text([{"role": "user", "content": "one"}]))
-    asyncio.run(provider.complete_text([{"role": "user", "content": "two"}]))
-
-    assert provider.usage_snapshot() == {
-        "call_count": 2,
-        "reported_call_count": 1,
-        "input_reported_call_count": 1,
-        "output_reported_call_count": 1,
-        "total_reported_call_count": 1,
-        "input_tokens": 12,
-        "output_tokens": 5,
-        "total_tokens": 17,
-        "cached_tokens": 3,
-        "reasoning_tokens": 2,
-        "complete": False,
-    }
-
-
-def test_responses_provider_normalizes_reported_usage():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            request=request,
-            json={
-                "output_text": "ok",
-                "usage": {
-                    "input_tokens": 20,
-                    "output_tokens": 8,
-                    "input_tokens_details": {"cached_tokens": 7},
-                    "output_tokens_details": {"reasoning_tokens": 4},
-                },
-            },
-        )
-
-    provider = OpenAICompatibleLLMProvider(
-        base_url="https://example.test/v1",
-        api_key="key",
-        model="test-model",
-        wire_api="responses",
-        transport=httpx.MockTransport(handler),
-    )
-
-    assert asyncio.run(
-        provider.complete_text([{"role": "user", "content": "test"}])
-    ) == "ok"
-    assert provider.usage_snapshot()["total_tokens"] == 28
-    assert provider.usage_snapshot()["complete"] is True
-
-
-def test_usage_helper_does_not_invent_usage_for_legacy_provider():
-    assert llm_usage_snapshot(object()) == {
-        "call_count": 0,
-        "reported_call_count": 0,
-        "input_reported_call_count": 0,
-        "output_reported_call_count": 0,
-        "total_reported_call_count": 0,
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "total_tokens": 0,
-        "cached_tokens": 0,
-        "reasoning_tokens": 0,
-        "complete": False,
-    }
 
 
 def test_responses_provider_falls_back_to_chat_completions_when_gateway_returns_no_json():

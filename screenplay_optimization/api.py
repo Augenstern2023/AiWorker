@@ -15,7 +15,6 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from analysis.llm import current_llm_price_snapshot
 from creative.repository import CreativeRepository
 from creative.project_prompt_service import ProjectPromptService
 from identity.dependencies import current_principal
@@ -211,7 +210,6 @@ def build_script_optimization_router(
                 "prompt_content_hash": str(
                     (prompt_snapshot or {}).get("content_hash") or ""
                 ),
-                "llm_price_snapshot": current_llm_price_snapshot(),
             },
         }
         try:

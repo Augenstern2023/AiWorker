@@ -9,7 +9,6 @@
 """Behavior tests for the durable Writer Agent action runner."""
 
 from pathlib import Path
-import os
 import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -2474,12 +2473,10 @@ def test_runner_launches_ten_episode_jobs_before_polling(runner_context):
 
 
 @pytest.mark.asyncio
-async def test_webgui_startup_resumes_writer_actions(monkeypatch):
+async def test_webgui_startup_resumes_writer_actions(
+    monkeypatch, isolated_system_database
+):
     """Only constructing the runner leaves persisted active actions idle after restart."""
-    monkeypatch.setenv(
-        "AIWORKER_SYSTEM_DATABASE_URL",
-        os.environ["AIWORKER_TEST_SYSTEM_DATABASE_URL"],
-    )
     import WebGUI
 
     resumed = threading.Event()

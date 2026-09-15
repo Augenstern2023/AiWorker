@@ -216,7 +216,7 @@
                     saveState: {}, notice: '', noticeType: 'success', noticeTimer: null,
                     moduleCapabilities: {},
                     sequentialGeneration: {
-                        modelOptions: [], modelRecordId: '', loading: false, error: '', loaded: false
+                        modelOptions: [], modelRecordId: '', loading: false, error: '', pending: null
                     },
                     promptLibrary: {
                         stage: '', loading: false, saving: false, error: '',
@@ -265,7 +265,8 @@
                         marketplaceSourceType: 'original', marketplaceSourceUrl: '',
                         marketplaceRightsStatement: '',
                         marketplacePublicationConfirmed: false,
-                        marketplaceRightsConfirmed: false
+                        marketplaceRightsConfirmed: false,
+                        marketplaceFieldErrors: {}
                     },
                     freeGeneration: {
                         stage: '', series: false, instruction: '', contextOptions: {},
@@ -380,6 +381,10 @@
                         document.activeElement?.blur();
                     });
                     this.workflowTaskModal = this.modal('workflowTaskModal');
+                    this.sequentialGenerationModelModal = this.modal('sequentialGenerationModelModal');
+                    document.getElementById('sequentialGenerationModelModal')?.addEventListener('hidden.bs.modal', () => {
+                        this.creativeWorkspace.sequentialGeneration.pending = null;
+                    });
                     this.freeCreativeGenerationModal = this.modal('freeCreativeGenerationModal');
                     this.creativeModeMigrationModal = this.modal('creativeModeMigrationModal');
                     this.planningAssignmentModal = this.modal('planningAssignmentModal');

@@ -19,7 +19,7 @@ from typing import Any
 
 import config
 
-from analysis.llm import create_llm_provider_from_config, llm_usage_snapshot
+from analysis.llm import create_llm_provider_from_config
 from core.events import emit_event
 from core.job import CrawlJob
 from creative.imitation_service import complete_with_one_repair, generate_blueprints
@@ -92,12 +92,7 @@ def emit(job: CrawlJob, event: str, message: str, level: str = "info", payload: 
 
 
 def _usage_payload(job: CrawlJob, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    return {
-        **dict(payload or {}),
-        "llm_usage": llm_usage_snapshot(
-            getattr(job, "_llm_usage_provider", None)
-        ),
-    }
+    return dict(payload or {})
 
 
 def _resolve_outline_reasoning_effort(job: CrawlJob) -> str:
@@ -339,6 +334,7 @@ def _generation_meta(
         "llm_model_display_name": str(
             extra.get("llm_model_display_name") or ""
         ),
+        "prompt_source": "template" if isinstance(prompt_snapshot, dict) else "system",
         "prompt_ab_experiment_id": str(
             extra.get("prompt_ab_experiment_id") or ""
         ),
@@ -476,7 +472,6 @@ async def _run_once(job: CrawlJob) -> None:
             )
             return
     provider = _create_generation_provider(extra)
-    setattr(job, "_llm_usage_provider", provider)
     extra.update(
         _provider_generation_meta(
             provider, str(extra.get("llm_model_record_id") or "")

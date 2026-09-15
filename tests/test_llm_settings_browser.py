@@ -144,11 +144,16 @@ def _mount_llm_page(page: Page, payload: dict = SETTINGS_PAYLOAD) -> None:
           window.requests = [];
           window.settingsPayload = structuredClone(payload);
           window.resolveLLMTest = null;
+          window.settingsFetches = 0;
+          window.credentialPutFailure = null;
+          window.credentialDeleteFailure = null;
+          window.testFailure = null;
           window.aiworkerApi = {
             async request(url, options = {}) {
               const body = options.body ? JSON.parse(options.body) : null;
               window.requests.push({url, method: options.method || 'GET', body});
               if (url === '/api/llm/settings') {
+                window.settingsFetches += 1;
                 return {ok: true, status: 200, async json() {
                   return structuredClone(window.settingsPayload);
                 }};
@@ -156,14 +161,19 @@ def _mount_llm_page(page: Page, payload: dict = SETTINGS_PAYLOAD) -> None:
               if (url === '/api/llm/test') {
                 return await new Promise(resolve => {
                   window.resolveLLMTest = () => resolve({
-                    ok: true, status: 200, async json() { return {
-                      status: 'success', message: '模型连接测试成功',
-                      latency_ms: 37, response_preview: 'OK'
-                    }; }
+                    ok: !window.testFailure, status: window.testFailure ? 400 : 200, async json() {
+                      return window.testFailure || {
+                        status: 'success', message: '模型连接测试成功',
+                        latency_ms: 37, response_preview: 'OK'
+                      };
+                    }
                   });
                 });
               }
               if (url.endsWith('/credential') && options.method === 'PUT') {
+                if (window.credentialPutFailure) {
+                  return {ok: false, status: 503, async json() { return window.credentialPutFailure; }};
+                }
                 const providerId = url.split('/').at(-2);
                 const provider = window.settingsPayload.providers.find(item => item.id === providerId);
                 provider.credential_status = 'configured';
@@ -174,6 +184,9 @@ def _mount_llm_page(page: Page, payload: dict = SETTINGS_PAYLOAD) -> None:
                 }};
               }
               if (url.endsWith('/credential') && options.method === 'DELETE') {
+                if (window.credentialDeleteFailure) {
+                  return {ok: false, status: 503, async json() { return window.credentialDeleteFailure; }};
+                }
                 const providerId = url.split('/').at(-2);
                 const provider = window.settingsPayload.providers.find(item => item.id === providerId);
                 provider.credential_status = 'configured';
@@ -335,7 +348,7 @@ def test_llm_provider_save_rotates_key_then_clears_the_password_field() -> None:
         assert page.get_by_label("API Key", exact=True).input_value() == ""
 
         page.get_by_text("内部网关", exact=True).click()
-        page.get_by_label("API Key", exact=True).fill("rotated-secret")
+        page.get_by_label("API Key", exact=True).fill("  rotated-secret  ")
         page.get_by_role("button", name="保存提供商").click()
         page.wait_for_function(
             "window.requests.some(item => item.url === '/api/llm/providers/provider-1/credential')"
@@ -345,7 +358,7 @@ def test_llm_provider_save_rotates_key_then_clears_the_password_field() -> None:
             "window.requests.find(item => item.url === '/api/llm/providers/provider-1/credential')"
         )
         assert request["method"] == "PUT"
-        assert request["body"] == {"api_key": "rotated-secret"}
+        assert request["body"] == {"api_key": "  rotated-secret  "}
         assert page.get_by_label("API Key", exact=True).input_value() == ""
         assert page.get_by_text("新密钥已生效", exact=True).is_visible()
         assert page.get_by_text("系统凭据库", exact=True).is_visible()
@@ -365,7 +378,7 @@ def test_llm_connection_test_uses_unsaved_fields_and_announces_result() -> None:
 
         page.get_by_label("Base URL").fill("https://draft.example.test/v1")
         page.get_by_label("API Key 环境变量").fill("DRAFT_API_KEY")
-        page.get_by_label("API Key", exact=True).fill("temporary-secret")
+        page.get_by_label("API Key", exact=True).fill("  temporary-secret  ")
         page.get_by_label("测试模型 ID").fill("draft-model")
         test_button = page.get_by_role("button", name="测试连接")
         test_button.click()
@@ -380,7 +393,7 @@ def test_llm_connection_test_uses_unsaved_fields_and_announces_result() -> None:
             "provider_id": "provider-1",
             "base_url": "https://draft.example.test/v1",
             "api_key_env_var": "DRAFT_API_KEY",
-            "api_key": "temporary-secret",
+            "api_key": "  temporary-secret  ",
             "model_id": "draft-model",
             "wire_api": "chat_completions",
         }
@@ -390,6 +403,81 @@ def test_llm_connection_test_uses_unsaved_fields_and_announces_result() -> None:
         assert page.get_by_label("API Key", exact=True).input_value() == ""
         assert page.get_by_text("37 ms", exact=False).is_visible()
         assert page.get_by_text("OK", exact=True).is_visible()
+        browser.close()
+
+
+def test_llm_credential_put_failure_refreshes_metadata_and_redacts_server_detail() -> None:
+    """Would catch a failed rotation leaving stale state or reflecting a server secret."""
+
+    payload = deepcopy(SETTINGS_PAYLOAD)
+    payload["providers"][0]["is_default"] = False
+    payload["providers"][0]["models"][0]["is_default"] = False
+    payload["default_model_id"] = None
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        _mount_llm_page(page, payload)
+        page.evaluate(
+            "document.querySelector('main')._x_dataStack[0].fetchLLMSettings()"
+        )
+        page.evaluate(
+            "window.credentialPutFailure = {detail: 'encoded-secret-fragment: c2VjcmV0'}"
+        )
+
+        page.get_by_label("提供商名称").fill("已保存但密钥失败")
+        page.get_by_label("API Key", exact=True).fill("fresh-secret")
+        page.get_by_role("button", name="保存提供商").click()
+        page.wait_for_function("window.settingsFetches >= 2")
+
+        assert page.get_by_text(
+            "提供商设置已保存，但新密钥未保存，请重试", exact=True
+        ).is_visible()
+        assert "encoded-secret-fragment" not in page.locator("body").inner_text()
+        assert "c2VjcmV0" not in page.locator("body").inner_text()
+        assert page.get_by_label("API Key", exact=True).input_value() == ""
+        browser.close()
+
+
+def test_llm_sensitive_request_errors_are_fixed_and_controls_lock_during_test() -> None:
+    """Would catch secret-reflecting errors or edits while a test has an in-flight key."""
+
+    payload = deepcopy(SETTINGS_PAYLOAD)
+    payload["providers"][0]["credential_source"] = "credential_store"
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        _mount_llm_page(page, payload)
+        page.evaluate(
+            "document.querySelector('main')._x_dataStack[0].fetchLLMSettings()"
+        )
+
+        page.get_by_label("API Key", exact=True).fill("temporary-secret")
+        page.get_by_label("测试模型 ID").fill("model-a")
+        page.get_by_role("button", name="测试连接").click()
+        page.wait_for_function("window.resolveLLMTest !== null")
+        assert page.locator(".list-group-item-action").first.is_disabled()
+        assert page.get_by_role("button", name="保存提供商").is_disabled()
+        assert page.get_by_role("button", name="测试连接").is_disabled()
+        assert page.get_by_role("button", name="清除页面密钥").is_disabled()
+        assert page.get_by_label("提供商名称").is_disabled()
+        assert page.get_by_label("API Key", exact=True).is_disabled()
+
+        page.evaluate(
+            "window.testFailure = {detail: 'truncated key: temporar', message: 'encoded dGVtcG9yYXJ5LXNlY3JldA=='}; window.resolveLLMTest()"
+        )
+        page.locator("#llm-settings-error").get_by_text(
+            "使用新密钥测试失败，请检查密钥或网络设置", exact=True
+        ).wait_for()
+        body_text = page.locator("body").inner_text()
+        assert "temporar" not in body_text
+        assert "dGVtcG9yYXJ5LXNlY3JldA==" not in body_text
+
+        page.evaluate(
+            "window.credentialDeleteFailure = {detail: 'encoded dGVtcG9yYXJ5LXNlY3JldA=='}"
+        )
+        page.get_by_role("button", name="清除页面密钥").click()
+        page.get_by_text("清除页面密钥失败，请重试", exact=True).wait_for()
+        assert "dGVtcG9yYXJ5LXNlY3JldA==" not in page.locator("body").inner_text()
         browser.close()
 
 

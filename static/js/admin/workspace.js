@@ -891,6 +891,11 @@ window.aiworkerModules.push(() => ({
                     return data?.detail || data?.message || fallback;
                 },
 
+                llmSecretSafeMessage(error, fallback, secret) {
+                    const message = String(error?.message || fallback);
+                    return secret && message.includes(secret) ? fallback : message;
+                },
+
                 selectedLLMProvider() {
                     return this.llmSettings.providers.find(
                         provider => provider.id === this.llmSettings.selectedProviderId
@@ -954,9 +959,11 @@ window.aiworkerModules.push(() => ({
                         base_url: provider.base_url || '',
                         wire_api: provider.wire_api || 'chat_completions',
                         api_key_env_var: provider.api_key_env_var || '',
+                        api_key: '',
                         has_api_key: Boolean(provider.has_api_key),
                         credential_status: provider.credential_status
                             || (provider.has_api_key ? 'configured' : 'missing'),
+                        credential_source: provider.credential_source || 'missing',
                         is_enabled: provider.is_enabled !== false
                     };
                     state.modelDraft = {model_id: '', display_name: ''};
@@ -983,8 +990,10 @@ window.aiworkerModules.push(() => ({
                         base_url: preset.base_url || '',
                         wire_api: preset.wire_api || 'chat_completions',
                         api_key_env_var: preset.env_key || '',
+                        api_key: '',
                         has_api_key: false,
                         credential_status: 'missing',
+                        credential_source: 'missing',
                         is_enabled: true
                     };
                     state.modelDraft = {model_id: '', display_name: ''};
@@ -1018,6 +1027,7 @@ window.aiworkerModules.push(() => ({
                     state.saving = true;
                     state.error = '';
                     state.notice = '';
+                    const apiKey = String(editor.api_key || '').trim();
                     const payload = {
                         name: String(editor.name).trim(),
                         preset: editor.preset,
@@ -1039,11 +1049,55 @@ window.aiworkerModules.push(() => ({
                         try { data = await response.json(); } catch (_) {}
                         if (!response.ok) throw new Error(this.llmResponseMessage(data, '保存提供商失败'));
                         const providerId = data.id || editor.id;
-                        state.notice = editor.id ? '提供商设置已更新' : '提供商已添加';
+                        if (apiKey) {
+                            if (!providerId) throw new Error('保存提供商失败');
+                            const credentialResponse = await aiworkerApi.request(
+                                `/api/llm/providers/${providerId}/credential`,
+                                {
+                                    method: 'PUT',
+                                    headers: {'Content-Type': 'application/json'},
+                                    body: JSON.stringify({api_key: apiKey})
+                                }
+                            );
+                            let credentialData = {};
+                            try { credentialData = await credentialResponse.json(); } catch (_) {}
+                            if (!credentialResponse.ok) {
+                                throw new Error(this.llmResponseMessage(credentialData, '保存页面密钥失败'));
+                            }
+                            state.notice = '新密钥已生效';
+                        } else {
+                            state.notice = editor.id ? '提供商设置已更新' : '提供商已添加';
+                        }
                         await this.fetchLLMSettings({selectedProviderId: providerId});
                     } catch (error) {
-                        state.error = error.message || '保存提供商失败';
+                        state.error = this.llmSecretSafeMessage(error, '保存提供商失败', apiKey);
                     } finally {
+                        editor.api_key = '';
+                        state.saving = false;
+                    }
+                },
+
+                async clearLLMProviderCredential() {
+                    const state = this.llmSettings;
+                    const providerId = state.editor.id;
+                    if (!providerId || state.editor.credential_source !== 'credential_store' || state.saving) return;
+                    state.saving = true;
+                    state.error = '';
+                    state.notice = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/llm/providers/${providerId}/credential`,
+                            {method: 'DELETE'}
+                        );
+                        let data = {};
+                        try { data = await response.json(); } catch (_) {}
+                        if (!response.ok) throw new Error(this.llmResponseMessage(data, '清除页面密钥失败'));
+                        state.notice = '页面密钥已清除';
+                        await this.fetchLLMSettings({selectedProviderId: providerId});
+                    } catch (error) {
+                        state.error = this.llmSecretSafeMessage(error, '清除页面密钥失败', String(state.editor.api_key || '').trim());
+                    } finally {
+                        state.editor.api_key = '';
                         state.saving = false;
                     }
                 },
@@ -1247,10 +1301,12 @@ window.aiworkerModules.push(() => ({
                     state.testing = true;
                     state.error = '';
                     state.test.result = null;
+                    const apiKey = String(editor.api_key || '').trim();
                     const payload = {
                         ...(editor.id ? {provider_id: editor.id} : {}),
                         base_url: String(editor.base_url).trim(),
                         api_key_env_var: String(editor.api_key_env_var || '').trim(),
+                        ...(apiKey ? {api_key: apiKey} : {}),
                         model_id: modelId,
                         wire_api: editor.wire_api
                     };
@@ -1265,10 +1321,11 @@ window.aiworkerModules.push(() => ({
                         if (!response.ok) throw new Error(this.llmResponseMessage(data, '模型连接测试失败'));
                         state.test.result = data;
                     } catch (error) {
-                        const message = error.message || '模型连接测试失败';
+                        const message = this.llmSecretSafeMessage(error, '模型连接测试失败', apiKey);
                         state.test.result = {status: 'error', message};
                         state.error = message;
                     } finally {
+                        editor.api_key = '';
                         state.testing = false;
                     }
                 },

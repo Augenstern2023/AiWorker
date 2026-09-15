@@ -112,7 +112,9 @@ def _llm_state() -> dict:
             "base_url": "",
             "wire_api": "chat_completions",
             "api_key_env_var": "",
+            "api_key": "",
             "credential_status": "missing",
+            "credential_source": "missing",
             "has_api_key": False,
             "is_enabled": True,
         },
@@ -161,6 +163,26 @@ def _mount_llm_page(page: Page, payload: dict = SETTINGS_PAYLOAD) -> None:
                   });
                 });
               }
+              if (url.endsWith('/credential') && options.method === 'PUT') {
+                const providerId = url.split('/').at(-2);
+                const provider = window.settingsPayload.providers.find(item => item.id === providerId);
+                provider.credential_status = 'configured';
+                provider.credential_source = 'credential_store';
+                provider.has_api_key = true;
+                return {ok: true, status: 200, async json() {
+                  return {provider_id: providerId, credential_status: 'configured', credential_source: 'credential_store'};
+                }};
+              }
+              if (url.endsWith('/credential') && options.method === 'DELETE') {
+                const providerId = url.split('/').at(-2);
+                const provider = window.settingsPayload.providers.find(item => item.id === providerId);
+                provider.credential_status = 'configured';
+                provider.credential_source = 'environment';
+                provider.has_api_key = true;
+                return {ok: true, status: 200, async json() {
+                  return {provider_id: providerId, credential_status: 'configured', credential_source: 'environment'};
+                }};
+              }
               if (url.endsWith('/models/sync')) {
                 return {ok: false, status: 400, async json() {
                   return {detail: '模型列表响应缺少 data 数组，请改用手工新增'};
@@ -181,6 +203,14 @@ def _mount_llm_page(page: Page, payload: dict = SETTINGS_PAYLOAD) -> None:
                   .filter(provider => provider.id !== providerId);
                 return {ok: true, status: 200, async json() {
                   return {status: 'success', provider_id: providerId};
+                }};
+              }
+              if (url.startsWith('/api/llm/providers/') && options.method === 'PUT') {
+                const providerId = url.split('/').at(-1);
+                const provider = window.settingsPayload.providers.find(item => item.id === providerId);
+                Object.assign(provider, body);
+                return {ok: true, status: 200, async json() {
+                  return {id: providerId};
                 }};
               }
               return {ok: true, status: 200, async json() {
@@ -232,10 +262,11 @@ def test_llm_settings_load_master_detail_with_environment_credential() -> None:
         assert page.get_by_label("API Key 环境变量").input_value() == (
             "INTERNAL_GATEWAY_KEY"
         )
-        assert page.locator(
-            'section[aria-labelledby="llm-settings-title"] input[type="password"]'
-        ).count() == 0
-        assert page.get_by_text("环境凭据已配置", exact=True).is_visible()
+        api_key = page.get_by_label("API Key", exact=True)
+        assert api_key.get_attribute("type") == "password"
+        assert api_key.get_attribute("autocomplete") == "new-password"
+        assert api_key.input_value() == ""
+        assert page.get_by_text("环境变量", exact=True).is_visible()
         assert page.get_by_text("可能被明文传输", exact=False).is_visible()
         assert not page.locator("#llm-settings-error").is_visible()
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
@@ -276,15 +307,15 @@ def test_llm_settings_marks_missing_environment_credential() -> None:
             "document.querySelector('main')._x_dataStack[0].fetchLLMSettings()"
         )
 
-        assert page.get_by_text("环境凭据缺失", exact=True).is_visible()
+        assert page.get_by_text("凭据缺失", exact=True).is_visible()
         assert page.get_by_label("API Key 环境变量").input_value() == (
             "INTERNAL_GATEWAY_KEY"
         )
         browser.close()
 
 
-def test_llm_provider_uses_environment_variable_instead_of_password() -> None:
-    """Would catch provider forms submitting plaintext credentials."""
+def test_llm_provider_save_rotates_key_then_clears_the_password_field() -> None:
+    """Would catch a rotation skipping the vault or retaining the secret in the UI."""
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -301,32 +332,23 @@ def test_llm_provider_uses_environment_variable_instead_of_password() -> None:
         assert page.get_by_label("API Key 环境变量").input_value() == (
             "DEEPSEEK_API_KEY"
         )
-        assert page.locator(
-            'section[aria-labelledby="llm-settings-title"] input[type="password"]'
-        ).count() == 0
+        assert page.get_by_label("API Key", exact=True).input_value() == ""
 
-        page.get_by_label("提供商名称").fill("备用 DeepSeek")
-        page.get_by_label("Base URL").fill("https://gateway.example.test/v1")
-        page.get_by_label("API Key 环境变量").fill("CUSTOM_LLM_KEY")
+        page.get_by_text("内部网关", exact=True).click()
+        page.get_by_label("API Key", exact=True).fill("rotated-secret")
         page.get_by_role("button", name="保存提供商").click()
         page.wait_for_function(
-            "window.requests.some(item => item.url === '/api/llm/providers')"
+            "window.requests.some(item => item.url === '/api/llm/providers/provider-1/credential')"
         )
 
         request = page.evaluate(
-            "window.requests.find(item => item.url === '/api/llm/providers')"
+            "window.requests.find(item => item.url === '/api/llm/providers/provider-1/credential')"
         )
-        assert request["method"] == "POST"
-        assert request["body"] == {
-            "name": "备用 DeepSeek",
-            "preset": "deepseek",
-            "base_url": "https://gateway.example.test/v1",
-            "wire_api": "chat_completions",
-            "api_key_env_var": "CUSTOM_LLM_KEY",
-            "is_enabled": True,
-        }
-        assert "api_key" not in request["body"]
-        assert "clear_api_key" not in request["body"]
+        assert request["method"] == "PUT"
+        assert request["body"] == {"api_key": "rotated-secret"}
+        assert page.get_by_label("API Key", exact=True).input_value() == ""
+        assert page.get_by_text("新密钥已生效", exact=True).is_visible()
+        assert page.get_by_text("系统凭据库", exact=True).is_visible()
         browser.close()
 
 
@@ -343,6 +365,7 @@ def test_llm_connection_test_uses_unsaved_fields_and_announces_result() -> None:
 
         page.get_by_label("Base URL").fill("https://draft.example.test/v1")
         page.get_by_label("API Key 环境变量").fill("DRAFT_API_KEY")
+        page.get_by_label("API Key", exact=True).fill("temporary-secret")
         page.get_by_label("测试模型 ID").fill("draft-model")
         test_button = page.get_by_role("button", name="测试连接")
         test_button.click()
@@ -357,12 +380,14 @@ def test_llm_connection_test_uses_unsaved_fields_and_announces_result() -> None:
             "provider_id": "provider-1",
             "base_url": "https://draft.example.test/v1",
             "api_key_env_var": "DRAFT_API_KEY",
+            "api_key": "temporary-secret",
             "model_id": "draft-model",
             "wire_api": "chat_completions",
         }
 
         page.evaluate("window.resolveLLMTest()")
         page.get_by_text("模型连接测试成功", exact=True).wait_for()
+        assert page.get_by_label("API Key", exact=True).input_value() == ""
         assert page.get_by_text("37 ms", exact=False).is_visible()
         assert page.get_by_text("OK", exact=True).is_visible()
         browser.close()
@@ -420,8 +445,8 @@ def test_llm_default_items_cannot_be_disabled_before_switching_default() -> None
         browser.close()
 
 
-def test_llm_provider_update_submits_only_environment_variable_name() -> None:
-    """Would catch provider updates retaining legacy plaintext fields."""
+def test_llm_provider_update_keeps_empty_key_out_of_metadata_request() -> None:
+    """Would catch an empty password field overwriting or transmitting credentials."""
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -446,7 +471,44 @@ def test_llm_provider_update_submits_only_environment_variable_name() -> None:
         )
         assert request["body"]["api_key_env_var"] == "UPDATED_GATEWAY_KEY"
         assert "api_key" not in request["body"]
-        assert "clear_api_key" not in request["body"]
+        assert not page.evaluate(
+            "window.requests.some(item => item.url.endsWith('/credential'))"
+        )
+        browser.close()
+
+
+def test_llm_connection_test_omits_empty_password_and_clear_uses_credential_endpoint() -> None:
+    """Would catch secret query-string leakage or treating an empty test key as a value."""
+
+    payload = deepcopy(SETTINGS_PAYLOAD)
+    payload["providers"][0]["credential_source"] = "credential_store"
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        _mount_llm_page(page, payload)
+        page.evaluate(
+            "document.querySelector('main')._x_dataStack[0].fetchLLMSettings()"
+        )
+
+        page.get_by_label("测试模型 ID").fill("model-a")
+        page.get_by_role("button", name="测试连接").click()
+        page.wait_for_function("window.resolveLLMTest !== null")
+        test_request = page.evaluate(
+            "window.requests.find(item => item.url === '/api/llm/test')"
+        )
+        assert "api_key" not in test_request["body"]
+        page.evaluate("window.resolveLLMTest()")
+
+        page.get_by_role("button", name="清除页面密钥").click()
+        page.wait_for_function(
+            "window.requests.some(item => item.url === '/api/llm/providers/provider-1/credential' && item.method === 'DELETE')"
+        )
+        clear_request = page.evaluate(
+            "window.requests.find(item => item.url === '/api/llm/providers/provider-1/credential' && item.method === 'DELETE')"
+        )
+        assert clear_request["body"] is None
+        assert clear_request["url"] == "/api/llm/providers/provider-1/credential"
+        assert page.get_by_text("环境变量", exact=True).is_visible()
         browser.close()
 
 

@@ -54,7 +54,7 @@ def _workspace_source() -> str:
     )
 
 
-def test_llm_settings_uses_environment_variable_credentials_only():
+def test_llm_settings_supports_credential_vault_rotation_without_key_echo():
     html = _source(
         "templates/admin/config.html",
         "templates/common/workspace/free_creative_modals.html",
@@ -66,12 +66,15 @@ def test_llm_settings_uses_environment_variable_credentials_only():
 
     assert "llm-provider-api-key-env-var" in html
     assert "API Key 环境变量" in html
-    assert "服务与 Worker 从启动环境读取" in html
-    assert "llm-provider-api-key\"" not in html
+    assert 'for="llm-provider-api-key"' in html
+    assert 'id="llm-provider-api-key"' in html
+    assert 'type="password"' in html
+    assert 'autocomplete="new-password"' in html
+    assert "清除页面密钥" in html
     assert "Fernet 加密保存" not in html
-    assert "保存时明确清除现有 API Key" not in html
     assert "api_key_env_var" in script
-    assert "clear_api_key" not in script
+    assert "/credential" in script
+    assert "api_key: ''" in script
 
 
 def test_webgui_registers_rag_routes():

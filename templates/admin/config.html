@@ -63,9 +63,9 @@
                         <div class="d-flex align-items-start justify-content-between gap-3 mb-3 flex-wrap">
                             <div>
                                 <h4 class="h5 mb-1" x-text="llmSettings.editor.id ? '编辑提供商' : '新增提供商'"></h4>
-                                <div class="small text-muted">服务与 Worker 从启动环境读取凭据；这里只保存环境变量名称，不保存 API Key。</div>
+                                <div class="small text-muted">页面密钥保存到系统凭据库；未设置时回退读取启动环境变量。</div>
                             </div>
-                            <span class="badge" :class="llmSettings.editor.credential_status === 'configured' ? 'text-bg-success' : 'text-bg-warning'" x-text="llmSettings.editor.credential_status === 'configured' ? '环境凭据已配置' : '环境凭据缺失'"></span>
+                            <span class="badge" :class="llmSettings.editor.credential_status === 'configured' ? 'text-bg-success' : 'text-bg-warning'" x-text="llmSettings.editor.credential_status !== 'configured' ? '凭据缺失' : (llmSettings.editor.credential_source === 'credential_store' ? '系统凭据库' : '环境变量')"></span>
                         </div>
 
                         <form @submit.prevent="saveLLMProvider" novalidate>
@@ -102,14 +102,22 @@
                                 <div class="col-12">
                                     <label class="form-label" for="llm-provider-api-key-env-var">API Key 环境变量</label>
                                     <input id="llm-provider-api-key-env-var" class="form-control font-monospace" type="text" x-model.trim="llmSettings.editor.api_key_env_var" maxlength="255" required :disabled="llmSettings.saving" placeholder="例如 CUSTOM_LLM_KEY" autocomplete="off" spellcheck="false">
-                                    <div class="small mt-1" :class="llmSettings.editor.credential_status === 'configured' ? 'text-muted' : 'text-warning'" x-text="llmSettings.editor.credential_status === 'configured' ? '当前 Web 进程可以读取该变量；修改变量值后需要重启服务。' : '当前 Web 进程未读取到非空值，请先配置启动环境并重启服务。'"></div>
+                                    <div class="small mt-1" :class="llmSettings.editor.credential_status === 'configured' ? 'text-muted' : 'text-warning'" x-text="llmSettings.editor.credential_source === 'credential_store' ? '页面密钥优先于环境变量；清除后将回退环境变量。' : (llmSettings.editor.credential_status === 'configured' ? '当前 Web 进程可以读取该变量；修改变量值后需要重启服务。' : '当前 Web 进程未读取到非空值，请先配置启动环境并重启服务。')"></div>
+                                </div>
+                                <div class="col-12">
+                                    <label class="form-label" for="llm-provider-api-key">API Key</label>
+                                    <input id="llm-provider-api-key" class="form-control" type="password" x-model="llmSettings.editor.api_key" maxlength="4096" :disabled="llmSettings.saving || llmSettings.testing" autocomplete="new-password" placeholder="留空表示不修改" spellcheck="false">
+                                    <div class="form-text">仅在保存时写入系统凭据库；临时连接测试和保存完成后都会清空。</div>
                                 </div>
                             </div>
                             <div class="d-flex justify-content-between align-items-center gap-2 mt-3 flex-wrap">
-                                <button type="button" class="btn btn-outline-danger" x-show="llmSettings.editor.id" @click="deleteLLMProvider" :disabled="selectedLLMProvider()?.is_default || llmSettings.saving || Boolean(llmSettings.providerDeletingId)" :title="selectedLLMProvider()?.is_default ? '请先切换全局默认模型' : '删除提供商及其所有模型；不会删除环境变量中的凭据'" :aria-label="`删除提供商 ${selectedLLMProvider()?.name || ''}`">
-                                    <span x-show="llmSettings.providerDeletingId !== llmSettings.editor.id"><i class="bi bi-trash me-1" aria-hidden="true"></i>删除提供商</span>
-                                    <span x-show="llmSettings.providerDeletingId === llmSettings.editor.id">删除中…</span>
-                                </button>
+                                <div class="d-flex gap-2 flex-wrap">
+                                    <button type="button" class="btn btn-outline-warning" x-show="llmSettings.editor.id && llmSettings.editor.credential_source === 'credential_store'" @click="clearLLMProviderCredential" :disabled="llmSettings.saving" aria-label="清除页面密钥">清除页面密钥</button>
+                                    <button type="button" class="btn btn-outline-danger" x-show="llmSettings.editor.id" @click="deleteLLMProvider" :disabled="selectedLLMProvider()?.is_default || llmSettings.saving || Boolean(llmSettings.providerDeletingId)" :title="selectedLLMProvider()?.is_default ? '请先切换全局默认模型' : '删除提供商及其所有模型；不会删除环境变量中的凭据'" :aria-label="`删除提供商 ${selectedLLMProvider()?.name || ''}`">
+                                        <span x-show="llmSettings.providerDeletingId !== llmSettings.editor.id"><i class="bi bi-trash me-1" aria-hidden="true"></i>删除提供商</span>
+                                        <span x-show="llmSettings.providerDeletingId === llmSettings.editor.id">删除中…</span>
+                                    </button>
+                                </div>
                                 <span x-show="!llmSettings.editor.id"></span>
                                 <button type="submit" class="btn btn-primary" :disabled="llmSettings.saving || !llmSettings.editor.name || !llmSettings.editor.base_url || !llmSettings.editor.api_key_env_var" :aria-busy="llmSettings.saving">
                                     <span x-show="!llmSettings.saving"><i class="bi bi-save me-1" aria-hidden="true"></i>保存提供商</span>

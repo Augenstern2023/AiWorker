@@ -122,6 +122,10 @@ from workflow.transition_service import TransitionService
 logger = logging.getLogger("aiworker.creative")
 
 _MODE_MIGRATION_PREVIEW_TIMEOUT_SECONDS = 8.0
+_MODE_MIGRATION_NON_BLOCKING_JOB_TYPES = frozenset({
+    "project_review",
+    "screenplay_review",
+})
 
 
 class TopicGenerateRequest(BaseModel):
@@ -3528,7 +3532,11 @@ def build_creative_router(
             )
         return changed
 
-    def active_project_job_labels(project_id: int) -> list[str]:
+    def active_project_job_labels(
+        project_id: int,
+        *,
+        ignored_crawler_types: frozenset[str] | None = None,
+    ) -> list[str]:
         if job_manager is None:
             return []
         labels: list[str] = []
@@ -3542,6 +3550,8 @@ def build_creative_router(
             if status in {"completed", "success", "succeeded", "failed", "cancelled", "stopped"}:
                 continue
             crawler_type = str(job.get("crawler_type") or "job")
+            if crawler_type in (ignored_crawler_types or ()):
+                continue
             labels.append(crawler_type)
         return labels
 
@@ -3561,7 +3571,11 @@ def build_creative_router(
                     asyncio.to_thread(
                         project_creative_tasks, project_id, principal
                     ),
-                    asyncio.to_thread(active_project_job_labels, project_id),
+                    asyncio.to_thread(
+                        active_project_job_labels,
+                        project_id,
+                        ignored_crawler_types=_MODE_MIGRATION_NON_BLOCKING_JOB_TYPES,
+                    ),
                 ),
                 timeout=_MODE_MIGRATION_PREVIEW_TIMEOUT_SECONDS,
             )
@@ -3592,7 +3606,10 @@ def build_creative_router(
         assert_project_read_access(request, project_id, principal)
         project = project_or_404(project_id)
         assert_mode_member(project, principal)
-        active_jobs = active_project_job_labels(project_id)
+        active_jobs = active_project_job_labels(
+            project_id,
+            ignored_crawler_types=_MODE_MIGRATION_NON_BLOCKING_JOB_TYPES,
+        )
         if active_jobs:
             raise HTTPException(409, "项目存在运行中的后台任务，暂不能迁移")
         migration_preview = free_mode_service.migration_preview(project_id)

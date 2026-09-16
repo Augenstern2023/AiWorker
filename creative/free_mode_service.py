@@ -1397,11 +1397,6 @@ class FreeCreativeModeService:
                 "WHERE project_id = ? AND status = 'active'",
                 (int(project_id),),
             ).fetchone()["count"])
-            active_review_count = int(conn.execute(
-                "SELECT COUNT(*) AS count FROM script_reviews WHERE project_id = ? "
-                "AND status NOT IN ('completed', 'confirmed', 'cancelled', 'failed')",
-                (int(project_id),),
-            ).fetchone()["count"])
             active_optimization_count = int(conn.execute(
                 "SELECT COUNT(*) AS count FROM script_optimizations WHERE project_id = ? "
                 "AND status NOT IN ('completed', 'cancelled', 'failed')",
@@ -1439,8 +1434,6 @@ class FreeCreativeModeService:
             blockers.append("项目已经是自由创作模式")
         if active_generation_count:
             blockers.append("项目存在运行中的创作生成")
-        if active_review_count:
-            blockers.append("项目存在进行中的剧本审核")
         if active_optimization_count:
             blockers.append("项目存在进行中的剧本优化")
         return {

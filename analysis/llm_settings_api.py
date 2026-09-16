@@ -238,9 +238,9 @@ class LLMSettingsService:
         try:
             # Validate the protocol, but never return untrusted upstream text.
             if wire_api == "responses":
-                parse_responses_text(payload)
+                parse_responses_text(payload, reject_truncated=False)
             else:
-                parse_chat_completion_text(payload)
+                parse_chat_completion_text(payload, reject_truncated=False)
         except (LLMError, TypeError, ValueError, AttributeError):
             raise LLMSettingsError("模型服务返回格式无效") from None
         return {

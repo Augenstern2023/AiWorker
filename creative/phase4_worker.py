@@ -23,6 +23,7 @@ from analysis.llm import create_llm_provider_from_config, get_llm_usage_snapshot
 from core.events import emit_event
 from core.job import CrawlJob
 from creative.imitation_service import complete_with_one_repair, generate_blueprints
+from creative.llm_observability import build_attempt_reporter, set_attempt_reporter
 from creative.original_direction_service import (
     derive_original_direction,
     generate_original_directions,
@@ -1064,6 +1065,13 @@ async def run(job: CrawlJob) -> None:
 
         heartbeat = threading.Thread(target=renew_lease, daemon=True)
         heartbeat.start()
+    previous_reporter = set_attempt_reporter(
+        build_attempt_reporter(
+            lambda message, level, payload: emit(job, "log", message, level, payload),
+            job_id=job.job_id,
+            stage=str(extra.get("normalized_stage") or action or ""),
+        )
+    )
     try:
         await _run_once(job)
     except Exception:
@@ -1087,6 +1095,7 @@ async def run(job: CrawlJob) -> None:
                     pass
         raise
     finally:
+        set_attempt_reporter(previous_reporter)
         heartbeat_stop.set()
         if heartbeat is not None:
             heartbeat.join(timeout=1.0)

@@ -8,8 +8,11 @@
 
 from __future__ import annotations
 
+import inspect
 import json
+import logging
 import re
+import time
 from typing import Any, Awaitable, Callable
 
 from analysis.llm import (
@@ -17,7 +20,11 @@ from analysis.llm import (
     LLMOutputTruncatedError,
     is_retryable_llm_exception,
 )
+from creative.llm_observability import active_attempt_reporter, summarize_payload_shape, truncate_text
 from creative.prompt_templates import blueprint_messages, repair_messages
+
+logger = logging.getLogger(__name__)
+RAW_RESPONSE_LOG_LIMIT = 4000
 
 
 def _flatten_text(value: Any) -> str:
@@ -69,33 +76,141 @@ def assess_similarity_risk(source: dict[str, Any], blueprint: dict[str, Any]) ->
     }
 
 
+async def complete_json_payload(
+    provider: Any,
+    messages: list[dict[str, str]],
+    json_schema: dict[str, Any] | None = None,
+) -> Any:
+    """调用 provider.complete_json；仅当 provider 支持 schema 参数时才传 JSON Schema。
+
+    测试替身与旧 provider 的签名是 ``complete_json(messages)``，因此这里按签名探测，
+    避免为了严格模式而破坏既有实现。
+    """
+    if json_schema is None:
+        return await provider.complete_json(messages)
+    complete = provider.complete_json
+    try:
+        parameters = inspect.signature(complete).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    accepts_schema = "schema" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    if not accepts_schema:
+        return await provider.complete_json(messages)
+    return await complete(messages, schema=json_schema)
+
+
+def _repair_error(last_error: Exception | None, payload: Any) -> str:
+    error = str(last_error or "unknown error")
+    if payload is None:
+        return error
+    return f"{error}；上一次响应{summarize_payload_shape(payload)}"
+
+
+async def _report_attempt(
+    reporter: Callable[[dict[str, Any]], Any] | None, info: dict[str, Any]
+) -> None:
+    if reporter is None:
+        return
+    try:
+        outcome = reporter(info)
+        if inspect.isawaitable(outcome):
+            await outcome
+    except Exception:
+        logger.warning("模型结构校验尝试上报失败", exc_info=True)
+
+
+def _log_attempt_failure(
+    attempt: int, max_attempts: int, exc: Exception, payload: Any
+) -> None:
+    raw = (
+        json.dumps(payload, ensure_ascii=False) if payload is not None else ""
+    )
+    logger.warning(
+        "模型响应未通过结构校验（第 %s/%s 次）：%s；%s；原始响应：%s",
+        attempt,
+        max_attempts,
+        exc,
+        summarize_payload_shape(payload),
+        truncate_text(raw, RAW_RESPONSE_LOG_LIMIT),
+    )
+
+
 async def complete_with_one_repair(
     provider: Any,
     messages: list[dict[str, str]],
     validator: Callable[[Any], Any],
     *,
     max_attempts: int = 2,
+    on_attempt: Callable[[dict[str, Any]], Any] | None = None,
+    json_schema: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
+    reporter = on_attempt or active_attempt_reporter()
     last_error: Exception | None = None
+    last_payload: Any = None
     for attempt in range(max_attempts):
-        current = messages if attempt == 0 else repair_messages(messages, str(last_error or "unknown error"))
+        current = (
+            messages
+            if attempt == 0
+            else repair_messages(messages, _repair_error(last_error, last_payload))
+        )
+        started_at = time.monotonic()
+        payload: Any = None
         try:
-            payload = await provider.complete_json(current)
-            return validator(payload), {
-                "provider": str(
-                    (payload.get("provider") if isinstance(payload, dict) else "")
-                    or getattr(provider, "provider_name", "")
-                ),
-                "repair_attempted": bool(attempt),
-            }
+            payload = await complete_json_payload(provider, current, json_schema)
+            last_payload = payload
+            result = validator(payload)
         except Exception as exc:
-            if isinstance(exc, LLMOutputTruncatedError):
-                raise
             if is_retryable_llm_exception(exc):
                 raise
             last_error = exc
+            elapsed_seconds = time.monotonic() - started_at
+            _log_attempt_failure(attempt + 1, max_attempts, exc, payload)
+            await _report_attempt(
+                reporter,
+                {
+                    "attempt": attempt + 1,
+                    "max_attempts": max_attempts,
+                    "ok": False,
+                    "error": str(exc),
+                    "elapsed_seconds": elapsed_seconds,
+                    "payload": payload,
+                    "request": dict(
+                        getattr(provider, "last_request_summary", None) or {}
+                    ),
+                    "truncated_text": str(getattr(exc, "partial_text", "") or ""),
+                },
+            )
+            # 输出被截断属于调用参数问题，重发同一份请求只会再被截断一次；
+            # 直接抛出，让任务日志显示真实原因（提高输出上限或缩小单次生成范围）。
+            if isinstance(exc, LLMOutputTruncatedError):
+                raise
+            continue
+        await _report_attempt(
+            reporter,
+            {
+                "attempt": attempt + 1,
+                "max_attempts": max_attempts,
+                "ok": True,
+                "error": "",
+                "elapsed_seconds": time.monotonic() - started_at,
+                "payload": payload,
+                "request": dict(
+                    getattr(provider, "last_request_summary", None) or {}
+                ),
+            },
+        )
+        return result, {
+            "provider": str(
+                (payload.get("provider") if isinstance(payload, dict) else "")
+                or getattr(provider, "provider_name", "")
+            ),
+            "repair_attempted": bool(attempt),
+        }
     raise LLMError(f"LLM 返回内容无法通过结构校验：{last_error}") from last_error
 
 

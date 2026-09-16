@@ -1165,3 +1165,20 @@ def test_route_uses_saved_provider_environment_variable(monkeypatch):
     )
 
     assert response.status_code == 200
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wire_api", ["responses", "chat_completions"])
+async def test_connection_accepts_a_short_probe_truncated_by_output_budget(wire_api):
+    response = (
+        {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}, "output_text": "O"}
+        if wire_api == "responses"
+        else {"choices": [{"message": {"content": "O"}, "finish_reason": "length"}]}
+    )
+    service = _api_module().LLMSettingsService(
+        _repository(), transport=httpx.MockTransport(lambda request: httpx.Response(200, json=response))
+    )
+    result = await service.test_connection(
+        base_url="https://draft.example.test/v1", api_key="secret",
+        model_id="model", wire_api=wire_api,
+    )
+    assert result["status"] == "success"
+    assert "response_preview" not in result

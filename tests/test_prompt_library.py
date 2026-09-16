@@ -596,7 +596,8 @@ def test_character_template_styles_people_without_replacing_bundle_contract():
         snapshot,
     )
 
-    assert "返回 characters 和 relationships 数组" in messages[0]["content"]
+    assert '{"characters": [...], "relationships": [...]}' in messages[0]["content"]
+    assert "characters 与 relationships 都必须是 JSON 数组" in messages[0]["content"]
     assert "dialogue_style" in messages[0]["content"]
     assert "当前项目创作风格要求" in messages[0]["content"]
     assert "身份信息差" in messages[0]["content"]

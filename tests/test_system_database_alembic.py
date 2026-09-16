@@ -752,3 +752,18 @@ def test_role_page_access_migration_round_trips_existing_account_grants(
     finally:
         command.upgrade(config, "head")
         engine.dispose()
+def test_llm_model_schema_matches_deployed_pricing_revision():
+    table = SYSTEM_METADATA.tables["llm_models"]
+
+    assert {
+        "input_price_per_million",
+        "output_price_per_million",
+        "price_currency",
+    } <= {column.name for column in table.c}
+    assert table.c.price_currency.nullable is False
+    assert str(table.c.price_currency.server_default.arg) == "'CNY'"
+    assert {
+        "ck_llm_models_input_price",
+        "ck_llm_models_output_price",
+        "ck_llm_models_price_currency",
+    } <= {constraint.name for constraint in table.constraints}

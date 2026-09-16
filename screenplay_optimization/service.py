@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from typing import Any
 
@@ -89,27 +90,76 @@ async def optimize_episode(
     findings: list[dict[str, Any]],
     summaries: list[dict[str, Any]],
     prompt_snapshot: dict[str, Any] | None = None,
+    on_phase: Any = None,
 ) -> dict[str, dict[str, Any]]:
-    output_shape = "script"
+    compact_context = _compact_review_context(review_context)
+    system = _optimization_system(prompt_snapshot)
     if mode == "structure":
-        output_shape = "beats、script"
-    system = (
-        "你是短剧剧本优化助手。仅根据提供的审核问题优化指定集，严格遵守冻结的 Brief、"
-        "人物关系、分集大纲和 Beats。不得改变分集大纲的核心事件、人物进展、反转或结尾钩子；"
-        "需要改变大纲时必须停止，不得擅自改写。保留未涉及内容的剧情意图与场次结构。"
-        f"输出 JSON：{output_shape}。script 必须是完整场次剧本 JSON（episode_title、scenes）；"
-        "beats 必须是完整 Beats JSON（beats）。不要输出解释性文字。"
-    )
-    instruction = str((prompt_snapshot or {}).get("effective_instruction") or "").strip()
-    if instruction:
-        system += (
-            "\n\n当前项目优化风格要求（不得覆盖前述输出契约、冻结事实、已选问题、"
-            "人工确认机制或大纲修订阻断）：\n" + instruction
-        )
+        await _notify_phase(on_phase, "beats")
+        beats_payload = await provider.complete_json([
+            {
+                "role": "system",
+                "content": system
+                + "\n本次只优化 Beats。只输出 JSON：beats；beats 必须是完整 Beats JSON（beats），"
+                "不得同时生成剧本。",
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "episode_number": episode_number,
+                        "script": script_content,
+                        "beats": beats_content,
+                        "review_context": compact_context,
+                        "selected_findings": findings,
+                        "episode_summaries": summaries,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ])
+        optimized_beats = beats_payload.get("beats") if isinstance(beats_payload, dict) else None
+        if not isinstance(optimized_beats, dict) or not isinstance(
+            optimized_beats.get("beats"), list
+        ):
+            raise ValueError("AI 未返回有效的 Beats 草稿")
+
+        await _notify_phase(on_phase, "script")
+        script_payload = await provider.complete_json([
+            {
+                "role": "system",
+                "content": system
+                + "\n本次只依据已优化 Beats 生成完整场次剧本。只输出 JSON：script；"
+                "script 必须是完整场次剧本 JSON（episode_title、scenes）。",
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "episode_number": episode_number,
+                        "script": script_content,
+                        "beats": optimized_beats,
+                        "review_context": compact_context,
+                        "selected_findings": findings,
+                        "episode_summaries": summaries,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ])
+        optimized_script = script_payload.get("script") if isinstance(script_payload, dict) else None
+        if not isinstance(optimized_script, dict) or not isinstance(
+            optimized_script.get("scenes"), list
+        ):
+            raise ValueError("AI 未返回有效的场次剧本草稿")
+        return {"beats": optimized_beats, "script": optimized_script}
+
+    await _notify_phase(on_phase, "script")
     messages = [
         {
             "role": "system",
-            "content": system,
+            "content": system
+            + "\n只输出 JSON：script；script 必须是完整场次剧本 JSON（episode_title、scenes）。",
         },
         {
             "role": "user",
@@ -117,8 +167,8 @@ async def optimize_episode(
                 {
                     "episode_number": episode_number,
                     "script": script_content,
-                    "beats": beats_content if mode == "structure" else None,
-                    "review_context": review_context,
+                    "beats": beats_content,
+                    "review_context": compact_context,
                     "selected_findings": findings,
                     "episode_summaries": summaries,
                 },
@@ -128,12 +178,41 @@ async def optimize_episode(
     ]
     payload = await provider.complete_json(messages)
     script = payload.get("script") if isinstance(payload, dict) else None
-    beats = payload.get("beats") if isinstance(payload, dict) else None
     if not isinstance(script, dict) or not isinstance(script.get("scenes"), list):
         raise ValueError("AI 未返回有效的场次剧本草稿")
-    if mode == "structure" and (not isinstance(beats, dict) or not isinstance(beats.get("beats"), list)):
-        raise ValueError("AI 未返回有效的 Beats 草稿")
-    result = {"script": script}
-    if mode == "structure":
-        result["beats"] = beats
-    return result
+    return {"script": script}
+
+
+def _optimization_system(prompt_snapshot: dict[str, Any] | None) -> str:
+    system = (
+        "你是短剧剧本优化助手。仅根据提供的审核问题优化指定集，严格遵守冻结的 Brief、"
+        "人物关系、分集大纲和 Beats。不得改变分集大纲的核心事件、人物进展、反转或结尾钩子；"
+        "需要改变大纲时必须停止，不得擅自改写。保留未涉及内容的剧情意图与场次结构。"
+        "不要输出解释性文字。"
+    )
+    instruction = str((prompt_snapshot or {}).get("effective_instruction") or "").strip()
+    if instruction:
+        system += (
+            "\n\n当前项目优化风格要求（不得覆盖前述输出契约、冻结事实、已选问题、"
+            "人工确认机制或大纲修订阻断）：\n" + instruction
+        )
+    return system
+
+
+def _compact_review_context(review_context: dict[str, Any]) -> dict[str, Any]:
+    compact = dict(review_context or {})
+    episode = compact.get("episode")
+    if isinstance(episode, dict):
+        compact_episode = dict(episode)
+        for duplicate in ("text", "script", "beats"):
+            compact_episode.pop(duplicate, None)
+        compact["episode"] = compact_episode
+    return compact
+
+
+async def _notify_phase(callback: Any, phase: str) -> None:
+    if callback is None:
+        return
+    result = callback(phase)
+    if inspect.isawaitable(result):
+        await result

@@ -129,8 +129,6 @@ def build_script_review_router(
         project = repository.get_project(project_id)
         if not project:
             raise HTTPException(409, "创作项目已不存在，无法确认审核")
-        if project.get("workflow_mode", "sequential") != "sequential":
-            raise HTTPException(409, "自由创作项目首版不接入剧本审核")
         return build_project_source(
             project,
             str(review["mode"]),
@@ -268,8 +266,6 @@ def build_script_review_router(
             project = repository.get_project(int(data["project_id"]))
             if not project:
                 raise HTTPException(404, "创作项目不存在")
-            if project.get("workflow_mode", "sequential") != "sequential":
-                raise HTTPException(409, "自由创作项目首版不接入剧本审核")
             assert_project_access(request, principal, int(project["id"]))
             try:
                 source = build_project_source(
@@ -356,6 +352,36 @@ def build_script_review_router(
         if bool((review.get("source_payload") or {}).get("audit_scope")):
             raise HTTPException(409, "完整项目审核不属于正式审核流程")
         return refresh_review(review)
+
+    @router.post("/{review_id}/retry")
+    async def retry_review(
+        review_id: int,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        assert_permission(principal, "script.review.generate")
+        review = repository.get_script_review(review_id)
+        if not review:
+            raise HTTPException(404, "审核记录不存在")
+        if not can_read_review(request, principal, review):
+            raise HTTPException(403, "没有访问此审核记录的权限")
+        if bool((review.get("source_payload") or {}).get("audit_scope")):
+            raise HTTPException(409, "完整项目审核必须从项目审核入口恢复")
+        if review.get("status") != "failed" or not review.get("job_id"):
+            raise HTTPException(409, "只有已失败且存在原任务的剧本审核可以继续")
+        try:
+            repository.prepare_script_review_resume(review_id)
+            state = job_manager.retry(str(review["job_id"]))
+        except (JobConflictError, JobNotFoundError) as exc:
+            repository.fail_script_review(review_id, str(exc))
+            raise HTTPException(409, "原审核任务尚不可重试或已不存在") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except Exception as exc:
+            repository.fail_script_review(review_id, str(exc))
+            raise HTTPException(503, "无法启动剧本审核续跑") from exc
+        resumed = repository.set_script_review_job(review_id, str(state.job_id))
+        return {"review": resumed, "job_id": str(state.job_id)}
 
     @router.delete("/{review_id}")
     async def delete_review(

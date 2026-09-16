@@ -15,12 +15,13 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from creative.repository import CreativeRepository
+from creative.free_mode_service import FreeCreativeModeService
 from creative.project_prompt_service import ProjectPromptService
+from creative.repository import CreativeRepository
 from identity.dependencies import current_principal
 from identity.permission_service import PermissionService
 from identity.schema import Principal
-from runtime.job_manager import JobConflictError
+from runtime.job_manager import JobConflictError, JobNotFoundError
 from screenplay_review.service import build_project_source, source_fingerprint
 
 from .service import content_fingerprint, validate_optimization_request
@@ -100,8 +101,6 @@ def build_script_optimization_router(
         project = repository.get_project(int(review.get("project_id") or 0))
         if not project:
             raise HTTPException(409, "创作项目已不存在")
-        if project.get("workflow_mode", "sequential") != "sequential":
-            raise HTTPException(409, "自由创作项目首版不接入剧本优化")
         try:
             source = build_project_source(
                 project, str(review["mode"]), [int(item) for item in review["episode_numbers"]]
@@ -113,6 +112,29 @@ def build_script_optimization_router(
         return project
 
     def latest_episode(project: dict[str, Any], stage: str, episode_number: int) -> dict[str, Any] | None:
+        if str(project.get("workflow_mode") or "sequential") == "free":
+            head = next(
+                (
+                    item
+                    for item in project.get("resource_heads") or []
+                    if str(item.get("stage") or "") == stage
+                    and int(item.get("episode_number") or 0) == int(episode_number)
+                ),
+                None,
+            )
+            if head is None:
+                return None
+            return next(
+                (
+                    item
+                    for item in project.get("episodes") or []
+                    if item.get("stage") == stage
+                    and int(item.get("episode_number") or 0) == int(episode_number)
+                    and str(item.get("id") or "")
+                    == str(head.get("resource_ref") or "")
+                ),
+                None,
+            )
         candidates = [
             item for item in project.get("episodes") or []
             if item.get("stage") == stage and int(item.get("episode_number") or 0) == episode_number
@@ -122,6 +144,22 @@ def build_script_optimization_router(
             key=lambda item: (int(item.get("version") or 0), int(item.get("id") or 0)),
             default=None,
         )
+
+    def free_head(
+        project: dict[str, Any], stage: str, episode_number: int
+    ) -> dict[str, Any]:
+        head = next(
+            (
+                item
+                for item in project.get("resource_heads") or []
+                if str(item.get("stage") or "") == stage
+                and int(item.get("episode_number") or 0) == int(episode_number)
+            ),
+            None,
+        )
+        if head is None:
+            raise ValueError(f"第 {episode_number} 集尚未选择当前 {stage} 版本")
+        return head
 
     def accepted_generation_meta(
         optimization: dict[str, Any], draft_id: int
@@ -247,8 +285,6 @@ def build_script_optimization_router(
         project = repository.get_project(project_id)
         if not project:
             raise HTTPException(404, "创作项目不存在")
-        if project.get("workflow_mode", "sequential") != "sequential":
-            raise HTTPException(409, "自由创作项目首版不接入剧本优化")
         if not can_access_project(request, principal, project_id):
             raise HTTPException(403, "没有访问此创作项目的权限")
         return {
@@ -269,6 +305,35 @@ def build_script_optimization_router(
             raise HTTPException(404, "优化任务不存在")
         get_review_or_404(request, principal, int(optimization["review_id"]))
         return optimization
+
+    @router.post("/api/script-optimizations/{optimization_id}/retry")
+    async def retry_optimization(
+        optimization_id: int,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ) -> dict[str, Any]:
+        assert_permission(principal, "script.optimize.generate")
+        optimization = repository.get_script_optimization(optimization_id)
+        if not optimization:
+            raise HTTPException(404, "优化任务不存在")
+        review = get_review_or_404(request, principal, int(optimization["review_id"]))
+        if optimization["status"] != "failed" or not optimization.get("job_id"):
+            raise HTTPException(409, "只有已失败且存在原任务的优化任务可以继续生成")
+        assert_fresh_review(review)
+        try:
+            repository.prepare_script_optimization_resume(optimization_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        try:
+            state = job_manager.retry(str(optimization["job_id"]))
+        except (JobConflictError, JobNotFoundError) as exc:
+            repository.fail_script_optimization(optimization_id, str(exc))
+            raise HTTPException(409, "原任务尚不可重试或已不存在") from exc
+        except Exception as exc:
+            repository.fail_script_optimization(optimization_id, str(exc))
+            raise HTTPException(503, "无法启动优化任务续跑") from exc
+        resumed = repository.set_script_optimization_job(optimization_id, str(state.job_id))
+        return {"optimization": resumed, "job_id": str(state.job_id)}
 
     @router.get("/api/script-optimization-drafts/{draft_id}")
     async def get_draft(
@@ -304,10 +369,11 @@ def build_script_optimization_router(
         project = repository.get_project(int(optimization["project_id"]))
         if not project:
             raise HTTPException(409, "创作项目已不存在")
-        if project.get("workflow_mode", "sequential") != "sequential":
-            raise HTTPException(409, "自由创作项目首版不接入剧本优化")
         try:
             accepted_content = payload.content if payload and payload.content is not None else draft["content"]
+            free_mode = str(project.get("workflow_mode") or "sequential") == "free"
+            free_service = FreeCreativeModeService(repository) if free_mode else None
+            created_head: dict[str, Any] | None = None
             if draft["kind"] == "beats":
                 build_project_source(project, "single", [int(draft["episode_number"])])
                 source = repository.get_episode(int(draft["source_episode_id"] or 0))
@@ -319,12 +385,26 @@ def build_script_optimization_router(
                     or content_fingerprint(source["content"]) != draft["source_fingerprint"]
                 ):
                     raise ValueError("来源 Beats 已更新，请重新生成优化草稿")
-                created = repository.create_episode_beats(
-                    int(project["id"]), int(draft["episode_number"]), accepted_content,
-                    generation_meta=accepted_generation_meta(optimization, draft_id),
-                    update_project_status=False,
-                )
+                if free_service is not None:
+                    head = free_head(project, "beats", int(draft["episode_number"]))
+                    result = free_service.create_episode_resource(
+                        int(project["id"]), "beats", int(draft["episode_number"]),
+                        accepted_content,
+                        expected_head_revision=int(head["revision"]),
+                        actor_user_id=principal.user_id,
+                        source_refs=dict(source.get("upstream_refs") or {}),
+                        generation_meta=accepted_generation_meta(optimization, draft_id),
+                    )
+                    created = result["resource"]
+                    created_head = result["head"]
+                else:
+                    created = repository.create_episode_beats(
+                        int(project["id"]), int(draft["episode_number"]), accepted_content,
+                        generation_meta=accepted_generation_meta(optimization, draft_id),
+                        update_project_status=False,
+                    )
             else:
+                source_refs: dict[str, Any] = {}
                 if optimization["mode"] == "structure":
                     peer = next((item for item in optimization["drafts"] if item["episode_number"] == draft["episode_number"] and item["kind"] == "beats"), None)
                     if not peer or peer["status"] != "accepted" or not peer.get("accepted_episode_id"):
@@ -332,6 +412,18 @@ def build_script_optimization_router(
                     beats = repository.get_episode(int(peer["accepted_episode_id"]))
                     if not beats or beats.get("status") not in {"locked", "approved"} or content_fingerprint(beats["content"]) != draft["source_fingerprint"]:
                         raise ValueError("对应 Beats 未锁定或已变化，请重新生成场次剧本草稿")
+                    if free_mode:
+                        current_beats = latest_episode(
+                            project, "beats", int(draft["episode_number"])
+                        )
+                        if not current_beats or int(current_beats["id"]) != int(beats["id"]):
+                            raise ValueError("对应 Beats 已不再是当前版本，请重新生成场次剧本草稿")
+                    source_refs = dict(beats.get("upstream_refs") or {})
+                    source_refs.update({
+                        "beats_id": int(beats["id"]),
+                        "beats_version": int(beats.get("version") or 1),
+                        "beats_content_fingerprint": content_fingerprint(beats["content"]),
+                    })
                 else:
                     build_project_source(project, "single", [int(draft["episode_number"])])
                     source = repository.get_episode(int(draft["source_episode_id"] or 0))
@@ -343,15 +435,41 @@ def build_script_optimization_router(
                         or content_fingerprint(source["content"]) != draft["source_fingerprint"]
                     ):
                         raise ValueError("来源场次剧本已更新，请重新生成优化草稿")
-                created = repository.create_episode_script(
-                    int(project["id"]), int(draft["episode_number"]), accepted_content,
-                    generation_meta=accepted_generation_meta(optimization, draft_id),
-                    update_project_status=False,
-                )
+                    source_refs = dict(source.get("upstream_refs") or {})
+                if free_service is not None:
+                    head = free_head(project, "script", int(draft["episode_number"]))
+                    result = free_service.create_episode_resource(
+                        int(project["id"]), "script", int(draft["episode_number"]),
+                        accepted_content,
+                        expected_head_revision=int(head["revision"]),
+                        actor_user_id=principal.user_id,
+                        source_refs=source_refs,
+                        generation_meta=accepted_generation_meta(optimization, draft_id),
+                    )
+                    created = result["resource"]
+                    created_head = result["head"]
+                else:
+                    created = repository.create_episode_script(
+                        int(project["id"]), int(draft["episode_number"]), accepted_content,
+                        generation_meta=accepted_generation_meta(optimization, draft_id),
+                        update_project_status=False,
+                    )
             if payload and payload.lock_after_accept:
                 if draft["kind"] != "script":
                     raise ValueError("仅场次剧本草稿支持应用后锁定")
-                created = repository.lock_episode_script(int(created["id"]))
+                if free_service is not None:
+                    assert created_head is not None
+                    free_service.lock_resource(
+                        project_id=int(project["id"]),
+                        stage="script",
+                        resource_ref=str(created["id"]),
+                        episode_number=int(draft["episode_number"]),
+                        expected_head_revision=int(created_head["revision"]),
+                        actor_user_id=principal.user_id,
+                    )
+                    created = repository.get_episode(int(created["id"])) or created
+                else:
+                    created = repository.lock_episode_script(int(created["id"]))
             return repository.accept_script_optimization_draft(draft_id, int(created["id"]), principal.user_id)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc

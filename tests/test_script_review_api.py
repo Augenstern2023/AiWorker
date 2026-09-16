@@ -664,3 +664,42 @@ def test_delete_refreshes_missing_job_before_checking_active_status(tmp_path) ->
     assert deleted.status_code == 200
     assert deleted.json() == {"deleted": True, "id": review["id"]}
     assert repository.get_script_review(review["id"]) is None
+
+
+def test_failed_script_review_can_resume_from_its_saved_checkpoint(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    review = repository.create_script_review(
+        source_type="text",
+        mode="multiple",
+        project_id=None,
+        episode_numbers=[1, 2],
+        source_fingerprint="review-fingerprint",
+        source_payload={"episode_numbers": [1, 2]},
+        created_by="writer-1",
+    )
+    repository.set_script_review_job(review["id"], "failed-review-job")
+    repository.start_script_review(review["id"])
+    repository.checkpoint_script_review(
+        review["id"],
+        {
+            "partial": True,
+            "episode_reviews": [{"episode_number": 1, "summary": "已完成", "findings": []}],
+        },
+    )
+    repository.fail_script_review(review["id"], "第二集失败")
+
+    class RetryJobManager(FakeJobManager):
+        def retry(self, job_id: str):
+            assert job_id == "failed-review-job"
+            return SimpleNamespace(job_id="resumed-review-job")
+
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = _principal
+    app.include_router(build_script_review_router(repository, RetryJobManager()))
+
+    response = TestClient(app).post(f"/api/script-reviews/{review['id']}/retry")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["review"]["status"] == "queued"
+    assert response.json()["review"]["job_id"] == "resumed-review-job"
+    assert response.json()["review"]["report"]["episode_reviews"][0]["episode_number"] == 1

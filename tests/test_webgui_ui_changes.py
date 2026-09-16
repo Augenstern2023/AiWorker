@@ -95,6 +95,9 @@ def test_llm_model_settings_omit_pricing_and_prompt_ab_controls():
     ):
         assert removed not in script
 
+    assert "llm-manual-model-max-output-tokens" in html
+    assert "max_output_tokens" in script
+
 
 def test_webgui_does_not_register_prompt_ab_or_iteration_routes():
     paths = {route.path for route in WebGUI.app.routes}
@@ -451,10 +454,12 @@ def test_script_review_can_start_and_review_optimization_drafts():
     assert "编辑草稿" in script
 
 
-def test_script_review_project_selector_only_lists_projects_with_locked_outlines():
+def test_script_review_project_selector_includes_free_projects_and_uses_heads():
     script = _source("static/js/review/scripts.js")
 
-    assert "filter((item) => item.outline_batch_id)" in script
+    assert "item.outline_batch_id || item.workflow_mode === 'free'" in script
+    assert "projectData.resource_heads" in script
+    assert "reviewableScripts" in script
 
 
 def test_script_review_multi_episode_picker_has_a_select_all_control():

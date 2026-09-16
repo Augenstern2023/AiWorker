@@ -2,7 +2,7 @@
     <div class="d-flex justify-content-between align-items-end mb-3">
         <div>
             <h5 class="mb-1">场次剧本</h5>
-            <div class="small text-muted" x-text="isFreeCreativeProject() ? '当前集可独立创建或生成；首版不进入审核、优化和正式交付。' : '基于已锁定 Beats 生成可拍摄场次与台词'"></div>
+            <div class="small text-muted" x-text="isFreeCreativeProject() ? '当前集可独立创作；完成剧本后同样进入审核、优化和最终交付。' : '基于已锁定 Beats 生成可拍摄场次与台词'"></div>
             <div class="small text-muted" x-show="!isFreeCreativeProject()" x-text="projectScriptsSeriesBlockReason()"></div>
         </div>
         <div class="d-flex gap-2 align-items-end flex-wrap justify-content-end">

@@ -160,8 +160,9 @@ class DeliveryService:
         project = self.creative_repository.get_project(project_id)
         if project is None:
             raise KeyError(str(project_id))
-        if project.get("workflow_mode", "sequential") != "sequential":
-            raise ValueError("自由创作项目首版不接入正式交付")
+        sequential_mode = (
+            str(project.get("workflow_mode") or "sequential") == "sequential"
+        )
         adapter = CreativeWorkflowAdapter(
             self.creative_repository, self.workflow_repository
         )
@@ -198,7 +199,7 @@ class DeliveryService:
             )
         task = (
             self._resolve_delivery_task(project_id, workflow_task_id)
-            if is_formal else None
+            if is_formal and sequential_mode else None
         )
         delivery_id = str(uuid.uuid4())
         extension = "json" if format == "json" else format
@@ -324,8 +325,9 @@ class DeliveryService:
             project = self.creative_repository.get_project(int(project_summary["id"]))
             if project is None:
                 continue
-            if project.get("workflow_mode", "sequential") != "sequential":
-                continue
+            sequential_mode = (
+                str(project.get("workflow_mode") or "sequential") == "sequential"
+            )
             resources: list[tuple[str, str, int, str]] = []
             resources.extend(
                 ("brief", str(item["id"]), int(item["version"]), str(item["status"]))
@@ -364,7 +366,7 @@ class DeliveryService:
             for stage, resource_id, version, resource_status in resources:
                 is_formal = self._is_formal_resource(resource_status)
                 workflow_task_id = None
-                if is_formal:
+                if is_formal and sequential_mode:
                     try:
                         workflow_task_id = self._resolve_delivery_task(
                             int(project["id"]), None
@@ -503,19 +505,20 @@ class DeliveryService:
         path = Path(record["path"]).resolve()
         if path.parent != self.delivery_dir.resolve() or not path.is_file():
             raise FileNotFoundError(path)
+        project = self.creative_repository.get_project(int(record["project_id"]))
+        if project is None:
+            raise ValueError("delivery source is no longer available")
+        sequential_mode = (
+            str(project.get("workflow_mode") or "sequential") == "sequential"
+        )
         is_formal = bool(record.get("is_formal"))
-        if is_formal and not record.get("workflow_task_id"):
+        if is_formal and sequential_mode and not record.get("workflow_task_id"):
             task = self._resolve_delivery_task(int(record["project_id"]), None)
             self._mark_reconciled(
                 record["id"], "workflow_task_id", task["id"]
             )
             record["workflow_task_id"] = task["id"]
         if not record.get("stage_content_fingerprint"):
-            project = self.creative_repository.get_project(
-                int(record["project_id"])
-            )
-            if project is None:
-                raise ValueError("delivery source is no longer available")
             snapshot = CreativeWorkflowAdapter(
                 self.creative_repository, self.workflow_repository
             ).snapshot(record["stage"], record["resource_id"], reconcile=False)
@@ -533,7 +536,8 @@ class DeliveryService:
             record["stage_content_fingerprint"] = fingerprint
         if is_formal:
             self._record_stage_export(record)
-            self._complete_workflow_task(record, page_authorized=page_authorized)
+            if sequential_mode:
+                self._complete_workflow_task(record, page_authorized=page_authorized)
         self._record_audit(record, request=request)
         refreshed = self._get_unreconciled(record["id"])
         assert refreshed is not None

@@ -13,8 +13,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from creative.repository import CreativeRepository
+from creative.free_mode_service import FreeCreativeModeService
 from creative.prompt_store import PromptStore
+from creative.repository import CreativeRepository
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from identity.dependencies import current_principal
@@ -62,14 +63,121 @@ def _project_with_review(
     return project, review, scripts
 
 
-def _admin_client(repository: CreativeRepository) -> TestClient:
+def _admin_client(repository: CreativeRepository, job_manager=None) -> TestClient:
     app = FastAPI()
     app.dependency_overrides[current_principal] = lambda: Principal(
         user_id="admin-1", username="admin", display_name="管理员", role_codes=("system_admin",),
         permissions=frozenset({"*"}), data_scope="all", session_id="session-admin",
     )
-    app.include_router(build_script_optimization_router(repository, object()))
+    app.include_router(build_script_optimization_router(repository, job_manager or object()))
     return TestClient(app)
+
+
+def _free_project_with_review(
+    repository: CreativeRepository,
+) -> tuple[dict, dict, dict]:
+    project = repository.create_original_project(
+        seed_text="普通女孩发现家族秘密",
+        name="自由优化项目",
+        target_episode_count=1,
+        created_by="admin-1",
+        creation_request_id="free-optimization-project",
+        workflow_mode="free",
+    )
+    service = FreeCreativeModeService(repository)
+    brief = service.create_brief(
+        project["id"], {"title": "方向"},
+        expected_head_revision=0, actor_user_id="admin-1",
+    )
+    service.lock_resource(
+        project_id=project["id"], stage="brief",
+        resource_ref=str(brief["resource"]["id"]),
+        expected_head_revision=brief["head"]["revision"], actor_user_id="admin-1",
+    )
+    cast = service.create_characters(
+        project["id"], [{"name": "主角"}], [],
+        expected_head_revision=0, actor_user_id="admin-1",
+    )
+    service.lock_resource(
+        project_id=project["id"], stage="characters",
+        resource_ref=cast["resource"]["batch_id"],
+        expected_head_revision=cast["head"]["revision"], actor_user_id="admin-1",
+    )
+    outline = service.create_outline(
+        project["id"], [{"episode": 1, "core_event": "主角反击"}],
+        expected_head_revision=0, actor_user_id="admin-1",
+    )
+    service.lock_resource(
+        project_id=project["id"], stage="outline",
+        resource_ref=outline["resource"]["batch_id"],
+        expected_head_revision=outline["head"]["revision"], actor_user_id="admin-1",
+    )
+    beats = service.create_episode_resource(
+        project["id"], "beats", 1, {"beats": [{"order": 1}]},
+        expected_head_revision=0, actor_user_id="admin-1",
+    )
+    service.lock_resource(
+        project_id=project["id"], stage="beats", episode_number=1,
+        resource_ref=str(beats["resource"]["id"]),
+        expected_head_revision=beats["head"]["revision"], actor_user_id="admin-1",
+    )
+    script = service.create_episode_resource(
+        project["id"], "script", 1,
+        {"episode_title": "自由原稿", "scenes": []},
+        expected_head_revision=0, actor_user_id="admin-1",
+    )
+    project = repository.get_project(project["id"])
+    assert project is not None
+    source = build_project_source(project, "single", [1])
+    review = repository.create_script_review(
+        source_type="project", mode="single", project_id=project["id"],
+        episode_numbers=[1], source_fingerprint=source["fingerprint"],
+        source_payload=source, created_by="admin-1",
+    )
+    repository.complete_script_review(review["id"], {
+        "ai_verdict": "建议修改", "summary": "", "core_findings": [{"title": "节奏"}],
+        "episode_reviews": [], "cross_episode_findings": [],
+    })
+    review = repository.confirm_script_review(
+        review["id"], "建议修改", "", "admin-1", source["fingerprint"]
+    )
+    return project, review, script["resource"]
+
+
+def test_failed_optimization_can_retry_with_its_saved_drafts(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, _ = _project_with_review(repository, episode_count=2)
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="direct",
+        source_fingerprint=review["source_fingerprint"],
+        selected_findings=[{"ref": "core:0", "episode_numbers": [1, 2]}],
+        target_episode_numbers=[1, 2], created_by="admin-1",
+    )
+    repository.set_script_optimization_job(optimization["id"], "original-job")
+    repository.start_script_optimization(optimization["id"])
+    repository.save_script_optimization_episode(optimization["id"], 1, [{
+        "episode_number": 1, "kind": "script", "source_episode_id": 1,
+        "source_fingerprint": "frozen", "content": {"episode_title": "首集", "scenes": []},
+    }])
+    repository.fail_script_optimization(optimization["id"], "第二集失败")
+
+    class JobManager:
+        def __init__(self):
+            self.retried = []
+
+        def retry(self, job_id):
+            self.retried.append(job_id)
+            return SimpleNamespace(job_id="resumed-job")
+
+    jobs = JobManager()
+    client = _admin_client(repository, jobs)
+    response = client.post(f"/api/script-optimizations/{optimization['id']}/retry")
+
+    assert response.status_code == 200, response.text
+    assert jobs.retried == ["original-job"]
+    assert response.json()["optimization"]["job_id"] == "resumed-job"
+    assert [(item["episode_number"], item["kind"]) for item in response.json()["optimization"]["drafts"]] == [(1, "script")]
+    assert client.post(f"/api/script-optimizations/{optimization['id']}/retry").status_code == 409
 
 
 @pytest.mark.parametrize(
@@ -277,6 +385,47 @@ async def test_optimization_template_cannot_replace_output_or_outline_guards() -
     assert result["script"]["episode_title"] == "优化稿"
 
 
+@pytest.mark.asyncio
+async def test_structure_optimization_splits_beats_and_script_without_duplicate_context() -> None:
+    requests = []
+
+    class FakeProvider:
+        async def complete_json(self, messages):
+            import json
+            payload = json.loads(messages[-1]["content"])
+            requests.append(payload)
+            if len(requests) == 1:
+                return {"beats": {"beats": [{"order": 1, "goal": "更快反击"}]}}
+            return {"script": {"episode_title": "依据新 Beats 的优化稿", "scenes": []}}
+
+    result = await optimize_episode(
+        FakeProvider(),
+        mode="structure",
+        episode_number=2,
+        script_content={"episode_title": "原稿", "scenes": []},
+        beats_content={"beats": [{"order": 1, "goal": "反击"}]},
+        review_context={
+            "brief": {"content": {"theme": "成长"}},
+            "episode": {
+                "episode_number": 2,
+                "text": "重复原稿",
+                "script": {"content": {"episode_title": "原稿", "scenes": []}},
+                "beats": {"content": {"beats": [{"order": 1, "goal": "反击"}]}},
+                "outline": {"content": {"episode": 2}},
+            },
+        },
+        findings=[{"title": "结构拖沓"}],
+        summaries=[],
+    )
+
+    assert len(requests) == 2
+    assert "script" not in requests[0]["review_context"]["episode"]
+    assert "beats" not in requests[0]["review_context"]["episode"]
+    assert "text" not in requests[0]["review_context"]["episode"]
+    assert requests[1]["beats"] == result["beats"]
+    assert result["script"]["episode_title"] == "依据新 Beats 的优化稿"
+
+
 def test_text_review_cannot_create_an_optimization_task(tmp_path) -> None:
     repository = CreativeRepository(tmp_path / "creative.db")
     review = repository.create_script_review(
@@ -346,6 +495,42 @@ def test_accept_direct_optimization_creates_editable_script_without_status_chang
     assert accepted["status"] == "accepted"
     assert repository.get_episode(accepted["accepted_episode_id"])["content"]["episode_title"] == "优化稿"
     assert repository.get_project(project["id"])["status"] == before_status
+
+
+def test_free_project_accepts_optimization_as_new_current_head(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, source_script = _free_project_with_review(repository)
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="direct",
+        source_fingerprint=review["source_fingerprint"],
+        selected_findings=[{"ref": "core:0", "episode_numbers": [1]}],
+        target_episode_numbers=[1], created_by="admin-1",
+    )
+    completed = repository.complete_script_optimization(optimization["id"], [{
+        "episode_number": 1,
+        "kind": "script",
+        "source_episode_id": source_script["id"],
+        "source_fingerprint": content_fingerprint(source_script["content"]),
+        "content": {"episode_title": "自由优化稿", "scenes": []},
+    }])
+
+    response = _admin_client(repository).post(
+        f"/api/script-optimization-drafts/{completed['drafts'][0]['id']}/accept",
+        json={"lock_after_accept": True},
+    )
+
+    assert response.status_code == 200, response.text
+    accepted = repository.get_episode(response.json()["accepted_episode_id"])
+    assert accepted is not None
+    assert accepted["resource_scope"] == "free"
+    assert accepted["status"] == "locked"
+    refreshed = repository.get_project(project["id"])
+    head = next(
+        item for item in refreshed["resource_heads"]
+        if item["stage"] == "script" and item["episode_number"] == 1
+    )
+    assert head["resource_ref"] == str(accepted["id"])
+    assert build_project_source(refreshed, "single", [1])["episodes"][0]["script"]["id"] == accepted["id"]
 
 
 def test_structure_script_draft_requires_accepted_and_locked_paired_beats(tmp_path) -> None:
@@ -566,7 +751,7 @@ async def test_optimization_worker_generates_isolated_direct_script_draft(tmp_pa
             assert messages[1]["role"] == "user"
             return {"script": {"episode_title": "优化后的第 1 集", "scenes": []}}
 
-    monkeypatch.setattr(optimization_worker, "create_provider", lambda: FakeProvider())
+    monkeypatch.setattr(optimization_worker, "create_provider", lambda **_: FakeProvider())
     monkeypatch.chdir(tmp_path)
     await optimization_worker.run(CrawlJob(job_id="optimization-direct", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)}))
 
@@ -595,7 +780,7 @@ async def test_optimization_worker_generates_paired_structure_drafts(tmp_path, m
                 "script": {"episode_title": "结构优化稿", "scenes": []},
             }
 
-    monkeypatch.setattr(optimization_worker, "create_provider", lambda: FakeProvider())
+    monkeypatch.setattr(optimization_worker, "create_provider", lambda **_: FakeProvider())
     monkeypatch.chdir(tmp_path)
     await optimization_worker.run(CrawlJob(job_id="optimization-structure", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)}))
 
@@ -623,7 +808,7 @@ async def test_optimization_worker_marks_task_failed_without_drafts(tmp_path, mo
         async def complete_json(self, messages):
             raise RuntimeError("provider unavailable")
 
-    monkeypatch.setattr(optimization_worker, "create_provider", lambda: FailingProvider())
+    monkeypatch.setattr(optimization_worker, "create_provider", lambda **_: FailingProvider())
     with pytest.raises(RuntimeError, match="provider unavailable"):
         await optimization_worker.run(CrawlJob(job_id="optimization-failed", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)}))
 
@@ -631,6 +816,159 @@ async def test_optimization_worker_marks_task_failed_without_drafts(tmp_path, mo
     assert failed is not None
     assert failed["status"] == "failed"
     assert failed["drafts"] == []
+
+
+@pytest.mark.asyncio
+async def test_optimization_worker_emits_safe_retry_progress(tmp_path, monkeypatch) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, _ = _project_with_review(repository)
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="direct",
+        source_fingerprint=review["source_fingerprint"],
+        selected_findings=[{"ref": "core:0", "episode_numbers": [1]}],
+        target_episode_numbers=[1], created_by="admin-1",
+    )
+    events = []
+
+    class RetryingProvider:
+        max_retries = 2
+
+        async def complete_json(self, messages):
+            assert self.retry_callback is not None
+            self.retry_callback(1, 2, "secret request body")
+            return {"script": {"episode_title": "完成", "scenes": []}}
+
+    provider = RetryingProvider()
+
+    def provider_factory(*, retry_callback=None):
+        provider.retry_callback = retry_callback
+        return provider
+
+    monkeypatch.setattr(optimization_worker, "create_provider", provider_factory)
+    monkeypatch.setattr(
+        optimization_worker, "emit",
+        lambda job, event, message, level="info", payload=None: events.append(
+            {"event": event, "message": message, "payload": payload or {}}
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+    await optimization_worker.run(CrawlJob(
+        job_id="optimization-retry", platform="creative",
+        crawler_type="screenplay_optimization",
+        extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)},
+    ))
+
+    retry = next(item for item in events if "重试" in item["message"])
+    assert retry["payload"]["current_episode"] == 1
+    assert retry["payload"]["request_attempt"] == 2
+    assert retry["payload"]["request_max_attempts"] == 3
+    assert "secret request body" not in str(events)
+
+
+@pytest.mark.asyncio
+async def test_optimization_worker_keeps_first_episode_and_skips_it_on_resume(
+    tmp_path, monkeypatch,
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, _ = _project_with_review(repository, episode_count=2)
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="direct",
+        source_fingerprint=review["source_fingerprint"],
+        selected_findings=[{"ref": "core:0", "episode_numbers": [1, 2]}],
+        target_episode_numbers=[1, 2], created_by="admin-1",
+    )
+    calls = []
+
+    class InterruptingProvider:
+        async def complete_json(self, messages):
+            import json
+            number = json.loads(messages[-1]["content"])["episode_number"]
+            calls.append(number)
+            if number == 2 and calls.count(2) == 1:
+                raise RuntimeError("second episode unavailable")
+            return {"script": {"episode_title": f"完成第 {number} 集", "scenes": []}}
+
+    monkeypatch.setattr(optimization_worker, "create_provider", lambda **_: InterruptingProvider())
+    monkeypatch.chdir(tmp_path)
+    job = CrawlJob(
+        job_id="optimization-resume", platform="creative",
+        crawler_type="screenplay_optimization",
+        extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)},
+    )
+    with pytest.raises(RuntimeError, match="second episode unavailable"):
+        await optimization_worker.run(job)
+
+    failed = repository.get_script_optimization(optimization["id"])
+    assert failed["status"] == "failed"
+    assert [(item["episode_number"], item["kind"]) for item in failed["drafts"]] == [(1, "script")]
+    await optimization_worker.run(job)
+    completed = repository.get_script_optimization(optimization["id"])
+    assert completed["status"] == "completed"
+    assert [(item["episode_number"], item["kind"]) for item in completed["drafts"]] == [
+        (1, "script"), (2, "script")
+    ]
+    assert calls == [1, 2, 2]
+
+
+@pytest.mark.asyncio
+async def test_structure_optimization_persists_each_complete_pair_before_next_episode(
+    tmp_path, monkeypatch,
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, _ = _project_with_review(
+        repository, episode_count=2, change_route="beats_then_script"
+    )
+    optimization = repository.create_script_optimization(
+        review_id=review["id"], project_id=project["id"], mode="structure",
+        source_fingerprint=review["source_fingerprint"],
+        selected_findings=[{"ref": "core:0", "episode_numbers": [1, 2]}],
+        target_episode_numbers=[1, 2], created_by="admin-1",
+    )
+
+    class Provider:
+        async def complete_json(self, messages):
+            import json
+            number = json.loads(messages[-1]["content"])["episode_number"]
+            if number == 2:
+                saved = repository.get_script_optimization(optimization["id"])["drafts"]
+                assert [(item["episode_number"], item["kind"]) for item in saved] == [
+                    (1, "beats"), (1, "script")
+                ]
+                raise RuntimeError("second pair unavailable")
+            return {
+                "beats": {"beats": [{"order": 1, "goal": "反击"}]},
+                "script": {"episode_title": "优化第一集", "scenes": []},
+            }
+
+    monkeypatch.setattr(optimization_worker, "create_provider", lambda **_: Provider())
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(RuntimeError, match="second pair unavailable"):
+        await optimization_worker.run(CrawlJob(
+            job_id="optimization-structure-partial", platform="creative",
+            crawler_type="screenplay_optimization",
+            extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)},
+        ))
+    failed = repository.get_script_optimization(optimization["id"])
+    beats, script = failed["drafts"]
+    assert failed["status"] == "failed"
+    assert beats["peer_draft_id"] == script["id"]
+    assert script["peer_draft_id"] == beats["id"]
+
+
+def test_optimization_episode_checkpoint_rejects_half_a_structure_pair(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    task = repository.create_script_optimization(
+        review_id=12, project_id=7, mode="structure", source_fingerprint="source",
+        selected_findings=[], target_episode_numbers=[1], created_by="writer-1",
+    )
+    repository.start_script_optimization(task["id"])
+    with pytest.raises(ValueError, match="不完整"):
+        repository.save_script_optimization_episode(task["id"], 1, [{
+            "episode_number": 1, "kind": "beats", "content": {"beats": []},
+        }])
+    assert repository.get_script_optimization(task["id"])["drafts"] == []
+    with pytest.raises(ValueError, match="尚未完成"):
+        repository.finish_script_optimization(task["id"])
 
 
 @pytest.mark.asyncio
@@ -649,7 +987,7 @@ async def test_optimization_worker_rejects_a_task_when_review_source_has_changed
         async def complete_json(self, messages):
             raise AssertionError("来源已变更时不应调用 AI")
 
-    monkeypatch.setattr(optimization_worker, "create_provider", lambda: FakeProvider())
+    monkeypatch.setattr(optimization_worker, "create_provider", lambda **_: FakeProvider())
     with pytest.raises(ValueError, match="剧本已更新"):
         await optimization_worker.run(CrawlJob(job_id="optimization-stale", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)}))
 

@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import json
 from pathlib import Path
+import time
 from typing import Any
 
 import config
@@ -25,8 +26,15 @@ from creative.repository import CreativeRepository
 from .service import review_source
 
 
-def create_provider() -> Any:
-    return create_llm_provider_from_config(config)
+def create_provider(*, profile: str = "unit", retry_callback: Any = None) -> Any:
+    prefix = (
+        "SCREENPLAY_REVIEW_SUMMARY_LLM"
+        if profile == "summary"
+        else "SCREENPLAY_REVIEW_UNIT_LLM"
+    )
+    return create_llm_provider_from_config(
+        config, prefix=prefix, retry_callback=retry_callback
+    )
 
 
 def emit(
@@ -76,13 +84,44 @@ async def run(job: CrawlJob) -> None:
     def checkpoint(report: dict[str, Any]) -> None:
         repository.checkpoint_script_review(review_id, report)
 
+    active_request: dict[str, Any] = {}
+
+    def request_started(request: dict[str, Any]) -> None:
+        active_request.clear()
+        active_request.update(request)
+        labels = {
+            "unit": "正在逐集审核",
+            "batch_summary": "正在汇总审核批次",
+            "final_summary": "正在生成审核总评",
+        }
+        emit(
+            job,
+            "progress",
+            labels.get(str(request.get("kind") or ""), "正在执行剧本审核"),
+            payload={
+                "stage": "script_review",
+                **request,
+                "request_attempt": 1,
+                "request_started_at": time.time(),
+            },
+        )
+
+    def report_retry(retry_number: int, max_retries: int, _reason: str) -> None:
+        emit(
+            job,
+            "progress",
+            "剧本审核模型请求正在重试",
+            payload={
+                "stage": "script_review",
+                **active_request,
+                "request_attempt": int(retry_number) + 1,
+                "request_max_attempts": int(max_retries) + 1,
+                "request_started_at": time.time(),
+            },
+        )
+
     try:
         prior_report = review.get("report") or {}
-        completed_episodes = (
-            prior_report.get("episode_reviews")
-            if prior_report.get("partial") is True
-            else None
-        )
         prompt_snapshot = dict(review["source_payload"].get("prompt_snapshot") or {})
         if prompt_snapshot:
             expected_mode = "single" if review["mode"] == "single" else "series"
@@ -91,13 +130,18 @@ async def run(job: CrawlJob) -> None:
                 or prompt_snapshot.get("mode") != expected_mode
             ):
                 raise ValueError("审核提示词快照与任务范围不匹配")
-        provider = create_provider()
+        provider = create_provider(profile="unit", retry_callback=report_retry)
+        summary_provider = create_provider(
+            profile="summary", retry_callback=report_retry
+        )
         report = await review_source(
             provider,
             review["source_payload"],
+            summary_provider=summary_provider,
             on_progress=progress,
             on_checkpoint=checkpoint,
-            initial_episode_reviews=completed_episodes,
+            on_request=request_started,
+            initial_report=prior_report,
             prompt_snapshot=prompt_snapshot or None,
         )
         completed = repository.complete_script_review(review_id, report)

@@ -63,6 +63,40 @@ def test_project_source_requires_a_locked_story_context() -> None:
         build_project_source(project, "multiple", [1, 2])
 
 
+def test_free_project_source_uses_selected_heads_for_formal_review() -> None:
+    project = {
+        "id": 8,
+        "name": "自由审核项目",
+        "workflow_mode": "free",
+        "blueprints": [
+            {"id": 11, "status": "brief_locked", "version": 1, "content": {"tone": "逆袭"}},
+        ],
+        "characters": [
+            {"id": 21, "batch_id": "cast-1", "status": "locked", "version": 1, "content": {"name": "主角"}},
+        ],
+        "relationships": [],
+        "episodes": [
+            {"id": 31, "stage": "outline", "batch_id": "outline-1", "episode_number": 1, "status": "locked", "version": 1, "content": {"core_event": "反击"}},
+            {"id": 41, "stage": "beats", "episode_number": 1, "status": "locked", "version": 1, "content": {"beats": [{"order": 1}]}},
+            _script(1, 1, "当前 Head"),
+            _script(1, 2, "未选中的新版本"),
+        ],
+        "resource_heads": [
+            {"stage": "brief", "episode_number": 0, "resource_ref": "11"},
+            {"stage": "characters", "episode_number": 0, "resource_ref": "cast-1"},
+            {"stage": "outline", "episode_number": 0, "resource_ref": "outline-1"},
+            {"stage": "beats", "episode_number": 1, "resource_ref": "41"},
+            {"stage": "script", "episode_number": 1, "resource_ref": "11"},
+        ],
+    }
+
+    source = build_project_source(project, "single", [1])
+
+    assert source["episodes"][0]["resource_id"] == 11
+    assert "当前 Head" in source["episodes"][0]["text"]
+    assert "未选中的新版本" not in source["episodes"][0]["text"]
+
+
 def test_project_source_freezes_the_locked_outline_beats_and_story_context() -> None:
     project = {
         "id": 7,
@@ -421,7 +455,7 @@ async def test_review_worker_persists_ai_report_for_confirmation(tmp_path, monke
                 "cross_episode_findings": [],
             }
 
-    monkeypatch.setattr(worker, "create_provider", lambda: FakeProvider())
+    monkeypatch.setattr(worker, "create_provider", lambda **_: FakeProvider())
     monkeypatch.chdir(tmp_path)
     await worker.run(
         CrawlJob(
@@ -483,7 +517,7 @@ async def test_review_worker_keeps_a_viewable_checkpoint_when_multi_episode_revi
                 "cross_episode_findings": [],
             }
 
-    monkeypatch.setattr(worker, "create_provider", lambda: InterruptedProvider())
+    monkeypatch.setattr(worker, "create_provider", lambda **_: InterruptedProvider())
     monkeypatch.chdir(tmp_path)
     with pytest.raises(RuntimeError, match="服务中断"):
         await worker.run(

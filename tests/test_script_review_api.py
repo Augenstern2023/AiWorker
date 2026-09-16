@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -95,6 +97,82 @@ class MembershipPermissionService(PermissionService):
         self, principal: Principal, project_id: str
     ) -> bool:
         return False
+
+
+@pytest.mark.parametrize(
+    "history", ["current", "legacy", "deleted-template", "legacy-deleted"]
+)
+def test_private_review_history_and_retry_remain_owner_only(tmp_path, history):
+    repository = CreativeRepository(tmp_path / "history.db")
+    project = _reviewable_project(repository)
+    prompts = PromptStore(repository.db_path)
+    owner = _principal()
+    prompts.enable_project(project["id"], actor_user_id=owner.user_id)
+    private = prompts.create_template(
+        title="私人历史",
+        description="",
+        content=builtin_template("generic-vertical-short"),
+        owner_scope="user",
+        owner_user_id=owner.user_id,
+    )
+
+    class RetryJobs(FakeJobManager):
+        def retry(self, job_id):
+            return SimpleNamespace(job_id="retried-private-review")
+
+    jobs = RetryJobs()
+    current = [owner]
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = lambda: current[0]
+    app.state.identity_permission_service = MembershipPermissionService(
+        {repository.workflow_project_id(project["id"])}
+    )
+    app.include_router(build_script_review_router(repository, jobs))
+    client = TestClient(app)
+    created = client.post(
+        "/api/script-reviews",
+        json={
+            "source_type": "project",
+            "mode": "single",
+            "project_id": project["id"],
+            "episode_numbers": [1],
+            "prompt_template_key": private["template_key"],
+        },
+    )
+    assert created.status_code == 201, created.text
+    review_id = created.json()["review"]["id"]
+    frozen = repository.get_script_review(review_id)["source_payload"]
+    if history.startswith("legacy"):
+        for key in ("owner_scope", "owner_user_id", "project_id"):
+            frozen["prompt_snapshot"].pop(key, None)
+        with repository._connect() as conn:
+            conn.execute(
+                "UPDATE script_reviews SET source_payload_json = ? WHERE id = ?",
+                (json.dumps(frozen), review_id),
+            )
+    if "deleted" in history:
+        with prompts._connect() as conn:
+            conn.execute(
+                "DELETE FROM creative_prompt_template_revisions WHERE template_id = ?",
+                (private["id"],),
+            )
+            conn.execute(
+                "DELETE FROM creative_prompt_templates WHERE id = ?", (private["id"],)
+            )
+    repository.fail_script_review(review_id, "retryable")
+    current[0] = replace(owner, user_id="another-active-member")
+    assert client.get(f"/api/script-reviews/{review_id}").status_code == 403
+    assert client.post(f"/api/script-reviews/{review_id}/retry").status_code == 403
+    assert client.get("/api/script-reviews").json()["items"] == []
+    assert repository.get_script_review(review_id)["status"] == "failed"
+    current[0] = owner
+    assert client.get(f"/api/script-reviews/{review_id}").status_code == 200
+    assert client.post(f"/api/script-reviews/{review_id}/retry").status_code == 200
+    if not history.startswith("legacy"):
+        snapshot = frozen["prompt_snapshot"]
+        assert snapshot["owner_scope"] == "user"
+        assert snapshot["owner_user_id"] == owner.user_id
+        assert snapshot["project_id"] is None
 
 
 def _reviewable_project(repository: CreativeRepository) -> dict:

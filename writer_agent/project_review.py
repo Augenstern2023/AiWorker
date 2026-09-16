@@ -253,6 +253,10 @@ class ProjectReviewCoordinator:
     def _assert_review_readable(
         self, review: dict[str, Any], session: dict[str, Any], principal: Any
     ) -> None:
+        if not ProjectPromptService(self.repository).can_access_review_prompt(
+            review, principal.user_id
+        ):
+            raise ProjectReviewError(403, "无权访问该审核的个人模板快照")
         if (
             not principal.is_system_admin
             and str(session.get("user_id") or "") != str(principal.user_id)
@@ -269,6 +273,10 @@ class ProjectReviewCoordinator:
             raise ProjectReviewError(403, "当前账号已无权读取关联项目")
 
     def _queue(self, review: dict[str, Any], principal: Any, *, retry_failed_operation: bool) -> Any:
+        if not ProjectPromptService(self.repository).can_access_review_prompt(
+            review, principal.user_id
+        ):
+            raise ProjectReviewError(403, "无权使用该审核的个人模板快照")
         if self.job_manager is None:
             raise ProjectReviewError(503, "完整项目审核任务服务不可用")
         created_by = str(review.get("created_by") or principal.user_id)

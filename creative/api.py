@@ -3619,6 +3619,26 @@ def build_creative_router(
         assert_project_read_access(request, project_id, principal)
         project = project_or_404(project_id)
         assert_mode_member(project, principal)
+        try:
+            prior = free_mode_service.completed_migration(
+                project_id, payload.operation_id
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if prior is not None:
+            return prior
+
+        def rollback_migration_members(compensation: dict[str, Any]) -> None:
+            workflow_repository.rollback_copied_project_members(
+                compensation["target_project_id"], compensation["membership_ids"]
+            )
+
+        try:
+            free_mode_service.recover_migration_compensation(
+                project_id, payload.operation_id, rollback_migration_members
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
         active_jobs = active_project_job_labels(
             project_id,
             ignored_crawler_types=_MODE_MIGRATION_NON_BLOCKING_JOB_TYPES,
@@ -3629,16 +3649,17 @@ def build_creative_router(
         if migration_preview["blockers"]:
             raise HTTPException(409, "；".join(migration_preview["blockers"]))
 
-        def copy_migration_members(target_project_id: int):
+        def copy_migration_members(target_project_id: int) -> dict[str, Any]:
             # The target is new and uncommitted; it cannot have a legacy identity.
             target_identity = repository.workflow_project_id(target_project_id)
             members = workflow_repository.copy_active_project_members(
                 workflow_project_id(project_id), target_identity, principal
             )
             membership_ids = [str(member["id"]) for member in members]
-            return lambda: workflow_repository.rollback_copied_project_members(
-                target_identity, membership_ids
-            )
+            return {
+                "target_project_id": target_identity,
+                "membership_ids": membership_ids,
+            }
 
         try:
             migrated = free_mode_service.migrate_to_free(
@@ -3648,6 +3669,7 @@ def build_creative_router(
                 actor_user_id=principal.user_id,
                 seed_text=payload.seed_text,
                 copy_members=copy_migration_members,
+                rollback_members=rollback_migration_members,
             )
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc

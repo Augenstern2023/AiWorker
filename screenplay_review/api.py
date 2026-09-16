@@ -117,6 +117,10 @@ def build_script_review_router(
     def can_read_review(
         request: Request, principal: Principal, review: dict[str, Any]
     ) -> bool:
+        if not ProjectPromptService(repository).can_access_review_prompt(
+            review, principal.user_id
+        ):
+            return False
         project_id = review.get("project_id")
         if project_id is None:
             return principal.is_system_admin or review.get("created_by") == principal.user_id

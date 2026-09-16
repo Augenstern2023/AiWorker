@@ -40,6 +40,34 @@ class ProjectPromptService:
             ),
         }
 
+    def can_access_review_prompt(
+        self, review: dict[str, Any], actor_user_id: str
+    ) -> bool:
+        snapshot = dict(
+            (review.get("source_payload") or {}).get("prompt_snapshot") or {}
+        )
+        if not snapshot:
+            return True
+        ownership = snapshot
+        if not snapshot.get("owner_scope"):
+            # Older immutable snapshots predate persisted ownership metadata.
+            ownership = (
+                self.store.get_template(str(snapshot.get("template_id") or "")) or {}
+            )
+        scope = ownership.get("owner_scope")
+        if scope == "system":
+            return True
+        if scope == "user":
+            return (
+                bool(actor_user_id) and ownership.get("owner_user_id") == actor_user_id
+            )
+        if scope == "project":
+            return int(ownership.get("project_id") or 0) == int(
+                review.get("project_id") or -1
+            )
+        # Missing/deleted legacy templates cannot safely be treated as shared.
+        return bool(actor_user_id) and review.get("created_by") == actor_user_id
+
     def recommendations(
         self,
         project_id: int,

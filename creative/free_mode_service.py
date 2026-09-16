@@ -45,14 +45,74 @@ class FreeCreativeModeService:
         self.repository = repository
 
     @contextmanager
-    def _migration_transaction(self, compensations: list[Callable[[], None]]):
+    def _migration_transaction(
+        self,
+        project_id: int,
+        operation_id: str,
+        compensations: list[dict[str, Any]],
+        rollback_members: Callable[[dict[str, Any]], None] | None,
+    ):
         try:
             with self.repository._connect() as conn:
                 yield conn
-        except BaseException:
-            for compensate in reversed(compensations):
-                compensate()
+        except BaseException as exc:
+            if (
+                compensations
+                and self.completed_migration(project_id, operation_id) is None
+            ):
+                # Persist outside the rolled-back project transaction BEFORE cleanup.
+                with self.repository._connect() as conn:
+                    conn.execute(
+                        "INSERT INTO creative_mode_migration_compensations "
+                        "(operation_id, project_id, payload_json, last_error, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (
+                            operation_id,
+                            project_id,
+                            json.dumps(compensations),
+                            str(exc),
+                            time.time(),
+                        ),
+                    )
+                self.recover_migration_compensation(
+                    project_id, operation_id, rollback_members
+                )
             raise
+
+    def recover_migration_compensation(
+        self,
+        project_id: int,
+        operation_id: str,
+        rollback_members: Callable[[dict[str, Any]], None] | None,
+    ) -> None:
+        with self.repository._connect() as conn:
+            pending = conn.execute(
+                "SELECT * FROM creative_mode_migration_compensations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+        if pending is None:
+            return
+        if int(pending["project_id"]) != int(project_id):
+            raise ValueError("migration operation id belongs to another project")
+        if rollback_members is None:
+            raise ValueError("迁移成员补偿服务不可用，请稍后重试")
+        try:
+            for compensation in reversed(json.loads(pending["payload_json"])):
+                rollback_members(compensation)
+        except BaseException as exc:
+            with self.repository._connect() as conn:
+                conn.execute(
+                    "UPDATE creative_mode_migration_compensations SET last_error = ? "
+                    "WHERE operation_id = ?",
+                    (str(exc), operation_id),
+                )
+            raise
+        with self.repository._connect() as conn:
+            conn.execute(
+                "DELETE FROM creative_mode_migration_compensations "
+                "WHERE operation_id = ? AND project_id = ? AND payload_json = ?",
+                (operation_id, project_id, pending["payload_json"]),
+            )
 
     @staticmethod
     def _loads(value: Any, fallback: Any) -> Any:
@@ -1530,16 +1590,9 @@ class FreeCreativeModeService:
         )
         return int(cursor.lastrowid)
 
-    def migrate_to_free(
-        self,
-        *,
-        project_id: int,
-        expected_mode_revision: int,
-        operation_id: str,
-        actor_user_id: str,
-        seed_text: str = "",
-        copy_members: Callable[[int], Callable[[], None] | None] | None = None,
-    ) -> dict[str, Any]:
+    def completed_migration(
+        self, project_id: int, operation_id: str
+    ) -> dict[str, Any] | None:
         with self.repository._connect() as conn:
             prior = conn.execute(
                 "SELECT * FROM creative_mode_migrations WHERE operation_id = ?",
@@ -1551,11 +1604,30 @@ class FreeCreativeModeService:
             if prior["status"] != "completed":
                 raise ValueError("creative mode migration is not complete")
             return self._completed_migration_result(prior, operation_id)
+        return None
+
+    def migrate_to_free(
+        self,
+        *,
+        project_id: int,
+        expected_mode_revision: int,
+        operation_id: str,
+        actor_user_id: str,
+        seed_text: str = "",
+        copy_members: Callable[[int], dict[str, Any]] | None = None,
+        rollback_members: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        prior = self.completed_migration(project_id, operation_id)
+        if prior is not None:
+            return prior
+        self.recover_migration_compensation(project_id, operation_id, rollback_members)
         preview = self.migration_preview(project_id)
         if preview["blockers"]:
             raise ValueError("；".join(preview["blockers"]))
-        compensations: list[Callable[[], None]] = []
-        with self._migration_transaction(compensations) as conn:
+        compensations: list[dict[str, Any]] = []
+        with self._migration_transaction(
+            project_id, operation_id, compensations, rollback_members
+        ) as conn:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 "SELECT * FROM creative_mode_migrations WHERE operation_id = ?",
@@ -1817,9 +1889,7 @@ class FreeCreativeModeService:
                 (json.dumps(mapping, ensure_ascii=False), now, str(operation_id)),
             )
             if copy_members is not None:
-                compensate = copy_members(target_project_id)
-                if compensate is not None:
-                    compensations.append(compensate)
+                compensations.append(copy_members(target_project_id))
         return {
             "project": self.repository.get_project(target_project_id) or {},
             "mapping": mapping,

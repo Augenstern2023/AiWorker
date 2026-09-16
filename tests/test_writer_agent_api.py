@@ -862,6 +862,61 @@ def test_project_review_freezes_selected_series_review_template(tmp_path) -> Non
     assert jobs.calls[0][1]["extra"]["prompt_snapshot"] == frozen
 
 
+def test_project_review_private_history_cannot_be_resumed_by_session_owner(tmp_path):
+    client, repository, store, session, _permissions, jobs, current = (
+        _project_review_api_context(tmp_path, principal=_admin_principal())
+    )
+    project_id = store.get(session["id"], "writer-1")["project_id"]
+    prompts = PromptStore(repository.db_path)
+    prompts.enable_project(project_id, actor_user_id="admin-1")
+    private = prompts.create_template(
+        title="管理员私人模板",
+        description="",
+        content=builtin_template("generic-vertical-short"),
+        owner_scope="user",
+        owner_user_id="admin-1",
+    )
+    base = f"/api/writer-agent/sessions/{session['id']}/project-reviews"
+    preview = client.post(f"{base}/preview", json={"audit_scope": "project"}).json()
+    created = client.post(
+        base,
+        json={
+            "audit_scope": "project",
+            "expected_fingerprint": preview["fingerprint"],
+            "client_request_id": "private-history",
+            "prompt_template_key": private["template_key"],
+        },
+    )
+    assert created.status_code == 201, created.text
+    review_id = created.json()["review"]["id"]
+    current["principal"] = _principal(
+        "writer-1", frozenset({"script.review.generate", "script.review.read"})
+    )
+    replay = client.post(
+        base,
+        json={
+            "audit_scope": "project",
+            "expected_fingerprint": preview["fingerprint"],
+            "client_request_id": "private-history",
+        },
+    )
+    # Review request keys are actor-scoped: this creates a separate public review.
+    assert replay.status_code == 201
+    assert replay.json()["review"]["id"] != review_id
+    assert (
+        repository.get_script_review(replay.json()["review"]["id"])["source_payload"][
+            "prompt_snapshot"
+        ]["owner_scope"]
+        == "system"
+    )
+    assert repository.get_script_review(review_id)["status"] == "queued"
+    repository.fail_script_review(review_id, "retryable")
+    assert client.get(f"{base}/{review_id}").status_code == 403
+    assert client.post(f"{base}/{review_id}/resume").status_code == 403
+    assert repository.get_script_review(review_id)["status"] == "failed"
+    assert len(jobs.calls) == 2
+
+
 def test_turn_rollback_is_blocked_after_project_review_was_created(
     tmp_path,
 ) -> None:

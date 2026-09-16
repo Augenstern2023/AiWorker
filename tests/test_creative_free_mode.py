@@ -1455,6 +1455,26 @@ async def test_migration_api_ignores_active_review_jobs(tmp_path):
         assert current["project_id"] == project["id"]
         assert current["status"] == "running"
         assert current["job_id"] in {"screenplay_review-job", "project_review-job"}
+    # An already completed operation stays replayable when source activity changes.
+    jobs.append(
+        {
+            "status": "running",
+            "job": {
+                "crawler_type": "phase4_generate",
+                "extra": {"project_id": project["id"]},
+            },
+        }
+    )
+    replay = await migrate_endpoint(
+        project_id=project["id"],
+        payload=CreativeModeMigrationRequest(
+            expected_mode_revision=0, operation_id="review-job-free-copy"
+        ),
+        request=request,
+        principal=principal,
+    )
+    assert replay["project"]["id"] == migrated["project"]["id"]
+    assert replay["created"] is False
 
 
 @pytest.mark.asyncio
@@ -1535,7 +1555,7 @@ async def test_migration_api_still_blocks_active_non_review_job(tmp_path, crawle
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["member-copy", "sqlite-commit"])
+@pytest.mark.parametrize("failure", ["member-copy", "sqlite-commit", "compensation"])
 async def test_failed_migration_rolls_back_copy_and_members_then_retries(
     tmp_path, monkeypatch, failure
 ):
@@ -1565,14 +1585,20 @@ async def test_failed_migration_rolls_back_copy_and_members_then_retries(
     workflow.list_tasks.return_value = []
     copied_members = {}
     failing = [True]
+    copy_count = [0]
+    commit_failed = [False]
 
     def copy_members(source, target, actor):
         if failure == "member-copy" and failing[0]:
             raise RuntimeError("injected member copy failure")
-        copied_members[target] = [{"id": "copied-member", "project_id": target}]
-        return copied_members[target]
+        copy_count[0] += 1
+        member = {"id": f"copied-member-{copy_count[0]}", "project_id": target}
+        copied_members.setdefault(target, []).append(member)
+        return [member]
 
     def rollback_members(target, membership_ids):
+        if failure == "compensation" and failing[0]:
+            raise RuntimeError("injected compensation database failure")
         copied_members[target] = [
             member
             for member in copied_members.get(target, [])
@@ -1602,11 +1628,13 @@ async def test_failed_migration_rolls_back_copy_and_members_then_retries(
         with connect() as conn:
             yield conn
             if (
-                failure == "sqlite-commit"
+                failure in {"sqlite-commit", "compensation"}
                 and failing[0]
+                and not commit_failed[0]
                 and conn.in_transaction
                 and copied_members
             ):
+                commit_failed[0] = True
                 raise RuntimeError("injected sqlite commit failure")
 
     monkeypatch.setattr(repository, "_connect", failing_connect)
@@ -1640,13 +1668,70 @@ async def test_failed_migration_rolls_back_copy_and_members_then_retries(
             ).fetchone()[0]
             == 0
         )
-    assert copied_members == {}
+    if failure == "compensation":
+        old_target = next(iter(copied_members))
+        old_id = copied_members[old_target][0]["id"]
+        copied_members[old_target].append({"id": "unrelated", "project_id": old_target})
+        with connect() as conn:
+            pending = conn.execute(
+                "SELECT * FROM creative_mode_migration_compensations WHERE operation_id = 'rollback-operation'"
+            ).fetchone()
+            assert pending["project_id"] == project["id"]
+            assert json.loads(pending["payload_json"])[0]["membership_ids"] == [old_id]
+        # Rebuild the service/router to rule out an in-memory-only cleanup plan.
+        blocked_jobs = [
+            {
+                "status": "running",
+                "job": {
+                    "crawler_type": "phase4_generate",
+                    "extra": {"project_id": project["id"]},
+                },
+            }
+        ]
+        router = build_creative_router(
+            root=tmp_path,
+            runtime_dir=tmp_path / ".runtime",
+            repository=repository,
+            workflow_repository=workflow,
+            application_service=Mock(),
+            job_manager=SimpleNamespace(list_jobs=lambda: blocked_jobs),
+        )
+        migrate = next(
+            route.endpoint
+            for route in router.routes
+            if route.path == "/api/creative/projects/{project_id}/migrate-to-free"
+        )
+    else:
+        assert copied_members == {}
     failing[0] = False
+    if failure == "compensation":
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as blocked:
+            await migrate(**kwargs)
+        assert blocked.value.status_code == 409
+        assert copied_members[old_target] == [
+            {"id": "unrelated", "project_id": old_target}
+        ]
+        with connect() as conn:
+            assert (
+                conn.execute(
+                    "SELECT COUNT(*) FROM creative_mode_migration_compensations"
+                ).fetchone()[0]
+                == 0
+            )
+        blocked_jobs.clear()
     result = await migrate(**kwargs)
     replay = await migrate(**kwargs)
     assert replay["project"]["id"] == result["project"]["id"]
     assert replay["created"] is False
     assert len(copied_members) == 1
+    if failure == "compensation":
+        remaining_ids = {
+            member["id"] for members in copied_members.values() for member in members
+        }
+        assert old_id not in remaining_ids
+        assert remaining_ids == {"unrelated", "copied-member-2"}
 
 
 def test_member_copy_filters_inactive_users_and_compensation_is_exact(

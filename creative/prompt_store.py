@@ -1618,7 +1618,7 @@ class PromptStore:
             raise PermissionError("无权使用其他项目模板")
         if not self._supports_stage(revision, stage):
             raise ValueError(f"所选模板版本不支持 {stage} 阶段")
-        return compose_prompt_snapshot(
+        snapshot = compose_prompt_snapshot(
             template_id=template["id"],
             template_key=template["template_key"],
             title=template["title"],
@@ -1628,3 +1628,9 @@ class PromptStore:
             mode=mode,
             override=override,
         )
+        snapshot.update(
+            owner_scope=template["owner_scope"],
+            owner_user_id=template["owner_user_id"],
+            project_id=template["project_id"],
+        )
+        return snapshot

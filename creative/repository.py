@@ -676,6 +676,15 @@ class CreativeRepository:
                     FOREIGN KEY(project_id) REFERENCES creative_projects(id)
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS creative_mode_migration_compensations (
+                    operation_id TEXT PRIMARY KEY,
+                    project_id INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL
+                )
+            """)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_creative_heads_project "
                 "ON creative_resource_heads(project_id, resource_scope, stage, episode_number)"

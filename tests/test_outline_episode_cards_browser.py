@@ -232,6 +232,7 @@ def outline_cards_page() -> Iterator[Page]:
                 startCreativeGeneration(url, body, action) {
                   window.outlineOverviewGeneration = {url, body, action};
                 },
+                promptGenerationPayload(_stage, body = {}) { return {...body}; },
                 showCreativeNotice() {},
                 modal(id) {
                   const element = document.getElementById(id);
@@ -600,6 +601,7 @@ def test_series_overview_validates_and_saves_the_batch_without_losing_input(
 
     fields.nth(0).fill("")
     page.get_by_role("button", name="保存全集剧情概览").click()
+    overview.locator(".outline-overview-error").first.wait_for(state="visible")
     assert "请填写核心事件" in overview.inner_text()
     assert page.evaluate("window.outlineOverviewRequests.length") == 0
     page.get_by_role("button", name="收起全集剧情概览").click()
@@ -624,7 +626,7 @@ def test_series_overview_validates_and_saves_the_batch_without_losing_input(
         "Alpine.$data(document.querySelector('main')).outlineItems.forEach(item => item.status = 'locked')"
     )
     assert fields.nth(0).is_disabled()
-    assert page.get_by_role("button", name="保存全集剧情概览").is_hidden()
+    page.get_by_role("button", name="保存全集剧情概览").wait_for(state="hidden")
 
 
 def test_series_overview_save_response_does_not_mutate_a_new_context(
@@ -842,6 +844,7 @@ def test_outline_drafts_are_editable_but_locked_versions_are_read_only(
     page.get_by_role("button", name="展开第 1 集").click()
     fields = first.locator("textarea")
     assert fields.count() == 6
+    first.locator("[data-outline-ai-field]").first.wait_for(state="visible")
     assert first.locator("[data-outline-ai-field]:visible").count() == 6
     assert fields.nth(0).is_enabled()
     fields.nth(0).fill("编辑后的核心事件")
@@ -855,7 +858,8 @@ def test_outline_drafts_are_editable_but_locked_versions_are_read_only(
         "Alpine.$data(document.querySelector('main')).outlineItems[0].status = 'locked'"
     )
     assert fields.nth(0).is_disabled()
-    assert first.locator(".outline-save-action").is_hidden()
+    first.locator(".outline-save-action").wait_for(state="hidden")
+    first.locator("[data-outline-ai-field]").first.wait_for(state="visible")
     assert first.locator("[data-outline-ai-field]:visible").count() == 6
 
 
@@ -867,6 +871,7 @@ def test_outline_field_grid_is_responsive_without_horizontal_page_overflow(
     grid = page.locator(
         '.outline-episode-card[data-episode-number="1"] .outline-field-grid'
     )
+    grid.wait_for(state="visible")
 
     desktop_columns = page.evaluate(
         "element => getComputedStyle(element).gridTemplateColumns", grid.element_handle()

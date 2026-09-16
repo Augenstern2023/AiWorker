@@ -211,7 +211,7 @@ window.aiworkerModules.push(() => ({
             }
             return this.startCreativeGeneration(
                 `/api/creative/projects/${projectId}/outlines/${batchId}/overview/generate`,
-                body,
+                this.promptGenerationPayload('outline', body),
                 'outline_overview',
                 {batchId}
             );

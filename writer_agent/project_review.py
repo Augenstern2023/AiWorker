@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from project_review.source import build_project_review_source
+from creative.project_prompt_service import ProjectPromptService
 
 
 def long_project_review_scope(message: str) -> str | None:
@@ -55,13 +56,27 @@ class ProjectReviewCoordinator:
             source = build_project_review_source(project, audit_scope)
         except ValueError as exc:
             raise ProjectReviewError(409, str(exc)) from exc
-        return self._preview_payload(source)
+        payload = self._preview_payload(source)
+        try:
+            payload["prompt_module"] = ProjectPromptService(
+                self.repository
+            ).module_state(
+                int(project["id"]),
+                "review",
+                actor_user_id=principal.user_id,
+            )
+        except ValueError:
+            payload["prompt_module"] = None
+        return payload
 
     def create(
         self, session_id: int, principal: Any, audit_scope: str,
         expected_fingerprint: str, client_request_id: str,
         *,
         mutation_token: str | None = None,
+        prompt_template_key: str | None = None,
+        prompt_template_revision: int | None = None,
+        prompt_override: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         session, project = self._session_project(session_id, principal)
         if not str(client_request_id).strip():
@@ -75,6 +90,25 @@ class ProjectReviewCoordinator:
                 409, "项目内容已更新，请刷新审核预检后再确认",
                 extra=self._preview_payload(source),
             )
+        try:
+            prompt_snapshot = ProjectPromptService(
+                self.repository
+            ).resolve_generation_snapshot(
+                project_id=int(project["id"]),
+                stage="review",
+                series=True,
+                episode_number=None,
+                template_key=prompt_template_key,
+                template_revision=prompt_template_revision,
+                run_override=prompt_override,
+                actor_user_id=principal.user_id,
+            )
+        except PermissionError as exc:
+            raise ProjectReviewError(403, str(exc)) from exc
+        except ValueError as exc:
+            raise ProjectReviewError(409, str(exc)) from exc
+        if prompt_snapshot is not None:
+            source["prompt_snapshot"] = prompt_snapshot
         source["writer_session_id"] = int(session_id)
         review_turn = next(
             (
@@ -237,6 +271,9 @@ class ProjectReviewCoordinator:
             raise ProjectReviewError(503, "完整项目审核任务服务不可用")
         created_by = str(review.get("created_by") or principal.user_id)
         operation_id = f"project-review:{review['id']}"
+        prompt_snapshot = dict(
+            dict(review.get("source_payload") or {}).get("prompt_snapshot") or {}
+        )
         payload = {
             "platform": "creative", "crawler_type": "project_review",
             "keywords": [], "save_data_option": "json", "get_comments": False,
@@ -248,6 +285,19 @@ class ProjectReviewCoordinator:
                 "db_path": str(Path(self.repository.db_path).resolve()),
                 "runtime_dir": str(self.runtime_dir.resolve()),
                 "retry_failed_operation": retry_failed_operation,
+                "prompt_snapshot": prompt_snapshot or None,
+                "prompt_template_id": str(
+                    prompt_snapshot.get("template_id") or ""
+                ),
+                "prompt_template_key": str(
+                    prompt_snapshot.get("template_key") or ""
+                ),
+                "prompt_template_revision": int(
+                    prompt_snapshot.get("revision") or 0
+                ),
+                "prompt_content_hash": str(
+                    prompt_snapshot.get("content_hash") or ""
+                ),
             },
         }
         try:

@@ -2,10 +2,11 @@
     <div class="d-flex justify-content-between align-items-end mb-3">
         <div>
             <h5 class="mb-1">场次剧本</h5>
-            <div class="small text-muted" x-text="isFreeCreativeProject() ? '当前集可独立创建或生成；首版不进入审核、优化和正式交付。' : '基于已锁定 Beats 生成可拍摄场次与台词'"></div>
+            <div class="small text-muted" x-text="isFreeCreativeProject() ? '当前集可独立创作；完成剧本后同样进入审核、优化和最终交付。' : '基于已锁定 Beats 生成可拍摄场次与台词'"></div>
             <div class="small text-muted" x-show="!isFreeCreativeProject()" x-text="projectScriptsSeriesBlockReason()"></div>
         </div>
         <div class="d-flex gap-2 align-items-end flex-wrap justify-content-end">
+            <button class="btn btn-outline-info btn-sm" type="button" @click="openPromptLibrary('script')" title="选择场次剧本生成模板"><i class="bi bi-sliders me-1"></i>选择生成模板</button>
             <div>
                 <label class="form-label small">集数</label>
                 <select class="form-select form-select-sm" style="width:150px" x-model.number="creativeWorkspace.selectedEpisode">
@@ -30,6 +31,7 @@
                     <div><span class="fw-semibold" x-text="`第 ${item.episode_number} 集 · ${item.content?.episode_title || '未命名'} `"></span><span class="small text-muted" x-text="`v${item.version} · ${creativeWorkflowStatusLabel(item.status)}`"></span></div>
                     <a class="btn btn-outline-primary btn-sm" :href="creativeModuleUrl('script', item.episode_number)">打开单集编辑</a>
                 </div>
+                <div class="small text-muted mb-2" data-template-provenance x-text="creativeTemplateProvenance(item)"></div>
                 <template x-for="scene in (item.content?.scenes || [])" :key="`all-scene-${item.id}-${scene.sequence_no}-${scene.scene_no}`">
                     <div class="border-top py-3">
                         <div class="small fw-semibold mb-2" x-text="`[${scene.sequence_no}]-[${scene.scene_no}] [${scene.time_of_day || ''}] [${scene.interior_exterior || ''}] [${scene.location || ''}]`"></div>
@@ -57,6 +59,7 @@
                     <a class="btn btn-outline-secondary btn-sm" :href="`/api/creative/projects/${creativeWorkspace.project.id}/generated-content/download?stage=script&resource_id=${selectedProjectScript().id}&format=txt`" title="下载本集 TXT"><i class="bi bi-download me-1"></i>本集下载</a>
                 </div>
             </div>
+            <div class="small text-muted mb-2" data-template-provenance x-text="creativeTemplateProvenance(selectedProjectScript())"></div>
             <div class="mb-3"><label class="form-label small">集标题</label><input class="form-control form-control-sm" x-model="selectedProjectScript().content.episode_title" :disabled="!creativeResourceEditable(selectedProjectScript())"></div>
             <template x-for="scene in selectedProjectScript().content.scenes" :key="`${scene.sequence_no}-${scene.scene_no}`">
                 <div class="border-top py-3">
@@ -83,3 +86,4 @@
     </template>
     <div class="text-center text-muted py-4" x-show="creativeWorkspace.selectedEpisode > 0 && !selectedProjectScript()" x-text="scriptWorkspaceEmptyMessage()"></div>
 </div>
+{% include "common/workspace/prompt_library_modal.html" %}

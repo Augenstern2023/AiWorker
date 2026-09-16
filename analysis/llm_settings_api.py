@@ -77,12 +77,14 @@ class ProviderUpdateRequest(LLMSettingsRequest):
 class ModelCreateRequest(LLMSettingsRequest):
     model_id: str = Field(min_length=1, max_length=255)
     display_name: str = Field(default="", max_length=255)
+    max_output_tokens: int | None = Field(default=None, ge=0)
     is_enabled: bool = True
 
 
 class ModelUpdateRequest(LLMSettingsRequest):
     model_id: str | None = Field(default=None, min_length=1, max_length=255)
     display_name: str | None = Field(default=None, max_length=255)
+    max_output_tokens: int | None = Field(default=None, ge=0)
     is_enabled: bool | None = None
 
 
@@ -550,7 +552,7 @@ def build_llm_settings_router(
         before = settings_model(model_record_id)
         try:
             model = service.repository.update_model(
-                model_record_id, **payload.model_dump()
+                model_record_id, **payload.model_dump(exclude_unset=True)
             )
         except LLMSettingsError as exc:
             raise route_error(exc) from exc

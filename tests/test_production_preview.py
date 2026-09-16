@@ -11,7 +11,7 @@ import sqlite3
 import pytest
 
 from creative import production_export
-from tests.test_production_export import db, free_db
+from tests.test_production_export import db, free_db, imitation_db
 
 
 def preview(db):
@@ -44,6 +44,47 @@ def test_free_custom_version_selection_is_explicitly_warned(free_db):
     assert result["version_selection"]["strategy"] == "custom"
     assert result["version_selection"]["warnings"]
     assert "自由创作" in result["version_selection"]["warnings"][0]
+
+
+def test_standard_imitation_preview_starts_with_source_breakdown(imitation_db):
+    result = production_export.preview_production_package(imitation_db, 1)
+
+    assert result["ready"] is True
+    assert result["stages"][0] == {
+        "stage": "breakdown",
+        "episode_number": None,
+        "state": "ready",
+        "versions": [{"id": 1, "version": 2}],
+        "message": "检查通过",
+        "edit_url": "/selection/topics",
+    }
+
+
+def test_standard_imitation_preview_blocks_unlocked_source_breakdown(imitation_db):
+    with sqlite3.connect(imitation_db) as connection:
+        connection.execute(
+            "UPDATE creative_breakdowns SET status='draft' WHERE id=1"
+        )
+
+    result = production_export.preview_production_package(imitation_db, 1)
+
+    assert result["ready"] is False
+    issue = next(item for item in result["issues"] if item["stage"] == "breakdown")
+    assert issue["code"] == "missing_locked_input"
+    assert issue["edit_url"] == "/selection/topics"
+
+
+@pytest.mark.parametrize(
+    ("project", "expected"),
+    [
+        ({"creation_mode": "imitation", "workflow_mode": "sequential"}, True),
+        ({"creation_mode": "imitation", "workflow_mode": "free"}, False),
+        ({"creation_mode": "original", "workflow_mode": "sequential"}, False),
+        ({"creation_mode": "original", "workflow_mode": "free"}, False),
+    ],
+)
+def test_breakdown_export_scope_depends_on_project_type(project, expected):
+    assert production_export._exports_breakdown(project) is expected
 
 
 def test_preview_collects_independent_issues_and_blocks_dependents(db):

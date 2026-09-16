@@ -120,7 +120,11 @@ def _llm_state() -> dict:
             "has_api_key": False,
             "is_enabled": True,
         },
-        "modelDraft": {"model_id": "", "display_name": ""},
+        "modelDraft": {
+            "model_id": "",
+            "display_name": "",
+            "max_output_tokens": "",
+        },
         "modelEditor": None,
         "test": {"model_id": "", "result": None},
     }
@@ -377,7 +381,7 @@ def test_llm_settings_load_master_detail_with_environment_credential() -> None:
         )
         page.get_by_role("heading", name="LLM 模型管理").wait_for()
 
-        assert page.get_by_text("内部网关", exact=True).is_visible()
+        page.get_by_text("内部网关", exact=True).wait_for(state="visible")
         assert page.get_by_label("模型列表").get_by_text("Model A", exact=True).is_visible()
         assert page.get_by_label("API Key 环境变量").input_value() == (
             "INTERNAL_GATEWAY_KEY"
@@ -491,7 +495,7 @@ def test_llm_connection_test_uses_unsaved_fields_and_announces_result() -> None:
         test_button.click()
         page.wait_for_function("window.resolveLLMTest !== null")
         assert test_button.is_disabled()
-        assert page.get_by_text("测试中…", exact=True).is_visible()
+        page.get_by_text("测试中…", exact=True).wait_for(state="visible")
 
         request = page.evaluate(
             "window.requests.find(item => item.url === '/api/llm/test')"
@@ -594,6 +598,41 @@ def test_llm_sensitive_request_errors_are_fixed_and_controls_lock_during_test() 
         browser.close()
 
 
+@pytest.mark.parametrize("busy_flag", ["saving", "testing", "syncing", "modelSaving"])
+def test_llm_operation_entry_points_block_requests_during_any_active_operation(busy_flag):
+    """Catch direct method calls bypassing disabled controls and overlapping writes."""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        _mount_llm_page(page)
+        page.evaluate("document.querySelector('main')._x_dataStack[0].fetchLLMSettings()")
+        page.add_script_tag(path=API_SCRIPT)
+        sent = []
+        page.on("request", lambda request: sent.append(request.url)
+                if "/api/llm/" in request.url else None)
+        page.route("**/api/llm/**", lambda route: route.fulfill(status=400, json={"detail": "blocked"}))
+        page.on("dialog", lambda dialog: dialog.accept())
+        for method in [
+            "saveLLMProvider", "clearLLMProviderCredential", "deleteLLMProvider",
+            "syncLLMModels", "addLLMModel", "saveLLMModel", "deleteLLMModel",
+            "setDefaultLLMModel", "testLLMConnection",
+        ]:
+            page.evaluate("""async ({busyFlag, method}) => {
+                const app = document.querySelector('main')._x_dataStack[0];
+                const state = app.llmSettings;
+                state.providers[0].is_default = false;
+                state.editor.credential_source = 'credential_store';
+                state.modelDraft = {model_id: 'new-model', display_name: ''};
+                const model = {...state.providers[0].models[0], is_default: false};
+                app.startEditLLMModel(model);
+                state[busyFlag] = true;
+                await app[method](model);
+                state[busyFlag] = false;
+            }""", {"busyFlag": busy_flag, "method": method})
+            assert sent == [], f"{method} sent a request while {busy_flag} was active"
+        browser.close()
+
+
 def test_llm_temporary_key_success_discards_untrusted_response_data() -> None:
     """Would catch a successful temporary-key test reflecting server-controlled secrets."""
 
@@ -660,6 +699,7 @@ def test_llm_sync_failure_keeps_manual_model_fallback_available() -> None:
         assert request["body"] == {
             "model_id": "manual-fallback",
             "display_name": "Manual Fallback",
+            "max_output_tokens": None,
             "is_enabled": True,
         }
         browser.close()
@@ -777,8 +817,9 @@ def test_llm_model_can_be_edited_and_selected_as_global_default() -> None:
 
         page.get_by_role("button", name="编辑模型 Model B").click()
         page.locator("#llm-edit-model-name-model-record-2").wait_for()
-        assert not page.get_by_role("button", name="编辑模型 Model B").is_visible()
+        page.get_by_role("button", name="编辑模型 Model B").wait_for(state="hidden")
         page.locator("#llm-edit-model-name-model-record-2").fill("Model B Updated")
+        page.locator("#llm-edit-model-max-output-tokens-model-record-2").fill("0")
         page.locator("#llm-edit-model-name-model-record-2").press("Enter")
         page.wait_for_function(
             "window.requests.some(item => item.url === '/api/llm/models/model-record-2')"
@@ -789,6 +830,7 @@ def test_llm_model_can_be_edited_and_selected_as_global_default() -> None:
         assert update_request["body"] == {
             "model_id": "model-b",
             "display_name": "Model B Updated",
+            "max_output_tokens": 0,
             "is_enabled": True,
         }
 

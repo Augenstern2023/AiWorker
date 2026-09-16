@@ -18,6 +18,67 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize(
+    ("page_name", "url"),
+    [
+        ("planning-brief", "http://aiworker.test/planning/projects/9/brief"),
+        ("writing-outlines", "http://aiworker.test/writing/projects/9/outlines"),
+        (
+            "writing-beats",
+            "http://aiworker.test/writing/projects/9/episodes/1/beats?episode=all",
+        ),
+        (
+            "writing-scripts",
+            "http://aiworker.test/writing/projects/9/episodes/1/scripts?episode=all",
+        ),
+    ],
+)
+def test_episode_workspace_initial_state_matches_the_all_episode_url(
+    page_name: str, url: str
+) -> None:
+    """Project entry and all-view URLs must render with the all view immediately."""
+    tasks_script = ROOT / "static/js/common/tasks.js"
+    creative_script = ROOT / "static/js/common/creative.js"
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route(
+            "http://aiworker.test/**",
+            lambda route: route.fulfill(
+                content_type="text/html",
+                body=f'<body data-workspace-page="{page_name}"></body>',
+            ),
+        )
+        page.goto(url)
+        page.evaluate("window.aiworkerModules = []")
+        page.add_script_tag(path=tasks_script)
+        page.add_script_tag(path=creative_script)
+
+        state = page.evaluate(
+            """
+            () => {
+              const data = appData();
+              data.creativeWorkspace.project = {id: 9, target_episode_count: 2};
+              return {
+                selectedEpisode: data.creativeWorkspace.selectedEpisode,
+                outlineUrl: data.creativeModuleUrl('outline'),
+                beatsUrl: data.creativeModuleUrl('beats'),
+                scriptUrl: data.creativeModuleUrl('script'),
+              };
+            }
+            """
+        )
+
+        assert state == {
+            "selectedEpisode": 0,
+            "outlineUrl": "/writing/projects/9/outlines?episode=all",
+            "beatsUrl": "/writing/projects/9/episodes/1/beats?episode=all",
+            "scriptUrl": "/writing/projects/9/episodes/1/scripts?episode=all",
+        }
+        browser.close()
+
+
+@pytest.mark.parametrize(
     ("stage", "template_name", "visible_selector", "expected_text"),
     [
         ("beats", "project_beats.html", "section.border", "第二集场景"),
@@ -75,6 +136,7 @@ def test_episode_workspace_all_view_and_multi_download_modal(
         errors: list[str] = []
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.set_content(f'<main x-data="appData()">{template}{modal}</main>')
+        page.add_style_tag(path=ROOT / "static/css/bootstrap.min.css")
         page.evaluate("window.aiworkerModules = []")
         page.add_script_tag(path=creative_script)
         page.evaluate(
@@ -153,6 +215,18 @@ def test_episode_workspace_all_view_and_multi_download_modal(
         )
         assert state["selectedEpisodes"] == [1, 2]
         assert state["allEpisodes"] is True
+        assert page.evaluate(
+            """
+            () => [...document.querySelectorAll('#creativeEpisodeDownloadModal label.form-check')]
+              .every(label => {
+                const input = label.querySelector('input[type="checkbox"]');
+                if (!input) return true;
+                const outer = label.getBoundingClientRect();
+                const inner = input.getBoundingClientRect();
+                return inner.left >= outer.left && inner.right <= outer.right;
+              })
+            """
+        )
         assert not errors
         browser.close()
 

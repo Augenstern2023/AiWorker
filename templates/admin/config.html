@@ -8,10 +8,10 @@
             <div class="small text-muted">统一管理 OpenAI 兼容提供商、模型与默认调用配置；新调用会立即读取最新设置。</div>
         </div>
         <div class="d-flex gap-2 flex-wrap">
-            <button type="button" class="btn btn-outline-secondary btn-sm" @click="fetchLLMSettings()" :disabled="llmSettings.loading || llmSettings.saving || llmSettings.testing" aria-label="刷新 LLM 设置">
+            <button type="button" class="btn btn-outline-secondary btn-sm" @click="fetchLLMSettings()" :disabled="llmSettings.loading || llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving" aria-label="刷新 LLM 设置">
                 <i class="bi bi-arrow-clockwise me-1" aria-hidden="true"></i>刷新
             </button>
-            <button type="button" class="btn btn-primary btn-sm" @click="startNewLLMProvider()" :disabled="llmSettings.loading || llmSettings.saving || llmSettings.testing" aria-label="新增提供商">
+            <button type="button" class="btn btn-primary btn-sm" @click="startNewLLMProvider()" :disabled="llmSettings.loading || llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving" aria-label="新增提供商">
                 <i class="bi bi-plus-lg me-1" aria-hidden="true"></i>新增提供商
             </button>
         </div>
@@ -46,7 +46,7 @@
                     <div class="p-3 text-muted small" x-show="!llmSettings.loading && !llmSettings.providers.length">暂无提供商。可从预设开始新增，所有端点和协议仍可编辑。</div>
                     <div class="list-group list-group-flush" x-show="!llmSettings.loading && llmSettings.providers.length">
                         <template x-for="provider in llmSettings.providers" :key="provider.id">
-                            <button type="button" class="list-group-item list-group-item-action text-start" :class="{'active': llmSettings.selectedProviderId === provider.id}" @click="selectLLMProvider(provider)" :disabled="llmSettings.saving || llmSettings.testing" :aria-current="llmSettings.selectedProviderId === provider.id ? 'true' : null">
+                            <button type="button" class="list-group-item list-group-item-action text-start" :class="{'active': llmSettings.selectedProviderId === provider.id}" @click="selectLLMProvider(provider)" :disabled="llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving" :aria-current="llmSettings.selectedProviderId === provider.id ? 'true' : null">
                                 <div class="d-flex justify-content-between align-items-start gap-2">
                                     <span class="fw-semibold text-break" x-text="provider.name"></span>
                                     <span class="badge flex-shrink-0" :class="provider.is_enabled ? 'text-bg-success' : 'text-bg-secondary'" x-text="provider.is_enabled ? '已启用' : '已停用'"></span>
@@ -72,54 +72,54 @@
                             <div class="row g-3">
                                 <div class="col-12 col-md-6">
                                     <label class="form-label" for="llm-provider-preset">提供商预设</label>
-                                    <select id="llm-provider-preset" class="form-select" x-model="llmSettings.editor.preset" @change="applyLLMProviderPreset" :disabled="llmSettings.saving || llmSettings.testing">
+                                    <select id="llm-provider-preset" class="form-select" x-model="llmSettings.editor.preset" @change="applyLLMProviderPreset" :disabled="llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving">
                                         <template x-for="(preset, key) in llmSettings.presets" :key="key"><option :value="key" x-text="preset.label"></option></template>
                                     </select>
                                 </div>
                                 <div class="col-12 col-md-6">
                                     <label class="form-label" for="llm-provider-name">提供商名称</label>
-                                    <input id="llm-provider-name" class="form-control" x-model.trim="llmSettings.editor.name" maxlength="120" required :disabled="llmSettings.saving || llmSettings.testing" autocomplete="organization">
+                                    <input id="llm-provider-name" class="form-control" x-model.trim="llmSettings.editor.name" maxlength="120" required :disabled="llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving" autocomplete="organization">
                                 </div>
                                 <div class="col-12">
                                     <label class="form-label" for="llm-provider-base-url">Base URL</label>
-                                    <input id="llm-provider-base-url" class="form-control" type="url" x-model.trim="llmSettings.editor.base_url" maxlength="2048" required :disabled="llmSettings.saving || llmSettings.testing" placeholder="https://api.example.com/v1" autocomplete="url">
+                                    <input id="llm-provider-base-url" class="form-control" type="url" x-model.trim="llmSettings.editor.base_url" maxlength="2048" required :disabled="llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving" placeholder="https://api.example.com/v1" autocomplete="url">
                                     <div class="alert alert-warning py-2 mt-2 mb-0" role="alert" x-show="llmEndpointWarning(llmSettings.editor.base_url)" x-text="llmEndpointWarning(llmSettings.editor.base_url)"></div>
                                 </div>
                                 <div class="col-12 col-md-6">
                                     <label class="form-label" for="llm-provider-wire-api">调用协议</label>
-                                    <select id="llm-provider-wire-api" class="form-select" x-model="llmSettings.editor.wire_api" :disabled="llmSettings.saving || llmSettings.testing">
+                                    <select id="llm-provider-wire-api" class="form-select" x-model="llmSettings.editor.wire_api" :disabled="llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving">
                                         <option value="responses">Responses API</option>
                                         <option value="chat_completions">Chat Completions</option>
                                     </select>
                                 </div>
                                 <div class="col-12 col-md-6 d-flex align-items-end">
                                     <div class="form-check form-switch mb-2">
-                                        <input id="llm-provider-enabled" class="form-check-input" type="checkbox" role="switch" x-model="llmSettings.editor.is_enabled" :disabled="llmSettings.saving || llmSettings.testing || (selectedLLMProvider()?.is_default && llmSettings.editor.is_enabled)">
+                                        <input id="llm-provider-enabled" class="form-check-input" type="checkbox" role="switch" x-model="llmSettings.editor.is_enabled" :disabled="llmSettings.saving || llmSettings.testing || (selectedLLMProvider()?.is_default && llmSettings.editor.is_enabled) || llmSettings.syncing || llmSettings.modelSaving">
                                         <label class="form-check-label" for="llm-provider-enabled">启用提供商</label>
                                         <div class="small text-muted" x-show="selectedLLMProvider()?.is_default">请先切换全局默认模型</div>
                                     </div>
                                 </div>
                                 <div class="col-12">
                                     <label class="form-label" for="llm-provider-api-key-env-var">API Key 环境变量</label>
-                                    <input id="llm-provider-api-key-env-var" class="form-control font-monospace" type="text" x-model.trim="llmSettings.editor.api_key_env_var" maxlength="255" :disabled="llmSettings.saving || llmSettings.testing" placeholder="可选兜底，例如 CUSTOM_LLM_KEY" autocomplete="off" spellcheck="false">
+                                    <input id="llm-provider-api-key-env-var" class="form-control font-monospace" type="text" x-model.trim="llmSettings.editor.api_key_env_var" maxlength="255" :disabled="llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving" placeholder="可选兜底，例如 CUSTOM_LLM_KEY" autocomplete="off" spellcheck="false">
                                     <div class="small mt-1" :class="llmSettings.editor.credential_status === 'configured' ? 'text-muted' : 'text-warning'" x-text="llmSettings.editor.credential_source === 'credential_store' ? '页面密钥优先于环境变量；清除后将回退环境变量。' : (llmSettings.editor.credential_status === 'configured' ? '当前 Web 进程可以读取该变量；修改变量值后需要重启服务。' : '当前 Web 进程未读取到非空值，请先配置启动环境并重启服务。')"></div>
                                 </div>
                                 <div class="col-12">
                                     <label class="form-label" for="llm-provider-api-key">API Key</label>
-                                    <input id="llm-provider-api-key" class="form-control" type="password" x-model="llmSettings.editor.api_key" maxlength="4096" :disabled="llmSettings.saving || llmSettings.testing" autocomplete="new-password" placeholder="留空表示不修改" spellcheck="false">
+                                    <input id="llm-provider-api-key" class="form-control" type="password" x-model="llmSettings.editor.api_key" maxlength="4096" :disabled="llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving" autocomplete="new-password" placeholder="留空表示不修改" spellcheck="false">
                                     <div class="form-text">仅在保存时写入系统凭据库；临时连接测试和保存完成后都会清空。</div>
                                 </div>
                             </div>
                             <div class="d-flex justify-content-between align-items-center gap-2 mt-3 flex-wrap">
                                 <div class="d-flex gap-2 flex-wrap">
-                                    <button type="button" class="btn btn-outline-warning" x-show="llmSettings.editor.id && llmSettings.editor.credential_source === 'credential_store'" @click="clearLLMProviderCredential" :disabled="llmSettings.saving || llmSettings.testing" aria-label="清除页面密钥">清除页面密钥</button>
-                                    <button type="button" class="btn btn-outline-danger" x-show="llmSettings.editor.id" @click="deleteLLMProvider" :disabled="selectedLLMProvider()?.is_default || llmSettings.saving || llmSettings.testing || Boolean(llmSettings.providerDeletingId)" :title="selectedLLMProvider()?.is_default ? '请先切换全局默认模型' : '删除提供商及其所有模型；不会删除环境变量中的凭据'" :aria-label="`删除提供商 ${selectedLLMProvider()?.name || ''}`">
+                                    <button type="button" class="btn btn-outline-warning" x-show="llmSettings.editor.id && llmSettings.editor.credential_source === 'credential_store'" @click="clearLLMProviderCredential" :disabled="llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving" aria-label="清除页面密钥">清除页面密钥</button>
+                                    <button type="button" class="btn btn-outline-danger" x-show="llmSettings.editor.id" @click="deleteLLMProvider" :disabled="selectedLLMProvider()?.is_default || llmSettings.saving || llmSettings.testing || Boolean(llmSettings.providerDeletingId) || llmSettings.syncing || llmSettings.modelSaving" :title="selectedLLMProvider()?.is_default ? '请先切换全局默认模型' : '删除提供商及其所有模型；不会删除环境变量中的凭据'" :aria-label="`删除提供商 ${selectedLLMProvider()?.name || ''}`">
                                         <span x-show="llmSettings.providerDeletingId !== llmSettings.editor.id"><i class="bi bi-trash me-1" aria-hidden="true"></i>删除提供商</span>
                                         <span x-show="llmSettings.providerDeletingId === llmSettings.editor.id">删除中…</span>
                                     </button>
                                 </div>
                                 <span x-show="!llmSettings.editor.id"></span>
-                                <button type="submit" class="btn btn-primary" :disabled="llmSettings.saving || llmSettings.testing || !llmSettings.editor.name || !llmSettings.editor.base_url" :aria-busy="llmSettings.saving">
+                                <button type="submit" class="btn btn-primary" :disabled="llmSettings.saving || llmSettings.testing || !llmSettings.editor.name || !llmSettings.editor.base_url || llmSettings.syncing || llmSettings.modelSaving" :aria-busy="llmSettings.saving">
                                     <span x-show="!llmSettings.saving"><i class="bi bi-save me-1" aria-hidden="true"></i>保存提供商</span>
                                     <span x-show="llmSettings.saving">保存中…</span>
                                 </button>
@@ -130,7 +130,7 @@
                         <section aria-labelledby="llm-models-title" x-show="llmSettings.editor.id">
                             <div class="d-flex align-items-start justify-content-between gap-3 mb-3 flex-wrap">
                                 <div><h5 class="mb-1" id="llm-models-title">模型列表</h5><div class="small text-muted">同步只合并远端模型，不会移除手工模型或暂时缺失的模型。</div></div>
-                                <button type="button" class="btn btn-outline-primary btn-sm" @click="syncLLMModels" :disabled="llmSettings.syncing || llmSettings.saving || llmSettings.testing || !llmSettings.editor.is_enabled" :aria-busy="llmSettings.syncing" aria-label="同步模型">
+                                <button type="button" class="btn btn-outline-primary btn-sm" @click="syncLLMModels" :disabled="llmSettings.syncing || llmSettings.saving || llmSettings.testing || !llmSettings.editor.is_enabled || llmSettings.modelSaving" :aria-busy="llmSettings.syncing" aria-label="同步模型">
                                     <span x-show="!llmSettings.syncing"><i class="bi bi-cloud-arrow-down me-1" aria-hidden="true"></i>同步模型</span>
                                     <span x-show="llmSettings.syncing">同步中…</span>
                                 </button>
@@ -144,20 +144,21 @@
                                             <div class="d-flex flex-column flex-sm-row align-items-sm-start justify-content-between gap-2">
                                                 <div class="min-w-0">
                                                     <div class="d-flex gap-2 align-items-center flex-wrap"><span class="fw-semibold text-break" x-text="model.display_name || model.model_id"></span><span class="badge text-bg-primary" x-show="model.is_default">全局默认</span><span class="badge text-bg-secondary" x-show="!model.is_enabled">已停用</span></div>
-                                                    <div class="small text-muted text-break"><code x-text="model.model_id"></code><span class="ms-2" x-text="model.source === 'manual' ? '手工' : (model.source === 'imported' ? '导入' : '同步')"></span></div>
+                                                    <div class="small text-muted text-break"><code x-text="model.model_id"></code><span class="ms-2" x-text="model.source === 'manual' ? '手工' : (model.source === 'imported' ? '导入' : '同步')"></span><span class="ms-2" x-text="model.max_output_tokens == null ? '输出上限：继承全局' : (model.max_output_tokens === 0 ? '输出上限：网关默认' : `输出上限：${model.max_output_tokens} Token`)"></span></div>
                                                 </div>
                                                 <div class="d-flex gap-2 flex-wrap flex-shrink-0">
-                                                    <button type="button" class="btn btn-outline-secondary btn-sm" @click="startEditLLMModel(model)" :disabled="llmSettings.modelSaving || llmSettings.saving || llmSettings.testing" :aria-label="`编辑模型 ${model.display_name || model.model_id}`">编辑</button>
-                                                    <button type="button" class="btn btn-outline-primary btn-sm" @click="setDefaultLLMModel(model)" :disabled="model.is_default || !model.is_enabled || !llmSettings.editor.is_enabled || llmSettings.saving || llmSettings.testing || Boolean(llmSettings.defaultSavingId)" :aria-label="`设为默认模型 ${model.display_name || model.model_id}`">设为默认</button>
-                                                    <button type="button" class="btn btn-outline-danger btn-sm" @click="deleteLLMModel(model)" :disabled="model.is_default || llmSettings.modelSaving || llmSettings.saving || llmSettings.testing || Boolean(llmSettings.modelDeletingId)" :title="model.is_default ? '请先切换全局默认模型' : ''" :aria-label="`删除模型 ${model.display_name || model.model_id}`"><span x-show="llmSettings.modelDeletingId !== model.id">删除</span><span x-show="llmSettings.modelDeletingId === model.id">删除中…</span></button>
+                                                    <button type="button" class="btn btn-outline-secondary btn-sm" @click="startEditLLMModel(model)" :disabled="llmSettings.modelSaving || llmSettings.saving || llmSettings.testing || llmSettings.syncing" :aria-label="`编辑模型 ${model.display_name || model.model_id}`">编辑</button>
+                                                    <button type="button" class="btn btn-outline-primary btn-sm" @click="setDefaultLLMModel(model)" :disabled="model.is_default || !model.is_enabled || !llmSettings.editor.is_enabled || llmSettings.saving || llmSettings.testing || Boolean(llmSettings.defaultSavingId) || llmSettings.syncing || llmSettings.modelSaving" :aria-label="`设为默认模型 ${model.display_name || model.model_id}`">设为默认</button>
+                                                    <button type="button" class="btn btn-outline-danger btn-sm" @click="deleteLLMModel(model)" :disabled="model.is_default || llmSettings.modelSaving || llmSettings.saving || llmSettings.testing || Boolean(llmSettings.modelDeletingId) || llmSettings.syncing" :title="model.is_default ? '请先切换全局默认模型' : ''" :aria-label="`删除模型 ${model.display_name || model.model_id}`"><span x-show="llmSettings.modelDeletingId !== model.id">删除</span><span x-show="llmSettings.modelDeletingId === model.id">删除中…</span></button>
                                                 </div>
                                             </div>
                                         </div>
                                         <template x-if="llmSettings.modelEditor?.id === model.id">
                                             <form class="row g-2 align-items-end" @submit.prevent="saveLLMModel">
-                                                <div class="col-12 col-md-5"><label class="form-label small" :for="`llm-edit-model-id-${model.id}`">模型 ID</label><input class="form-control form-control-sm" :id="`llm-edit-model-id-${model.id}`" x-model.trim="llmSettings.modelEditor.model_id" required :disabled="llmSettings.modelSaving || llmSettings.saving || llmSettings.testing"></div>
-                                                <div class="col-12 col-md-4"><label class="form-label small" :for="`llm-edit-model-name-${model.id}`">显示名</label><input class="form-control form-control-sm" :id="`llm-edit-model-name-${model.id}`" x-model.trim="llmSettings.modelEditor.display_name" :disabled="llmSettings.modelSaving || llmSettings.saving || llmSettings.testing"></div>
-                                                <div class="col-12 col-md-3 d-flex gap-2 align-items-center flex-wrap"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" role="switch" :id="`llm-edit-model-enabled-${model.id}`" x-model="llmSettings.modelEditor.is_enabled" :disabled="llmSettings.modelSaving || llmSettings.saving || llmSettings.testing || (llmSettings.modelEditor.is_default && llmSettings.modelEditor.is_enabled)"><label class="form-check-label small" :for="`llm-edit-model-enabled-${model.id}`">启用</label></div><span class="small text-muted" x-show="llmSettings.modelEditor.is_default">请先切换全局默认模型</span><button type="submit" class="btn btn-primary btn-sm" :disabled="llmSettings.modelSaving || llmSettings.saving || llmSettings.testing">保存</button><button type="button" class="btn btn-link btn-sm" @click="llmSettings.modelEditor = null" :disabled="llmSettings.modelSaving || llmSettings.saving || llmSettings.testing">取消</button></div>
+                                                <div class="col-12 col-md-4"><label class="form-label small" :for="`llm-edit-model-id-${model.id}`">模型 ID</label><input class="form-control form-control-sm" :id="`llm-edit-model-id-${model.id}`" x-model.trim="llmSettings.modelEditor.model_id" required :disabled="llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving"></div>
+                                                <div class="col-12 col-md-4"><label class="form-label small" :for="`llm-edit-model-name-${model.id}`">显示名</label><input class="form-control form-control-sm" :id="`llm-edit-model-name-${model.id}`" x-model.trim="llmSettings.modelEditor.display_name" :disabled="llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving"></div>
+                                                <div class="col-12 col-md-4"><label class="form-label small" :for="`llm-edit-model-max-output-tokens-${model.id}`">最大输出 Token</label><input class="form-control form-control-sm" type="number" min="0" step="1" :id="`llm-edit-model-max-output-tokens-${model.id}`" x-model="llmSettings.modelEditor.max_output_tokens" placeholder="留空继承全局；0 使用网关默认" :disabled="llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving"></div>
+                                                <div class="col-12 d-flex gap-2 align-items-center flex-wrap"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" role="switch" :id="`llm-edit-model-enabled-${model.id}`" x-model="llmSettings.modelEditor.is_enabled" :disabled="llmSettings.modelEditor.is_default && llmSettings.modelEditor.is_enabled || llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving"><label class="form-check-label small" :for="`llm-edit-model-enabled-${model.id}`">启用</label></div><span class="small text-muted" x-show="llmSettings.modelEditor.is_default">请先切换全局默认模型</span><button type="submit" class="btn btn-primary btn-sm" :disabled="llmSettings.modelSaving || llmSettings.saving || llmSettings.testing || llmSettings.syncing">保存</button><button type="button" class="btn btn-link btn-sm" @click="llmSettings.modelEditor = null" :disabled="llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving">取消</button></div>
                                             </form>
                                         </template>
                                     </div>
@@ -165,9 +166,10 @@
                             </div>
 
                             <form class="row g-2 align-items-end" @submit.prevent="addLLMModel">
-                                <div class="col-12 col-md-5"><label class="form-label" for="llm-manual-model-id">手工模型 ID</label><input id="llm-manual-model-id" class="form-control" x-model.trim="llmSettings.modelDraft.model_id" maxlength="255" required placeholder="例如 gpt-5.1" :disabled="llmSettings.saving || llmSettings.testing"></div>
-                                <div class="col-12 col-md-4"><label class="form-label" for="llm-manual-model-name">模型显示名</label><input id="llm-manual-model-name" class="form-control" x-model.trim="llmSettings.modelDraft.display_name" maxlength="255" placeholder="选填" :disabled="llmSettings.saving || llmSettings.testing"></div>
-                                <div class="col-12 col-md-3 d-grid"><button type="submit" class="btn btn-outline-primary" :disabled="llmSettings.modelSaving || llmSettings.saving || llmSettings.testing || !llmSettings.modelDraft.model_id" aria-label="添加模型">添加模型</button></div>
+                                <div class="col-12 col-md-4"><label class="form-label" for="llm-manual-model-id">手工模型 ID</label><input id="llm-manual-model-id" class="form-control" x-model.trim="llmSettings.modelDraft.model_id" maxlength="255" required placeholder="例如 gpt-5.1" :disabled="llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving"></div>
+                                <div class="col-12 col-md-4"><label class="form-label" for="llm-manual-model-name">模型显示名</label><input id="llm-manual-model-name" class="form-control" x-model.trim="llmSettings.modelDraft.display_name" maxlength="255" placeholder="选填" :disabled="llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving"></div>
+                                <div class="col-12 col-md-4"><label class="form-label" for="llm-manual-model-max-output-tokens">最大输出 Token</label><input id="llm-manual-model-max-output-tokens" class="form-control" type="number" min="0" step="1" x-model="llmSettings.modelDraft.max_output_tokens" placeholder="留空继承全局；0 使用网关默认" :disabled="llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving"></div>
+                                <div class="col-12 d-grid"><button type="submit" class="btn btn-outline-primary" :disabled="llmSettings.modelSaving || !llmSettings.modelDraft.model_id || llmSettings.saving || llmSettings.testing || llmSettings.syncing" aria-label="添加模型">添加模型</button></div>
                             </form>
                         </section>
 
@@ -177,11 +179,11 @@
                             <form class="row g-2 align-items-end" @submit.prevent="testLLMConnection">
                                 <div class="col-12 col-md-8">
                                     <label class="form-label" for="llm-test-model-id">测试模型 ID</label>
-                                    <input id="llm-test-model-id" class="form-control" x-model.trim="llmSettings.test.model_id" list="llm-model-options" required placeholder="选择已有模型或自由输入" :disabled="llmSettings.saving || llmSettings.testing">
+                                    <input id="llm-test-model-id" class="form-control" x-model.trim="llmSettings.test.model_id" list="llm-model-options" required placeholder="选择已有模型或自由输入" :disabled="llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving">
                                     <datalist id="llm-model-options"><template x-for="model in (selectedLLMProvider()?.models || [])" :key="model.id"><option :value="model.model_id" x-text="model.display_name || model.model_id"></option></template></datalist>
                                 </div>
                                 <div class="col-12 col-md-4 d-grid">
-                                    <button type="submit" class="btn btn-outline-info" :disabled="llmSettings.saving || llmSettings.testing || !llmSettings.editor.base_url || !llmSettings.test.model_id" :aria-busy="llmSettings.testing" aria-label="测试连接">
+                                    <button type="submit" class="btn btn-outline-info" :disabled="llmSettings.saving || llmSettings.testing || !llmSettings.editor.base_url || !llmSettings.test.model_id || llmSettings.syncing || llmSettings.modelSaving" :aria-busy="llmSettings.testing" aria-label="测试连接">
                                         <span x-show="!llmSettings.testing"><i class="bi bi-plug me-1" aria-hidden="true"></i>测试连接</span>
                                         <span x-show="llmSettings.testing">测试中…</span>
                                     </button>
@@ -202,7 +204,7 @@
 <section class="mb-4">
     <div class="d-flex align-items-center justify-content-between gap-3 mb-3 flex-wrap">
         <div><h3 class="mb-1">红果剧目来源与抓包设置</h3><div class="small text-muted">第三方来源用于剧目和剧集下载；抓包服务用于本地已抓取的红果视频。</div></div>
-        <button type="button" class="btn btn-outline-secondary btn-sm" @click="fetchDramaSettings" :disabled="dramaAnalysis.loading" title="刷新设置" aria-label="刷新设置"><i class="bi bi-arrow-clockwise"></i></button>
+        <button type="button" class="btn btn-outline-secondary btn-sm" @click="fetchDramaSettings" :disabled="dramaAnalysis.loading || llmSettings.saving || llmSettings.testing || llmSettings.syncing || llmSettings.modelSaving" title="刷新设置" aria-label="刷新设置"><i class="bi bi-arrow-clockwise"></i></button>
     </div>
     <div class="row g-3">
         <div class="col-12 col-xl-6">

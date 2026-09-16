@@ -3,6 +3,7 @@
 
     const STAGE_LABELS = {
         project: '项目资料',
+        breakdown: '剧目拆解',
         brief: '创作任务书',
         characters: '人物',
         relationships: '人物关系',

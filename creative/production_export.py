@@ -8,7 +8,8 @@
 
 """Read-only, atomic production handoff (no repository initialization or writes).
 
-Contract 1.0: project and brief are row dictionaries; characters, relationships,
+Contract 1.0: project and brief are row dictionaries; standard imitation
+ projects also include their locked source breakdown. Characters, relationships,
  outlines, beats and scripts are lists of row dictionaries. Original columns,
  including *_json, versions and timestamps, are preserved. Each *_json column
  also has a decoded alias without that suffix (content, upstream_refs, etc.).
@@ -43,6 +44,35 @@ from pathlib import Path
 from typing import Any, Callable
 
 _LOCKED = {"locked", "approved"}
+
+
+def _stage_edit_url(
+    project_id: int,
+    stage: str,
+    episode_number: int | None = None,
+) -> str:
+    """Return the registered workspace page for resolving an export issue."""
+    if stage == "breakdown":
+        return "/selection/topics"
+    if stage in {"project", "brief"}:
+        return f"/planning/projects/{project_id}/brief"
+    if stage in {"characters", "relationships"}:
+        return f"/planning/projects/{project_id}/characters"
+    if stage == "outline":
+        return f"/writing/projects/{project_id}/outlines"
+    if stage in {"beats", "script"}:
+        number = max(1, int(episode_number or 1))
+        page = "beats" if stage == "beats" else "scripts"
+        return f"/writing/projects/{project_id}/episodes/{number}/{page}"
+    return "/writing/projects"
+
+
+def _exports_breakdown(project: dict[str, Any]) -> bool:
+    """Only standard imitation projects carry their source breakdown."""
+    return (
+        str(project.get("creation_mode") or "imitation") == "imitation"
+        and str(project.get("workflow_mode") or "sequential") != "free"
+    )
 
 
 def _digest(value: Any) -> str:
@@ -125,12 +155,10 @@ class _Inspection:
 
     def check(self, stage: str, operation: Callable, *, number: int | None = None,
               dependencies: bool = True) -> Any:
-        route = 'planning' if stage in {'project', 'brief', 'characters', 'relationships', 'outline'} else 'writing'
-        page = {'project': 'brief', 'relationships': 'characters', 'outline': 'outlines', 'script': 'scripts'}.get(stage, stage)
         result = {
             'stage': stage, 'episode_number': number, 'state': 'blocked',
             'versions': [], 'message': '上游未通过检查，无法验证',
-            'edit_url': f'/{route}/projects/{self.project["id"]}/{page}',
+            'edit_url': _stage_edit_url(self.project["id"], stage, number),
         }
         self.stages.append(result)
         if not dependencies:
@@ -223,7 +251,7 @@ def _package_version_manifest(package: dict[str, Any]) -> dict[str, Any]:
     provenance = package["provenance"]
     character_version = max((int(item.get("version") or 0) for item in characters), default=0)
     outline_version = max((int(item.get("version") or 0) for item in outlines.values()), default=0)
-    return {
+    manifest = {
         "brief": _manifest_item(brief["id"], brief.get("version")),
         "characters": _manifest_item(
             provenance["character_batch_id"], character_version,
@@ -240,6 +268,15 @@ def _package_version_manifest(package: dict[str, Any]) -> dict[str, Any]:
             for number in provenance["episode_numbers"]
         },
     }
+    breakdown = package.get("breakdown")
+    if breakdown is not None:
+        manifest = {
+            "breakdown": _manifest_item(
+                breakdown["id"], breakdown.get("version")
+            ),
+            **manifest,
+        }
+    return manifest
 
 
 def _requested_manifest_item(
@@ -550,6 +587,31 @@ def _custom_sequential_snapshot(
     manifest: dict[str, Any],
 ) -> dict[str, Any] | None:
     project_id = int(project["id"])
+    breakdown = None
+    if _exports_breakdown(project):
+        breakdown_request = _requested_manifest_item(manifest, "breakdown")
+
+        def read_breakdown() -> dict[str, Any]:
+            raw = conn.execute(
+                "SELECT * FROM creative_breakdowns WHERE id = ? AND topic_id = ?",
+                (project.get("breakdown_id"), project.get("topic_id")),
+            ).fetchone()
+            if raw is None:
+                raise ValueError("breakdown: missing locked input")
+            value = _row(raw)
+            _locked(value, "breakdown")
+            if (
+                breakdown_request is not None
+                and str(breakdown_request["resource_ref"]) != str(value["id"])
+            ):
+                raise ValueError("breakdown: selected version no longer exists")
+            _assert_requested_version(
+                breakdown_request, value.get("version"), "breakdown"
+            )
+            _digest(value)
+            return value
+
+        breakdown = inspection.check("breakdown", read_breakdown)
     briefs = [
         _row(row) for row in conn.execute(
             "SELECT * FROM creative_blueprints WHERE project_id = ? "
@@ -765,6 +827,12 @@ def _custom_sequential_snapshot(
         "brief": brief, "characters": characters, "relationships": relationships,
         "outlines": outlines, "beats": beats, "scripts": scripts,
     }
+    if breakdown is not None:
+        package["breakdown"] = breakdown
+        package["provenance"].update({
+            "breakdown_id": breakdown["id"],
+            "breakdown_version": breakdown["version"],
+        })
     package["version_manifest"] = _package_version_manifest(package)
     package["fingerprint"] = _digest(_fingerprint_payload(package))
     return package
@@ -1141,6 +1209,22 @@ def _inspect_snapshot(
                 conn, inspection, project, package, numbers, strategy,
             )
             return inspection, package
+        breakdown = None
+        if _exports_breakdown(project):
+            breakdown_row = conn.execute(
+                "SELECT * FROM creative_breakdowns WHERE id = ? AND topic_id = ?",
+                (project.get("breakdown_id"), project.get("topic_id")),
+            ).fetchone()
+
+            def read_breakdown():
+                if breakdown_row is None:
+                    raise ValueError("breakdown: missing locked input")
+                value = _row(breakdown_row)
+                _locked(value, "breakdown")
+                _digest(value)
+                return value
+
+            breakdown = inspection.check("breakdown", read_breakdown)
         brief_row = conn.execute(
             "SELECT * FROM creative_blueprints WHERE project_id = ? AND id = ?",
             (project_id, project.get("locked_brief_id")),
@@ -1229,6 +1313,12 @@ def _inspect_snapshot(
             },
             "brief": brief, **cast, "outlines": outlines, "beats": beats, "scripts": scripts,
         }
+        if breakdown is not None:
+            package["breakdown"] = breakdown
+            package["provenance"].update({
+                "breakdown_id": breakdown["id"],
+                "breakdown_version": breakdown["version"],
+            })
         package["version_manifest"] = _package_version_manifest(package)
         package["fingerprint"] = _digest(_fingerprint_payload(package))
         _attach_version_selection(

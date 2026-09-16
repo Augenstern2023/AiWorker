@@ -46,6 +46,8 @@ from creative.script_service import (
 
 
 MAX_INLINE_SOURCE_SNAPSHOT_BYTES = 2 * 1024 * 1024
+BEATS_SERIES_CHUNK_SIZE = 10
+SCRIPT_SERIES_CHUNK_SIZE = 2
 
 
 def create_provider(model_record_id: str | None = None):
@@ -87,6 +89,10 @@ def _provider_generation_meta(
 
 def emit(job: CrawlJob, event: str, message: str, level: str = "info", payload: dict[str, Any] | None = None) -> None:
     emit_event(event, job.job_id, "creative-phase4-worker", "creative", level, message, payload or {})
+
+
+def _usage_payload(job: CrawlJob, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    return dict(payload or {})
 
 
 def _resolve_outline_reasoning_effort(job: CrawlJob) -> str:
@@ -314,6 +320,7 @@ def _generation_context(
 def _generation_meta(
     meta: dict[str, Any], extra: dict[str, Any]
 ) -> dict[str, Any]:
+    prompt_snapshot = extra.get("prompt_snapshot")
     return {
         **meta,
         "generation_instruction": str(extra.get("generation_instruction") or ""),
@@ -327,6 +334,25 @@ def _generation_meta(
         "llm_model_display_name": str(
             extra.get("llm_model_display_name") or ""
         ),
+        "prompt_source": "template" if isinstance(prompt_snapshot, dict) else "system",
+        "prompt_ab_experiment_id": str(
+            extra.get("prompt_ab_experiment_id") or ""
+        ),
+        "prompt_ab_arm": str(extra.get("prompt_ab_arm") or ""),
+        "prompt_ab_source_fingerprint": str(
+            extra.get("prompt_ab_source_fingerprint") or ""
+        ),
+        **(
+            {
+                "prompt_snapshot": prompt_snapshot,
+                "prompt_template_id": str(prompt_snapshot.get("template_id") or ""),
+                "prompt_template_key": str(prompt_snapshot.get("template_key") or ""),
+                "prompt_template_revision": int(prompt_snapshot.get("revision") or 0),
+                "prompt_content_hash": str(prompt_snapshot.get("content_hash") or ""),
+            }
+            if isinstance(prompt_snapshot, dict)
+            else {}
+        ),
     }
 
 
@@ -335,6 +361,7 @@ async def generate_series_overview(
     project: dict[str, Any],
     episodes: list[dict[str, Any]],
     series_arc: str,
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     overview, meta = await complete_with_one_repair(
         provider,
@@ -343,7 +370,8 @@ async def generate_series_overview(
                 "project": project,
                 "episodes": episodes,
                 "series_arc": series_arc,
-            }
+            },
+            prompt_snapshot,
         ),
         lambda payload: normalize_series_overview(
             payload.get("series_overview") if "series_overview" in payload else payload
@@ -370,6 +398,38 @@ async def _run_once(job: CrawlJob) -> None:
     source_authority = _validate_source_authority(extra, repository, project_id)
     inputs = repository.get_project_inputs(project_id)
     source_snapshot = _load_source_snapshot(extra)
+    prompt_snapshot = (
+        dict(source_snapshot.get("prompt_snapshot") or {})
+        if isinstance(source_snapshot, dict)
+        else {}
+    )
+    if prompt_snapshot:
+        expected_prompt_stage = {
+            "blueprints": "brief",
+            "blueprint_variant": "brief",
+            "characters": "characters",
+            "outlines": "outline",
+            "outline_overview": "outline",
+            "beats": "beats",
+            "script": "script",
+        }.get(action)
+        expected_mode = (
+            "rewrite"
+            if action in {"blueprint_variant", "outline_overview"}
+            else "series"
+            if action == "outlines"
+            else "series"
+            if action == "blueprints" and int(extra.get("count") or 1) > 1
+            else "series"
+            if bool(extra.get("series"))
+            else "single"
+        )
+        if (
+            str(prompt_snapshot.get("stage") or "") != expected_prompt_stage
+            or str(prompt_snapshot.get("mode") or "") != expected_mode
+        ):
+            raise ValueError("server prompt snapshot does not match generation task")
+        extra["prompt_snapshot"] = prompt_snapshot
     context = _generation_context(extra, source_snapshot)
     project = dict(inputs["project"])
     if context is not None:
@@ -475,6 +535,7 @@ async def _run_once(job: CrawlJob) -> None:
                 list(extra.get("market_context") or []),
                 list(extra.get("blocked_terms") or []),
                 count,
+                prompt_snapshot=prompt_snapshot or None,
             )
             source_refs = {
                 "seed_id": seed["id"],
@@ -500,7 +561,12 @@ async def _run_once(job: CrawlJob) -> None:
                     "generation_context": context,
                 }
             generated, meta = await generate_blueprints(
-                provider, project, inputs["topic"], breakdown, count
+                provider,
+                project,
+                inputs["topic"],
+                breakdown,
+                count,
+                prompt_snapshot=prompt_snapshot or None,
             )
             resources = repository.create_blueprints(
                 project_id,
@@ -527,6 +593,7 @@ async def _run_once(job: CrawlJob) -> None:
             instruction=str(extra.get("instruction") or ""),
             market_context=list(extra.get("market_context") or []),
             blocked_terms=list(extra.get("blocked_terms") or []),
+            prompt_snapshot=prompt_snapshot or None,
         )
         resources = repository.create_blueprints(
             project_id, [generated], job.job_id, _generation_meta(meta, extra),
@@ -540,7 +607,9 @@ async def _run_once(job: CrawlJob) -> None:
         brief = dict(_locked_brief(project))
         if context is not None:
             brief["generation_context"] = context
-        generated, meta = await generate_character_bundle(provider, project, brief)
+        generated, meta = await generate_character_bundle(
+            provider, project, brief, prompt_snapshot=prompt_snapshot or None
+        )
         bundle = repository.create_character_batch(
             project_id,
             generated["characters"],
@@ -605,7 +674,15 @@ async def _run_once(job: CrawlJob) -> None:
             scope = "全剧阶段弧线" if request_kind == "series_arc" else (
                 f"第 {request.get('batch_start')}-{request.get('batch_end')} 集"
             )
-            if request_kind == "series_arc":
+            if phase == "truncated":
+                message = f"{scope}输出达到上限，准备拆分"
+            elif phase == "split":
+                message = (
+                    f"已将第 {request.get('batch_start')}-{request.get('batch_end')} 集拆分为"
+                    f"第 {request.get('left_start')}-{request.get('left_end')} 集和"
+                    f"第 {request.get('right_start')}-{request.get('right_end')} 集"
+                )
+            elif request_kind == "series_arc":
                 message = "正在规划全剧阶段弧线" if phase == "started" else (
                     f"{scope}模型响应{'失败' if phase == 'failed' else '完成'}"
                 )
@@ -623,10 +700,10 @@ async def _run_once(job: CrawlJob) -> None:
                 job,
                 "progress",
                 message,
-                "error" if phase == "failed" else "info",
+                "error" if phase == "failed" else "warning" if phase == "truncated" else "info",
                 payload,
             )
-            if phase in {"finished", "failed"}:
+            if phase in {"finished", "failed", "truncated"}:
                 active_outline_request.clear()
 
         def save_outline_checkpoint(
@@ -697,6 +774,7 @@ async def _run_once(job: CrawlJob) -> None:
                 resume_stages=resume_stages,
                 resume_series_overview=resume_series_overview,
                 reasoning_effort=outline_reasoning_effort,
+                prompt_snapshot=prompt_snapshot or None,
             )
         if outline_batch_id is None:
             raise RuntimeError("分集大纲未创建任何生成检查点")
@@ -713,6 +791,7 @@ async def _run_once(job: CrawlJob) -> None:
             project,
             [item.get("content") or {} for item in batch["episodes"]],
             str(first_content.get("series_arc") or ""),
+            prompt_snapshot=prompt_snapshot or None,
         )
         saved = repository.update_outline_overview(
             project_id,
@@ -759,8 +838,15 @@ async def _run_once(job: CrawlJob) -> None:
                 job, "progress", f"已恢复 {completed}/{total_episodes} 集",
                 payload={"stage": action, "completed": completed, "total": total_episodes},
             )
-        for start in range(completed + 1, total_episodes + 1, 10):
-            end = min(total_episodes, start + 9)
+        series_chunk_size = (
+            SCRIPT_SERIES_CHUNK_SIZE
+            if action == "script"
+            else BEATS_SERIES_CHUNK_SIZE
+        )
+        for start in range(
+            completed + 1, total_episodes + 1, series_chunk_size
+        ):
+            end = min(total_episodes, start + series_chunk_size - 1)
             retry_completed = start - 1
             await wait_if_paused(job)
             outlines = [
@@ -779,6 +865,7 @@ async def _run_once(job: CrawlJob) -> None:
                 checkpoint_items, meta = await generate_episode_beats_chunk(
                     provider, project, brief, outlines, characters, relationships,
                     continuity_ledger=build_continuity_ledger(prior),
+                    prompt_snapshot=prompt_snapshot or None,
                 )
             else:
                 selected_beats = {
@@ -800,6 +887,7 @@ async def _run_once(job: CrawlJob) -> None:
                     continuity_ledger=_continuity_ledger_through(
                         project, start - 1, repository=repository
                     ),
+                    prompt_snapshot=prompt_snapshot or None,
                 )
             if generation_reservation is not None:
                 repository.validate_generation_reservation(
@@ -813,7 +901,7 @@ async def _run_once(job: CrawlJob) -> None:
                 {
                     **_generation_meta(meta, extra),
                     "series_generation": True,
-                    "chunk_size": 10,
+                    "chunk_size": series_chunk_size,
                     "checkpoint_start": start,
                     "checkpoint_end": end,
                     "checkpoint_episode_count": end,
@@ -866,6 +954,7 @@ async def _run_once(job: CrawlJob) -> None:
                 ),
                 brief=brief,
                 relationships=relationships,
+                prompt_snapshot=prompt_snapshot or None,
             )
             resource = repository.create_episode_beats(
                 project_id,
@@ -896,6 +985,7 @@ async def _run_once(job: CrawlJob) -> None:
                 ),
                 brief=brief,
                 relationships=relationships,
+                prompt_snapshot=prompt_snapshot or None,
             )
             resource = repository.create_episode_script(
                 project_id,
@@ -928,7 +1018,12 @@ async def _run_once(job: CrawlJob) -> None:
     )
     emit(job, "artifact", "Phase 4 生成记录", payload={"path": str(report_path), "artifact_type": "json"})
     emit(job, "progress", "生成完成", payload={"stage": action, "completed": total_episodes, "total": total_episodes})
-    emit(job, "job_finished", "创作内容生成完成", payload=result)
+    emit(
+        job,
+        "job_finished",
+        "创作内容生成完成",
+        payload=_usage_payload(job, result),
+    )
 
 
 async def run(job: CrawlJob) -> None:
@@ -1003,7 +1098,13 @@ def main() -> int:
     try:
         asyncio.run(run(job))
     except Exception as exc:
-        emit(job, "job_failed", str(exc), "error")
+        emit(
+            job,
+            "job_failed",
+            str(exc),
+            "error",
+            _usage_payload(job),
+        )
         return 1
     return 0
 

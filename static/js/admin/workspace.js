@@ -961,7 +961,9 @@ window.aiworkerModules.push(() => ({
                         credential_source: provider.credential_source || 'missing',
                         is_enabled: provider.is_enabled !== false
                     };
-                    state.modelDraft = {model_id: '', display_name: ''};
+                    state.modelDraft = {
+                        model_id: '', display_name: '', max_output_tokens: ''
+                    };
                     state.modelEditor = null;
                     state.test = {
                         model_id: (provider.models || []).find(model => model.is_default)?.model_id
@@ -991,7 +993,9 @@ window.aiworkerModules.push(() => ({
                         credential_source: 'missing',
                         is_enabled: true
                     };
-                    state.modelDraft = {model_id: '', display_name: ''};
+                    state.modelDraft = {
+                        model_id: '', display_name: '', max_output_tokens: ''
+                    };
                     state.modelEditor = null;
                     state.test = {model_id: '', result: null};
                     state.error = '';
@@ -1019,6 +1023,7 @@ window.aiworkerModules.push(() => ({
 
                 async saveLLMProvider() {
                     const state = this.llmSettings;
+                    if (state.saving || state.testing || state.syncing || state.modelSaving) return;
                     if (state.saving || state.testing) return;
                     const editor = state.editor;
                     if (!String(editor.name || '').trim() || !String(editor.base_url || '').trim()) {
@@ -1094,6 +1099,7 @@ window.aiworkerModules.push(() => ({
 
                 async clearLLMProviderCredential() {
                     const state = this.llmSettings;
+                    if (state.saving || state.testing || state.syncing || state.modelSaving) return;
                     const providerId = state.editor.id;
                     if (!providerId || state.editor.credential_source !== 'credential_store' || state.saving || state.testing) return;
                     state.saving = true;
@@ -1119,6 +1125,7 @@ window.aiworkerModules.push(() => ({
 
                 async deleteLLMProvider() {
                     const state = this.llmSettings;
+                    if (state.saving || state.testing || state.syncing || state.modelSaving) return;
                     const provider = this.selectedLLMProvider();
                     if (!provider?.id || provider.is_default || state.providerDeletingId) return;
                     const label = provider.name || provider.id;
@@ -1149,6 +1156,7 @@ window.aiworkerModules.push(() => ({
 
                 async syncLLMModels() {
                     const state = this.llmSettings;
+                    if (state.saving || state.testing || state.syncing || state.modelSaving) return;
                     const providerId = state.editor.id;
                     if (!providerId || state.syncing) return;
                     state.syncing = true;
@@ -1176,6 +1184,7 @@ window.aiworkerModules.push(() => ({
 
                 async addLLMModel() {
                     const state = this.llmSettings;
+                    if (state.saving || state.testing || state.syncing || state.modelSaving) return;
                     const providerId = state.editor.id;
                     const modelId = String(state.modelDraft.model_id || '').trim();
                     if (!providerId || !modelId) {
@@ -1194,6 +1203,9 @@ window.aiworkerModules.push(() => ({
                                 body: JSON.stringify({
                                     model_id: modelId,
                                     display_name: String(state.modelDraft.display_name || '').trim(),
+                                    max_output_tokens: String(state.modelDraft.max_output_tokens ?? '').trim() === ''
+                                        ? null
+                                        : Number(state.modelDraft.max_output_tokens),
                                     is_enabled: true
                                 })
                             }
@@ -1201,7 +1213,9 @@ window.aiworkerModules.push(() => ({
                         let data = {};
                         try { data = await response.json(); } catch (_) {}
                         if (!response.ok) throw new Error(this.llmResponseMessage(data, '添加模型失败'));
-                        state.modelDraft = {model_id: '', display_name: ''};
+                        state.modelDraft = {
+                            model_id: '', display_name: '', max_output_tokens: ''
+                        };
                         state.notice = '模型已添加';
                         await this.fetchLLMSettings({selectedProviderId: providerId});
                     } catch (error) {
@@ -1216,6 +1230,7 @@ window.aiworkerModules.push(() => ({
                         id: model.id,
                         model_id: model.model_id || '',
                         display_name: model.display_name || '',
+                        max_output_tokens: model.max_output_tokens ?? '',
                         is_enabled: model.is_enabled !== false,
                         is_default: Boolean(model.is_default)
                     };
@@ -1224,6 +1239,7 @@ window.aiworkerModules.push(() => ({
 
                 async saveLLMModel() {
                     const state = this.llmSettings;
+                    if (state.saving || state.testing || state.syncing || state.modelSaving) return;
                     if (state.saving || state.testing) return;
                     const editor = state.modelEditor;
                     if (!editor || !String(editor.model_id || '').trim()) {
@@ -1240,6 +1256,9 @@ window.aiworkerModules.push(() => ({
                             body: JSON.stringify({
                                 model_id: String(editor.model_id).trim(),
                                 display_name: String(editor.display_name || '').trim(),
+                                max_output_tokens: String(editor.max_output_tokens ?? '').trim() === ''
+                                    ? null
+                                    : Number(editor.max_output_tokens),
                                 is_enabled: Boolean(editor.is_enabled)
                             })
                         });
@@ -1258,6 +1277,7 @@ window.aiworkerModules.push(() => ({
 
                 async deleteLLMModel(model) {
                     const state = this.llmSettings;
+                    if (state.saving || state.testing || state.syncing || state.modelSaving) return;
                     if (!model?.id || model.is_default || state.modelDeletingId) return;
                     const label = model.display_name || model.model_id;
                     if (!window.confirm(`确认删除模型「${label}」？删除后可重新同步或手工添加。`)) return;
@@ -1283,6 +1303,7 @@ window.aiworkerModules.push(() => ({
 
                 async setDefaultLLMModel(model) {
                     const state = this.llmSettings;
+                    if (state.saving || state.testing || state.syncing || state.modelSaving) return;
                     if (!model?.id || state.defaultSavingId) return;
                     state.defaultSavingId = model.id;
                     state.error = '';
@@ -1307,6 +1328,7 @@ window.aiworkerModules.push(() => ({
 
                 async testLLMConnection() {
                     const state = this.llmSettings;
+                    if (state.saving || state.testing || state.syncing || state.modelSaving) return;
                     const editor = state.editor;
                     const modelId = String(state.test.model_id || '').trim();
                     if (!String(editor.base_url || '').trim() || !modelId) {

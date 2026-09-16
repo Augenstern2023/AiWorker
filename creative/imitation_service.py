@@ -12,7 +12,11 @@ import json
 import re
 from typing import Any, Awaitable, Callable
 
-from analysis.llm import LLMError, is_retryable_llm_exception
+from analysis.llm import (
+    LLMError,
+    LLMOutputTruncatedError,
+    is_retryable_llm_exception,
+)
 from creative.prompt_templates import blueprint_messages, repair_messages
 
 
@@ -87,6 +91,8 @@ async def complete_with_one_repair(
                 "repair_attempted": bool(attempt),
             }
         except Exception as exc:
+            if isinstance(exc, LLMOutputTruncatedError):
+                raise
             if is_retryable_llm_exception(exc):
                 raise
             last_error = exc
@@ -135,6 +141,7 @@ async def generate_blueprints(
     topic: dict[str, Any],
     breakdown: dict[str, Any],
     count: int = 3,
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not 3 <= int(count) <= 5:
         raise ValueError("仿制方向数量必须在 3-5 之间")
@@ -146,7 +153,7 @@ async def generate_blueprints(
     }
     items, meta = await complete_with_one_repair(
         provider,
-        blueprint_messages(payload, int(count)),
+        blueprint_messages(payload, int(count), prompt_snapshot),
         lambda result: _validate_blueprints(result, int(count)),
     )
     result: list[dict[str, Any]] = []

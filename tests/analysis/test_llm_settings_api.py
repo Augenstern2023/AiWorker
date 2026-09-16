@@ -1020,6 +1020,59 @@ def test_settings_route_exposes_presets_and_current_default(monkeypatch):
     assert response.json()["presets"]["minimax"]["wire_api"] == "chat_completions"
 
 
+def test_model_routes_accept_update_and_clear_max_output_tokens(monkeypatch):
+    monkeypatch.setenv("TOKEN_ROUTE_KEY", "route-secret")
+    module = _api_module()
+    repository = _repository()
+    provider = repository.create_provider(
+        name="Token Route Provider",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+        api_key_env_var="TOKEN_ROUTE_KEY",
+    )
+    app = FastAPI()
+    app.include_router(
+        module.build_llm_settings_router(
+            module.LLMSettingsService(repository),
+            _RecordingAudit(),
+            administrator_dependency=lambda: _admin(),
+        )
+    )
+    client = TestClient(app)
+
+    created = client.post(
+        f"/api/llm/providers/{provider['id']}/models",
+        json={"model_id": "token-model", "max_output_tokens": 16384},
+    )
+    unchanged = client.put(
+        f"/api/llm/models/{created.json()['id']}",
+        json={"display_name": "Renamed model"},
+    )
+    updated = client.put(
+        f"/api/llm/models/{created.json()['id']}",
+        json={"max_output_tokens": 0},
+    )
+    cleared = client.put(
+        f"/api/llm/models/{created.json()['id']}",
+        json={"max_output_tokens": None},
+    )
+    rejected = client.put(
+        f"/api/llm/models/{created.json()['id']}",
+        json={"max_output_tokens": -1},
+    )
+
+    assert created.status_code == 201
+    assert created.json()["max_output_tokens"] == 16384
+    assert unchanged.status_code == 200
+    assert unchanged.json()["max_output_tokens"] == 16384
+    assert updated.status_code == 200
+    assert updated.json()["max_output_tokens"] == 0
+    assert cleared.status_code == 200
+    assert cleared.json()["max_output_tokens"] is None
+    assert rejected.status_code == 422
+
+
 def test_route_can_test_an_environment_variable_before_saving_provider_changes(
     monkeypatch,
 ):

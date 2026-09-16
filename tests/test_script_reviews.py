@@ -63,6 +63,40 @@ def test_project_source_requires_a_locked_story_context() -> None:
         build_project_source(project, "multiple", [1, 2])
 
 
+def test_free_project_source_uses_selected_heads_for_formal_review() -> None:
+    project = {
+        "id": 8,
+        "name": "自由审核项目",
+        "workflow_mode": "free",
+        "blueprints": [
+            {"id": 11, "status": "brief_locked", "version": 1, "content": {"tone": "逆袭"}},
+        ],
+        "characters": [
+            {"id": 21, "batch_id": "cast-1", "status": "locked", "version": 1, "content": {"name": "主角"}},
+        ],
+        "relationships": [],
+        "episodes": [
+            {"id": 31, "stage": "outline", "batch_id": "outline-1", "episode_number": 1, "status": "locked", "version": 1, "content": {"core_event": "反击"}},
+            {"id": 41, "stage": "beats", "episode_number": 1, "status": "locked", "version": 1, "content": {"beats": [{"order": 1}]}},
+            _script(1, 1, "当前 Head"),
+            _script(1, 2, "未选中的新版本"),
+        ],
+        "resource_heads": [
+            {"stage": "brief", "episode_number": 0, "resource_ref": "11"},
+            {"stage": "characters", "episode_number": 0, "resource_ref": "cast-1"},
+            {"stage": "outline", "episode_number": 0, "resource_ref": "outline-1"},
+            {"stage": "beats", "episode_number": 1, "resource_ref": "41"},
+            {"stage": "script", "episode_number": 1, "resource_ref": "11"},
+        ],
+    }
+
+    source = build_project_source(project, "single", [1])
+
+    assert source["episodes"][0]["resource_id"] == 11
+    assert "当前 Head" in source["episodes"][0]["text"]
+    assert "未选中的新版本" not in source["episodes"][0]["text"]
+
+
 def test_project_source_freezes_the_locked_outline_beats_and_story_context() -> None:
     project = {
         "id": 7,
@@ -129,6 +163,25 @@ def test_formal_review_prompt_requires_an_independent_beats_audit() -> None:
 
     assert "逐项核对 Beats" in messages[0]["content"]
     assert "beats_then_script" in messages[0]["content"]
+
+
+def test_review_template_changes_focus_without_replacing_report_contract() -> None:
+    snapshot = {
+        "stage": "review",
+        "mode": "single",
+        "effective_instruction": "优先检查身份信息差是否清楚。",
+    }
+
+    messages = _review_messages(
+        {"formal": True, "episode_numbers": [1], "episodes": [{}]},
+        snapshot,
+    )
+
+    system = messages[0]["content"]
+    assert "优先检查身份信息差是否清楚" in system
+    assert "ai_verdict、summary、core_findings" in system
+    assert "outline_revision_required" in system
+    assert "不得覆盖前述 JSON 契约" in system
 
 
 def test_uploaded_script_text_accepts_markdown_and_common_chinese_encoding() -> None:
@@ -402,7 +455,7 @@ async def test_review_worker_persists_ai_report_for_confirmation(tmp_path, monke
                 "cross_episode_findings": [],
             }
 
-    monkeypatch.setattr(worker, "create_provider", lambda: FakeProvider())
+    monkeypatch.setattr(worker, "create_provider", lambda **_: FakeProvider())
     monkeypatch.chdir(tmp_path)
     await worker.run(
         CrawlJob(
@@ -464,7 +517,7 @@ async def test_review_worker_keeps_a_viewable_checkpoint_when_multi_episode_revi
                 "cross_episode_findings": [],
             }
 
-    monkeypatch.setattr(worker, "create_provider", lambda: InterruptedProvider())
+    monkeypatch.setattr(worker, "create_provider", lambda **_: InterruptedProvider())
     monkeypatch.chdir(tmp_path)
     with pytest.raises(RuntimeError, match="服务中断"):
         await worker.run(

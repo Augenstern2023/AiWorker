@@ -8,6 +8,10 @@
     const fileWrap = document.getElementById('script-review-file-wrap');
     const scriptFile = document.getElementById('script-review-file');
     const episodes = document.getElementById('script-review-episodes');
+    const reviewPromptWrap = document.getElementById('script-review-prompt-wrap');
+    const reviewPromptTemplate = document.getElementById('script-review-prompt-template');
+    const reviewPromptRequirements = document.getElementById('script-review-prompt-requirements');
+    const reviewPromptDescription = document.getElementById('script-review-prompt-description');
     const submit = document.getElementById('script-review-submit');
     const result = document.getElementById('script-review-result');
     const history = document.getElementById('script-review-history');
@@ -191,13 +195,15 @@
         const isRunning = ['queued', 'running'].includes(optimization.status);
         const completed = optimization.status === 'completed';
         const failed = optimization.status === 'failed';
+        const savedEpisodes = new Set((optimization.drafts || []).map((draft) => Number(draft.episode_number))).size;
+        const totalEpisodes = (optimization.target_episode_numbers || []).length;
         if (optimizationProgressStatus) {
             optimizationProgressStatus.className = `alert ${failed ? 'alert-danger' : completed ? 'alert-success' : 'alert-info'} py-2`;
             optimizationProgressStatus.textContent = failed
-                ? '优化草稿生成失败'
+                ? `优化草稿生成失败；已保存 ${savedEpisodes}/${totalEpisodes} 集，可继续生成未完成的集数。`
                 : completed ? '优化草稿已生成，可进入逐集查看和对比。' : optimizationStatus(optimization.status);
         }
-        if (optimizationProgressValue) optimizationProgressValue.textContent = failed ? '生成失败' : completed ? '生成完成' : '处理中';
+        if (optimizationProgressValue) optimizationProgressValue.textContent = failed ? `已保存 ${savedEpisodes}/${totalEpisodes} 集` : completed ? '生成完成' : '处理中';
         if (optimizationProgressBar) {
             optimizationProgressBar.className = `progress-bar progress-bar-striped${isRunning ? ' progress-bar-animated' : ''}${failed ? ' bg-danger' : completed ? ' bg-success' : ''}`;
             optimizationProgressBar.style.width = '100%';
@@ -205,8 +211,11 @@
         if (failed && optimizationProgressError) {
             optimizationProgressError.textContent = optimization.error || '优化草稿任务执行失败，请稍后重试。';
             optimizationProgressError.classList.remove('d-none');
+        } else if (optimizationProgressError) {
+            optimizationProgressError.textContent = '';
+            optimizationProgressError.classList.add('d-none');
         }
-        optimizationProgressViewDrafts?.classList.toggle('d-none', !completed);
+        optimizationProgressViewDrafts?.classList.toggle('d-none', !completed && !savedEpisodes);
         if (!isRunning && optimizationProgress.elapsedTimer) {
             window.clearInterval(optimizationProgress.elapsedTimer);
             optimizationProgress.elapsedTimer = null;
@@ -260,14 +269,33 @@
         syncSelectAllReviewEpisodes();
     }
 
+    function reviewableScripts(projectData) {
+        const scripts = (projectData?.episodes || []).filter((item) => item.stage === 'script');
+        if (projectData?.workflow_mode !== 'free') {
+            const latest = new Map();
+            scripts.forEach((item) => {
+                const existing = latest.get(Number(item.episode_number));
+                if (!existing || Number(item.version) > Number(existing.version)) {
+                    latest.set(Number(item.episode_number), item);
+                }
+            });
+            return latest;
+        }
+        const byId = new Map(scripts.map((item) => [String(item.id), item]));
+        const current = new Map();
+        (projectData.resource_heads || [])
+            .filter((item) => item.stage === 'script' && Number(item.episode_number) > 0)
+            .forEach((head) => {
+                const item = byId.get(String(head.resource_ref));
+                if (item) current.set(Number(head.episode_number), item);
+            });
+        return current;
+    }
+
     function renderEpisodes() {
         episodes.replaceChildren();
         if (source.value !== 'project' || !selectedProject || mode.value === 'collection') return;
-        const latest = new Map();
-        (selectedProject.episodes || []).filter((item) => item.stage === 'script').forEach((item) => {
-            const existing = latest.get(item.episode_number);
-            if (!existing || Number(item.version) > Number(existing.version)) latest.set(item.episode_number, item);
-        });
+        const latest = reviewableScripts(selectedProject);
         const episodeNumbers = [...latest.keys()].sort((a, b) => a - b);
         if (mode.value === 'single') {
             const select = document.createElement('select');
@@ -315,9 +343,16 @@
     async function loadSelectedProject() {
         const id = Number(project.value || 0);
         selectedProject = null;
-        if (!id) return renderEpisodes();
+        if (reviewPromptRequirements) reviewPromptRequirements.value = '';
+        if (!id) {
+            resetPromptSelector(reviewPromptTemplate, reviewPromptDescription);
+            return renderEpisodes();
+        }
         try {
             selectedProject = await readJson(await aiworkerApi.request(`/api/creative/projects/${id}`));
+            await loadPromptSelector(
+                id, 'review', reviewPromptTemplate, reviewPromptDescription,
+            );
         } catch (requestError) {
             showError(requestError.message);
         }
@@ -326,14 +361,17 @@
 
     async function loadProjects() {
         const payload = await readJson(await aiworkerApi.request('/api/creative/projects'));
-        reviewProjects = (payload.items || []).filter((item) => item.outline_batch_id);
+        reviewProjects = (payload.items || []).filter(
+            (item) => item.outline_batch_id || item.workflow_mode === 'free',
+        );
         project.replaceChildren();
         if (!reviewProjects.length) {
             const option = document.createElement('option');
             option.value = '';
-            option.textContent = '暂无已锁定分集大纲的项目';
+            option.textContent = '暂无可进入正式审核的项目';
             project.append(option);
             selectedProject = null;
+            resetPromptSelector(reviewPromptTemplate, reviewPromptDescription);
             renderEpisodes();
             return;
         }
@@ -350,6 +388,7 @@
         const uploading = source.value === 'text';
         projectWrap.classList.toggle('d-none', uploading);
         fileWrap.classList.toggle('d-none', !uploading);
+        reviewPromptWrap?.classList.toggle('d-none', uploading);
         episodes.classList.toggle('d-none', uploading || mode.value === 'collection');
         mode.disabled = uploading;
         if (uploading) mode.value = 'single';
@@ -362,6 +401,62 @@
         return [...episodes.querySelectorAll('input:checked')].map((input) => Number(input.value));
     }
 
+    function resetPromptSelector(select, description, message = '选择项目后读取模板库') {
+        if (select) {
+            select.replaceChildren(new Option(message, ''));
+            select.disabled = true;
+        }
+        if (description) description.textContent = message;
+    }
+
+    function templateDimensionText(template) {
+        const dimensions = template?.content?.dimensions || {};
+        return [...new Set(Object.values(dimensions).map((value) => String(value || '').trim()).filter(Boolean))].join(' · ');
+    }
+
+    async function loadPromptSelector(projectId, stage, select, description) {
+        if (!select || !projectId) return resetPromptSelector(select, description);
+        resetPromptSelector(select, description, '正在读取项目模板…');
+        const response = await aiworkerApi.request(`/api/creative/projects/${projectId}/prompt-modules/${stage}?episode_number=0`);
+        const data = await readJson(response);
+        if (!data.settings?.enabled) {
+            resetPromptSelector(select, description, '项目尚未启用模板库，将沿用经典提示词');
+            return data;
+        }
+        const templates = (data.templates || []).filter((item) => !Array.isArray(item.supported_stages) || item.supported_stages.includes(stage));
+        select.replaceChildren();
+        const effectiveTitle = data.effective?.title || '项目默认模板';
+        select.append(new Option(`使用项目默认（${effectiveTitle}）`, ''));
+        templates.forEach((template) => {
+            const option = new Option(`${template.title} · ${templateDimensionText(template)}`, template.template_key);
+            option.dataset.revision = String(template.revision || 1);
+            option.dataset.description = template.description || '';
+            select.append(option);
+        });
+        select.disabled = false;
+        const updateDescription = () => {
+            const selected = select.selectedOptions[0];
+            description.textContent = selected?.dataset.description
+                || `当前默认：${effectiveTitle}。模板不得覆盖系统输出契约和流程阻断。`;
+        };
+        select.onchange = updateDescription;
+        updateDescription();
+        return data;
+    }
+
+    function promptSelectionPayload(select, requirements) {
+        if (!select || select.disabled) return {};
+        const selected = select.selectedOptions[0];
+        const customRequirements = String(requirements?.value || '').trim();
+        return {
+            ...(select.value ? {
+                prompt_template_key: select.value,
+                prompt_template_revision: Number(selected?.dataset.revision || 1),
+            } : {}),
+            ...(customRequirements ? { prompt_override: { custom_requirements: customRequirements } } : {}),
+        };
+    }
+
     async function createReview() {
         showError();
         const file = source.value === 'text' ? scriptFile.files?.[0] : null;
@@ -372,7 +467,11 @@
         submit.disabled = true;
         const payload = source.value === 'text'
             ? { source_type: 'text', mode: 'single' }
-            : { source_type: 'project', mode: mode.value, project_id: Number(project.value), episode_numbers: selectedEpisodes() };
+            : {
+                source_type: 'project', mode: mode.value, project_id: Number(project.value),
+                episode_numbers: selectedEpisodes(),
+                ...promptSelectionPayload(reviewPromptTemplate, reviewPromptRequirements),
+            };
         showReviewProgress(reviewScope(payload));
         try {
             const response = source.value === 'text'
@@ -516,6 +615,22 @@
         modeSelect.className = 'form-select form-select-sm mb-3';
         modeSelect.innerHTML = '<option value="direct">直接优化场次剧本</option><option value="structure">结构优化（Beats + 场次剧本）</option>';
         section.append(modeSelect);
+        const promptPanel = document.createElement('div');
+        promptPanel.className = 'border rounded p-3 mb-3';
+        const promptSelect = document.createElement('select');
+        promptSelect.className = 'form-select form-select-sm mb-2';
+        promptSelect.setAttribute('aria-label', '优化模板');
+        const promptRequirements = document.createElement('textarea');
+        promptRequirements.className = 'form-control form-control-sm';
+        promptRequirements.rows = 2;
+        promptRequirements.maxLength = 4000;
+        promptRequirements.placeholder = '本次优化补充要求，例如：减少解释性台词，保留冷幽默。';
+        const promptDescription = document.createElement('div');
+        promptDescription.className = 'form-text';
+        promptPanel.append(promptSelect, promptRequirements, promptDescription);
+        section.append(promptPanel);
+        loadPromptSelector(review.project_id, 'optimization', promptSelect, promptDescription)
+            .catch((requestError) => resetPromptSelector(promptSelect, promptDescription, requestError.message));
         const findingRows = optimizationFindings(review.report || {});
         const selectedFindings = document.createElement('div');
         findingRows.forEach(({ ref, item, cross }) => {
@@ -594,7 +709,11 @@
             try {
                 const created = await readJson(await aiworkerApi.request(`/api/script-reviews/${review.id}/optimizations`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ mode: modeSelect.value, findings }),
+                    body: JSON.stringify({
+                        mode: modeSelect.value,
+                        findings,
+                        ...promptSelectionPayload(promptSelect, promptRequirements),
+                    }),
                 }));
                 optimizationProgress.optimizationId = created.optimization.id;
                 updateOptimizationProgress(created.optimization);
@@ -646,6 +765,29 @@
                 title.className = 'small fw-semibold mt-3';
                 title.textContent = `${optimization.mode === 'structure' ? '结构优化' : '场次剧本优化'} · ${optimizationStatus(optimization.status)}`;
                 container.append(title);
+                if (optimization.status === 'failed') {
+                    const saved = new Set((optimization.drafts || []).map((draft) => Number(draft.episode_number))).size;
+                    const note = document.createElement('div');
+                    note.className = 'small text-muted mt-1';
+                    note.textContent = `已保存 ${saved}/${(optimization.target_episode_numbers || []).length} 集；续跑会跳过已保存的集数。`;
+                    container.append(note);
+                    const retry = document.createElement('button');
+                    retry.type = 'button';
+                    retry.className = 'btn btn-outline-warning btn-sm mt-2';
+                    retry.textContent = '继续生成未完成集数';
+                    retry.addEventListener('click', async () => {
+                        retry.disabled = true;
+                        try {
+                            const payload = await readJson(await aiworkerApi.request(`/api/script-optimizations/${optimization.id}/retry`, { method: 'POST' }));
+                            updateOptimizationProgress(payload.optimization);
+                            await loadOptimizationHistory(review, container);
+                        } catch (requestError) {
+                            showError(requestError.message);
+                            retry.disabled = false;
+                        }
+                    });
+                    container.append(retry);
+                }
                 (optimization.drafts || []).forEach((draft) => {
                     const row = document.createElement('div');
                     row.className = 'small d-flex flex-wrap align-items-center gap-2 mt-2';
@@ -832,6 +974,13 @@
             stale.className = 'alert alert-warning mt-3 mb-0';
             stale.textContent = '剧本已更新，此报告已过期，需重新审核后才能确认。';
             result.append(stale);
+        } else if (review.status === 'failed') {
+            const retry = document.createElement('button');
+            retry.type = 'button';
+            retry.className = 'btn btn-outline-warning btn-sm mt-3';
+            retry.textContent = '继续未完成审核';
+            retry.addEventListener('click', () => retryReview(review.id));
+            result.append(retry);
         }
         renderOptimizationSection(review);
     }
@@ -878,6 +1027,24 @@
         }
     }
 
+    async function retryReview(reviewId) {
+        showError();
+        try {
+            const payload = await readJson(await aiworkerApi.request(`/api/script-reviews/${reviewId}/retry`, { method: 'POST' }));
+            const review = payload.review;
+            activeReviewId = review.id;
+            showReviewProgress(`${sourceLabel(review)} · 继续未完成审核`);
+            reviewProgress.reviewId = review.id;
+            updateReviewProgress(review);
+            renderReview(review);
+            await loadHistory();
+            void pollReview(review.id);
+        } catch (requestError) {
+            showError(requestError.message);
+            showReviewProgressError(requestError.message);
+        }
+    }
+
     async function pollReview(reviewId) {
         if (reviewPollTimers.has(reviewId)) return;
         try {
@@ -911,6 +1078,16 @@
                 const action = document.createElement('td'); action.className = 'text-end';
                 const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-outline-light btn-sm'; button.title = '查看审核报告'; button.innerHTML = '<i class="bi bi-eye" aria-hidden="true"></i>';
                 button.addEventListener('click', () => openReview(review.id)); action.append(button); row.append(action); history.append(row);
+                if (review.status === 'failed') {
+                    const retry = document.createElement('button');
+                    retry.type = 'button';
+                    retry.className = 'btn btn-outline-warning btn-sm ms-2';
+                    retry.title = '继续未完成审核';
+                    retry.setAttribute('aria-label', '继续未完成审核');
+                    retry.innerHTML = '<i class="bi bi-arrow-repeat" aria-hidden="true"></i>';
+                    retry.addEventListener('click', () => retryReview(review.id));
+                    action.append(retry);
+                }
                 if (!['queued', 'running'].includes(review.status)) {
                     const remove = document.createElement('button');
                     remove.type = 'button';

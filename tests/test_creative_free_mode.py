@@ -109,6 +109,85 @@ def test_existing_projects_default_to_sequential_mode(tmp_path):
     assert project["resource_heads"] == []
 
 
+def test_free_candidate_generation_can_preserve_the_current_head(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = create_free_project(repository)
+    service = FreeCreativeModeService(repository)
+    current = service.create_briefs(
+        project["id"],
+        [{"title": "当前 Brief", "logline": "当前版本"}],
+        expected_head_revision=0,
+        actor_user_id="owner-1",
+    )
+
+    candidate = service.create_briefs(
+        project["id"],
+        [{"title": "A/B 候选", "logline": "不自动成为当前版本"}],
+        expected_head_revision=current["head"]["revision"],
+        actor_user_id="owner-1",
+        generation_meta={"prompt_ab_experiment_id": "experiment-1", "prompt_ab_arm": "A"},
+        select_as_head=False,
+    )
+    head_after = service.get_head(project["id"], "brief")
+
+    assert candidate["head"] is None
+    assert candidate["resources"][0]["status"] == "draft"
+    assert head_after == current["head"]
+
+
+def test_free_generation_context_options_do_not_hydrate_the_whole_project(
+    tmp_path, monkeypatch
+):
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = create_free_project(repository)
+    service = FreeCreativeModeService(repository)
+    brief = service.create_brief(
+        project["id"],
+        {"title": "可引用 Brief"},
+        expected_head_revision=0,
+        actor_user_id="owner-1",
+    )
+    service.lock_resource(
+        project_id=project["id"],
+        stage="brief",
+        resource_ref=str(brief["resource"]["id"]),
+        expected_head_revision=brief["head"]["revision"],
+        actor_user_id="owner-1",
+    )
+    for episode_number in (1, 2):
+        beats = service.create_episode_resource(
+            project["id"],
+            "beats",
+            episode_number,
+            {"beats": [{"summary": f"第 {episode_number} 集"}]},
+            expected_head_revision=0,
+            actor_user_id="owner-1",
+        )
+        service.lock_resource(
+            project_id=project["id"],
+            stage="beats",
+            resource_ref=str(beats["resource"]["id"]),
+            expected_head_revision=beats["head"]["revision"],
+            actor_user_id="owner-1",
+            episode_number=episode_number,
+        )
+
+    def fail_if_full_project_is_loaded(_project_id):
+        raise AssertionError("context options must not hydrate every generated resource")
+
+    monkeypatch.setattr(repository, "get_project", fail_if_full_project_is_loaded)
+
+    options = service.context_options(project["id"], episode_number=1)
+
+    assert [item["content"]["title"] for item in options["briefs"]] == [
+        "可引用 Brief"
+    ]
+    assert options["character_batches"] == []
+    assert options["outline_batches"] == []
+    assert [item["episode_number"] for item in options["beats"]] == [1]
+    assert len(options["heads"]) == 3
+
+
 def create_free_outline_for_rewrite(
     repository: CreativeRepository, *, locked: bool
 ) -> tuple[dict, dict, dict]:
@@ -722,6 +801,117 @@ def test_empty_project_can_switch_mode_but_content_project_cannot(tmp_path):
         )
 
 
+@pytest.mark.asyncio
+async def test_active_project_member_can_change_mode_and_free_copy_inherits_team(
+    tmp_path,
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from creative.api import (
+        build_creative_router,
+        uses_project_member_stage_authorization,
+    )
+    from creative.schema import CreativeModeChangeRequest, CreativeModeMigrationRequest
+    from identity.permission_service import PermissionService
+
+    repository = CreativeRepository(tmp_path / "member-mode.sqlite3")
+    switch_project = repository.create_original_project(
+        seed_text="switch seed",
+        name="switch project",
+        target_episode_count=3,
+        created_by="planner-1",
+        creation_request_id="member-mode-switch",
+    )
+    switch_project = repository.mark_project_bootstrap_status(
+        switch_project["id"], "ready"
+    )
+    migration_project = repository.create_original_project(
+        seed_text="migration seed",
+        name="migration project",
+        target_episode_count=3,
+        created_by="planner-1",
+        creation_request_id="member-mode-migration",
+    )
+    migration_project = repository.mark_project_bootstrap_status(
+        migration_project["id"], "ready"
+    )
+    workflow = Mock()
+    workflow.resolve_creative_project_identity = None
+    workflow.is_active_project_member.return_value = True
+    workflow.list_tasks.return_value = [
+        {
+            "id": "pending-brief",
+            "project_id": repository.workflow_project_id(switch_project["id"]),
+            "task_type": "brief",
+            "status": "pool",
+        }
+    ]
+    router = build_creative_router(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        repository=repository,
+        workflow_repository=workflow,
+        application_service=Mock(),
+    )
+    permission_service = object.__new__(PermissionService)
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(identity_permission_service=permission_service)
+        )
+    )
+    principal = SimpleNamespace(
+        is_system_admin=False,
+        user_id="writer-1",
+        role_codes=("screenwriter",),
+        permissions=frozenset(),
+    )
+
+    assert uses_project_member_stage_authorization(
+        f"/projects/{switch_project['id']}/workflow-mode", "PATCH"
+    )
+    assert uses_project_member_stage_authorization(
+        f"/projects/{migration_project['id']}/migrate-to-free", "POST"
+    )
+    switch_endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if route.path == "/api/creative/projects/{project_id}/workflow-mode"
+    )
+    switched = await switch_endpoint(
+        project_id=switch_project["id"],
+        payload=CreativeModeChangeRequest(
+            workflow_mode="free", expected_mode_revision=0
+        ),
+        request=request,
+        principal=principal,
+    )
+    assert switched["workflow_mode"] == "free"
+    workflow.cancel_task_for_mode_change.assert_called_once_with(
+        "pending-brief", principal
+    )
+
+    migrate_endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if route.path == "/api/creative/projects/{project_id}/migrate-to-free"
+    )
+    migrated = await migrate_endpoint(
+        project_id=migration_project["id"],
+        payload=CreativeModeMigrationRequest(
+            expected_mode_revision=0,
+            operation_id="member-created-free-copy",
+        ),
+        request=request,
+        principal=principal,
+    )
+    source_id = repository.workflow_project_id(migration_project["id"])
+    target_id = repository.workflow_project_id(migrated["project"]["id"])
+    workflow.copy_active_project_members.assert_called_once_with(
+        source_id, target_id, principal
+    )
+
+
 def test_topic_project_can_switch_to_free_without_manual_seed(tmp_path):
     db_path = tmp_path / "switch-topic-project-without-seed.sqlite3"
     create_legacy_workflow_mode_database(db_path)
@@ -771,6 +961,7 @@ async def test_empty_project_preview_ignores_started_task_without_resources(tmp_
         "task_type": "brief",
         "status": "in_progress",
     }]
+    workflow.list_project_members.return_value = []
     router = build_creative_router(
         root=tmp_path,
         runtime_dir=tmp_path / ".runtime",
@@ -812,6 +1003,61 @@ async def test_empty_project_preview_ignores_started_task_without_resources(tmp_
 
 
 @pytest.mark.asyncio
+async def test_mode_migration_preview_returns_timeout_instead_of_hanging(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from fastapi import HTTPException
+
+    import creative.api as creative_api
+
+    repository = CreativeRepository(tmp_path / "slow-preview.sqlite3")
+    project = repository.create_original_project(
+        seed_text="迁移预检超时测试",
+        name="慢预检项目",
+        target_episode_count=3,
+        created_by="owner-1",
+        creation_request_id="slow-preview-project",
+    )
+    project = repository.mark_project_bootstrap_status(project["id"], "ready")
+    workflow = Mock()
+    workflow.list_tasks.return_value = []
+    workflow.list_project_members.return_value = []
+    slow_jobs = SimpleNamespace(
+        list_jobs=lambda: (time.sleep(0.05) or [])
+    )
+    monkeypatch.setattr(
+        creative_api, "_MODE_MIGRATION_PREVIEW_TIMEOUT_SECONDS", 0.005
+    )
+    router = creative_api.build_creative_router(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        repository=repository,
+        workflow_repository=workflow,
+        application_service=Mock(),
+        job_manager=slow_jobs,
+    )
+    endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if route.path
+        == "/api/creative/projects/{project_id}/mode-migration-preview"
+    )
+
+    with pytest.raises(HTTPException) as timeout:
+        await endpoint(
+            project_id=project["id"],
+            request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())),
+            principal=SimpleNamespace(is_system_admin=True, user_id="owner-1"),
+        )
+
+    assert timeout.value.status_code == 503
+    assert timeout.value.detail == "迁移预检超时，请稍后重试"
+
+
+@pytest.mark.asyncio
 async def test_content_project_migration_creates_free_copy_and_preserves_source(
     tmp_path,
 ):
@@ -848,6 +1094,7 @@ async def test_content_project_migration_creates_free_copy_and_preserves_source(
             "status": "returned",
         },
     ]
+    workflow.list_project_members.return_value = []
     router = build_creative_router(
         root=tmp_path,
         runtime_dir=tmp_path / ".runtime",
@@ -1066,7 +1313,7 @@ def test_migrated_free_project_can_update_settings_without_rewriting_legacy_auth
     assert source_project["locked_brief_id"] == legacy_brief_id
 
 
-def test_migration_is_blocked_by_active_review(tmp_path):
+def test_migration_allows_active_review_and_leaves_it_on_source(tmp_path):
     repository = CreativeRepository(tmp_path / "creative.sqlite3")
     project = repository.create_original_project(
         seed_text="一个等待审核的项目",
@@ -1078,7 +1325,7 @@ def test_migration_is_blocked_by_active_review(tmp_path):
     project = repository.mark_project_bootstrap_status(project["id"], "ready")
     now = time.time()
     with repository._connect() as conn:
-        conn.execute(
+        cursor = conn.execute(
             """
             INSERT INTO script_reviews (
                 project_id, source_type, mode, episode_numbers_json,
@@ -1088,16 +1335,171 @@ def test_migration_is_blocked_by_active_review(tmp_path):
             """,
             (project["id"], now, now),
         )
+        review_id = int(cursor.lastrowid)
     service = FreeCreativeModeService(repository)
 
     preview = service.migration_preview(project["id"])
-    assert preview["can_migrate"] is False
-    with pytest.raises(ValueError, match="审核"):
-        service.migrate_to_free(
-            project_id=project["id"],
+    assert preview["can_migrate"] is True
+    migrated = service.migrate_to_free(
+        project_id=project["id"],
+        expected_mode_revision=0,
+        operation_id="migration-operation-2",
+        actor_user_id="owner-1",
+    )
+
+    assert repository.get_script_review(review_id)["project_id"] == project["id"]
+    assert repository.get_script_review(review_id)["status"] == "running"
+    assert repository.list_script_reviews(
+        project_ids={migrated["project"]["id"]}
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_migration_api_ignores_active_review_jobs(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from creative.api import build_creative_router
+    from creative.schema import CreativeModeMigrationRequest
+
+    repository = CreativeRepository(tmp_path / "review-job-migration.sqlite3")
+    project = repository.create_original_project(
+        seed_text="审核任务仍在执行",
+        name="审核中迁移",
+        target_episode_count=2,
+        created_by="owner-1",
+        creation_request_id="review-job-migration",
+    )
+    project = repository.mark_project_bootstrap_status(project["id"], "ready")
+    workflow = Mock()
+    workflow.list_tasks.return_value = []
+    workflow.list_project_members.return_value = []
+    review_jobs = SimpleNamespace(
+        list_jobs=lambda: [
+            {
+                "status": "running",
+                "job": {
+                    "crawler_type": crawler_type,
+                    "extra": {"project_id": project["id"]},
+                },
+            }
+            for crawler_type in ("screenplay_review", "project_review")
+        ]
+    )
+    router = build_creative_router(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        repository=repository,
+        workflow_repository=workflow,
+        application_service=Mock(),
+        job_manager=review_jobs,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    principal = SimpleNamespace(is_system_admin=True, user_id="owner-1")
+    preview_endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if route.path
+        == "/api/creative/projects/{project_id}/mode-migration-preview"
+    )
+
+    preview = await preview_endpoint(
+        project_id=project["id"], request=request, principal=principal
+    )
+
+    assert preview["can_migrate"] is True
+    assert preview["active_jobs"] == []
+
+    migrate_endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if route.path == "/api/creative/projects/{project_id}/migrate-to-free"
+    )
+    migrated = await migrate_endpoint(
+        project_id=project["id"],
+        payload=CreativeModeMigrationRequest(
             expected_mode_revision=0,
-            operation_id="migration-operation-2",
-            actor_user_id="owner-1",
+            operation_id="review-job-free-copy",
+        ),
+        request=request,
+        principal=principal,
+    )
+
+    assert migrated["project"]["workflow_mode"] == "free"
+    assert migrated["project"]["id"] != project["id"]
+
+
+@pytest.mark.asyncio
+async def test_migration_api_still_blocks_active_non_review_job(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from fastapi import HTTPException
+
+    from creative.api import build_creative_router
+    from creative.schema import CreativeModeMigrationRequest
+
+    repository = CreativeRepository(tmp_path / "generation-job-migration.sqlite3")
+    project = repository.create_original_project(
+        seed_text="生成任务仍在执行",
+        name="生成中不迁移",
+        target_episode_count=2,
+        created_by="owner-1",
+        creation_request_id="generation-job-migration",
+    )
+    project = repository.mark_project_bootstrap_status(project["id"], "ready")
+    workflow = Mock()
+    workflow.list_tasks.return_value = []
+    workflow.list_project_members.return_value = []
+    generation_jobs = SimpleNamespace(
+        list_jobs=lambda: [
+            {
+                "status": "running",
+                "job": {
+                    "crawler_type": "phase4",
+                    "extra": {"project_id": project["id"]},
+                },
+            }
+        ]
+    )
+    router = build_creative_router(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        repository=repository,
+        workflow_repository=workflow,
+        application_service=Mock(),
+        job_manager=generation_jobs,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    principal = SimpleNamespace(is_system_admin=True, user_id="owner-1")
+    preview_endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if route.path
+        == "/api/creative/projects/{project_id}/mode-migration-preview"
+    )
+
+    preview = await preview_endpoint(
+        project_id=project["id"], request=request, principal=principal
+    )
+
+    assert preview["can_migrate"] is False
+    assert preview["active_jobs"] == ["phase4"]
+
+    migrate_endpoint = next(
+        route.endpoint
+        for route in router.routes
+        if route.path == "/api/creative/projects/{project_id}/migrate-to-free"
+    )
+    with pytest.raises(HTTPException, match="运行中的后台任务"):
+        await migrate_endpoint(
+            project_id=project["id"],
+            payload=CreativeModeMigrationRequest(
+                expected_mode_revision=0,
+                operation_id="blocked-generation-job-copy",
+            ),
+            request=request,
+            principal=principal,
         )
 
 

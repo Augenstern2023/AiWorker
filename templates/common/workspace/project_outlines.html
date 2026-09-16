@@ -65,6 +65,7 @@
                 <header class="outline-episode-header">
                     <div class="outline-episode-identity">
                         <span class="outline-episode-number" x-text="`第 ${item.episode_number} 集`"></span>
+                        <span class="small text-muted" data-template-provenance x-text="creativeTemplateProvenance(item)"></span>
                         <a class="badge text-bg-success text-decoration-none outline-script-status" x-show="projectEpisodeScript(item.episode_number)" :href="`/writing/projects/${creativeWorkspace.project.id}/episodes/${item.episode_number}/scripts`" @click.stop title="打开场次剧本" x-text="projectEpisodeScriptLabel(item.episode_number)"></a>
                         <button class="badge outline-update-status" type="button" x-show="hasProjectEpisodeUpdates(item.episode_number)" @click.stop="openOutlineEpisodeUpdates(item.episode_number)" title="查看 Beats 与剧本更新记录" aria-label="查看 Beats 与剧本更新记录"><i class="bi bi-clock-history" aria-hidden="true"></i><span x-text="projectEpisodeUpdateSummary(item.episode_number)"></span></button>
                     </div>

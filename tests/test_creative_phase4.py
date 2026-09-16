@@ -275,6 +275,25 @@ def test_project_brief_settings_are_editable_until_brief_is_locked(tmp_path: Pat
         repository.update_project(project["id"], {"target_episode_count": 40})
 
 
+def test_manual_brief_version_keeps_template_provenance_but_marks_revision(tmp_path: Path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    topic, breakdown = seed_adopted_topic(repository)
+    project = repository.create_project(topic["id"], breakdown["id"], "模板来源", 20)
+    first = repository.create_blueprints(
+        project["id"], [{"content": {"title": "方向"}}],
+        generation_meta={
+            "job_id": "original-job",
+            "prompt_snapshot": {"template_key": "frozen", "title": "原模板", "revision": 2},
+        },
+    )[0]
+
+    second = repository.create_blueprint_version(first["id"])
+    assert second["generation_meta"]["prompt_snapshot"] == first["generation_meta"]["prompt_snapshot"]
+    assert second["generation_meta"]["manual_revision"] is True
+    assert second["generation_meta"]["revision_source_id"] == first["id"]
+    assert first["generation_meta"].get("manual_revision") is None
+
+
 def test_successor_brief_draft_can_update_and_freeze_new_project_settings(tmp_path: Path):
     repository = CreativeRepository(tmp_path / "creative.db")
     topic, breakdown = seed_adopted_topic(repository)
@@ -738,6 +757,7 @@ def build_phase4_client(
     tmp_path: Path,
     *,
     llm_provider_factory=None,
+    llm_model_resolver=None,
 ) -> tuple[TestClient, CreativeRepository, RecordingJobManager]:
     runtime_dir = tmp_path / ".runtime"
     manager = RecordingJobManager()
@@ -767,6 +787,7 @@ def build_phase4_client(
         job_manager=manager,
         workflow_repository=workflow,
         llm_provider_factory=llm_provider_factory,
+        llm_model_resolver=llm_model_resolver,
     )
     session_app = FastAPI()
 
@@ -1770,6 +1791,25 @@ def test_breakdown_api_enqueues_job_when_transcript_exists(tmp_path: Path):
     assert manager.created[0]["crawler_type"] == "breakdown_generate"
     assert manager.created[0]["extra"]["topic_id"] == topic["id"]
     assert manager.created[0]["extra"]["workspace_root"] == str(tmp_path.resolve())
+
+
+def test_breakdown_api_forwards_selected_model_to_generation_job(tmp_path: Path):
+    resolved: list[str] = []
+    client, repository, manager = build_phase4_client(
+        tmp_path,
+        llm_model_resolver=lambda model_id: resolved.append(model_id) or {"id": model_id},
+    )
+    topic = seed_topic_without_breakdown(repository, "指定模型拆解")
+    write_episode_script(tmp_path, topic["title"], 1, "第一集剧情正文")
+
+    response = client.post(
+        "/api/creative/breakdowns",
+        json={"topic_id": topic["id"], "llm_model_record_id": "model-record-2"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert resolved == ["model-record-2"]
+    assert manager.created[0]["extra"]["llm_model_record_id"] == "model-record-2"
 
 
 def test_breakdown_api_enqueues_without_workflow_task(tmp_path: Path):

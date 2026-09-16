@@ -49,6 +49,8 @@ PAGE_TEMPLATES = {
     "/writing/projects/{project_id}/outlines": "writing/outlines.html",
     "/writing/projects/{project_id}/episodes/{episode_number}/beats": "writing/beats.html",
     "/writing/projects/{project_id}/episodes/{episode_number}/scripts": "writing/scripts.html",
+    "/projects/{project_id}/prompt-templates": "common/workspace/prompt_template_center.html",
+    "/projects/{project_id}/prompt-effects": "common/workspace/prompt_template_effects.html",
     "/review/scripts": "review/scripts.html",
     "/review/writer-agent": "review/writer_agent.html",
     "/review/projects": "review/projects.html",
@@ -96,9 +98,8 @@ def build_page_router(
         if not navigation_service.can_open(principal, request.url.path):
             raise HTTPException(status_code=403, detail="没有执行此操作的权限")
         project_id = request.path_params.get("project_id")
-        if (
-            project_id is not None
-            and request.url.path.startswith("/writing/projects/")
+        if project_id is not None and request.url.path.startswith(
+            ("/writing/projects/", "/projects/")
         ):
             service = getattr(
                 request.app.state, "identity_permission_service", None
@@ -229,6 +230,17 @@ def build_page_router(
             f"/planning/projects/{project_id}/brief", status_code=307
         )
 
+    @router.get("/projects/{project_id}/prompt-effects", include_in_schema=False)
+    def legacy_prompt_effects_page(
+        project_id: str,
+        request: Request,
+        principal: Principal = Depends(require_page_access),
+    ) -> RedirectResponse:
+        query = f"?{request.url.query}" if request.url.query else ""
+        return RedirectResponse(
+            f"/projects/{project_id}/prompt-templates{query}", status_code=307
+        )
+
     @router.get("/planning/projects", response_class=HTMLResponse)
     def planning_projects_page(
         request: Request,
@@ -248,7 +260,10 @@ def build_page_router(
         raise HTTPException(status_code=403, detail="没有执行此操作的权限")
 
     for route, permission, title in PAGE_ROUTES:
-        if route in {"/admin/audit", "/planning/projects"}:
+        if route in {
+            "/admin/audit", "/planning/projects",
+            "/projects/{project_id}/prompt-effects",
+        }:
             continue
         router.add_api_route(
             route,
@@ -283,10 +298,14 @@ def _page_response(
                 "selection/dashboard.html",
                 "writing/dashboard.html",
             },
-            workspace_page=(
-                "tasks"
-                if template_name in {"common/tasks.html", "common/my_tasks.html"}
-                else template_name.removesuffix(".html").replace("/", "-").replace("_", "-")
+            workspace_page={
+                "common/tasks.html": "tasks",
+                "common/my_tasks.html": "tasks",
+                "common/workspace/prompt_template_center.html": "prompt-template-center",
+                "common/workspace/prompt_template_effects.html": "prompt-template-effects",
+            }.get(
+                template_name,
+                template_name.removesuffix(".html").replace("/", "-").replace("_", "-"),
             ),
         ),
     )

@@ -34,6 +34,8 @@ PAGE_ROUTES = (
         "page.writing",
         "场次剧本",
     ),
+    ("/projects/{project_id}/prompt-templates", "page.writing", "模板中心"),
+    ("/projects/{project_id}/prompt-effects", "page.writing", "模板效果"),
     ("/review/scripts", "page.script_review", "剧本审核"),
     ("/review/writer-agent", "page.script_review", "编剧大师"),
     ("/review/projects", "page.review", "负责项目"),
@@ -61,6 +63,8 @@ PAGE_ACCESS_GRANT_ROUTES: dict[str, str] = {
     "/writing/projects/{project_id}/outlines": "/writing/projects",
     "/writing/projects/{project_id}/episodes/{episode_number}/beats": "/writing/projects",
     "/writing/projects/{project_id}/episodes/{episode_number}/scripts": "/writing/projects",
+    "/projects/{project_id}/prompt-templates": "/writing/projects",
+    "/projects/{project_id}/prompt-effects": "/writing/projects",
     "/review/projects/{project_id}/members": "/review/projects",
     "/review/projects/{project_id}/versions": "/review/projects",
 }
@@ -82,6 +86,14 @@ PAGE_ACCESS_ADDITIONAL_GRANT_ROUTES: dict[str, tuple[str, ...]] = {
         "/review/projects",
     ),
     "/writing/projects/{project_id}/episodes/{episode_number}/scripts": (
+        "/review/projects",
+    ),
+    "/projects/{project_id}/prompt-templates": (
+        "/planning/projects",
+        "/review/projects",
+    ),
+    "/projects/{project_id}/prompt-effects": (
+        "/planning/projects",
         "/review/projects",
     ),
 }

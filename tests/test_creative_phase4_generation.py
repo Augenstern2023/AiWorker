@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 import pytest
 
+from analysis.llm import LLMOutputTruncatedError
 from core.job import CrawlJob
 from creative import api as creative_api
 from creative import phase4_worker
@@ -34,6 +35,7 @@ from creative.script_service import (
     generate_character_bundle,
     generate_episode_beats_chunk,
     generate_episode_beats,
+    generate_episode_script_chunk,
     generate_outline_bundle,
     validate_beats,
 )
@@ -541,6 +543,7 @@ async def test_outline_generation_emits_request_progress_for_series_arc_and_chun
     assert all(set(event) == {
         "phase", "request_kind", "batch_start", "batch_end", "batch_started_at",
         "reasoning_effort", "prompt_chars", "request_elapsed_seconds", "batch_in_flight",
+        "llm_provider", "llm_model", "wire_api", "max_output_tokens",
     } for event in events)
     assert events[0]["batch_start"] is events[0]["batch_end"] is None
     assert (events[2]["batch_start"], events[2]["batch_end"]) == (1, 1)
@@ -620,6 +623,61 @@ def valid_script_content(episode_number: int = 1) -> dict:
 
 
 @pytest.mark.asyncio
+async def test_script_chunk_repairs_only_missing_episodes():
+    provider = SequentialProvider([
+        {"episodes": [{"episode": 1, **valid_script_content(1)}]},
+        {"episodes": [{"episode": 2, **valid_script_content(2)}]},
+    ])
+
+    generated, meta = await generate_episode_script_chunk(
+        provider,
+        {"name": "项目", "target_episode_count": 2},
+        {"content": {"title": "锁定 Brief"}},
+        [
+            {"episode_number": number, "content": outline_episode(number)}
+            for number in range(1, 3)
+        ],
+        [{"content": {"name": "主角"}}],
+        [],
+        {number: valid_beat_content() for number in range(1, 3)},
+        continuity_ledger=[],
+    )
+
+    assert [episode_number for episode_number, _ in generated] == [1, 2]
+    assert len(provider.calls) == 2
+    repair_payload = json.loads(provider.calls[1][1]["content"])
+    assert [item["episode_number"] for item in repair_payload["locked_outlines"]] == [2]
+    assert [item["episode_number"] for item in repair_payload["locked_beats"]] == [2]
+    assert meta["repair_attempted"] is True
+
+
+@pytest.mark.asyncio
+async def test_script_chunk_reports_actual_and_missing_episodes_after_repair():
+    provider = SequentialProvider([
+        {"episodes": [{"episode": 1, **valid_script_content(1)}]},
+        {"episodes": [{"episode": 1, **valid_script_content(1)}]},
+    ])
+
+    with pytest.raises(
+        script_service.LLMError,
+        match="实际集数：1.*缺失集数：2.*最终缺失集数：2",
+    ):
+        await generate_episode_script_chunk(
+            provider,
+            {"name": "项目", "target_episode_count": 2},
+            {"content": {"title": "锁定 Brief"}},
+            [
+                {"episode_number": number, "content": outline_episode(number)}
+                for number in range(1, 3)
+            ],
+            [{"content": {"name": "主角"}}],
+            [],
+            {number: valid_beat_content() for number in range(1, 3)},
+            continuity_ledger=[],
+        )
+
+
+@pytest.mark.asyncio
 async def test_beats_series_requests_one_model_response_per_ten_episode_chunk():
     provider = SequentialProvider([{
         "episodes": [
@@ -671,7 +729,176 @@ async def test_outline_generation_chunks_every_ten_episodes():
     assert len(result["episodes"]) == 12
     assert result["series_overview"] == series_overview()
     assert progress == [(10, 12), (12, 12)]
-    assert meta["chunk_size"] == 10
+    assert meta["preferred_chunk_size"] == 10
+
+
+@pytest.mark.asyncio
+async def test_outline_generation_splits_a_truncated_chunk_and_checkpoints_each_child():
+    provider = SequentialProvider([
+        series_arc_payload(),
+        LLMOutputTruncatedError(
+            "模型输出被输出上限截断（finish_reason=length，已返回 5602 字符）",
+            finish_reason="length",
+            returned_chars=5602,
+        ),
+        {"episodes": [outline_episode(number) for number in range(1, 6)]},
+        {"episodes": [outline_episode(number) for number in range(6, 11)]},
+    ])
+    checkpoints = []
+    progress = []
+    request_progress = []
+
+    result, meta = await generate_outline_bundle(
+        provider,
+        {"name": "项目", "target_episode_count": 10},
+        {"title": "Brief"},
+        [{"content": {"name": "周晴"}}],
+        [],
+        on_checkpoint=lambda _arc, episodes, snapshot: checkpoints.append(
+            (len(episodes), dict(snapshot))
+        ),
+        on_progress=lambda done, total: progress.append((done, total)),
+        on_request_progress=request_progress.append,
+    )
+
+    assert [item["episode"] for item in result["episodes"]] == list(range(1, 11))
+    assert [count for count, _snapshot in checkpoints] == [5, 10]
+    assert progress == [(5, 10), (10, 10)]
+    assert meta["preferred_chunk_size"] == 10
+    assert meta["split_count"] == 1
+    assert meta["actual_batches"] == [
+        {"start": 1, "end": 10, "status": "truncated"},
+        {"start": 1, "end": 5, "status": "completed"},
+        {"start": 6, "end": 10, "status": "completed"},
+    ]
+    right_payload = json.loads(provider.calls[3][1]["content"])
+    assert [
+        item["episode"] for item in right_payload["history_context"]["recent_episodes"]
+    ] == list(range(1, 6))
+    assert [
+        event["phase"]
+        for event in request_progress
+        if event.get("phase") in {"truncated", "split"}
+    ] == ["truncated", "split"]
+    assert next(
+        event for event in request_progress if event.get("phase") == "truncated"
+    )["returned_chars"] == 5602
+
+
+@pytest.mark.asyncio
+async def test_outline_generation_recursively_splits_a_truncated_child_range():
+    provider = SequentialProvider([
+        series_arc_payload(),
+        LLMOutputTruncatedError(
+            "1-10 truncated", finish_reason="length", returned_chars=5000
+        ),
+        LLMOutputTruncatedError(
+            "1-5 truncated", finish_reason="max_tokens", returned_chars=4000
+        ),
+        {"episodes": [outline_episode(number) for number in range(1, 3)]},
+        {"episodes": [outline_episode(number) for number in range(3, 6)]},
+        {"episodes": [outline_episode(number) for number in range(6, 11)]},
+    ])
+
+    result, meta = await generate_outline_bundle(
+        provider,
+        {"name": "项目", "target_episode_count": 10},
+        {"title": "Brief"},
+        [{"content": {"name": "周晴"}}],
+        [],
+    )
+
+    assert [item["episode"] for item in result["episodes"]] == list(range(1, 11))
+    assert meta["split_count"] == 2
+    assert meta["actual_batches"] == [
+        {"start": 1, "end": 10, "status": "truncated"},
+        {"start": 1, "end": 5, "status": "truncated"},
+        {"start": 1, "end": 2, "status": "completed"},
+        {"start": 3, "end": 5, "status": "completed"},
+        {"start": 6, "end": 10, "status": "completed"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_outline_generation_stops_when_one_episode_is_still_truncated():
+    provider = SequentialProvider([
+        series_arc_payload(),
+        LLMOutputTruncatedError(
+            "single truncated", finish_reason="max_output_tokens", returned_chars=3000
+        ),
+    ])
+
+    with pytest.raises(
+        LLMOutputTruncatedError,
+        match="单集生成仍达到模型输出上限",
+    ):
+        await generate_outline_bundle(
+            provider,
+            {"name": "项目", "target_episode_count": 1},
+            {"title": "Brief"},
+            [{"content": {"name": "周晴"}}],
+            [],
+        )
+
+    assert len(provider.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_outline_split_keeps_left_checkpoint_when_right_episode_fails():
+    provider = SequentialProvider([
+        series_arc_payload(),
+        LLMOutputTruncatedError(
+            "1-2 truncated", finish_reason="length", returned_chars=4000
+        ),
+        {"episodes": [outline_episode(1)]},
+        LLMOutputTruncatedError(
+            "2 truncated", finish_reason="length", returned_chars=3500
+        ),
+    ])
+    checkpoints = []
+
+    with pytest.raises(
+        LLMOutputTruncatedError,
+        match="第 2 集单集生成仍达到模型输出上限",
+    ):
+        await generate_outline_bundle(
+            provider,
+            {"name": "项目", "target_episode_count": 2},
+            {"title": "Brief"},
+            [{"content": {"name": "周晴"}}],
+            [],
+            on_checkpoint=lambda _arc, episodes, _meta: checkpoints.append(
+                [item["episode"] for item in episodes]
+            ),
+        )
+
+    assert checkpoints == [[1]]
+
+
+@pytest.mark.asyncio
+async def test_outline_resume_after_split_checkpoint_starts_at_next_episode():
+    provider = SequentialProvider([{
+        "episodes": [outline_episode(number) for number in range(6, 11)],
+    }])
+
+    result, _ = await generate_outline_bundle(
+        provider,
+        {"name": "项目", "target_episode_count": 10},
+        {"title": "Brief"},
+        [{"content": {"name": "周晴"}}],
+        [],
+        resume_episodes=[outline_episode(number) for number in range(1, 6)],
+        resume_series_arc="相识、对抗、合作",
+        resume_stages=["相识", "对抗", "合作"],
+        resume_series_overview=series_overview(),
+    )
+
+    assert len(provider.calls) == 1
+    payload = json.loads(provider.calls[0][1]["content"])
+    assert [
+        item["episode"] for item in payload["history_context"]["recent_episodes"]
+    ] == [1, 2, 3, 4, 5]
+    assert [item["episode"] for item in result["episodes"]] == list(range(1, 11))
 
 
 @pytest.mark.asyncio
@@ -2010,25 +2237,26 @@ def test_phase4_worker_saves_series_beats_in_ten_episode_checkpoints(tmp_path, m
     assert any(item["payload"].get("completed") == 12 for item in events)
 
 
-def test_phase4_worker_saves_series_scripts_after_all_current_beats_are_locked(tmp_path, monkeypatch):
+def test_phase4_worker_saves_series_scripts_in_two_episode_chunks(tmp_path, monkeypatch):
     db_path = tmp_path / ".runtime" / "creative" / "creative.db"
     repository = CreativeRepository(db_path)
     project = seed_worker_project(repository)
-    repository.update_project(project["id"], {"target_episode_count": 12})
+    repository.update_project(project["id"], {"target_episode_count": 5})
     brief = repository.create_blueprints(project["id"], [{"content": {"title": "方向"}}])[0]
     repository.lock_brief(brief["id"])
     characters = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
     repository.lock_character_batch(project["id"], characters["batch_id"])
     outlines = repository.create_outline_batch(
-        project["id"], [outline_episode(number) for number in range(1, 13)], "全剧弧线"
+        project["id"], [outline_episode(number) for number in range(1, 6)], "全剧弧线"
     )
     repository.lock_outline_batch(project["id"], outlines["batch_id"])
-    for episode_number in range(1, 13):
+    for episode_number in range(1, 6):
         beats = repository.create_episode_beats(project["id"], episode_number, valid_beat_content())
         repository.lock_episode_beats(beats["id"])
     provider = SequentialProvider([
-        {"episodes": [{"episode": number, **valid_script_content(number)} for number in range(1, 11)]},
-        {"episodes": [{"episode": number, **valid_script_content(number)} for number in range(11, 13)]},
+        {"episodes": [{"episode": number, **valid_script_content(number)} for number in range(1, 3)]},
+        {"episodes": [{"episode": number, **valid_script_content(number)} for number in range(3, 5)]},
+        {"episodes": [{"episode": 5, **valid_script_content(5)}]},
     ])
     monkeypatch.setattr(phase4_worker, "create_provider", lambda: provider)
     job = CrawlJob(
@@ -2043,10 +2271,14 @@ def test_phase4_worker_saves_series_scripts_after_all_current_beats_are_locked(t
     asyncio.run(phase4_worker.run(job))
 
     scripts = [item for item in repository.get_project(project["id"])["episodes"] if item["stage"] == "script"]
-    assert [item["episode_number"] for item in scripts] == list(range(1, 13))
+    assert [item["episode_number"] for item in scripts] == list(range(1, 6))
     assert {item["status"] for item in scripts} == {"draft"}
     assert len({item["batch_id"] for item in scripts}) == 1
-    assert len(provider.calls) == 2
+    assert len(provider.calls) == 3
+    assert [
+        [item["episode_number"] for item in json.loads(call[1]["content"])["locked_outlines"]]
+        for call in provider.calls
+    ] == [[1, 2], [3, 4], [5]]
     assert "locked_beats" in provider.calls[0][1]["content"]
 
 
@@ -2262,6 +2494,12 @@ def test_non_outline_worker_action_keeps_provider_reasoning_effort(tmp_path, mon
 
 def test_rewrite_outline_field_calls_llm_once_and_returns_only_target_value():
     provider = SequentialProvider([{"value": "主角在旧剧院找到被烧毁账本的末页。"}])
+    prompt_snapshot = {
+        "template_id": "system:outline-test",
+        "revision": 2,
+        "content_hash": "outline-rewrite-hash",
+        "effective_instruction": "保持悬疑信息留白，通过既有道具导出反转。",
+    }
     value, meta = asyncio.run(script_service.rewrite_outline_field(
         provider,
         project={"id": 8, "name": "旧剧院", "target_episode_count": 3},
@@ -2273,10 +2511,13 @@ def test_rewrite_outline_field_calls_llm_once_and_returns_only_target_value():
         next_episode={"episode": 3, "core_event": "旧剧院交锋"},
         field="core_event",
         instruction="强化危险感",
+        prompt_snapshot=prompt_snapshot,
     ))
 
     assert value == "主角在旧剧院找到被烧毁账本的末页。"
     assert len(provider.calls) == 1
+    assert "当前项目创作风格要求" in provider.calls[0][0]["content"]
+    assert "既有道具导出反转" in provider.calls[0][0]["content"]
     payload = json.loads(provider.calls[0][1]["content"])
     assert payload["target_field"] == "core_event"
     assert payload["instruction"] == "强化危险感"
@@ -2284,6 +2525,8 @@ def test_rewrite_outline_field_calls_llm_once_and_returns_only_target_value():
     assert payload["previous_episode"]["episode"] == 1
     assert payload["next_episode"]["episode"] == 3
     assert meta["prompt_template_version"] == "outline-field-rewrite-v1"
+    assert meta["prompt_template_id"] == "system:outline-test"
+    assert meta["prompt_template_revision"] == 2
 
 
 @pytest.mark.parametrize("field", OUTLINE_TEXT_FIELDS)

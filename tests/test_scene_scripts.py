@@ -13,6 +13,7 @@ from sqlalchemy import create_engine, text
 
 from creative.api import build_merged_script_download, build_script_text
 from creative.delivery import DeliveryService
+from creative.free_mode_service import FreeCreativeModeService
 from creative.repository import CreativeRepository
 from creative.script_service import validate_script
 from creative.lifecycle_service import TopicLifecycleService, script_resource_fingerprint
@@ -521,6 +522,71 @@ def test_draft_delivery_preview_does_not_export_or_complete_workflow(
     assert len(task_calls) == calls_before_preview
     assert not repository.has_stage_export(
         project["id"], "beats", preview["stage_content_fingerprint"]
+    )
+
+
+def test_free_project_locked_script_can_be_formally_delivered_without_workflow_task(
+    tmp_path, monkeypatch
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = repository.create_original_project(
+        seed_text="自由创作交付测试",
+        name="自由交付项目",
+        target_episode_count=1,
+        created_by="admin",
+        creation_request_id="free-delivery-project",
+        workflow_mode="free",
+    )
+    repository.mark_project_bootstrap_status(project["id"], "ready")
+    free = FreeCreativeModeService(repository)
+    script = free.create_episode_resource(
+        project["id"], "script", 1,
+        {"episode_title": "终稿", "scenes": []},
+        expected_head_revision=0, actor_user_id="admin",
+    )
+    free.lock_resource(
+        project_id=project["id"], stage="script", episode_number=1,
+        resource_ref=str(script["resource"]["id"]),
+        expected_head_revision=script["head"]["revision"], actor_user_id="admin",
+    )
+
+    class ExistingAudit:
+        def query(self, **_kwargs):
+            return [{"id": "existing"}]
+
+    service = DeliveryService(
+        root=tmp_path,
+        creative_repository=repository,
+        workflow_repository=object(),
+        audit_service=ExistingAudit(),
+    )
+    monkeypatch.setattr(
+        service, "_resolve_delivery_task",
+        lambda *_args: pytest.fail("自由创作正式交付不应解析标准工作流任务"),
+    )
+
+    option = next(
+        item for item in service.options()
+        if item["stage"] == "script"
+        and item["resource_id"] == str(script["resource"]["id"])
+    )
+    delivery = service.create(
+        project_id=project["id"], stage="script",
+        resource_id=str(script["resource"]["id"]), format="txt",
+        actor=Principal(
+            user_id="admin", username="admin", display_name="Admin",
+            role_codes=("system_admin",), permissions=frozenset({"*"}),
+            data_scope="all", session_id="session",
+        ),
+    )
+
+    assert option["is_formal"] is True
+    assert option["workflow_task_id"] is None
+    assert delivery["is_formal"] is True
+    assert delivery["workflow_task_id"] is None
+    assert delivery["workflow_completed_at"] is None
+    assert repository.has_stage_export(
+        project["id"], "script", delivery["stage_content_fingerprint"]
     )
 
 

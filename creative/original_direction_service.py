@@ -155,6 +155,7 @@ async def generate_original_directions(
     market_context: list[dict[str, Any]],
     blocked_terms: list[str],
     count: int = 3,
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not 1 <= int(count) <= 5:
         raise ValueError("单次原创方向生成数量必须在 1-5 之间")
@@ -176,7 +177,7 @@ async def generate_original_directions(
     repair_attempted = False
     try:
         first = await provider.complete_json(
-            original_direction_messages(request_payload, int(count))
+            original_direction_messages(request_payload, int(count), prompt_snapshot)
         )
         accepted, first_errors = _accept_candidates(
             first, accepted, market_context=market_context,
@@ -195,7 +196,7 @@ async def generate_original_directions(
                 "missing_count": missing,
             }
             second = await provider.complete_json(
-                original_direction_messages(repair_payload, missing)
+                original_direction_messages(repair_payload, missing, prompt_snapshot)
             )
             accepted, _ = _accept_candidates(
                 second, accepted, market_context=market_context,
@@ -240,6 +241,7 @@ async def derive_original_direction(
     instruction: str,
     market_context: list[dict[str, Any]],
     blocked_terms: list[str],
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     payload = {
         "project": project,
@@ -249,7 +251,9 @@ async def derive_original_direction(
         "market_context": market_context,
     }
     try:
-        response = await provider.complete_json(original_variant_messages(payload))
+        response = await provider.complete_json(
+            original_variant_messages(payload, prompt_snapshot)
+        )
         raw = response.get("direction") if isinstance(response, dict) else None
         content = validate_original_direction_content(
             raw, market_context=market_context, blocked_terms=blocked_terms

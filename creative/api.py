@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 from datetime import datetime
 from io import BytesIO, StringIO
@@ -23,7 +24,7 @@ import uuid
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from openpyxl import Workbook
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from creative.hit_breakdown import breakdown_field_guide, personalize_breakdown_field_guide
 from creative.application_service import (
@@ -40,6 +41,9 @@ from creative.original_direction_service import validate_original_direction_cont
 from creative.original_project_service import OriginalProjectService
 from creative.outline_fields import OUTLINE_TEXT_FIELDS, outline_field_source_fingerprint
 from creative.outline_overview import SERIES_OVERVIEW_FIELD_LABELS, read_series_overview
+from creative.prompt_marketplace import PromptMarketplaceService
+from creative.prompt_observability import PromptObservabilityService
+from creative.project_prompt_service import ProjectPromptService
 from creative.repository import CreativeRepository, TopicDecisionConflict, canonical_request_hash
 from creative.script_service import normalize_script_content, rewrite_outline_field, validate_script
 from creative.selection_stage_service import SelectionStageService
@@ -61,6 +65,7 @@ from creative.schema import (
     EpisodeBeatsRequest,
     FreeBriefCreateRequest,
     FreeCharacterBatchCreateRequest,
+    FreeCreativeContextRefs,
     FreeCreativeGenerateRequest,
     FreeCreativeHeadRequest,
     FreeCreativeLockRequest,
@@ -74,6 +79,16 @@ from creative.schema import (
     OutlineOverviewRequest,
     OriginalProjectCreateRequest,
     PlanningAssignmentRequest,
+    PromptBindingRequest,
+    PromptGovernanceActionRequest,
+    PromptImportPreviewRequest,
+    PromptMarketplaceInstallRequest,
+    PromptMarketplaceRatingRequest,
+    PromptMarketplaceReviewRequest,
+    PromptMarketplaceSubmissionRequest,
+    PromptProjectEnableRequest,
+    PromptTemplateCreateRequest,
+    PromptTemplateRevisionRequest,
     ProjectCreateRequest,
     ProjectUpdateRequest,
     SeedUpdateRequest,
@@ -106,6 +121,12 @@ from workflow.transition_service import TransitionService
 
 logger = logging.getLogger("aiworker.creative")
 
+_MODE_MIGRATION_PREVIEW_TIMEOUT_SECONDS = 8.0
+_MODE_MIGRATION_NON_BLOCKING_JOB_TYPES = frozenset({
+    "project_review",
+    "screenplay_review",
+})
+
 
 class TopicGenerateRequest(BaseModel):
     platform: str = "dy"
@@ -130,6 +151,7 @@ class BreakdownCreateRequest(BaseModel):
     topic_id: int
     force_regenerate: bool = False
     workflow_task_id: str | None = None
+    llm_model_record_id: str | None = Field(None, min_length=1, max_length=64)
 
 
 class BreakdownUpdateRequest(BaseModel):
@@ -187,11 +209,14 @@ def uses_project_member_stage_authorization(path: str, method: str) -> bool:
         return True
     if method == "PATCH" and not suffix:
         return True
+    if suffix in {"/workflow-mode", "/migrate-to-free"}:
+        return method in {"PATCH", "POST"}
     return bool(
         re.match(
             r"/(?:"
             r"free|blueprints|briefs|seeds|characters|character-batches|outlines|"
             r"beats|scripts|episodes/\d+/(?:beats|scripts)|generation-jobs|"
+            r"prompt-library|prompt-marketplace|prompt-modules|prompt-system|"
             r"workflow-tasks/(?:brief|characters|outline|beats|script)"
             r")(?:/|$)",
             suffix,
@@ -1039,6 +1064,15 @@ def build_creative_router(
         )
     )
     free_mode_service = FreeCreativeModeService(repository)
+    project_prompt_service = ProjectPromptService(repository)
+    prompt_marketplace_service = PromptMarketplaceService(
+        repository, project_prompt_service.store
+    )
+    prompt_observability_service = (
+        PromptObservabilityService(repository, job_manager)
+        if job_manager is not None
+        else None
+    )
     if application_service is None:
         workflow_identity_repository = getattr(
             workflow_repository, "identity_repository", None
@@ -1621,6 +1655,18 @@ def build_creative_router(
         generation_instruction = str(
             extra.pop("generation_instruction", "") or ""
         ).strip()
+        prompt_template_key = str(
+            extra.pop("prompt_template_key", "") or ""
+        ).strip() or None
+        prompt_template_revision = extra.pop("prompt_template_revision", None)
+        prompt_override = dict(extra.pop("prompt_override", {}) or {})
+        prompt_mode = str(extra.pop("prompt_mode", "") or "").strip() or None
+        if (
+            prompt_mode is None
+            and normalized_stage == "brief"
+            and int(extra.get("count") or 1) > 1
+        ):
+            prompt_mode = "series"
         source_snapshot = extra.pop("source_snapshot", None)
         source_snapshot_id = str(extra.pop("source_snapshot_id", "") or "").strip()
         if source_snapshot is None:
@@ -1638,6 +1684,35 @@ def build_creative_router(
             source_snapshot_id = source_snapshot_id or str(embedded_id or "").strip()
             if not source_snapshot_id:
                 source_snapshot_id = f"creative-source-{operation_id}"
+        source_snapshot = dict(source_snapshot)
+        source_snapshot.pop("prompt_snapshot", None)
+        try:
+            prompt_snapshot = (
+                project_prompt_service.resolve_generation_snapshot(
+                    project_id=project_id,
+                    stage=normalized_stage,
+                    series=bool(extra.get("series")),
+                    mode=prompt_mode,
+                    episode_number=extra.get("episode_number"),
+                    template_key=prompt_template_key,
+                    template_revision=(
+                        int(prompt_template_revision)
+                        if prompt_template_revision is not None
+                        else None
+                    ),
+                    run_override=prompt_override,
+                    actor_user_id=principal.user_id if principal is not None else "",
+                )
+                if normalized_stage in {"brief", "characters", "outline", "beats", "script"}
+                else None
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if prompt_snapshot is not None:
+            source_snapshot["prompt_snapshot"] = prompt_snapshot
+        job_observability = prompt_job_identity(prompt_snapshot)
         try:
             state = application_service.start_generation_compat(
                 project_id=project_id,
@@ -1650,6 +1725,7 @@ def build_creative_router(
                 source_snapshot_id=source_snapshot_id,
                 source_snapshot=source_snapshot,
                 llm_model_record_id=llm_model_record_id,
+                **job_observability,
                 **extra,
             )
         except JobConflictError as exc:
@@ -1693,7 +1769,447 @@ def build_creative_router(
             "source_snapshot_id": getattr(payload, "source_snapshot_id", None),
             "source_snapshot": getattr(payload, "source_snapshot", None),
             "llm_model_record_id": getattr(payload, "llm_model_record_id", None),
+            "prompt_template_key": getattr(payload, "prompt_template_key", None),
+            "prompt_template_revision": getattr(
+                payload, "prompt_template_revision", None
+            ),
+            "prompt_override": getattr(payload, "prompt_override", {}),
         }
+
+    def can_manage_prompt_project(
+        request: Request, project_id: int, principal: Principal
+    ) -> bool:
+        if principal.is_system_admin:
+            return True
+        permission_service = getattr(
+            request.app.state, "identity_permission_service", None
+        )
+        if isinstance(permission_service, PermissionService) and (
+            permission_service.can_access_managed_project(
+                principal, workflow_project_id(project_id)
+            )
+        ):
+            return True
+        return False
+
+    def assert_prompt_project_manager(
+        request: Request, project_id: int, principal: Principal
+    ) -> None:
+        if can_manage_prompt_project(request, project_id, principal):
+            return
+        raise HTTPException(403, "只有项目负责人可以管理项目模板")
+
+    def assert_prompt_stage_manager(
+        request: Request, project_id: int, stage: str, principal: Principal
+    ) -> None:
+        if principal.is_system_admin:
+            return
+        permission_service = getattr(
+            request.app.state, "identity_permission_service", None
+        )
+        if isinstance(permission_service, PermissionService) and (
+            permission_service.can_access_managed_project(
+                principal, workflow_project_id(project_id)
+            )
+        ):
+            return
+        permission = {
+            "brief": "brief.edit",
+            "characters": "character.edit",
+            "outline": "outline.edit",
+            "beats": "beats.edit",
+            "script": "script.edit",
+            "review": "script.review.generate",
+            "optimization": "script.optimize.generate",
+        }.get(stage)
+        if (
+            permission is not None
+            and permission in principal.permissions
+            and workflow_repository.is_active_project_member(
+                workflow_project_id(project_id), principal
+            )
+        ):
+            return
+        raise HTTPException(403, "只有项目负责人或当前阶段负责人可以修改模板")
+
+    @router.get("/projects/{project_id}/prompt-marketplace")
+    async def get_project_prompt_marketplace(
+        project_id: int,
+        request: Request,
+        q: str = Query("", max_length=120),
+        stage: str | None = Query(None),
+        license_code: str | None = Query(None, alias="license"),
+        limit: int = Query(100, ge=1, le=500),
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        assert_project_read_access(request, project_id, principal)
+        try:
+            result = prompt_marketplace_service.marketplace(
+                project_id=project_id,
+                actor_user_id=principal.user_id,
+                query=q,
+                stage=stage,
+                license_code=license_code,
+                is_admin=principal.is_system_admin,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        result["can_install"] = can_manage_prompt_project(
+            request, project_id, principal
+        )
+        return result
+
+    @router.post(
+        "/projects/{project_id}/prompt-library/templates/{template_id}/marketplace-submissions"
+    )
+    async def submit_project_prompt_marketplace_template(
+        project_id: int,
+        template_id: str,
+        payload: PromptMarketplaceSubmissionRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        assert_project_read_access(request, project_id, principal)
+        try:
+            return prompt_marketplace_service.submit(
+                project_id=project_id,
+                template_id=template_id,
+                expected_template_revision=payload.expected_template_revision,
+                operation_id=payload.operation_id,
+                title=payload.title,
+                description=payload.description,
+                tags=payload.tags,
+                attribution_name=payload.attribution_name,
+                license_code=payload.license_code,
+                source_type=payload.source_type,
+                source_url=payload.source_url,
+                rights_statement=payload.rights_statement,
+                publication_confirmed=payload.publication_confirmed,
+                rights_confirmed=payload.rights_confirmed,
+                actor_user_id=principal.user_id,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post(
+        "/projects/{project_id}/prompt-marketplace/submissions/{submission_id}/review"
+    )
+    async def review_project_prompt_marketplace_submission(
+        project_id: int,
+        submission_id: str,
+        payload: PromptMarketplaceReviewRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        assert_project_read_access(request, project_id, principal)
+        try:
+            return prompt_marketplace_service.moderate(
+                submission_id=submission_id,
+                action=payload.action,
+                note=payload.note,
+                expected_review_revision=payload.expected_review_revision,
+                operation_id=payload.operation_id,
+                actor_user_id=principal.user_id,
+                is_admin=principal.is_system_admin,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post(
+        "/projects/{project_id}/prompt-marketplace/listings/{submission_id}/install"
+    )
+    async def install_project_prompt_marketplace_listing(
+        project_id: int,
+        submission_id: str,
+        payload: PromptMarketplaceInstallRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        assert_project_read_access(request, project_id, principal)
+        assert_prompt_project_manager(request, project_id, principal)
+        try:
+            return prompt_marketplace_service.install(
+                project_id=project_id,
+                submission_id=submission_id,
+                operation_id=payload.operation_id,
+                license_accepted=payload.license_accepted,
+                actor_user_id=principal.user_id,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.put(
+        "/projects/{project_id}/prompt-marketplace/listings/{submission_id}/rating"
+    )
+    async def rate_project_prompt_marketplace_listing(
+        project_id: int,
+        submission_id: str,
+        payload: PromptMarketplaceRatingRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        assert_project_read_access(request, project_id, principal)
+        try:
+            return prompt_marketplace_service.rate(
+                project_id=project_id,
+                submission_id=submission_id,
+                score=payload.score,
+                review_text=payload.review_text,
+                expected_revision=payload.expected_revision,
+                actor_user_id=principal.user_id,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.get("/projects/{project_id}/prompt-library")
+    async def get_project_prompt_library(
+        project_id: int,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        assert_project_read_access(request, project_id, principal)
+        return project_prompt_service.catalog(project_id, principal.user_id)
+
+    @router.get("/projects/{project_id}/prompt-library/recommendations")
+    async def get_project_prompt_recommendations(
+        project_id: int,
+        request: Request,
+        stage: str | None = Query(None),
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        assert_project_read_access(request, project_id, principal)
+        try:
+            return project_prompt_service.recommendations(
+                project_id,
+                principal.user_id,
+                stage=stage,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @router.get("/projects/{project_id}/prompt-library/observability")
+    async def get_project_prompt_observability(
+        project_id: int,
+        request: Request,
+        stage: str | None = Query(None),
+        template_key: str | None = Query(None, max_length=160),
+        limit: int = Query(200, ge=1, le=1000),
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        assert_project_read_access(request, project_id, principal)
+        if prompt_observability_service is None:
+            raise HTTPException(503, "模板可观测性任务服务不可用")
+        try:
+            return prompt_observability_service.report(
+                project_id=project_id,
+                actor_user_id=principal.user_id,
+                stage=stage,
+                template_key=template_key,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @router.post("/projects/{project_id}/prompt-library/import-preview")
+    async def preview_project_prompt_import(
+        project_id: int,
+        payload: PromptImportPreviewRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        assert_project_read_access(request, project_id, principal)
+        if llm_provider_factory is None:
+            raise HTTPException(503, "LLM provider is not configured")
+        try:
+            provider = llm_provider_factory()
+        except Exception as exc:
+            raise HTTPException(503, "LLM provider is not configured") from exc
+        try:
+            return await project_prompt_service.import_preview(
+                project_id,
+                provider=provider,
+                source_text=payload.source_text,
+                target_stage=payload.target_stage,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                422, f"导入分析结果不符合模板契约：{exc}"
+            ) from exc
+        except Exception as exc:
+            logger.exception("Prompt template import preview failed")
+            raise HTTPException(502, "外部提示词分析失败") from exc
+
+    @router.post("/projects/{project_id}/prompt-system/enable")
+    async def enable_project_prompt_library(
+        project_id: int,
+        payload: PromptProjectEnableRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        assert_prompt_project_manager(request, project_id, principal)
+        try:
+            return project_prompt_service.enable_existing_project(
+                project_id,
+                principal.user_id,
+                template_key=payload.template_key,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post("/projects/{project_id}/prompt-library/templates")
+    async def create_project_prompt_template(
+        project_id: int,
+        payload: PromptTemplateCreateRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        assert_project_read_access(request, project_id, principal)
+        if payload.owner_scope == "project":
+            assert_prompt_project_manager(request, project_id, principal)
+        try:
+            return project_prompt_service.create_template(
+                project_id=project_id,
+                actor_user_id=principal.user_id,
+                title=payload.title,
+                description=payload.description,
+                owner_scope=payload.owner_scope,
+                content=payload.content,
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post("/projects/{project_id}/prompt-library/templates/{template_id}/revisions")
+    async def revise_project_prompt_template(
+        project_id: int,
+        template_id: str,
+        payload: PromptTemplateRevisionRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        assert_project_read_access(request, project_id, principal)
+        template = project_prompt_service.store.get_template(template_id)
+        if template and template.get("owner_scope") == "project":
+            assert_prompt_project_manager(request, project_id, principal)
+        try:
+            return project_prompt_service.save_template_revision(
+                project_id=project_id,
+                template_id=template_id,
+                actor_user_id=principal.user_id,
+                expected_revision=payload.expected_revision,
+                content=payload.content,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.get("/projects/{project_id}/prompt-library/governance")
+    async def get_project_prompt_governance(
+        project_id: int,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        assert_project_read_access(request, project_id, principal)
+        result = project_prompt_service.governance(project_id)
+        result["can_manage"] = can_manage_prompt_project(
+            request, project_id, principal
+        )
+        return result
+
+    @router.post(
+        "/projects/{project_id}/prompt-library/templates/{template_id}/governance"
+    )
+    async def govern_project_prompt_template(
+        project_id: int,
+        template_id: str,
+        payload: PromptGovernanceActionRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        assert_project_read_access(request, project_id, principal)
+        assert_prompt_project_manager(request, project_id, principal)
+        try:
+            return project_prompt_service.govern_template(
+                project_id=project_id,
+                template_id=template_id,
+                action=payload.action,
+                note=payload.note,
+                expected_governance_revision=payload.expected_governance_revision,
+                operation_id=payload.operation_id,
+                actor_user_id=principal.user_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.get("/projects/{project_id}/prompt-modules/{stage}")
+    async def get_project_prompt_module(
+        project_id: int,
+        stage: str,
+        request: Request,
+        episode_number: int = Query(0, ge=0, le=100),
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        assert_project_read_access(request, project_id, principal)
+        try:
+            return project_prompt_service.module_state(
+                project_id,
+                stage,
+                episode_number=episode_number,
+                actor_user_id=principal.user_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @router.put("/projects/{project_id}/prompt-modules/{stage}")
+    async def update_project_prompt_module(
+        project_id: int,
+        stage: str,
+        payload: PromptBindingRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        assert_prompt_stage_manager(request, project_id, stage, principal)
+        try:
+            return project_prompt_service.bind(
+                project_id=project_id,
+                stage=stage,
+                episode_number=payload.episode_number,
+                template_key=payload.template_key,
+                template_revision=payload.template_revision,
+                override=payload.override,
+                actor_user_id=principal.user_id,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @router.post("/projects/{project_id}/generation-jobs/{job_id}/retry")
     async def retry_project_generation_job(
@@ -2127,6 +2643,7 @@ def build_creative_router(
             writer_member_ids = _validate_members(
                 principal, payload.writer_member_ids, "screenwriter"
             )
+            created_project = existing is None
             project = existing or repository.create_project(
                 topic_id,
                 int(breakdown["id"]),
@@ -2136,6 +2653,10 @@ def build_creative_router(
                 creation_request_id=payload.creation_request_id,
                 created_by=principal.user_id,
             )
+            if created_project:
+                project_prompt_service.enable_new_project(
+                    int(project["id"]), principal.user_id
+                )
             project_id = str(project["id"])
             scoped_project_id = workflow_project_id(project_id)
             workflow_repository.ensure_project_creator(
@@ -2462,6 +2983,7 @@ def build_creative_router(
             })
         if job_manager is None:
             raise HTTPException(503, "creative job manager is unavailable")
+        llm_model_record_id = validate_llm_model(payload.llm_model_record_id)
         coverage = sorted({
             *[int(item["episode_number"]) for item in episodes],
             *[int(item["episode_number"]) for item in video_assets],
@@ -2493,6 +3015,11 @@ def build_creative_router(
                     principal.user_id if principal is not None else None
                 ),
                 "project_id": project_id,
+                **(
+                    {"llm_model_record_id": llm_model_record_id}
+                    if llm_model_record_id
+                    else {}
+                ),
             },
         }
         try:
@@ -2688,6 +3215,10 @@ def build_creative_router(
                     seed_text=payload.seed_text,
                 )
             resolved_project = repository.get_project(int(project["id"])) or project
+            if not is_existing_project:
+                project_prompt_service.enable_new_project(
+                    int(resolved_project["id"]), principal.user_id
+                )
             if resolved_project.get("created_by") == principal.user_id:
                 workflow_repository.ensure_project_creator(
                     workflow_project_id(resolved_project["id"]),
@@ -2750,6 +3281,10 @@ def build_creative_router(
             raise HTTPException(409, str(exc)) from exc
         except Exception as exc:
             raise HTTPException(503, "原创项目初始化失败，请重试") from exc
+        if created:
+            project_prompt_service.enable_new_project(
+                int(project["id"]), principal.user_id
+            )
         return JSONResponse(project, status_code=201 if created else 200)
 
     @router.get("/projects/{project_id}/seeds")
@@ -2921,18 +3456,12 @@ def build_creative_router(
             managed_preview=has_managed_project_preview_access(request, principal),
         )
 
-    def assert_mode_manager(project: dict[str, Any], principal: Principal) -> None:
-        if (
-            principal.is_system_admin
-            or project.get("created_by") == principal.user_id
+    def assert_mode_member(project: dict[str, Any], principal: Principal) -> None:
+        if principal.is_system_admin or workflow_repository.is_active_project_member(
+            workflow_project_id(project["id"]), principal
         ):
             return
-        try:
-            workflow_repository.assert_can_manage_project(
-                workflow_project_id(project["id"]), principal
-            )
-        except PermissionError as exc:
-            raise HTTPException(403, "只有项目创建者或项目管理员可以修改创作模式") from exc
+        raise HTTPException(403, "只有项目组成员可以修改创作模式")
 
     def project_creative_tasks(project_id: int, principal: Principal) -> list[dict[str, Any]]:
         return [
@@ -2956,7 +3485,9 @@ def build_creative_router(
             if task.get("status") in {"pool", "assigned"} or (
                 not has_resources and task.get("status") == "in_progress"
             ):
-                workflow_repository.cancel_task(str(task["id"]), principal)
+                workflow_repository.cancel_task_for_mode_change(
+                    str(task["id"]), principal
+                )
 
     @router.patch("/projects/{project_id}/workflow-mode")
     async def change_project_workflow_mode(
@@ -2967,7 +3498,7 @@ def build_creative_router(
     ):
         assert_project_read_access(request, project_id, principal)
         project = project_or_404(project_id)
-        assert_mode_manager(project, principal)
+        assert_mode_member(project, principal)
         if payload.workflow_mode == "free":
             active_jobs = active_project_job_labels(project_id)
             if active_jobs:
@@ -3001,7 +3532,11 @@ def build_creative_router(
             )
         return changed
 
-    def active_project_job_labels(project_id: int) -> list[str]:
+    def active_project_job_labels(
+        project_id: int,
+        *,
+        ignored_crawler_types: frozenset[str] | None = None,
+    ) -> list[str]:
         if job_manager is None:
             return []
         labels: list[str] = []
@@ -3015,6 +3550,8 @@ def build_creative_router(
             if status in {"completed", "success", "succeeded", "failed", "cancelled", "stopped"}:
                 continue
             crawler_type = str(job.get("crawler_type") or "job")
+            if crawler_type in (ignored_crawler_types or ()):
+                continue
             labels.append(crawler_type)
         return labels
 
@@ -3026,10 +3563,24 @@ def build_creative_router(
     ):
         assert_project_read_access(request, project_id, principal)
         project = project_or_404(project_id)
-        assert_mode_manager(project, principal)
-        preview = free_mode_service.migration_preview(project_id)
-        tasks = project_creative_tasks(project_id, principal)
-        active_jobs = active_project_job_labels(project_id)
+        assert_mode_member(project, principal)
+        try:
+            preview, tasks, active_jobs = await asyncio.wait_for(
+                asyncio.gather(
+                    asyncio.to_thread(free_mode_service.migration_preview, project_id),
+                    asyncio.to_thread(
+                        project_creative_tasks, project_id, principal
+                    ),
+                    asyncio.to_thread(
+                        active_project_job_labels,
+                        project_id,
+                        ignored_crawler_types=_MODE_MIGRATION_NON_BLOCKING_JOB_TYPES,
+                    ),
+                ),
+                timeout=_MODE_MIGRATION_PREVIEW_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as exc:
+            raise HTTPException(503, "迁移预检超时，请稍后重试") from exc
         blockers = list(preview["blockers"])
         if active_jobs:
             blockers.append("项目存在运行中的后台任务")
@@ -3054,8 +3605,11 @@ def build_creative_router(
     ):
         assert_project_read_access(request, project_id, principal)
         project = project_or_404(project_id)
-        assert_mode_manager(project, principal)
-        active_jobs = active_project_job_labels(project_id)
+        assert_mode_member(project, principal)
+        active_jobs = active_project_job_labels(
+            project_id,
+            ignored_crawler_types=_MODE_MIGRATION_NON_BLOCKING_JOB_TYPES,
+        )
         if active_jobs:
             raise HTTPException(409, "项目存在运行中的后台任务，暂不能迁移")
         migration_preview = free_mode_service.migration_preview(project_id)
@@ -3071,6 +3625,15 @@ def build_creative_router(
             )
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+        target_project = migrated.get("project") or {}
+        target_project_id = target_project.get("id")
+        if target_project_id is None:
+            raise HTTPException(503, "自由创作副本成员同步失败，请重试")
+        workflow_repository.copy_active_project_members(
+            workflow_project_id(project_id),
+            workflow_project_id(int(target_project_id)),
+            principal,
+        )
         audit_service = getattr(request.app.state, "audit_service", None)
         if isinstance(audit_service, AuditService):
             audit_service.record(
@@ -3163,6 +3726,7 @@ def build_creative_router(
                 content,
                 expected_head_revision=payload.expected_head_revision,
                 actor_user_id=principal.user_id,
+                generation_meta={"origin": "manual"},
             )
         except PermissionError as exc:
             raise HTTPException(403, str(exc)) from exc
@@ -3183,6 +3747,7 @@ def build_creative_router(
                 payload.relationships,
                 expected_head_revision=payload.expected_head_revision,
                 actor_user_id=principal.user_id,
+                generation_meta={"origin": "manual"},
             )
         except PermissionError as exc:
             raise HTTPException(403, str(exc)) from exc
@@ -3204,6 +3769,7 @@ def build_creative_router(
                 series_overview=payload.series_overview,
                 expected_head_revision=payload.expected_head_revision,
                 actor_user_id=principal.user_id,
+                generation_meta={"origin": "manual"},
             )
         except PermissionError as exc:
             raise HTTPException(403, str(exc)) from exc
@@ -3235,6 +3801,7 @@ def build_creative_router(
                 payload.content or default_content,
                 expected_head_revision=payload.expected_head_revision,
                 actor_user_id=principal.user_id,
+                generation_meta={"origin": "manual"},
             )
         except PermissionError as exc:
             raise HTTPException(403, str(exc)) from exc
@@ -3363,6 +3930,16 @@ def build_creative_router(
             raise HTTPException(409, str(exc)) from exc
         return normalized
 
+    def prompt_job_identity(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(snapshot, dict) or not snapshot:
+            return {}
+        return {
+            "prompt_template_id": str(snapshot.get("template_id") or ""),
+            "prompt_template_key": str(snapshot.get("template_key") or ""),
+            "prompt_template_revision": int(snapshot.get("revision") or 0),
+            "prompt_content_hash": str(snapshot.get("content_hash") or ""),
+        }
+
     def start_free_generation_job(
         *,
         project_id: int,
@@ -3378,6 +3955,26 @@ def build_creative_router(
         )
         try:
             application_service.assert_stage_write_access(project_id, stage, principal)
+            prompt_snapshot = (
+                project_prompt_service.resolve_generation_snapshot(
+                    project_id=project_id,
+                    stage=stage,
+                    series=False,
+                    mode=(
+                        "series"
+                        if stage == "outline"
+                        or (stage == "brief" and int(payload.count) > 1)
+                        else None
+                    ),
+                    episode_number=episode_number,
+                    template_key=payload.prompt_template_key,
+                    template_revision=payload.prompt_template_revision,
+                    run_override=payload.prompt_override,
+                    actor_user_id=principal.user_id,
+                )
+                if stage in {"brief", "characters", "outline", "beats", "script"}
+                else None
+            )
             context = free_mode_service.create_generation_context(
                 context_id=payload.operation_id,
                 project_id=project_id,
@@ -3386,6 +3983,7 @@ def build_creative_router(
                 instruction=payload.generation_instruction,
                 context_refs=payload.context_refs.model_dump(),
                 actor_user_id=principal.user_id,
+                prompt_snapshot=prompt_snapshot,
             )
         except PermissionError as exc:
             raise HTTPException(403, str(exc)) from exc
@@ -3407,6 +4005,9 @@ def build_creative_router(
             "expected_head_revision": payload.expected_head_revision,
             "count": payload.count if stage == "brief" else 1,
             "llm_model_record_id": llm_model_record_id,
+            "prompt_content_hash": str(
+                (prompt_snapshot or {}).get("content_hash") or ""
+            ),
         })
         state = job_manager.create_job(
             {
@@ -3429,6 +4030,7 @@ def build_creative_router(
                     "expected_head_revision": payload.expected_head_revision,
                     "count": payload.count if stage == "brief" else 1,
                     "llm_model_record_id": llm_model_record_id,
+                    **prompt_job_identity(prompt_snapshot),
                     "db_path": str(repository.db_path.resolve()),
                     "runtime_dir": str(Path(runtime_dir).resolve()),
                 },
@@ -3479,6 +4081,16 @@ def build_creative_router(
                     instruction=payload.generation_instruction,
                     context_refs=context_refs,
                     actor_user_id=principal.user_id,
+                    prompt_snapshot=project_prompt_service.resolve_generation_snapshot(
+                        project_id=project_id,
+                        stage=stage,
+                        series=True,
+                        episode_number=episode_number,
+                        template_key=payload.prompt_template_key,
+                        template_revision=payload.prompt_template_revision,
+                        run_override=payload.prompt_override,
+                        actor_user_id=principal.user_id,
+                    ),
                 )
                 for episode_number in range(1, total + 1)
             }
@@ -3527,6 +4139,11 @@ def build_creative_router(
                         for number, revision in expected_head_revisions.items()
                     },
                     "llm_model_record_id": llm_model_record_id,
+                    **prompt_job_identity(
+                        dict(next(iter(contexts.values()))["context_snapshot"]).get(
+                            "prompt_snapshot"
+                        )
+                    ),
                     "db_path": str(repository.db_path.resolve()),
                     "runtime_dir": str(Path(runtime_dir).resolve()),
                 },
@@ -4157,6 +4774,10 @@ def build_creative_router(
             source_snapshot_id=payload.source_snapshot_id,
             source_snapshot=payload.source_snapshot,
             llm_model_record_id=payload.llm_model_record_id,
+            prompt_template_key=payload.prompt_template_key,
+            prompt_template_revision=payload.prompt_template_revision,
+            prompt_override=payload.prompt_override,
+            prompt_mode="rewrite",
         )
 
     @router.patch("/blueprints/{blueprint_id}")
@@ -4294,6 +4915,7 @@ def build_creative_router(
             principal,
             request,
             workflow_task_id=workflow_task_id,
+            prompt_mode="series",
             **generation_request_extra(payload),
         )
 
@@ -4469,6 +5091,22 @@ def build_creative_router(
         except Exception as exc:
             raise HTTPException(503, "LLM provider is not configured") from exc
         try:
+            prompt_snapshot = project_prompt_service.resolve_generation_snapshot(
+                project_id=project_id,
+                stage="outline",
+                series=False,
+                mode="rewrite",
+                episode_number=0,
+                template_key=None,
+                template_revision=None,
+                run_override=None,
+                actor_user_id=principal.user_id,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        try:
             candidate, meta = await rewrite_outline_field(
                 provider,
                 project=context["project"],
@@ -4488,6 +5126,7 @@ def build_creative_router(
                 ),
                 field=field,
                 instruction=payload.instruction,
+                prompt_snapshot=prompt_snapshot,
             )
         except Exception as exc:
             raise HTTPException(502, "大纲字段重写失败") from exc
@@ -4640,6 +5279,7 @@ def build_creative_router(
             request,
             workflow_task_id=workflow_task_id,
             batch_id=batch_id,
+            prompt_mode="rewrite",
             **generation_request_extra(payload),
         )
 
@@ -4862,7 +5502,7 @@ def build_creative_router(
         )
         return create_generation_job(
             project_id, "script", principal, request,
-            series=True, chunk_size=10, episode_start=1, episode_end=total,
+            series=True, chunk_size=2, episode_start=1, episode_end=total,
             workflow_task_id=workflow_task_id,
             **generation_request_extra(payload),
         )

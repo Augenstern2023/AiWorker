@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import json
 from pathlib import Path
+import time
 from typing import Any
 
 import config
@@ -26,12 +27,20 @@ from screenplay_review.service import build_project_source, source_fingerprint
 from .service import content_fingerprint, optimize_episode, report_findings
 
 
-def create_provider() -> Any:
-    return create_llm_provider_from_config(config)
+def create_provider(*, retry_callback: Any = None) -> Any:
+    return create_llm_provider_from_config(
+        config,
+        prefix="SCREENPLAY_OPTIMIZATION_LLM",
+        retry_callback=retry_callback,
+    )
 
 
 def emit(job: CrawlJob, event: str, message: str, level: str = "info", payload: dict[str, Any] | None = None) -> None:
     emit_event(event, job.job_id, "screenplay-optimization-worker", "creative", level, message, payload or {})
+
+
+def _usage_payload(job: CrawlJob, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    return dict(payload or {})
 
 
 def _latest(project: dict[str, Any], stage: str, episode_number: int) -> dict[str, Any] | None:
@@ -58,6 +67,14 @@ async def run(job: CrawlJob) -> None:
     repository.start_script_optimization(optimization_id)
     emit(job, "job_started", "开始生成剧本优化草稿")
     try:
+        prompt_snapshot = dict(optimization.get("prompt_snapshot") or {})
+        if prompt_snapshot:
+            expected_mode = "series" if optimization["mode"] == "structure" else "single"
+            if (
+                prompt_snapshot.get("stage") != "optimization"
+                or prompt_snapshot.get("mode") != expected_mode
+            ):
+                raise ValueError("优化提示词快照与任务模式不匹配")
         current_source = build_project_source(
             project,
             str(review["mode"]),
@@ -82,11 +99,28 @@ async def run(job: CrawlJob) -> None:
     context_by_episode = {
         int(item["episode_number"]): item for item in current_source.get("episodes") or []
     }
-    generated_drafts: list[dict[str, Any]] = []
     total = len(optimization["target_episode_numbers"])
+    current_episode = 0
+    current_phase = ""
+
+    def report_retry(retry_number: int, max_retries: int, _reason: str) -> None:
+        # Model errors can contain request details; events expose only safe metadata.
+        emit(
+            job, "progress", "剧本优化模型请求正在重试",
+            payload={
+                "optimization_id": optimization_id,
+                "current_episode": current_episode,
+                "optimization_phase": current_phase,
+                "request_attempt": int(retry_number) + 1,
+                "request_max_attempts": int(max_retries) + 1,
+                "request_started_at": time.time(),
+            },
+        )
+
     try:
-        provider = create_provider()
+        provider = create_provider(retry_callback=report_retry)
         for index, episode_number in enumerate(optimization["target_episode_numbers"], start=1):
+            current_episode = int(episode_number)
             episode_context = context_by_episode.get(int(episode_number))
             if not episode_context:
                 raise ValueError(f"第 {episode_number} 集场次剧本不存在")
@@ -96,6 +130,48 @@ async def run(job: CrawlJob) -> None:
                 raise ValueError(f"第 {episode_number} 集场次剧本不存在")
             if optimization["mode"] == "structure" and not beats:
                 raise ValueError(f"第 {episode_number} 集 Beats 不存在")
+            existing = [
+                draft for draft in repository.get_script_optimization(optimization_id)["drafts"]
+                if int(draft["episode_number"]) == int(episode_number)
+            ]
+            expected = {"beats", "script"} if optimization["mode"] == "structure" else {"script"}
+            if existing:
+                if len(existing) != len(expected) or {draft["kind"] for draft in existing} != expected:
+                    raise ValueError(f"第 {episode_number} 集已有不完整的优化草稿")
+                emit(
+                    job, "progress", f"第 {episode_number} 集草稿已保存，跳过重复生成",
+                    payload={"completed": index, "total": total, "current_episode": current_episode},
+                )
+                continue
+            emit(
+                job, "progress", f"正在生成第 {episode_number} 集优化草稿",
+                payload={
+                    "completed": index - 1, "total": total,
+                    "current_episode": current_episode, "request_attempt": 1,
+                    "request_max_attempts": int(getattr(provider, "max_retries", 0)) + 1,
+                    "request_started_at": time.time(),
+                },
+            )
+
+            def phase_started(phase: str) -> None:
+                nonlocal current_phase
+                current_phase = str(phase)
+                label = "Beats" if current_phase == "beats" else "场次剧本"
+                emit(
+                    job,
+                    "progress",
+                    f"正在生成第 {episode_number} 集{label}优化草稿",
+                    payload={
+                        "completed": index - 1,
+                        "total": total,
+                        "current_episode": current_episode,
+                        "optimization_phase": current_phase,
+                        "request_attempt": 1,
+                        "request_max_attempts": int(getattr(provider, "max_retries", 0)) + 1,
+                        "request_started_at": time.time(),
+                    },
+                )
+
             result = await optimize_episode(
                 provider,
                 mode=str(optimization["mode"]),
@@ -110,35 +186,41 @@ async def run(job: CrawlJob) -> None:
                 },
                 findings=selected_by_episode.get(int(episode_number), []),
                 summaries=summaries,
+                prompt_snapshot=prompt_snapshot or None,
+                on_phase=phase_started,
             )
             if optimization["mode"] == "structure":
-                generated_drafts.append(
+                episode_drafts = [
                     {
                         "episode_number": int(episode_number), "kind": "beats",
                         "source_episode_id": beats["id"],
                         "source_fingerprint": content_fingerprint(beats["content"]),
                         "content": result["beats"],
-                    }
-                )
-                generated_drafts.append(
+                    },
                     {
                         "episode_number": int(episode_number), "kind": "script",
                         "source_episode_id": None,
                         "source_fingerprint": content_fingerprint(result["beats"]),
                         "content": result["script"],
-                    }
-                )
+                    },
+                ]
             else:
-                generated_drafts.append(
+                episode_drafts = [
                     {
                         "episode_number": int(episode_number), "kind": "script",
                         "source_episode_id": script["id"],
                         "source_fingerprint": content_fingerprint(script["content"]),
                         "content": result["script"],
-                    }
-                )
-            emit(job, "progress", f"已生成 {index}/{total} 集优化草稿", payload={"completed": index, "total": total})
-        completed = repository.complete_script_optimization(optimization_id, generated_drafts)
+                    },
+                ]
+            repository.save_script_optimization_episode(
+                optimization_id, int(episode_number), episode_drafts
+            )
+            emit(
+                job, "progress", f"已保存 {index}/{total} 集优化草稿",
+                payload={"completed": index, "total": total, "current_episode": current_episode},
+            )
+        completed = repository.finish_script_optimization(optimization_id)
     except Exception as exc:
         repository.fail_script_optimization(optimization_id, str(exc))
         raise
@@ -146,7 +228,12 @@ async def run(job: CrawlJob) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(completed, ensure_ascii=False, indent=2), encoding="utf-8")
     emit(job, "artifact", "剧本优化草稿", payload={"path": str(target), "artifact_type": "json"})
-    emit(job, "job_finished", "剧本优化草稿生成完成", payload={"optimization_id": optimization_id})
+    emit(
+        job,
+        "job_finished",
+        "剧本优化草稿生成完成",
+        payload=_usage_payload(job, {"optimization_id": optimization_id}),
+    )
 
 
 def main() -> int:
@@ -156,7 +243,7 @@ def main() -> int:
     try:
         asyncio.run(run(job))
     except Exception as exc:
-        emit(job, "job_failed", str(exc), "error")
+        emit(job, "job_failed", str(exc), "error", _usage_payload(job))
         return 1
     return 0
 

@@ -130,6 +130,37 @@ def test_breakdown_worker_persists_personalized_draft_and_completion_event(tmp_p
     }
 
 
+def test_breakdown_worker_uses_selected_model_record(tmp_path, monkeypatch):
+    db_path = tmp_path / ".runtime/creative/creative.db"
+    repository = CreativeRepository(db_path)
+    topic, _ = seed_topic(repository)
+    script_path = write_script(tmp_path)
+    selected: list[str | None] = []
+
+    def fake_provider(model_record_id=None):
+        selected.append(model_record_id)
+        return Provider(generated_payload(script_path))
+
+    monkeypatch.setattr(breakdown_worker, "create_provider", fake_provider)
+    monkeypatch.setattr(breakdown_worker, "emit_event", lambda *args, **kwargs: None)
+    job = CrawlJob(
+        job_id="breakdown-model-2",
+        platform="creative",
+        crawler_type="breakdown_generate",
+        extra={
+            "topic_id": topic["id"],
+            "db_path": str(db_path),
+            "runtime_dir": str(tmp_path / ".runtime"),
+            "workspace_root": str(tmp_path),
+            "llm_model_record_id": "model-record-2",
+        },
+    )
+
+    asyncio.run(breakdown_worker.run(job))
+
+    assert selected == ["model-record-2"]
+
+
 def test_breakdown_worker_does_not_create_partial_draft_on_generation_failure(tmp_path, monkeypatch):
     db_path = tmp_path / ".runtime/creative/creative.db"
     repository = CreativeRepository(db_path)

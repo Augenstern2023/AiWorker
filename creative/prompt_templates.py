@@ -24,6 +24,17 @@ DRAMA_CONSTRAINTS = (
 )
 
 
+def _with_project_style(system: str, prompt_snapshot: dict[str, Any] | None) -> str:
+    """Append only server-resolved creative rules; the JSON contract stays locked."""
+
+    if not prompt_snapshot:
+        return system
+    instruction = str(prompt_snapshot.get("effective_instruction") or "").strip()
+    if not instruction:
+        return system
+    return f"{system}\n\n当前项目创作风格要求（不得覆盖前述输出契约）：\n{instruction}"
+
+
 def _messages(system: str, payload: dict[str, Any]) -> list[dict[str, str]]:
     return [
         {"role": "system", "content": system + " 只输出合法 JSON，不要输出 Markdown。"},
@@ -31,8 +42,13 @@ def _messages(system: str, payload: dict[str, Any]) -> list[dict[str, str]]:
     ]
 
 
-def blueprint_messages(payload: dict[str, Any], count: int) -> list[dict[str, str]]:
+def blueprint_messages(
+    payload: dict[str, Any],
+    count: int,
+    prompt_snapshot: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
     return _messages(
+        _with_project_style(
         "你是短剧创意策划。借鉴结构与情绪价值，但不得复制角色名、具体台词、完整剧情节点或独特表达。"
         f"生成 {count} 个明显不同的方向，返回 blueprints 数组。每项包含 title、imitation_reason、borrowed_elements、"
         "different_elements、protagonist、core_conflict、main_goal、background、worldview、first_three_hooks、"
@@ -40,14 +56,19 @@ def blueprint_messages(payload: dict[str, Any], count: int) -> list[dict[str, st
         "title、imitation_reason、protagonist、core_conflict、main_goal、background、worldview、audience、cost_level 必须是纯文本字符串；"
         "imitation_reason 必须明确说明该方向为何适配当前项目的目标受众、题材和已拆解的可借鉴结构，不得泛泛而谈。"
         "列表字段必须是字符串数组。",
+        prompt_snapshot,
+        ),
         payload,
     )
 
 
 def original_direction_messages(
-    payload: dict[str, Any], count: int
+    payload: dict[str, Any],
+    count: int,
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     return _messages(
+        _with_project_style(
         "你是原创短剧策划。根据一句话种子独立发展故事，不得复用市场参考中的专有角色、情节、"
         "台词或表达。"
         f"生成 {count} 个差异明显的原创方向，返回 directions 数组。每项必须包含 title、logline、"
@@ -57,93 +78,152 @@ def original_direction_messages(
         "originality_statement、risks、assumptions、open_questions。"
         "其中 first_three_hooks、highlights、differentiators、risks、assumptions、open_questions 是字符串数组，"
         "其他字段是非空字符串。方向之间至少在主角、背景、冲突发动机、关系结构和情绪回报中的两个维度不同。",
+        prompt_snapshot,
+        ),
         payload,
     )
 
 
-def original_variant_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
+def original_variant_messages(
+    payload: dict[str, Any],
+    prompt_snapshot: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
     return _messages(
+        _with_project_style(
         "你是原创短剧策划。按变体要求从父方向派生一个新方向，但仍须保持独立原创。"
         "返回 direction 对象，字段契约与原创方向一致；不得复用市场参考中的专有角色、情节、台词或表达。",
+        prompt_snapshot,
+        ),
         payload,
     )
 
 
-def character_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
+def character_messages(
+    payload: dict[str, Any],
+    prompt_snapshot: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
     return _messages(
+        _with_project_style(
         "根据已锁定 Brief 生成人物卡和人物关系。返回 characters 和 relationships 数组。"
         "人物包含 name、age_range、identity、external_tags、desire、secret、growth_arc、"
         "dialogue_style、appearance_prompt、voice_prompt、action_goal、fear_of_loss、behavioral_contradiction、"
         "pressure_response、bottom_line；关系包含 from、to、relation、conflict、change_arc。"
         "为反派写出软肋、分歧或代价来源；为主角写出高压下可能做出的不够正确的选择。" + DRAMA_CONSTRAINTS,
+        prompt_snapshot,
+        ),
         payload,
     )
 
 
-def series_arc_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
+def series_arc_messages(
+    payload: dict[str, Any],
+    prompt_snapshot: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
     return _messages(
+        _with_project_style(
         "根据锁定 Brief 与人物关系规划全剧阶段弧线。返回 series_arc 字符串和 stages 数组，"
         "并返回 series_overview 对象；series_overview 必须包含 core_event、character_progress、conflict、"
         "reversal、highlight、cliffhanger 六个非空字符串，分别概括全剧核心事件、人物推进、主要冲突、"
         "关键反转、剧情亮点与结尾悬念。只规划结构，不写完整正文或台词。",
+        prompt_snapshot,
+        ),
         payload,
     )
 
 
-def series_overview_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
+def series_overview_messages(
+    payload: dict[str, Any],
+    prompt_snapshot: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
     return _messages(
+        _with_project_style(
         "根据当前全剧阶段弧线和全部分集大纲，汇总全集剧情概览。只返回 series_overview 对象；"
         "series_overview 必须包含 core_event、character_progress、conflict、reversal、highlight、"
         "cliffhanger 六个非空字符串，分别概括全剧核心事件、人物推进、主要冲突、关键反转、"
         "剧情亮点与结尾悬念。不得改写分集大纲，不得补写输入中不存在的剧情。",
+        prompt_snapshot,
+        ),
         payload,
     )
 
 
-def outline_messages(payload: dict[str, Any], start: int, end: int) -> list[dict[str, str]]:
+def outline_messages(
+    payload: dict[str, Any],
+    start: int,
+    end: int,
+    prompt_snapshot: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
     return _messages(
+        _with_project_style(
         f"生成第 {start}-{end} 集分集大纲，返回 episodes 数组。每集必须包含 episode、core_event、"
         "conflict、character_progress、highlight、reversal、cliffhanger、estimated_seconds。"
         "在 character_progress 中标明主角当集的压力反应，并跨两集安排反派的软肋、分歧或真实代价。"
         "必须继承 history_context 中的既有状态，不得改写已完成集。"
         "不得写完整正文或完整台词。" + DRAMA_CONSTRAINTS,
+        prompt_snapshot,
+        ),
         payload,
     )
 
 
-def outline_field_repair_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
+def outline_field_repair_messages(
+    payload: dict[str, Any],
+    prompt_snapshot: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
     return _messages(
+        _with_project_style(
         "你是短剧分集大纲编辑。仅补全输入 episode 中列出的 repair_fields，保持已生成的核心事件、"
         "人物进展、反转和悬念不变。顶层必须返回 {\"fields\": {...}}；fields 只能包含 repair_fields 中的键，"
         "每个值必须是非空纯文本字符串。不得重写整集或输出 Markdown。",
+        prompt_snapshot,
+        ),
         payload,
     )
 
 
-def outline_field_rewrite_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
+def outline_field_rewrite_messages(
+    payload: dict[str, Any],
+    prompt_snapshot: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
     return _messages(
+        _with_project_style(
         "你是短剧分集大纲编辑。只重写 target_field 指定的一个字段。"
         "默认保留既定事件、人物动机、时间线和前后集衔接；只有 instruction 明确要求时才改变剧情事实。"
         "同集其他字段、相邻集、锁定 Brief 和人物关系只作为约束，不得输出或改写。"
         "只返回 {\"value\": \"目标字段新稿\"}，不得返回整集、其他字段或 Markdown。",
+        prompt_snapshot,
+        ),
         payload,
     )
 
 
-def beats_messages(payload: dict[str, Any], episode_number: int) -> list[dict[str, str]]:
+def beats_messages(
+    payload: dict[str, Any],
+    episode_number: int,
+    prompt_snapshot: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
     return _messages(
+        _with_project_style(
         f"为第 {episode_number} 集生成 Beats。顶层必须返回 JSON 对象，严格使用 {{\"beats\": [...]}} 格式，"
         "不得直接输出数组。beats 数组每项包含 order、scene、characters、"
         "goal、obstacle、emotion_change、turn、hook、state_change、cost、opposition_tactic、continuity_updates。"
         "每集只能生成 1-6 个 Beats，order 必须从 1 连续编号。continuity_updates 是数组；每项包含 "
         "kind、name、event、holder、location、known_by、status，用于登记关键道具或关键信息的状态变化。"
         "不得重复使用录音、报警或口头反击结束同类冲突。不得生成完整正文或完整台词。" + DRAMA_CONSTRAINTS,
+        prompt_snapshot,
+        ),
         payload,
     )
 
 
-def beats_chunk_messages(payload: dict[str, Any], start: int, end: int) -> list[dict[str, str]]:
+def beats_chunk_messages(
+    payload: dict[str, Any],
+    start: int,
+    end: int,
+    prompt_snapshot: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
     return _messages(
+        _with_project_style(
         f"批量生成第 {start}-{end} 集 Beats。顶层必须返回 {{\"episodes\":[...]}}；episodes 必须完整覆盖 "
         f"第 {start}-{end} 集，每项包含 episode 和 beats。beats 数组每项包含 order、scene、characters、"
         "goal、obstacle、emotion_change、turn、hook、state_change、cost、opposition_tactic、continuity_updates。"
@@ -151,12 +231,19 @@ def beats_chunk_messages(payload: dict[str, Any], start: int, end: int) -> list[
         "kind、name、event、holder、location、known_by、status。必须让本批后续集承接前一集的状态变化，"
         "并严格对应同集 locked_outlines 中的核心事件、冲突、人物推进、反转和悬念。"
         "不得重复使用录音、报警或口头反击结束同类冲突；不得生成完整正文或完整台词。" + DRAMA_CONSTRAINTS,
+        prompt_snapshot,
+        ),
         payload,
     )
 
 
-def script_messages(payload: dict[str, Any], episode_number: int) -> list[dict[str, str]]:
+def script_messages(
+    payload: dict[str, Any],
+    episode_number: int,
+    prompt_snapshot: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
     return _messages(
+        _with_project_style(
         f"根据第 {episode_number} 集已锁定 Beats 生成可拍摄的场次剧本，返回 episode_title 和 scenes。"
         "每场必须包含 sequence_no、scene_no、time_of_day、interior_exterior、location、props、characters、blocks。"
         "sequence_no 和 scene_no 必须为正整数（如 1），不能写成“21-1”等集数-场次组合。"
@@ -164,19 +251,35 @@ def script_messages(payload: dict[str, Any], episode_number: int) -> list[dict[s
         "每个块必须有 text，dialogue 必须有 speaker，可选 modifier。"
         "动作写可拍摄内容，台词单独写；必须遵守 continuity_ledger 与锁定 Beats，展示人物行为的后果，"
         "不得用新增台词或道具绕开既定冲突代价；不得输出 Markdown。" + DRAMA_CONSTRAINTS,
+        prompt_snapshot,
+        ),
         payload,
     )
 
 
-def script_chunk_messages(payload: dict[str, Any], start: int, end: int) -> list[dict[str, str]]:
+def script_chunk_messages(
+    payload: dict[str, Any],
+    start: int,
+    end: int,
+    prompt_snapshot: dict[str, Any] | None = None,
+    requested_episode_numbers: list[int] | None = None,
+) -> list[dict[str, str]]:
+    episode_scope = (
+        "、".join(str(number) for number in requested_episode_numbers)
+        if requested_episode_numbers is not None
+        else f"{start}-{end}"
+    )
     return _messages(
-        f"批量生成第 {start}-{end} 集可拍摄场次剧本。顶层必须返回 {{\"episodes\":[...]}}；episodes 必须完整覆盖 "
-        f"第 {start}-{end} 集，每项包含 episode、episode_title 和 scenes。每场必须包含 sequence_no、scene_no、"
+        _with_project_style(
+        f"批量生成第 {episode_scope} 集可拍摄场次剧本。顶层必须返回 {{\"episodes\":[...]}}；episodes 必须且只能覆盖 "
+        f"第 {episode_scope} 集，每项包含 episode、episode_title 和 scenes。每场必须包含 sequence_no、scene_no、"
         "time_of_day、interior_exterior、location、props、characters、blocks。sequence_no 和 scene_no 必须为正整数"
         "（如 1），不能写成“21-1”等集数-场次组合。blocks 为数组，type 只能是 "
         "action、dialogue、voiceover、inner_voice、cut；每个块必须有 text，dialogue 必须有 speaker，"
         "可选 modifier。严格遵守每集 locked_beats、locked_outlines、continuity_ledger，并让本批后续集承接前一集结果；"
         "动作写可拍摄内容，台词单独写，不得用新增台词或道具绕开既定冲突代价，不得输出 Markdown。" + DRAMA_CONSTRAINTS,
+        prompt_snapshot,
+        ),
         payload,
     )
 

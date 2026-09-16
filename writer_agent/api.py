@@ -176,6 +176,9 @@ class ProjectReviewPreviewRequest(BaseModel):
 class ProjectReviewCreateRequest(ProjectReviewPreviewRequest):
     expected_fingerprint: str = Field(min_length=1)
     client_request_id: str = Field(min_length=1, max_length=200)
+    prompt_template_key: str | None = Field(None, min_length=1, max_length=120)
+    prompt_template_revision: int | None = Field(None, ge=1)
+    prompt_override: dict[str, Any] = Field(default_factory=dict)
 
 
 def create_provider() -> Any:
@@ -1120,6 +1123,9 @@ def build_writer_agent_router(
                 session_id, principal, payload.audit_scope,
                 payload.expected_fingerprint, payload.client_request_id,
                 mutation_token=mutation_token,
+                prompt_template_key=payload.prompt_template_key,
+                prompt_template_revision=payload.prompt_template_revision,
+                prompt_override=payload.prompt_override,
             )
         except ProjectReviewError as exc:
             raise project_review_error(exc) from exc

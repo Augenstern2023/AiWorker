@@ -114,6 +114,7 @@ _SCRIPT_REVIEWS: tuple[ApiRoute, ...] = (
     ("POST", "/api/script-reviews/{review_id}/optimizations"),
     ("GET", "/api/script-reviews/{review_id}/optimizations"),
     ("GET", "/api/script-optimizations/{optimization_id}"),
+    ("POST", "/api/script-optimizations/{optimization_id}/retry"),
     ("GET", "/api/script-optimization-drafts/{draft_id}"),
     ("POST", "/api/script-optimization-drafts/{draft_id}/accept"),
     ("POST", "/api/script-optimization-drafts/{draft_id}/reject"),

@@ -67,6 +67,7 @@ PROVIDER_PRESETS: dict[str, dict[str, str]] = {
 _RUNTIME_REPOSITORY: "LLMSettingsRepository | None" = None
 _RUNTIME_REPOSITORY_LOCK = threading.Lock()
 _ENV_VAR_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_UNSET = object()
 
 
 class LLMSecretError(RuntimeError):
@@ -161,6 +162,20 @@ def validate_llm_base_url(value: str) -> str:
     return normalized
 
 
+def validate_max_output_tokens(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError) as exc:
+        raise LLMSettingsError("最大输出 Token 必须是大于或等于 0 的整数") from exc
+    if isinstance(value, float) and not value.is_integer():
+        raise LLMSettingsError("最大输出 Token 必须是大于或等于 0 的整数")
+    if normalized < 0:
+        raise LLMSettingsError("最大输出 Token 必须是大于或等于 0 的整数")
+    return normalized
+
+
 def _provider_dict(row: Any) -> dict[str, Any]:
     return {
         "id": str(row["id"]),
@@ -194,6 +209,7 @@ def _model_dict(row: Any) -> dict[str, Any]:
         "provider_id": str(row["provider_id"]),
         "model_id": str(row["model_id"]),
         "display_name": str(row["display_name"] or ""),
+        "max_output_tokens": row["max_output_tokens"],
         "source": str(row["source"]),
         "is_enabled": bool(row["is_enabled"]),
         "created_at": row["created_at"],
@@ -402,6 +418,7 @@ class LLMSettingsRepository:
         *,
         model_id: str,
         display_name: str = "",
+        max_output_tokens: int | None = None,
         source: str = "manual",
         is_enabled: bool = True,
     ) -> dict[str, Any]:
@@ -421,6 +438,9 @@ class LLMSettingsRepository:
                         provider_id=provider_id,
                         model_id=normalized_id,
                         display_name=str(display_name or "").strip(),
+                        max_output_tokens=validate_max_output_tokens(
+                            max_output_tokens
+                        ),
                         source=source,
                         is_enabled=bool(is_enabled),
                     )
@@ -438,6 +458,7 @@ class LLMSettingsRepository:
         *,
         model_id: str | None = None,
         display_name: str | None = None,
+        max_output_tokens: int | None | object = _UNSET,
         is_enabled: bool | None = None,
     ) -> dict[str, Any]:
         with self.database.transaction() as connection:
@@ -456,6 +477,10 @@ class LLMSettingsRepository:
                 values["model_id"] = normalized
             if display_name is not None:
                 values["display_name"] = str(display_name).strip()
+            if max_output_tokens is not _UNSET:
+                values["max_output_tokens"] = validate_max_output_tokens(
+                    max_output_tokens
+                )
             if is_enabled is not None:
                 values["is_enabled"] = bool(is_enabled)
             try:
@@ -621,6 +646,7 @@ class LLMSettingsRepository:
                 select(
                     llm_models.c.id,
                     llm_models.c.model_id,
+                    llm_models.c.max_output_tokens,
                     llm_models.c.display_name,
                     llm_models.c.is_enabled.label("model_is_enabled"),
                     llm_providers.c.id.label("provider_id"),
@@ -695,6 +721,7 @@ class LLMSettingsRepository:
                     llm_providers.c.wire_api,
                     llm_providers.c.api_key_env_var,
                     llm_models.c.model_id,
+                    llm_models.c.max_output_tokens,
                 )
                 .select_from(
                     llm_settings.join(
@@ -719,7 +746,7 @@ class LLMSettingsRepository:
                 "api_key_env_var": str(row["api_key_env_var"] or ""),
             }
         )
-        return {
+        result = {
             "provider": str(row["preset"]),
             "provider_id": str(row["provider_id"]),
             "base_url": str(row["base_url"]),
@@ -728,6 +755,9 @@ class LLMSettingsRepository:
             "wire_api": str(row["wire_api"]),
             "allow_insecure_http": urlsplit(str(row["base_url"])).scheme.lower() == "http",
         }
+        if row["max_output_tokens"] is not None:
+            result["max_output_tokens"] = int(row["max_output_tokens"])
+        return result
 
     def effective_model(self, model_record_id: str) -> dict[str, Any]:
         """Resolve one enabled model record to its server-side credentials."""
@@ -737,6 +767,7 @@ class LLMSettingsRepository:
                     llm_models.c.id.label("model_record_id"),
                     llm_models.c.model_id,
                     llm_models.c.display_name,
+                    llm_models.c.max_output_tokens,
                     llm_models.c.is_enabled.label("model_is_enabled"),
                     llm_providers.c.id.label("provider_id"),
                     llm_providers.c.name.label("provider_name"),
@@ -769,7 +800,7 @@ class LLMSettingsRepository:
             )
         except (LLMSettingsError, LLMSecretError) as exc:
             raise LLMSettingsConflict(str(exc)) from exc
-        return {
+        result = {
             "provider": str(row["preset"]),
             "provider_id": str(row["provider_id"]),
             "provider_display_name": str(row["provider_name"]),
@@ -785,6 +816,9 @@ class LLMSettingsRepository:
                 urlsplit(str(row["base_url"])).scheme.lower() == "http"
             ),
         }
+        if row["max_output_tokens"] is not None:
+            result["max_output_tokens"] = int(row["max_output_tokens"])
+        return result
 
     def provider_connection(
         self, provider_id: str, *, require_api_key: bool = True

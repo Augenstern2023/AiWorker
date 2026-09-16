@@ -328,6 +328,10 @@ llm_models = Table(
     ),
     Column("model_id", Text, nullable=False),
     Column("display_name", Text, nullable=False, server_default=text("''")),
+    Column("max_output_tokens", Integer),
+    Column("input_price_per_million", Float),
+    Column("output_price_per_million", Float),
+    Column("price_currency", Text, nullable=False, server_default=text("'CNY'")),
     Column("source", Text, nullable=False, server_default=text("'manual'")),
     Column("is_enabled", Boolean, nullable=False, server_default=text("true")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
@@ -336,6 +340,22 @@ llm_models = Table(
     CheckConstraint(
         "source IN ('manual', 'synced', 'imported')",
         name="ck_llm_models_source",
+    ),
+    CheckConstraint(
+        "max_output_tokens IS NULL OR max_output_tokens >= 0",
+        name="ck_llm_models_max_output_tokens",
+    ),
+    CheckConstraint(
+        "input_price_per_million IS NULL OR input_price_per_million >= 0",
+        name="ck_llm_models_input_price",
+    ),
+    CheckConstraint(
+        "output_price_per_million IS NULL OR output_price_per_million >= 0",
+        name="ck_llm_models_output_price",
+    ),
+    CheckConstraint(
+        "price_currency IN ('CNY', 'USD')",
+        name="ck_llm_models_price_currency",
     ),
 )
 

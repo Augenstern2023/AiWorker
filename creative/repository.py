@@ -65,6 +65,14 @@ _WRITER_PROJECT_DELETION_TABLES = (
     "script_optimization_drafts",
     "creative_deliveries",
     "creative_production_exports",
+    "creative_project_prompt_settings",
+    "creative_project_prompt_bindings",
+    "creative_prompt_templates",
+    "creative_prompt_ab_experiments",
+    "creative_prompt_iteration_drafts",
+    "creative_prompt_governance_events",
+    "creative_prompt_market_installations",
+    "creative_prompt_market_ratings",
 )
 _WRITER_PROJECT_EXTERNAL_TABLES = (
     "creative_stage_exports",
@@ -806,6 +814,7 @@ class CreativeRepository:
                     source_fingerprint TEXT NOT NULL,
                     selected_findings_json TEXT NOT NULL,
                     target_episode_numbers_json TEXT NOT NULL,
+                    prompt_snapshot_json TEXT NOT NULL DEFAULT '{}',
                     status TEXT NOT NULL DEFAULT 'queued',
                     created_by TEXT NOT NULL,
                     job_id TEXT NOT NULL DEFAULT '',
@@ -836,6 +845,15 @@ class CreativeRepository:
                 CREATE INDEX IF NOT EXISTS idx_script_optimization_drafts_task
                 ON script_optimization_drafts(optimization_id, episode_number, kind);
             """)
+            optimization_columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(script_optimizations)").fetchall()
+            }
+            if "prompt_snapshot_json" not in optimization_columns:
+                conn.execute(
+                    "ALTER TABLE script_optimizations ADD COLUMN "
+                    "prompt_snapshot_json TEXT NOT NULL DEFAULT '{}'"
+                )
             for table in (
                 "creative_projects",
                 "creative_breakdowns",
@@ -2857,6 +2875,48 @@ class CreativeRepository:
                     (project_id,),
                 ).fetchall()
             ]
+        prompt_template_ids = [
+            str(row["id"])
+            for row in tables.get("creative_prompt_templates", [])
+        ]
+        prompt_revision_table = "creative_prompt_template_revisions"
+        prompt_revision_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (prompt_revision_table,),
+        ).fetchone()
+        if prompt_revision_exists is None or not prompt_template_ids:
+            tables[prompt_revision_table] = []
+        else:
+            placeholders = ",".join("?" for _ in prompt_template_ids)
+            tables[prompt_revision_table] = [
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT * FROM {prompt_revision_table} "
+                    f"WHERE template_id IN ({placeholders}) ORDER BY rowid",
+                    prompt_template_ids,
+                ).fetchall()
+            ]
+        experiment_ids = [
+            str(row["id"])
+            for row in tables.get("creative_prompt_ab_experiments", [])
+        ]
+        prompt_ab_arms_table = "creative_prompt_ab_arms"
+        prompt_ab_arms_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (prompt_ab_arms_table,),
+        ).fetchone()
+        if prompt_ab_arms_exists is None or not experiment_ids:
+            tables[prompt_ab_arms_table] = []
+        else:
+            placeholders = ",".join("?" for _ in experiment_ids)
+            tables[prompt_ab_arms_table] = [
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT * FROM {prompt_ab_arms_table} "
+                    f"WHERE experiment_id IN ({placeholders}) ORDER BY rowid",
+                    experiment_ids,
+                ).fetchall()
+            ]
         payload = {"project_id": int(project_id), "tables": tables}
         return {**payload, "fingerprint": canonical_request_hash(payload)}
 
@@ -3322,6 +3382,46 @@ class CreativeRepository:
             conn.execute("DELETE FROM creative_generation_contexts WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_resource_heads WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_mode_migrations WHERE project_id = ?", (project_id,))
+            prompt_tables = {
+                str(row["name"])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND "
+                    "name LIKE 'creative_%prompt%'"
+                ).fetchall()
+            }
+            if "creative_project_prompt_bindings" in prompt_tables:
+                conn.execute(
+                    "DELETE FROM creative_project_prompt_bindings WHERE project_id = ?",
+                    (project_id,),
+                )
+            if "creative_project_prompt_settings" in prompt_tables:
+                conn.execute(
+                    "DELETE FROM creative_project_prompt_settings WHERE project_id = ?",
+                    (project_id,),
+                )
+            if {
+                "creative_prompt_templates",
+                "creative_prompt_template_revisions",
+            }.issubset(prompt_tables):
+                project_template_ids = [
+                    str(row["id"])
+                    for row in conn.execute(
+                        "SELECT id FROM creative_prompt_templates WHERE project_id = ?",
+                        (project_id,),
+                    ).fetchall()
+                ]
+                if project_template_ids:
+                    placeholders = ",".join("?" for _ in project_template_ids)
+                    conn.execute(
+                        f"DELETE FROM creative_prompt_template_revisions "
+                        f"WHERE template_id IN ({placeholders})",
+                        project_template_ids,
+                    )
+                    conn.execute(
+                        f"DELETE FROM creative_prompt_templates "
+                        f"WHERE id IN ({placeholders})",
+                        project_template_ids,
+                    )
             conn.execute("DELETE FROM creative_episodes WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_relationships WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_characters WHERE project_id = ?", (project_id,))
@@ -3871,7 +3971,10 @@ class CreativeRepository:
                     current["risk_score"], current["risk_level"], current["difference_note"],
                     json.dumps(current["source_refs"], ensure_ascii=False),
                     current["direction_type"],
-                    json.dumps(current["generation_meta"], ensure_ascii=False),
+                    json.dumps(
+                        {**current["generation_meta"], "manual_revision": True,
+                         "revision_source_id": blueprint_id}, ensure_ascii=False
+                    ),
                     workflow_task_id or current.get("workflow_task_id"), now, now,
                 ),
             )
@@ -3946,7 +4049,11 @@ class CreativeRepository:
                     source["difference_note"],
                     source["source_refs_json"],
                     source["direction_type"],
-                    source["generation_meta_json"],
+                    json.dumps(
+                        {**json.loads(source["generation_meta_json"] or "{}"),
+                         "manual_revision": True, "revision_source_id": blueprint_id},
+                        ensure_ascii=False,
+                    ),
                     workflow_task_id or source["workflow_task_id"],
                     now,
                     now,
@@ -6003,6 +6110,34 @@ class CreativeRepository:
                 raise ValueError("审核记录不存在")
         return self._script_review(dict(resumed)) if resumed else {}
 
+    def prepare_script_review_resume(self, review_id: int) -> dict[str, Any]:
+        """Requeue a failed formal review while preserving its partial checkpoint."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM script_reviews WHERE id = ?", (int(review_id),)
+            ).fetchone()
+            if row is None:
+                raise ValueError("审核记录不存在")
+            if _is_project_long_review(row):
+                raise ValueError("完整项目审核必须从项目审核入口恢复")
+            if str(row["status"]) in {"queued", "running"}:
+                return self._script_review(dict(row))
+            if str(row["status"]) != "failed":
+                raise ValueError("只有失败的剧本审核可以继续")
+            conn.execute(
+                """
+                UPDATE script_reviews
+                SET status = 'queued', error = '', updated_at = ?
+                WHERE id = ? AND status = 'failed'
+                """,
+                (time.time(), int(review_id)),
+            )
+            resumed = conn.execute(
+                "SELECT * FROM script_reviews WHERE id = ?", (int(review_id),)
+            ).fetchone()
+        return self._script_review(dict(resumed)) if resumed else {}
+
     def checkpoint_script_review(
         self, review_id: int, report: dict[str, Any]
     ) -> dict[str, Any]:
@@ -6099,6 +6234,7 @@ class CreativeRepository:
         selected_findings: list[dict[str, Any]],
         target_episode_numbers: list[int],
         created_by: str,
+        prompt_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         now = time.time()
         with self._connect() as conn:
@@ -6107,8 +6243,8 @@ class CreativeRepository:
                 INSERT INTO script_optimizations (
                     review_id, project_id, mode, source_fingerprint,
                     selected_findings_json, target_episode_numbers_json,
-                    created_by, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    prompt_snapshot_json, created_by, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     review_id,
@@ -6117,6 +6253,7 @@ class CreativeRepository:
                     source_fingerprint,
                     json.dumps(selected_findings, ensure_ascii=False),
                     json.dumps(target_episode_numbers, ensure_ascii=False),
+                    json.dumps(prompt_snapshot or {}, ensure_ascii=False),
                     created_by,
                     now,
                     now,
@@ -6148,14 +6285,123 @@ class CreativeRepository:
         return [self.get_script_optimization(int(row["id"])) or {} for row in rows]
 
     def start_script_optimization(self, optimization_id: int) -> dict[str, Any]:
-        return self._update_script_optimization(
-            optimization_id, {"status": "running", "error": ""}
-        )
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE script_optimizations SET status = 'running', error = '', "
+                "updated_at = ? WHERE id = ? AND status IN ('queued', 'failed')",
+                (time.time(), optimization_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("优化任务已开始或已完成，不能重复运行")
+        return self.get_script_optimization(optimization_id) or {}
+
+    def prepare_script_optimization_resume(self, optimization_id: int) -> dict[str, Any]:
+        """Claim one failed task for retry without removing completed episode drafts."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE script_optimizations SET status = 'queued', error = '', "
+                "updated_at = ? WHERE id = ? AND status = 'failed'",
+                (time.time(), optimization_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("只有失败的优化任务可以继续生成")
+        return self.get_script_optimization(optimization_id) or {}
 
     def set_script_optimization_job(
         self, optimization_id: int, job_id: str
     ) -> dict[str, Any]:
         return self._update_script_optimization(optimization_id, {"job_id": job_id})
+
+    def save_script_optimization_episode(
+        self, optimization_id: int, episode_number: int,
+        drafts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Commit a whole episode (including a structure pair) before the next request."""
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM script_optimizations WHERE id = ?", (optimization_id,)
+            ).fetchone()
+            if not row or row["status"] != "running":
+                raise ValueError("优化任务未运行，无法保存草稿")
+            targets = json.loads(row["target_episode_numbers_json"] or "[]")
+            if int(episode_number) not in targets:
+                raise ValueError("优化草稿不在任务目标集数中")
+            expected = {"beats", "script"} if row["mode"] == "structure" else {"script"}
+            if len(drafts) != len(expected) or {
+                str(draft.get("kind") or "") for draft in drafts
+            } != expected or any(
+                int(draft.get("episode_number") or 0) != int(episode_number)
+                for draft in drafts
+            ):
+                raise ValueError("当前集优化草稿不完整")
+            existing = conn.execute(
+                "SELECT kind FROM script_optimization_drafts "
+                "WHERE optimization_id = ? AND episode_number = ?",
+                (optimization_id, episode_number),
+            ).fetchall()
+            if existing:
+                if len(existing) != len(expected) or {item["kind"] for item in existing} != expected:
+                    raise ValueError("当前集已有不完整的优化草稿")
+                return self.get_script_optimization(optimization_id) or {}
+            inserted: dict[str, int] = {}
+            for draft in drafts:
+                kind = str(draft["kind"])
+                cursor = conn.execute(
+                    """INSERT INTO script_optimization_drafts (
+                        optimization_id, project_id, episode_number, kind,
+                        source_episode_id, source_fingerprint, content_json,
+                        peer_draft_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        optimization_id, int(row["project_id"]), int(episode_number),
+                        kind, draft.get("source_episode_id"),
+                        str(draft.get("source_fingerprint") or ""),
+                        json.dumps(draft.get("content") or {}, ensure_ascii=False),
+                        None, now, now,
+                    ),
+                )
+                inserted[kind] = int(cursor.lastrowid)
+            if row["mode"] == "structure":
+                conn.execute(
+                    "UPDATE script_optimization_drafts SET peer_draft_id = ? WHERE id = ?",
+                    (inserted["script"], inserted["beats"]),
+                )
+                conn.execute(
+                    "UPDATE script_optimization_drafts SET peer_draft_id = ? WHERE id = ?",
+                    (inserted["beats"], inserted["script"]),
+                )
+            conn.execute(
+                "UPDATE script_optimizations SET updated_at = ? WHERE id = ?",
+                (now, optimization_id),
+            )
+        return self.get_script_optimization(optimization_id) or {}
+
+    def finish_script_optimization(self, optimization_id: int) -> dict[str, Any]:
+        """Mark complete only when every target episode has its full draft set."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM script_optimizations WHERE id = ?", (optimization_id,)
+            ).fetchone()
+            if not row or row["status"] != "running":
+                raise ValueError("优化任务未运行")
+            expected = {"beats", "script"} if row["mode"] == "structure" else {"script"}
+            targets = json.loads(row["target_episode_numbers_json"] or "[]")
+            for number in targets:
+                drafts = conn.execute(
+                    "SELECT kind FROM script_optimization_drafts "
+                    "WHERE optimization_id = ? AND episode_number = ?",
+                    (optimization_id, int(number)),
+                ).fetchall()
+                if len(drafts) != len(expected) or {item["kind"] for item in drafts} != expected:
+                    raise ValueError(f"第 {number} 集优化草稿尚未完成")
+            conn.execute(
+                "UPDATE script_optimizations SET status = 'completed', error = '', "
+                "updated_at = ? WHERE id = ?", (time.time(), optimization_id),
+            )
+        return self.get_script_optimization(optimization_id) or {}
 
     def complete_script_optimization(
         self, optimization_id: int, drafts: list[dict[str, Any]]
@@ -6516,6 +6762,7 @@ class CreativeRepository:
         row["target_episode_numbers"] = json.loads(
             row.pop("target_episode_numbers_json") or "[]"
         )
+        row["prompt_snapshot"] = json.loads(row.pop("prompt_snapshot_json", "{}") or "{}")
         return row
 
     @staticmethod

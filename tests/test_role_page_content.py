@@ -7,6 +7,7 @@
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -112,13 +113,13 @@ def test_role_scripts_do_not_depend_on_legacy_current_tab():
 
 
 def test_all_workspace_javascript_has_valid_syntax():
-    node = Path(r"C:\Users\Administrator\tools\node-v24.16.0-win-x64\node.exe")
-    assert node.exists()
+    node = shutil.which("node")
+    assert node is not None
     scripts = sorted((ROOT / "static/js").glob("**/*.js"))
     failures = []
     for script in scripts:
         result = subprocess.run(
-            [str(node), "--check", str(script)],
+            [node, "--check", str(script)],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -172,7 +173,8 @@ def test_planning_projects_use_real_stage_routes():
     assert "`/planning/projects/${data.id}/brief" in creative
     assert not Path("templates/planning/directions.html").exists()
     assert "仿写方向" not in brief
-    assert 'href="/planning/projects/{{ project_id }}/characters"' in brief
+    assert '{% include "common/workspace/project_list_back_link.html" %}' in brief
+    assert 'href="/planning/projects/{{ project_id }}/characters"' not in brief
 
 
 def test_project_brief_uses_multiline_controls_for_generated_long_text():

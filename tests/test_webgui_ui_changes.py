@@ -77,6 +77,38 @@ def test_llm_settings_supports_credential_vault_rotation_without_key_echo():
     assert "api_key: ''" in script
 
 
+def test_llm_model_settings_omit_pricing_and_prompt_ab_controls():
+    html = _source("templates/admin/config.html")
+    script = _source(
+        "static/js/common/tasks.js",
+        "static/js/admin/workspace.js",
+    )
+
+    for removed in (
+        "输入/百万 Token",
+        "输出/百万 Token",
+        "未配置 Token 单价",
+        "llm-manual-model-currency",
+    ):
+        assert removed not in html
+    for removed in (
+        "input_price_per_million",
+        "output_price_per_million",
+        "price_currency",
+    ):
+        assert removed not in script
+
+    assert "llm-manual-model-max-output-tokens" in html
+    assert "max_output_tokens" in script
+
+
+def test_webgui_does_not_register_prompt_ab_or_iteration_routes():
+    paths = {route.path for route in WebGUI.app.routes}
+
+    assert not any("/prompt-library/ab-tests" in path for path in paths)
+    assert not any("/prompt-library/iteration-drafts" in path for path in paths)
+
+
 def test_webgui_registers_rag_routes():
     paths = {route.path for route in WebGUI.app.routes}
 
@@ -425,10 +457,12 @@ def test_script_review_can_start_and_review_optimization_drafts():
     assert "编辑草稿" in script
 
 
-def test_script_review_project_selector_only_lists_projects_with_locked_outlines():
+def test_script_review_project_selector_includes_free_projects_and_uses_heads():
     script = _source("static/js/review/scripts.js")
 
-    assert "filter((item) => item.outline_batch_id)" in script
+    assert "item.outline_batch_id || item.workflow_mode === 'free'" in script
+    assert "projectData.resource_heads" in script
+    assert "reviewableScripts" in script
 
 
 def test_script_review_multi_episode_picker_has_a_select_all_control():
@@ -974,6 +1008,72 @@ def test_mode_switch_does_not_request_a_creative_seed():
     assert "仅复制已保存内容" in migration_modal
     assert "原标准流程项目和任务保持不变" in migration_modal
     assert "await this.selectCreativeProject(data.project.id)" in method
+    assert "new AbortController()" in method
+    assert "controller.abort(), 10000" in method
+    assert "aiworkerApi.isAbortError(error)" in method
+    assert "迁移预检超时，请重试" in method
+    assert "retryCreativeModeMigrationPreview" in method
+    assert "重试预检" in migration_modal
+    assert "cancelCreativeModeMigrationPreview" in tasks
+    assert 'x-show.important="creativeWorkspace.modeMigration.loading"' in migration_modal
+    assert 'x-show="creativeWorkspace.modeMigration.loading"' not in migration_modal
+    assert 'x-show.important="creativeWorkspace.freeGeneration.loading"' in modal
+
+
+def test_mode_migration_preview_loading_has_a_bounded_wait():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the browser module")
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert/strict');
+const nativeSetTimeout = global.setTimeout;
+global.window = {
+  aiworkerModules: [],
+  setTimeout: (callback, _delay, ...args) => nativeSetTimeout(callback, 5, ...args),
+  clearTimeout: global.clearTimeout,
+};
+global.aiworkerApi = {
+  isAbortError: error => error?.name === 'AbortError',
+  request: async (_url, options = {}) => new Promise((_resolve, reject) => {
+    options.signal?.addEventListener('abort', () => {
+      const error = new Error('aborted');
+      error.name = 'AbortError';
+      reject(error);
+    }, {once: true});
+  }),
+};
+vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
+const component = window.aiworkerModules[0]();
+Object.assign(component, {
+  creativeWorkspace: {
+    project: {id: 4, workflow_mode: 'sequential'},
+    modeMigration: {
+      preview: null, confirmed: false, loading: false,
+      submitting: false, error: '', requestSequence: 0,
+    },
+  },
+  creativeModeMigrationModal: {show() {}, hide() {}},
+});
+(async () => {
+  const verdict = await Promise.race([
+    component.openCreativeModeMigration().then(() => 'settled'),
+    new Promise(resolve => nativeSetTimeout(() => resolve('still-loading'), 100)),
+  ]);
+  assert.equal(verdict, 'settled', 'migration preview remained loading after its request deadline');
+  assert.equal(component.creativeWorkspace.modeMigration.loading, false);
+  assert.match(component.creativeWorkspace.modeMigration.error, /超时/);
+})().catch(error => { console.error(error); process.exit(1); });
+'''
+    result = subprocess.run(
+        [node, "-e", script, "static/js/common/creative.js"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_draft_breakdowns_are_visible_but_not_project_eligible():
@@ -1369,25 +1469,24 @@ def test_creative_progress_modal_blurs_the_close_button_before_it_is_hidden():
     assert "document.activeElement?.blur();" in tasks
 
 
-def test_scene_script_workspace_links_back_to_its_source_beats():
-    page = _source("templates/writing/scripts.html")
+@pytest.mark.parametrize(
+    ("template_name", "redundant_label"),
+    (
+        ("templates/planning/brief.html", "人物关系"),
+        ("templates/planning/characters.html", "返回 Brief"),
+        ("templates/writing/outlines.html", "返回人物关系"),
+        ("templates/writing/beats.html", "返回全剧大纲"),
+        ("templates/writing/scripts.html", "返回 Beats"),
+    ),
+)
+def test_project_stage_pages_use_project_list_instead_of_redundant_stage_links(
+    template_name: str,
+    redundant_label: str,
+):
+    page = _source(template_name)
 
-    assert 'href="/writing/projects/{{ project_id }}/episodes/{{ episode_number }}/beats"' in page
-    assert "返回 Beats" in page
-
-
-def test_beats_workspace_links_back_to_episode_outlines():
-    page = _source("templates/writing/beats.html")
-
-    assert 'href="/writing/projects/{{ project_id }}/outlines"' in page
-    assert "返回全剧大纲" in page
-
-
-def test_outlines_workspace_links_back_to_characters():
-    page = _source("templates/writing/outlines.html")
-
-    assert 'href="/planning/projects/{{ project_id }}/characters"' in page
-    assert "返回人物关系" in page
+    assert '{% include "common/workspace/project_list_back_link.html" %}' in page
+    assert redundant_label not in page
 
 
 def test_outline_rows_show_a_link_when_the_episode_script_exists():
@@ -1489,16 +1588,70 @@ def test_all_creative_module_links_are_clickable_before_upstream_locking():
     assert "五个创作模块入口始终可直接进入" in project_list
 
 
-def test_sequential_workflow_exposes_and_submits_selected_model():
+def test_sequential_workflow_selects_model_only_when_starting_generation():
     navigation = _source("templates/common/workspace/project_module_navigation.html")
+    modal = _source("templates/common/workspace/free_creative_modals.html")
     creative = _source("static/js/common/creative.js")
     tasks = _source("static/js/common/tasks.js")
 
-    assert 'id="sequential-generation-model"' in navigation
-    assert "creativeWorkspace.sequentialGeneration.modelRecordId" in navigation
-    assert "loadSequentialGenerationModels(data.id)" in creative
+    assert 'id="sequential-generation-model"' not in navigation
+    assert 'id="sequentialGenerationModelModal"' in modal
+    assert 'x-model="creativeWorkspace.sequentialGeneration.modelRecordId"' in modal
+    assert "openSequentialGenerationModel" in creative
+    assert "submitSequentialGeneration" in creative
     assert "llm_model_record_id: modelRecordId" in creative
     assert "sequentialGeneration:" in tasks
+
+
+def test_standard_generate_opens_model_dialog_before_sending_job():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the browser module")
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert/strict');
+global.window = {aiworkerModules: []};
+vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
+const component = window.aiworkerModules[0]();
+const calls = [];
+Object.assign(component, {
+  creativeWorkspace: {
+    project: {id: 4, workflow_mode: 'sequential'},
+    sequentialGeneration: {modelOptions: [], modelRecordId: '', loading: false, error: '', pending: null},
+  },
+  sequentialGenerationModelModal: {show: () => calls.push('show'), hide: () => calls.push('hide')},
+  loadSequentialGenerationModels: async () => {
+    calls.push('load');
+    component.creativeWorkspace.sequentialGeneration.loading = false;
+  },
+});
+(async () => {
+  await component.startCreativeGeneration('/api/creative/projects/4/blueprints/generate', {count: 3}, 'blueprints');
+  assert.deepEqual(calls, ['show', 'load']);
+  assert.equal(component.creativeWorkspace.sequentialGeneration.pending.body.count, 3);
+  component.creativeWorkspace.sequentialGeneration.modelRecordId = 'chosen-model';
+  component.startCreativeGeneration = async (...args) => calls.push(args);
+  await component.submitSequentialGeneration();
+  assert.equal(calls[2], 'hide');
+  assert.equal(calls[3][1].llm_model_record_id, 'chosen-model');
+  assert.equal(calls[3][3].modelConfirmed, true);
+  assert.equal(component.creativeWorkspace.sequentialGeneration.pending, null);
+  component.creativeWorkspace.sequentialGeneration.pending = {
+    url: '/api/creative/projects/4/characters/generate', body: {}, action: 'characters', options: {},
+  };
+  component.creativeWorkspace.sequentialGeneration.modelRecordId = '';
+  component.creativeWorkspace.sequentialGeneration.error = '模型列表暂时不可用';
+  await component.submitSequentialGeneration();
+  assert.equal(calls[5][1].llm_model_record_id, undefined);
+  assert.equal(calls[5][3].modelConfirmed, true);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''
+    result = subprocess.run(
+        [node, "-e", script, "static/js/common/creative.js"],
+        capture_output=True, text=True, encoding="utf-8", check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_free_outline_keeps_field_level_ai_rewrite_and_head_conflict_guard():
@@ -1594,6 +1747,55 @@ Object.assign(component, {
     result = subprocess.run(
         [node, "-e", script, "static/js/common/creative.js"],
         capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_free_generation_config_loading_has_a_bounded_wait():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the browser module")
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert/strict');
+const nativeSetTimeout = global.setTimeout;
+global.window = {aiworkerModules: []};
+global.setTimeout = (callback, _delay, ...args) => nativeSetTimeout(callback, 5, ...args);
+global.aiworkerApi = {
+  request: async (_url, options = {}) => new Promise((_resolve, reject) => {
+    options.signal?.addEventListener('abort', () => {
+      const error = new Error('aborted');
+      error.name = 'AbortError';
+      reject(error);
+    }, {once: true});
+  }),
+};
+vm.runInThisContext(fs.readFileSync(process.argv[1], 'utf8'));
+const component = window.aiworkerModules[0]();
+Object.assign(component, {
+  creativeWorkspace: {
+    project: {id: 4, workflow_mode: 'free'},
+    directionCount: 3,
+    selectedEpisode: 1,
+    freeGeneration: {},
+    moduleCapabilities: {brief: {can_generate: true}},
+  },
+  freeCreativeGenerationModal: {show() {}, hide() {}},
+});
+(async () => {
+  const verdict = await Promise.race([
+    component.openFreeCreativeGeneration('brief').then(() => 'settled'),
+    new Promise(resolve => nativeSetTimeout(() => resolve('still-loading'), 100)),
+  ]);
+  assert.equal(verdict, 'settled', 'generation config remained loading after its request deadline');
+  assert.equal(component.creativeWorkspace.freeGeneration.loading, false);
+  assert.match(component.creativeWorkspace.freeGeneration.error, /超时/);
+})().catch(error => { console.error(error); process.exit(1); });
+'''
+    result = subprocess.run(
+        [node, "-e", script, "static/js/common/creative.js"],
+        capture_output=True, text=True, encoding="utf-8", check=False,
     )
     assert result.returncode == 0, result.stderr
 
@@ -1972,7 +2174,9 @@ def test_existing_breakdown_opens_without_generation_and_regeneration_is_explici
     assert "this.breakdownGeneration.status = 'existing'" in html
     assert "openBreakdownEditor(source, topic.title, data.breakdown)" in html
     assert "regenerateCurrentBreakdown" in html
-    assert "force_regenerate: forceRegenerate" in html
+    assert "force_regenerate: Boolean(state.forceRegenerate)" in html
+    assert 'id="breakdown-generation-model"' in html
+    assert "llm_model_record_id" in html
     assert "startTranscriptBreakdown(topic, source, true)" in html
     assert "Boolean(topic?.locked_breakdown_id)" not in html
     assert "return this.startTranscriptBreakdown(\n                        topic,\n                        'topic-library'\n                    );" in html

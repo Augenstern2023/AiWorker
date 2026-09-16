@@ -23,6 +23,19 @@
             }
         }
 
+        function creativeEpisodeView(page) {
+            const episodeView = new URLSearchParams(window.location.search).get('episode');
+            if (episodeView === 'all') return 0;
+            if (/^\d+$/.test(String(episodeView || '')) && Number(episodeView) > 0) {
+                return Number(episodeView);
+            }
+            if (page === 'writing-outlines') return 0;
+            const pathEpisode = window.location.pathname.match(
+                /\/episodes\/(\d+)\/(?:beats|scripts)/
+            )?.[1];
+            return pathEpisode ? Number(pathEpisode) : 0;
+        }
+
         function appData() {
             const workspace = {
                 page: document.body.dataset.workspacePage || '',
@@ -159,7 +172,9 @@
                         has_api_key: false, is_enabled: true,
                         credential_status: 'missing'
                     },
-                    modelDraft: {model_id: '', display_name: ''},
+                    modelDraft: {
+                        model_id: '', display_name: '', max_output_tokens: ''
+                    },
                     modelEditor: null,
                     test: {model_id: '', result: null}
                 },
@@ -173,7 +188,7 @@
                 adoptionNoticeModal: null,
                 generatedContentPreview: {topic: null, project: null, stage: '', versions: [], selectedVersion: 0, selectedResourceId: '', snapshot: null, loading: false, error: ''},
                 breakdownEditor: {source: '', title: '', record: null, content: {}, fieldGuide: [], saving: false, error: ''},
-                breakdownGeneration: {topic: null, source: '', jobId: '', status: '', message: '', progress: {}, coverage: [], requiresTranscription: false, notifiedStatus: '', error: '', startedAt: 0, elapsedSeconds: 0},
+                breakdownGeneration: {topic: null, source: '', forceRegenerate: false, jobId: '', status: '', message: '', progress: {}, coverage: [], requiresTranscription: false, notifiedStatus: '', error: '', startedAt: 0, elapsedSeconds: 0, modelOptions: [], modelRecordId: '', modelsLoading: false},
                 breakdownGenerationJobs: {},
                 breakdownJobStatuses: {},
                 dramaDownloadJobStatuses: {},
@@ -182,7 +197,7 @@
                     projects: [], eligibleTopics: [], lockedBreakdowns: [], project: null, loading: false, error: '', step: 'blueprints', deletingProjectId: null,
                     create: {topic_id: '', breakdown_id: '', name: '', target_platform: '', target_episode_count: 20, workflow_mode: 'sequential', creation_request_id: ''},
                     originalCreate: {seed_text: '', name: '', genre: '', target_platform: '', target_audience: '', target_episode_count: 20, episode_duration_seconds: 120, cost_level: '', content_boundaries: [], reference_refs: [], workflow_mode: 'sequential', creation_request_id: '', saving: false, error: ''},
-                    directionCount: 3, selectedSeedId: null, preservedBlueprintIds: [], variantInstruction: '', selectedBlueprintId: null, selectedCharacterBriefId: null, selectedOutlineBriefId: null, selectedOutlineCharacterBatchId: null, selectedEpisode: 1,
+                    directionCount: 3, selectedSeedId: null, preservedBlueprintIds: [], variantInstruction: '', selectedBlueprintId: null, selectedCharacterBriefId: null, selectedOutlineBriefId: null, selectedOutlineCharacterBatchId: null, selectedEpisode: creativeEpisodeView(document.body.dataset.workspacePage || ''),
                     episodeDownload: {stage: '', selectedEpisodes: [], allEpisodes: true, format: 'md'},
                     jobId: '', jobMessage: '', jobProgress: {}, jobStatus: '', paused: false, notifiedStatus: '', retrying: false,
                     jobLogs: [], jobLogCount: 0, showJobLogs: false,
@@ -200,15 +215,49 @@
                     saveState: {}, notice: '', noticeType: 'success', noticeTimer: null,
                     moduleCapabilities: {},
                     sequentialGeneration: {
-                        modelOptions: [], modelRecordId: '', loading: false, error: '', loaded: false
+                        modelOptions: [], modelRecordId: '', loading: false, error: '', pending: null
+                    },
+                    promptLibrary: {
+                        stage: '', loading: false, saving: false, error: '',
+                        settings: {enabled: false}, templates: [], effective: null,
+                        selectedTemplateKey: '', selectedTemplateRevision: 1,
+                        customRequirements: '', scope: 'stage', runSelections: {},
+                        recommendations: [], recommendationLoading: false,
+                        editing: false, editContent: {},
+                        editParametersJson: '{}', editExamplesJson: '[]',
+                        importOpen: false, importLoading: false, importSourceText: '',
+                        importDraft: null, importWarnings: [], importSourceSummary: {},
+                        importTitle: '', importDescription: '', importOwnerScope: 'user',
+                        importParametersJson: '{}', importExamplesJson: '[]',
+                        personalOpen: false,
+                        governanceOpen: false, governanceLoading: false,
+                        governanceSaving: false, governanceItems: [], governancePolicy: [],
+                        governanceCanManage: false,
+                        observabilityOpen: false, observabilityLoading: false,
+                        observabilityReport: null, observabilityStage: '',
+                        observabilityTemplateKey: '',
+                        marketplaceOpen: false, marketplaceLoading: false,
+                        marketplaceSaving: false, marketplaceItems: [],
+                        marketplaceOwnSubmissions: [], marketplaceModerationQueue: [],
+                        marketplaceLicenses: [], marketplaceSourceTypes: [],
+                        marketplacePolicy: [], marketplaceCanReview: false,
+                        marketplaceCanInstall: false, marketplaceQuery: '',
+                        marketplaceStage: '', marketplaceLicense: '',
+                        marketplaceTags: '', marketplaceAttributionName: '',
+                        marketplaceLicenseCode: 'CC-BY-NC-4.0',
+                        marketplaceSourceType: 'original', marketplaceSourceUrl: '',
+                        marketplaceRightsStatement: '',
+                        marketplacePublicationConfirmed: false,
+                        marketplaceRightsConfirmed: false,
+                        marketplaceFieldErrors: {}
                     },
                     freeGeneration: {
                         stage: '', series: false, instruction: '', contextOptions: {},
                         modelOptions: [], modelRecordId: '',
                         contextRefs: {brief_id: null, character_batch_id: '', outline_batch_id: '', beats_id: null},
-                        loading: false, submitting: false, error: ''
+                        loading: false, submitting: false, error: '', requestSequence: 0
                     },
-                    modeMigration: {preview: null, confirmed: false, loading: false, submitting: false, error: ''}
+                    modeMigration: {preview: null, confirmed: false, loading: false, submitting: false, error: '', requestSequence: 0}
                 },
                 dramaDownload: {title: '', topic: null, source: 'hongguo', fallbackReason: '', candidates: [], providers: [], captureCandidates: [], thirdPartyError: '', captureError: '', selectedCandidate: null, selectedAwemeIds: [], allDouyinCandidates: false, episodes: [], relatedVideos: [], missingEpisodes: [], seriesRangeLabel: '', seriesWarnings: [], selectedEpisodes: [], allEpisodes: false, episodesExpanded: true, searching: false, episodesLoading: false, starting: false, error: '', jobId: '', jobStatus: '', progress: {}, progressMessage: '', paused: false, finished: false, background: false, showFiles: false, logs: [], logCount: 0, videoPreviewPath: '', videoPreviewUrl: '', videoPreviewError: ''},
                 dramaReviews: {topic: null, title: '', platform: 'hg', limit: 100, allReviews: false, format: 'csv', jobId: '', status: '', reviewCount: 0, sourceTotal: 0, items: [], loading: false, polling: false, error: ''},
@@ -295,6 +344,7 @@
                     document.getElementById('filePreviewModal')?.addEventListener('hidden.bs.modal', () => this.closeFilePreview());
                     this.topicTranscriptPreviewModal = this.modal('topicTranscriptPreviewModal');
                     this.dramaReviewCaptureModal = this.modal('dramaReviewCaptureModal');
+                    this.promptLibraryModal = this.modal('promptLibraryModal');
                     document.getElementById('dramaReviewCaptureModal')?.addEventListener(
                         'hidden.bs.modal',
                         () => this.finishDisplayedDramaReviewJob?.()
@@ -314,8 +364,15 @@
                         document.activeElement?.blur();
                     });
                     this.workflowTaskModal = this.modal('workflowTaskModal');
+                    this.sequentialGenerationModelModal = this.modal('sequentialGenerationModelModal');
+                    document.getElementById('sequentialGenerationModelModal')?.addEventListener('hidden.bs.modal', () => {
+                        this.creativeWorkspace.sequentialGeneration.pending = null;
+                    });
                     this.freeCreativeGenerationModal = this.modal('freeCreativeGenerationModal');
                     this.creativeModeMigrationModal = this.modal('creativeModeMigrationModal');
+                    document.getElementById('creativeModeMigrationModal')?.addEventListener('hidden.bs.modal', () => {
+                        this.cancelCreativeModeMigrationPreview?.();
+                    });
                     this.planningAssignmentModal = this.modal('planningAssignmentModal');
                     this.adoptionNoticeModal = this.modal('adoptionNoticeModal');
 
@@ -347,10 +404,19 @@
                     if (['selection-hits', 'selection-topics'].includes(this.page)) {
                         this.restoreLatestActiveDramaDownload?.();
                     }
-                    if (this.page.startsWith('planning-') || this.page.startsWith('writing-')) {
+                    if (
+                        this.page.startsWith('planning-')
+                        || this.page.startsWith('writing-')
+                        || this.page.startsWith('prompt-template-')
+                    ) {
                         const queryProjectId = new URLSearchParams(window.location.search).get('project_id');
                         const pathProjectId = window.location.pathname.match(/\/projects\/([^/]+)/)?.[1];
-                        await this.fetchCreativeProjects(queryProjectId || pathProjectId || null);
+                        const requestedProjectId = queryProjectId || pathProjectId || null;
+                        if (this.page.startsWith('prompt-template-') && requestedProjectId) {
+                            await this.selectCreativeProject(requestedProjectId);
+                        } else {
+                            await this.fetchCreativeProjects(requestedProjectId);
+                        }
                         const topicId = new URLSearchParams(window.location.search).get('topic_id');
                         if (this.page === 'planning-projects' && topicId) {
                             this.creativeWorkspace.create.topic_id = Number(topicId);
@@ -375,16 +441,9 @@
                                 }
                             }
                         }
-                        const episode = window.location.pathname.match(/\/episodes\/(\d+)\/(?:beats|scripts)/)?.[1];
-                        const episodeView = new URLSearchParams(window.location.search).get('episode');
-                        if (episodeView === 'all') {
-                            this.creativeWorkspace.selectedEpisode = 0;
-                        } else if (/^\d+$/.test(String(episodeView || '')) && Number(episodeView) > 0) {
-                            this.creativeWorkspace.selectedEpisode = Number(episodeView);
-                        } else if (this.page === 'writing-outlines') {
-                            this.creativeWorkspace.selectedEpisode = 0;
-                        } else if (episode) {
-                            this.creativeWorkspace.selectedEpisode = Number(episode);
+                        this.creativeWorkspace.selectedEpisode = creativeEpisodeView(this.page);
+                        if (this.page.startsWith('prompt-template-')) {
+                            await this.initializePromptWorkspacePage();
                         }
                         if (
                             this.page === 'planning-brief'

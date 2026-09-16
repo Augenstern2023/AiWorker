@@ -14,6 +14,8 @@ import inspect
 import json
 from typing import Any
 
+from .strategy import ReviewExecutionPlan, estimate_tokens, plan_review_execution
+
 
 REVIEW_MODES = frozenset({"single", "multiple", "collection"})
 SOURCE_TYPES = frozenset({"project", "text"})
@@ -71,19 +73,12 @@ def build_project_source(
     project: dict[str, Any], mode: str, episode_numbers: list[int]
 ) -> dict[str, Any]:
     """Freeze one formally valid creative context for each reviewed episode."""
-    latest: dict[int, dict[str, Any]] = {}
-    for item in project.get("episodes") or []:
-        if item.get("stage") != "script":
-            continue
-        number = int(item.get("episode_number") or 0)
-        if number < 1:
-            continue
-        current = latest.get(number)
-        if current is None or (int(item.get("version") or 0), int(item.get("id") or 0)) > (
-            int(current.get("version") or 0),
-            int(current.get("id") or 0),
-        ):
-            latest[number] = item
+    free_mode = str(project.get("workflow_mode") or "sequential") == "free"
+    latest = (
+        _free_head_episodes(project, "script")
+        if free_mode
+        else _latest_stage_episodes(project, "script")
+    )
     selected = sorted(latest) if mode == "collection" else list(episode_numbers)
     missing = [number for number in selected if number not in latest]
     if not selected:
@@ -91,17 +86,29 @@ def build_project_source(
     if missing:
         raise ValueError(f"第 {', '.join(str(number) for number in missing)} 集尚无场次剧本")
 
-    brief, characters, relationships = _project_story_context(project)
-    outline_batch_id = str(project.get("outline_batch_id") or "")
-    episodes = [
-        _source_episode_with_context(
-            latest[number],
-            _current_outline(project, number, outline_batch_id),
-            _current_beats(project, number, outline_batch_id),
-            project,
-        )
-        for number in selected
-    ]
+    if free_mode:
+        brief, characters, relationships = _free_project_story_context(project)
+        outline_batch_id = _free_head_ref(project, "outline")
+        episodes = [
+            _free_source_episode_with_context(
+                latest[number],
+                _current_free_outline(project, number, outline_batch_id),
+                _current_free_episode(project, "beats", number, require_locked=True),
+            )
+            for number in selected
+        ]
+    else:
+        brief, characters, relationships = _project_story_context(project)
+        outline_batch_id = str(project.get("outline_batch_id") or "")
+        episodes = [
+            _source_episode_with_context(
+                latest[number],
+                _current_outline(project, number, outline_batch_id),
+                _current_beats(project, number, outline_batch_id),
+                project,
+            )
+            for number in selected
+        ]
     source = {
         "project_id": int(project["id"]),
         "project_name": str(project.get("name") or ""),
@@ -115,6 +122,66 @@ def build_project_source(
     }
     source["fingerprint"] = source_fingerprint(source)
     return source
+
+
+def _latest_stage_episodes(
+    project: dict[str, Any], stage: str
+) -> dict[int, dict[str, Any]]:
+    latest: dict[int, dict[str, Any]] = {}
+    for item in project.get("episodes") or []:
+        if item.get("stage") != stage:
+            continue
+        number = int(item.get("episode_number") or 0)
+        if number < 1:
+            continue
+        current = latest.get(number)
+        if current is None or _version_key(item) > _version_key(current):
+            latest[number] = item
+    return latest
+
+
+def _free_head_ref(
+    project: dict[str, Any], stage: str, episode_number: int = 0
+) -> str:
+    head = next(
+        (
+            item
+            for item in project.get("resource_heads") or []
+            if str(item.get("stage") or "") == stage
+            and int(item.get("episode_number") or 0) == int(episode_number)
+        ),
+        None,
+    )
+    if not head or not str(head.get("resource_ref") or ""):
+        labels = {
+            "brief": "Brief",
+            "characters": "人物关系",
+            "outline": "分集大纲",
+            "beats": "Beats",
+            "script": "场次剧本",
+        }
+        prefix = f"第 {episode_number} 集" if episode_number else "项目"
+        raise ValueError(f"{prefix}尚未选择当前 {labels.get(stage, stage)} 版本")
+    return str(head["resource_ref"])
+
+
+def _free_head_episodes(
+    project: dict[str, Any], stage: str
+) -> dict[int, dict[str, Any]]:
+    episodes_by_id = {
+        str(item.get("id")): item
+        for item in project.get("episodes") or []
+        if item.get("stage") == stage
+    }
+    current: dict[int, dict[str, Any]] = {}
+    for head in project.get("resource_heads") or []:
+        if str(head.get("stage") or "") != stage:
+            continue
+        number = int(head.get("episode_number") or 0)
+        resource = episodes_by_id.get(str(head.get("resource_ref") or ""))
+        if number > 0 and resource is not None:
+            current[number] = resource
+    return current
 
 
 def build_text_source(text: str, *, source_filename: str = "") -> dict[str, Any]:
@@ -136,7 +203,11 @@ def build_text_source(text: str, *, source_filename: str = "") -> dict[str, Any]
 
 def source_fingerprint(source: dict[str, Any]) -> str:
     value = json.dumps(
-        {key: value for key, value in source.items() if key != "fingerprint"},
+        {
+            key: value
+            for key, value in source.items()
+            if key not in {"fingerprint", "prompt_snapshot"}
+        },
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -273,6 +344,46 @@ def _project_story_context(
     )
 
 
+def _free_project_story_context(
+    project: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    brief_ref = _free_head_ref(project, "brief")
+    brief = next(
+        (
+            item
+            for item in project.get("blueprints") or []
+            if str(item.get("id") or "") == brief_ref
+        ),
+        None,
+    )
+    if not brief or str(brief.get("status") or "") not in {
+        "brief_locked", "locked", "approved",
+    }:
+        raise ValueError("自由创作项目当前 Brief 尚未锁定，无法发起正式审核")
+
+    character_batch_id = _free_head_ref(project, "characters")
+    characters = [
+        item
+        for item in project.get("characters") or []
+        if str(item.get("batch_id") or "") == character_batch_id
+    ]
+    relationships = [
+        item
+        for item in project.get("relationships") or []
+        if str(item.get("batch_id") or "") == character_batch_id
+    ]
+    if not characters or any(
+        str(item.get("status") or "") not in APPROVED_STATUSES
+        for item in [*characters, *relationships]
+    ):
+        raise ValueError("自由创作项目当前人物关系版本尚未锁定，无法发起正式审核")
+    return (
+        _resource_snapshot(brief),
+        [_resource_snapshot(item) for item in characters],
+        [_resource_snapshot(item) for item in relationships],
+    )
+
+
 def _current_outline(project: dict[str, Any], episode_number: int, batch_id: str) -> dict[str, Any]:
     if not batch_id:
         raise ValueError("项目尚未锁定分集大纲，无法发起正式审核")
@@ -286,6 +397,48 @@ def _current_outline(project: dict[str, Any], episode_number: int, batch_id: str
     if not candidates:
         raise ValueError(f"第 {episode_number} 集分集大纲未锁定，无法发起正式审核")
     return max(candidates, key=_version_key)
+
+
+def _current_free_outline(
+    project: dict[str, Any], episode_number: int, batch_id: str
+) -> dict[str, Any]:
+    candidates = [
+        item
+        for item in project.get("episodes") or []
+        if item.get("stage") == "outline"
+        and str(item.get("batch_id") or "") == batch_id
+        and int(item.get("episode_number") or 0) == int(episode_number)
+        and str(item.get("status") or "") in APPROVED_STATUSES
+    ]
+    if not candidates:
+        raise ValueError(
+            f"自由创作项目第 {episode_number} 集当前分集大纲尚未锁定，无法发起正式审核"
+        )
+    return max(candidates, key=_version_key)
+
+
+def _current_free_episode(
+    project: dict[str, Any], stage: str, episode_number: int, *, require_locked: bool
+) -> dict[str, Any]:
+    resource_ref = _free_head_ref(project, stage, episode_number)
+    resource = next(
+        (
+            item
+            for item in project.get("episodes") or []
+            if item.get("stage") == stage
+            and int(item.get("episode_number") or 0) == int(episode_number)
+            and str(item.get("id") or "") == resource_ref
+        ),
+        None,
+    )
+    if resource is None:
+        raise ValueError(f"自由创作项目第 {episode_number} 集当前 {stage} 版本不存在")
+    if require_locked and str(resource.get("status") or "") not in APPROVED_STATUSES:
+        label = "Beats" if stage == "beats" else "场次剧本"
+        raise ValueError(
+            f"自由创作项目第 {episode_number} 集当前 {label} 尚未锁定，无法发起正式审核"
+        )
+    return resource
 
 
 def _current_beats(project: dict[str, Any], episode_number: int, outline_batch_id: str) -> dict[str, Any]:
@@ -318,6 +471,18 @@ def _source_episode_with_context(
     actual_beats_fingerprint = str(refs.get("beats_content_fingerprint") or "")
     if actual_beats_fingerprint and actual_beats_fingerprint != expected_beats_fingerprint:
         raise ValueError(f"第 {episode_number} 集场次剧本引用的 Beats 内容已变化，请重新生成场次剧本")
+    return {
+        **_source_episode(script),
+        "script": _resource_snapshot(script),
+        "outline": _resource_snapshot(outline),
+        "beats": _resource_snapshot(beats),
+    }
+
+
+def _free_source_episode_with_context(
+    script: dict[str, Any], outline: dict[str, Any], beats: dict[str, Any]
+) -> dict[str, Any]:
+    """Freeze the selected free-mode heads without imposing sequential refs."""
     return {
         **_source_episode(script),
         "script": _resource_snapshot(script),
@@ -404,24 +569,42 @@ async def review_source(
     provider: Any,
     source: dict[str, Any],
     *,
+    summary_provider: Any = None,
     on_progress: Any = None,
     on_checkpoint: Any = None,
+    on_request: Any = None,
     initial_episode_reviews: list[dict[str, Any]] | None = None,
+    initial_report: dict[str, Any] | None = None,
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Ask the configured LLM for a bounded, evidence-based review report."""
+    """Review one, several, or all episodes with a scale-appropriate pipeline."""
     episodes = list(source.get("episodes") or [])
     if not episodes:
         raise ValueError("审核来源没有可用剧本")
-    if len(episodes) == 1:
-        report = normalize_review_report(
-            await provider.complete_json(_review_messages(source))
+    plan = plan_review_execution(source)
+    summary_provider = summary_provider or provider
+    if plan.scale == "single":
+        request_source = _semantic_unit_source(source, episodes[0], plan)
+        await _report_request(
+            on_request,
+            _request_metadata("unit", plan, episode_number=plan.episode_numbers[0]),
         )
+        report = normalize_review_report(
+            await provider.complete_json(_review_messages(request_source, prompt_snapshot))
+        )
+        report["strategy"] = plan.to_dict()
         await _report_progress(on_progress, 1, 1)
         return report
 
+    saved_report = initial_report if isinstance(initial_report, dict) else {}
+    saved_episode_reviews = (
+        saved_report.get("episode_reviews")
+        if saved_report.get("partial") is True
+        else initial_episode_reviews
+    ) or []
     completed_by_episode = {
         int(item.get("episode_number") or 0): item
-        for item in (initial_episode_reviews or [])
+        for item in saved_episode_reviews
         if isinstance(item, dict) and int(item.get("episode_number") or 0) > 0
     }
     episode_reports = [
@@ -429,54 +612,177 @@ async def review_source(
         for number in sorted(completed_by_episode)
         if any(int(episode.get("episode_number") or 0) == number for episode in episodes)
     ]
-    total = len(episodes) + 1
-    for index, episode in enumerate(episodes, start=1):
+    saved_batch_summaries = [
+        item
+        for item in saved_report.get("batch_summaries") or []
+        if isinstance(item, dict)
+    ]
+    batch_summaries_by_index = {
+        int(item.get("batch_index") or 0): item
+        for item in saved_batch_summaries
+        if int(item.get("batch_index") or 0) > 0
+    }
+    batch_summary_steps = len(plan.batches) if plan.use_batch_summaries else 0
+    total = len(episodes) + batch_summary_steps + 1
+    completed_steps = len(episode_reports) + len(batch_summaries_by_index)
+    continuity_state = dict(saved_report.get("continuity_state") or {})
+    failed_episodes: list[dict[str, Any]] = []
+    for episode in episodes:
         episode_number = int(episode["episode_number"])
         if episode_number in completed_by_episode:
-            await _report_progress(on_progress, index, total)
             continue
-        episode_source = {
-            **source,
-            "mode": "single",
-            "episode_numbers": [episode_number],
-            "episodes": [episode],
-        }
-        episode_report = normalize_review_report(
-            await provider.complete_json(_review_messages(episode_source))
+        episode_source = _semantic_unit_source(source, episode, plan)
+        episode_source["continuity_context"] = continuity_state
+        await _report_request(
+            on_request,
+            _request_metadata("unit", plan, episode_number=episode_number),
         )
+        try:
+            raw_episode_report = await provider.complete_json(
+                _review_messages(episode_source, prompt_snapshot)
+            )
+        except Exception as exc:
+            failed_episodes.append(
+                {"episode_number": episode_number, "error": str(exc)[:500]}
+            )
+            completed_steps += 1
+            await _report_checkpoint(
+                on_checkpoint,
+                build_partial_review_report(
+                    episode_reports,
+                    len(episodes),
+                    strategy=plan,
+                    batch_summaries=list(batch_summaries_by_index.values()),
+                    continuity_state=continuity_state,
+                    checkpoint_key=f"unit_failed:{episode_number}",
+                    failed_episodes=failed_episodes,
+                ),
+            )
+            await _report_progress(on_progress, completed_steps, total)
+            continue
+        episode_report = normalize_review_report(raw_episode_report)
         completed = {
             "episode_number": episode_number,
             "summary": episode_report["summary"],
             "findings": episode_report["core_findings"],
         }
+        next_continuity = raw_episode_report.get("continuity_state")
+        if isinstance(next_continuity, dict) and next_continuity:
+            continuity_state = dict(next_continuity)
+            completed["continuity_state"] = continuity_state
         completed_by_episode[episode_number] = completed
         episode_reports.append(completed)
+        episode_reports.sort(key=lambda item: int(item.get("episode_number") or 0))
+        completed_steps += 1
         await _report_checkpoint(
             on_checkpoint,
-            build_partial_review_report(episode_reports, len(episodes)),
+            build_partial_review_report(
+                episode_reports,
+                len(episodes),
+                strategy=plan,
+                batch_summaries=list(batch_summaries_by_index.values()),
+                continuity_state=continuity_state,
+                checkpoint_key=f"unit:{episode_number}",
+                failed_episodes=failed_episodes,
+            ),
         )
-        await _report_progress(on_progress, index, total)
+        await _report_progress(on_progress, completed_steps, total)
 
-    combined = {
-        **source,
-        "episode_reports": [
-            {
-                "episode_number": item["episode_number"],
-                "summary": item.get("summary") or "",
-                "core_findings": item.get("findings") or [],
-            }
-            for item in episode_reports
-        ],
-    }
+    if failed_episodes:
+        numbers = "、".join(str(item["episode_number"]) for item in failed_episodes)
+        first_error = str(failed_episodes[0].get("error") or "模型请求失败")
+        raise RuntimeError(
+            f"第 {numbers} 集审核失败：{first_error}；其他已完成结果已保存，可重试续跑"
+        )
+
+    if plan.use_batch_summaries:
+        reports_by_episode = {
+            int(item.get("episode_number") or 0): item for item in episode_reports
+        }
+        for batch_index, batch in enumerate(plan.batches, start=1):
+            if batch_index in batch_summaries_by_index:
+                continue
+            batch_results = [
+                reports_by_episode[number]
+                for number in batch
+                if number in reports_by_episode
+            ]
+            await _report_request(
+                on_request,
+                _request_metadata(
+                    "batch_summary", plan, batch_index=batch_index, batch=batch
+                ),
+            )
+            raw_summary = await summary_provider.complete_json(
+                _batch_summary_messages(
+                    source,
+                    batch_index=batch_index,
+                    episode_numbers=list(batch),
+                    episode_reports=batch_results,
+                    continuity_state=continuity_state,
+                    prompt_snapshot=prompt_snapshot,
+                )
+            )
+            summary = _normalize_batch_summary(
+                raw_summary, batch_index=batch_index, episode_numbers=list(batch)
+            )
+            batch_summaries_by_index[batch_index] = summary
+            next_continuity = raw_summary.get("continuity_state")
+            if isinstance(next_continuity, dict) and next_continuity:
+                continuity_state = dict(next_continuity)
+            completed_steps += 1
+            await _report_checkpoint(
+                on_checkpoint,
+                build_partial_review_report(
+                    episode_reports,
+                    len(episodes),
+                    strategy=plan,
+                    batch_summaries=list(batch_summaries_by_index.values()),
+                    continuity_state=continuity_state,
+                    checkpoint_key=f"batch_summary:{batch_index}",
+                ),
+            )
+            await _report_progress(on_progress, completed_steps, total)
+
+    final_payload = _final_summary_payload(
+        source,
+        plan,
+        episode_reports=episode_reports,
+        batch_summaries=list(batch_summaries_by_index.values()),
+        continuity_state=continuity_state,
+    )
+    await _report_request(on_request, _request_metadata("final_summary", plan))
     report = normalize_review_report(
-        await provider.complete_json(_summary_messages(combined))
+        await summary_provider.complete_json(
+            _summary_messages(final_payload, prompt_snapshot)
+        )
+    )
+    report.update(
+        {
+            "partial": False,
+            "strategy": plan.to_dict(),
+            "episode_reviews": episode_reports,
+            "batch_summaries": [
+                batch_summaries_by_index[index]
+                for index in sorted(batch_summaries_by_index)
+            ],
+            "continuity_state": continuity_state,
+            "checkpoint_key": "final_summary",
+        }
     )
     await _report_progress(on_progress, total, total)
     return report
 
 
 def build_partial_review_report(
-    episode_reviews: list[dict[str, Any]], total_episode_count: int
+    episode_reviews: list[dict[str, Any]],
+    total_episode_count: int,
+    *,
+    strategy: ReviewExecutionPlan | None = None,
+    batch_summaries: list[dict[str, Any]] | None = None,
+    continuity_state: dict[str, Any] | None = None,
+    checkpoint_key: str = "",
+    failed_episodes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Make completed per-episode results readable before the final aggregation."""
     completed = len(episode_reviews)
@@ -491,10 +797,239 @@ def build_partial_review_report(
         "core_findings": [],
         "episode_reviews": episode_reviews,
         "cross_episode_findings": [],
+        "batch_summaries": batch_summaries or [],
+        "continuity_state": continuity_state or {},
+        "checkpoint_key": checkpoint_key,
+        "strategy": strategy.to_dict() if strategy is not None else {},
+        "failed_episodes": failed_episodes or [],
     }
 
 
-def _review_messages(source: dict[str, Any]) -> list[dict[str, str]]:
+def _semantic_unit_source(
+    source: dict[str, Any],
+    episode: dict[str, Any],
+    plan: ReviewExecutionPlan,
+) -> dict[str, Any]:
+    """Keep one complete episode, remove duplicate bodies, then trim unrelated cast."""
+    compact_episode = dict(episode)
+    if isinstance(compact_episode.get("script"), dict):
+        compact_episode.pop("text", None)
+    payload = {
+        "project_id": source.get("project_id"),
+        "project_name": source.get("project_name"),
+        "mode": "single",
+        "formal": bool(source.get("formal")),
+        "episode_numbers": [int(episode.get("episode_number") or 0)],
+        "brief": source.get("brief"),
+        "characters": list(source.get("characters") or []),
+        "relationships": list(source.get("relationships") or []),
+        "episodes": [compact_episode],
+    }
+    if estimate_tokens(payload) <= plan.unit_target_tokens:
+        return payload
+
+    relevant_characters, relevant_names = _relevant_characters(
+        payload["characters"], compact_episode
+    )
+    if relevant_characters:
+        payload["characters"] = relevant_characters
+        payload["relationships"] = _relevant_relationships(
+            payload["relationships"], relevant_names
+        )
+    payload["semantic_budget"] = {
+        "target_tokens": plan.unit_target_tokens,
+        "estimated_tokens": estimate_tokens(payload),
+        "source_was_truncated": False,
+        "context_reduced_to_relevant_characters": bool(relevant_characters),
+    }
+    return payload
+
+
+def _relevant_characters(
+    characters: list[Any], episode: dict[str, Any]
+) -> tuple[list[dict[str, Any]], set[str]]:
+    episode_text = json.dumps(episode, ensure_ascii=False).lower()
+    relevant: list[dict[str, Any]] = []
+    names: set[str] = set()
+    for item in characters:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content") if isinstance(item.get("content"), dict) else item
+        name = str(
+            content.get("name")
+            or content.get("character_name")
+            or content.get("role_name")
+            or ""
+        ).strip()
+        role = str(content.get("role") or content.get("role_type") or "").lower()
+        if name and (name.lower() in episode_text or role in {"主角", "protagonist", "lead"}):
+            relevant.append(item)
+            names.add(name)
+    return relevant, names
+
+
+def _relevant_relationships(
+    relationships: list[Any], relevant_names: set[str]
+) -> list[dict[str, Any]]:
+    if not relevant_names:
+        return [item for item in relationships if isinstance(item, dict)]
+    lowered_names = {name.lower() for name in relevant_names}
+    result = []
+    for item in relationships:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content") if isinstance(item.get("content"), dict) else item
+        text = json.dumps(content, ensure_ascii=False).lower()
+        if any(name in text for name in lowered_names):
+            result.append(item)
+    return result
+
+
+def _source_manifest(source: dict[str, Any]) -> dict[str, Any]:
+    episodes = []
+    for item in source.get("episodes") or []:
+        if not isinstance(item, dict):
+            continue
+        episodes.append(
+            {
+                "episode_number": int(item.get("episode_number") or 0),
+                "script": _resource_ref(item.get("script") or item),
+                "outline": _resource_ref(item.get("outline")),
+                "beats": _resource_ref(item.get("beats")),
+            }
+        )
+    return {
+        "project_id": source.get("project_id"),
+        "project_name": source.get("project_name"),
+        "mode": source.get("mode"),
+        "formal": bool(source.get("formal")),
+        "episode_numbers": list(source.get("episode_numbers") or []),
+        "brief": _resource_ref(source.get("brief")),
+        "episodes": episodes,
+        "source_fingerprint": source.get("fingerprint"),
+    }
+
+
+def _resource_ref(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: value.get(key)
+        for key in ("id", "resource_id", "version", "content_fingerprint")
+        if value.get(key) not in (None, "")
+    }
+
+
+def _batch_summary_messages(
+    source: dict[str, Any],
+    *,
+    batch_index: int,
+    episode_numbers: list[int],
+    episode_reports: list[dict[str, Any]],
+    continuity_state: dict[str, Any],
+    prompt_snapshot: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
+    payload = {
+        "request_kind": "batch_summary",
+        "batch_index": batch_index,
+        "episode_numbers": episode_numbers,
+        "episode_reports": episode_reports,
+        "continuity_state": continuity_state,
+        "source_manifest": _source_manifest(source),
+    }
+    return [
+        {
+            "role": "system",
+            "content": _with_review_style(
+                "你是短剧跨集审核助手。只根据已完成的逐集报告提炼本批次的剧情承接、"
+                "人物状态、设定一致性、重复拖沓和未解决冲突，不得要求重新加载或编造剧本正文。"
+                "只输出 JSON：summary、findings、continuity_state。findings 每项包含 title、"
+                "category、severity、episode_number、evidence、suggestion、change_route。",
+                prompt_snapshot,
+            ),
+        },
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+
+
+def _normalize_batch_summary(
+    payload: dict[str, Any], *, batch_index: int, episode_numbers: list[int]
+) -> dict[str, Any]:
+    raw_findings = payload.get("findings")
+    if not isinstance(raw_findings, list):
+        raw_findings = payload.get("cross_episode_findings") or payload.get("core_findings") or []
+    return {
+        "batch_index": int(batch_index),
+        "episode_numbers": [int(number) for number in episode_numbers],
+        "summary": str(payload.get("summary") or "").strip(),
+        "findings": [
+            _normalize_finding(item) for item in raw_findings if isinstance(item, dict)
+        ],
+        "continuity_state": (
+            dict(payload.get("continuity_state") or {})
+            if isinstance(payload.get("continuity_state"), dict)
+            else {}
+        ),
+    }
+
+
+def _final_summary_payload(
+    source: dict[str, Any],
+    plan: ReviewExecutionPlan,
+    *,
+    episode_reports: list[dict[str, Any]],
+    batch_summaries: list[dict[str, Any]],
+    continuity_state: dict[str, Any],
+) -> dict[str, Any]:
+    payload = {
+        "request_kind": "final_summary",
+        "review_strategy": plan.to_dict(),
+        "source_manifest": _source_manifest(source),
+        "continuity_state": continuity_state,
+    }
+    if plan.use_batch_summaries:
+        payload["batch_summaries"] = batch_summaries
+    else:
+        payload["episode_reports"] = episode_reports
+    return payload
+
+
+def _request_metadata(
+    kind: str,
+    plan: ReviewExecutionPlan,
+    *,
+    episode_number: int = 0,
+    batch_index: int = 0,
+    batch: tuple[int, ...] = (),
+) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "scale": plan.scale,
+        "current_episode": int(episode_number),
+        "batch_index": int(batch_index),
+        "batch_start": int(batch[0]) if batch else 0,
+        "batch_end": int(batch[-1]) if batch else 0,
+        "batch_size": len(batch),
+    }
+
+
+def _with_review_style(
+    system: str, prompt_snapshot: dict[str, Any] | None
+) -> str:
+    if not prompt_snapshot:
+        return system
+    instruction = str(prompt_snapshot.get("effective_instruction") or "").strip()
+    if not instruction:
+        return system
+    return (
+        f"{system}\n\n当前项目审核侧重点（不得覆盖前述 JSON 契约、固定规则包、"
+        f"证据要求、修改路径或人工确认机制）：\n{instruction}"
+    )
+
+
+def _review_messages(
+    source: dict[str, Any], prompt_snapshot: dict[str, Any] | None = None
+) -> list[dict[str, str]]:
     episode_numbers = {int(number) for number in source.get("episode_numbers") or []}
     checks = [
         "检查剧情逻辑、人物执行、台词与 OS、爽点、节奏和结尾钩子。",
@@ -514,7 +1049,7 @@ def _review_messages(source: dict[str, Any]) -> list[dict[str, str]]:
     return [
         {
             "role": "system",
-            "content": (
+            "content": _with_review_style((
                 "你是短剧编剧审稿助手。AI 建议结论只能是“通过”或“建议修改”，"
                 "不得代写剧本。输出 JSON：ai_verdict、summary、core_findings、"
                 "episode_reviews、cross_episode_findings。episode_reviews 每项必须有 "
@@ -526,20 +1061,23 @@ def _review_messages(source: dict[str, Any]) -> list[dict[str, str]]:
                 "必须标记 outline_revision_required。\n"
                 f"固定规则包：{RULE_PACKAGE}，覆盖{RULES}。\n"
                 + "\n".join(checks)
-            ),
+            ), prompt_snapshot),
         },
         {"role": "user", "content": json.dumps(source, ensure_ascii=False)},
     ]
 
 
-def _summary_messages(source: dict[str, Any]) -> list[dict[str, str]]:
+def _summary_messages(
+    source: dict[str, Any], prompt_snapshot: dict[str, Any] | None = None
+) -> list[dict[str, str]]:
     return [
         {
             "role": "system",
-            "content": (
-                "你是短剧编剧审稿助手。根据逐集审核和剧本，汇总多集或合集审核报告。"
+            "content": _with_review_style((
+                "你是短剧编剧审稿助手。根据逐集审核或批次摘要汇总多集、合集审核报告。"
                 "结论只能是“通过”或“建议修改”。重点检查跨集剧情承接、人物状态、"
                 "设定一致性、前三集信息前置和重复拖沓；无法确认的内容标记证据不足。"
+                "输入不包含剧本正文时只能引用报告内已有证据，不得要求补载或猜测正文。"
                 "输出 JSON：ai_verdict、summary、core_findings、"
                 "episode_reviews、cross_episode_findings；episode_reviews 每项必须有 episode_number、summary 和 findings；"
                 "每条问题都要给 title、category、outline_anchor、beat_orders、evidence、suggestion、"
@@ -547,7 +1085,7 @@ def _summary_messages(source: dict[str, Any]) -> list[dict[str, str]]:
                 "汇总时保留逐集对 Beats 的归因：Beats 本身需要调整才标记 beats_then_script，"
                 "仅场次细节问题标记 script_only。"
                 f"core_findings 最多 5 条。固定规则包：{RULE_PACKAGE}，覆盖{RULES}。"
-            ),
+            ), prompt_snapshot),
         },
         {"role": "user", "content": json.dumps(source, ensure_ascii=False)},
     ]
@@ -565,6 +1103,14 @@ async def _report_checkpoint(callback: Any, report: dict[str, Any]) -> None:
     if callback is None:
         return
     result = callback(report)
+    if inspect.isawaitable(result):
+        await result
+
+
+async def _report_request(callback: Any, request: dict[str, Any]) -> None:
+    if callback is None:
+        return
+    result = callback(request)
     if inspect.isawaitable(result):
         await result
 

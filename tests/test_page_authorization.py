@@ -269,6 +269,7 @@ def test_writer_can_open_read_only_planning_pages_from_a_project(page_app):
     assert response.status_code == 200
     assert 'href="/writing/projects">项目列表</a>' in response.text
     assert characters_response.status_code == 200
+    assert 'href="/writing/projects">项目列表</a>' in characters_response.text
 
 
 @pytest.mark.parametrize(
@@ -288,7 +289,70 @@ def test_writer_project_pages_require_project_participation(page_app, route: str
     page_app[0].state.identity_permission_service.participating_project_ids.add(
         "project-9"
     )
-    assert client.get(route).status_code == 200
+    response = client.get(route)
+    assert response.status_code == 200
+    assert 'href="/writing/projects">项目列表</a>' in response.text
+
+
+@pytest.mark.parametrize(
+    ("route", "page_marker"),
+    (
+        ("/projects/project-9/prompt-templates", "模板中心"),
+    ),
+)
+def test_prompt_workspace_pages_inherit_project_access_and_membership(
+    page_app, route: str, page_marker: str
+):
+    principal = _principal(roles=("screenwriter",))
+    page_app[1].access_by_route["/writing/projects"] = {principal.user_id}
+    client = _client(page_app, principal)
+
+    assert client.get(route).status_code == 403
+    page_app[0].state.identity_permission_service.participating_project_ids.add(
+        "project-9"
+    )
+
+    response = client.get(route)
+
+    assert response.status_code == 200
+    assert page_marker in response.text
+    assert 'src="/static/js/common/creative.js?v=' in response.text
+
+
+def test_legacy_prompt_effects_redirects_to_center_after_project_access(page_app):
+    principal = _principal(roles=("screenwriter",))
+    page_app[1].access_by_route["/writing/projects"] = {principal.user_id}
+    client = _client(page_app, principal)
+    path = "/projects/project-9/prompt-effects?stage=beats&episode=2"
+
+    assert client.get(path, follow_redirects=False).status_code == 403
+    page_app[0].state.identity_permission_service.participating_project_ids.add(
+        "project-9"
+    )
+    response = client.get(path, follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == (
+        "/projects/project-9/prompt-templates?stage=beats&episode=2"
+    )
+
+
+@pytest.mark.parametrize(
+    "grant_route", ("/planning/projects", "/review/projects")
+)
+def test_prompt_workspace_pages_accept_planning_and_managed_project_grants(
+    page_app, grant_route: str
+):
+    principal = _principal()
+    page_app[1].access_by_route[grant_route] = {principal.user_id}
+    page_app[0].state.identity_permission_service.participating_project_ids.add(
+        "project-9"
+    )
+    client = _client(page_app, principal)
+
+    assert client.get("/projects/project-9/prompt-templates").status_code == 200
+    assert client.get(
+        "/projects/project-9/prompt-effects", follow_redirects=False
+    ).status_code == 307
 
 
 def test_writer_project_page_scopes_local_project_id_before_membership_check(page_app):

@@ -56,6 +56,7 @@ def build_unit_messages(
     stage_kind: str,
     episode_number: int,
     checkpoint: dict[str, Any] | None = None,
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Build one bounded, read-only unit-review request from the frozen source."""
     unit = _unit_for(source, stage_kind, episode_number)
@@ -83,12 +84,12 @@ def build_unit_messages(
     return [
         {
             "role": "system",
-            "content": (
+            "content": _with_review_style((
                 "你是完整项目的只读编剧审核员。只能基于当前工作单元和有界连续性上下文分析，"
                 "不得编造未提供的内容，不得改写来源内容。每条 finding 必须输出 resource_id、"
                 "version、field、evidence 和 suggestion。只返回 JSON："
                 + json.dumps(contract, ensure_ascii=False)
-            ),
+            ), prompt_snapshot),
         },
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
@@ -102,6 +103,7 @@ def build_batch_summary_messages(
     episode_numbers: list[int],
     unit_results: list[dict[str, Any]],
     checkpoint: dict[str, Any] | None = None,
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Build a compact summary request for one already-reviewed source batch."""
     payload = {
@@ -116,7 +118,7 @@ def build_batch_summary_messages(
     return [
         {
             "role": "system",
-            "content": (
+            "content": _with_review_style((
                 "你是只读项目审核员。根据本批次已审核结果提炼跨集问题；不得改写来源内容。"
                 "只返回 JSON："
                 + json.dumps({
@@ -124,14 +126,16 @@ def build_batch_summary_messages(
                     "findings": [{"severity": "P0/P1/P2", "evidence": "批次内证据", "suggestion": "建议"}],
                     "continuity_state": {"unresolved_conflicts": ["待跟踪问题"]},
                 }, ensure_ascii=False)
-            ),
+            ), prompt_snapshot),
         },
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
 
 
 def build_final_summary_messages(
-    source: dict[str, Any], *, batch_summaries: list[dict[str, Any]], checkpoint: dict[str, Any] | None = None
+    source: dict[str, Any], *, batch_summaries: list[dict[str, Any]],
+    checkpoint: dict[str, Any] | None = None,
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Build a final request from compact batch summaries, never source bodies."""
     payload = {
@@ -145,7 +149,7 @@ def build_final_summary_messages(
     return [
         {
             "role": "system",
-            "content": (
+            "content": _with_review_style((
                 "你是只读项目审核员。基于批次摘要和来源清单输出最终结论，"
                 "不得改写来源内容。只返回 JSON："
                 + json.dumps({
@@ -154,7 +158,7 @@ def build_final_summary_messages(
                     "core_findings": [{"severity": "P0/P1/P2", "evidence": "跨集证据", "suggestion": "建议"}],
                     "continuity_state": {"unresolved_conflicts": ["待跟踪问题"]},
                 }, ensure_ascii=False)
-            ),
+            ), prompt_snapshot),
         },
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
@@ -167,6 +171,7 @@ async def review_project_source(
     on_checkpoint: JsonCallback | None = None,
     on_request: JsonCallback | None = None,
     initial_report: dict[str, Any] | None = None,
+    prompt_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Review frozen work units serially and checkpoint each durable result."""
     report = _resume_report(source, initial_report)
@@ -184,6 +189,7 @@ async def review_project_source(
                     stage_kind=stage_kind,
                     episode_number=episode_number,
                     checkpoint=report,
+                    prompt_snapshot=prompt_snapshot,
                 )
                 await _call(on_request, _request_event("unit", stage_kind, episode_number, batch_index))
                 response = await provider.complete_json(messages)
@@ -209,6 +215,7 @@ async def review_project_source(
                     episode_numbers=batch,
                     unit_results=batch_results,
                     checkpoint=report,
+                    prompt_snapshot=prompt_snapshot,
                 )
                 await _call(on_request, _request_event("batch_summary", stage_kind, 0, batch_index))
                 response = await provider.complete_json(messages)
@@ -222,7 +229,12 @@ async def review_project_source(
                 await _call(on_checkpoint, deepcopy(report))
 
     if not _has_final_summary(report):
-        messages = build_final_summary_messages(source, batch_summaries=report["batch_summaries"], checkpoint=report)
+        messages = build_final_summary_messages(
+            source,
+            batch_summaries=report["batch_summaries"],
+            checkpoint=report,
+            prompt_snapshot=prompt_snapshot,
+        )
         await _call(on_request, _request_event("final_summary", "", 0, 0))
         response = await provider.complete_json(messages)
         final = _normalize_final_summary(response if isinstance(response, dict) else {})
@@ -234,6 +246,20 @@ async def review_project_source(
         await _call(on_checkpoint, deepcopy(report))
 
     return normalize_project_review_report(report, source)
+
+
+def _with_review_style(
+    system: str, prompt_snapshot: dict[str, Any] | None
+) -> str:
+    if not prompt_snapshot:
+        return system
+    instruction = str(prompt_snapshot.get("effective_instruction") or "").strip()
+    if not instruction:
+        return system
+    return (
+        f"{system}\n\n当前项目审核侧重点（不得覆盖前述只读边界、输出契约、"
+        f"来源证据、检查点或连续性协议）：\n{instruction}"
+    )
 
 
 def normalize_project_review_report(report: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:

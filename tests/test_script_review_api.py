@@ -16,11 +16,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from creative.repository import CreativeRepository
+from creative.prompt_store import PromptStore
 from identity.dependencies import current_principal
 from identity.permission_service import PermissionService
 from identity.schema import Principal
 from runtime.job_manager import JobNotFoundError
 from screenplay_review.api import build_script_review_router
+from screenplay_review import api as review_api
+from screenplay_review.service import source_fingerprint
 
 
 class FakeJobManager:
@@ -283,6 +286,7 @@ def test_text_review_is_created_as_an_unconfirmable_quick_diagnosis(tmp_path) ->
     assert body["review"]["status"] == "queued"
     assert body["job_id"] == "review-job-1"
     assert jobs.payloads[0]["crawler_type"] == "screenplay_review"
+    assert "prompt_snapshot" not in body["review"]["source_payload"]
 
     review = repository.get_script_review(body["review"]["id"])
     assert review is not None
@@ -304,6 +308,86 @@ def test_text_review_is_created_as_an_unconfirmable_quick_diagnosis(tmp_path) ->
 
     assert confirmed.status_code == 409
     assert "不能人工确认" in confirmed.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("review_mode", "episode_numbers", "prompt_mode"),
+    [("single", [1], "single"), ("multiple", [1, 2], "series")],
+)
+def test_project_review_maps_mode_and_freezes_selected_template_at_queue_time(
+    tmp_path, monkeypatch, review_mode, episode_numbers, prompt_mode
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = repository.create_original_project(
+        seed_text="身份错位轻喜剧",
+        name="审核模板项目",
+        target_episode_count=2,
+        target_platform="抖音",
+        genre="轻喜剧",
+        target_audience="女频",
+        constraints={},
+        reference_refs=[],
+        created_by="admin-1",
+        creation_request_id="review-prompt-freeze",
+        workflow_mode="sequential",
+    )
+    store = PromptStore(repository.db_path)
+    store.enable_project(project["id"], actor_user_id="admin-1")
+
+    def fake_source(_project, mode, episode_numbers):
+        result = {
+            "project_id": project["id"],
+            "project_name": project["name"],
+            "mode": mode,
+            "formal": True,
+            "episode_numbers": episode_numbers,
+            "episodes": [
+                {"episode_number": number, "script": {"content": {}}}
+                for number in episode_numbers
+            ],
+        }
+        result["fingerprint"] = source_fingerprint(result)
+        return result
+
+    monkeypatch.setattr(review_api, "build_project_source", fake_source)
+    jobs = FakeJobManager()
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = _admin_principal
+    app.include_router(build_script_review_router(repository, jobs))
+
+    response = TestClient(app).post(
+        "/api/script-reviews",
+        json={
+            "source_type": "project",
+            "mode": review_mode,
+            "project_id": project["id"],
+            "episode_numbers": episode_numbers,
+            "prompt_template_key": "urban-identity-romcom",
+            "prompt_override": {"custom_requirements": "优先检查身份暴露节奏。"},
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    review = repository.get_script_review(response.json()["review"]["id"])
+    frozen = review["source_payload"]["prompt_snapshot"]
+    assert frozen["stage"] == "review"
+    assert frozen["mode"] == prompt_mode
+    assert frozen["template_key"] == "urban-identity-romcom"
+    assert "身份暴露节奏" in frozen["effective_instruction"]
+    assert jobs.payloads[0]["extra"]["prompt_snapshot"] == frozen
+
+    generic = store.get_template_by_key("generic-vertical-short")
+    generic_revision = store.get_revision(generic["id"])
+    store.set_binding(
+        project_id=project["id"],
+        stage="review",
+        episode_number=0,
+        template_id=generic["id"],
+        template_revision=generic_revision["revision"],
+        override={},
+        actor_user_id="admin-1",
+    )
+    assert repository.get_script_review(review["id"])["source_payload"]["prompt_snapshot"] == frozen
 
 
 def test_project_review_is_marked_stale_and_confirmation_is_rejected(tmp_path) -> None:
@@ -580,3 +664,42 @@ def test_delete_refreshes_missing_job_before_checking_active_status(tmp_path) ->
     assert deleted.status_code == 200
     assert deleted.json() == {"deleted": True, "id": review["id"]}
     assert repository.get_script_review(review["id"]) is None
+
+
+def test_failed_script_review_can_resume_from_its_saved_checkpoint(tmp_path) -> None:
+    repository = CreativeRepository(tmp_path / "creative.db")
+    review = repository.create_script_review(
+        source_type="text",
+        mode="multiple",
+        project_id=None,
+        episode_numbers=[1, 2],
+        source_fingerprint="review-fingerprint",
+        source_payload={"episode_numbers": [1, 2]},
+        created_by="writer-1",
+    )
+    repository.set_script_review_job(review["id"], "failed-review-job")
+    repository.start_script_review(review["id"])
+    repository.checkpoint_script_review(
+        review["id"],
+        {
+            "partial": True,
+            "episode_reviews": [{"episode_number": 1, "summary": "已完成", "findings": []}],
+        },
+    )
+    repository.fail_script_review(review["id"], "第二集失败")
+
+    class RetryJobManager(FakeJobManager):
+        def retry(self, job_id: str):
+            assert job_id == "failed-review-job"
+            return SimpleNamespace(job_id="resumed-review-job")
+
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = _principal
+    app.include_router(build_script_review_router(repository, RetryJobManager()))
+
+    response = TestClient(app).post(f"/api/script-reviews/{review['id']}/retry")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["review"]["status"] == "queued"
+    assert response.json()["review"]["job_id"] == "resumed-review-job"
+    assert response.json()["review"]["report"]["episode_reviews"][0]["episode_number"] == 1

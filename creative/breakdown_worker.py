@@ -28,8 +28,17 @@ from creative.transcript_materializer import materialize_video_transcripts
 HEARTBEAT_SECONDS = 15.0
 
 
-def create_provider():
+def create_provider(model_record_id: str | None = None):
+    if model_record_id:
+        return create_llm_provider_from_config(
+            config, model_record_id=model_record_id
+        )
     return create_llm_provider_from_config(config)
+
+
+def create_generation_provider(extra: dict[str, Any]):
+    model_record_id = str(extra.get("llm_model_record_id") or "").strip()
+    return create_provider(model_record_id) if model_record_id else create_provider()
 
 
 def emit(
@@ -159,7 +168,9 @@ async def run(job: CrawlJob) -> None:
     heartbeat_stop = asyncio.Event()
     heartbeat_task = asyncio.create_task(emit_analysis_heartbeats(job, coverage, heartbeat_stop))
     try:
-        content, sources, risks, meta = await generate_breakdown(create_provider(), topic, bundle)
+        content, sources, risks, meta = await generate_breakdown(
+            create_generation_provider(extra), topic, bundle
+        )
     finally:
         heartbeat_stop.set()
         await heartbeat_task

@@ -44,8 +44,14 @@ class ProjectPromptService:
         self, review: dict[str, Any], actor_user_id: str
     ) -> bool:
         snapshot = dict(
-            (review.get("source_payload") or {}).get("prompt_snapshot") or {}
+            review.get("prompt_snapshot")
+            or (review.get("source_payload") or {}).get("prompt_snapshot") or {}
         )
+        return self.can_access_snapshot(snapshot, actor_user_id, review.get("project_id"))
+
+    def can_access_snapshot(
+        self, snapshot: dict[str, Any], actor_user_id: str, project_id: Any = None
+    ) -> bool:
         if not snapshot:
             return True
         ownership = snapshot
@@ -62,12 +68,36 @@ class ProjectPromptService:
                 bool(actor_user_id) and ownership.get("owner_user_id") == actor_user_id
             )
         if scope == "project":
-            return int(ownership.get("project_id") or 0) == int(
-                review.get("project_id") or -1
-            )
+            return str(ownership.get("project_id") or "") == str(project_id or "-")
         # Historical creators may have used another user's private binding.
         # Without recoverable ownership, no actor can safely access the snapshot.
         return False
+
+    def public_projection(
+        self, value: Any, actor_user_id: str, project_id: Any = None
+    ) -> Any:
+        """Copy public payloads, retaining only identity for inaccessible snapshots.
+
+        Walk nested generation metadata, context snapshots and job payloads so all
+        consumers share the same ownership rule. Frozen server inputs stay intact.
+        """
+        if isinstance(value, list):
+            return [self.public_projection(item, actor_user_id, project_id) for item in value]
+        if not isinstance(value, dict):
+            return value
+        scope_project_id = value.get("project_id") or project_id
+        result = {}
+        for key, item in value.items():
+            if key == "prompt_snapshot" and isinstance(item, dict):
+                if not self.can_access_snapshot(item, actor_user_id, scope_project_id):
+                    result[key] = {
+                        field: item[field] for field in (
+                            "template_id", "template_key", "revision", "content_hash",
+                        ) if field in item
+                    }
+                    continue
+            result[key] = self.public_projection(item, actor_user_id, scope_project_id)
+        return result
 
     def recommendations(
         self,

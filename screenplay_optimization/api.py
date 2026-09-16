@@ -56,6 +56,11 @@ def build_script_optimization_router(
     runtime_dir: str | Path = ".runtime",
 ) -> APIRouter:
     router = APIRouter(tags=["script-optimizations"])
+    prompt_service = ProjectPromptService(repository)
+
+    def assert_prompt_access(record: dict[str, Any], principal: Principal) -> None:
+        if not prompt_service.can_access_review_prompt(record, principal.user_id):
+            raise HTTPException(403, "无权访问或使用该记录的个人模板快照")
 
     def assert_permission(principal: Principal, permission: str) -> None:
         if not principal.is_system_admin and permission not in principal.permissions:
@@ -86,6 +91,7 @@ def build_script_optimization_router(
         review = repository.get_script_review(review_id)
         if not review:
             raise HTTPException(404, "审核记录不存在")
+        assert_prompt_access(review, principal)
         project_id = review.get("project_id")
         if project_id is None:
             if principal.is_system_admin or review.get("created_by") == principal.user_id:
@@ -269,7 +275,10 @@ def build_script_optimization_router(
     ) -> dict[str, list[dict[str, Any]]]:
         assert_permission(principal, "script.optimize.read")
         get_review_or_404(request, principal, review_id)
-        return {"items": repository.list_script_optimizations(review_id)}
+        return {"items": [
+            item for item in repository.list_script_optimizations(review_id)
+            if prompt_service.can_access_review_prompt(item, principal.user_id)
+        ]}
 
     @router.get("/api/creative/projects/{project_id}/episodes/{episode_number}/optimization-drafts")
     async def list_episode_drafts(
@@ -303,6 +312,7 @@ def build_script_optimization_router(
         optimization = repository.get_script_optimization(optimization_id)
         if not optimization:
             raise HTTPException(404, "优化任务不存在")
+        assert_prompt_access(optimization, principal)
         get_review_or_404(request, principal, int(optimization["review_id"]))
         return optimization
 
@@ -316,6 +326,7 @@ def build_script_optimization_router(
         optimization = repository.get_script_optimization(optimization_id)
         if not optimization:
             raise HTTPException(404, "优化任务不存在")
+        assert_prompt_access(optimization, principal)
         review = get_review_or_404(request, principal, int(optimization["review_id"]))
         if optimization["status"] != "failed" or not optimization.get("job_id"):
             raise HTTPException(409, "只有已失败且存在原任务的优化任务可以继续生成")

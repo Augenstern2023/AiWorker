@@ -21,6 +21,7 @@ import config
 from analysis.llm import create_llm_provider_from_config, get_llm_usage_snapshot
 from core.events import emit_event
 from core.job import CrawlJob
+from creative.llm_observability import dump_terminal_error, public_failure_summary
 from creative.repository import CreativeRepository
 
 from .service import review_source
@@ -197,7 +198,11 @@ def main() -> int:
     try:
         asyncio.run(run(job))
     except Exception as exc:
-        emit(job, "job_failed", str(exc), "error", _usage_payload(job))
+        error_code, message = public_failure_summary(exc)
+        error_debug_path = dump_terminal_error(job.job_id, exc)
+        emit(job, "job_failed", message, "error", _usage_payload(job, {
+            "error_code": error_code, "error_debug_path": error_debug_path,
+        }))
         return 1
     return 0
 

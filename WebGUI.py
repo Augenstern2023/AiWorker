@@ -80,6 +80,7 @@ from creative.delivery import DeliveryService, build_delivery_router
 from creative.market_reference_service import MarketReferenceService
 from creative.original_project_service import OriginalProjectService
 from creative.project_creator_migration import migrate_project_creator_memberships
+from creative.project_prompt_service import ProjectPromptService
 from creative.production_exports import ProductionExportService
 from creative.production_exports_api import build_production_export_router
 from creative.repository import CreativeRepository, DownloadTopicDecisionConflict
@@ -1140,6 +1141,12 @@ def _resolve_download_topic(
 
 def _public_created_job(job_state) -> dict[str, Any]:
     return job_manager.get_job(job_state.job_id)
+
+
+def _public_job(job: dict[str, Any], principal: Principal) -> dict[str, Any]:
+    return ProjectPromptService(creative_repository).public_projection(
+        job, principal.user_id, job.get("project_id")
+    )
 
 
 def _record_job_audit(
@@ -3484,7 +3491,7 @@ async def list_jobs(
 ):
     return {
         "jobs": [
-            job
+            _public_job(job, principal)
             for job in job_manager.list_jobs()
             if _can_read_job(job, principal, request)
         ]
@@ -3500,7 +3507,7 @@ async def get_job(
     try:
         job = job_manager.get_job(job_id)
         _assert_can_read_job(job, principal, request)
-        return job
+        return _public_job(job, principal)
     except JobNotFoundError:
         raise HTTPException(404, "Job not found")
 
@@ -3614,7 +3621,7 @@ async def retry_job(
         _record_job_audit(
             request, principal, "job.retry", retried_job, before=before
         )
-        return {"status": "success", "job": retried_job}
+        return {"status": "success", "job": _public_job(retried_job, principal)}
     except JobNotFoundError:
         raise HTTPException(404, "Job not found")
     except JobConflictError as exc:

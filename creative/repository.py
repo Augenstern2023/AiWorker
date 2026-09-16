@@ -128,6 +128,7 @@ class CreativeRepository:
         self._migrate_legacy_workflow_mode_constraint_if_needed(self.db_path)
         self._init_schema()
         self.store_id = self._load_or_create_store_id()
+        self._preserve_pending_migration_identities()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -159,6 +160,54 @@ class CreativeRepository:
         """Build the globally scoped workflow identity for a local project."""
 
         return f"creative:{self.store_id}:project:{int(project_id)}"
+
+    @staticmethod
+    def _raise_project_identity_sequence_conn(
+        conn: sqlite3.Connection, minimum_id: int
+    ) -> None:
+        row = conn.execute(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'creative_projects'"
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO sqlite_sequence (name, seq) VALUES ('creative_projects', ?)",
+                (minimum_id,),
+            )
+        else:
+            conn.execute(
+                "UPDATE sqlite_sequence SET seq = MAX(seq, ?) "
+                "WHERE name = 'creative_projects'",
+                (minimum_id,),
+            )
+
+    def _preserve_pending_migration_identities(self) -> None:
+        """Quarantine identities exposed before the durable reservation upgrade."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            pending = conn.execute(
+                "SELECT payload_json FROM creative_mode_migration_compensations"
+            ).fetchall()
+            for row in pending:
+                for compensation in json.loads(row["payload_json"]):
+                    target_id = self.local_project_id_from_workflow(
+                        compensation.get("target_project_id")
+                    )
+                    if target_id is not None:
+                        self._raise_project_identity_sequence_conn(conn, target_id)
+
+    def reserve_project_identity(self) -> int:
+        """Commit an ID before a later transaction exposes it to external members."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT MAX(value) AS last_id FROM ("
+                "SELECT COALESCE(MAX(id), 0) AS value FROM creative_projects "
+                "UNION ALL SELECT seq FROM sqlite_sequence "
+                "WHERE name = 'creative_projects')"
+            ).fetchone()
+            project_id = int(row["last_id"] or 0) + 1
+            self._raise_project_identity_sequence_conn(conn, project_id)
+        return project_id
 
     def workflow_topic_id(self, topic_id: int | str) -> str:
         """Build the globally scoped workflow identity for a local topic."""

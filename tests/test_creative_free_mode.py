@@ -1725,13 +1725,185 @@ async def test_failed_migration_rolls_back_copy_and_members_then_retries(
     replay = await migrate(**kwargs)
     assert replay["project"]["id"] == result["project"]["id"]
     assert replay["created"] is False
-    assert len(copied_members) == 1
     if failure == "compensation":
+        assert len(copied_members) == 2
+        assert repository.workflow_project_id(result["project"]["id"]) != old_target
         remaining_ids = {
             member["id"] for members in copied_members.values() for member in members
         }
         assert old_id not in remaining_ids
         assert remaining_ids == {"unrelated", "copied-member-2"}
+    else:
+        assert len(copied_members) == 1
+
+
+@pytest.mark.parametrize("next_creation", ["ordinary-project", "other-migration"])
+@pytest.mark.parametrize("restart_store", [False, True])
+def test_failed_compensation_identity_is_never_reused(
+    tmp_path, monkeypatch, next_creation, restart_store
+):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from sqlalchemy import create_engine
+    from workflow.repository import WorkflowRepository
+
+    repository = CreativeRepository(tmp_path / "identity-reservation.db")
+    source = repository.create_original_project(
+        seed_text="保留源项目", name="源项目", target_episode_count=2,
+        created_by="owner-1", creation_request_id="source-identity",
+    )
+    repository.mark_project_bootstrap_status(source["id"], "ready")
+    source_identity = repository.workflow_project_id(source["id"])
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'identity-members.db'}")
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE TABLE users (id TEXT PRIMARY KEY, status TEXT, is_deleted INTEGER)"
+        )
+        conn.exec_driver_sql(
+            "CREATE TABLE project_members (id TEXT PRIMARY KEY, project_id TEXT, "
+            "user_id TEXT, project_role TEXT, status TEXT, added_by TEXT, "
+            "created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, "
+            "UNIQUE(project_id, user_id, project_role))"
+        )
+        conn.exec_driver_sql(
+            "CREATE TABLE workflow_project_member_events (id TEXT, project_id TEXT, "
+            "membership_id TEXT, event_type TEXT, actor_id TEXT, before_json TEXT, "
+            "after_json TEXT, writer_operation_id TEXT)"
+        )
+        conn.exec_driver_sql("INSERT INTO users VALUES ('owner-1', 'active', 0)")
+        conn.exec_driver_sql(
+            "INSERT INTO project_members (id, project_id, user_id, project_role, status) "
+            "VALUES ('source-member', ?, 'owner-1', 'writer', 'active')", (source_identity,),
+        )
+
+    class WorkflowConnection:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def exec_driver_sql(self, sql, parameters=()):
+            return self.conn.exec_driver_sql(sql.replace("%s", "?"), parameters)
+
+        def execute(self, *args, **kwargs):
+            return self.conn.execute(*args, **kwargs)
+
+    @contextmanager
+    def transaction():
+        with engine.begin() as conn:
+            yield WorkflowConnection(conn)
+
+    workflow = object.__new__(WorkflowRepository)
+    workflow.identity_repository = SimpleNamespace(transaction=transaction)
+    monkeypatch.setattr(workflow, "_lock_project_write", lambda *args, **kwargs: None)
+    monkeypatch.setattr(workflow, "_live_actor", lambda *args: {"is_system_admin": True})
+    copied_targets = []
+    cleanup_fails = True
+
+    def copy_members(target):
+        target_identity = repository.workflow_project_id(target)
+        members = workflow.copy_active_project_members(
+            source_identity, target_identity, {"user_id": "owner-1"}
+        )
+        copied_targets.append(target)
+        return {"target_project_id": target_identity, "membership_ids": [m["id"] for m in members]}
+
+    def rollback_members(compensation):
+        if cleanup_fails:
+            raise RuntimeError("injected cleanup failure")
+        workflow.rollback_copied_project_members(
+            compensation["target_project_id"], compensation["membership_ids"]
+        )
+
+    connect = repository._connect
+    commit_failed = False
+
+    @contextmanager
+    def failing_connect():
+        nonlocal commit_failed
+        with connect() as conn:
+            yield conn
+            if copied_targets and conn.in_transaction and not commit_failed:
+                commit_failed = True
+                raise RuntimeError("injected migration commit failure")
+
+    service = FreeCreativeModeService(repository)
+    operation = dict(
+        project_id=source["id"], expected_mode_revision=0,
+        operation_id="failed-identity-migration", actor_user_id="owner-1",
+        copy_members=copy_members, rollback_members=rollback_members,
+    )
+    with monkeypatch.context() as failure_patch:
+        failure_patch.setattr(repository, "_connect", failing_connect)
+        with pytest.raises(RuntimeError, match="cleanup failure"):
+            service.migrate_to_free(**operation)
+    failed_target = copied_targets[0]
+    failed_identity = repository.workflow_project_id(failed_target)
+    assert repository.get_project(failed_target) is None
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "INSERT INTO project_members (id, project_id, user_id, project_role, status) "
+            "VALUES ('unrelated', ?, 'unrelated-user', 'writer', 'active')", (failed_identity,),
+        )
+
+    # Recovery must hold both before and after reopening the creative store.
+    if restart_store:
+        repository = CreativeRepository(repository.db_path)
+    service = FreeCreativeModeService(repository)
+    if next_creation == "ordinary-project":
+        other = repository.create_original_project(
+            seed_text="其他负责人的项目", name="其他项目", target_episode_count=2,
+            created_by="owner-2", creation_request_id="unrelated-owner-operation",
+        )
+    else:
+        other = service.migrate_to_free(
+            project_id=source["id"], expected_mode_revision=0,
+            operation_id="other-identity-migration", actor_user_id="owner-2",
+        )["project"]
+    assert other["id"] != failed_target
+    assert repository.workflow_project_id(other["id"]) != failed_identity
+
+    cleanup_fails = False
+    result = service.migrate_to_free(**operation)
+    replay = service.migrate_to_free(**operation)
+    assert result["project"]["id"] not in {failed_target, other["id"]}
+    assert replay["project"]["id"] == result["project"]["id"]
+    assert replay["created"] is False
+    with repository._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM creative_mode_migration_compensations").fetchone()[0] == 0
+    with engine.begin() as conn:
+        assert conn.exec_driver_sql(
+            "SELECT id FROM project_members WHERE project_id = ?", (failed_identity,),
+        ).scalars().all() == ["unrelated"]
+        assert conn.exec_driver_sql(
+            "SELECT COUNT(*) FROM project_members WHERE project_id = ?",
+            (repository.workflow_project_id(result["project"]["id"]),),
+        ).scalar() == 1
+    engine.dispose()
+
+
+def test_legacy_pending_compensation_reserves_identity_on_repository_startup(tmp_path):
+    repository = CreativeRepository(tmp_path / "legacy-pending-identity.db")
+    source = repository.create_original_project(
+        seed_text="旧迁移源", name="旧项目", target_episode_count=2,
+        created_by="owner-1", creation_request_id="legacy-source",
+    )
+    failed_target = source["id"] + 1
+    with repository._connect() as conn:
+        conn.execute(
+            "INSERT INTO creative_mode_migration_compensations "
+            "(operation_id, project_id, payload_json, created_at) VALUES (?, ?, ?, ?)",
+            ("legacy-failed-migration", source["id"], json.dumps([{
+                "target_project_id": repository.workflow_project_id(failed_target),
+                "membership_ids": ["stranded-member"],
+            }]), time.time()),
+        )
+    restarted = CreativeRepository(repository.db_path)
+    other = restarted.create_original_project(
+        seed_text="新负责人的项目", name="新项目", target_episode_count=2,
+        created_by="owner-2", creation_request_id="new-owner-request",
+    )
+    assert other["id"] > failed_target
+    assert restarted.get_project(failed_target) is None
 
 
 def test_member_copy_filters_inactive_users_and_compensation_is_exact(

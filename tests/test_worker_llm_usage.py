@@ -11,6 +11,7 @@
 import importlib
 import json
 import sys
+from pathlib import Path
 
 import httpx
 import pytest
@@ -204,3 +205,52 @@ def test_idempotent_generation_terminal_has_empty_usage_for_this_run(tmp_path, m
     usage = events[-1]["payload"]["llm_usage"]
     assert usage["call_count"] == usage["total_tokens"] == 0
     assert usage["complete"] is False
+
+
+@pytest.mark.parametrize("kind", ["screenplay_review", "screenplay_optimization"])
+@pytest.mark.parametrize("failure", ["refusal", "truncated"])
+def test_screenplay_failure_terminal_redacts_provider_text_and_keeps_diagnostics(
+    kind, failure, tmp_path, monkeypatch, capsys,
+):
+    worker, job, _ = _setup_worker(kind, tmp_path, monkeypatch)
+    secret = "PROVIDER_PRIVATE_RESPONSE_SENTINEL"
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        response = {
+            "status": "completed", "usage": {"input_tokens": 11, "output_tokens": 5, "total_tokens": 16},
+            "output": [{"type": "message", "content": [{"type": "refusal", "refusal": secret}]}],
+        }
+        if failure == "truncated":
+            response.update(status="incomplete", incomplete_details={"reason": "max_output_tokens"},
+                            output=[{"type": "message", "content": [{"type": "output_text", "text": secret}]}])
+        return httpx.Response(200, json=response)
+
+    monkeypatch.setattr(worker, "create_provider", lambda **_: OpenAICompatibleLLMProvider(
+        "https://llm.test/v1", "secret", "model", wire_api="responses",
+        transport=httpx.MockTransport(handler), max_retries=0,
+    ))
+    monkeypatch.setattr(CrawlJob, "load", lambda *_: job)
+    monkeypatch.setattr(sys, "argv", ["worker", "--job-file", "unused.json"])
+    monkeypatch.chdir(tmp_path)
+    assert worker.main() == 1
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    terminal = [event for event in events if event["event"] == "job_failed"]
+    assert len(terminal) == 1
+    assert secret not in json.dumps(events)
+    payload = terminal[0]["payload"]
+    diagnostic = json.loads(Path(payload["error_debug_path"]).read_text(encoding="utf-8"))
+    assert secret in json.dumps(diagnostic)
+    if failure == "truncated":
+        assert diagnostic["finish_reason"] == "max_output_tokens"
+        assert diagnostic["returned_chars"] == len(secret)
+        assert diagnostic["partial_text"] == secret
+    usage = payload["llm_usage"]
+    assert usage["input_tokens"] == 11 * len(calls)
+    assert usage["output_tokens"] == 5 * len(calls)
+    assert usage["complete"] is True
+    repository = CreativeRepository(job.extra["db_path"])
+    record = (repository.get_script_review(job.extra["review_id"]) if kind == "screenplay_review"
+              else repository.get_script_optimization(job.extra["optimization_id"]))
+    assert record["status"] == "failed"

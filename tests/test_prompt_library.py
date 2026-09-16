@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 
 import pytest
@@ -829,6 +830,74 @@ def test_enabled_project_pins_only_new_outline_stage_to_compatible_revision(
     assert migrated.binding(project_id, "brief", 0)["template_revision"] == 1
     assert migrated.binding(project_id, "characters", 0)["template_revision"] == 1
     assert migrated.binding(project_id, "outline", 0)["template_revision"] == 2
+
+
+@pytest.mark.parametrize("governance_status", ["pending_review", "deprecated", "archived"])
+@pytest.mark.parametrize("storage", ["file", "memory"])
+def test_startup_new_stage_never_binds_unapproved_or_retired_revision(
+    tmp_path, monkeypatch, governance_status, storage
+):
+    if storage == "memory":
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        monkeypatch.setattr(CreativeRepository, "_connect", lambda _: connection)
+        monkeypatch.setattr(PromptStore, "_connect", lambda _: connection)
+    repository = CreativeRepository(tmp_path / "legacy-governance.db")
+    store = PromptStore(repository.db_path)
+    project_id = _project(repository)
+    template = store.create_template(
+        title="旧版项目模板", description="启动补齐治理边界",
+        content=builtin_template("generic-vertical-short"),
+        owner_scope="project", owner_user_id="owner-1", project_id=project_id,
+    )
+    store.enable_project(
+        project_id, actor_user_id="owner-1", template_key=template["template_key"]
+    )
+    store.set_binding(
+        project_id=project_id, stage="beats", episode_number=0,
+        template_id=template["id"], template_revision=1,
+        override={"custom_requirements": "保留已绑定版本与覆盖。"}, actor_user_id="owner-1",
+    )
+    existing_binding = store.binding(project_id, "beats", 0)
+    # Model a pre-review-stage database while keeping v2 creation on the real path.
+    legacy_content = store.get_revision(template["id"], 1)["content"]
+    legacy_content["stage_rules"].pop("review")
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE creative_prompt_template_revisions SET content_json = ?, "
+            "content_hash = ? WHERE template_id = ? AND revision = 1",
+            (json.dumps(legacy_content), content_hash(legacy_content), template["id"]),
+        )
+    changed = builtin_template("generic-vertical-short")
+    changed["shared_dna"] = "未经重新选择，不得自动执行这份新内容。"
+    store.save_revision(
+        template["id"], changed, expected_revision=1, actor_user_id="owner-1"
+    )
+    if governance_status != "pending_review":
+        store.govern_project_template(
+            project_id=project_id, template_id=template["id"], action="approve",
+            note="审核通过", expected_governance_revision=1,
+            operation_id="approve-legacy-v2", actor_user_id="owner-1",
+        )
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE creative_prompt_templates SET governance_status = ? WHERE id = ?",
+                (governance_status, template["id"]),
+            )
+
+    restarted = PromptStore(repository.db_path)
+    snapshot = restarted.resolve_snapshot(
+        project_id=project_id, stage="review", mode="single", actor_user_id="owner-1"
+    )
+
+    assert snapshot["template_key"] == "generic-vertical-short"
+    assert changed["shared_dna"] not in snapshot["effective_instruction"]
+    assert restarted.binding(project_id, "beats", 0) == existing_binding
+    assert restarted.project_settings(project_id)["default_template_revision"] == 1
+    again = PromptStore(repository.db_path)
+    assert again.binding(project_id, "review", 0) == restarted.binding(project_id, "review", 0)
+    if storage == "memory":
+        connection.close()
 
 
 def test_script_snapshot_rejects_cross_stage_content_by_construction():

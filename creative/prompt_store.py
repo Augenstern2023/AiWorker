@@ -428,13 +428,19 @@ class PromptStore:
             template_id = str(project["default_template_id"] or "")
             if template_id:
                 try:
+                    template = self.get_template(template_id)
+                    if template is None:
+                        raise ValueError("默认模板不存在")
+                    self._assert_template_selectable(template)
+                    approved_revision = int(template["approved_revision"])
                     pinned = self.get_revision(
                         template_id, int(project["default_template_revision"])
                     )
-                    candidates.append((template_id, pinned))
-                    latest = self.get_revision(template_id)
-                    if int(latest["revision"]) != int(pinned["revision"]):
-                        candidates.append((template_id, latest))
+                    if int(pinned["revision"]) <= approved_revision:
+                        candidates.append((template_id, pinned))
+                    approved = self.get_revision(template_id, approved_revision)
+                    if int(approved["revision"]) != int(pinned["revision"]):
+                        candidates.append((template_id, approved))
                 except (TypeError, ValueError):
                     pass
             if generic is not None and generic_revision is not None:

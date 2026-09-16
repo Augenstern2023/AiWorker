@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
@@ -37,6 +37,7 @@ from .lifecycle_service import (
     content_fingerprint as stage_content_fingerprint,
 )
 from .repository import CreativeRepository
+from .project_prompt_service import ProjectPromptService
 from .workflow_adapter import CreativeWorkflowAdapter
 
 
@@ -119,6 +120,7 @@ class DeliveryService:
                 "audit_recorded_at": "REAL",
                 "resource_status": "TEXT NOT NULL DEFAULT ''",
                 "is_formal": "INTEGER NOT NULL DEFAULT 1",
+                "projection_source_json": "TEXT NOT NULL DEFAULT '{}'",
             }
             for column, definition in additions.items():
                 if column not in columns:
@@ -233,8 +235,8 @@ class DeliveryService:
                         resource_version, submission_id, submission_version,
                         format, content_fingerprint, actor_id, workflow_task_id,
                         stage_content_fingerprint, resource_status, is_formal,
-                        path, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        path, created_at, projection_source_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         delivery_id,
@@ -254,6 +256,10 @@ class DeliveryService:
                         int(is_formal),
                         str(path),
                         created_at,
+                        json.dumps(
+                            {"project": {"id": project["id"], "name": project["name"]},
+                             "payload": payload}, ensure_ascii=False,
+                        ),
                     ),
                 )
         except sqlite3.IntegrityError:
@@ -719,8 +725,58 @@ class DeliveryService:
             raise FileNotFoundError(path)
         return path
 
+    def public_download_content(
+        self, record: dict[str, Any], actor_user_id: str
+    ) -> bytes:
+        """Project an archive for its reader without changing the audited bytes."""
+        path = Path(record["path"]).resolve()
+        if path.parent != self.delivery_dir.resolve() or not path.is_file():
+            raise FileNotFoundError(path)
+        original = path.read_bytes()
+        if hashlib.sha256(original).hexdigest() != record["fingerprint"]:
+            raise ValueError("交付文件校验失败，无法安全下载")
+        with self.creative_repository._connect() as conn:
+            row = conn.execute(
+                "SELECT projection_source_json FROM creative_deliveries WHERE id = ?",
+                (record["id"],),
+            ).fetchone()
+        if row is None:
+            raise KeyError(record["id"])
+        frozen = json.loads(row["projection_source_json"] or "{}")
+        if frozen:
+            project, payload = frozen["project"], frozen["payload"]
+        elif record["format"] == "json":
+            # Old JSON archives already contain the complete immutable payload.
+            payload = json.loads(original)
+            project = {"id": payload["project_id"], "name": payload["project_name"]}
+        else:
+            # Markdown cannot be safely parsed back into prompt ownership. Only
+            # use the historical resource if it reproduces the archive exactly.
+            project = self.creative_repository.get_project(int(record["project_id"]))
+            if project is None:
+                raise ValueError("历史交付来源不可用，无法安全下载")
+            try:
+                snapshot = CreativeWorkflowAdapter(
+                    self.creative_repository, self.workflow_repository
+                ).snapshot(record["resource_type"], record["resource_id"], reconcile=False)
+            except (KeyError, ValueError) as exc:
+                raise ValueError("历史交付来源不可用，无法安全下载") from exc
+            payload = self._payload(project, record["stage"], snapshot)
+        if frozen or record["format"] != "json":
+            if self._serialize(project, payload, record["stage"], record["format"]) != original:
+                raise ValueError("历史交付无法安全重现，请创建新资源版本后重新交付")
+        if str(payload.get("project_id")) != str(record["project_id"]):
+            raise ValueError("交付文件的项目不匹配")
+        projected = ProjectPromptService(self.creative_repository).public_projection(
+            payload, actor_user_id, record["project_id"]
+        )
+        if projected == payload:
+            return original
+        return self._serialize(project, projected, record["stage"], record["format"])
+
     @staticmethod
     def _public_record(record: dict[str, Any]) -> dict[str, Any]:
+        record.pop("projection_source_json", None)
         record["project_id"] = str(record["project_id"])
         record["fingerprint"] = record.pop("content_fingerprint")
         record["actor_user_id"] = record.pop("actor_id")
@@ -892,7 +948,7 @@ def build_delivery_router(service: DeliveryService) -> APIRouter:
         delivery_id: str,
         request: Request,
         principal: Principal = Depends(admin),
-    ) -> FileResponse:
+    ) -> Response:
         try:
             page_authorized = not principal.is_system_admin
             path = service.download_path(
@@ -921,10 +977,19 @@ def build_delivery_router(service: DeliveryService) -> APIRouter:
             if record["format"] == "json"
             else "text/markdown; charset=utf-8"
         )
-        return FileResponse(
-            path,
+        try:
+            content = service.public_download_content(record, principal.user_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return Response(
+            content=content,
             media_type=media_type,
-            filename=f"creative-{record['project_id']}-{record['stage']}.{record['format']}",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="creative-{record["project_id"]}-'
+                    f'{record["stage"]}.{record["format"]}"'
+                ),
+            },
         )
 
     return router

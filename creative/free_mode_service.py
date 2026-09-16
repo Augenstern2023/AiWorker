@@ -1552,6 +1552,7 @@ class FreeCreativeModeService:
     def _create_free_project_copy_conn(
         conn: Any,
         *,
+        target_project_id: int,
         source_project: dict[str, Any],
         operation_id: str,
         actor_user_id: str,
@@ -1560,17 +1561,18 @@ class FreeCreativeModeService:
         cursor = conn.execute(
             """
             INSERT INTO creative_projects (
-                topic_id, breakdown_id, name, genre, target_platform,
+                id, topic_id, breakdown_id, name, genre, target_platform,
                 target_audience, target_episode_count, episode_duration_seconds,
                 status, locked_brief_id, character_batch_id, outline_batch_id,
                 workflow_task_id, creation_workflow_task_id, creation_request_id,
                 created_by, deleted, creation_mode, bootstrap_status, revision,
                 workflow_mode, mode_revision, mode_changed_at, mode_changed_by,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'free_active', NULL, NULL, NULL,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'free_active', NULL, NULL, NULL,
                       NULL, NULL, ?, ?, 0, ?, 'ready', 0, 'free', 0, ?, ?, ?, ?)
             """,
             (
+                target_project_id,
                 source_project.get("topic_id"),
                 source_project.get("breakdown_id"),
                 f"{str(source_project.get('name') or '未命名项目').strip()}（自由副本）",
@@ -1624,6 +1626,9 @@ class FreeCreativeModeService:
         preview = self.migration_preview(project_id)
         if preview["blockers"]:
             raise ValueError("；".join(preview["blockers"]))
+        # SQLite rolls AUTOINCREMENT back with the project. Reserve separately so
+        # external memberships can never attach to a later, unrelated project.
+        target_project_id = self.repository.reserve_project_identity()
         compensations: list[dict[str, Any]] = []
         with self._migration_transaction(
             project_id, operation_id, compensations, rollback_members
@@ -1663,6 +1668,7 @@ class FreeCreativeModeService:
             )
             target_project_id = self._create_free_project_copy_conn(
                 conn,
+                target_project_id=target_project_id,
                 source_project=project,
                 operation_id=operation_id,
                 actor_user_id=actor_user_id,

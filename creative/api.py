@@ -44,6 +44,7 @@ from creative.outline_overview import SERIES_OVERVIEW_FIELD_LABELS, read_series_
 from creative.prompt_marketplace import PromptMarketplaceService
 from creative.prompt_observability import PromptObservabilityService
 from creative.project_prompt_service import ProjectPromptService
+from creative.prompt_response import prompt_projection_route
 from creative.repository import CreativeRepository, TopicDecisionConflict, canonical_request_hash
 from creative.script_service import normalize_script_content, rewrite_outline_field, validate_script
 from creative.selection_stage_service import SelectionStageService
@@ -1547,6 +1548,7 @@ def build_creative_router(
         *,
         managed_preview: bool = False,
     ) -> dict[str, Any]:
+        project = project_prompt_service.public_projection(project, principal.user_id, project["id"])
         if principal.is_system_admin:
             return project
         has_active_membership = any(
@@ -1842,6 +1844,8 @@ def build_creative_router(
         ):
             return
         raise HTTPException(403, "只有项目负责人或当前阶段负责人可以修改模板")
+
+    router.route_class = prompt_projection_route(project_prompt_service, optional_principal)
 
     @router.get("/projects/{project_id}/prompt-marketplace")
     async def get_project_prompt_marketplace(
@@ -4387,6 +4391,7 @@ def build_creative_router(
         versions, selected_resource_id, snapshot = generated_stage_snapshot(
             project, stage, resource_id
         )
+        snapshot = project_prompt_service.public_projection(snapshot, principal.user_id, project_id)
         return {
             "project": {"id": project["id"], "name": project["name"]},
             "stage": stage,
@@ -4407,6 +4412,7 @@ def build_creative_router(
         assert_project_owner_preview_access(request, project_id, principal)
         project = project_or_404(project_id)
         _, _, snapshot = generated_stage_snapshot(project, stage, resource_id)
+        snapshot = project_prompt_service.public_projection(snapshot, principal.user_id, project_id)
         body, media_type = serialize_generated_stage(project, stage, snapshot, format)
         if stage == "script":
             filename = script_download_filename(

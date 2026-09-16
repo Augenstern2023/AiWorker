@@ -18,7 +18,7 @@ from typing import Any
 
 import config
 
-from analysis.llm import create_llm_provider_from_config
+from analysis.llm import create_llm_provider_from_config, get_llm_usage_snapshot
 from core.events import emit_event
 from core.job import CrawlJob
 from creative.repository import CreativeRepository
@@ -56,10 +56,13 @@ def emit(
 
 
 def _usage_payload(job: CrawlJob, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    return dict(payload or {})
+    return {**(payload or {}), "llm_usage": get_llm_usage_snapshot(
+        *getattr(job, "_llm_usage_providers", ())
+    )}
 
 
 async def run(job: CrawlJob) -> None:
+    job._llm_usage_providers = []
     extra = job.extra or {}
     review_id = int(extra.get("review_id") or 0)
     if review_id < 1:
@@ -131,9 +134,11 @@ async def run(job: CrawlJob) -> None:
             ):
                 raise ValueError("审核提示词快照与任务范围不匹配")
         provider = create_provider(profile="unit", retry_callback=report_retry)
+        job._llm_usage_providers.append(provider)
         summary_provider = create_provider(
             profile="summary", retry_callback=report_retry
         )
+        job._llm_usage_providers.append(summary_provider)
         report = await review_source(
             provider,
             review["source_payload"],

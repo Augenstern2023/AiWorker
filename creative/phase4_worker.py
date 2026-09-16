@@ -19,7 +19,7 @@ from typing import Any
 
 import config
 
-from analysis.llm import create_llm_provider_from_config
+from analysis.llm import create_llm_provider_from_config, get_llm_usage_snapshot
 from core.events import emit_event
 from core.job import CrawlJob
 from creative.imitation_service import complete_with_one_repair, generate_blueprints
@@ -92,7 +92,9 @@ def emit(job: CrawlJob, event: str, message: str, level: str = "info", payload: 
 
 
 def _usage_payload(job: CrawlJob, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    return dict(payload or {})
+    return {**(payload or {}), "llm_usage": get_llm_usage_snapshot(
+        *getattr(job, "_llm_usage_providers", ())
+    )}
 
 
 def _resolve_outline_reasoning_effort(job: CrawlJob) -> str:
@@ -468,10 +470,11 @@ async def _run_once(job: CrawlJob) -> None:
                 job,
                 "job_finished",
                 "创作内容生成已完成，返回幂等结果",
-                payload=generation_reservation["result"],
+                payload=_usage_payload(job, generation_reservation["result"]),
             )
             return
     provider = _create_generation_provider(extra)
+    job._llm_usage_providers.append(provider)
     extra.update(
         _provider_generation_meta(
             provider, str(extra.get("llm_model_record_id") or "")
@@ -1027,6 +1030,9 @@ async def _run_once(job: CrawlJob) -> None:
 
 
 async def run(job: CrawlJob) -> None:
+    # Runtime-only references survive asyncio.run exceptions; CrawlJob.to_dict
+    # serializes declared dataclass fields only, never these providers.
+    job._llm_usage_providers = []
     extra = job.extra or {}
     action = str(extra.get("action") or "").strip()
     reserved_generation = extra.get("workflow_mode") != "free" and (

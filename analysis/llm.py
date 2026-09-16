@@ -130,6 +130,62 @@ class LLMProvider:
         raise NotImplementedError
 
 
+_USAGE_COUNTERS = (
+    "call_count", "reported_call_count", "input_reported_call_count",
+    "output_reported_call_count", "total_reported_call_count", "input_tokens",
+    "output_tokens", "total_tokens", "cached_tokens", "reasoning_tokens",
+)
+
+
+def _usage_integer(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def get_llm_usage_snapshot(*providers: Any) -> dict[str, Any]:
+    """Merge actual provider counters once per instance, including fallbacks.
+
+    Unsupported providers contribute no tokens and prevent complete coverage.
+    No provider references or credentials escape into the returned snapshot.
+    """
+    result = dict.fromkeys(_USAGE_COUNTERS, 0)
+    visited: set[int] = set()
+    supported = True
+
+    def collect(provider: Any) -> None:
+        nonlocal supported
+        if id(provider) in visited:
+            return
+        visited.add(id(provider))
+        if isinstance(provider, OpenAICompatibleLLMProvider):
+            snapshot = provider._usage
+        else:
+            reader = getattr(provider, "usage_snapshot", None)
+            snapshot = reader() if callable(reader) else None
+            if not isinstance(snapshot, dict):
+                supported = False
+                return
+            supported = supported and snapshot.get("complete") is True
+        for key in _USAGE_COUNTERS:
+            value = _usage_integer(snapshot.get(key))
+            if value is None:
+                supported = False
+            else:
+                result[key] += value
+        fallback = getattr(provider, "fallback_provider", None)
+        if fallback is not None:
+            collect(fallback)
+
+    for provider in providers:
+        collect(provider)
+    result["complete"] = supported and result["call_count"] > 0 and all(
+        result[key] == result["call_count"] for key in (
+            "reported_call_count", "input_reported_call_count",
+            "output_reported_call_count", "total_reported_call_count",
+        )
+    )
+    return result
+
+
 class OpenAICompatibleLLMProvider(LLMProvider):
     def __init__(
         self,
@@ -168,6 +224,40 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         self.retry_read_timeouts = bool(retry_read_timeouts)
         self.transport = transport
         self.retry_callback = retry_callback
+        self._usage = dict.fromkeys(_USAGE_COUNTERS, 0)
+
+    def usage_snapshot(self) -> dict[str, Any]:
+        return get_llm_usage_snapshot(self)
+
+    def _record_usage(self, payload: Any, *, responses: bool) -> None:
+        usage = payload.get("usage") if isinstance(payload, dict) else None
+        if not isinstance(usage, dict):
+            return
+        input_key = "input_tokens" if responses else "prompt_tokens"
+        output_key = "output_tokens" if responses else "completion_tokens"
+        values = {
+            "input_tokens": _usage_integer(usage.get(input_key)),
+            "output_tokens": _usage_integer(usage.get(output_key)),
+            "total_tokens": _usage_integer(usage.get("total_tokens")),
+        }
+        if values["total_tokens"] is None and all(
+            values[key] is not None for key in ("input_tokens", "output_tokens")
+        ):
+            values["total_tokens"] = values["input_tokens"] + values["output_tokens"]
+        if any(value is not None for value in values.values()):
+            self._usage["reported_call_count"] += 1
+        for key, value in values.items():
+            if value is not None:
+                self._usage[key] += value
+                self._usage[key.replace("_tokens", "_reported_call_count")] += 1
+        for detail_key, token_key in (
+            (f"{input_key}_details", "cached_tokens"),
+            (f"{output_key}_details", "reasoning_tokens"),
+        ):
+            details = usage.get(detail_key)
+            value = _usage_integer(details.get(token_key)) if isinstance(details, dict) else None
+            if value is not None:
+                self._usage[token_key] += value
 
     async def analyze_video(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         result = await self.complete_json(build_video_analysis_messages(payload))
@@ -280,7 +370,15 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         ) as client:
             for attempt in range(self.max_retries + 1):
                 try:
+                    self._usage["call_count"] += 1
                     response = await client.post(endpoint, headers=headers, json=request_body)
+                    # Account for the supplier response before content parsing,
+                    # truncation checks, or HTTP errors can leave this attempt.
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        payload = None
+                    self._record_usage(payload, responses=endpoint.endswith("/responses"))
                     response.raise_for_status()
                     return response
                 except Exception as exc:

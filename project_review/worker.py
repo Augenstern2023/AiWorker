@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 import config
 
-from analysis.llm import create_llm_provider_from_config
+from analysis.llm import create_llm_provider_from_config, get_llm_usage_snapshot
 from core.events import emit_event
 from core.job import CrawlJob
 from creative.repository import CreativeRepository
@@ -57,7 +57,9 @@ def emit(
 
 
 def _usage_payload(job: CrawlJob, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    return dict(payload or {})
+    return {**(payload or {}), "llm_usage": get_llm_usage_snapshot(
+        *getattr(job, "_llm_usage_providers", ())
+    )}
 
 
 class _ObservedProvider:
@@ -143,6 +145,7 @@ class _ObservedProvider:
 
 
 async def run(job: CrawlJob) -> None:
+    job._llm_usage_providers = []
     extra = job.extra or {}
     review_id = _as_int(extra.get("review_id"))
     if review_id < 1:
@@ -193,6 +196,7 @@ async def run(job: CrawlJob) -> None:
             )
 
         provider = create_provider(retry_callback=observed.retry_callback)
+        job._llm_usage_providers.append(provider)
         observed.bind(provider)
         report = await review_project_source(
             observed,

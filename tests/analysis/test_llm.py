@@ -55,6 +55,104 @@ def test_parse_json_object_handles_markdown_fence():
     assert parse_json_object('```json\n{"summary": "摘要"}\n```') == {"summary": "摘要"}
 
 
+@pytest.mark.parametrize("wire_api", ["chat_completions", "responses"])
+@pytest.mark.parametrize("outcome", ["success", "invalid_json", "truncated"])
+@pytest.mark.asyncio
+async def test_real_usage_survives_content_parsing_errors(wire_api, outcome):
+    """Usage must be captured before parsing content or detecting truncation."""
+    content = '{"ok": true}' if outcome == "success" else "not json"
+    if wire_api == "responses":
+        payload = {
+            "output_text": content,
+            "status": "incomplete" if outcome == "truncated" else "completed",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "usage": {"input_tokens": 13, "output_tokens": 7, "total_tokens": 20,
+                      "input_tokens_details": {"cached_tokens": 4},
+                      "output_tokens_details": {"reasoning_tokens": 3}},
+        }
+    else:
+        payload = {
+            "choices": [{"message": {"content": content},
+                         "finish_reason": "length" if outcome == "truncated" else "stop"}],
+            "usage": {"prompt_tokens": 13, "completion_tokens": 7, "total_tokens": 20,
+                      "prompt_tokens_details": {"cached_tokens": 4},
+                      "completion_tokens_details": {"reasoning_tokens": 3}},
+        }
+    provider = OpenAICompatibleLLMProvider(
+        "https://llm.test/v1", "secret", "model", wire_api=wire_api,
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload)),
+    )
+    if outcome == "success":
+        assert (await provider.complete_json([]))["ok"] is True
+    else:
+        with pytest.raises(json.JSONDecodeError if outcome == "invalid_json" else LLMError):
+            await provider.complete_json([])
+    assert provider.usage_snapshot() == {
+        "call_count": 1, "reported_call_count": 1,
+        "input_reported_call_count": 1, "output_reported_call_count": 1,
+        "total_reported_call_count": 1, "input_tokens": 13, "output_tokens": 7,
+        "total_tokens": 20, "cached_tokens": 4, "reasoning_tokens": 3, "complete": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_usage_counts_missing_partial_invalid_and_derived_totals_without_estimates():
+    usages = iter([
+        {"prompt_tokens": 0, "completion_tokens": 7},
+        None,
+        {"prompt_tokens": 5, "completion_tokens": True, "total_tokens": -1},
+        {"prompt_tokens": "12", "completion_tokens": 1.5, "total_tokens": 8,
+         "prompt_tokens_details": {"cached_tokens": -1},
+         "completion_tokens_details": {"reasoning_tokens": False}},
+    ])
+    provider = OpenAICompatibleLLMProvider(
+        "https://llm.test/v1", "secret", "model",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={
+            "usage": next(usages), "choices": [{"message": {"content": "x" * 10000}}],
+        })),
+    )
+    for _ in range(4):
+        await provider.complete_text([])
+    assert provider.usage_snapshot() == {
+        "call_count": 4, "reported_call_count": 3,
+        "input_reported_call_count": 2, "output_reported_call_count": 1,
+        "total_reported_call_count": 2, "input_tokens": 5, "output_tokens": 7,
+        "total_tokens": 15, "cached_tokens": 0, "reasoning_tokens": 0, "complete": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_usage_aggregates_fallback_and_counts_failed_http_attempts_once():
+    fallback = OpenAICompatibleLLMProvider(
+        "https://fallback.test/v1", "secret", "model",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={
+            "usage": {"prompt_tokens": 2, "completion_tokens": 3},
+            "choices": [{"message": {"content": "ok"}}],
+        })),
+    )
+    provider = OpenAICompatibleLLMProvider(
+        "https://llm.test/v1", "secret", "model", max_retries=1, retry_base_delay=0,
+        fallback_provider=fallback,
+        transport=httpx.MockTransport(lambda request: httpx.Response(503, json={})),
+    )
+    assert await provider.complete_text([]) == "ok"
+    fallback.fallback_provider = provider  # Snapshot traversal must tolerate cycles.
+    usage = provider.usage_snapshot()
+    assert usage["call_count"] == 3
+    assert usage["reported_call_count"] == 1
+    assert usage["total_tokens"] == 5
+    assert usage["complete"] is False
+
+
+def test_usage_helper_does_not_invent_usage_for_test_doubles():
+    from analysis.llm import get_llm_usage_snapshot
+
+    snapshot = get_llm_usage_snapshot(object())
+    assert snapshot["call_count"] == 0
+    assert snapshot["total_tokens"] == 0
+    assert snapshot["complete"] is False
+
+
 def _running_rotation_client(monkeypatch, *, selected: bool, wire_api: str):
     from analysis import llm as llm_module
 

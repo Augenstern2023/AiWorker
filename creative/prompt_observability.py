@@ -185,11 +185,18 @@ def _usage_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
         "reasoning_tokens",
     )
     normalized: dict[str, Any] = {}
+    valid = True
     for key in keys:
-        value = _safe_int(raw.get(key))
-        normalized[key] = value if value is not None else 0
-    normalized["complete"] = bool(raw.get("complete")) and (
+        value = raw.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            normalized[key] = value
+        else:
+            normalized[key] = 0
+            valid = False
+    normalized["complete"] = valid and raw.get("complete") is True and normalized["call_count"] > 0 and (
         normalized["reported_call_count"] == normalized["call_count"]
+        and normalized["input_reported_call_count"] == normalized["call_count"]
+        and normalized["output_reported_call_count"] == normalized["call_count"]
         and normalized["total_reported_call_count"] == normalized["call_count"]
     )
     return normalized

@@ -18,7 +18,7 @@ from typing import Any
 
 import config
 
-from analysis.llm import create_llm_provider_from_config
+from analysis.llm import create_llm_provider_from_config, get_llm_usage_snapshot
 from core.events import emit_event
 from core.job import CrawlJob
 from creative.repository import CreativeRepository
@@ -40,7 +40,9 @@ def emit(job: CrawlJob, event: str, message: str, level: str = "info", payload: 
 
 
 def _usage_payload(job: CrawlJob, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    return dict(payload or {})
+    return {**(payload or {}), "llm_usage": get_llm_usage_snapshot(
+        *getattr(job, "_llm_usage_providers", ())
+    )}
 
 
 def _latest(project: dict[str, Any], stage: str, episode_number: int) -> dict[str, Any] | None:
@@ -52,6 +54,7 @@ def _latest(project: dict[str, Any], stage: str, episode_number: int) -> dict[st
 
 
 async def run(job: CrawlJob) -> None:
+    job._llm_usage_providers = []
     extra = job.extra or {}
     optimization_id = int(extra.get("optimization_id") or 0)
     if optimization_id < 1:
@@ -119,6 +122,7 @@ async def run(job: CrawlJob) -> None:
 
     try:
         provider = create_provider(retry_callback=report_retry)
+        job._llm_usage_providers.append(provider)
         for index, episode_number in enumerate(optimization["target_episode_numbers"], start=1):
             current_episode = int(episode_number)
             episode_context = context_by_episode.get(int(episode_number))

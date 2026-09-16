@@ -19,6 +19,9 @@ from creative.free_mode_service import FreeCreativeModeService
 from creative.repository import CreativeRepository
 
 
+pytestmark = pytest.mark.usefixtures("isolated_creative_rank_source")
+
+
 def _free_project(repository: CreativeRepository) -> dict[str, Any]:
     project = repository.create_original_project(
         seed_text="一个能听见谎言的普通女孩",

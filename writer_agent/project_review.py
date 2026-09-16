@@ -65,6 +65,8 @@ class ProjectReviewCoordinator:
                 "review",
                 actor_user_id=principal.user_id,
             )
+        except PermissionError as exc:
+            raise ProjectReviewError(403, str(exc)) from exc
         except ValueError:
             payload["prompt_module"] = None
         return payload

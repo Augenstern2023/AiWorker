@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from creative.repository import CreativeRepository
 from creative.prompt_store import PromptStore
+from creative.prompt_registry import builtin_template
 from identity.dependencies import current_principal
 from identity.permission_service import PermissionService
 from identity.schema import Principal
@@ -33,6 +34,47 @@ class FakeJobManager:
     def create_job(self, payload: dict):
         self.payloads.append(payload)
         return SimpleNamespace(job_id="review-job-1")
+
+
+@pytest.mark.parametrize("selection", ["binding", "temporary"])
+def test_review_job_rejects_another_members_private_template(tmp_path, selection):
+    repository = CreativeRepository(tmp_path / "private-review.db")
+    project = _reviewable_project(repository)
+    store = PromptStore(repository.db_path)
+    store.enable_project(project["id"], actor_user_id="private-owner")
+    private = store.create_template(
+        title="私人审核",
+        description="",
+        content=builtin_template("generic-vertical-short"),
+        owner_scope="user",
+        owner_user_id="private-owner",
+    )
+    if selection == "binding":
+        store.set_binding(
+            project_id=project["id"],
+            stage="review",
+            episode_number=0,
+            template_id=private["id"],
+            template_revision=1,
+            override={},
+            actor_user_id="private-owner",
+        )
+    jobs = FakeJobManager()
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = _admin_principal
+    app.include_router(build_script_review_router(repository, jobs))
+    payload = {
+        "source_type": "project",
+        "mode": "single",
+        "project_id": project["id"],
+        "episode_numbers": [1],
+    }
+    if selection == "temporary":
+        payload["prompt_template_key"] = private["template_key"]
+    response = TestClient(app).post("/api/script-reviews", json=payload)
+    assert response.status_code == 403
+    assert repository.list_script_reviews(project_ids={project["id"]}) == []
+    assert jobs.payloads == []
 
 
 class MembershipPermissionService(PermissionService):

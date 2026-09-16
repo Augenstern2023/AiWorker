@@ -2279,6 +2279,27 @@ class WorkflowRepository:
                 copied.append(dict(member))
         return copied
 
+    def rollback_copied_project_members(
+        self, target_project_id: str, membership_ids: list[str]
+    ) -> None:
+        """Compensate only rows returned by a failed derived-project migration."""
+        if not membership_ids:
+            return
+        with self.identity_repository.transaction() as connection:
+            self._lock_project_write(connection, target_project_id)
+            connection.execute(
+                delete(workflow_project_member_events).where(
+                    workflow_project_member_events.c.project_id == target_project_id,
+                    workflow_project_member_events.c.membership_id.in_(membership_ids),
+                )
+            )
+            connection.execute(
+                delete(project_members).where(
+                    project_members.c.project_id == target_project_id,
+                    project_members.c.id.in_(membership_ids),
+                )
+            )
+
     def ensure_project_creator(
         self, project_id: str, creator_user_id: str, actor: Principal | dict[str, Any]
     ) -> dict[str, Any] | None:

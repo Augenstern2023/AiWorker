@@ -19,6 +19,9 @@ from creative.outline_fields import outline_field_source_fingerprint
 from creative.repository import CreativeRepository
 
 
+pytestmark = pytest.mark.usefixtures("isolated_creative_rank_source")
+
+
 def create_legacy_workflow_mode_database(db_path) -> None:
     CreativeRepository(db_path)
     connection = sqlite3.connect(db_path)
@@ -839,6 +842,7 @@ async def test_active_project_member_can_change_mode_and_free_copy_inherits_team
     workflow = Mock()
     workflow.resolve_creative_project_identity = None
     workflow.is_active_project_member.return_value = True
+    workflow.copy_active_project_members.return_value = []
     workflow.list_tasks.return_value = [
         {
             "id": "pending-brief",
@@ -955,6 +959,7 @@ async def test_empty_project_preview_ignores_started_task_without_resources(tmp_
     )
     project = repository.mark_project_bootstrap_status(project["id"], "ready")
     workflow = Mock()
+    workflow.copy_active_project_members.return_value = []
     workflow.list_tasks.return_value = [{
         "id": "brief-started",
         "project_id": str(project["id"]),
@@ -1023,6 +1028,7 @@ async def test_mode_migration_preview_returns_timeout_instead_of_hanging(
     )
     project = repository.mark_project_bootstrap_status(project["id"], "ready")
     workflow = Mock()
+    workflow.copy_active_project_members.return_value = []
     workflow.list_tasks.return_value = []
     workflow.list_project_members.return_value = []
     slow_jobs = SimpleNamespace(
@@ -1080,6 +1086,7 @@ async def test_content_project_migration_creates_free_copy_and_preserves_source(
         project["id"], [{"content": {"title": "标准流程方向"}}]
     )[0]
     workflow = Mock()
+    workflow.copy_active_project_members.return_value = []
     workflow.list_tasks.return_value = [
         {
             "id": "brief-started",
@@ -1372,20 +1379,35 @@ async def test_migration_api_ignores_active_review_jobs(tmp_path):
     )
     project = repository.mark_project_bootstrap_status(project["id"], "ready")
     workflow = Mock()
+    workflow.copy_active_project_members.return_value = []
     workflow.list_tasks.return_value = []
     workflow.list_project_members.return_value = []
-    review_jobs = SimpleNamespace(
-        list_jobs=lambda: [
-            {
-                "status": "running",
-                "job": {
-                    "crawler_type": crawler_type,
-                    "extra": {"project_id": project["id"]},
-                },
-            }
-            for crawler_type in ("screenplay_review", "project_review")
-        ]
-    )
+    jobs = [
+        {
+            "status": "running",
+            "job": {
+                "crawler_type": crawler_type,
+                "extra": {"project_id": project["id"]},
+            },
+        }
+        for crawler_type in ("screenplay_review", "project_review")
+    ]
+    before_jobs = json.loads(json.dumps(jobs))
+    review_jobs = SimpleNamespace(list_jobs=lambda: jobs)
+    reviews = []
+    for crawler_type in ("screenplay_review", "project_review"):
+        review = repository.create_script_review(
+            source_type="project",
+            mode="full",
+            project_id=project["id"],
+            episode_numbers=[],
+            source_fingerprint=crawler_type,
+            source_payload={"project_id": project["id"], "audit_scope": crawler_type},
+            created_by="owner-1",
+        )
+        repository.set_script_review_job(review["id"], crawler_type + "-job")
+        repository.start_script_review(review["id"])
+        reviews.append(review["id"])
     router = build_creative_router(
         root=tmp_path,
         runtime_dir=tmp_path / ".runtime",
@@ -1399,8 +1421,7 @@ async def test_migration_api_ignores_active_review_jobs(tmp_path):
     preview_endpoint = next(
         route.endpoint
         for route in router.routes
-        if route.path
-        == "/api/creative/projects/{project_id}/mode-migration-preview"
+        if route.path == "/api/creative/projects/{project_id}/mode-migration-preview"
     )
 
     preview = await preview_endpoint(
@@ -1427,10 +1448,20 @@ async def test_migration_api_ignores_active_review_jobs(tmp_path):
 
     assert migrated["project"]["workflow_mode"] == "free"
     assert migrated["project"]["id"] != project["id"]
+    assert jobs == before_jobs
+    assert repository.list_script_reviews(project_ids={migrated["project"]["id"]}) == []
+    for review_id in reviews:
+        current = repository.get_script_review(review_id)
+        assert current["project_id"] == project["id"]
+        assert current["status"] == "running"
+        assert current["job_id"] in {"screenplay_review-job", "project_review-job"}
 
 
 @pytest.mark.asyncio
-async def test_migration_api_still_blocks_active_non_review_job(tmp_path):
+@pytest.mark.parametrize(
+    "crawler_type", ["phase4", "phase4_generate", "screenplay_optimization"]
+)
+async def test_migration_api_still_blocks_active_non_review_job(tmp_path, crawler_type):
     from types import SimpleNamespace
     from unittest.mock import Mock
 
@@ -1456,7 +1487,7 @@ async def test_migration_api_still_blocks_active_non_review_job(tmp_path):
             {
                 "status": "running",
                 "job": {
-                    "crawler_type": "phase4",
+                    "crawler_type": crawler_type,
                     "extra": {"project_id": project["id"]},
                 },
             }
@@ -1484,7 +1515,7 @@ async def test_migration_api_still_blocks_active_non_review_job(tmp_path):
     )
 
     assert preview["can_migrate"] is False
-    assert preview["active_jobs"] == ["phase4"]
+    assert preview["active_jobs"] == [crawler_type]
 
     migrate_endpoint = next(
         route.endpoint
@@ -1501,6 +1532,229 @@ async def test_migration_api_still_blocks_active_non_review_job(tmp_path):
             request=request,
             principal=principal,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["member-copy", "sqlite-commit"])
+async def test_failed_migration_rolls_back_copy_and_members_then_retries(
+    tmp_path, monkeypatch, failure
+):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from creative.api import build_creative_router
+    from creative.prompt_store import PromptStore
+    from creative.schema import CreativeModeMigrationRequest
+
+    repository = CreativeRepository(tmp_path / "rollback.db")
+    project = repository.create_original_project(
+        seed_text="回滚源项目",
+        name="回滚项目",
+        target_episode_count=2,
+        created_by="owner-1",
+        creation_request_id="rollback-source",
+    )
+    repository.mark_project_bootstrap_status(project["id"], "ready")
+    repository.create_blueprints(project["id"], [{"content": {"title": "保留源内容"}}])
+    PromptStore(repository.db_path).enable_project(
+        project["id"], actor_user_id="owner-1"
+    )
+    workflow = Mock()
+    workflow.resolve_creative_project_identity = None
+    workflow.list_tasks.return_value = []
+    copied_members = {}
+    failing = [True]
+
+    def copy_members(source, target, actor):
+        if failure == "member-copy" and failing[0]:
+            raise RuntimeError("injected member copy failure")
+        copied_members[target] = [{"id": "copied-member", "project_id": target}]
+        return copied_members[target]
+
+    def rollback_members(target, membership_ids):
+        copied_members[target] = [
+            member
+            for member in copied_members.get(target, [])
+            if member["id"] not in membership_ids
+        ]
+        if not copied_members[target]:
+            copied_members.pop(target)
+
+    workflow.copy_active_project_members.side_effect = copy_members
+    workflow.rollback_copied_project_members.side_effect = rollback_members
+    router = build_creative_router(
+        root=tmp_path,
+        runtime_dir=tmp_path / ".runtime",
+        repository=repository,
+        workflow_repository=workflow,
+        application_service=Mock(),
+    )
+    migrate = next(
+        route.endpoint
+        for route in router.routes
+        if route.path == "/api/creative/projects/{project_id}/migrate-to-free"
+    )
+    connect = repository._connect
+
+    @contextmanager
+    def failing_connect():
+        with connect() as conn:
+            yield conn
+            if (
+                failure == "sqlite-commit"
+                and failing[0]
+                and conn.in_transaction
+                and copied_members
+            ):
+                raise RuntimeError("injected sqlite commit failure")
+
+    monkeypatch.setattr(repository, "_connect", failing_connect)
+    kwargs = dict(
+        project_id=project["id"],
+        payload=CreativeModeMigrationRequest(
+            expected_mode_revision=0, operation_id="rollback-operation"
+        ),
+        request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())),
+        principal=SimpleNamespace(is_system_admin=True, user_id="owner-1"),
+    )
+    with pytest.raises(RuntimeError, match="injected"):
+        await migrate(**kwargs)
+    with connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM creative_projects").fetchone()[0] == 1
+        assert (
+            conn.execute("SELECT COUNT(*) FROM creative_mode_migrations").fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute("SELECT COUNT(*) FROM creative_blueprints").fetchone()[0] == 1
+        )
+        assert (
+            conn.execute("SELECT COUNT(*) FROM creative_resource_heads").fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM creative_project_prompt_settings WHERE project_id != ?",
+                (project["id"],),
+            ).fetchone()[0]
+            == 0
+        )
+    assert copied_members == {}
+    failing[0] = False
+    result = await migrate(**kwargs)
+    replay = await migrate(**kwargs)
+    assert replay["project"]["id"] == result["project"]["id"]
+    assert replay["created"] is False
+    assert len(copied_members) == 1
+
+
+def test_member_copy_filters_inactive_users_and_compensation_is_exact(
+    tmp_path, monkeypatch
+):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from sqlalchemy import create_engine
+    from workflow.repository import WorkflowRepository
+
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'workflow.db'}")
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE TABLE users (id TEXT PRIMARY KEY, status TEXT, is_deleted INTEGER)"
+        )
+        conn.exec_driver_sql(
+            "CREATE TABLE project_members (id TEXT PRIMARY KEY, project_id TEXT, user_id TEXT, project_role TEXT, status TEXT, added_by TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(project_id, user_id, project_role))"
+        )
+        conn.exec_driver_sql(
+            "CREATE TABLE workflow_project_member_events (id TEXT, project_id TEXT, membership_id TEXT, event_type TEXT, actor_id TEXT, before_json TEXT, after_json TEXT, writer_operation_id TEXT)"
+        )
+        for user, status, deleted, membership_status in [
+            ("actor", "active", 0, "active"),
+            ("inactive-member", "active", 0, "inactive"),
+            ("disabled-user", "disabled", 0, "active"),
+            ("deleted-user", "active", 1, "active"),
+        ]:
+            conn.exec_driver_sql(
+                "INSERT INTO users VALUES (?, ?, ?)", (user, status, deleted)
+            )
+            conn.exec_driver_sql(
+                "INSERT INTO project_members (id, project_id, user_id, project_role, status) VALUES (?, 'source', ?, 'writer', ?)",
+                (user, user, membership_status),
+            )
+
+    class SQLiteWorkflowConnection:
+        # Only adapt PostgreSQL DBAPI placeholders. All copy/filter SQL stays real.
+        def __init__(self, conn):
+            self.conn = conn
+
+        def exec_driver_sql(self, sql, parameters=()):
+            return self.conn.exec_driver_sql(sql.replace("%s", "?"), parameters)
+
+        def execute(self, *args, **kwargs):
+            return self.conn.execute(*args, **kwargs)
+
+    @contextmanager
+    def transaction():
+        with engine.begin() as conn:
+            yield SQLiteWorkflowConnection(conn)
+
+    workflow = object.__new__(WorkflowRepository)
+    workflow.identity_repository = SimpleNamespace(transaction=transaction)
+    # PostgreSQL advisory locks and session authorization are separate boundaries.
+    monkeypatch.setattr(workflow, "_lock_project_write", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        workflow, "_live_actor", lambda conn, actor: {"is_system_admin": False}
+    )
+    with pytest.raises(PermissionError):
+        workflow.copy_active_project_members(
+            "source", "target", {"user_id": "outsider"}
+        )
+    with monkeypatch.context() as failure_patch:
+        def fail_member_event(*args, **kwargs):
+            raise RuntimeError("injected member event failure")
+
+        failure_patch.setattr(workflow, "_record_project_member_event", fail_member_event)
+        with pytest.raises(RuntimeError, match="member event"):
+            workflow.copy_active_project_members(
+                "source", "failed-target", {"user_id": "actor"}
+            )
+    with engine.begin() as conn:
+        assert conn.exec_driver_sql(
+            "SELECT COUNT(*) FROM project_members WHERE project_id = 'failed-target'"
+        ).scalar() == 0
+    copied = workflow.copy_active_project_members(
+        "source", "target", {"user_id": "actor"}
+    )
+    assert [row["user_id"] for row in copied] == ["actor"]
+    repeated = workflow.copy_active_project_members(
+        "source", "target", {"user_id": "actor"}
+    )
+    assert [row["id"] for row in repeated] == [row["id"] for row in copied]
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "INSERT INTO project_members (id, project_id, user_id, project_role, status) VALUES ('unrelated', 'target', 'unrelated', 'writer', 'active')"
+        )
+    workflow.rollback_copied_project_members(
+        "target", [row["id"] for row in copied] + ["actor"]
+    )
+    with engine.begin() as conn:
+        assert conn.exec_driver_sql(
+            "SELECT id FROM project_members WHERE project_id = 'target'"
+        ).scalars().all() == ["unrelated"]
+        assert (
+            conn.exec_driver_sql(
+                "SELECT COUNT(*) FROM project_members WHERE project_id = 'source'"
+            ).scalar()
+            == 4
+        )
+        assert (
+            conn.exec_driver_sql(
+                "SELECT COUNT(*) FROM workflow_project_member_events WHERE project_id = 'target'"
+            ).scalar()
+            == 0
+        )
+    engine.dispose()
 
 
 def test_project_deletion_cleans_free_mode_authority_and_audit_rows(tmp_path):

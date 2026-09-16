@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from collections.abc import Callable
+from contextlib import contextmanager
 from typing import Any
 
 from creative.outline_fields import outline_field_source_fingerprint
@@ -41,6 +43,16 @@ class FreeCreativeModeService:
 
     def __init__(self, repository: CreativeRepository) -> None:
         self.repository = repository
+
+    @contextmanager
+    def _migration_transaction(self, compensations: list[Callable[[], None]]):
+        try:
+            with self.repository._connect() as conn:
+                yield conn
+        except BaseException:
+            for compensate in reversed(compensations):
+                compensate()
+            raise
 
     @staticmethod
     def _loads(value: Any, fallback: Any) -> Any:
@@ -1526,6 +1538,7 @@ class FreeCreativeModeService:
         operation_id: str,
         actor_user_id: str,
         seed_text: str = "",
+        copy_members: Callable[[int], Callable[[], None] | None] | None = None,
     ) -> dict[str, Any]:
         with self.repository._connect() as conn:
             prior = conn.execute(
@@ -1541,7 +1554,8 @@ class FreeCreativeModeService:
         preview = self.migration_preview(project_id)
         if preview["blockers"]:
             raise ValueError("；".join(preview["blockers"]))
-        with self.repository._connect() as conn:
+        compensations: list[Callable[[], None]] = []
+        with self._migration_transaction(compensations) as conn:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 "SELECT * FROM creative_mode_migrations WHERE operation_id = ?",
@@ -1802,6 +1816,10 @@ class FreeCreativeModeService:
                 "updated_at = ? WHERE operation_id = ?",
                 (json.dumps(mapping, ensure_ascii=False), now, str(operation_id)),
             )
+            if copy_members is not None:
+                compensate = copy_members(target_project_id)
+                if compensate is not None:
+                    compensations.append(compensate)
         return {
             "project": self.repository.get_project(target_project_id) or {},
             "mapping": mapping,

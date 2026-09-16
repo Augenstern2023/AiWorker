@@ -28,6 +28,7 @@ import pytest
 from identity.dependencies import current_principal
 from identity.schema import Principal
 from creative.prompt_store import PromptStore
+from creative.prompt_registry import builtin_template
 from writer_agent import api as writer_agent_api
 from writer_agent.action_service import ActionService, persist_proposed_actions
 from writer_agent.project_review import long_project_review_scope
@@ -788,6 +789,46 @@ def test_project_review_preview_create_is_idempotent_and_session_owner_can_read_
     exported = client.get(f"{base}/{review_id}/export")
     assert exported.status_code == 200
     assert "完整项目审核报告" in exported.text
+
+
+@pytest.mark.parametrize("action", ["preview", "create"])
+def test_project_review_rejects_private_bound_template(tmp_path, action) -> None:
+    client, repository, store, session, _permissions, jobs, _current = (
+        _project_review_api_context(tmp_path, principal=_admin_principal())
+    )
+    project_id = store.get(session["id"], "writer-1")["project_id"]
+    prompts = PromptStore(repository.db_path)
+    prompts.enable_project(project_id, actor_user_id="private-owner")
+    base = f"/api/writer-agent/sessions/{session['id']}/project-reviews"
+    preview = client.post(f"{base}/preview", json={"audit_scope": "project"}).json()
+    private = prompts.create_template(
+        title="私人审核",
+        description="",
+        content=builtin_template("generic-vertical-short"),
+        owner_scope="user",
+        owner_user_id="private-owner",
+    )
+    prompts.set_binding(
+        project_id=project_id,
+        stage="review",
+        episode_number=0,
+        template_id=private["id"],
+        template_revision=1,
+        override={},
+        actor_user_id="private-owner",
+    )
+    payload = {"audit_scope": "project"}
+    if action == "create":
+        payload.update(
+            expected_fingerprint=preview["fingerprint"],
+            client_request_id="private-review",
+        )
+    response = client.post(
+        f"{base}/preview" if action == "preview" else base, json=payload
+    )
+    assert response.status_code == 403
+    assert repository.list_script_reviews(project_ids={project_id}) == []
+    assert jobs.jobs == {}
 
 
 def test_project_review_freezes_selected_series_review_template(tmp_path) -> None:

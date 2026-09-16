@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -16,10 +17,13 @@ from fastapi import FastAPI, HTTPException, Request
 from identity.schema import Principal
 from identity.permission_service import PermissionService
 import pytest
+from sqlalchemy import create_engine
 
 from creative.api import build_creative_router
+from creative.application_service import CreativeApplicationService
 from creative.free_mode_service import FreeCreativeModeService
 from creative.prompt_registry import builtin_template
+from creative.prompt_marketplace import PromptMarketplaceService
 from creative.prompt_store import PromptStore
 from creative.repository import CreativeRepository
 from creative.schema import (
@@ -34,7 +38,88 @@ from creative.schema import (
     PromptMarketplaceSubmissionRequest,
     PromptProjectEnableRequest,
     PromptTemplateCreateRequest,
+    PromptTemplateRevisionRequest,
 )
+
+
+pytestmark = pytest.mark.usefixtures("isolated_creative_rank_source")
+
+
+@pytest.fixture
+def permission_context(tmp_path):
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'permissions.db'}")
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE TABLE project_members (id TEXT PRIMARY KEY, project_id TEXT, user_id TEXT, project_role TEXT, status TEXT)"
+        )
+    service = PermissionService(
+        SimpleNamespace(connect=engine.begin), SimpleNamespace()
+    )
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = _prompt_project(repository)
+    project_key = repository.workflow_project_id(project["id"])
+    with engine.begin() as conn:
+        for user_id, scope, status, role in [
+            ("member", project_key, "active", "writer"),
+            ("stage-owner", project_key, "active", "writer"),
+            ("manager", project_key, "active", "manager"),
+            ("other-project", "different-project", "active", "manager"),
+            ("inactive", project_key, "inactive", "manager"),
+        ]:
+            conn.exec_driver_sql(
+                "INSERT INTO project_members VALUES (?, ?, ?, ?, ?)",
+                (user_id, scope, user_id, role, status),
+            )
+    router, workflow, application = _router(
+        repository,
+        tmp_path,
+        job_manager=SimpleNamespace(
+            create_job=lambda payload, **kwargs: SimpleNamespace(
+                to_dict=lambda: {"job_id": "generated"}
+            )
+        ),
+    )
+    workflow.resolve_creative_project_identity = None
+    workflow.is_active_project_member.side_effect = (
+        lambda project_id, actor: service.is_active_project_member(actor, project_id)
+    )
+    application.permission_service = service
+    application.workflow_repository = workflow
+    application.workflow_identity = SimpleNamespace(
+        project_id=repository.workflow_project_id
+    )
+    application.assert_stage_write_access = (
+        lambda *args: CreativeApplicationService.assert_stage_write_access(
+            application, *args
+        )
+    )
+    app = FastAPI()
+    app.state.identity_permission_service = service
+    yield repository, project, router, app
+    engine.dispose()
+
+
+def _matrix_principal(user_id):
+    return replace(
+        _principal(
+            user_id,
+            admin=user_id == "admin",
+            permissions=(
+                {"script.edit", "project.read.established"}
+                if user_id != "member"
+                else ()
+            ),
+        ),
+        data_scope=(
+            "all"
+            if user_id == "admin"
+            else (
+                "managed_projects"
+                if user_id in {"manager", "other-project", "inactive"}
+                else "task"
+            )
+        ),
+    )
 
 
 def _principal(user_id: str, *, admin: bool = False, permissions=()) -> Principal:
@@ -808,3 +893,391 @@ async def test_prompt_marketplace_api_requires_review_and_installs_without_bindi
     )
     assert rated["summary"]["average"] == 5
     assert rated["summary"]["count"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "user_id",
+    [
+        "member",
+        "stage-owner",
+        "manager",
+        "admin",
+        "other-project",
+        "inactive",
+        "no-membership",
+    ],
+)
+@pytest.mark.parametrize(
+    "operation",
+    ["catalog", "module", "binding", "revision", "governance", "generation"],
+)
+async def test_independent_prompt_routes_enforce_membership_and_authority(
+    permission_context, user_id, operation
+):
+    repository, project, router, app = permission_context
+    store = PromptStore(repository.db_path)
+    template = store.create_template(
+        title="项目模板",
+        description="",
+        content=builtin_template("generic-vertical-short"),
+        owner_scope="project",
+        owner_user_id="manager",
+        project_id=project["id"],
+    )
+    kwargs = {
+        "project_id": project["id"],
+        "request": _request(app),
+        "principal": _matrix_principal(user_id),
+    }
+    route, method = "/prompt-library", "GET"
+    if operation in {"module", "binding"}:
+        route, method = "/prompt-modules/{stage}", (
+            "GET" if operation == "module" else "PUT"
+        )
+        kwargs["stage"] = "script"
+        kwargs.update(
+            {"episode_number": 0}
+            if operation == "module"
+            else {"payload": PromptBindingRequest(template_key="urban-identity-romcom")}
+        )
+    elif operation == "revision":
+        route, method = "/prompt-library/templates/{template_id}/revisions", "POST"
+        kwargs.update(
+            template_id=template["id"],
+            payload=PromptTemplateRevisionRequest(
+                expected_revision=1, content=builtin_template("urban-identity-romcom")
+            ),
+        )
+    elif operation == "governance":
+        route, method = "/prompt-library/templates/{template_id}/governance", "POST"
+        kwargs.update(
+            template_id=template["id"],
+            payload=PromptGovernanceActionRequest(
+                action="request_review",
+                note="审核项目模板",
+                expected_governance_revision=0,
+                operation_id="matrix-governance",
+            ),
+        )
+    elif operation == "generation":
+        route, method = "/free/{stage}/generate", "POST"
+        kwargs.pop("request")
+        kwargs.update(
+            stage="briefs",
+            episode_number=None,
+            payload=FreeCreativeGenerateRequest(
+                operation_id="matrix-generation",
+                prompt_template_key="urban-identity-romcom",
+            ),
+        )
+    allowed = user_id in {"member", "stage-owner", "manager", "admin"}
+    if operation == "binding":
+        allowed = user_id in {"stage-owner", "manager", "admin"}
+    elif operation in {"revision", "governance"}:
+        allowed = user_id in {"manager", "admin"}
+    endpoint = _endpoint(router, "/api/creative/projects/{project_id}" + route, method)
+    if not allowed:
+        with pytest.raises(HTTPException) as error:
+            await endpoint(**kwargs)
+        assert error.value.status_code == 403
+        assert store.get_revision(template["id"])["revision"] == 1
+        assert store.binding(project["id"], "script", 0) is None
+        return
+    result = await endpoint(**kwargs)
+    if operation == "catalog":
+        assert template["id"] in {item["id"] for item in result["templates"]}
+    elif operation == "module":
+        assert result["effective"]["template_key"] == "generic-vertical-short"
+    elif operation == "binding":
+        assert (
+            store.binding(project["id"], "script", 0)["template_id"]
+            == "system:urban-identity-romcom"
+        )
+    elif operation == "revision":
+        assert store.get_revision(template["id"])["revision"] == 2
+    elif operation == "governance":
+        assert (
+            store.get_template(template["id"])["governance_status"] == "pending_review"
+        )
+    else:
+        assert (
+            FreeCreativeModeService(repository).get_generation_context(
+                "matrix-generation"
+            )["context_snapshot"]["prompt_snapshot"]["template_key"]
+            == "urban-identity-romcom"
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "operation", ["catalog", "module", "binding", "revision", "generation"]
+)
+async def test_private_template_cannot_leak_through_project_binding(
+    permission_context, operation
+):
+    repository, project, router, app = permission_context
+    store = PromptStore(repository.db_path)
+    private = store.create_template(
+        title="秘密模板",
+        description="",
+        content=builtin_template("barrage-revenge"),
+        owner_scope="user",
+        owner_user_id="manager",
+    )
+    store.set_binding(
+        project_id=project["id"],
+        stage="script",
+        episode_number=0,
+        template_id=private["id"],
+        template_revision=1,
+        override={},
+        actor_user_id="manager",
+    )
+    principal = _matrix_principal("stage-owner")
+    kwargs = dict(project_id=project["id"], principal=principal, request=_request(app))
+    path, method = "/prompt-library", "GET"
+    if operation == "catalog":
+        result = await _endpoint(
+            router, "/api/creative/projects/{project_id}" + path, method
+        )(**kwargs)
+        assert private["id"] not in {item["id"] for item in result["templates"]}
+        return
+    if operation in {"module", "binding"}:
+        path, method = "/prompt-modules/{stage}", (
+            "GET" if operation == "module" else "PUT"
+        )
+        kwargs.update(stage="script")
+        kwargs.update(
+            {"episode_number": 0}
+            if operation == "module"
+            else {"payload": PromptBindingRequest(template_key=private["template_key"])}
+        )
+    elif operation == "revision":
+        path, method = "/prompt-library/templates/{template_id}/revisions", "POST"
+        kwargs.update(
+            template_id=private["id"],
+            payload=PromptTemplateRevisionRequest(
+                expected_revision=1, content=builtin_template("urban-identity-romcom")
+            ),
+        )
+    else:
+        path, method = "/free/{stage}/generate", "POST"
+        kwargs.pop("request")
+        kwargs.update(
+            stage="scripts",
+            episode_number=1,
+            payload=FreeCreativeGenerateRequest(
+                operation_id="private-bound-generation"
+            ),
+        )
+    with pytest.raises(HTTPException) as error:
+        await _endpoint(router, "/api/creative/projects/{project_id}" + path, method)(
+            **kwargs
+        )
+    assert error.value.status_code == 403
+    assert store.get_revision(private["id"])["revision"] == 1
+    if operation in {"module", "binding"}:
+        kwargs["principal"] = _matrix_principal("manager")
+        owned = await _endpoint(
+            router, "/api/creative/projects/{project_id}" + path, method
+        )(**kwargs)
+        assert owned["effective"]["template_id"] == private["id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "user_id",
+    ["member", "manager", "admin", "other-project", "inactive", "no-membership"],
+)
+@pytest.mark.parametrize("operation", ["install", "rating"])
+async def test_marketplace_install_and_rating_authority(
+    permission_context, user_id, operation
+):
+    repository, project, router, app = permission_context
+    store = PromptStore(repository.db_path)
+    private = store.create_template(
+        title="公开作品",
+        description="",
+        content=builtin_template("generic-vertical-short"),
+        owner_scope="user",
+        owner_user_id="manager",
+    )
+    market = PromptMarketplaceService(repository, store)
+    submitted = market.submit(
+        project_id=project["id"],
+        template_id=private["id"],
+        expected_template_revision=1,
+        operation_id="market-submission",
+        title="公开作品",
+        description="测试作品",
+        tags=[],
+        attribution_name="原创作者",
+        license_code="CC-BY-4.0",
+        source_type="original",
+        source_url="",
+        rights_statement="本人原创并授权其他项目安装使用。",
+        publication_confirmed=True,
+        rights_confirmed=True,
+        actor_user_id="manager",
+    )
+    market.moderate(
+        submission_id=submitted["id"],
+        action="approve",
+        note="来源审核通过",
+        expected_review_revision=0,
+        operation_id="market-approve",
+        actor_user_id="admin",
+        is_admin=True,
+    )
+    if operation == "rating":
+        market.install(
+            project_id=project["id"],
+            submission_id=submitted["id"],
+            operation_id="manager-install",
+            license_accepted=True,
+            actor_user_id="manager",
+        )
+    payload = (
+        PromptMarketplaceInstallRequest(
+            operation_id="permission-install", license_accepted=True
+        )
+        if operation == "install"
+        else PromptMarketplaceRatingRequest(
+            score=4, review_text="已验证", expected_revision=0
+        )
+    )
+    endpoint = _endpoint(
+        router,
+        "/api/creative/projects/{project_id}/prompt-marketplace/listings/{submission_id}/"
+        + operation,
+        "POST" if operation == "install" else "PUT",
+    )
+    kwargs = dict(
+        project_id=project["id"],
+        submission_id=submitted["id"],
+        payload=payload,
+        request=_request(app),
+        principal=_matrix_principal(user_id),
+    )
+    # The publisher (manager) cannot rate their own listing, even after install.
+    allowed = user_id in (
+        {"manager", "admin"} if operation == "install" else {"member", "admin"}
+    )
+    if not allowed:
+        with pytest.raises(HTTPException) as error:
+            await endpoint(**kwargs)
+        assert error.value.status_code == 403
+    else:
+        result = await endpoint(**kwargs)
+        if operation == "install":
+            assert result["bound"] is False
+        else:
+            assert result["summary"]["average"] == 4
+            assert result["summary"]["count"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["binding", "revision", "generation"])
+async def test_project_template_cannot_be_used_in_another_project(
+    permission_context, operation
+):
+    repository, project, router, app = permission_context
+    other = repository.create_original_project(
+        seed_text="另一个项目",
+        name="另一个项目",
+        target_episode_count=1,
+        created_by="manager",
+        creation_request_id="other-project-template",
+        workflow_mode="free",
+    )
+    store = PromptStore(repository.db_path)
+    foreign = store.create_template(
+        title="他项目模板",
+        description="",
+        content=builtin_template("generic-vertical-short"),
+        owner_scope="project",
+        owner_user_id="manager",
+        project_id=other["id"],
+    )
+    kwargs = dict(
+        project_id=project["id"],
+        principal=_matrix_principal("manager"),
+        request=_request(app),
+    )
+    if operation == "binding":
+        route, method = "/prompt-modules/{stage}", "PUT"
+        kwargs.update(
+            stage="script",
+            payload=PromptBindingRequest(template_key=foreign["template_key"]),
+        )
+    elif operation == "revision":
+        route, method = "/prompt-library/templates/{template_id}/revisions", "POST"
+        kwargs.update(
+            template_id=foreign["id"],
+            payload=PromptTemplateRevisionRequest(
+                expected_revision=1, content=builtin_template("urban-identity-romcom")
+            ),
+        )
+    else:
+        route, method = "/free/{stage}/generate", "POST"
+        kwargs.pop("request")
+        kwargs.update(
+            stage="briefs",
+            episode_number=None,
+            payload=FreeCreativeGenerateRequest(
+                operation_id="foreign-template",
+                prompt_template_key=foreign["template_key"],
+            ),
+        )
+    with pytest.raises(HTTPException) as error:
+        await _endpoint(router, "/api/creative/projects/{project_id}" + route, method)(
+            **kwargs
+        )
+    assert error.value.status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_id", ["other-project", "inactive", "no-membership"])
+@pytest.mark.parametrize("operation", ["mode-migration-preview", "migrate-to-free"])
+async def test_migration_rejects_unassigned_or_inactive_members(
+    permission_context, user_id, operation
+):
+    from creative.schema import CreativeModeMigrationRequest
+
+    _, project, router, app = permission_context
+    kwargs = dict(
+        project_id=project["id"],
+        request=_request(app),
+        principal=_matrix_principal(user_id),
+    )
+    if operation == "migrate-to-free":
+        kwargs["payload"] = CreativeModeMigrationRequest(
+            expected_mode_revision=0, operation_id="unauthorized-migration"
+        )
+    with pytest.raises(HTTPException) as error:
+        await _endpoint(
+            router,
+            "/api/creative/projects/{project_id}/" + operation,
+            "POST" if operation == "migrate-to-free" else "GET",
+        )(**kwargs)
+    assert error.value.status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_id", ["other-project", "inactive", "no-membership"])
+async def test_portfolio_read_grant_does_not_open_project_prompt_library(
+    permission_context, user_id
+):
+    _, project, router, app = permission_context
+    principal = replace(
+        _matrix_principal(user_id), permissions=frozenset({"project.read.established"})
+    )
+    endpoint = _endpoint(
+        router, "/api/creative/projects/{project_id}/prompt-library", "GET"
+    )
+    with pytest.raises(HTTPException) as error:
+        await endpoint(
+            project_id=project["id"], request=_request(app, "GET"), principal=principal
+        )
+    assert error.value.status_code == 403

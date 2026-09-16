@@ -1054,3 +1054,139 @@ def test_included_examples_and_parameter_overrides_reach_effective_instruction()
     assert '"max_beats":4' in snapshot["effective_instruction"]
     assert "模板示例（节拍力度）" in snapshot["effective_instruction"]
     assert "误会必须引发一次可见的关系变化" in snapshot["effective_instruction"]
+
+
+@pytest.mark.parametrize(
+    ("stage", "binding_kind"),
+    [
+        ("script", "default"),
+        ("script", "stage"),
+        ("script", "episode"),
+        ("review", "default"),
+        ("review", "stage"),
+    ],
+)
+def test_bound_private_template_still_requires_owner(prompt_store, binding_kind, stage):
+    # A binding must not turn a private template into shared project content.
+    repository, store = prompt_store
+    project_id = _project(repository)
+    personal = store.create_template(
+        title="私人内容",
+        description="",
+        content=builtin_template("generic-vertical-short"),
+        owner_scope="user",
+        owner_user_id="owner-1",
+    )
+    store.enable_project(
+        project_id,
+        actor_user_id="owner-1",
+        template_key=(
+            personal["template_key"]
+            if binding_kind == "default"
+            else "generic-vertical-short"
+        ),
+    )
+    if binding_kind != "default":
+        store.set_binding(
+            project_id=project_id,
+            stage=stage,
+            episode_number=1 if binding_kind == "episode" else 0,
+            template_id=personal["id"],
+            template_revision=1,
+            override={},
+            actor_user_id="owner-1",
+        )
+    assert (
+        store.resolve_snapshot(
+            project_id=project_id,
+            stage=stage,
+            mode="single",
+            episode_number=1 if stage == "script" else 0,
+            actor_user_id="owner-1",
+        )["template_id"]
+        == personal["id"]
+    )
+    with pytest.raises(PermissionError, match="个人模板"):
+        store.resolve_snapshot(
+            project_id=project_id,
+            stage=stage,
+            mode="single",
+            episode_number=1 if stage == "script" else 0,
+            actor_user_id="other-member",
+        )
+
+
+def test_legacy_startup_preserves_custom_revisions_and_bindings(tmp_path):
+    repository = CreativeRepository(tmp_path / "legacy-startup.db")
+    project_id = _project(repository)
+    with repository._connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE name LIKE 'creative_prompt_%'"
+            ).fetchall()
+            == []
+        )
+    store = PromptStore(repository.db_path)
+    store.enable_project(project_id, actor_user_id="owner-1")
+    for scope, stage, episode in [("user", "script", 1), ("project", "beats", 0)]:
+        template = store.create_template(
+            title=f"保留 {scope}",
+            description="原始数据",
+            content=builtin_template("generic-vertical-short"),
+            owner_scope=scope,
+            owner_user_id="owner-1",
+            project_id=project_id if scope == "project" else None,
+        )
+        store.set_binding(
+            project_id=project_id,
+            stage=stage,
+            episode_number=episode,
+            template_id=template["id"],
+            template_revision=1,
+            override={"custom_requirements": "保留绑定"},
+            actor_user_id="owner-1",
+        )
+        content = builtin_template("urban-identity-romcom")
+        store.save_revision(
+            template["id"], content, expected_revision=1, actor_user_id="owner-1"
+        )
+    store = PromptStore(repository.db_path)
+    tables = [
+        "creative_prompt_template_revisions",
+        "creative_project_prompt_settings",
+        "creative_project_prompt_bindings",
+    ]
+    with store._connect() as conn:
+        before = {
+            table: [
+                tuple(row)
+                for row in conn.execute(f"SELECT * FROM {table} ORDER BY rowid")
+            ]
+            for table in tables
+        }
+        for column in [
+            "governance_status",
+            "governance_revision",
+            "approved_revision",
+            "governance_note",
+            "governance_updated_by",
+            "governance_updated_at",
+        ]:
+            conn.execute(f"ALTER TABLE creative_prompt_templates DROP COLUMN {column}")
+    for _ in range(2):
+        store = PromptStore(repository.db_path)
+        with store._connect() as conn:
+            after = {
+                table: [
+                    tuple(row)
+                    for row in conn.execute(f"SELECT * FROM {table} ORDER BY rowid")
+                ]
+                for table in tables
+            }
+        assert after == before
+        assert {
+            item["title"]
+            for item in store.list_catalog(
+                project_id=project_id, actor_user_id="owner-1"
+            )
+        } >= {"保留 user", "保留 project"}

@@ -127,6 +127,7 @@ class ProjectPromptService:
                 stage=stage,
                 mode="single",
                 episode_number=episode_number,
+                actor_user_id=actor_user_id,
             )
             if effective is not None:
                 latest = self.store.get_revision(effective["template_id"])
@@ -185,6 +186,7 @@ class ProjectPromptService:
                 stage=stage,
                 mode="single",
                 episode_number=episode_number,
+                actor_user_id=actor_user_id,
             ),
         }
 

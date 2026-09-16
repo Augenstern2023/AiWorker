@@ -65,6 +65,15 @@ def project_root_path():
 
 
 @pytest.fixture
+def isolated_creative_rank_source(monkeypatch):
+    """Prompt/generation routes do not need the external ranking database."""
+    monkeypatch.setattr(
+        "creative.topic_service.TodayRankService.from_environment",
+        lambda **kwargs: object(),
+    )
+
+
+@pytest.fixture
 def isolated_system_database(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[SystemDatabase]:

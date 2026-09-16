@@ -1612,6 +1612,10 @@ class PromptStore:
                 template["id"], int(settings["default_template_revision"])
             )
             override = dict(run_override or {})
+        if template["owner_scope"] == "user" and template["owner_user_id"] != actor_user_id:
+            raise PermissionError("无权使用该个人模板")
+        if template["owner_scope"] == "project" and int(template["project_id"] or 0) != int(project_id):
+            raise PermissionError("无权使用其他项目模板")
         if not self._supports_stage(revision, stage):
             raise ValueError(f"所选模板版本不支持 {stage} 阶段")
         return compose_prompt_snapshot(

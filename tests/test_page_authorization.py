@@ -287,6 +287,10 @@ def test_writer_project_pages_require_project_participation(page_app, route: str
 
     assert client.get(route).status_code == 403
     page_app[0].state.identity_permission_service.participating_project_ids.add(
+        "unrelated-project"
+    )
+    assert client.get(route).status_code == 403
+    page_app[0].state.identity_permission_service.participating_project_ids.add(
         "project-9"
     )
     response = client.get(route)

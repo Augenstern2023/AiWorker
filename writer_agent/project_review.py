@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,10 @@ class ProjectReviewCoordinator:
         self.job_manager = job_manager
         self.runtime_dir = Path(runtime_dir)
 
+    @cached_property
+    def prompt_service(self) -> ProjectPromptService:
+        return ProjectPromptService(self.repository)
+
     def _workflow_project_id(self, project_id: Any) -> str:
         scope = getattr(self.repository, "workflow_project_id", None)
         return scope(project_id) if callable(scope) else str(project_id)
@@ -58,9 +63,7 @@ class ProjectReviewCoordinator:
             raise ProjectReviewError(409, str(exc)) from exc
         payload = self._preview_payload(source)
         try:
-            payload["prompt_module"] = ProjectPromptService(
-                self.repository
-            ).module_state(
+            payload["prompt_module"] = self.prompt_service.module_state(
                 int(project["id"]),
                 "review",
                 actor_user_id=principal.user_id,
@@ -93,9 +96,7 @@ class ProjectReviewCoordinator:
                 extra=self._preview_payload(source),
             )
         try:
-            prompt_snapshot = ProjectPromptService(
-                self.repository
-            ).resolve_generation_snapshot(
+            prompt_snapshot = self.prompt_service.resolve_generation_snapshot(
                 project_id=int(project["id"]),
                 stage="review",
                 series=True,
@@ -253,7 +254,7 @@ class ProjectReviewCoordinator:
     def _assert_review_readable(
         self, review: dict[str, Any], session: dict[str, Any], principal: Any
     ) -> None:
-        if not ProjectPromptService(self.repository).can_access_review_prompt(
+        if not self.prompt_service.can_access_review_prompt(
             review, principal.user_id
         ):
             raise ProjectReviewError(403, "无权访问该审核的个人模板快照")
@@ -273,7 +274,7 @@ class ProjectReviewCoordinator:
             raise ProjectReviewError(403, "当前账号已无权读取关联项目")
 
     def _queue(self, review: dict[str, Any], principal: Any, *, retry_failed_operation: bool) -> Any:
-        if not ProjectPromptService(self.repository).can_access_review_prompt(
+        if not self.prompt_service.can_access_review_prompt(
             review, principal.user_id
         ):
             raise ProjectReviewError(403, "无权使用该审核的个人模板快照")

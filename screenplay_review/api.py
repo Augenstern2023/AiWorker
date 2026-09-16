@@ -81,6 +81,7 @@ def build_script_review_router(
     runtime_dir: str | Path = ".runtime",
 ) -> APIRouter:
     router = APIRouter(prefix="/api/script-reviews", tags=["script-reviews"])
+    prompt_service = ProjectPromptService(repository)
 
     def assert_permission(principal: Principal, permission: str) -> None:
         if not principal.is_system_admin and permission not in principal.permissions:
@@ -117,7 +118,7 @@ def build_script_review_router(
     def can_read_review(
         request: Request, principal: Principal, review: dict[str, Any]
     ) -> bool:
-        if not ProjectPromptService(repository).can_access_review_prompt(
+        if not prompt_service.can_access_review_prompt(
             review, principal.user_id
         ):
             return False
@@ -189,7 +190,7 @@ def build_script_review_router(
     ) -> dict[str, Any]:
         source = dict(source)
         if source_type == "project":
-            prompt_snapshot = ProjectPromptService(repository).resolve_generation_snapshot(
+            prompt_snapshot = prompt_service.resolve_generation_snapshot(
                 project_id=int(source["project_id"]),
                 stage="review",
                 series=str(source["mode"]) != "single",

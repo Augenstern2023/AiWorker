@@ -862,7 +862,17 @@ def test_project_review_freezes_selected_series_review_template(tmp_path) -> Non
     assert jobs.calls[0][1]["extra"]["prompt_snapshot"] == frozen
 
 
-def test_project_review_private_history_cannot_be_resumed_by_session_owner(tmp_path):
+def test_project_review_private_history_cannot_be_resumed_by_session_owner(
+    tmp_path, monkeypatch
+):
+    initializations = []
+    original_init = PromptStore.__init__
+
+    def counted_init(store, db_path):
+        initializations.append(db_path)
+        original_init(store, db_path)
+
+    monkeypatch.setattr(PromptStore, "__init__", counted_init)
     client, repository, store, session, _permissions, jobs, current = (
         _project_review_api_context(tmp_path, principal=_admin_principal())
     )
@@ -915,6 +925,17 @@ def test_project_review_private_history_cannot_be_resumed_by_session_owner(tmp_p
     assert client.post(f"{base}/{review_id}/resume").status_code == 403
     assert repository.get_script_review(review_id)["status"] == "failed"
     assert len(jobs.calls) == 2
+    current["principal"] = _admin_principal()
+    for _ in range(3):
+        assert (
+            client.post(f"{base}/preview", json={"audit_scope": "project"}).status_code
+            == 200
+        )
+        assert client.get(f"{base}/{review_id}").status_code == 200
+    assert client.post(f"{base}/{review_id}/resume").status_code == 200
+    # One coordinator-owned store plus the explicit setup store above; all real
+    # initialization, authorization, snapshot creation, and queue paths still run.
+    assert len(initializations) == 2
 
 
 def test_turn_rollback_is_blocked_after_project_review_was_created(

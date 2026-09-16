@@ -65,8 +65,9 @@ class ProjectPromptService:
             return int(ownership.get("project_id") or 0) == int(
                 review.get("project_id") or -1
             )
-        # Missing/deleted legacy templates cannot safely be treated as shared.
-        return bool(actor_user_id) and review.get("created_by") == actor_user_id
+        # Historical creators may have used another user's private binding.
+        # Without recoverable ownership, no actor can safely access the snapshot.
+        return False
 
     def recommendations(
         self,

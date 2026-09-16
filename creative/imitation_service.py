@@ -12,7 +12,11 @@ import json
 import re
 from typing import Any, Awaitable, Callable
 
-from analysis.llm import LLMError, is_retryable_llm_exception
+from analysis.llm import (
+    LLMError,
+    LLMOutputTruncatedError,
+    is_retryable_llm_exception,
+)
 from creative.prompt_templates import blueprint_messages, repair_messages
 
 
@@ -87,6 +91,8 @@ async def complete_with_one_repair(
                 "repair_attempted": bool(attempt),
             }
         except Exception as exc:
+            if isinstance(exc, LLMOutputTruncatedError):
+                raise
             if is_retryable_llm_exception(exc):
                 raise
             last_error = exc

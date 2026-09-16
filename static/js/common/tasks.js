@@ -173,7 +173,7 @@
                         credential_status: 'missing'
                     },
                     modelDraft: {
-                        model_id: '', display_name: ''
+                        model_id: '', display_name: '', max_output_tokens: ''
                     },
                     modelEditor: null,
                     test: {model_id: '', result: null}

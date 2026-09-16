@@ -119,6 +119,7 @@ def _llm_state() -> dict:
         "modelDraft": {
             "model_id": "",
             "display_name": "",
+            "max_output_tokens": "",
         },
         "modelEditor": None,
         "test": {"model_id": "", "result": None},
@@ -398,6 +399,7 @@ def test_llm_sync_failure_keeps_manual_model_fallback_available() -> None:
         assert request["body"] == {
             "model_id": "manual-fallback",
             "display_name": "Manual Fallback",
+            "max_output_tokens": None,
             "is_enabled": True,
         }
         browser.close()
@@ -480,6 +482,7 @@ def test_llm_model_can_be_edited_and_selected_as_global_default() -> None:
         page.locator("#llm-edit-model-name-model-record-2").wait_for()
         page.get_by_role("button", name="编辑模型 Model B").wait_for(state="hidden")
         page.locator("#llm-edit-model-name-model-record-2").fill("Model B Updated")
+        page.locator("#llm-edit-model-max-output-tokens-model-record-2").fill("0")
         page.locator("#llm-edit-model-name-model-record-2").press("Enter")
         page.wait_for_function(
             "window.requests.some(item => item.url === '/api/llm/models/model-record-2')"
@@ -490,6 +493,7 @@ def test_llm_model_can_be_edited_and_selected_as_global_default() -> None:
         assert update_request["body"] == {
             "model_id": "model-b",
             "display_name": "Model B Updated",
+            "max_output_tokens": 0,
             "is_enabled": True,
         }
 

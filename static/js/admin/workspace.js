@@ -960,7 +960,7 @@ window.aiworkerModules.push(() => ({
                         is_enabled: provider.is_enabled !== false
                     };
                     state.modelDraft = {
-                        model_id: '', display_name: ''
+                        model_id: '', display_name: '', max_output_tokens: ''
                     };
                     state.modelEditor = null;
                     state.test = {
@@ -990,7 +990,7 @@ window.aiworkerModules.push(() => ({
                         is_enabled: true
                     };
                     state.modelDraft = {
-                        model_id: '', display_name: ''
+                        model_id: '', display_name: '', max_output_tokens: ''
                     };
                     state.modelEditor = null;
                     state.test = {model_id: '', result: null};
@@ -1129,6 +1129,9 @@ window.aiworkerModules.push(() => ({
                                 body: JSON.stringify({
                                     model_id: modelId,
                                     display_name: String(state.modelDraft.display_name || '').trim(),
+                                    max_output_tokens: String(state.modelDraft.max_output_tokens ?? '').trim() === ''
+                                        ? null
+                                        : Number(state.modelDraft.max_output_tokens),
                                     is_enabled: true
                                 })
                             }
@@ -1137,7 +1140,7 @@ window.aiworkerModules.push(() => ({
                         try { data = await response.json(); } catch (_) {}
                         if (!response.ok) throw new Error(this.llmResponseMessage(data, '添加模型失败'));
                         state.modelDraft = {
-                            model_id: '', display_name: ''
+                            model_id: '', display_name: '', max_output_tokens: ''
                         };
                         state.notice = '模型已添加';
                         await this.fetchLLMSettings({selectedProviderId: providerId});
@@ -1153,6 +1156,7 @@ window.aiworkerModules.push(() => ({
                         id: model.id,
                         model_id: model.model_id || '',
                         display_name: model.display_name || '',
+                        max_output_tokens: model.max_output_tokens ?? '',
                         is_enabled: model.is_enabled !== false,
                         is_default: Boolean(model.is_default)
                     };
@@ -1176,6 +1180,9 @@ window.aiworkerModules.push(() => ({
                             body: JSON.stringify({
                                 model_id: String(editor.model_id).trim(),
                                 display_name: String(editor.display_name || '').trim(),
+                                max_output_tokens: String(editor.max_output_tokens ?? '').trim() === ''
+                                    ? null
+                                    : Number(editor.max_output_tokens),
                                 is_enabled: Boolean(editor.is_enabled)
                             })
                         });

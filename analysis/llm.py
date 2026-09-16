@@ -104,6 +104,21 @@ class LLMIncompleteResponseError(LLMError):
     pass
 
 
+class LLMOutputTruncatedError(LLMIncompleteResponseError):
+    """The provider stopped because the generated output exhausted its budget."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        finish_reason: str,
+        returned_chars: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.finish_reason = str(finish_reason or "").strip().lower()
+        self.returned_chars = max(0, int(returned_chars or 0))
+
+
 class LLMRefusalError(LLMError):
     pass
 
@@ -124,10 +139,12 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         provider_name: str = "openai-compatible",
         wire_api: str = "chat_completions",
         reasoning_effort: str = "",
+        max_output_tokens: int | None = None,
         allow_insecure_http: bool = False,
         timeout: int = 180,
         max_retries: int = 2,
         retry_base_delay: float = 1.0,
+        retry_read_timeouts: bool = True,
         transport: httpx.AsyncBaseTransport | None = None,
         retry_callback: Callable[[int, int, str], Any] | None = None,
     ):
@@ -139,10 +156,12 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         self.provider_name = provider_name
         self.wire_api = wire_api
         self.reasoning_effort = reasoning_effort
+        self.max_output_tokens = _max_output_tokens(max_output_tokens)
         self.allow_insecure_http = bool(allow_insecure_http)
         self.timeout = timeout
         self.max_retries = max(0, min(5, int(max_retries)))
         self.retry_base_delay = max(0.0, float(retry_base_delay))
+        self.retry_read_timeouts = bool(retry_read_timeouts)
         self.transport = transport
         self.retry_callback = retry_callback
 
@@ -206,6 +225,7 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             reasoning_effort=resolve_reasoning_effort(
                 self.reasoning_effort, messages
             ),
+            max_output_tokens=self.max_output_tokens,
         )
         endpoint = f"{self.base_url}/responses"
         response = await self._post_with_retry(endpoint, headers, request_body)
@@ -233,6 +253,8 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             request_body["reasoning_effort"] = reasoning_effort
         if reasoning_effort == "none":
             request_body["temperature"] = 0.2
+        if self.max_output_tokens and self.max_output_tokens > 0:
+            request_body["max_tokens"] = self.max_output_tokens
         if json_mode:
             request_body["response_format"] = {"type": "json_object"}
         endpoint = f"{self.base_url}/chat/completions"
@@ -261,7 +283,11 @@ class OpenAICompatibleLLMProvider(LLMProvider):
                         if isinstance(exc, httpx.TimeoutException)
                         else str(exc)
                     )
-                    if not is_retryable_llm_exception(exc) or attempt >= self.max_retries:
+                    retryable = is_retryable_llm_exception(exc) and not (
+                        isinstance(exc, httpx.ReadTimeout)
+                        and not self.retry_read_timeouts
+                    )
+                    if not retryable or attempt >= self.max_retries:
                         if isinstance(exc, httpx.TimeoutException):
                             raise LLMTimeoutError(reason) from exc
                         raise
@@ -437,6 +463,14 @@ def resolve_llm_settings(
         if prefixed_max_retries not in (None, "")
         else getattr(config_module, "LLM_MAX_RETRIES", "")
     )
+    prefixed_retry_read_timeouts = getattr(
+        config_module, f"{prefix}_RETRY_READ_TIMEOUTS", ""
+    )
+    retry_read_timeouts_value = (
+        prefixed_retry_read_timeouts
+        if prefixed_retry_read_timeouts not in (None, "")
+        else getattr(config_module, "LLM_RETRY_READ_TIMEOUTS", True)
+    )
     scenario_base_url = (
         getattr(config_module, f"{scenario_prefix}_BASE_URL", "")
         if scenario_prefix
@@ -457,6 +491,31 @@ def resolve_llm_settings(
         if scenario_prefix
         else ""
     )
+    scenario_max_output_tokens = (
+        getattr(config_module, f"{scenario_prefix}_MAX_OUTPUT_TOKENS", None)
+        if scenario_prefix
+        else None
+    )
+    if scenario_prefix and scenario_max_output_tokens in (None, ""):
+        scenario_environment_value = os.getenv(
+            f"{scenario_prefix}_MAX_OUTPUT_TOKENS"
+        )
+        if scenario_environment_value is not None:
+            scenario_max_output_tokens = scenario_environment_value
+    model_max_output_tokens = database_default.get("max_output_tokens")
+    global_max_output_tokens = getattr(
+        config_module, "LLM_MAX_OUTPUT_TOKENS", None
+    )
+    if global_max_output_tokens in (None, ""):
+        global_environment_value = os.getenv("LLM_MAX_OUTPUT_TOKENS")
+        if global_environment_value is not None:
+            global_max_output_tokens = global_environment_value
+    if scenario_max_output_tokens not in (None, ""):
+        max_output_tokens_value = scenario_max_output_tokens
+    elif model_max_output_tokens is not None:
+        max_output_tokens_value = model_max_output_tokens
+    else:
+        max_output_tokens_value = global_max_output_tokens
     return {
         "provider": provider,
         "base_url": str(
@@ -483,6 +542,7 @@ def resolve_llm_settings(
             or getattr(config_module, "LLM_REASONING_EFFORT", "")
             or defaults["reasoning_effort"]
         ),
+        "max_output_tokens": _max_output_tokens(max_output_tokens_value),
         "allow_insecure_http": _boolean_setting(
             scenario_allow_insecure
             or database_default.get("allow_insecure_http", "")
@@ -499,6 +559,9 @@ def resolve_llm_settings(
             getattr(config_module, f"{prefix}_RETRY_BASE_DELAY", "")
             or getattr(config_module, "LLM_RETRY_BASE_DELAY", "")
         ),
+        "retry_read_timeouts": _boolean_setting_with_default(
+            retry_read_timeouts_value, True
+        ),
     }
 
 
@@ -506,6 +569,12 @@ def _boolean_setting(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _boolean_setting_with_default(value: Any, default: bool) -> bool:
+    if value in (None, ""):
+        return bool(default)
+    return _boolean_setting(value)
 
 
 def _timeout_seconds(value: Any, default: int = 180) -> int:
@@ -521,6 +590,20 @@ def _max_retries(value: Any, default: int = 2) -> int:
         return max(0, min(5, int(normalized)))
     except (TypeError, ValueError):
         return default
+
+
+def _max_output_tokens(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError) as exc:
+        raise LLMError("LLM_MAX_OUTPUT_TOKENS 必须是大于或等于 0 的整数") from exc
+    if isinstance(value, float) and not value.is_integer():
+        raise LLMError("LLM_MAX_OUTPUT_TOKENS 必须是大于或等于 0 的整数")
+    if normalized < 0:
+        raise LLMError("LLM_MAX_OUTPUT_TOKENS 必须是大于或等于 0 的整数")
+    return normalized
 
 
 def _retry_base_delay(value: Any, default: float = 1.0) -> float:
@@ -555,8 +638,10 @@ def create_llm_provider_from_config(
         settings_repository=settings_repository,
         database_default=selected_settings,
     )
+    resolved_max_output_tokens = settings["max_output_tokens"]
     if selected_settings is not None:
         settings.update(selected_settings)
+        settings["max_output_tokens"] = resolved_max_output_tokens
     provider = OpenAICompatibleLLMProvider(
         base_url=settings["base_url"],
         api_key=settings["api_key"],
@@ -566,10 +651,12 @@ def create_llm_provider_from_config(
         provider_name=settings["provider"],
         wire_api=settings["wire_api"],
         reasoning_effort=settings["reasoning_effort"],
+        max_output_tokens=settings["max_output_tokens"],
         allow_insecure_http=settings["allow_insecure_http"],
         timeout=settings["timeout_seconds"],
         max_retries=settings["max_retries"],
         retry_base_delay=settings["retry_base_delay"],
+        retry_read_timeouts=settings["retry_read_timeouts"],
         retry_callback=retry_callback,
     )
     provider.provider_id = str(settings.get("provider_id") or "")
@@ -590,6 +677,7 @@ def build_responses_request_body(
     messages: List[Dict[str, str]],
     json_mode: bool = False,
     reasoning_effort: str = "",
+    max_output_tokens: int | None = None,
 ) -> Dict[str, Any]:
     body: Dict[str, Any] = {
         "model": model,
@@ -599,6 +687,8 @@ def build_responses_request_body(
         body["text"] = {"format": {"type": "json_object"}}
     if reasoning_effort:
         body["reasoning"] = {"effort": reasoning_effort}
+    if max_output_tokens and max_output_tokens > 0:
+        body["max_output_tokens"] = max_output_tokens
     return body
 
 
@@ -630,15 +720,19 @@ def parse_chat_completion_text(response_json: Dict[str, Any]) -> str:
 
     choice = choices[0]
     finish_reason = str(choice.get("finish_reason") or "").strip().lower()
-    if finish_reason in {"length", "max_tokens", "max_output_tokens"}:
-        raise LLMIncompleteResponseError(
-            "Chat Completions response is incomplete: max_output_tokens."
-        )
-
     message = choice.get("message") or {}
     content = message.get("content", "")
     if isinstance(content, list):
         content = "".join(item.get("text", "") if isinstance(item, dict) else str(item) for item in content)
+    if finish_reason in {"length", "max_tokens", "max_output_tokens"}:
+        returned_chars = len(str(content))
+        raise LLMOutputTruncatedError(
+            "模型输出被输出上限截断"
+            f"（finish_reason={finish_reason}，已返回 {returned_chars} 字符）",
+            finish_reason=finish_reason,
+            returned_chars=returned_chars,
+        )
+
     return str(content).strip()
 
 
@@ -650,6 +744,25 @@ def parse_responses_text(response_json: Dict[str, Any]) -> str:
             if isinstance(details, dict)
             else str(details)
         )
+        normalized_reason = str(reason or "unknown").strip().lower()
+        if normalized_reason in {"length", "max_tokens", "max_output_tokens"}:
+            partial_text = str(response_json.get("output_text") or "")
+            if not partial_text:
+                partial_text = "".join(
+                    str(content.get("text") or "")
+                    for item in response_json.get("output") or []
+                    if isinstance(item, dict)
+                    for content in item.get("content") or []
+                    if isinstance(content, dict)
+                    and content.get("type") in {"output_text", "text"}
+                )
+            returned_chars = len(partial_text)
+            raise LLMOutputTruncatedError(
+                "模型输出被输出上限截断"
+                f"（incomplete_reason={normalized_reason}，已返回 {returned_chars} 字符）",
+                finish_reason=normalized_reason,
+                returned_chars=returned_chars,
+            )
         raise LLMIncompleteResponseError(
             f"Responses API response is incomplete: {reason}."
         )

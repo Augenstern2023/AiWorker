@@ -250,6 +250,55 @@ def test_repository_sets_an_enabled_model_as_effective_default(monkeypatch):
     }
 
 
+def test_model_max_output_tokens_round_trips_and_drives_runtime(monkeypatch):
+    monkeypatch.setenv("MODEL_TOKEN_LIMIT_KEY", "runtime-secret")
+    repository = _repository()
+    provider = repository.create_provider(
+        name="Token Limit Provider",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+        api_key_env_var="MODEL_TOKEN_LIMIT_KEY",
+    )
+    inherited = repository.create_model(
+        provider["id"], model_id="inherit-model"
+    )
+    configured = repository.create_model(
+        provider["id"], model_id="configured-model", max_output_tokens=16384
+    )
+
+    assert inherited["max_output_tokens"] is None
+    assert configured["max_output_tokens"] == 16384
+    assert repository.effective_model(configured["id"])["max_output_tokens"] == 16384
+
+    disabled_wire_limit = repository.update_model(
+        configured["id"], max_output_tokens=0
+    )
+    assert disabled_wire_limit["max_output_tokens"] == 0
+    assert repository.effective_model(configured["id"])["max_output_tokens"] == 0
+
+    cleared = repository.update_model(configured["id"], max_output_tokens=None)
+    assert cleared["max_output_tokens"] is None
+    assert "max_output_tokens" not in repository.effective_model(configured["id"])
+
+
+@pytest.mark.parametrize("value", [-1, "invalid", 1.5])
+def test_repository_rejects_invalid_model_max_output_tokens(value):
+    repository = _repository()
+    provider = repository.create_provider(
+        name="Invalid Token Limit Provider",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+        api_key_env_var="INVALID_TOKEN_LIMIT_KEY",
+    )
+
+    with pytest.raises(ValueError, match="输出 Token"):
+        repository.create_model(
+            provider["id"], model_id="invalid-model", max_output_tokens=value
+        )
+
+
 def test_repository_lists_and_resolves_enabled_models_without_exposing_secrets(
     monkeypatch,
 ):

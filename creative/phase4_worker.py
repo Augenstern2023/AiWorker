@@ -674,7 +674,15 @@ async def _run_once(job: CrawlJob) -> None:
             scope = "全剧阶段弧线" if request_kind == "series_arc" else (
                 f"第 {request.get('batch_start')}-{request.get('batch_end')} 集"
             )
-            if request_kind == "series_arc":
+            if phase == "truncated":
+                message = f"{scope}输出达到上限，准备拆分"
+            elif phase == "split":
+                message = (
+                    f"已将第 {request.get('batch_start')}-{request.get('batch_end')} 集拆分为"
+                    f"第 {request.get('left_start')}-{request.get('left_end')} 集和"
+                    f"第 {request.get('right_start')}-{request.get('right_end')} 集"
+                )
+            elif request_kind == "series_arc":
                 message = "正在规划全剧阶段弧线" if phase == "started" else (
                     f"{scope}模型响应{'失败' if phase == 'failed' else '完成'}"
                 )
@@ -692,10 +700,10 @@ async def _run_once(job: CrawlJob) -> None:
                 job,
                 "progress",
                 message,
-                "error" if phase == "failed" else "info",
+                "error" if phase == "failed" else "warning" if phase == "truncated" else "info",
                 payload,
             )
-            if phase in {"finished", "failed"}:
+            if phase in {"finished", "failed", "truncated"}:
                 active_outline_request.clear()
 
         def save_outline_checkpoint(

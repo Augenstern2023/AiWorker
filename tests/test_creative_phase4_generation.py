@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 import pytest
 
+from analysis.llm import LLMOutputTruncatedError
 from core.job import CrawlJob
 from creative import api as creative_api
 from creative import phase4_worker
@@ -542,6 +543,7 @@ async def test_outline_generation_emits_request_progress_for_series_arc_and_chun
     assert all(set(event) == {
         "phase", "request_kind", "batch_start", "batch_end", "batch_started_at",
         "reasoning_effort", "prompt_chars", "request_elapsed_seconds", "batch_in_flight",
+        "llm_provider", "llm_model", "wire_api", "max_output_tokens",
     } for event in events)
     assert events[0]["batch_start"] is events[0]["batch_end"] is None
     assert (events[2]["batch_start"], events[2]["batch_end"]) == (1, 1)
@@ -727,7 +729,176 @@ async def test_outline_generation_chunks_every_ten_episodes():
     assert len(result["episodes"]) == 12
     assert result["series_overview"] == series_overview()
     assert progress == [(10, 12), (12, 12)]
-    assert meta["chunk_size"] == 10
+    assert meta["preferred_chunk_size"] == 10
+
+
+@pytest.mark.asyncio
+async def test_outline_generation_splits_a_truncated_chunk_and_checkpoints_each_child():
+    provider = SequentialProvider([
+        series_arc_payload(),
+        LLMOutputTruncatedError(
+            "模型输出被输出上限截断（finish_reason=length，已返回 5602 字符）",
+            finish_reason="length",
+            returned_chars=5602,
+        ),
+        {"episodes": [outline_episode(number) for number in range(1, 6)]},
+        {"episodes": [outline_episode(number) for number in range(6, 11)]},
+    ])
+    checkpoints = []
+    progress = []
+    request_progress = []
+
+    result, meta = await generate_outline_bundle(
+        provider,
+        {"name": "项目", "target_episode_count": 10},
+        {"title": "Brief"},
+        [{"content": {"name": "周晴"}}],
+        [],
+        on_checkpoint=lambda _arc, episodes, snapshot: checkpoints.append(
+            (len(episodes), dict(snapshot))
+        ),
+        on_progress=lambda done, total: progress.append((done, total)),
+        on_request_progress=request_progress.append,
+    )
+
+    assert [item["episode"] for item in result["episodes"]] == list(range(1, 11))
+    assert [count for count, _snapshot in checkpoints] == [5, 10]
+    assert progress == [(5, 10), (10, 10)]
+    assert meta["preferred_chunk_size"] == 10
+    assert meta["split_count"] == 1
+    assert meta["actual_batches"] == [
+        {"start": 1, "end": 10, "status": "truncated"},
+        {"start": 1, "end": 5, "status": "completed"},
+        {"start": 6, "end": 10, "status": "completed"},
+    ]
+    right_payload = json.loads(provider.calls[3][1]["content"])
+    assert [
+        item["episode"] for item in right_payload["history_context"]["recent_episodes"]
+    ] == list(range(1, 6))
+    assert [
+        event["phase"]
+        for event in request_progress
+        if event.get("phase") in {"truncated", "split"}
+    ] == ["truncated", "split"]
+    assert next(
+        event for event in request_progress if event.get("phase") == "truncated"
+    )["returned_chars"] == 5602
+
+
+@pytest.mark.asyncio
+async def test_outline_generation_recursively_splits_a_truncated_child_range():
+    provider = SequentialProvider([
+        series_arc_payload(),
+        LLMOutputTruncatedError(
+            "1-10 truncated", finish_reason="length", returned_chars=5000
+        ),
+        LLMOutputTruncatedError(
+            "1-5 truncated", finish_reason="max_tokens", returned_chars=4000
+        ),
+        {"episodes": [outline_episode(number) for number in range(1, 3)]},
+        {"episodes": [outline_episode(number) for number in range(3, 6)]},
+        {"episodes": [outline_episode(number) for number in range(6, 11)]},
+    ])
+
+    result, meta = await generate_outline_bundle(
+        provider,
+        {"name": "项目", "target_episode_count": 10},
+        {"title": "Brief"},
+        [{"content": {"name": "周晴"}}],
+        [],
+    )
+
+    assert [item["episode"] for item in result["episodes"]] == list(range(1, 11))
+    assert meta["split_count"] == 2
+    assert meta["actual_batches"] == [
+        {"start": 1, "end": 10, "status": "truncated"},
+        {"start": 1, "end": 5, "status": "truncated"},
+        {"start": 1, "end": 2, "status": "completed"},
+        {"start": 3, "end": 5, "status": "completed"},
+        {"start": 6, "end": 10, "status": "completed"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_outline_generation_stops_when_one_episode_is_still_truncated():
+    provider = SequentialProvider([
+        series_arc_payload(),
+        LLMOutputTruncatedError(
+            "single truncated", finish_reason="max_output_tokens", returned_chars=3000
+        ),
+    ])
+
+    with pytest.raises(
+        LLMOutputTruncatedError,
+        match="单集生成仍达到模型输出上限",
+    ):
+        await generate_outline_bundle(
+            provider,
+            {"name": "项目", "target_episode_count": 1},
+            {"title": "Brief"},
+            [{"content": {"name": "周晴"}}],
+            [],
+        )
+
+    assert len(provider.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_outline_split_keeps_left_checkpoint_when_right_episode_fails():
+    provider = SequentialProvider([
+        series_arc_payload(),
+        LLMOutputTruncatedError(
+            "1-2 truncated", finish_reason="length", returned_chars=4000
+        ),
+        {"episodes": [outline_episode(1)]},
+        LLMOutputTruncatedError(
+            "2 truncated", finish_reason="length", returned_chars=3500
+        ),
+    ])
+    checkpoints = []
+
+    with pytest.raises(
+        LLMOutputTruncatedError,
+        match="第 2 集单集生成仍达到模型输出上限",
+    ):
+        await generate_outline_bundle(
+            provider,
+            {"name": "项目", "target_episode_count": 2},
+            {"title": "Brief"},
+            [{"content": {"name": "周晴"}}],
+            [],
+            on_checkpoint=lambda _arc, episodes, _meta: checkpoints.append(
+                [item["episode"] for item in episodes]
+            ),
+        )
+
+    assert checkpoints == [[1]]
+
+
+@pytest.mark.asyncio
+async def test_outline_resume_after_split_checkpoint_starts_at_next_episode():
+    provider = SequentialProvider([{
+        "episodes": [outline_episode(number) for number in range(6, 11)],
+    }])
+
+    result, _ = await generate_outline_bundle(
+        provider,
+        {"name": "项目", "target_episode_count": 10},
+        {"title": "Brief"},
+        [{"content": {"name": "周晴"}}],
+        [],
+        resume_episodes=[outline_episode(number) for number in range(1, 6)],
+        resume_series_arc="相识、对抗、合作",
+        resume_stages=["相识", "对抗", "合作"],
+        resume_series_overview=series_overview(),
+    )
+
+    assert len(provider.calls) == 1
+    payload = json.loads(provider.calls[0][1]["content"])
+    assert [
+        item["episode"] for item in payload["history_context"]["recent_episodes"]
+    ] == [1, 2, 3, 4, 5]
+    assert [item["episode"] for item in result["episodes"]] == list(range(1, 11))
 
 
 @pytest.mark.asyncio

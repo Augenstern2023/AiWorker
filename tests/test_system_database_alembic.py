@@ -55,11 +55,15 @@ def run_alembic_upgrade(postgres_url: str, monkeypatch: pytest.MonkeyPatch) -> N
     command.upgrade(config, "head")
 
 
-def test_prompt_pricing_migration_extends_deployed_system_head():
+def test_model_output_limit_migration_extends_deployed_system_head():
     config = Config(str(PROJECT_ROOT / "alembic.ini"))
     revisions = ScriptDirectory.from_config(config)
 
-    assert revisions.get_current_head() == "0023_llm_model_pricing"
+    assert revisions.get_current_head() == "0024_llm_model_max_output_tokens"
+    assert (
+        revisions.get_revision("0024_llm_model_max_output_tokens").down_revision
+        == "0023_llm_model_pricing"
+    )
     assert (
         revisions.get_revision("0023_llm_model_pricing").down_revision
         == "0022_remove_team_management"
@@ -81,6 +85,16 @@ def test_llm_provider_schema_declares_local_api_key_reference():
     assert isinstance(columns.api_key_env_var.type, Text)
     assert columns.api_key_env_var.nullable is False
     assert str(columns.api_key_env_var.server_default.arg) == "''"
+
+
+def test_llm_model_schema_declares_nullable_output_token_limit():
+    table = SYSTEM_METADATA.tables["llm_models"]
+
+    assert table.c.max_output_tokens.nullable is True
+    assert table.c.max_output_tokens.type.__class__.__name__ == "Integer"
+    assert "ck_llm_models_max_output_tokens" in {
+        constraint.name for constraint in table.constraints
+    }
 
 
 def test_system_schema_declares_all_shared_tables():
@@ -123,7 +137,7 @@ def test_llm_provider_schema_declares_local_api_key_reference():
     assert str(columns.api_key_env_var.server_default.arg) == "''"
 
 
-def test_empty_schema_upgrade_reaches_team_removal_head(postgres_url):
+def test_empty_schema_upgrade_reaches_model_output_limit_head(postgres_url):
     engine = create_engine(postgres_url)
     try:
         with engine.connect() as connection:
@@ -131,7 +145,7 @@ def test_empty_schema_upgrade_reaches_team_removal_head(postgres_url):
                 connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
-                == "0022_remove_team_management"
+                == "0024_llm_model_max_output_tokens"
             )
         column = next(
             item
@@ -533,6 +547,15 @@ def test_upgrade_head_creates_system_tables(postgres_url, monkeypatch):
         assert inspector.has_table("llm_providers")
         assert inspector.has_table("llm_models")
         assert inspector.has_table("llm_settings")
+        model_columns = {
+            column["name"]: column
+            for column in inspector.get_columns("llm_models")
+        }
+        assert model_columns["max_output_tokens"]["nullable"] is True
+        assert "ck_llm_models_max_output_tokens" in {
+            constraint["name"]
+            for constraint in inspector.get_check_constraints("llm_models")
+        }
     finally:
         engine.dispose()
 

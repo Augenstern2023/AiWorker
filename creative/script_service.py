@@ -15,7 +15,11 @@ import re
 import time
 from typing import Any, Callable
 
-from analysis.llm import LLMError, is_retryable_llm_exception
+from analysis.llm import (
+    LLMError,
+    LLMOutputTruncatedError,
+    is_retryable_llm_exception,
+)
 from creative.imitation_service import complete_with_one_repair
 from creative.outline_fields import OUTLINE_FIELD_LABELS, OUTLINE_TEXT_FIELDS
 from creative.outline_overview import normalize_series_overview
@@ -458,6 +462,10 @@ async def _complete_outline_request(
         "batch_started_at": batch_started_at,
         "reasoning_effort": reasoning_effort,
         "prompt_chars": sum(len(str(message.get("content") or "")) for message in messages),
+        "llm_provider": str(getattr(provider, "provider_display_name", "") or getattr(provider, "provider_name", "")),
+        "llm_model": str(getattr(provider, "model_display_name", "") or getattr(provider, "model", "")),
+        "wire_api": str(getattr(provider, "wire_api", "")),
+        "max_output_tokens": getattr(provider, "max_output_tokens", None),
     }
     await _notify_outline_request_progress(
         on_request_progress,
@@ -467,6 +475,19 @@ async def _complete_outline_request(
         result = await complete_with_one_repair(
             provider, messages, validator, max_attempts=max_attempts
         )
+    except LLMOutputTruncatedError as exc:
+        await _notify_outline_request_progress(
+            on_request_progress,
+            {
+                **shared,
+                "phase": "truncated",
+                "request_elapsed_seconds": time.monotonic() - request_started_at,
+                "batch_in_flight": False,
+                "finish_reason": exc.finish_reason,
+                "returned_chars": exc.returned_chars,
+            },
+        )
+        raise
     except Exception:
         await _notify_outline_request_progress(
             on_request_progress,
@@ -642,35 +663,89 @@ async def generate_outline_bundle(
             reasoning_effort=reasoning_effort,
             on_request_progress=on_request_progress,
         )
+    preferred_chunk_size = 10
+    actual_batches: list[dict[str, Any]] = []
+    split_count = 0
+    meta.update(
+        {
+            "preferred_chunk_size": preferred_chunk_size,
+            "actual_batches": actual_batches,
+            "split_count": split_count,
+        }
+    )
     missing_fields: dict[int, list[str]] = {}
-    for start in range(len(episodes) + 1, total + 1, 10):
-        end = min(total, start + 9)
+
+    async def generate_range(start: int, end: int) -> None:
+        nonlocal split_count
         await _checkpoint(checkpoint)
-        chunk_result, chunk_meta = await _complete_outline_request(
-            provider,
-            outline_messages(
-                {**base, "series_arc": arc, "history_context": build_outline_history_context(episodes)},
-                start,
-                end,
-                prompt_snapshot,
-            ),
-            lambda payload, chunk_start=start, chunk_end=end: _normalize_outline_chunk(
-                payload,
-                chunk_start,
-                chunk_end,
-                default_estimated_seconds=default_estimated_seconds,
-            ),
-            request_kind="outline_chunk",
-            batch_start=start,
-            batch_end=end,
-            reasoning_effort=reasoning_effort,
-            on_request_progress=on_request_progress,
-            max_attempts=4,
-        )
+        try:
+            chunk_result, chunk_meta = await _complete_outline_request(
+                provider,
+                outline_messages(
+                    {
+                        **base,
+                        "series_arc": arc,
+                        "history_context": build_outline_history_context(episodes),
+                    },
+                    start,
+                    end,
+                    prompt_snapshot,
+                ),
+                lambda payload, chunk_start=start, chunk_end=end: _normalize_outline_chunk(
+                    payload,
+                    chunk_start,
+                    chunk_end,
+                    default_estimated_seconds=default_estimated_seconds,
+                ),
+                request_kind="outline_chunk",
+                batch_start=start,
+                batch_end=end,
+                reasoning_effort=reasoning_effort,
+                on_request_progress=on_request_progress,
+                max_attempts=4,
+            )
+        except LLMOutputTruncatedError as exc:
+            actual_batches.append(
+                {"start": start, "end": end, "status": "truncated"}
+            )
+            if start == end:
+                raise LLMOutputTruncatedError(
+                    f"第 {start} 集单集生成仍达到模型输出上限；"
+                    "请提高模型输出上限或减少单集字段内容",
+                    finish_reason=exc.finish_reason,
+                    returned_chars=exc.returned_chars,
+                ) from exc
+            midpoint = (start + end - 1) // 2
+            split_count += 1
+            meta["split_count"] = split_count
+            await _notify_outline_request_progress(
+                on_request_progress,
+                {
+                    "phase": "split",
+                    "request_kind": "outline_chunk",
+                    "batch_start": start,
+                    "batch_end": end,
+                    "left_start": start,
+                    "left_end": midpoint,
+                    "right_start": midpoint + 1,
+                    "right_end": end,
+                    "finish_reason": exc.finish_reason,
+                    "returned_chars": exc.returned_chars,
+                    "reasoning_effort": reasoning_effort,
+                    "batch_in_flight": False,
+                },
+            )
+            await generate_range(start, midpoint)
+            await generate_range(midpoint + 1, end)
+            return
+
         chunk = chunk_result["episodes"]
         episodes.extend(chunk)
         missing_fields.update(chunk_result["missing_fields"])
         meta.update({key: value for key, value in chunk_meta.items() if value})
+        actual_batches.append(
+            {"start": start, "end": end, "status": "completed"}
+        )
         if on_checkpoint:
             result = on_checkpoint(arc, episodes, meta)
             if inspect.isawaitable(result):
@@ -679,6 +754,9 @@ async def generate_outline_bundle(
             result = on_progress(len(episodes), total)
             if inspect.isawaitable(result):
                 await result
+
+    for start in range(len(episodes) + 1, total + 1, preferred_chunk_size):
+        await generate_range(start, min(total, start + preferred_chunk_size - 1))
     fallback_fields = await _repair_outline_fields(
         provider, base, arc, episodes, missing_fields, prompt_snapshot
     )
@@ -704,7 +782,14 @@ async def generate_outline_bundle(
             result = on_checkpoint(arc, episodes, meta)
             if inspect.isawaitable(result):
                 await result
-    meta.update({"prompt_template_version": PROMPT_TEMPLATE_VERSION, "chunk_size": 10})
+    meta.update(
+        {
+            "prompt_template_version": PROMPT_TEMPLATE_VERSION,
+            "preferred_chunk_size": preferred_chunk_size,
+            "actual_batches": actual_batches,
+            "split_count": split_count,
+        }
+    )
     return {
         "series_arc": arc["series_arc"],
         "stages": arc["stages"],

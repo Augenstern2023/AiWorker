@@ -329,3 +329,59 @@ async def test_failed_attempt_reporters_do_not_log_callback_exception_text(caplo
     )
     reporter({"attempt": 2, "max_attempts": 2, "ok": True})
     assert secret not in caplog.text
+
+
+@pytest.mark.parametrize("failure", ["validator", "supplier", "truncated"])
+def test_phase4_terminal_failure_keeps_sensitive_error_only_in_diagnostics(failure, tmp_path, monkeypatch, capsys):
+    import sys
+    import httpx
+    from analysis.llm import LLMError, OpenAICompatibleLLMProvider
+    from core.job import CrawlJob
+    from creative import imitation_service
+    from tests.test_worker_llm_usage import _setup_worker
+
+    secret = "PRIVATE_TERMINAL_SYSTEM_PROMPT"
+    fragment = "  " + secret + "\n"
+    worker, job, content = _setup_worker("creative", tmp_path, monkeypatch)
+    if failure == "validator":
+        def validate(payload, count):
+            raise ValueError(secret)
+        monkeypatch.setattr(imitation_service, "_validate_blueprints", validate)
+
+    class Provider(OpenAICompatibleLLMProvider):
+        async def complete_json(self, messages, schema=None):
+            result = await super().complete_json(messages, schema=schema)
+            if failure == "supplier":
+                raise LLMError(secret)
+            return result
+
+    def handler(request):
+        return httpx.Response(200, json={
+            "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+            "choices": [{"message": {"content": fragment if failure == "truncated" else json.dumps(content)},
+                         "finish_reason": "length" if failure == "truncated" else "stop"}],
+        })
+    provider = Provider("https://llm.test/v1", "secret-key", "model", transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(worker, "create_provider", lambda *args, **kwargs: provider)
+    monkeypatch.setattr(CrawlJob, "load", lambda *args: job)
+    monkeypatch.setattr(sys, "argv", ["worker", "--job-file", "unused.json"])
+    monkeypatch.chdir(tmp_path)
+
+    assert worker.main() == 1
+    stdout = capsys.readouterr().out
+    events = [json.loads(line) for line in stdout.splitlines() if line.startswith("{")]
+    terminal = [event for event in events if event["event"] == "job_failed"]
+    assert len(terminal) == 1
+    assert secret not in stdout
+    assert secret not in (tmp_path / ".runtime" / "logs" / f"{job.job_id}.jsonl").read_text(encoding="utf-8")
+    payload = terminal[0]["payload"]
+    assert payload["error_code"] == ("llm_output_truncated" if failure == "truncated" else "llm_error")
+    assert payload["llm_usage"]["total_tokens"] == (6 if failure == "truncated" else 12)
+    assert payload["llm_usage"]["complete"] is True
+    diagnostic = json.loads(Path(payload["error_debug_path"]).read_text(encoding="utf-8"))
+    if failure == "truncated":
+        assert diagnostic["partial_text"] == fragment
+        assert diagnostic["finish_reason"] == "length"
+        assert diagnostic["returned_chars"] == len(fragment)
+    else:
+        assert secret in diagnostic["error"]

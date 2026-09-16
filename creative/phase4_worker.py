@@ -23,7 +23,12 @@ from analysis.llm import create_llm_provider_from_config, get_llm_usage_snapshot
 from core.events import emit_event
 from core.job import CrawlJob
 from creative.imitation_service import complete_with_one_repair, generate_blueprints
-from creative.llm_observability import build_attempt_reporter, set_attempt_reporter
+from creative.llm_observability import (
+    build_attempt_reporter,
+    dump_terminal_error,
+    public_failure_summary,
+    set_attempt_reporter,
+)
 from creative.original_direction_service import (
     derive_original_direction,
     generate_original_directions,
@@ -1113,12 +1118,14 @@ def main() -> int:
     try:
         asyncio.run(run(job))
     except Exception as exc:
+        error_code, message = public_failure_summary(exc)
+        error_debug_path = dump_terminal_error(job.job_id, exc)
         emit(
             job,
             "job_failed",
-            str(exc),
+            message,
             "error",
-            _usage_payload(job),
+            _usage_payload(job, {"error_code": error_code, "error_debug_path": error_debug_path}),
         )
         return 1
     return 0

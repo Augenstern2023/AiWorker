@@ -23,6 +23,8 @@ import logging
 from pathlib import Path
 from typing import Any, Callable
 
+from analysis.llm import LLMError, LLMOutputTruncatedError, LLMTimeoutError
+
 logger = logging.getLogger(__name__)
 
 
@@ -205,6 +207,42 @@ def _available_debug_path(path: Path) -> Path:
         candidate = path.with_name(f"{path.stem}-{sequence}{path.suffix}")
         sequence += 1
     return candidate
+
+
+def public_failure_summary(exc: Exception) -> tuple[str, str]:
+    """Classify failures without exposing supplier or validator error text."""
+    if isinstance(exc, LLMOutputTruncatedError):
+        return "llm_output_truncated", "模型输出被截断，请缩小单次生成范围或调整输出上限。"
+    if isinstance(exc, LLMTimeoutError):
+        return "llm_timeout", "模型调用超时，请稍后重试。"
+    if isinstance(exc, LLMError):
+        return "llm_error", "模型调用或响应校验失败，请查看任务诊断。"
+    return "creative_generation_failed", "创作任务失败，请查看任务诊断。"
+
+
+def dump_terminal_error(job_id: str, exc: Exception) -> str | None:
+    """Keep the original failure in task diagnostics, never in public events."""
+    try:
+        target_dir = LLM_DEBUG_BASE_DIR / str(job_id) / "llm_debug"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        path = _available_debug_path(target_dir / "terminal-error.json")
+        diagnostic = {
+            "job_id": str(job_id),
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "cause": str(exc.__cause__) if exc.__cause__ is not None else None,
+        }
+        if isinstance(exc, LLMOutputTruncatedError):
+            diagnostic.update(
+                finish_reason=exc.finish_reason,
+                returned_chars=exc.returned_chars,
+                partial_text=exc.partial_text,
+            )
+        path.write_text(json.dumps(diagnostic, ensure_ascii=False, indent=2), encoding="utf-8")
+        return str(path)
+    except Exception:
+        logger.warning("写入任务失败诊断文件失败")
+        return None
 
 
 def build_attempt_reporter(

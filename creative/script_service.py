@@ -714,6 +714,7 @@ async def generate_outline_bundle(
                     "请提高模型输出上限或减少单集字段内容",
                     finish_reason=exc.finish_reason,
                     returned_chars=exc.returned_chars,
+                    partial_text=exc.partial_text,
                 ) from exc
             midpoint = (start + end - 1) // 2
             split_count += 1

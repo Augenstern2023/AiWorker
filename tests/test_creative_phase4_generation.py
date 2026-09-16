@@ -824,14 +824,15 @@ async def test_outline_generation_stops_when_one_episode_is_still_truncated():
     provider = SequentialProvider([
         series_arc_payload(),
         LLMOutputTruncatedError(
-            "single truncated", finish_reason="max_output_tokens", returned_chars=3000
+            "single truncated", finish_reason="max_output_tokens", returned_chars=3,
+            partial_text="abc",
         ),
     ])
 
     with pytest.raises(
         LLMOutputTruncatedError,
         match="单集生成仍达到模型输出上限",
-    ):
+    ) as caught:
         await generate_outline_bundle(
             provider,
             {"name": "项目", "target_episode_count": 1},
@@ -841,6 +842,9 @@ async def test_outline_generation_stops_when_one_episode_is_still_truncated():
         )
 
     assert len(provider.calls) == 2
+    assert caught.value.finish_reason == "max_output_tokens"
+    assert caught.value.returned_chars == 3
+    assert caught.value.partial_text == "abc"
 
 
 @pytest.mark.asyncio

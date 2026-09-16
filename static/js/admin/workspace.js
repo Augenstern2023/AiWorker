@@ -920,6 +920,13 @@ window.aiworkerModules.push(() => ({
 
                 async fetchLLMSettings({selectedProviderId = ''} = {}) {
                     const state = this.llmSettings;
+                    if (state.saving || state.testing || state.syncing || state.modelSaving) return;
+                    return this._refreshLLMSettings({selectedProviderId});
+                },
+
+                // Operation completion refreshes must run while their lock is still held.
+                async _refreshLLMSettings({selectedProviderId = ''} = {}) {
+                    const state = this.llmSettings;
                     state.loading = true;
                     state.error = '';
                     try {
@@ -934,8 +941,8 @@ window.aiworkerModules.push(() => ({
                         const provider = state.providers.find(item => item.id === preferredId)
                             || state.providers[0]
                             || null;
-                        if (provider) this.selectLLMProvider(provider);
-                        else this.startNewLLMProvider(Object.keys(state.presets)[0] || 'custom');
+                        if (provider) this._selectLLMProvider(provider);
+                        else this._startNewLLMProvider(Object.keys(state.presets)[0] || 'custom');
                     } catch (error) {
                         state.error = error.message || '读取 LLM 设置失败，请重试';
                     } finally {
@@ -944,6 +951,12 @@ window.aiworkerModules.push(() => ({
                 },
 
                 selectLLMProvider(provider) {
+                    const state = this.llmSettings;
+                    if (state.saving || state.testing || state.syncing || state.modelSaving) return;
+                    this._selectLLMProvider(provider);
+                },
+
+                _selectLLMProvider(provider) {
                     if (!provider) return;
                     const state = this.llmSettings;
                     state.selectedProviderId = provider.id;
@@ -976,6 +989,12 @@ window.aiworkerModules.push(() => ({
 
                 startNewLLMProvider(presetName = 'openai') {
                     const state = this.llmSettings;
+                    if (state.saving || state.testing || state.syncing || state.modelSaving) return;
+                    this._startNewLLMProvider(presetName);
+                },
+
+                _startNewLLMProvider(presetName = 'openai') {
+                    const state = this.llmSettings;
                     const preset = state.presets[presetName]
                         || state.presets.custom
                         || {label: '', base_url: '', wire_api: 'chat_completions'};
@@ -1004,6 +1023,8 @@ window.aiworkerModules.push(() => ({
                 },
 
                 applyLLMProviderPreset() {
+                    const state = this.llmSettings;
+                    if (state.saving || state.testing || state.syncing || state.modelSaving) return;
                     const editor = this.llmSettings.editor;
                     const preset = this.llmSettings.presets[editor.preset];
                     if (!preset) return;
@@ -1075,7 +1096,7 @@ window.aiworkerModules.push(() => ({
                                 }
                             );
                             if (!credentialResponse.ok) {
-                                await this.fetchLLMSettings({selectedProviderId: providerId});
+                                await this._refreshLLMSettings({selectedProviderId: providerId});
                                 state.error = '提供商设置已保存，但新密钥未保存，请重试';
                                 return;
                             }
@@ -1083,10 +1104,10 @@ window.aiworkerModules.push(() => ({
                         } else {
                             state.notice = editor.id ? '提供商设置已更新' : '提供商已添加';
                         }
-                        await this.fetchLLMSettings({selectedProviderId: providerId});
+                        await this._refreshLLMSettings({selectedProviderId: providerId});
                     } catch (error) {
                         if (metadataSaved && hasApiKey) {
-                            await this.fetchLLMSettings({selectedProviderId: providerId});
+                            await this._refreshLLMSettings({selectedProviderId: providerId});
                             state.error = '提供商设置已保存，但新密钥未保存，请重试';
                         } else {
                             state.error = error.message || '保存提供商失败';
@@ -1114,7 +1135,7 @@ window.aiworkerModules.push(() => ({
                         try { data = await response.json(); } catch (_) {}
                         if (!response.ok) throw new Error(this.llmResponseMessage(data, '清除页面密钥失败'));
                         state.notice = '页面密钥已清除';
-                        await this.fetchLLMSettings({selectedProviderId: providerId});
+                        await this._refreshLLMSettings({selectedProviderId: providerId});
                     } catch (_) {
                         state.error = '清除页面密钥失败，请重试';
                     } finally {
@@ -1145,7 +1166,7 @@ window.aiworkerModules.push(() => ({
                         try { data = await response.json(); } catch (_) {}
                         if (!response.ok) throw new Error(this.llmResponseMessage(data, '删除提供商失败'));
                         const nextProvider = state.providers.find(item => item.id !== provider.id);
-                        await this.fetchLLMSettings({selectedProviderId: nextProvider?.id || ''});
+                        await this._refreshLLMSettings({selectedProviderId: nextProvider?.id || ''});
                         state.notice = `提供商 ${label} 已删除`;
                     } catch (error) {
                         state.error = error.message || '删除提供商失败';
@@ -1171,7 +1192,7 @@ window.aiworkerModules.push(() => ({
                         try { data = await response.json(); } catch (_) {}
                         if (!response.ok) throw new Error(this.llmResponseMessage(data, '模型同步失败'));
                         state.notice = `模型同步完成：新增 ${Number(data.added || 0)} 个，更新 ${Number(data.updated || 0)} 个`;
-                        await this.fetchLLMSettings({selectedProviderId: providerId});
+                        await this._refreshLLMSettings({selectedProviderId: providerId});
                     } catch (error) {
                         const message = error.message || '模型同步失败';
                         state.error = message.includes('手工新增')
@@ -1217,7 +1238,7 @@ window.aiworkerModules.push(() => ({
                             model_id: '', display_name: '', max_output_tokens: ''
                         };
                         state.notice = '模型已添加';
-                        await this.fetchLLMSettings({selectedProviderId: providerId});
+                        await this._refreshLLMSettings({selectedProviderId: providerId});
                     } catch (error) {
                         state.error = error.message || '添加模型失败';
                     } finally {
@@ -1226,6 +1247,8 @@ window.aiworkerModules.push(() => ({
                 },
 
                 startEditLLMModel(model) {
+                    const state = this.llmSettings;
+                    if (state.saving || state.testing || state.syncing || state.modelSaving) return;
                     this.llmSettings.modelEditor = {
                         id: model.id,
                         model_id: model.model_id || '',
@@ -1267,7 +1290,7 @@ window.aiworkerModules.push(() => ({
                         if (!response.ok) throw new Error(this.llmResponseMessage(data, '更新模型失败'));
                         state.modelEditor = null;
                         state.notice = '模型设置已更新';
-                        await this.fetchLLMSettings({selectedProviderId: state.editor.id});
+                        await this._refreshLLMSettings({selectedProviderId: state.editor.id});
                     } catch (error) {
                         state.error = error.message || '更新模型失败';
                     } finally {
@@ -1293,7 +1316,7 @@ window.aiworkerModules.push(() => ({
                         if (!response.ok) throw new Error(this.llmResponseMessage(data, '删除模型失败'));
                         if (state.modelEditor?.id === model.id) state.modelEditor = null;
                         state.notice = `模型 ${label} 已删除`;
-                        await this.fetchLLMSettings({selectedProviderId: state.editor.id});
+                        await this._refreshLLMSettings({selectedProviderId: state.editor.id});
                     } catch (error) {
                         state.error = error.message || '删除模型失败';
                     } finally {
@@ -1318,7 +1341,7 @@ window.aiworkerModules.push(() => ({
                         try { data = await response.json(); } catch (_) {}
                         if (!response.ok) throw new Error(this.llmResponseMessage(data, '切换默认模型失败'));
                         state.notice = `默认模型已切换为 ${model.display_name || model.model_id}`;
-                        await this.fetchLLMSettings({selectedProviderId: state.editor.id});
+                        await this._refreshLLMSettings({selectedProviderId: state.editor.id});
                     } catch (error) {
                         state.error = error.message || '切换默认模型失败';
                     } finally {

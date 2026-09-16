@@ -1668,3 +1668,41 @@ def test_fallback_provider_preserves_schema_and_effective_request_diagnostics():
     assert captured[0]["response_format"]["type"] == "json_schema"
     assert primary.last_request_summary["model"] == "fallback"
     assert primary.usage_snapshot()["call_count"] == 2
+@pytest.mark.parametrize("status", [415, 422])
+@pytest.mark.parametrize("capability", ["json_schema", "max_output_tokens"])
+def test_responses_downgrades_sent_capabilities_before_unavailable_chat(status, capability):
+    calls = []
+    credentials = []
+    def handler(request):
+        body = json.loads(request.content)
+        calls.append((request.url.path, body))
+        assert request.headers["Authorization"] == "Bearer current"
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(404, text="Chat endpoint unavailable")
+        rejected = (
+            body["text"]["format"]["type"] == "json_schema"
+            if capability == "json_schema" else "max_output_tokens" in body
+        )
+        usage = {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}
+        if rejected:
+            return httpx.Response(status, json={"error": capability + " unsupported", "usage": usage})
+        return httpx.Response(200, json={"output_text": '{"ok":true}', "usage": usage})
+    def resolver():
+        credentials.append(True)
+        return "current"
+    provider = OpenAICompatibleLLMProvider(
+        "https://example.test/v1", "old", "model", wire_api="responses",
+        api_key_resolver=resolver, max_output_tokens=200, max_retries=0,
+        transport=httpx.MockTransport(handler),
+    )
+    assert asyncio.run(provider.complete_json([{"role":"user","content":"test"}], schema={"type":"object"}))["ok"]
+    assert len(calls) == 2
+    assert all(path.endswith("/responses") for path, body in calls)
+    assert len(credentials) == 1
+    assert provider.usage_snapshot()["total_tokens"] == 6
+    assert provider.usage_snapshot()["complete"] is True
+    assert provider.last_request_summary["protocol"] == "responses"
+    if capability == "json_schema":
+        assert provider.json_schema_supported is False
+    else:
+        assert provider.max_output_tokens_rejected is True

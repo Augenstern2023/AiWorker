@@ -104,9 +104,9 @@ CHARACTER_BUNDLE_JSON_SCHEMA: dict[str, Any] = {
                 "required": sorted(CHARACTER_FIELDS),
                 "properties": {
                     field: (
-                        {"type": "array", "items": {"type": "string"}}
+                        {"type": "array", "items": {"type": "string", "minLength": 1, "pattern": r"\S"}}
                         if field == "external_tags"
-                        else {"type": "string"}
+                        else {"type": "string", "minLength": 1, "pattern": r"\S"}
                     )
                     for field in sorted(CHARACTER_FIELDS)
                 },
@@ -119,7 +119,8 @@ CHARACTER_BUNDLE_JSON_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
                 "required": sorted(RELATIONSHIP_FIELDS),
                 "properties": {
-                    field: {"type": "string"} for field in sorted(RELATIONSHIP_FIELDS)
+                    field: {"type": "string", "minLength": 1, "pattern": r"\S"}
+                    for field in sorted(RELATIONSHIP_FIELDS)
                 },
             },
         },
@@ -171,6 +172,20 @@ def _require_object_items(items: list[Any], label: str) -> list[dict[str, Any]]:
     return items
 
 
+def _validate_character_fields(item: dict[str, Any], fields: frozenset[str], label: str) -> dict[str, Any]:
+    result = _require_fields(item, fields, label)
+    for field in sorted(fields):
+        value = result[field]
+        if field == "external_tags":
+            if not isinstance(value, list) or any(
+                not isinstance(tag, str) or not tag.strip() for tag in value
+            ):
+                raise ValueError("人物卡 external_tags 必须是非空字符串组成的数组")
+        elif not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{label} {field} 必须是非空字符串")
+    return result
+
+
 def _validate_character_bundle(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("人物与人物关系必须返回 JSON 对象")
@@ -187,11 +202,11 @@ def _validate_character_bundle(payload: dict[str, Any]) -> dict[str, Any]:
     if relationships is None:
         raise ValueError("relationships 必须是数组")
     characters = [
-        _require_fields(item, CHARACTER_FIELDS, "人物卡")
+        _validate_character_fields(item, CHARACTER_FIELDS, "人物卡")
         for item in _require_object_items(characters, "人物卡")
     ]
     relationships = [
-        _require_fields(item, RELATIONSHIP_FIELDS, "人物关系")
+        _validate_character_fields(item, RELATIONSHIP_FIELDS, "人物关系")
         for item in _require_object_items(relationships, "人物关系")
     ]
     # 空关系本身合法（例如全剧只有一个人物），但多人物却没有关系通常是模型漏输出，

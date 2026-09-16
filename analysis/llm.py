@@ -335,7 +335,7 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         try:
             return await self._request_text(model, messages, json_mode, api_key, schema, max_output_tokens)
         except Exception as exc:
-            if schema is not None and is_json_schema_unsupported_exception(exc):
+            if json_mode and schema and is_json_schema_unsupported_exception(exc):
                 self.json_schema_supported = False
                 logger.warning(
                     "网关不接受 response_format=json_schema，已回退为 json_object：%s", exc
@@ -360,6 +360,14 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             try:
                 return await self._complete_responses_text(messages, json_mode, model, api_key, json_schema, max_output_tokens)
             except Exception as exc:
+                # Capability rejection belongs to the outer bounded downgrade
+                # loop. Only unsupported protocols should fall back to Chat.
+                if (
+                    json_mode and json_schema and is_json_schema_unsupported_exception(exc)
+                ) or (
+                    max_output_tokens and is_max_output_tokens_unsupported_exception(exc)
+                ):
+                    raise
                 if not is_responses_api_unsupported_exception(exc):
                     raise
                 return await self._complete_chat_completions_text(messages, json_mode, model, api_key, json_schema, max_output_tokens)
@@ -519,7 +527,7 @@ def is_max_output_tokens_unsupported_exception(exc: Exception) -> bool:
     """网关不接受显式输出上限（超出模型上限或挤爆上下文）时，退回网关默认值重试一次。"""
     if not isinstance(exc, httpx.HTTPStatusError):
         return False
-    if int(exc.response.status_code) not in {400, 422}:
+    if int(exc.response.status_code) not in {400, 415, 422}:
         return False
     text = _rejection_text(exc)
     return any(

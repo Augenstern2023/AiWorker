@@ -2826,3 +2826,29 @@ def test_outline_field_source_fingerprint_tracks_source_identity_and_current_val
 
     assert source_a == outline_field_source_fingerprint(candidate_changed, "core_event")
     assert source_a != outline_field_source_fingerprint(source_changed, "core_event")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,value", [
+    ("name", None), ("name", 123), ("identity", ""), ("desire", "  "),
+    ("external_tags", 123), ("external_tags", "隐忍"),
+    ("external_tags", [123]), ("external_tags", [""]),
+])
+async def test_character_field_contract_triggers_repair(field, value):
+    provider = SequentialProvider([
+        {"characters": [character_payload(**{field: value})], "relationships": []},
+        {"characters": [character_payload()], "relationships": []},
+    ])
+    bundle, meta = await generate_character_bundle(provider, {}, {})
+    assert meta["repair_attempted"] is True
+    assert bundle["characters"][0]["name"] == "林穗"
+    assert bundle["relationships"] == []
+    assert len(provider.calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,value", [("from", None), ("to", 12), ("relation", ""), ("conflict", "  ")])
+async def test_relationship_field_contract_fails_after_repair(field, value):
+    invalid = {"人物卡": [character_payload()], "人物关系": {"pair": relationship_payload(**{field: value})}}
+    provider = SequentialProvider([invalid, invalid])
+    with pytest.raises(LLMError, match="非空字符串"):
+        await generate_character_bundle(provider, {}, {})
+    assert len(provider.calls) == 2

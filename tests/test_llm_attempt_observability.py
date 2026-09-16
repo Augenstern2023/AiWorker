@@ -61,8 +61,9 @@ def test_attempt_reporter_emits_shape_summary_and_dumps_raw_response(tmp_path):
     message, level, payload = events[0]
     assert level == "warning"
     assert "第 1/2 次模型响应未通过结构校验" in message
-    assert "relationships 必须是数组" in message
-    assert "relations(对象/1键)" in message
+    assert "模型响应未通过结构校验" in message
+    assert "顶层对象/2键" in message
+    assert "relationships 必须是数组" not in message
     assert payload["debug_path"]
 
     dumped = json.loads(Path(payload["debug_path"]).read_text(encoding="utf-8"))
@@ -70,6 +71,7 @@ def test_attempt_reporter_emits_shape_summary_and_dumps_raw_response(tmp_path):
     assert dumped["attempt"] == 1
     assert dumped["elapsed_seconds"] == 12.5
     assert dumped["response"]["relations"] == {"林穗-周谨": {}}
+    assert dumped["error"] == "relationships 必须是数组"
 
 
 def test_attempt_reporter_dumps_each_failed_attempt_into_its_own_file(tmp_path):
@@ -119,7 +121,8 @@ def test_attempt_reporter_reports_repair_success_and_missing_payload(tmp_path):
 
     assert "第 2/2 次模型响应通过结构校验" in events[0][0]
     assert events[0][1] == "info"
-    assert "LLM_BASE_URL is required." in events[1][0]
+    assert "模型响应未通过结构校验" in events[1][0]
+    assert "LLM_BASE_URL is required." not in events[1][0]
     assert events[1][1] == "warning"
     assert events[1][2]["debug_path"] is None
 
@@ -270,3 +273,59 @@ def test_repeated_batch_attempts_keep_every_response_and_truncated_fragment(tmp_
     assert len({event["debug_path"] for event in events}) == 2
     assert len({event["truncated_path"] for event in events}) == 2
     assert [Path(event["truncated_path"]).read_text(encoding="utf-8") for event in events] == ["  first\n", " second\n"]
+@pytest.mark.asyncio
+@pytest.mark.parametrize("truncated", [False, True])
+async def test_attempt_logs_and_events_exclude_supplier_echo_but_files_keep_it(tmp_path, caplog, truncated):
+    from analysis.llm import LLMError, LLMOutputTruncatedError
+    from creative.imitation_service import complete_with_one_repair
+
+    secret = "PRIVATE_SYSTEM_PROMPT_DO_NOT_DISCLOSE"
+    raw = "  " + secret + "\n"
+    events = []
+    reporter = build_attempt_reporter(
+        lambda message, level, payload: events.append((message, payload)),
+        job_id="safe-diagnostic", stage="characters", base_dir=tmp_path,
+    )
+    class Provider:
+        last_request_summary = {"protocol": "responses", "model": "model", "system_prompt": secret}
+        async def complete_json(self, messages):
+            if truncated:
+                raise LLMOutputTruncatedError(secret, finish_reason="length", returned_chars=len(raw), partial_text=raw)
+            return {secret: {"echo": secret}}
+    def validate(payload):
+        raise ValueError(secret)
+
+    with pytest.raises(LLMError) as caught:
+        await complete_with_one_repair(Provider(), [], validate, max_attempts=1, on_attempt=reporter)
+    assert secret not in caplog.text
+    assert secret not in repr(events)
+    event = events[0][1]
+    if truncated:
+        assert caught.value.partial_text == raw
+        assert caught.value.finish_reason == "length"
+        assert caught.value.returned_chars == len(raw)
+        assert Path(event["truncated_path"]).read_text(encoding="utf-8") == raw
+    else:
+        dumped = json.loads(Path(event["debug_path"]).read_text(encoding="utf-8"))
+        assert dumped["response"] == {secret: {"echo": secret}}
+        assert dumped["error"] == secret
+
+
+@pytest.mark.asyncio
+async def test_failed_attempt_reporters_do_not_log_callback_exception_text(caplog):
+    from creative.imitation_service import complete_with_one_repair
+    secret = "PRIVATE_CALLBACK_CONTENT"
+    class Provider:
+        async def complete_json(self, messages):
+            return {"ok": True}
+    def broken(info):
+        raise ValueError(secret)
+    result, _ = await complete_with_one_repair(Provider(), [], lambda value: value, on_attempt=broken)
+    assert result == {"ok": True}
+    assert secret not in caplog.text
+
+    reporter = build_attempt_reporter(
+        lambda *args: broken(None), job_id="broken-notify", stage="characters",
+    )
+    reporter({"attempt": 2, "max_attempts": 2, "ok": True})
+    assert secret not in caplog.text

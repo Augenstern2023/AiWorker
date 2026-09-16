@@ -10,10 +10,10 @@
 
 结构校验失败时，任务日志过去只留下最终错误文本（例如「relationships 必须是数组」），
 既看不到模型实际返回了什么，也看不出第一次修复重试是否真的发生过。这里把每次尝试的
-序号、耗时、错误、返回体的顶层键形态与完整原始响应都记下来：
+序号、耗时、安全结构摘要与完整诊断信息分别保存：
 
-- 事件写入任务日志（``emit_event``），供 WebGUI「任务日志」直接阅读；
-- 完整返回体写入 ``data/creative/jobs/<job_id>/llm_debug/<stage>-attemptN.json``。
+- 任务日志（``emit_event``）只记录安全摘要，不含响应键值或异常原文；
+- 完整返回体及异常写入 ``data/creative/jobs/<job_id>/llm_debug/<stage>-attemptN.json``。
 """
 
 from __future__ import annotations
@@ -27,8 +27,6 @@ logger = logging.getLogger(__name__)
 
 
 LLM_DEBUG_BASE_DIR = Path("data") / "creative" / "jobs"
-MESSAGE_PREVIEW_LIMIT = 240
-EVENT_PREVIEW_LIMIT = 1200
 
 _ACTIVE_REPORTER: Callable[[dict[str, Any]], Any] | None = None
 
@@ -46,7 +44,7 @@ def _describe_value(value: Any) -> str:
 
 
 def summarize_payload_shape(payload: Any) -> str:
-    """用一行描述返回体的顶层形态，便于在日志里立刻看出键名漂移。"""
+    """供内部修复提示使用的键形态摘要；不得写入普通日志或任务事件。"""
     if isinstance(payload, dict):
         if not payload:
             return "顶层键：（无）"
@@ -57,6 +55,32 @@ def summarize_payload_shape(payload: Any) -> str:
     if isinstance(payload, list):
         return f"顶层为数组（数组/{len(payload)}项）"
     return f"顶层为 {type(payload).__name__}"
+
+
+def summarize_payload_metadata(payload: Any) -> str:
+    """Public diagnostic summary: never include upstream keys or values."""
+    if isinstance(payload, dict):
+        return f"顶层对象/{len(payload)}键"
+    if isinstance(payload, list):
+        return f"顶层数组/{len(payload)}项"
+    if payload is None:
+        return "无响应对象"
+    return "顶层标量"
+
+
+def _public_request_summary(summary: Any) -> dict[str, Any]:
+    if not isinstance(summary, dict):
+        return {}
+    result = {}
+    for key in ("protocol", "model", "reasoning_effort", "response_format"):
+        value = summary.get(key)
+        if isinstance(value, str):
+            result[key] = value
+    for key in ("max_tokens", "message_count", "input_chars"):
+        value = summary.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            result[key] = value
+    return result
 
 
 def truncate_text(value: Any, limit: int) -> str:
@@ -140,7 +164,6 @@ def dump_attempt_payload(
             job_id,
             stage,
             attempt,
-            exc_info=True,
         )
         return None
     return str(path)
@@ -169,7 +192,6 @@ def dump_truncated_text(
             job_id,
             stage,
             attempt,
-            exc_info=True,
         )
         return None
     return str(path)
@@ -203,7 +225,11 @@ def build_attempt_reporter(
         attempt = int(info.get("attempt") or 1)
         max_attempts = int(info.get("max_attempts") or 1)
         elapsed_seconds = float(info.get("elapsed_seconds") or 0.0)
-        error = str(info.get("error") or "")
+        error = (
+            "模型输出被输出上限截断"
+            if info.get("output_truncated") or info.get("truncated_text")
+            else "模型响应未通过结构校验"
+        )
         ok = bool(info.get("ok"))
         if ok and attempt == 1:
             return
@@ -215,7 +241,7 @@ def build_attempt_reporter(
             "elapsed_seconds": round(elapsed_seconds, 3),
             "ok": ok,
         }
-        request = info.get("request")
+        request = _public_request_summary(info.get("request"))
         if isinstance(request, dict) and request:
             payload["request"] = request
         request_line = format_request_summary(request)
@@ -244,16 +270,8 @@ def build_attempt_reporter(
             level = "info"
         else:
             response = info.get("payload")
-            shape = summarize_payload_shape(response)
+            shape = summarize_payload_metadata(response)
             payload["error"] = error
-            preview = truncate_text(
-                json.dumps(response, ensure_ascii=False)
-                if response is not None
-                else "",
-                EVENT_PREVIEW_LIMIT,
-            )
-            if preview:
-                payload["raw_response_preview"] = preview
             message = (
                 f"第 {attempt}/{max_attempts} 次模型响应未通过结构校验"
                 f"（{elapsed_seconds:.1f} 秒）：{error}"
@@ -262,8 +280,6 @@ def build_attempt_reporter(
                 message += f"；{shape}"
             if request_line:
                 message += f"；{request_line}"
-            if preview:
-                message += f"；原始响应开头：{truncate_text(preview, MESSAGE_PREVIEW_LIMIT)}"
             if debug_path:
                 message += f"；原始响应已保存：{debug_path}"
             if truncated_path:
@@ -278,7 +294,6 @@ def build_attempt_reporter(
                 job_id,
                 stage,
                 attempt,
-                exc_info=True,
             )
 
     return report

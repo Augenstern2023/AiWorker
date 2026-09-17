@@ -10,7 +10,9 @@ import hashlib
 import importlib
 import json
 import sqlite3
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -68,6 +70,17 @@ def create(environment, episode_numbers=None):
     )
 
 
+def archive_files(response):
+    with zipfile.ZipFile(BytesIO(response.content)) as archive:
+        return {name: archive.read(name) for name in archive.namelist()}
+
+
+def archived_package(response):
+    return json.loads(
+        archive_files(response)['99_数据清单/production-package.json']
+    )
+
+
 def test_create_download_and_reuse_are_immutable_and_audited(environment, db):
     before = export_production_package(db, 1)
     result = create(environment)
@@ -75,9 +88,23 @@ def test_create_download_and_reuse_are_immutable_and_audited(environment, db):
     record = result.json()['export']
     downloaded = environment.client.get(record['download_url'])
     assert downloaded.status_code == 200
-    assert json.loads(downloaded.content) == before
+    files = archive_files(downloaded)
+    assert json.loads(files['99_数据清单/production-package.json']) == before
+    assert files['02_Brief/创作Brief.md'].decode('utf-8').startswith('# 测试剧 · 创作 Brief')
+    assert '寻找真相' in files['02_Brief/创作Brief.md'].decode('utf-8')
+    assert '03_人物/人物设定.md' in files
+    assert '03_人物/人物关系.md' in files
+    assert '04_分集大纲/第001集_分集大纲.md' in files
+    assert '04_分集大纲/第002集_分集大纲.md' in files
+    assert '05_Beats/第001集_Beats.md' in files
+    assert '06_剧本/第002集_剧本.txt' in files
+    assert downloaded.headers['content-type'] == 'application/zip'
     assert downloaded.headers['cache-control'] == 'no-store'
     assert 'filename*=UTF-8' in downloaded.headers['content-disposition']
+    assert downloaded.headers['content-disposition'].endswith('.zip')
+    assert record['artifact_format'] == 'zip'
+    assert record['media_type'] == 'application/zip'
+    assert record['contract_version'] == '2.3'
     assert hashlib.sha256(downloaded.content).hexdigest() == record['file_sha256']
     with sqlite3.connect(db) as connection:
         connection.execute('UPDATE creative_projects SET updated_at=999')
@@ -123,11 +150,18 @@ def test_preview_create_and_history_preserve_selected_episodes(environment):
     assert record['workflow_mode'] == 'sequential'
 
     downloaded = environment.client.get(record['download_url'])
-    package = downloaded.json()
+    files = archive_files(downloaded)
+    package = json.loads(files['99_数据清单/production-package.json'])
     assert package['provenance']['episode_numbers'] == [2]
     assert package['provenance']['export_scope'] == 'partial'
     for stage in ('outlines', 'beats', 'scripts'):
         assert [item['episode_number'] for item in package[stage]] == [2]
+    assert '05_Beats/第002集_Beats.md' in files
+    assert '06_剧本/第002集_剧本.txt' in files
+    assert '04_分集大纲/第002集_分集大纲.md' in files
+    assert '05_Beats/第001集_Beats.md' not in files
+    assert '06_剧本/第001集_剧本.txt' not in files
+    assert '04_分集大纲/第001集_分集大纲.md' not in files
     history = environment.client.get(
         '/api/creative/projects/1/production-exports'
     ).json()['items'][0]
@@ -165,7 +199,9 @@ def test_custom_version_manifest_is_prechecked_exported_and_kept_in_history(envi
     record = created.json()['export']
     assert record['version_strategy'] == 'custom'
     assert record['version_manifest'] == manifest
-    assert environment.client.get(record['download_url']).json()['version_manifest'] == manifest
+    assert archived_package(
+        environment.client.get(record['download_url'])
+    )['version_manifest'] == manifest
     history = environment.client.get(
         '/api/creative/projects/1/production-exports'
     ).json()['items'][0]
@@ -291,6 +327,39 @@ def test_history_versions_pagination_and_deleted_project(environment, db):
     assert environment.client.get(first['download_url']).status_code == 404
 
 
+def test_legacy_json_export_remains_downloadable(environment):
+    package = export_production_package(environment.repository.db_path, 1)
+    content = json.dumps(package, ensure_ascii=False, indent=2).encode('utf-8')
+    path = environment.service.export_dir / 'legacy.json'
+    path.write_bytes(content)
+    with environment.repository._connect() as connection:
+        connection.execute(
+            '''
+            INSERT INTO creative_production_exports (
+                id, project_id, fingerprint, contract_version,
+                created_by, created_by_name, created_at, episode_count,
+                path, size_bytes, file_sha256, audit_recorded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                'legacy', 1, package['fingerprint'], '1.0',
+                'owner', '负责人', 1, 2, str(path), len(content),
+                hashlib.sha256(content).hexdigest(), 1,
+            ),
+        )
+
+    record = environment.client.get(
+        '/api/creative/projects/1/production-exports'
+    ).json()['items'][0]
+    assert record['artifact_format'] == 'json'
+    assert record['media_type'] == 'application/json'
+    downloaded = environment.client.get(record['download_url'])
+    assert downloaded.status_code == 200
+    assert downloaded.json() == package
+    assert downloaded.headers['content-type'] == 'application/json'
+    assert downloaded.headers['content-disposition'].endswith('.json')
+
+
 def test_existing_export_table_is_upgraded_for_episode_scope(tmp_path):
     repository = CreativeRepository(tmp_path / 'existing.sqlite')
     with repository._connect() as connection:
@@ -324,4 +393,5 @@ def test_existing_export_table_is_upgraded_for_episode_scope(tmp_path):
         'episode_numbers_json', 'export_scope',
         'project_total_episodes', 'workflow_mode',
         'version_strategy', 'version_manifest_json',
+        'artifact_format', 'media_type',
     } <= columns

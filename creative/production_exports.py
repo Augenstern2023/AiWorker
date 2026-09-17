@@ -36,11 +36,12 @@ from typing import Any, Callable
 from fastapi import Request
 
 from audit.service import AuditService
+from creative.production_archive import build_production_archive
 from creative.production_export import _inspect_snapshot
 from creative.repository import CreativeRepository
 from identity.schema import Principal
 
-CONTRACT_VERSION = "1.0"
+CONTRACT_VERSION = "2.3"
 _UNSAFE_FILENAME = re.compile(r'[\\/:*?"<>|\x00-\x1f\s]+')
 
 
@@ -98,6 +99,8 @@ class ProductionExportService:
                     workflow_mode TEXT NOT NULL DEFAULT 'sequential',
                     version_strategy TEXT NOT NULL DEFAULT 'current',
                     version_manifest_json TEXT NOT NULL DEFAULT '{}',
+                    artifact_format TEXT NOT NULL DEFAULT 'json',
+                    media_type TEXT NOT NULL DEFAULT 'application/json',
                     path TEXT NOT NULL,
                     size_bytes INTEGER NOT NULL,
                     file_sha256 TEXT NOT NULL,
@@ -119,6 +122,8 @@ class ProductionExportService:
                 "workflow_mode": "TEXT NOT NULL DEFAULT 'sequential'",
                 "version_strategy": "TEXT NOT NULL DEFAULT 'current'",
                 "version_manifest_json": "TEXT NOT NULL DEFAULT '{}'",
+                "artifact_format": "TEXT NOT NULL DEFAULT 'json'",
+                "media_type": "TEXT NOT NULL DEFAULT 'application/json'",
             }
             for column, definition in additions.items():
                 if column not in columns:
@@ -192,11 +197,11 @@ class ProductionExportService:
             self._verified_path(existing)
             return self._ensure_reuse_audit(self._public(existing), actor, request), False
         export_id = str(uuid.uuid4())
-        content = json.dumps(package, ensure_ascii=False, indent=2).encode("utf-8")
+        content = build_production_archive(package)
         provenance = package["provenance"]
         selected_numbers = list(provenance["episode_numbers"])
-        path = (self.export_dir / f"{export_id}.json").resolve()
-        temporary = path.with_name(f"{export_id}.json.tmp")
+        path = (self.export_dir / f"{export_id}.zip").resolve()
+        temporary = path.with_name(f"{export_id}.zip.tmp")
         temporary.write_bytes(content)
         os.replace(temporary, path)
         created_at = time.time()
@@ -209,8 +214,8 @@ class ProductionExportService:
                         created_by, created_by_name, created_at, episode_count,
                         episode_numbers_json, export_scope, project_total_episodes,
                         workflow_mode, version_strategy, version_manifest_json,
-                        path, size_bytes, file_sha256
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        artifact_format, media_type, path, size_bytes, file_sha256
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         export_id,
@@ -227,6 +232,8 @@ class ProductionExportService:
                         provenance["workflow_mode"],
                         "custom" if version_manifest is not None else "current",
                         json.dumps(package["version_manifest"], ensure_ascii=False),
+                        "zip",
+                        "application/zip",
                         str(path),
                         len(content),
                         hashlib.sha256(content).hexdigest(),
@@ -303,7 +310,7 @@ class ProductionExportService:
         request: Request | None = None,
         *,
         can_access: Callable[[int], bool] | None = None,
-    ) -> tuple[Path, str]:
+    ) -> tuple[Path, str, str]:
         """Locate the record, re-authorize by project, verify, audit.
 
         ``can_access`` is the caller's managed-project predicate; it is called
@@ -332,7 +339,13 @@ class ProductionExportService:
         scope = _episode_scope_label(
             record["episode_numbers"], record["export_scope"]
         )
-        return path, f"{name}_{scope}_生产包_{str(record['fingerprint'])[:12]}.json"
+        artifact_format = record["artifact_format"]
+        label = "项目文档包" if artifact_format == "zip" else "生产包"
+        filename = (
+            f"{name}_{scope}_{label}_{str(record['fingerprint'])[:12]}."
+            f"{artifact_format}"
+        )
+        return path, filename, record["media_type"]
 
     # -------------------------------------------------------------- internals
 
@@ -393,6 +406,8 @@ class ProductionExportService:
                     "workflow_mode": record["workflow_mode"],
                     "version_strategy": record["version_strategy"],
                     "version_manifest": record["version_manifest"],
+                    "artifact_format": record["artifact_format"],
+                    "media_type": record["media_type"],
                     "size_bytes": record["size_bytes"],
                     "file_sha256": record["file_sha256"],
                 },
@@ -437,6 +452,12 @@ class ProductionExportService:
                 version_manifest = {}
         except (TypeError, ValueError, json.JSONDecodeError):
             version_manifest = {}
+        artifact_format = str(record.get("artifact_format") or "").lower()
+        if artifact_format not in {"json", "zip"}:
+            artifact_format = "zip" if str(record.get("path") or "").lower().endswith(".zip") else "json"
+        media_type = str(record.get("media_type") or "")
+        if not media_type:
+            media_type = "application/zip" if artifact_format == "zip" else "application/json"
         return {
             "id": record["id"],
             "project_id": str(record["project_id"]),
@@ -452,6 +473,8 @@ class ProductionExportService:
             "workflow_mode": str(record.get("workflow_mode") or "sequential"),
             "version_strategy": str(record.get("version_strategy") or "current"),
             "version_manifest": version_manifest,
+            "artifact_format": artifact_format,
+            "media_type": media_type,
             "size_bytes": record["size_bytes"],
             "file_sha256": record["file_sha256"],
             "audit_status": "recorded" if record.get("audit_recorded_at") is not None else "pending",

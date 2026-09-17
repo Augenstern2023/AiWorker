@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ProjectCreateRequest(BaseModel):
@@ -79,6 +79,14 @@ class ProjectUpdateRequest(BaseModel):
     status: str | None = None
     draft_brief_id: int | None = Field(None, ge=1)
     expected_project_revision: int | None = Field(None, ge=0)
+
+
+class VideoParameterConfirmRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    model_key: Literal["minimax_h3", "minimax_h3_max", "seedance_2_5"]
+    scenario: Literal["platform_fit", "content_optimal"]
+    source_fingerprint: str = Field(min_length=64, max_length=64)
 
 
 class BlueprintGenerateRequest(BaseModel):

@@ -18,6 +18,10 @@ import pytest
 
 from creative.free_mode_service import FreeCreativeModeService
 from creative.repository import CreativeRepository
+from creative.video_parameter_recommendation import (
+    build_video_parameter_source,
+    fallback_recommendation,
+)
 
 
 def export(*args, **kwargs):
@@ -38,6 +42,19 @@ def insert(conn, table, **row):
     return conn.execute(f"INSERT INTO {table} ({keys}) VALUES ({placeholders})", tuple(row.values())).lastrowid
 
 
+def refresh_video_parameters(path):
+    repository = CreativeRepository(path)
+    project = repository.get_project(1)
+    source = build_video_parameter_source(project)
+    repository.complete_video_parameter_recommendation(
+        1,
+        source_fingerprint=source["fingerprint"],
+        source_episode_numbers=source["episode_numbers"],
+        source_complete=source["complete"],
+        recommendation=fallback_recommendation(source),
+    )
+
+
 @pytest.fixture
 def db(tmp_path):
     path = tmp_path / "creative # 测试.sqlite"
@@ -46,6 +63,7 @@ def db(tmp_path):
         "creative_topics", "creative_breakdowns", "creative_projects",
         "creative_blueprints", "creative_characters",
         "creative_relationships", "creative_episodes",
+        "creative_video_parameter_recommendations",
     }
     with sqlite3.connect(path) as conn:
         for node in ast.walk(tree):
@@ -85,6 +103,17 @@ def db(tmp_path):
             insert(conn, "creative_episodes", **common, stage="script", episode_number=number,
                    batch_id=f"script-{number}", content_json=json.dumps({"scenes": [{"blocks": [{"type": "action", "text": "开门"}]}]}),
                    upstream_refs_json=json.dumps(refs))
+    repository = CreativeRepository(path)
+    project = repository.get_project(1)
+    source = build_video_parameter_source(project)
+    repository.queue_video_parameter_recommendation(1, created_by="owner-1")
+    repository.complete_video_parameter_recommendation(
+        1,
+        source_fingerprint=source["fingerprint"],
+        source_episode_numbers=source["episode_numbers"],
+        source_complete=source["complete"],
+        recommendation=fallback_recommendation(source),
+    )
     return path
 
 
@@ -204,6 +233,18 @@ def free_db(tmp_path):
             expected_head_revision=script["head"]["revision"],
             actor_user_id="owner-1",
         )
+    current = repository.get_project(project["id"])
+    source = build_video_parameter_source(current)
+    repository.queue_video_parameter_recommendation(
+        project["id"], created_by="owner-1",
+    )
+    repository.complete_video_parameter_recommendation(
+        project["id"],
+        source_fingerprint=source["fingerprint"],
+        source_episode_numbers=source["episode_numbers"],
+        source_complete=source["complete"],
+        recommendation=fallback_recommendation(source),
+    )
     return path, project["id"]
 
 
@@ -211,7 +252,7 @@ def test_complete_package_preserves_source_rows_and_parsed_content(db):
     package = export(db, 1)
     assert set(package) == {"schemaVersion", "sourceSystem", "project", "provenance", "brief",
                             "characters", "relationships", "outlines", "beats", "scripts",
-                            "version_manifest", "fingerprint"}
+                            "video_parameter_recommendation", "version_manifest", "fingerprint"}
     assert package["schemaVersion"] == "1.0"
     assert package["sourceSystem"] == "AiWorker"
     assert package["project"]["name"] == "测试剧"
@@ -229,6 +270,8 @@ def test_complete_package_preserves_source_rows_and_parsed_content(db):
     assert package["version_manifest"]["episodes"]["1"]["script"] == {
         "resource_ref": str(package["scripts"][0]["id"]), "version": 1,
     }
+    assert package["video_parameter_recommendation"]["status"] == "ready"
+    assert package["video_parameter_recommendation"]["stale"] is False
     assert len(package["fingerprint"]) == 64
     assert package == export(db, 1)
 
@@ -305,16 +348,11 @@ def test_free_project_does_not_fall_back_when_current_head_is_draft(free_db):
         export(path, project_id)
 
 
-def test_subset_is_sorted_deduplicated_and_does_not_require_other_scripts(db):
+def test_subset_requires_video_parameters_from_a_complete_current_series(db):
     with sqlite3.connect(db) as conn:
         conn.execute("DELETE FROM creative_episodes WHERE stage='script' AND episode_number=1")
-    package = export(db, 1, [2, 2])
-    assert package["provenance"]["episode_numbers"] == [2]
-    assert package["provenance"]["export_scope"] == "partial"
-    assert package["provenance"]["project_total_episodes"] == 2
-    assert package["provenance"]["exported_episode_count"] == 1
-    for stage in ("outlines", "beats", "scripts"):
-        assert [row["episode_number"] for row in package[stage]] == [2]
+    with pytest.raises(ValueError, match="video_parameters"):
+        export(db, 1, [2, 2])
     with pytest.raises(ValueError, match="script"):
         export(db, 1)
 
@@ -379,6 +417,7 @@ def test_fingerprint_ignores_timestamps_json_formatting_but_tracks_content(db):
     with sqlite3.connect(db) as conn:
         conn.execute("UPDATE creative_episodes SET content_json=? WHERE stage='script' AND episode_number=1",
                      (json.dumps({"scenes": [{"blocks": [{"text": "关门"}]}]}),))
+    refresh_video_parameters(db)
     assert export(db, 1)["fingerprint"] != original["fingerprint"]
 
 
@@ -425,6 +464,7 @@ def test_fingerprint_keeps_story_fields_named_json(db):
         content = json.loads(row[1])
         content["production_json"] = "story-specific field, not a raw SQL duplicate"
         conn.execute("UPDATE creative_episodes SET content_json=? WHERE id=?", (json.dumps(content), row[0]))
+    refresh_video_parameters(db)
     assert export(db, 1)["fingerprint"] != original
 
 

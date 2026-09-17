@@ -43,6 +43,9 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Callable
 
+from creative.script_service import normalize_script_content
+from creative.video_parameter_recommendation import build_video_parameter_source
+
 _LOCKED = {"locked", "approved"}
 
 
@@ -60,7 +63,7 @@ def _stage_edit_url(
         return f"/planning/projects/{project_id}/characters"
     if stage == "outline":
         return f"/writing/projects/{project_id}/outlines"
-    if stage in {"beats", "script"}:
+    if stage in {"beats", "script", "video_parameters"}:
         number = max(1, int(episode_number or 1))
         page = "beats" if stage == "beats" else "scripts"
         return f"/writing/projects/{project_id}/episodes/{number}/{page}"
@@ -167,7 +170,23 @@ class _Inspection:
             value = operation()
         except ValueError as exc:
             detail = str(exc)
-            if 'invalid' in detail or 'JSON' in detail:
+            if stage == "video_parameters":
+                if "stale" in detail:
+                    code = "stale_video_parameters"
+                    message = "剧本或导出版本已变化，请在剧本页重新分析视频规格"
+                elif "incomplete" in detail:
+                    code = "incomplete_video_parameters"
+                    message = "视频规格建议未覆盖完整全剧，请在全剧剧本完成后重新分析"
+                elif "not ready" in detail:
+                    code = "pending_video_parameters"
+                    message = "视频规格建议尚未完成，请在剧本页完成分析"
+                elif "invalid" in detail or "JSON" in detail:
+                    code = "invalid_video_parameters"
+                    message = "视频规格建议格式无效，请在剧本页重新分析"
+                else:
+                    code = "missing_video_parameters"
+                    message = "缺少视频生成规格建议，请先在剧本页完成分析"
+            elif 'invalid' in detail or 'JSON' in detail:
                 code, message = 'invalid_content', '内容或元数据格式无效，请修复后重新锁定'
             elif 'stale' in detail:
                 code, message = 'stale_upstream', '引用的上游版本已变化，请更新后重新锁定'
@@ -179,7 +198,8 @@ class _Inspection:
             return None
         records = value if isinstance(value, list) else [value]
         result.update(state='ready', message='检查通过', versions=[
-            {'id': record['id'], 'version': record.get('version', 0)} for record in records
+            {'id': record['id'], 'version': record.get('version', 0)}
+            for record in records if isinstance(record, dict) and 'id' in record
         ])
         return value
 
@@ -205,6 +225,121 @@ def _scope_provenance(
         "project_total_episodes": total,
         "exported_episode_count": len(numbers),
     }
+
+
+def _current_video_parameter_source(
+    conn: sqlite3.Connection, project: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the recommendation fingerprint from this same read transaction."""
+    scope = "free" if str(project.get("workflow_mode")) == "free" else "sequential"
+    episodes = []
+    for raw in conn.execute(
+        "SELECT * FROM creative_episodes WHERE project_id = ? AND resource_scope = ? "
+        "ORDER BY stage, episode_number, version",
+        (int(project["id"]), scope),
+    ).fetchall():
+        item = _row(raw)
+        if item.get("stage") == "script":
+            item["content"] = normalize_script_content(item.get("content") or {})
+        episodes.append(item)
+    heads = [
+        dict(row) for row in conn.execute(
+            "SELECT * FROM creative_resource_heads WHERE project_id = ? "
+            "AND resource_scope = ? ORDER BY stage, episode_number",
+            (int(project["id"]), scope),
+        ).fetchall()
+    ]
+    return build_video_parameter_source({
+        **project,
+        "episodes": episodes,
+        "resource_heads": heads,
+    })
+
+
+def _read_video_parameter_recommendation(
+    conn: sqlite3.Connection,
+    project: dict[str, Any],
+    package: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        raw = conn.execute(
+            "SELECT * FROM creative_video_parameter_recommendations "
+            "WHERE project_id = ?",
+            (int(project["id"]),),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            raise
+        raw = None
+    if raw is None:
+        raise ValueError("video_parameters: missing recommendation")
+    try:
+        record = _row(raw)
+    except ValueError as exc:
+        raise ValueError("video_parameters: invalid JSON") from exc
+    record["source_complete"] = bool(record.get("source_complete"))
+    if str(record.get("status") or "") != "ready":
+        raise ValueError("video_parameters: not ready")
+    recommendation = record.get("recommendation")
+    if not isinstance(recommendation, dict) or not isinstance(
+        recommendation.get("models"), dict
+    ) or not recommendation["models"]:
+        raise ValueError("video_parameters: invalid recommendation")
+    if not record["source_complete"]:
+        raise ValueError("video_parameters: incomplete source")
+
+    source = _current_video_parameter_source(conn, project)
+    expected_numbers = list(
+        range(1, int(project.get("target_episode_count") or 0) + 1)
+    )
+    if (
+        not source.get("complete")
+        or list(record.get("source_episode_numbers") or []) != expected_numbers
+    ):
+        raise ValueError("video_parameters: incomplete source")
+    if str(record.get("source_fingerprint") or "") != str(source["fingerprint"]):
+        raise ValueError("video_parameters: stale recommendation")
+
+    current_scripts = {
+        int(item["episode_number"]): item for item in source.get("scripts") or []
+    }
+    for item in package.get("scripts") or []:
+        number = int(item.get("episode_number") or 0)
+        selected = {
+            "id": int(item.get("id") or 0),
+            "episode_number": number,
+            "version": int(item.get("version") or 0),
+            "status": str(item.get("status") or ""),
+            "content": normalize_script_content(item.get("content") or {}),
+        }
+        if current_scripts.get(number) != selected:
+            raise ValueError("video_parameters: stale export version")
+
+    record.update({
+        "stale": False,
+        "current_source_fingerprint": source["fingerprint"],
+        "current_episode_numbers": source["episode_numbers"],
+        "current_source_complete": source["complete"],
+    })
+    return record
+
+
+def _attach_video_parameter_recommendation(
+    conn: sqlite3.Connection,
+    inspection: _Inspection,
+    project: dict[str, Any],
+    package: dict[str, Any] | None,
+) -> bool:
+    record = inspection.check(
+        "video_parameters",
+        lambda: _read_video_parameter_recommendation(conn, project, package or {}),
+        dependencies=package is not None,
+    )
+    if package is None or record is None:
+        return False
+    package["video_parameter_recommendation"] = record
+    package["fingerprint"] = _digest(_fingerprint_payload(package))
+    return True
 
 
 def _free_head(
@@ -1197,18 +1332,24 @@ def _inspect_snapshot(
                 if version_manifest is not None
                 else _inspect_free_snapshot(conn, inspection, project, numbers)
             )
+            video_parameters_ready = _attach_video_parameter_recommendation(
+                conn, inspection, project, package,
+            )
             _attach_version_selection(
                 conn, inspection, project, package, numbers, strategy,
             )
-            return inspection, package
+            return inspection, package if video_parameters_ready else None
         if version_manifest is not None:
             package = _custom_sequential_snapshot(
                 conn, inspection, project, numbers, version_manifest,
             )
+            video_parameters_ready = _attach_video_parameter_recommendation(
+                conn, inspection, project, package,
+            )
             _attach_version_selection(
                 conn, inspection, project, package, numbers, strategy,
             )
-            return inspection, package
+            return inspection, package if video_parameters_ready else None
         breakdown = None
         if _exports_breakdown(project):
             breakdown_row = conn.execute(
@@ -1321,10 +1462,13 @@ def _inspect_snapshot(
             })
         package["version_manifest"] = _package_version_manifest(package)
         package["fingerprint"] = _digest(_fingerprint_payload(package))
+        video_parameters_ready = _attach_video_parameter_recommendation(
+            conn, inspection, project, package,
+        )
         _attach_version_selection(
             conn, inspection, project, package, numbers, strategy,
         )
-        return inspection, package
+        return inspection, package if video_parameters_ready else None
     finally:
         if conn.in_transaction:
             conn.rollback()

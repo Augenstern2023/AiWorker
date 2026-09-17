@@ -130,6 +130,30 @@ LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", "180"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
 LLM_RETRY_BASE_DELAY = float(os.getenv("LLM_RETRY_BASE_DELAY", "1"))
 LLM_RETRY_READ_TIMEOUTS = _env_bool("LLM_RETRY_READ_TIMEOUTS", True)
+# 视频参数推荐是受白名单约束的分类任务，不需要继承剧本创作的高推理、
+# 大输出和长重试配置。90 秒内未返回时由 worker 自动降级为规则建议。
+VIDEO_PARAMETER_LLM_REASONING_EFFORT = _env_choice(
+    "VIDEO_PARAMETER_LLM_REASONING_EFFORT",
+    "low",
+    {"none", "low", "medium"},
+)
+VIDEO_PARAMETER_LLM_MAX_OUTPUT_TOKENS = _env_int(
+    "VIDEO_PARAMETER_LLM_MAX_OUTPUT_TOKENS", 8192
+)
+VIDEO_PARAMETER_LLM_TIMEOUT_SECONDS = _env_int(
+    "VIDEO_PARAMETER_LLM_TIMEOUT_SECONDS", 90
+)
+VIDEO_PARAMETER_LLM_MAX_RETRIES = _env_int(
+    "VIDEO_PARAMETER_LLM_MAX_RETRIES", 1
+)
+VIDEO_PARAMETER_LLM_RETRY_READ_TIMEOUTS = _env_bool(
+    "VIDEO_PARAMETER_LLM_RETRY_READ_TIMEOUTS", False
+)
+# 整段规格分析的硬时限。即使底层请求或重试未按预期结束，也会及时降级，
+# 避免剧本页长期停留在“分析中”。
+VIDEO_PARAMETER_ANALYSIS_DEADLINE_SECONDS = _env_int(
+    "VIDEO_PARAMETER_ANALYSIS_DEADLINE_SECONDS", 60
+)
 # 正式剧本审核按规模拆成逐集、批次汇总和最终总评。各请求使用独立短时限，
 # 已经等待到读取超时的请求不再重复提交；连接错误和网关错误仍可重试一次。
 SCREENPLAY_REVIEW_UNIT_LLM_REASONING_EFFORT = _env_choice(

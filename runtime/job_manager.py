@@ -37,6 +37,7 @@ _CONCURRENT_SCREENPLAY_REVIEW_TYPES = frozenset(
     {"screenplay_review", "project_review"}
 )
 _CONCURRENT_SCREENPLAY_OPTIMIZATION_TYPES = frozenset({"screenplay_optimization"})
+_CONCURRENT_VIDEO_PARAMETER_TYPES = frozenset({"video_parameter_recommendation"})
 _PENDING_LAUNCH_GRACE_SECONDS = 30.0
 _LAUNCH_LEASE_SECONDS = 30.0
 
@@ -561,6 +562,9 @@ class JobManager:
         elif not job_types - _CONCURRENT_SCREENPLAY_OPTIMIZATION_TYPES:
             existing_identity = str(existing_extra.get("optimization_id") or "").strip()
             incoming_identity = str(incoming_extra.get("optimization_id") or "").strip()
+        elif not job_types - _CONCURRENT_VIDEO_PARAMETER_TYPES:
+            existing_identity = str(existing_extra.get("project_id") or "").strip()
+            incoming_identity = str(incoming_extra.get("project_id") or "").strip()
         else:
             return False
         return bool(existing_identity and incoming_identity and existing_identity != incoming_identity)

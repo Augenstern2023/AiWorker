@@ -204,6 +204,11 @@
                     jobStartedAt: 0, jobElapsedSeconds: 0,
                     startingAction: '', activeAction: '', activeEpisode: 0, activeSeriesGeneration: false, activeBatchId: '',
                     outlineEpisodeUpdates: {episodeNumber: 0, records: []},
+                    videoParameters: {
+                        record: null, capabilities: {}, scenarios: [], loading: false,
+                        analyzing: false, confirming: '', error: '', autoRequested: false,
+                        pollTimer: null, job: null, analysisDeadlineSeconds: 60
+                    },
                     outlineFieldRewrite: {
                         projectId: 0, batchId: '', episodeId: 0, episodeNumber: 0,
                         fieldKey: '', fieldLabel: '', sourceStatus: '', sourceText: '',

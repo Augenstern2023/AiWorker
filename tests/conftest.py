@@ -39,6 +39,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 
+
 def pytest_ignore_collect(collection_path: Path, config) -> bool:
     """Ignore suites whose human-approval workflow contracts were retired."""
     del config
@@ -96,6 +97,15 @@ def isolated_system_database(
         with admin_engine.begin() as connection:
             connection.exec_driver_sql(f'DROP SCHEMA "{schema_name}" CASCADE')
         admin_engine.dispose()
+
+
+@pytest.fixture
+def postgres_creative(isolated_system_database: SystemDatabase):
+    """A creative repository bound to the isolated PostgreSQL schema."""
+
+    from creative.postgres_repository import PostgresCreativeRepository
+
+    return PostgresCreativeRepository(isolated_system_database)
 
 
 @pytest.fixture

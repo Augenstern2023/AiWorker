@@ -12,17 +12,22 @@ from typing import Any, Callable
 
 import config
 
-from analysis.llm import create_llm_provider_from_config
+from analysis.llm import LLMOutputTruncatedError, create_llm_provider_from_config
 from core.job import CrawlJob
 from creative.free_mode_service import FreeCreativeModeService
 from creative.original_direction_service import generate_original_directions
-from creative.repository import CreativeRepository
+from creative.repository import CreativeRepository, canonical_request_hash
 from creative.script_service import (
+    build_continuity_ledger,
     generate_character_bundle,
     generate_episode_beats,
+    generate_episode_beats_chunk,
     generate_episode_script,
     generate_outline_bundle,
 )
+
+
+FREE_BEATS_SERIES_CHUNK_SIZE = 10
 
 
 def _create_generation_provider(extra: dict[str, Any]) -> Any:
@@ -181,44 +186,48 @@ async def _run_free_episode_series(
         f"准备生成全部集{resource_label}",
         payload={"stage": stage, "completed": 0, "total": total},
     )
-    episode_ids: list[int] = []
+    prepared: dict[int, dict[str, Any]] = {}
     for episode_number in range(1, total + 1):
         context = contexts[episode_number]
         snapshot = dict(context["context_snapshot"])
         prompt_snapshot = snapshot.get("prompt_snapshot")
-        prompt_kwargs = (
-            {"prompt_snapshot": dict(prompt_snapshot)}
-            if isinstance(prompt_snapshot, dict)
-            else {}
-        )
         episode_project = dict(project)
         episode_project.update(snapshot.get("project") or {})
         brief, characters, relationships, outline, beats = _prompt_inputs(
             context, episode_number
         )
-        if stage == "beats":
-            generated, meta = await generate_episode_beats(
-                provider,
-                episode_project,
-                outline,
-                characters,
-                episode_number,
-                brief=brief,
-                relationships=relationships,
-                **prompt_kwargs,
-            )
-        else:
-            generated, meta = await generate_episode_script(
-                provider,
-                episode_project,
-                outline,
-                characters,
-                beats,
-                episode_number,
-                brief=brief,
-                relationships=relationships,
-                **prompt_kwargs,
-            )
+        batch_brief = dict(brief)
+        generation_context = dict(batch_brief.get("generation_context") or {})
+        generation_context.pop("context_id", None)
+        batch_brief["generation_context"] = generation_context
+        prepared[episode_number] = {
+            "context": context,
+            "prompt_snapshot": (
+                dict(prompt_snapshot) if isinstance(prompt_snapshot, dict) else None
+            ),
+            "project": episode_project,
+            "brief": brief,
+            "batch_brief": batch_brief,
+            "characters": characters,
+            "relationships": relationships,
+            "outline": outline,
+            "beats": beats,
+        }
+
+    episode_ids: list[int] = []
+    generated_beats: list[dict[str, Any]] = []
+
+    def save_episode(
+        episode_number: int,
+        generated: dict[str, Any],
+        meta: dict[str, Any],
+        *,
+        batch_start: int | None = None,
+        batch_end: int | None = None,
+    ) -> None:
+        item = prepared[episode_number]
+        context = item["context"]
+        prompt_snapshot = item["prompt_snapshot"]
         result = service.create_episode_resource(
             project_id,
             stage,
@@ -237,6 +246,16 @@ async def _run_free_episode_series(
                 "prompt_template_version": context.get("prompt_schema_version") or "",
                 "resource_scope": "free",
                 "series_generation": True,
+                **(
+                    {
+                        "preferred_chunk_size": FREE_BEATS_SERIES_CHUNK_SIZE,
+                        "actual_chunk_size": int(batch_end) - int(batch_start) + 1,
+                        "checkpoint_start": int(batch_start),
+                        "checkpoint_end": int(batch_end),
+                    }
+                    if batch_start is not None and batch_end is not None
+                    else {}
+                ),
                 "prompt_source": "template" if isinstance(prompt_snapshot, dict) else "system",
                 **(
                     {
@@ -260,6 +279,8 @@ async def _run_free_episode_series(
             },
         )
         episode_ids.append(int(result["resource"]["id"]))
+        if stage == "beats":
+            generated_beats.append(result["resource"])
         emit(
             job,
             "progress",
@@ -271,6 +292,131 @@ async def _run_free_episode_series(
                 "episode_number": episode_number,
             },
         )
+
+    if stage == "beats":
+        project_context_fields = (
+            "id",
+            "name",
+            "genre",
+            "target_platform",
+            "target_audience",
+            "target_episode_count",
+            "episode_duration_seconds",
+            "locked_brief_id",
+            "character_batch_id",
+            "outline_batch_id",
+        )
+
+        def compatibility_signature(episode_number: int) -> str:
+            item = prepared[episode_number]
+            return canonical_request_hash({
+                "project": {
+                    key: item["project"].get(key) for key in project_context_fields
+                },
+                "brief": item["batch_brief"],
+                "characters": item["characters"],
+                "relationships": item["relationships"],
+                "prompt_snapshot": item["prompt_snapshot"],
+            })
+
+        compatible_groups: list[list[int]] = []
+        current_group: list[int] = []
+        current_signature = ""
+        for episode_number in range(1, total + 1):
+            signature = compatibility_signature(episode_number)
+            if current_group and (
+                len(current_group) >= FREE_BEATS_SERIES_CHUNK_SIZE
+                or signature != current_signature
+            ):
+                compatible_groups.append(current_group)
+                current_group = []
+            if not current_group:
+                current_signature = signature
+            current_group.append(episode_number)
+        if current_group:
+            compatible_groups.append(current_group)
+
+        async def generate_beats_range(episode_numbers: list[int]) -> None:
+            first_number = episode_numbers[0]
+            last_number = episode_numbers[-1]
+            first = prepared[first_number]
+            try:
+                rows, meta = await generate_episode_beats_chunk(
+                    provider,
+                    first["project"],
+                    first["batch_brief"],
+                    [prepared[number]["outline"] for number in episode_numbers],
+                    first["characters"],
+                    first["relationships"],
+                    continuity_ledger=build_continuity_ledger(generated_beats),
+                    prompt_snapshot=first["prompt_snapshot"],
+                )
+            except LLMOutputTruncatedError as exc:
+                if len(episode_numbers) == 1:
+                    raise LLMOutputTruncatedError(
+                        f"第 {first_number} 集自由 Beats 生成仍达到模型输出上限；"
+                        "请提高模型输出上限或减少单集字段内容",
+                        finish_reason=exc.finish_reason,
+                        returned_chars=exc.returned_chars,
+                    ) from exc
+                midpoint = len(episode_numbers) // 2
+                left = episode_numbers[:midpoint]
+                right = episode_numbers[midpoint:]
+                emit(
+                    job,
+                    "progress",
+                    f"第 {first_number}-{last_number} 集自由 Beats 输出达到上限，"
+                    f"自动拆分为第 {left[0]}-{left[-1]} 集和"
+                    f"第 {right[0]}-{right[-1]} 集",
+                    level="warning",
+                    payload={
+                        "stage": stage,
+                        "completed": len(episode_ids),
+                        "total": total,
+                        "split_start": first_number,
+                        "split_end": last_number,
+                        "left_start": left[0],
+                        "left_end": left[-1],
+                        "right_start": right[0],
+                        "right_end": right[-1],
+                        "finish_reason": exc.finish_reason,
+                        "returned_chars": exc.returned_chars,
+                    },
+                )
+                await generate_beats_range(left)
+                await generate_beats_range(right)
+                return
+            for episode_number, generated in rows:
+                save_episode(
+                    episode_number,
+                    generated,
+                    meta,
+                    batch_start=first_number,
+                    batch_end=last_number,
+                )
+
+        for group in compatible_groups:
+            await generate_beats_range(group)
+    else:
+        for episode_number in range(1, total + 1):
+            item = prepared[episode_number]
+            prompt_kwargs = (
+                {"prompt_snapshot": item["prompt_snapshot"]}
+                if isinstance(item["prompt_snapshot"], dict)
+                else {}
+            )
+            generated, meta = await generate_episode_script(
+                provider,
+                item["project"],
+                item["outline"],
+                item["characters"],
+                item["beats"],
+                episode_number,
+                brief=item["brief"],
+                relationships=item["relationships"],
+                **prompt_kwargs,
+            )
+            save_episode(episode_number, generated, meta)
     emit(
         job,
         "job_finished",

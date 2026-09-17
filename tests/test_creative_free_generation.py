@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from analysis.llm import LLMOutputTruncatedError
 from core.job import CrawlJob
 from creative import free_phase4_worker
 from creative.free_mode_service import FreeCreativeModeService
@@ -528,16 +529,34 @@ async def test_free_beats_series_generates_every_episode_and_preserves_locked_ve
         )
         for episode_number in range(1, 4)
     }
-    generated_episodes: list[int] = []
+    generated_ranges: list[list[int]] = []
 
-    async def generate_beats(_provider, _project, _outline, _characters, episode_number, **_kwargs):
-        generated_episodes.append(episode_number)
-        return {
-            "beats": [{"order": 1, "event": f"新第 {episode_number} 集"}],
-        }, {"model": "fake"}
+    async def generate_beats_chunk(
+        _provider,
+        _project,
+        _brief,
+        outlines,
+        _characters,
+        _relationships,
+        **_kwargs,
+    ):
+        episode_numbers = [int(item["episode_number"]) for item in outlines]
+        generated_ranges.append(episode_numbers)
+        return [
+            (
+                episode_number,
+                {"beats": [{"order": 1, "event": f"新第 {episode_number} 集"}]},
+            )
+            for episode_number in episode_numbers
+        ], {"model": "fake"}
 
     monkeypatch.setattr(free_phase4_worker, "create_llm_provider_from_config", lambda _config: object())
-    monkeypatch.setattr(free_phase4_worker, "generate_episode_beats", generate_beats)
+    monkeypatch.setattr(
+        free_phase4_worker,
+        "generate_episode_beats_chunk",
+        generate_beats_chunk,
+        raising=False,
+    )
     job = CrawlJob(
         job_id="free-beats-series",
         platform="creative",
@@ -566,7 +585,7 @@ async def test_free_beats_series_generates_every_episode_and_preserves_locked_ve
 
     await free_phase4_worker.run_free_generation(job, repository, emit)
 
-    assert generated_episodes == [1, 2, 3]
+    assert generated_ranges == [[1, 2, 3]]
     refreshed = repository.get_project(project["id"])
     assert refreshed is not None
     heads = {
@@ -602,6 +621,214 @@ async def test_free_beats_series_generates_every_episode_and_preserves_locked_ve
     assert events[-1][0] == "job_finished"
     assert events[-1][1]["series_generation"] is True
     assert events[-1][1]["episode_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_free_beats_series_splits_truncated_batches_and_carries_continuity(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = _free_project(repository)
+    service = FreeCreativeModeService(repository)
+    contexts = {
+        episode_number: service.create_generation_context(
+            context_id=f"split-series-context-{episode_number}",
+            project_id=project["id"],
+            stage="beats",
+            episode_number=episode_number,
+            instruction="保持连续线索",
+            context_refs={},
+            actor_user_id="owner-1",
+        )
+        for episode_number in range(1, 4)
+    }
+    requested_ranges: list[list[int]] = []
+    ledgers: list[list[dict[str, Any]]] = []
+
+    async def generate_beats_chunk(
+        _provider,
+        _project,
+        _brief,
+        outlines,
+        _characters,
+        _relationships,
+        **kwargs,
+    ):
+        episode_numbers = [int(item["episode_number"]) for item in outlines]
+        requested_ranges.append(episode_numbers)
+        ledgers.append(list(kwargs.get("continuity_ledger") or []))
+        if episode_numbers == [1, 2, 3]:
+            raise LLMOutputTruncatedError(
+                "1-3 truncated", finish_reason="length", returned_chars=60_000
+            )
+        return [
+            (
+                episode_number,
+                {
+                    "beats": [{
+                        "order": 1,
+                        "event": f"第 {episode_number} 集",
+                        "continuity_updates": ([{
+                            "kind": "information",
+                            "name": "自由批次线索",
+                            "event": "reveal",
+                            "holder": "主角",
+                            "location": "大厅",
+                            "known_by": ["主角"],
+                            "status": "active",
+                        }] if episode_number == 1 else []),
+                    }],
+                },
+            )
+            for episode_number in episode_numbers
+        ], {"model": "fake"}
+
+    monkeypatch.setattr(
+        free_phase4_worker,
+        "create_llm_provider_from_config",
+        lambda _config: object(),
+    )
+    monkeypatch.setattr(
+        free_phase4_worker,
+        "generate_episode_beats_chunk",
+        generate_beats_chunk,
+    )
+    job = CrawlJob(
+        job_id="free-beats-series-split",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "beats",
+            "normalized_stage": "beats",
+            "workflow_mode": "free",
+            "project_id": project["id"],
+            "episode_number": None,
+            "created_by_user_id": "owner-1",
+            "operation_id": "operation-beats-series-split",
+            "series": True,
+            "episode_start": 1,
+            "episode_end": 3,
+            "free_context_ids": {
+                str(number): context["id"] for number, context in contexts.items()
+            },
+            "expected_head_revisions": {"1": 0, "2": 0, "3": 0},
+        },
+    )
+    events: list[dict[str, Any]] = []
+
+    def emit(_job, event_type: str, _message: str, **kwargs) -> None:
+        events.append({
+            "event": event_type,
+            "level": kwargs.get("level", "info"),
+            "payload": dict(kwargs.get("payload") or {}),
+        })
+
+    await free_phase4_worker.run_free_generation(job, repository, emit)
+
+    assert requested_ranges == [[1, 2, 3], [1], [2, 3]]
+    assert ledgers[0] == []
+    assert ledgers[1] == []
+    assert ledgers[2][0]["name"] == "自由批次线索"
+    assert any(
+        event["level"] == "warning"
+        and event["payload"].get("split_start") == 1
+        and event["payload"].get("split_end") == 3
+        for event in events
+    )
+    generated = [
+        item
+        for item in repository.get_project(project["id"])["episodes"]
+        if item["stage"] == "beats"
+        and item.get("generation_meta", {}).get("job_id") == job.job_id
+    ]
+    assert [item["episode_number"] for item in generated] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_free_beats_series_does_not_batch_incompatible_prompt_snapshots(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    project = _free_project(repository)
+    service = FreeCreativeModeService(repository)
+    contexts = {
+        episode_number: service.create_generation_context(
+            context_id=f"incompatible-series-context-{episode_number}",
+            project_id=project["id"],
+            stage="beats",
+            episode_number=episode_number,
+            instruction="保持连续线索",
+            context_refs={},
+            actor_user_id="owner-1",
+            prompt_snapshot={
+                "template_id": "system:test-beats",
+                "template_key": "test-beats",
+                "revision": episode_number,
+                "stage": "beats",
+                "mode": "series",
+                "content_hash": f"beats-snapshot-{episode_number}",
+                "effective_instruction": f"第 {episode_number} 集专用提示词",
+            },
+        )
+        for episode_number in range(1, 4)
+    }
+    requested_ranges: list[list[int]] = []
+
+    async def generate_beats_chunk(
+        _provider,
+        _project,
+        _brief,
+        outlines,
+        _characters,
+        _relationships,
+        **_kwargs,
+    ):
+        episode_numbers = [int(item["episode_number"]) for item in outlines]
+        requested_ranges.append(episode_numbers)
+        return [
+            (episode_number, {"beats": [{"order": 1, "event": "生成"}]})
+            for episode_number in episode_numbers
+        ], {"model": "fake"}
+
+    monkeypatch.setattr(
+        free_phase4_worker,
+        "create_llm_provider_from_config",
+        lambda _config: object(),
+    )
+    monkeypatch.setattr(
+        free_phase4_worker,
+        "generate_episode_beats_chunk",
+        generate_beats_chunk,
+    )
+    job = CrawlJob(
+        job_id="free-beats-series-incompatible-prompts",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "beats",
+            "normalized_stage": "beats",
+            "workflow_mode": "free",
+            "project_id": project["id"],
+            "episode_number": None,
+            "created_by_user_id": "owner-1",
+            "operation_id": "operation-beats-series-incompatible-prompts",
+            "series": True,
+            "episode_start": 1,
+            "episode_end": 3,
+            "free_context_ids": {
+                str(number): context["id"] for number, context in contexts.items()
+            },
+            "expected_head_revisions": {"1": 0, "2": 0, "3": 0},
+        },
+    )
+
+    await free_phase4_worker.run_free_generation(
+        job, repository, lambda *_args, **_kwargs: None
+    )
+
+    assert requested_ranges == [[1], [2], [3]]
 
 
 @pytest.mark.asyncio

@@ -41,7 +41,13 @@ def insert(conn, table, **row):
 @pytest.fixture
 def db(tmp_path):
     path = tmp_path / "creative # 测试.sqlite"
-    tree = ast.parse((Path(__file__).parents[1] / "creative/repository.py").read_text(encoding="utf-8"))
+    # The legacy DDL now lives in the frozen SQLite module: creative/repository.py
+    # is a thin facade over it while the PostgreSQL cutover is in flight.
+    tree = ast.parse(
+        (
+            Path(__file__).parents[1] / "creative/legacy_sqlite_repository.py"
+        ).read_text(encoding="utf-8")
+    )
     tables = {"creative_projects", "creative_blueprints", "creative_characters",
               "creative_relationships", "creative_episodes"}
     with sqlite3.connect(path) as conn:

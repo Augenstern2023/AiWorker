@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
+import subprocess
 import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -221,9 +223,9 @@ def _build_table_specs() -> tuple[CreativeTableSpec, ...]:
     """Build the specification tuple in dependency order.
 
     ``MetaData.sorted_tables`` already returns tables in foreign-key dependency
-    order, which is exactly the import order the plan fixes as
-    metadata -> topics -> breakdowns -> projects -> seeds/versions ->
-    heads/contexts -> operations -> reviews/optimizations -> deliveries/exports.
+    order, which matches the order the plan fixes. ``creative_store_metadata``
+    is hoisted to the front because it carries ``store_id``: the identity every
+    workflow reference depends on must exist before anything else is read.
     """
 
     creative_table_names = frozenset(CREATIVE_METADATA.tables)
@@ -231,9 +233,14 @@ def _build_table_specs() -> tuple[CreativeTableSpec, ...]:
         _build_table_spec(table, creative_table_names)
         for table in CREATIVE_METADATA.sorted_tables
     ]
-    root = [spec for spec in specs if spec.is_control_table]
-    business = [spec for spec in specs if not spec.is_control_table]
-    return tuple(business + root)
+    identity_first = [spec for spec in specs if spec.name == "creative_store_metadata"]
+    control = [spec for spec in specs if spec.is_control_table]
+    business = [
+        spec
+        for spec in specs
+        if not spec.is_control_table and spec.name != "creative_store_metadata"
+    ]
+    return tuple(identity_first + business + control)
 
 
 CREATIVE_TABLE_SPECS: tuple[CreativeTableSpec, ...] = _build_table_specs()
@@ -949,6 +956,662 @@ def _chunks(values: Sequence[Any], size: int) -> Iterator[Sequence[Any]]:
         yield values[start : start + size]
 
 
+# ---------------------------------------------------------------------------
+# import
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ImportReport:
+    run_id: str
+    mode: str
+    status: str
+    verified: bool
+    source_path: str
+    source_sha256: str
+    source_schema_fingerprint: str
+    application_commit: str
+    alembic_revision: str
+    row_counts: Mapping[str, int]
+    target_counts: Mapping[str, int]
+    id_ranges: Mapping[str, Any]
+    digests: Mapping[str, str]
+    sequences: Mapping[str, int]
+    problems: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+    error_summary: str = ""
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status in {"completed", "verified"} and not self.problems
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "mode": self.mode,
+            "status": self.status,
+            "verified": self.verified,
+            "ok": self.ok,
+            "source_path": self.source_path,
+            "source_sha256": self.source_sha256,
+            "source_schema_fingerprint": self.source_schema_fingerprint,
+            "application_commit": self.application_commit,
+            "alembic_revision": self.alembic_revision,
+            "row_counts": dict(self.row_counts),
+            "target_counts": dict(self.target_counts),
+            "id_ranges": {
+                name: (None if limits is None else list(limits))
+                for name, limits in self.id_ranges.items()
+            },
+            "digests": dict(self.digests),
+            "sequences": dict(self.sequences),
+            "problems": list(self.problems),
+            "warnings": list(self.warnings),
+            "error_summary": self.error_summary,
+            "started_at": (
+                None
+                if self.started_at is None
+                else canonical_json_default(self.started_at)
+            ),
+            "finished_at": (
+                None
+                if self.finished_at is None
+                else canonical_json_default(self.finished_at)
+            ),
+        }
+
+
+def source_schema_fingerprint(connection: sqlite3.Connection) -> str:
+    """Fingerprint the source table/column/type shape.
+
+    Recorded on the control row so a later verification run can tell whether it
+    is looking at the same source schema the import consumed.
+    """
+
+    hasher = hashlib.sha256()
+    for table in _source_tables(connection):
+        hasher.update(table.encode("utf-8"))
+        hasher.update(b"\x00")
+        for row in connection.execute(f'PRAGMA table_info("{table}")').fetchall():
+            hasher.update(f"{row[1]}:{row[2]}:{row[3]}".encode("utf-8"))
+            hasher.update(b"\x01")
+        hasher.update(b"\n")
+    return hasher.hexdigest()
+
+
+def application_commit() -> str:
+    """Best-effort current commit, recorded on the control row for traceability."""
+
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover - environment
+        return ""
+    return completed.stdout.strip() if completed.returncode == 0 else ""
+
+
+def redact_secrets(value: str) -> str:
+    """Remove credentials from a message before it is persisted."""
+
+    return re.sub(r"://([^:/@\s]+):[^@/\s]+@", r"://\1:***@", value)
+
+
+def _require_migrated_target(database: SystemDatabase) -> str:
+    """Refuse to import unless the target is PostgreSQL, at head, and empty."""
+
+    if database.url.get_backend_name() != "postgresql":
+        raise CreativeImportError("the creative target must be PostgreSQL")
+
+    health = database.health()
+    if not health.reachable:
+        raise CreativeImportError(
+            f"PostgreSQL target is not reachable: {health.database_url_redacted}"
+        )
+    if not health.schema_current:
+        raise CreativeImportError(
+            "PostgreSQL target is not at the Alembic head "
+            f"(current={health.current_revision!r}, head={health.head_revision!r})"
+        )
+
+    target = inspect_target_creative(database)
+    if not target["empty"]:
+        counts = ", ".join(
+            f"{name}={count}"
+            for name, count in sorted(target["non_empty_tables"].items())
+        )
+        raise CreativeImportError(
+            "refusing to import into a non-empty creative target: " + counts
+        )
+    return health.current_revision or ""
+
+
+def _insert_source_rows(
+    connection: Connection,
+    spec: CreativeTableSpec,
+    rows: Sequence[Mapping[str, Any]],
+) -> int:
+    """Insert one table's rows verbatim, preserving every legacy identifier."""
+
+    if not rows:
+        return 0
+    table = CREATIVE_METADATA.tables[spec.name]
+    target_columns = frozenset(table.columns.keys())
+    payload = [
+        {
+            key: value
+            for key, value in normalize_for_target(row, spec, index=index).items()
+            if key in target_columns
+        }
+        for index, row in enumerate(rows)
+    ]
+    connection.execute(table.insert(), payload)
+    return len(payload)
+
+
+def _sequence_name(connection: Connection, spec: CreativeTableSpec) -> str | None:
+    table = CREATIVE_METADATA.tables[spec.name]
+    if "id" not in table.columns:
+        return None
+    return connection.execute(
+        select(func.pg_get_serial_sequence(spec.name, "id"))
+    ).scalar_one()
+
+
+def _reset_identity_sequences(
+    connection: Connection, specs: Sequence[CreativeTableSpec]
+) -> dict[str, int]:
+    """Point every identity sequence past the imported maximum."""
+
+    maximums: dict[str, int] = {}
+    for spec in specs:
+        sequence = _sequence_name(connection, spec)
+        if not sequence:
+            continue
+        table = CREATIVE_METADATA.tables[spec.name]
+        maximum = connection.execute(select(func.max(table.c.id))).scalar_one()
+        connection.execute(
+            sql_text("SELECT setval(CAST(:sequence AS regclass), :value, :called)"),
+            {
+                "sequence": sequence,
+                "value": int(maximum) if maximum is not None else 1,
+                "called": maximum is not None,
+            },
+        )
+        maximums[spec.name] = int(maximum) if maximum is not None else 0
+    return maximums
+
+
+def _verify_sequence_headroom(
+    connection: Connection,
+    specs: Sequence[CreativeTableSpec],
+    maximums: Mapping[str, int],
+) -> dict[str, int]:
+    """Prove the next generated identifier is beyond every imported one.
+
+    Reading ``last_value``/``is_called`` does not advance the sequence, so this
+    probe needs no savepoint and cannot disturb the import it is checking.
+    """
+
+    nexts: dict[str, int] = {}
+    for spec in specs:
+        if spec.name not in maximums:
+            continue
+        sequence = _sequence_name(connection, spec)
+        if not sequence:
+            continue
+        row = connection.execute(
+            sql_text(f"SELECT last_value, is_called FROM {sequence}")
+        ).one()
+        last_value, is_called = int(row[0]), bool(row[1])
+        next_value = last_value + 1 if is_called else last_value
+        maximum = maximums[spec.name]
+        if next_value <= maximum:
+            raise CreativeImportError(
+                f"{spec.name}: identity sequence would reuse id {next_value}, "
+                f"which is already imported (max {maximum})"
+            )
+        nexts[spec.name] = next_value
+    return nexts
+
+
+def _read_target_state(
+    connection: Connection, specs: Sequence[CreativeTableSpec]
+) -> tuple[dict[str, str], dict[str, int], dict[str, Any]]:
+    """Digest, count and range every target table using the same canonical form."""
+
+    digests: dict[str, str] = {}
+    counts: dict[str, int] = {}
+    ranges: dict[str, Any] = {}
+    for spec in specs:
+        table = CREATIVE_METADATA.tables[spec.name]
+        rows = [dict(row) for row in connection.execute(select(table)).mappings().all()]
+        rows.sort(key=lambda row: _sort_key(row, spec))
+        hasher = hashlib.sha256()
+        for index, row in enumerate(rows):
+            hasher.update(canonical_row(row, spec, index=index))
+            hasher.update(b"\n")
+        digests[spec.name] = hasher.hexdigest()
+        counts[spec.name] = len(rows)
+        ranges[spec.name] = _primary_key_range(rows, spec)
+    return digests, counts, ranges
+
+
+def _record_import_run(
+    database: SystemDatabase,
+    *,
+    run_id: str,
+    mode: str,
+    status: str,
+    inspection: CreativeInspectionReport | None,
+    schema_fingerprint: str,
+    revision: str,
+    row_counts: Mapping[str, int],
+    target_counts: Mapping[str, int],
+    digests: Mapping[str, str],
+    problems: Sequence[str],
+    error_summary: str,
+    started_at: datetime,
+    finished_at: datetime | None,
+    insert: bool,
+) -> None:
+    """Write the control row in its own short transaction.
+
+    The control row lives outside the business transaction on purpose: a failed
+    import must still leave one auditable ``failed`` record while no business
+    table holds a partial result.
+    """
+
+    table = CREATIVE_METADATA.tables[IMPORT_RUNS_TABLE]
+    values = {
+        "run_id": run_id,
+        "mode": mode,
+        "source_path": "" if inspection is None else inspection.source_path,
+        "source_sha256": "" if inspection is None else inspection.source_sha256,
+        "source_schema_fingerprint": schema_fingerprint,
+        "application_commit": application_commit(),
+        "alembic_revision": revision,
+        "status": status,
+        "source_counts_json": dict(row_counts),
+        "target_counts_json": dict(target_counts),
+        "table_hashes_json": dict(digests),
+        "issue_summary_json": {"problems": list(problems)},
+        "error_summary": redact_secrets(error_summary)[:4000],
+        "started_at": started_at,
+        "finished_at": finished_at,
+    }
+    with database.transaction() as connection:
+        if insert:
+            connection.execute(table.insert().values(**values))
+        else:
+            connection.execute(
+                table.update().where(table.c.run_id == run_id).values(**values)
+            )
+
+
+def _import_problems(
+    inspection: CreativeInspectionReport,
+    row_counts: Mapping[str, int],
+    target_counts: Mapping[str, int],
+    digests: Mapping[str, str],
+    ranges: Mapping[str, Any],
+) -> tuple[str, ...]:
+    problems: list[str] = []
+    for name in sorted(digests):
+        expected = inspection.digests.get(name)
+        if expected != digests[name]:
+            problems.append(
+                f"{name}: source digest {expected} != target digest {digests[name]}"
+            )
+    for name in sorted(target_counts):
+        if row_counts.get(name) != target_counts[name]:
+            problems.append(
+                f"{name}: source rows {row_counts.get(name)} != "
+                f"target rows {target_counts[name]}"
+            )
+    for name in sorted(ranges):
+        if inspection.id_ranges.get(name) != ranges.get(name):
+            problems.append(
+                f"{name}: source range {inspection.id_ranges.get(name)} != "
+                f"target range {ranges.get(name)}"
+            )
+    return tuple(problems)
+
+
+def import_sqlite_creative(
+    source: str | Path,
+    database: SystemDatabase,
+) -> ImportReport:
+    """Import the legacy creative store into PostgreSQL in one transaction.
+
+    Either every business table is migrated or none is. The control row is the
+    only record that survives a failure.
+    """
+
+    mode = "apply"
+    started_at = datetime.now(timezone.utc)
+    inspection = inspect_sqlite_creative(source, strict=True)
+    revision = _require_migrated_target(database)
+
+    with open_read_only(source) as source_connection:
+        schema_fingerprint = source_schema_fingerprint(source_connection)
+        present = set(_source_tables(source_connection))
+        source_rows = {
+            spec.name: [dict(row) for row in _fetch_rows(source_connection, spec.name)]
+            for spec in BUSINESS_TABLE_SPECS
+            if spec.name in present
+        }
+
+    run_id = uuid.uuid4().hex
+    row_counts = {
+        spec.name: len(source_rows.get(spec.name, ())) for spec in BUSINESS_TABLE_SPECS
+    }
+    _record_import_run(
+        database,
+        run_id=run_id,
+        mode=mode,
+        status="running",
+        inspection=inspection,
+        schema_fingerprint=schema_fingerprint,
+        revision=revision,
+        row_counts=row_counts,
+        target_counts={},
+        digests={},
+        problems=(),
+        error_summary="",
+        started_at=started_at,
+        finished_at=None,
+        insert=True,
+    )
+
+    try:
+        with database.transaction() as connection:
+            for spec in BUSINESS_TABLE_SPECS:
+                _insert_source_rows(connection, spec, source_rows.get(spec.name, ()))
+
+            maximums = _reset_identity_sequences(connection, BUSINESS_TABLE_SPECS)
+            sequences = _verify_sequence_headroom(
+                connection, BUSINESS_TABLE_SPECS, maximums
+            )
+            digests, target_counts, ranges = _read_target_state(
+                connection, BUSINESS_TABLE_SPECS
+            )
+    except Exception as exc:  # noqa: BLE001 - every failure must be recorded
+        _record_import_run(
+            database,
+            run_id=run_id,
+            mode=mode,
+            status="failed",
+            inspection=inspection,
+            schema_fingerprint=schema_fingerprint,
+            revision=revision,
+            row_counts=row_counts,
+            target_counts={},
+            digests={},
+            problems=(),
+            error_summary=f"{type(exc).__name__}: {exc}",
+            started_at=started_at,
+            finished_at=datetime.now(timezone.utc),
+            insert=False,
+        )
+        raise
+
+    problems = _import_problems(inspection, row_counts, target_counts, digests, ranges)
+    finished_at = datetime.now(timezone.utc)
+    status = "completed" if not problems else "failed"
+    _record_import_run(
+        database,
+        run_id=run_id,
+        mode=mode,
+        status=status,
+        inspection=inspection,
+        schema_fingerprint=schema_fingerprint,
+        revision=revision,
+        row_counts=row_counts,
+        target_counts=target_counts,
+        digests=digests,
+        problems=problems,
+        error_summary="\n".join(problems),
+        started_at=started_at,
+        finished_at=finished_at,
+        insert=False,
+    )
+
+    return ImportReport(
+        run_id=run_id,
+        mode=mode,
+        status=status,
+        verified=not problems,
+        source_path=inspection.source_path,
+        source_sha256=inspection.source_sha256,
+        source_schema_fingerprint=schema_fingerprint,
+        application_commit=application_commit(),
+        alembic_revision=revision,
+        row_counts=row_counts,
+        target_counts=target_counts,
+        id_ranges=ranges,
+        digests=digests,
+        sequences=sequences,
+        problems=problems,
+        warnings=inspection.warnings,
+        error_summary="\n".join(problems),
+        started_at=started_at,
+        finished_at=finished_at,
+    )
+
+
+VERSIONED_TABLES: tuple[tuple[str, str], ...] = (
+    ("creative_breakdowns", "parent_version_id"),
+    ("creative_seeds", "parent_version_id"),
+    ("creative_blueprints", "parent_version_id"),
+)
+
+
+def _parent_cannot_precede_child(parent: Any, child: Any) -> bool:
+    """Whether a parent version is impossible for the child that names it.
+
+    Identifiers are compared numerically when both are integers: a lexical
+    comparison would wrongly call id 10 with parent 9 a forward reference.
+    """
+
+    if isinstance(parent, int) and isinstance(child, int):
+        return parent >= child
+    return str(parent) >= str(child)
+
+
+def _version_chain_problems(database: SystemDatabase) -> list[str]:
+    """Every version row must point at a parent that exists and precedes it."""
+
+    problems: list[str] = []
+    with database.connection() as connection:
+        for name, parent_column in VERSIONED_TABLES:
+            table = CREATIVE_METADATA.tables[name]
+            if parent_column not in table.columns:
+                continue
+            rows = connection.execute(
+                select(table.c.id, table.c[parent_column])
+            ).all()
+            existing = {row[0] for row in rows}
+            for row in rows:
+                parent = row[1]
+                if parent is None:
+                    continue
+                if parent not in existing:
+                    problems.append(
+                        f"{name}: id={row[0]} has a broken parent version {parent}"
+                    )
+                elif _parent_cannot_precede_child(parent, row[0]):
+                    problems.append(
+                        f"{name}: id={row[0]} points forward to parent version {parent}"
+                    )
+    return problems
+
+
+def _head_reference_problems(database: SystemDatabase) -> list[str]:
+    """Every resource head must point at an episode row that exists."""
+
+    problems: list[str] = []
+    heads = CREATIVE_METADATA.tables["creative_resource_heads"]
+    episodes = CREATIVE_METADATA.tables["creative_episodes"]
+    with database.connection() as connection:
+        head_rows = connection.execute(
+            select(heads.c.project_id, heads.c.stage, heads.c.resource_ref)
+        ).all()
+        if not head_rows:
+            return problems
+        known = {
+            (row[0], row[1])
+            for row in connection.execute(
+                select(episodes.c.project_id, episodes.c.id)
+            ).all()
+        }
+        for row in head_rows:
+            project_id, stage, resource_ref = row[0], row[1], row[2]
+            if resource_ref is None:
+                continue
+            try:
+                reference = int(resource_ref)
+            except (TypeError, ValueError):
+                continue
+            if (project_id, reference) not in known:
+                problems.append(
+                    f"creative_resource_heads: project {project_id} stage {stage} "
+                    f"points at missing episode {resource_ref}"
+                )
+    return problems
+
+
+def _workflow_identity_problems(database: SystemDatabase) -> list[str]:
+    """The store identity must survive, and every project must be addressable."""
+
+    problems: list[str] = []
+    store_metadata = CREATIVE_METADATA.tables["creative_store_metadata"]
+    projects = CREATIVE_METADATA.tables["creative_projects"]
+    with database.connection() as connection:
+        store_id = connection.execute(
+            select(store_metadata.c.value).where(store_metadata.c.key == "store_id")
+        ).scalar_one_or_none()
+        if store_id is None:
+            problems.append("creative_store_metadata: store_id is missing after import")
+            return problems
+        normalized = str(store_id).strip()
+        try:
+            uuid.UUID(normalized)
+        except ValueError:
+            problems.append(
+                f"creative_store_metadata: store_id {store_id!r} is not a UUID"
+            )
+        for row in connection.execute(select(projects.c.id)).all():
+            local_id = int(row[0])
+            identity = f"creative:{normalized}:project:{local_id}"
+            # A project is addressable only if its identity decodes back.
+            prefix = f"creative:{normalized}:project:"
+            if not identity.startswith(prefix) or not identity.removeprefix(prefix).isdigit():
+                problems.append(f"creative_projects: id={local_id} is not addressable")
+    return problems
+
+
+def verify_creative_import(
+    source: str | Path,
+    database: SystemDatabase,
+) -> ImportReport:
+    """Re-verify an existing import by comparing every table's full hash.
+
+    Stronger than a row count or a sampled key comparison: the source is
+    re-read and re-canonicalised, and every business table must produce a
+    byte-identical digest.
+    """
+
+    started_at = datetime.now(timezone.utc)
+    inspection = inspect_sqlite_creative(source, strict=True)
+    health = database.health()
+    if not health.reachable:
+        raise CreativeImportError(
+            f"PostgreSQL target is not reachable: {health.database_url_redacted}"
+        )
+    if not health.schema_current:
+        raise CreativeImportError(
+            "PostgreSQL target is not at the Alembic head "
+            f"(current={health.current_revision!r}, head={health.head_revision!r})"
+        )
+    revision = health.current_revision or ""
+
+    with open_read_only(source) as source_connection:
+        schema_fingerprint = source_schema_fingerprint(source_connection)
+
+    with database.connection() as connection:
+        digests, target_counts, ranges = _read_target_state(
+            connection, BUSINESS_TABLE_SPECS
+        )
+        # Only identity-backed tables have a sequence to reason about; a TEXT
+        # primary key such as selection_stage_snapshots.id has none.
+        sequences: dict[str, int] = {}
+        for spec in BUSINESS_TABLE_SPECS:
+            if not _sequence_name(connection, spec):
+                continue
+            table = CREATIVE_METADATA.tables[spec.name]
+            sequences[spec.name] = int(
+                connection.execute(
+                    select(func.coalesce(func.max(table.c.id), 0))
+                ).scalar_one()
+            )
+
+    problems = list(
+        _import_problems(inspection, inspection.row_counts, target_counts, digests, ranges)
+    )
+    problems += _version_chain_problems(database)
+    problems += _head_reference_problems(database)
+    problems += _workflow_identity_problems(database)
+
+    finished_at = datetime.now(timezone.utc)
+    run_id = uuid.uuid4().hex
+    _record_import_run(
+        database,
+        run_id=run_id,
+        mode="verify",
+        status="failed" if problems else "completed",
+        inspection=inspection,
+        schema_fingerprint=schema_fingerprint,
+        revision=revision,
+        row_counts=inspection.row_counts,
+        target_counts=target_counts,
+        digests=digests,
+        problems=problems,
+        error_summary="\n".join(problems),
+        started_at=started_at,
+        finished_at=finished_at,
+        insert=True,
+    )
+
+    return ImportReport(
+        run_id=run_id,
+        mode="verify",
+        status="failed" if problems else "verified",
+        verified=not problems,
+        source_path=inspection.source_path,
+        source_sha256=inspection.source_sha256,
+        source_schema_fingerprint=schema_fingerprint,
+        application_commit=application_commit(),
+        alembic_revision=revision,
+        row_counts=inspection.row_counts,
+        target_counts=target_counts,
+        id_ranges=ranges,
+        digests=digests,
+        sequences=sequences,
+        problems=tuple(problems),
+        warnings=inspection.warnings,
+        error_summary="\n".join(problems),
+        started_at=started_at,
+        finished_at=finished_at,
+    )
+
+
 __all__ = [
     "BUSINESS_TABLE_NAMES",
     "BUSINESS_TABLE_SPECS",
@@ -962,16 +1625,23 @@ __all__ = [
     "IMPORT_RUNS_TABLE",
     "SPEC_BY_NAME",
     "TableInspection",
+    "ImportReport",
+    "VERSIONED_TABLES",
+    "application_commit",
     "canonical_json_default",
     "canonical_row",
     "coerce_boolean",
     "coerce_timestamp",
+    "import_sqlite_creative",
     "inspect_cross_domain_references",
     "inspect_sqlite_creative",
     "inspect_target_creative",
     "normalize_for_target",
     "open_read_only",
     "parse_json_value",
+    "redact_secrets",
     "sha256_file",
+    "source_schema_fingerprint",
     "table_digest",
+    "verify_creative_import",
 ]

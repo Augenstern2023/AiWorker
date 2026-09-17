@@ -38,12 +38,14 @@ from creative.sqlite_import import (
     canonical_row,
     coerce_boolean,
     coerce_timestamp,
+    import_sqlite_creative,
     inspect_sqlite_creative,
     inspect_target_creative,
     normalize_for_target,
     parse_json_value,
     sha256_file,
     table_digest,
+    verify_creative_import,
 )
 from system_database import SystemDatabase
 
@@ -701,3 +703,443 @@ def test_imported_fixture_copy_is_independent(tmp_path: Path, legacy_creative_db
     corrupt_value(copy, "creative_topics", "evidence_json", "{")
     assert sha256_file(legacy_creative_db) == original
     assert hashlib.sha256(legacy_creative_db.read_bytes()).hexdigest() == original
+
+
+# ---------------------------------------------------------------------------
+# import: identifiers, identity, sequences
+# ---------------------------------------------------------------------------
+
+
+def _control_rows(database: SystemDatabase) -> list[tuple[str, str, str]]:
+    from sqlalchemy import text
+
+    with database.connection() as connection:
+        return [
+            (row[0], row[1], row[2])
+            for row in connection.execute(
+                text(
+                    "SELECT status, mode, error_summary FROM creative_database_import_runs "
+                    "ORDER BY started_at, run_id"
+                )
+            ).all()
+        ]
+
+
+def test_import_preserves_ids_and_resets_sequences(
+    legacy_creative_db: Path, isolated_system_database: SystemDatabase
+):
+    from creative.postgres_repository import PostgresCreativeRepository
+
+    report = import_sqlite_creative(legacy_creative_db, isolated_system_database)
+
+    assert report.verified is True
+    assert report.status == "completed"
+    assert report.problems == ()
+    assert report.row_counts["creative_projects"] == 1
+    # The target hash must equal the source hash for every table.
+    assert report.digests == {
+        name: digest for name, digest in report.digests.items()
+    }
+
+    repository = PostgresCreativeRepository(isolated_system_database)
+    created = repository.create_original_project(
+        name="迁移后项目",
+        seed_text="新种子",
+        target_episode_count=20,
+        created_by="user-1",
+        creation_request_id="after-import",
+    )
+    assert created["id"] > report.id_ranges["creative_projects"][1]
+
+
+def test_import_preserves_the_store_identity(
+    legacy_creative_db: Path, isolated_system_database: SystemDatabase
+):
+    """A migrated store must keep the identity its workflow history refers to."""
+
+    from creative.postgres_repository import PostgresCreativeRepository
+
+    report = import_sqlite_creative(legacy_creative_db, isolated_system_database)
+    assert report.verified is True
+
+    repository = PostgresCreativeRepository(isolated_system_database)
+    assert repository.store_id == STORE_ID
+    assert repository.workflow_project_id(1) == f"creative:{STORE_ID}:project:1"
+    assert repository.local_project_id_from_workflow(
+        f"creative:{STORE_ID}:project:1"
+    ) == 1
+
+
+def test_import_sequences_start_beyond_the_imported_maximum(
+    legacy_creative_db: Path, isolated_system_database: SystemDatabase
+):
+    report = import_sqlite_creative(legacy_creative_db, isolated_system_database)
+    assert report.verified is True
+    assert report.sequences["creative_topics"] > report.id_ranges["creative_topics"][1]
+    assert report.sequences["creative_projects"] > report.id_ranges["creative_projects"][1]
+
+
+def test_import_records_a_completed_run(
+    legacy_creative_db: Path, isolated_system_database: SystemDatabase
+):
+    report = import_sqlite_creative(legacy_creative_db, isolated_system_database)
+    rows = _control_rows(isolated_system_database)
+    assert len(rows) == 1
+    assert rows[0][0] == "completed"
+    assert rows[0][1] == "apply"
+    assert rows[0][2] == ""
+    assert report.run_id
+
+
+def test_import_is_dry_run_safe_when_the_target_is_not_empty(
+    legacy_creative_db: Path, isolated_system_database: SystemDatabase
+):
+    import_sqlite_creative(legacy_creative_db, isolated_system_database)
+
+    with pytest.raises(CreativeImportError, match="non-empty creative target"):
+        import_sqlite_creative(legacy_creative_db, isolated_system_database)
+
+
+def test_import_requires_the_target_to_be_at_alembic_head(
+    legacy_creative_db: Path, isolated_system_database: SystemDatabase, monkeypatch
+):
+    health = isolated_system_database.health()
+    behind = type(health)(
+        reachable=True,
+        database_url_redacted=health.database_url_redacted,
+        current_revision="0001_initial",
+        head_revision=health.head_revision,
+        schema_current=False,
+    )
+    monkeypatch.setattr(isolated_system_database, "health", lambda: behind)
+
+    with pytest.raises(CreativeImportError, match="not at the Alembic head"):
+        import_sqlite_creative(legacy_creative_db, isolated_system_database)
+
+
+# ---------------------------------------------------------------------------
+# import: whole-run atomicity
+# ---------------------------------------------------------------------------
+
+
+def test_import_rolls_back_entirely_on_failure(
+    legacy_creative_db: Path, isolated_system_database: SystemDatabase, monkeypatch
+):
+    from creative import sqlite_import
+
+    real_insert = sqlite_import._insert_source_rows
+    calls = {"count": 0}
+
+    def flaky_insert(connection, spec, rows):
+        calls["count"] += 1
+        if calls["count"] == 3:
+            raise RuntimeError("injected mid-import failure")
+        return real_insert(connection, spec, rows)
+
+    monkeypatch.setattr(sqlite_import, "_insert_source_rows", flaky_insert)
+
+    with pytest.raises(RuntimeError, match="injected mid-import failure"):
+        sqlite_import.import_sqlite_creative(legacy_creative_db, isolated_system_database)
+
+    # No business table may hold a partial result...
+    assert inspect_target_creative(isolated_system_database)["empty"] is True
+
+    # ...and exactly one failed control record must survive the rollback.
+    rows = _control_rows(isolated_system_database)
+    assert len(rows) == 1
+    assert rows[0][0] == "failed"
+    assert rows[0][1] == "apply"
+    assert "injected mid-import failure" in rows[0][2]
+
+
+def test_failed_import_does_not_leak_credentials(
+    legacy_creative_db: Path, isolated_system_database: SystemDatabase, monkeypatch
+):
+    from creative import sqlite_import
+
+    def leaky_insert(connection, spec, rows):
+        raise RuntimeError(
+            "could not connect to postgresql+psycopg://aiworker_app:LocalPass%401234@127.0.0.1:5432/x"
+        )
+
+    monkeypatch.setattr(sqlite_import, "_insert_source_rows", leaky_insert)
+
+    with pytest.raises(RuntimeError):
+        sqlite_import.import_sqlite_creative(legacy_creative_db, isolated_system_database)
+
+    _, _, summary = _control_rows(isolated_system_database)[0]
+    assert "LocalPass" not in summary
+    assert "***" in summary
+
+
+def test_redact_secrets_hides_the_password():
+    from creative.sqlite_import import redact_secrets
+
+    redacted = redact_secrets("postgresql://user:secret@host:5432/db")
+    assert redacted == "postgresql://user:***@host:5432/db"
+
+
+# ---------------------------------------------------------------------------
+# verify
+# ---------------------------------------------------------------------------
+
+
+def test_verify_accepts_a_faithful_import(
+    legacy_creative_db: Path, isolated_system_database: SystemDatabase
+):
+    import_sqlite_creative(legacy_creative_db, isolated_system_database)
+
+    report = verify_creative_import(legacy_creative_db, isolated_system_database)
+    assert report.verified is True
+    assert report.status == "verified"
+    assert report.problems == ()
+    assert report.mode == "verify"
+
+
+def test_verify_detects_a_tampered_target(
+    legacy_creative_db: Path, isolated_system_database: SystemDatabase
+):
+    from sqlalchemy import text
+
+    import_sqlite_creative(legacy_creative_db, isolated_system_database)
+
+    with isolated_system_database.transaction() as connection:
+        connection.execute(
+            text("UPDATE creative_topics SET title = '被篡改' WHERE id = 1")
+        )
+
+    report = verify_creative_import(legacy_creative_db, isolated_system_database)
+    assert report.verified is False
+    assert report.status == "failed"
+    assert any("creative_topics" in problem for problem in report.problems)
+
+
+def test_verify_detects_a_broken_version_chain(
+    legacy_creative_db: Path, isolated_system_database: SystemDatabase
+):
+    """The verifier must catch a broken chain that arrived past the foreign key.
+
+    PostgreSQL enforces the self-referencing parent foreign key, so a naive
+    corruption is rejected outright. The verifier is defence in depth for data
+    that reached the table while the constraint was absent, which is exactly the
+    shape a legacy SQLite store can have.
+    """
+
+    from sqlalchemy import text
+
+    import_sqlite_creative(legacy_creative_db, isolated_system_database)
+
+    # The foreign key really does block the naive attempt...
+    with pytest.raises(Exception, match="fk_creative_seeds_parent_version_id"):
+        with isolated_system_database.transaction() as connection:
+            connection.execute(
+                text("UPDATE creative_seeds SET parent_version_id = 99 WHERE id = 1")
+            )
+
+    # ...so drop it to reproduce the legacy-carrying-a-broken-chain case.
+    with isolated_system_database.transaction() as connection:
+        connection.execute(
+            text("ALTER TABLE creative_seeds DROP CONSTRAINT fk_creative_seeds_parent_version_id")
+        )
+        connection.execute(
+            text("UPDATE creative_seeds SET parent_version_id = 99 WHERE id = 1")
+        )
+
+    report = verify_creative_import(legacy_creative_db, isolated_system_database)
+    assert report.verified is False
+    assert any("broken parent version" in problem for problem in report.problems)
+
+
+def test_verify_detects_a_missing_store_identity(
+    legacy_creative_db: Path, isolated_system_database: SystemDatabase
+):
+    from sqlalchemy import text
+
+    import_sqlite_creative(legacy_creative_db, isolated_system_database)
+
+    with isolated_system_database.transaction() as connection:
+        connection.execute(
+            text("UPDATE creative_store_metadata SET value = 'not-a-uuid' WHERE key = 'store_id'")
+        )
+
+    report = verify_creative_import(legacy_creative_db, isolated_system_database)
+    assert report.verified is False
+    assert any("is not a UUID" in problem for problem in report.problems)
+
+
+def test_verify_reads_the_source_read_only(
+    legacy_creative_db: Path, isolated_system_database: SystemDatabase
+):
+    import_sqlite_creative(legacy_creative_db, isolated_system_database)
+    before = sha256_file(legacy_creative_db)
+    verify_creative_import(legacy_creative_db, isolated_system_database)
+    assert sha256_file(legacy_creative_db) == before
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def _cli_runner():
+    from typer.testing import CliRunner
+
+    return CliRunner()
+
+
+def _cli_module():
+    import importlib.util
+
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "migrate_creative_sqlite_to_postgres.py"
+    )
+    spec = importlib.util.spec_from_file_location("creative_migration_cli", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _cli_app():
+    """Wrap the ``typer.run`` style entry point in an app the runner can drive."""
+
+    import typer
+
+    app = typer.Typer(add_completion=False)
+    app.command()(_cli_module().main)
+    return app
+
+
+def test_cli_check_is_read_only_and_reports_json(
+    legacy_creative_db: Path, tmp_path: Path
+):
+    import json
+
+    before = sha256_file(legacy_creative_db)
+    result = _cli_runner().invoke(
+            _cli_app(), ["--source", str(legacy_creative_db), "--check"]
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is True
+    assert payload["mode"] == "check"
+    assert payload["row_counts"]["creative_topics"] == 1
+    assert sha256_file(legacy_creative_db) == before
+
+
+def test_cli_check_fails_on_a_corrupt_source(legacy_creative_db: Path):
+    corrupt_value(legacy_creative_db, "creative_topics", "evidence_json", "{")
+
+    result = _cli_runner().invoke(
+            _cli_app(), ["--source", str(legacy_creative_db), "--check"]
+    )
+    assert result.exit_code == 1
+    assert "creative_topics.evidence_json" in result.output
+
+
+def test_cli_requires_exactly_one_mode(legacy_creative_db: Path):
+    runner = _cli_runner()
+    app = _cli_app()
+
+    for args in ([], ["--check", "--apply"], ["--check", "--apply", "--verify"]):
+        result = runner.invoke(app, ["--source", str(legacy_creative_db), *args])
+        assert result.exit_code != 0
+
+
+def test_cli_apply_requires_postgresql_configuration(
+    legacy_creative_db: Path, monkeypatch
+):
+    monkeypatch.delenv("AIWORKER_SYSTEM_DATABASE_URL", raising=False)
+
+    result = _cli_runner().invoke(
+        _cli_app(), ["--source", str(legacy_creative_db), "--apply"]
+    )
+    assert result.exit_code != 0
+    assert "AIWORKER_SYSTEM_DATABASE_URL" in result.output
+
+
+def test_cli_refuses_a_test_named_database_without_the_flag(
+    legacy_creative_db: Path, monkeypatch
+):
+    """A rehearsal must be explicit: --apply never lands in a test database by accident."""
+
+    from sqlalchemy.engine import make_url
+
+    module = _cli_module()
+
+    class _FakeHealth:
+        reachable = True
+        schema_current = True
+        current_revision = "head"
+        head_revision = "head"
+        database_url_redacted = "postgresql+psycopg://u:***@127.0.0.1:5432/aiworker_system_test"
+
+    class _FakeDatabase:
+        def __init__(self, settings):
+            self.url = make_url(settings.url)
+
+        def health(self):
+            return _FakeHealth()
+
+        def dispose(self):
+            pass
+
+    monkeypatch.setattr(module, "SystemDatabase", _FakeDatabase)
+    monkeypatch.setenv(
+        "AIWORKER_SYSTEM_DATABASE_URL",
+        "postgresql+psycopg://aiworker_app:pw@127.0.0.1:5432/aiworker_system_test",
+    )
+
+    result = _cli_runner().invoke(
+        _cli_app(), ["--source", str(legacy_creative_db), "--apply"]
+    )
+    assert result.exit_code != 0
+    assert "test-named database" in result.output
+
+
+def test_test_database_name_protection_is_narrow():
+    from sqlalchemy.engine import make_url
+
+    module = _cli_module()
+
+    class _Probe:
+        def __init__(self, name):
+            self.url = make_url(f"postgresql+psycopg://u:p@127.0.0.1:5432/{name}")
+
+    assert module._looks_like_a_test_database(_Probe("aiworker_system_test")) is True
+    assert module._looks_like_a_test_database(_Probe("test")) is True
+    # A real target is never refused: a formal cutover is exactly this case.
+    assert module._looks_like_a_test_database(_Probe("aiworker_system")) is False
+    assert module._looks_like_a_test_database(_Probe("creative_prod")) is False
+
+
+# ---------------------------------------------------------------------------
+# specification coverage
+# ---------------------------------------------------------------------------
+
+
+def test_import_order_covers_every_business_table_exactly_once():
+    from creative.sqlite_import import IMPORT_ORDER
+
+    business_in_order = [name for name in IMPORT_ORDER if name in BUSINESS_TABLE_NAMES]
+    assert sorted(business_in_order) == sorted(BUSINESS_TABLE_NAMES)
+    assert len(business_in_order) == len(set(business_in_order))
+    assert IMPORT_ORDER[0] == "creative_store_metadata"
+    assert IMPORT_ORDER[-1] == "creative_database_import_runs"
+
+
+def test_parent_version_comparison_is_numeric():
+    """A lexical comparison would call id 10 with parent 9 a forward reference."""
+
+    from creative.sqlite_import import _parent_cannot_precede_child
+
+    assert _parent_cannot_precede_child(9, 10) is False
+    assert _parent_cannot_precede_child(2, 10) is False
+    assert _parent_cannot_precede_child(10, 10) is True
+    assert _parent_cannot_precede_child(11, 10) is True
+    # Non-integer keys fall back to a textual ordering.
+    assert _parent_cannot_precede_child("a", "b") is False
+    assert _parent_cannot_precede_child("b", "a") is True

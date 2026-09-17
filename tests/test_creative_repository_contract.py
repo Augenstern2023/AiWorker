@@ -393,3 +393,113 @@ def test_repository_does_not_leak_sqlalchemy_types(
         assert type(converted) is dict
         for value in converted.values():
             assert not isinstance(value, datetime)
+
+
+# ---------------------------------------------------------------------------
+# full surface parity against the frozen SQLite implementation
+# ---------------------------------------------------------------------------
+
+# Every public method the PostgreSQL repository is allowed to add on top of the
+# frozen surface. Anything outside this set is an unintended API change.
+_INTENTIONAL_ADDITIONS = frozenset(
+    {
+        # shared repository infrastructure
+        "connection_scope",
+        "describe",
+        "health",
+        "local_topic_id_from_workflow",
+        "public_surface",
+        "row_dict",
+        "rows_dict",
+        "transaction_scope",
+        # delivery and production-export capabilities added by the migration
+        "delivery_public_record",
+        "find_delivery",
+        "find_production_export",
+        "get_delivery",
+        "get_production_export",
+        "get_production_status",
+        "list_deliveries",
+        "list_production_exports",
+        "mark_delivery_reconciled",
+        "mark_production_export_audited",
+        "production_export_public_record",
+        "record_delivery",
+        "record_production_export",
+        "record_production_status",
+    }
+)
+
+# Methods that may accept an extra optional connection so a caller can join an
+# existing transaction. Additive and keyword-defaulted, so every legacy call
+# still binds.
+_CONNECTION_AWARE = frozenset({"has_stage_export", "record_stage_export"})
+
+
+def _public_methods(cls: type) -> set[str]:
+    return {
+        name
+        for name in dir(cls)
+        if not name.startswith("_") and callable(getattr(cls, name, None))
+    }
+
+
+def test_postgres_covers_every_legacy_public_method():
+    """The cutover is only safe if no caller can hit a missing method."""
+
+    from creative.legacy_sqlite_repository import CreativeRepository
+
+    legacy = _public_methods(CreativeRepository)
+    postgres = _public_methods(PostgresCreativeRepository)
+
+    assert legacy - postgres == set(), "legacy methods missing from PostgreSQL"
+    # The frozen SQLite implementation is the contract; it must stay complete.
+    assert len(legacy) >= 136
+
+
+def test_postgres_adds_only_the_expected_public_methods():
+    from creative.legacy_sqlite_repository import CreativeRepository
+
+    added = _public_methods(PostgresCreativeRepository) - _public_methods(
+        CreativeRepository
+    )
+    assert added == set(_INTENTIONAL_ADDITIONS), sorted(
+        added.symmetric_difference(_INTENTIONAL_ADDITIONS)
+    )
+
+
+def test_shared_method_signatures_match_except_for_optional_connections():
+    """A caller written against SQLite must keep binding against PostgreSQL."""
+
+    import inspect
+
+    from creative.legacy_sqlite_repository import CreativeRepository
+
+    def parameters(func: object) -> list[inspect.Parameter]:
+        values = list(inspect.signature(func).parameters.values())
+        if values and values[0].name in {"self", "cls"}:
+            values = values[1:]
+        return values
+
+    drifted = []
+    for name in sorted(_public_methods(CreativeRepository)):
+        legacy = parameters(getattr(CreativeRepository, name))
+        postgres = parameters(getattr(PostgresCreativeRepository, name))
+
+        legacy_only = [p.replace(default=inspect.Parameter.empty) for p in legacy]
+        postgres_only = [p.replace(default=inspect.Parameter.empty) for p in postgres]
+
+        if legacy_only == postgres_only:
+            continue
+        # The only accepted difference is a trailing optional connection.
+        if (
+            name in _CONNECTION_AWARE
+            and len(postgres) == len(legacy) + 1
+            and postgres[-1].name == "connection"
+            and postgres[-1].default is None
+            and legacy_only == postgres_only[: len(legacy)]
+        ):
+            continue
+        drifted.append(name)
+
+    assert drifted == [], f"signature drift: {drifted}"

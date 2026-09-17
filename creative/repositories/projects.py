@@ -1151,34 +1151,46 @@ class ProjectsRepository:
             actions.append("generate_beats")
         return actions
 
-    @staticmethod
-    def _blueprint(row: dict[str, Any]) -> dict[str, Any]:
-        row["content"] = row.pop("content_json") or {}
-        row["source_refs"] = row.pop("source_refs_json") or {}
-        row["generation_meta"] = row.pop("generation_meta_json") or {}
-        return row
+    # -- row transforms -----------------------------------------------------
+    #
+    # These duplicate the transforms in VersionsRepository on purpose: both
+    # domains read the same tables and the mixin order decides which copy wins.
+    # Both copies therefore go through ``row_dict`` and return a new mapping, so
+    # the winner is interchangeable and a caller may pass either a RowMapping or
+    # an already-converted dict. Do not collapse them into an in-place variant.
 
-    @staticmethod
-    def _seed(row: dict[str, Any]) -> dict[str, Any]:
-        row["constraints"] = row.pop("constraints_json") or {}
-        row["reference_refs"] = row.pop("reference_refs_json") or []
-        return row
+    @classmethod
+    def _blueprint(cls, row: Any) -> dict[str, Any]:
+        result = cls.row_dict(row)
+        result["content"] = result.pop("content_json") or {}
+        result["source_refs"] = result.pop("source_refs_json") or {}
+        result["generation_meta"] = result.pop("generation_meta_json") or {}
+        return result
 
-    @staticmethod
-    def _creative_item(row: dict[str, Any]) -> dict[str, Any]:
-        row["content"] = row.pop("content_json") or {}
-        row["source_refs"] = row.pop("source_refs_json") or {}
-        row["generation_meta"] = row.pop("generation_meta_json") or {}
-        return row
+    @classmethod
+    def _seed(cls, row: Any) -> dict[str, Any]:
+        result = cls.row_dict(row)
+        result["constraints"] = result.pop("constraints_json") or {}
+        result["reference_refs"] = result.pop("reference_refs_json") or []
+        return result
 
-    @staticmethod
-    def _episode(row: dict[str, Any]) -> dict[str, Any]:
-        row["content"] = row.pop("content_json") or {}
-        if row.get("stage") == "script":
-            row["content"] = normalize_script_content(row["content"])
-        row["upstream_refs"] = row.pop("upstream_refs_json") or {}
-        row["generation_meta"] = row.pop("generation_meta_json") or {}
-        return row
+    @classmethod
+    def _creative_item(cls, row: Any) -> dict[str, Any]:
+        result = cls.row_dict(row)
+        result["content"] = result.pop("content_json") or {}
+        result["source_refs"] = result.pop("source_refs_json") or {}
+        result["generation_meta"] = result.pop("generation_meta_json") or {}
+        return result
+
+    @classmethod
+    def _episode(cls, row: Any) -> dict[str, Any]:
+        result = cls.row_dict(row)
+        result["content"] = result.pop("content_json") or {}
+        if result.get("stage") == "script":
+            result["content"] = normalize_script_content(result["content"])
+        result["upstream_refs"] = result.pop("upstream_refs_json") or {}
+        result["generation_meta"] = result.pop("generation_meta_json") or {}
+        return result
 
     @staticmethod
     def _title_key(value: Any) -> str:

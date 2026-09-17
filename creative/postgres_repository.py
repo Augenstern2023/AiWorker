@@ -29,14 +29,18 @@ from typing import Any
 
 from creative.repositories.base import CreativeRepositoryBase
 from creative.repositories.deliveries import DeliveriesRepository
+from creative.repositories.operations import OperationsRepository
 from creative.repositories.projects import ProjectsRepository
 from creative.repositories.reviews import ReviewsRepository
 from creative.repositories.topics import TopicsRepository
+from creative.repositories.versions import VersionsRepository
 
 
 class PostgresCreativeRepository(
     TopicsRepository,
     ProjectsRepository,
+    VersionsRepository,
+    OperationsRepository,
     ReviewsRepository,
     DeliveriesRepository,
     CreativeRepositoryBase,

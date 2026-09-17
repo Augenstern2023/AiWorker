@@ -133,6 +133,24 @@ def test_prompt_library_ui_keeps_contract_locked_and_supports_all_mvp_scopes():
     assert "保存为新版本" in modal
 
 
+def test_prompt_picker_clicks_full_card_and_shows_selected_template_details():
+    modal = _read("templates/common/workspace/prompt_library_modal.html")
+
+    assert '@click="selectPromptTemplate(template)"' in modal
+    assert '@keydown.enter.prevent="selectPromptTemplate(template)"' in modal
+    assert 'input class="visually-hidden" type="radio" name="prompt-template"' in modal
+    assert "'bg-primary border-primary text-white shadow-sm'" in modal
+    assert ">✓</span>" in modal
+    assert 'class="form-check-input mt-1" type="radio" name="prompt-template"' not in modal
+    assert 'data-prompt-template-details' in modal
+    assert "所选模板详情" in modal
+    assert "七维风格" in modal
+    assert "共享作品 DNA" in modal
+    assert "查看全部阶段规则、参数和示例" in modal
+    assert "example.include_in_context ? '参与生成' : '仅作说明'" in modal
+    assert "查看模板说明" not in modal
+
+
 def test_prompt_library_ui_explains_recommendations_and_requires_import_confirmation():
     modal = _read("templates/common/workspace/prompt_library_modal.html")
     script = _read("static/js/common/creative.js")
@@ -239,13 +257,23 @@ def test_generation_payload_consumes_a_server_versioned_single_run_selection():
     assert "this.promptGenerationPayload('outline', body)" in _read("static/js/writing/outlines.js")
 
 
-def test_old_project_upgrade_is_explicit_and_uses_classic_compatibility():
+def test_old_project_upgrade_is_folded_into_first_real_template_action():
     modal = _read("templates/common/workspace/prompt_library_modal.html")
     script = _read("static/js/common/creative.js")
+    api = _read("creative/api.py")
 
-    assert "这是旧项目，仍在使用原有硬编码提示词" in modal
-    assert "enableCurrentProjectPromptLibrary" in modal
-    assert "template_key: 'classic-compatible'" in script
+    assert "这是旧项目，当前默认仍使用原有提示词" in modal
+    assert "仅下次生成使用”不会改变项目设置" in modal
+    assert "首次“保存默认设置”会同时启用模板设置" in modal
+    assert "只影响之后新生成的内容，不会修改已有内容" in modal
+    assert "升级到模板系统" not in modal
+    assert "enableCurrentProjectPromptLibrary" not in script
+    assert "/prompt-system/enable" not in script
+    assert 'x-show="creativeWorkspace.promptLibrary.settings?.enabled" @click="usePromptForNextGeneration"' not in modal
+    assert 'x-show="creativeWorkspace.promptLibrary.settings?.enabled" @click="savePromptBinding"' not in modal
+    assert "if (!state.settings?.enabled && !window.confirm(" in script
+    assert "state.settings = data.settings || state.settings" in script
+    assert '@router.post("/projects/{project_id}/prompt-system/enable")' in api
 
 
 def test_review_and_optimization_pages_send_single_run_template_selections():

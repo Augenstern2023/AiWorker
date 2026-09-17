@@ -54,7 +54,7 @@
 - 弹幕预警型女性复仇爽剧；
 - 规则驱动型古装奇幻悬疑。
 
-另有一个不在模板库列表展示的“经典兼容模板”，供旧项目主动升级使用。附件中的具体作品名、人物名和情节不会进入通用模板。
+另有一个不在模板库列表展示的“经典兼容模板”，作为旧项目首次保存默认设置后的内部兼容基线。它不重复叠加旧硬编码提示词已有的创作规则；附件中的具体作品名、人物名和情节不会进入通用模板。
 
 ## 数据模型
 
@@ -95,8 +95,10 @@ Brief 单方向生成使用 `single` 规则，多候选方向使用 `series` 规
 
 - 新建项目默认启用模板库，并固定“通用竖屏短剧”的当前版本；
 - 旧项目没有 `creative_project_prompt_settings` 记录，因此继续使用原提示词；
-- 旧项目只能由项目负责人主动升级，升级后先固定“经典兼容模板”；
-- 升级不会重新生成或覆盖既有内容。
+- 旧项目选择“仅下次生成使用”时可直接使用所选模板，但不会开启项目级模板设置；
+- 旧项目首次“保存默认设置”时，服务端在同一请求内启用兼容基线并保存阶段或单集绑定；
+- 模板选择和默认设置都只影响未来生成，不会重新生成、修改或覆盖既有内容；
+- `POST /prompt-system/enable` 作为旧客户端的后端兼容接口继续保留，当前界面不再提供独立升级步骤。
 
 ## API
 
@@ -108,9 +110,9 @@ Brief 单方向生成使用 `single` 规则，多候选方向使用 `series` 规
 - `POST /prompt-library/import-preview`：把外部提示词整理为不落库的待审阅草稿；
 - `GET /prompt-library/governance`：读取项目模板治理状态、使用影响和最近治理记录；
 - `POST /prompt-library/templates/{template_id}/governance`：受控执行送审、批准、弃用、归档或恢复；
-- `POST /prompt-system/enable`：旧项目主动升级；
+- `POST /prompt-system/enable`：旧客户端显式启用接口（兼容保留）；
 - `GET /prompt-modules/{stage}`：读取阶段/单集绑定和有效模板；
-- `PUT /prompt-modules/{stage}`：保存阶段或单集绑定；
+- `PUT /prompt-modules/{stage}`：保存阶段或单集绑定；旧项目首次保存时同时启用模板设置；
 - `POST /prompt-library/templates`：复制为个人或项目模板；
 - `POST /prompt-library/templates/{template_id}/revisions`：保存自定义模板新版本。
 - `GET /prompt-marketplace?q={text}&stage={stage}&license={code}`：发现已审核模板，并读取自己的申请、当前项目安装和管理员审核队列；

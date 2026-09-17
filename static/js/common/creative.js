@@ -2473,32 +2473,6 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
-                async enableCurrentProjectPromptLibrary() {
-                    const state = this.creativeWorkspace.promptLibrary;
-                    const projectId = this.creativeWorkspace.project?.id;
-                    if (!projectId || state.saving) return;
-                    state.saving = true;
-                    state.error = '';
-                    try {
-                        const response = await aiworkerApi.request(
-                            `/api/creative/projects/${projectId}/prompt-system/enable`,
-                            {
-                                method: 'POST',
-                                headers: {'Content-Type': 'application/json'},
-                                body: JSON.stringify({template_key: 'classic-compatible'}),
-                            }
-                        );
-                        const data = await response.json();
-                        if (!response.ok) throw new Error(data.detail || '升级模板系统失败');
-                        await this.loadProjectPromptModule(state.stage);
-                        this.showCreativeNotice('项目已升级到提示词模板系统');
-                    } catch (error) {
-                        state.error = error.message || '升级模板系统失败';
-                    } finally {
-                        state.saving = false;
-                    }
-                },
-
                 promptRunSelection(stage) {
                     return this.creativeWorkspace.promptLibrary?.runSelections?.[stage] || null;
                 },
@@ -2524,7 +2498,7 @@ window.aiworkerModules.push(() => ({
                         customRequirements: String(state.customRequirements || '').trim(),
                     };
                     this.promptLibraryModal?.hide();
-                    this.showCreativeNotice(`${template.title}将在下次${this.promptStageLabel(state.stage)}生成中使用`);
+                    this.showCreativeNotice(`${template.title}将在下次${this.promptStageLabel(state.stage)}生成中使用，已有内容不变`);
                 },
 
                 async savePromptBinding() {
@@ -2534,6 +2508,12 @@ window.aiworkerModules.push(() => ({
                     if (!projectId || !template || state.saving) return;
                     const episodeNumber = ['beats', 'script'].includes(state.stage) && state.scope === 'episode'
                         ? Number(this.creativeWorkspace.selectedEpisode || 0) : 0;
+                    const defaultScope = episodeNumber > 0
+                        ? `第 ${episodeNumber} 集${this.promptStageLabel(state.stage)}默认模板`
+                        : `${this.promptStageLabel(state.stage)}阶段默认模板`;
+                    if (!state.settings?.enabled && !window.confirm(
+                        `保存后将启用模板设置，并把“${template.title}”设为${defaultScope}。只影响之后新生成的内容，不会修改已有内容。是否继续？`
+                    )) return;
                     state.saving = true;
                     state.error = '';
                     try {
@@ -2552,9 +2532,10 @@ window.aiworkerModules.push(() => ({
                         );
                         const data = await response.json();
                         if (!response.ok) throw new Error(data.detail || '保存提示词模板失败');
+                        state.settings = data.settings || state.settings;
                         state.effective = data.effective || state.effective;
                         this.promptLibraryModal?.hide();
-                        this.showCreativeNotice('提示词模板设置已保存');
+                        this.showCreativeNotice('提示词模板默认设置已保存，只影响之后新生成的内容');
                     } catch (error) {
                         state.error = error.message || '保存提示词模板失败';
                     } finally {

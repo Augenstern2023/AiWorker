@@ -148,6 +148,17 @@ def test_old_project_is_legacy_until_owner_enables_prompt_library(prompt_store):
         episode_number=1,
     ) is None
 
+    one_run = store.resolve_snapshot(
+        project_id=project_id,
+        stage="beats",
+        mode="single",
+        episode_number=1,
+        run_template_key="urban-identity-romcom",
+        actor_user_id="owner-1",
+    )
+    assert one_run["template_key"] == "urban-identity-romcom"
+    assert store.project_settings(project_id)["enabled"] is False
+
     store.enable_project(project_id, actor_user_id="owner-1")
     snapshot = store.resolve_snapshot(
         project_id=project_id,
@@ -161,6 +172,28 @@ def test_old_project_is_legacy_until_owner_enables_prompt_library(prompt_store):
     assert snapshot["stage"] == "beats"
     assert snapshot["mode"] == "single"
     assert len(snapshot["content_hash"]) == 64
+
+
+def test_first_persistent_binding_implicitly_enables_legacy_project(prompt_store):
+    repository, store = prompt_store
+    project_id = _project(repository)
+    service = ProjectPromptService(repository)
+
+    result = service.bind(
+        project_id=project_id,
+        stage="script",
+        episode_number=0,
+        template_key="urban-identity-romcom",
+        template_revision=1,
+        override={"custom_requirements": "后续新稿减少内心独白。"},
+        actor_user_id="owner-1",
+    )
+
+    default_template = store.get_template(result["settings"]["default_template_id"])
+    assert result["settings"]["enabled"] is True
+    assert default_template["template_key"] == "classic-compatible"
+    assert result["effective"]["template_key"] == "urban-identity-romcom"
+    assert "后续新稿减少内心独白" in result["effective"]["effective_instruction"]
 
 
 def test_episode_binding_wins_over_stage_binding_and_run_selection_wins_last(prompt_store):
@@ -521,6 +554,35 @@ def test_server_resolved_style_is_appended_without_replacing_output_contract():
     assert "当前项目创作风格要求" in styled[0]["content"]
     assert "身份信息差" in styled[0]["content"]
     assert "当前项目创作风格要求" not in legacy[0]["content"]
+
+
+def test_classic_compatibility_template_does_not_duplicate_legacy_rules():
+    template = builtin_template("classic-compatible")
+    snapshot = compose_prompt_snapshot(
+        template_id="system:classic-compatible",
+        template_key=template["key"],
+        title=template["title"],
+        revision=1,
+        content=template,
+        stage="beats",
+        mode="single",
+    )
+    customized = compose_prompt_snapshot(
+        template_id="system:classic-compatible",
+        template_key=template["key"],
+        title=template["title"],
+        revision=1,
+        content=template,
+        stage="beats",
+        mode="single",
+        override={"custom_requirements": "本次突出道具伏笔。"},
+    )
+
+    assert snapshot["effective_instruction"] == ""
+    assert beats_messages({"project": {"name": "测试"}}, 1, snapshot) == beats_messages(
+        {"project": {"name": "测试"}}, 1
+    )
+    assert customized["effective_instruction"] == "1. 本次突出道具伏笔。"
 
 
 def test_brief_template_styles_direction_without_replacing_blueprint_contract():

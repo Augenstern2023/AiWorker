@@ -105,7 +105,7 @@ _BUILTIN_TEMPLATES: tuple[dict[str, Any], ...] = (
     {
         "key": "classic-compatible",
         "title": "经典兼容模板",
-        "description": "保持模板库启用前的生成风格，用于旧项目主动升级。",
+        "description": "保持旧项目原有提示词语义，不额外叠加题材、风格或结构规则。",
         "catalog_visible": False,
         "dimensions": {
             "format": "竖屏短剧",
@@ -116,16 +116,16 @@ _BUILTIN_TEMPLATES: tuple[dict[str, Any], ...] = (
             "pacing": "快节奏",
             "expression": "可拍摄",
         },
-        "shared_dna": "遵守既定 Brief、人物、大纲与连续性，不复制参考作品的专有表达。",
-        "parameters": {"max_beats": 6, "strong_ending_hook": True},
+        "shared_dna": "沿用当前阶段既有系统提示词，不追加作品风格规则。",
+        "parameters": {},
         "stage_rules": _stage_rules(
-            brief="形成可供后续人物与大纲执行的清晰方向，明确主角目标、核心冲突、受众回报与制作边界。",
-            characters="把 Brief 转换为可行动的人物目标、恐惧、矛盾、压力反应和关系冲突；人物语言与成长方向必须可供后续大纲直接使用。",
-            outline="先建立可持续的全剧阶段弧线，再为每集分配不可替代的剧情职责；批次边界必须继承人物、关系、信息和关键道具状态。",
-            beats="每个节拍都必须改变人物资源、关系、信息或选择，结尾形成下一步行动压力。",
-            script="动作必须可拍摄，台词与动作分离，并展示人物行为造成的实际后果。",
-            review="以剧情逻辑、人物执行、台词可演性、节奏、情绪兑现和结尾钩子为审核重点；所有判断必须引用剧本证据。",
-            optimization="在不改变冻结大纲和人物事实的前提下，用最小改动解决已确认问题，并保持原稿的可拍摄性。",
+            brief="沿用 Brief 阶段既有系统提示词，不追加规则。",
+            characters="沿用人物阶段既有系统提示词，不追加规则。",
+            outline="沿用大纲阶段既有系统提示词，不追加规则。",
+            beats="沿用 Beats 阶段既有系统提示词，不追加规则。",
+            script="沿用剧本阶段既有系统提示词，不追加规则。",
+            review="沿用审核阶段既有系统提示词，不追加规则。",
+            optimization="沿用优化阶段既有系统提示词，不追加规则。",
         ),
         "examples": [],
     },
@@ -399,7 +399,10 @@ def compose_prompt_snapshot(
         raise ValueError(
             f"不支持的模板覆盖字段：{', '.join(sorted(unknown_override_keys))}"
         )
-    parts = [
+    # The compatibility template is an audit/versioning wrapper around the legacy
+    # hard-coded prompts. Re-appending equivalent rules here subtly changes old
+    # projects, so only an explicit per-run/project override may add instructions.
+    parts = [] if template_key == "classic-compatible" else [
         normalized["shared_dna"],
         normalized["stage_rules"][normalized_stage][normalized_mode],
     ]

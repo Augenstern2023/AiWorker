@@ -28,9 +28,10 @@ import inspect as _inspect
 from typing import Any
 
 from creative.repositories.base import CreativeRepositoryBase
+from creative.repositories.topics import TopicsRepository
 
 
-class PostgresCreativeRepository(CreativeRepositoryBase):
+class PostgresCreativeRepository(TopicsRepository, CreativeRepositoryBase):
     """Creative store backed by the shared PostgreSQL system database."""
 
     @classmethod

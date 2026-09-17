@@ -59,7 +59,9 @@ def test_local_migration_graph_contains_deployed_database_revision():
     config = Config(str(PROJECT_ROOT / "alembic.ini"))
     revisions = ScriptDirectory.from_config(config)
 
-    assert revisions.get_current_head() == "0024_llm_model_max_output_tokens"
+    # The deployed database reports 0024. The local graph must still resolve
+    # that revision even though the head has since moved on.
+    assert revisions.get_revision("0024_llm_model_max_output_tokens") is not None
     assert (
         revisions.get_revision("0024_llm_model_max_output_tokens").down_revision
         == "0023_llm_model_pricing"
@@ -137,7 +139,10 @@ def test_llm_provider_schema_declares_local_api_key_reference():
     assert str(columns.api_key_env_var.server_default.arg) == "''"
 
 
-def test_empty_schema_upgrade_reaches_max_output_tokens_head(postgres_url):
+def test_empty_schema_upgrade_reaches_current_head(postgres_url):
+    expected_head = ScriptDirectory.from_config(
+        Config(str(PROJECT_ROOT / "alembic.ini"))
+    ).get_current_head()
     engine = create_engine(postgres_url)
     try:
         with engine.connect() as connection:
@@ -145,7 +150,7 @@ def test_empty_schema_upgrade_reaches_max_output_tokens_head(postgres_url):
                 connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
-                == "0024_llm_model_max_output_tokens"
+                == expected_head
             )
         column = next(
             item

@@ -6791,6 +6791,84 @@ class CreativeRepository:
             )
         return [self.get_episode(episode_id) or {} for episode_id in ids]
 
+    def batch_lockable_episode_scripts(
+        self, project_id: int
+    ) -> list[dict[str, Any]]:
+        """Return the current-compatible Script draft for every project episode."""
+        project = self.get_project(project_id)
+        if not project:
+            raise ValueError("创作项目不存在")
+
+        selected: list[dict[str, Any]] = []
+        missing: list[int] = []
+        stale: list[int] = []
+        for episode_number in range(1, int(project["target_episode_count"]) + 1):
+            self._locked_beats_for_episode(project, episode_number)
+            candidates = [
+                item
+                for item in project.get("episodes", [])
+                if item.get("stage") == "script"
+                and int(item.get("episode_number") or 0) == episode_number
+                and item.get("status") in {"draft", "locked", "approved"}
+            ]
+            if not candidates:
+                missing.append(episode_number)
+                continue
+            compatible = [
+                item
+                for item in candidates
+                if self.episode_generation_refs_match(
+                    project,
+                    "script",
+                    episode_number,
+                    item.get("upstream_refs"),
+                )
+            ]
+            if not compatible:
+                stale.append(episode_number)
+                continue
+            selected.append(
+                max(
+                    compatible,
+                    key=lambda value: (
+                        int(value.get("version") or 0),
+                        int(value["id"]),
+                    ),
+                )
+            )
+
+        if missing:
+            raise ValueError(
+                f"以下集数缺少当前版本场次剧本草稿：{'、'.join(map(str, missing))}"
+            )
+        if stale:
+            raise ValueError(
+                f"以下集数场次剧本引用的 Beats 已过期：{'、'.join(map(str, stale))}"
+            )
+        drafts = [item for item in selected if item.get("status") == "draft"]
+        if not drafts:
+            raise ValueError("当前没有可批量锁定的场次剧本草稿")
+        return drafts
+
+    def lock_current_episode_scripts_batch(
+        self, project_id: int
+    ) -> list[dict[str, Any]]:
+        """Atomically lock all current-compatible Script drafts."""
+        drafts = self.batch_lockable_episode_scripts(project_id)
+        now = time.time()
+        ids = [int(item["id"]) for item in drafts]
+        placeholders = ", ".join("?" for _ in ids)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                f"UPDATE creative_episodes "
+                f"SET status = 'locked', locked_at = ?, updated_at = ? "
+                f"WHERE stage = 'script' AND status = 'draft' "
+                f"AND id IN ({placeholders})",
+                (now, now, *ids),
+            )
+        return [self.get_episode(episode_id) or {} for episode_id in ids]
+
     def lock_episode_script(
         self,
         episode_id: int,

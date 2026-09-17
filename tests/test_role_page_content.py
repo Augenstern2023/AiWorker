@@ -169,7 +169,8 @@ def test_planning_projects_use_real_stage_routes():
     creative = _read("static/js/common/creative.js")
     brief = _read("templates/planning/brief.html")
 
-    assert "`/planning/projects/${project.id}/brief`" in project_list
+    assert project_list.count('creativeProjectStageUrl(project)') == 2
+    assert "creativeProjectStageUrl(project)" in creative
     assert "`/planning/projects/${data.id}/brief" in creative
     assert not Path("templates/planning/directions.html").exists()
     assert "仿写方向" not in brief

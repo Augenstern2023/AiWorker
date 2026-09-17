@@ -5936,6 +5936,26 @@ def build_creative_router(
         except (PermissionError, ValueError) as exc:
             raise HTTPException(409 if isinstance(exc, ValueError) else 403, str(exc)) from exc
 
+    @router.post("/projects/{project_id}/scripts/lock")
+    async def lock_project_scripts_batch(
+        project_id: int,
+        payload: CreativeLockRequest,
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        try:
+            return workflow_transitions.complete_creative_scripts_batch_without_review(
+                payload.workflow_task_id, project_id, principal
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                404, "creative resource or workflow task not found"
+            ) from exc
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
 
     @router.get("/projects/{project_id}/export")
     async def export_project_stage(

@@ -345,7 +345,7 @@ window.aiworkerModules.push(() => ({
 
                 openCreativeProject(project) {
                     if (!project?.id) return;
-                    window.location.assign(`/planning/projects/${project.id}/brief`);
+                    window.location.assign(this.creativeProjectStageUrl(project));
                 },
 
                 async openCreativeTaskSetup() {
@@ -397,8 +397,38 @@ window.aiworkerModules.push(() => ({
                     return {
                         created: '待生成方向', direction_review: '方向评审', brief_locked: 'Brief 已锁定',
                         characters_draft: '人物草稿', characters_locked: '人物已锁定', outline_draft: '大纲草稿',
-                        outline_locked: '大纲已锁定', beats_in_progress: 'Beats 制作中', archived: '已归档'
+                        outline_locked: '大纲已锁定', beats_in_progress: 'Beats 制作中',
+                        script_in_progress: '场次剧本制作中', scripts_in_progress: '场次剧本制作中',
+                        completed: '已完成', archived: '已归档'
                     }[status] || status || '-';
+                },
+
+                creativeProjectStageUrl(project) {
+                    const projectId = encodeURIComponent(String(project?.id || ''));
+                    if (!projectId) return '#';
+                    const stage = {
+                        created: 'brief',
+                        direction_review: 'brief',
+                        brief_locked: 'characters',
+                        brief_approved: 'characters',
+                        characters_draft: 'characters',
+                        characters_locked: 'outline',
+                        characters_approved: 'outline',
+                        outline_draft: 'outline',
+                        outline_locked: 'beats',
+                        outline_approved: 'beats',
+                        beats_in_progress: 'beats',
+                        script_in_progress: 'script',
+                        scripts_in_progress: 'script',
+                        completed: 'script',
+                    }[project?.status] || 'brief';
+                    return {
+                        brief: `/planning/projects/${projectId}/brief`,
+                        characters: `/planning/projects/${projectId}/characters`,
+                        outline: `/writing/projects/${projectId}/outlines?episode=all`,
+                        beats: `/writing/projects/${projectId}/episodes/1/beats?episode=all`,
+                        script: `/writing/projects/${projectId}/episodes/1/scripts?episode=all`,
+                    }[stage];
                 },
 
                 creativeProjectModeLabel(project) {
@@ -1504,7 +1534,7 @@ window.aiworkerModules.push(() => ({
                         return;
                     }
                     const selected = Number(this.creativeWorkspace.selectedEpisode);
-                    const initial = selected > 0 && available.includes(selected) ? [selected] : [...available];
+                    const initial = !forceAll && selected > 0 && available.includes(selected) ? [selected] : [...available];
                     this.creativeWorkspace.episodeDownload = {
                         stage,
                         selectedEpisodes: initial,
@@ -3839,12 +3869,62 @@ window.aiworkerModules.push(() => ({
 
                 async completeProjectScript() {
                     const item = this.selectedProjectScript();
-                    if (!item || !this.isFreeCreativeProject()) return;
+                    if (!item) return;
                     try {
-                        await this.lockFreeCreativeResource('script', String(item.id), item.episode_number);
+                        if (this.isFreeCreativeProject()) {
+                            await this.lockFreeCreativeResource(
+                                'script', String(item.id), item.episode_number
+                            );
+                        } else {
+                            await this.completeCreativeResource(
+                                'script', item.id, this.creativeWorkspace.project.id
+                            );
+                        }
                         await this.selectCreativeProject(this.creativeWorkspace.project.id);
                         this.showCreativeNotice('场次剧本已完成并锁定');
                     } catch (error) { this.creativeWorkspace.error = error.message || '完成场次剧本失败'; }
+                },
+
+                async completeProjectScriptsBatch() {
+                    if (this.isFreeCreativeProject()) {
+                        return this.completeFreeProjectEpisodeSeries('script');
+                    }
+                    const items = this.batchLockableProjectEpisodes('script');
+                    if (!items.length || !this.canBatchLockProjectEpisodes('script')) return;
+                    const episodes = items
+                        .map(item => Number(item.episode_number))
+                        .sort((a, b) => a - b);
+                    const scope = episodes.length === 1
+                        ? `第 ${episodes[0]} 集`
+                        : `第 ${episodes[0]}-${episodes.at(-1)} 集`;
+                    if (!window.confirm(
+                        `将完成并锁定 ${scope}，共 ${episodes.length} 集当前场次剧本草稿。`
+                        + '已锁定集会跳过，锁定后不能直接编辑。是否继续？'
+                    )) return;
+                    try {
+                        const projectId = this.creativeWorkspace.project.id;
+                        const task = await this.resolveCreativeWorkflowTask(
+                            'script', projectId
+                        );
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/scripts/lock`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({workflow_task_id: task.id}),
+                            }
+                        );
+                        const payload = await response.json();
+                        if (!response.ok) {
+                            throw new Error(payload.detail || '批量锁定场次剧本失败');
+                        }
+                        await this.selectCreativeProject(projectId);
+                        this.showCreativeNotice(
+                            `已完成并锁定 ${payload.resources?.length || episodes.length} 集场次剧本`
+                        );
+                    } catch (error) {
+                        this.creativeWorkspace.error = error.message || '批量锁定场次剧本失败';
+                    }
                 },
 
                 async lockFreeCreativeResource(stage, resourceRef, episodeNumber = 0) {

@@ -1749,6 +1749,70 @@ def test_batch_lock_beats_locks_all_current_drafts_and_skips_existing_locked_ite
     assert repository.get_episode(second["id"])["status"] == "locked"
 
 
+def test_batch_lock_scripts_locks_all_current_drafts_and_skips_locked_items(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = seed_worker_project(repository, episode_count=2)
+    brief = repository.create_blueprints(
+        project["id"], [{"content": {"title": "方向"}}]
+    )[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(
+        project["id"], [{"name": "主角"}], []
+    )
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(
+        project["id"], [outline_episode(1), outline_episode(2)], "全剧弧线"
+    )
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    for episode_number in (1, 2):
+        beats = repository.create_episode_beats(
+            project["id"], episode_number, valid_beat_content()
+        )
+        repository.lock_episode_beats(beats["id"])
+    first = repository.create_episode_script(
+        project["id"], 1, valid_script_content(1)
+    )
+    second = repository.create_episode_script(
+        project["id"], 2, valid_script_content(2)
+    )
+    repository.lock_episode_script(first["id"])
+
+    locked = repository.lock_current_episode_scripts_batch(project["id"])
+
+    assert [item["episode_number"] for item in locked] == [2]
+    assert repository.get_episode(second["id"])["status"] == "locked"
+
+
+def test_batch_lock_scripts_preflights_all_episodes_before_writing(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = seed_worker_project(repository, episode_count=2)
+    brief = repository.create_blueprints(
+        project["id"], [{"content": {"title": "方向"}}]
+    )[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(
+        project["id"], [{"name": "主角"}], []
+    )
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(
+        project["id"], [outline_episode(1), outline_episode(2)], "全剧弧线"
+    )
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    for episode_number in (1, 2):
+        beats = repository.create_episode_beats(
+            project["id"], episode_number, valid_beat_content()
+        )
+        repository.lock_episode_beats(beats["id"])
+    first = repository.create_episode_script(
+        project["id"], 1, valid_script_content(1)
+    )
+
+    with pytest.raises(ValueError, match="第.*2.*集数缺少|以下集数缺少"):
+        repository.lock_current_episode_scripts_batch(project["id"])
+
+    assert repository.get_episode(first["id"])["status"] == "draft"
+
+
 def test_phase4_worker_persists_generation_and_report(tmp_path, monkeypatch):
     db_path = tmp_path / ".runtime" / "creative" / "creative.db"
     repository = CreativeRepository(db_path)

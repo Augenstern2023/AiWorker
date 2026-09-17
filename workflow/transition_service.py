@@ -254,6 +254,68 @@ class TransitionService:
             "beats_progress": beats_progress,
         }
 
+    def complete_creative_scripts_batch_without_review(
+        self, task_id: str, project_id: int, actor: Principal
+    ) -> dict[str, Any]:
+        """Lock all current Script drafts and complete the shared workflow task."""
+        if self.creative_adapter is None:
+            raise RuntimeError("creative workflow adapter is not configured")
+        completed = self.creative_adapter.lock_scripts_batch_without_review(
+            task_id, project_id, actor
+        )
+        resources = completed["resources"]
+        with self.repository.identity_repository.transaction() as connection:
+            task = self.repository.transition_task_in_transaction(
+                task_id,
+                "complete_work",
+                actor,
+                connection=connection,
+                details={
+                    "resource_type": "script",
+                    "resource_ids": [str(item["id"]) for item in resources],
+                    "completion": "batch_locked_without_review",
+                },
+                event_type="creative.lock.batch",
+            )
+            script_progress = self.creative_adapter.script_episode_progress(
+                str(resources[0]["id"])
+            )
+            if not script_progress["complete"]:
+                connection.execute(
+                    update(workflow_tasks)
+                    .where(
+                        workflow_tasks.c.id == task_id,
+                        workflow_tasks.c.status == "completed",
+                    )
+                    .values(status="in_progress")
+                )
+                self.repository._record_event(
+                    connection,
+                    task_id,
+                    "script.remaining",
+                    actor.user_id,
+                    "completed",
+                    "in_progress",
+                    script_progress,
+                )
+                task = self.repository._require_task(connection, task_id)
+                next_task = None
+            else:
+                next_node = WORKFLOW_NODES["script"][2]
+                next_task = self.repository.create_next_task(
+                    task_id,
+                    next_node,
+                    WORKFLOW_NODES[next_node][0],
+                    actor=SYSTEM_ACTOR,
+                    connection=connection,
+                )
+        return {
+            "resources": resources,
+            "task": task,
+            "next_task": next_task,
+            "script_progress": script_progress,
+        }
+
     def migrate_pending_creative_approvals(self) -> list[str]:
         """Lock legacy pending creative versions and remove their review wait state."""
         if self.creative_adapter is None:

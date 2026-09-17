@@ -533,6 +533,7 @@ presence_service = PresenceService(identity_repository)
 creative_repository = CreativeRepository(
     WORKSPACE_ROOT / ".runtime" / "creative" / "creative.db"
 )
+project_prompt_service = ProjectPromptService(creative_repository)
 service_instance_id = (
     os.getenv("AIWORKER_SERVICE_INSTANCE_ID", "").strip() or str(uuid.uuid4())
 )
@@ -1144,7 +1145,7 @@ def _public_created_job(job_state) -> dict[str, Any]:
 
 
 def _public_job(job: dict[str, Any], principal: Principal) -> dict[str, Any]:
-    return ProjectPromptService(creative_repository).public_projection(
+    return project_prompt_service.public_projection(
         job, principal.user_id, job.get("project_id")
     )
 
@@ -3610,6 +3611,10 @@ async def retry_job(
     try:
         before = job_manager.get_job(job_id)
         _assert_can_mutate_owned_job(before, principal, request)
+        if not project_prompt_service.can_access_prompt_snapshots(
+            before, principal.user_id, before.get("project_id")
+        ):
+            raise HTTPException(403, "无权复用此机器任务的提示词快照")
         _require_system_admin_rank_update(
             principal, str(before.get("crawler_type") or "")
         )

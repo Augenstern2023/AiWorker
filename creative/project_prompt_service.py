@@ -73,6 +73,32 @@ class ProjectPromptService:
         # Without recoverable ownership, no actor can safely access the snapshot.
         return False
 
+    def can_access_prompt_snapshots(
+        self, value: Any, actor_user_id: str, project_id: Any = None
+    ) -> bool:
+        """Return whether every frozen prompt nested in ``value`` is reusable."""
+
+        if isinstance(value, list):
+            return all(
+                self.can_access_prompt_snapshots(item, actor_user_id, project_id)
+                for item in value
+            )
+        if not isinstance(value, dict):
+            return True
+        scope_project_id = value.get("project_id") or project_id
+        for key, item in value.items():
+            if key == "prompt_snapshot" and isinstance(item, dict):
+                if not self.can_access_snapshot(
+                    item, actor_user_id, scope_project_id
+                ):
+                    return False
+                continue
+            if not self.can_access_prompt_snapshots(
+                item, actor_user_id, scope_project_id
+            ):
+                return False
+        return True
+
     def public_projection(
         self, value: Any, actor_user_id: str, project_id: Any = None
     ) -> Any:

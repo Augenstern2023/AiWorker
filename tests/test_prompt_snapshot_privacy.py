@@ -166,6 +166,7 @@ async def test_job_public_projections_keep_private_prompt_identity_only(tmp_path
     scope = dict(Any=Any, Principal=Principal, Request=Request, Depends=Depends,
                  current_principal=current_principal, HTTPException=HTTPException,
                  ProjectPromptService=ProjectPromptService, creative_repository=repository,
+                 project_prompt_service=ProjectPromptService(repository),
                  _operation_permission_granted=lambda *_: True,
                  workflow_repository=SimpleNamespace(list_project_members=lambda _: [
                      {"user_id": user, "status": "active"} for user in ("alice", "bob")]),
@@ -179,6 +180,131 @@ async def test_job_public_projections_keep_private_prompt_identity_only(tmp_path
     assert (SECRET in serialized) == (actor_id == "alice")
     assert snapshot["content_hash"] in serialized
     assert job["job"]["extra"]["prompt_snapshot"] == snapshot
+
+
+@pytest.mark.asyncio
+async def test_generic_job_retry_rejects_another_users_private_prompt_snapshot(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project, _, _ = _project_with_review(repository)
+    snapshot = _private_snapshot(repository, project["id"])
+    job = {
+        "job_id": "private-optimization-job",
+        "platform": "creative",
+        "crawler_type": "screenplay_optimization",
+        "status": "failed",
+        "created_by_user_id": "alice",
+        "project_id": project["id"],
+        "workflow_task_id": None,
+        "job": {
+            "job_id": "private-optimization-job",
+            "platform": "creative",
+            "crawler_type": "screenplay_optimization",
+            "extra": {"prompt_snapshot": snapshot},
+        },
+    }
+
+    class RetryManager:
+        retried = False
+
+        def get_job(self, _job_id):
+            return job
+
+        def retry(self, _job_id):
+            self.retried = True
+            return SimpleNamespace(job_id=job["job_id"])
+
+    manager = RetryManager()
+    names = {"_assert_can_mutate_owned_job", "retry_job"}
+    tree = ast.parse((Path(__file__).parents[1] / "WebGUI.py").read_text(encoding="utf-8-sig"))
+    selected = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names
+    ]
+    for node in selected:
+        node.decorator_list = []
+    scope = dict(
+        Any=Any,
+        Principal=Principal,
+        Request=Request,
+        Depends=Depends,
+        current_principal=current_principal,
+        HTTPException=HTTPException,
+        project_prompt_service=ProjectPromptService(repository),
+        job_manager=manager,
+        workflow_repository=SimpleNamespace(get_task=lambda _task_id: None),
+        _require_system_admin_rank_update=lambda *_: None,
+        _record_job_audit=lambda *_args, **_kwargs: None,
+        _public_job=lambda value, _principal: value,
+        JobNotFoundError=type("JobNotFoundError", (Exception,), {}),
+        JobConflictError=type("JobConflictError", (Exception,), {}),
+    )
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "WebGUI.py", "exec"), scope)
+
+    with pytest.raises(HTTPException) as denied:
+        await scope["retry_job"](
+            job_id=job["job_id"],
+            request=SimpleNamespace(),
+            principal=_principal("bob", admin=True),
+        )
+
+    assert denied.value.status_code == 403
+    assert denied.value.detail == "无权复用此机器任务的提示词快照"
+    assert manager.retried is False
+
+
+@pytest.mark.asyncio
+async def test_job_list_reuses_application_prompt_projection_service(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    jobs = [
+        {
+            "job_id": f"projection-{index}",
+            "platform": "dy",
+            "crawler_type": "search",
+            "created_by_user_id": f"owner-{index}",
+            "project_id": None,
+            "job": {"extra": {}},
+        }
+        for index in range(3)
+    ]
+    initializations = 0
+
+    class CountingProjectPromptService(ProjectPromptService):
+        def __init__(self, repository):
+            nonlocal initializations
+            initializations += 1
+            super().__init__(repository)
+
+    names = {"_workflow_project_key", "_can_read_job", "_public_job", "list_jobs"}
+    tree = ast.parse((Path(__file__).parents[1] / "WebGUI.py").read_text(encoding="utf-8-sig"))
+    selected = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names
+    ]
+    for node in selected:
+        node.decorator_list = []
+    scope = dict(
+        Any=Any,
+        Principal=Principal,
+        Request=Request,
+        Depends=Depends,
+        current_principal=current_principal,
+        ProjectPromptService=CountingProjectPromptService,
+        creative_repository=repository,
+        project_prompt_service=ProjectPromptService(repository),
+        _operation_permission_granted=lambda *_: True,
+        workflow_repository=SimpleNamespace(list_project_members=lambda _project_id: []),
+        job_manager=SimpleNamespace(list_jobs=lambda: jobs),
+    )
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "WebGUI.py", "exec"), scope)
+
+    result = await scope["list_jobs"](
+        principal=_principal("admin", admin=True), request=None
+    )
+
+    assert len(result["jobs"]) == len(jobs)
+    assert initializations == 0
 
 
 @pytest.mark.parametrize("actor_id", ["manager", "member"])

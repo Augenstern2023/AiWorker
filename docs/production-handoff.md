@@ -11,11 +11,11 @@
    - 入口一：`/review/projects`（负责项目）列表每行“导出项目文档包”按钮。
    - 入口二：`/planning/projects/{id}/brief`（创作任务书）页头“导出项目”按钮。
    - 两处共用 `templates/common/workspace/production_export_modal.html` 与 `static/js/common/production_export.js`，分“导出检查/历史导出”两个页签；范围支持全剧、连续区间、自选集数和当前可用集。
-   - 网页制品为 ZIP 项目文档包：仿写项目额外包含锁定的原剧拆解；Brief、人物设定和人物关系分别保存为 Markdown；分集大纲与 Beats 按集保存为 Markdown，场次剧本按集保存为 TXT；每集剧本开头重复附带同一份全剧 AI 视频生成规格建议；`99_数据清单` 保留原始 `production-package.json` 与逐文件 SHA256，供追溯和机器衔接。
+   - 网页制品为 ZIP 项目文档包：仿写项目额外包含锁定的原剧拆解；Brief、人物设定和人物关系分别保存为 Markdown；分集大纲与 Beats 按集保存为 Markdown，场次剧本按集保存为 TXT；每集剧本开头重复附带同一份全剧 AI 视频生成规格建议；压缩包不包含 JSON，`99_数据清单` 仅保留 TXT 格式的逐文件 SHA256。
    - 导出预检要求视频生成规格建议已生成、覆盖完整全剧且与当前有效场次剧本指纹一致；缺失、分析未完成、只覆盖部分剧本、内容为空或剧本变化导致过期时均阻止导出，并引导回剧本页处理。导出指定集时仍复用已验证的全剧规格建议。
    - 四个接口：`GET /api/creative/projects/{id}/production-export/preview` 可重复传入 `episode_numbers`；`POST /api/creative/projects/{id}/production-exports` 携带同一组 `episode_numbers` 与 `expected_fingerprint` 并校验 CSRF；另有历史列表与下载接口。
    - 权限：仅系统管理员，及拥有项目管理权限（`can_access_managed_project` 语义）的负责人。页面访问权限、普通成员身份一律不放行；未登录 401、无权限 403、项目/记录缺失 404、文件缺失/篡改/越界 410、审计暂不可用 503、检查未通过或版本变化 409。
-   - 不可变记录：表 `creative_production_exports` 以“项目 + 指纹 + 契约版本”为唯一键，保存制品格式、全剧/部分集标记、具体集数、项目总集数和创作模式；每集剧本含视频规格建议的 ZIP 文档包使用契约 2.3，历史 ZIP/JSON 继续按原格式下载。重复请求复用原产物并保留最初创建信息。
+   - 不可变记录：表 `creative_production_exports` 以“项目 + 指纹 + 契约版本”为唯一键，保存制品格式、全剧/部分集标记、具体集数、项目总集数和创作模式；不含 JSON 的 ZIP 文档包使用契约 2.4，历史 ZIP/JSON 继续按原格式下载。重复请求复用原产物并保留最初创建信息。
    - 版本指纹（锁定内容）与文件 SHA256（磁盘字节）分开：历史包不可被当前内容覆盖，下载前校验路径边界、文件存在性与文件校验值，损坏即 410，不静默重建。
    - 审计至少一次：`production_export.create / .reuse / .download_started`；审计失败记录保持 `pending` 并阻塞下载，重试（再次创建/下载）自动补记后才可下载。下载审计表示服务端批准开始返回文件，不证明浏览器已完整保存。
    - 生命周期：导出记录已纳入 Writer 回滚的删除状态与外部使用指纹；显式删除项目时，记录随 `creative_production_exports` 删除，文件仅允许清理固定导出目录内已登记路径；审计记录保留。
@@ -31,7 +31,7 @@ uv run python -m creative.production_export_cli --project-id PROJECT_ID > packag
 
 这是可信本地操作员接口，不是经审批审计的对外交付功能。实际商用/对外交付仍应走原有审批与授权流程。导出必须成功后才可消费 stdout；不要把失败产生的空文件送给下游。
 
-网页端：登录 WebGUI（http://localhost:8080）后，进入“负责项目”或项目 Brief 页，点击导出按钮；检查全部通过后“生成项目文档包”，随后在结果区或历史页签下载 ZIP。仅导出锁定创作资料，尚未开始生产。ZIP 中的 `99_数据清单/production-package.json` 与本地 CLI JSON 使用相同的锁定快照结构。
+网页端：登录 WebGUI（http://localhost:8080）后，进入“负责项目”或项目 Brief 页，点击导出按钮；检查全部通过后“生成项目文档包”，随后在结果区或历史页签下载 ZIP。仅导出锁定创作资料，尚未开始生产。ZIP 只含 Markdown、TXT 和校验清单，不包含 JSON；本地 CLI 的机器衔接接口保持不变。
 
 从 auto_short_play/automation 根目录执行：
 

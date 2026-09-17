@@ -191,7 +191,7 @@ def test_open_show_check_and_generate(page: Page) -> None:
                ], "issues": []}
     history = {"items": [], "total": 0, "page": 1, "page_size": 20}
     export = {"id": "e1", "project_id": "3", "fingerprint": preview["fingerprint"],
-              "contract_version": "2.3", "artifact_format": "zip", "media_type": "application/zip",
+              "contract_version": "2.4", "artifact_format": "zip", "media_type": "application/zip",
               "created_by": "owner", "created_by_name": "负责人",
               "created_at": 1, "episode_count": 2, "size_bytes": 100,
               "file_sha256": "deadbeef", "audit_status": "recorded",

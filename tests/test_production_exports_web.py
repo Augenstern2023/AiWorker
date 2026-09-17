@@ -75,12 +75,6 @@ def archive_files(response):
         return {name: archive.read(name) for name in archive.namelist()}
 
 
-def archived_package(response):
-    return json.loads(
-        archive_files(response)['99_数据清单/production-package.json']
-    )
-
-
 def test_create_download_and_reuse_are_immutable_and_audited(environment, db):
     before = export_production_package(db, 1)
     result = create(environment)
@@ -89,7 +83,7 @@ def test_create_download_and_reuse_are_immutable_and_audited(environment, db):
     downloaded = environment.client.get(record['download_url'])
     assert downloaded.status_code == 200
     files = archive_files(downloaded)
-    assert json.loads(files['99_数据清单/production-package.json']) == before
+    assert not any(name.lower().endswith('.json') for name in files)
     assert files['02_Brief/创作Brief.md'].decode('utf-8').startswith('# 测试剧 · 创作 Brief')
     assert '寻找真相' in files['02_Brief/创作Brief.md'].decode('utf-8')
     assert '03_人物/人物设定.md' in files
@@ -104,7 +98,7 @@ def test_create_download_and_reuse_are_immutable_and_audited(environment, db):
     assert downloaded.headers['content-disposition'].endswith('.zip')
     assert record['artifact_format'] == 'zip'
     assert record['media_type'] == 'application/zip'
-    assert record['contract_version'] == '2.3'
+    assert record['contract_version'] == '2.4'
     assert hashlib.sha256(downloaded.content).hexdigest() == record['file_sha256']
     with sqlite3.connect(db) as connection:
         connection.execute('UPDATE creative_projects SET updated_at=999')
@@ -151,11 +145,7 @@ def test_preview_create_and_history_preserve_selected_episodes(environment):
 
     downloaded = environment.client.get(record['download_url'])
     files = archive_files(downloaded)
-    package = json.loads(files['99_数据清单/production-package.json'])
-    assert package['provenance']['episode_numbers'] == [2]
-    assert package['provenance']['export_scope'] == 'partial'
-    for stage in ('outlines', 'beats', 'scripts'):
-        assert [item['episode_number'] for item in package[stage]] == [2]
+    assert not any(name.lower().endswith('.json') for name in files)
     assert '05_Beats/第002集_Beats.md' in files
     assert '06_剧本/第002集_剧本.txt' in files
     assert '04_分集大纲/第002集_分集大纲.md' in files
@@ -199,9 +189,10 @@ def test_custom_version_manifest_is_prechecked_exported_and_kept_in_history(envi
     record = created.json()['export']
     assert record['version_strategy'] == 'custom'
     assert record['version_manifest'] == manifest
-    assert archived_package(
-        environment.client.get(record['download_url'])
-    )['version_manifest'] == manifest
+    assert not any(
+        name.lower().endswith('.json')
+        for name in archive_files(environment.client.get(record['download_url']))
+    )
     history = environment.client.get(
         '/api/creative/projects/1/production-exports'
     ).json()['items'][0]

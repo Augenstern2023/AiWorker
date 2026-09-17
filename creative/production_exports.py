@@ -41,7 +41,7 @@ from creative.production_export import _inspect_snapshot
 from creative.repository import CreativeRepository
 from identity.schema import Principal
 
-CONTRACT_VERSION = "2.3"
+CONTRACT_VERSION = "2.4"
 _UNSAFE_FILENAME = re.compile(r'[\\/:*?"<>|\x00-\x1f\s]+')
 
 

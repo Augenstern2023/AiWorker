@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import zipfile
 from io import BytesIO
 from typing import Any
@@ -118,9 +117,6 @@ def build_production_archive(package: dict[str, Any]) -> bytes:
             f"{recommendation_text}\n{script_text}".encode("utf-8")
         )
 
-    files["99_数据清单/production-package.json"] = json.dumps(
-        package, ensure_ascii=False, indent=2
-    ).encode("utf-8")
     checksum_lines = [
         f"{hashlib.sha256(content).hexdigest()}  {path}"
         for path, content in sorted(files.items())
@@ -161,7 +157,7 @@ def _readme(package: dict[str, Any]) -> str:
             "04_分集大纲：每集一个 Markdown 文件。",
             "05_Beats：每集一个 Markdown 文件。",
             "06_剧本：每集一个 TXT 场次剧本，文件开头附全剧 AI 视频规格建议。",
-            "99_数据清单：原始锁定快照及文件校验值，供追溯使用。",
+            "99_数据清单：TXT 格式的逐文件校验值，供完整性核对使用。",
             "",
             "本压缩包仅包含导出时通过检查的锁定版本。",
         ]

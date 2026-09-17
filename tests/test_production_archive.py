@@ -25,6 +25,7 @@ def test_archive_is_deterministic_complete_and_writer_readable(db):
     with zipfile.ZipFile(BytesIO(first)) as archive:
         names = archive.namelist()
         assert names == sorted(names)
+        assert not any(name.lower().endswith('.json') for name in names)
         assert all(info.date_time == (1980, 1, 1, 0, 0, 0) for info in archive.infolist())
         assert all(not name.startswith(('/', '\\')) and '..' not in name for name in names)
         assert archive.read('02_Brief/创作Brief.md').decode('utf-8').startswith(

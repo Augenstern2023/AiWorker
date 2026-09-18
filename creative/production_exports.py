@@ -8,17 +8,27 @@
 
 """Immutable production package export records for the web handoff flow.
 
-Records live in the creative SQLite database; package files live under the
-server-owned ``.runtime/production-exports`` directory and are named by server
-generated ids. The identity of a package is ``project id + fingerprint +
-contract version``: a repeated request for the same version reuses the stored
-artifact and its original creation metadata, and a stored file is never
-rebuilt from current project content. Integrity uses two distinct values: the
-package fingerprint (locked creative content) and the file SHA256 (bytes on
-disk); a missing, tampered or displaced file fails closed with 410 semantics.
+Records live in the creative PostgreSQL store, in the Alembic-managed
+``creative_production_exports`` table declared by ``creative.database_schema``;
+package files live under the server-owned ``.runtime/production-exports``
+directory and are named by server generated ids. The identity of a package is
+``project id + fingerprint + contract version``: a repeated request for the same
+version reuses the stored artifact and its original creation metadata, and a
+stored file is never rebuilt from current project content. Integrity uses two
+distinct values: the package fingerprint (locked creative content) and the file
+SHA256 (bytes on disk); a missing, tampered or displaced file fails closed with
+410 semantics.
 
 Audit follows traceable at-least-once semantics. A record stays ``pending``
 until its create/reuse audit lands, and a pending record cannot be downloaded.
+
+The service owns neither schema nor connection. The export table is part of the
+migrated creative schema contract, so nothing here creates or alters it; every
+statement goes through the repository's production-export methods, or, for the
+single lookup that has no repository method of its own, through
+``connection_scope``. All filesystem work happens outside a transaction, and a
+connection borrowed from the repository is never committed, rolled back or
+closed by this module.
 """
 from __future__ import annotations
 
@@ -26,7 +36,6 @@ import hashlib
 import json
 import os
 import re
-import sqlite3
 import time
 import uuid
 from collections.abc import Iterable
@@ -34,10 +43,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import Request
+from sqlalchemy import select
 
 from audit.service import AuditService
+from creative.database_schema import creative_projects
 from creative.production_export import _inspect_snapshot
-from creative.repository import CreativeRepository
 from identity.schema import Principal
 
 CONTRACT_VERSION = "1.0"
@@ -61,74 +71,53 @@ class AuditUnavailable(RuntimeError):
 
 
 class ProductionExportService:
+    """Production package export bookkeeping over the PostgreSQL creative store.
+
+    ``repository`` is the injected creative repository. The service uses its
+    production-export surface (``record_production_export``,
+    ``find_production_export``, ``get_production_export``,
+    ``list_production_exports``, ``mark_production_export_audited``,
+    ``production_export_public_record``) plus the connection boundaries every
+    creative repository exposes (``connection_scope``).
+    """
+
     def __init__(
         self,
         *,
         root: str | Path,
-        repository: CreativeRepository,
+        repository: Any,  # the injected creative repository (duck typed, see above)
         audit_service: AuditService,
     ) -> None:
         self.repository = repository
         self.audit_service = audit_service
         self.export_dir = (Path(root).resolve() / ".runtime" / "production-exports")
         self.export_dir.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = self.repository._connect()
-        connection.execute("PRAGMA busy_timeout = 10000")
-        return connection
+    # -------------------------------------------------------------- snapshots
 
-    def _init_schema(self) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS creative_production_exports (
-                    id TEXT PRIMARY KEY,
-                    project_id INTEGER NOT NULL,
-                    fingerprint TEXT NOT NULL,
-                    contract_version TEXT NOT NULL,
-                    created_by TEXT NOT NULL,
-                    created_by_name TEXT NOT NULL DEFAULT '',
-                    created_at REAL NOT NULL,
-                    episode_count INTEGER NOT NULL,
-                    episode_numbers_json TEXT NOT NULL DEFAULT '[]',
-                    export_scope TEXT NOT NULL DEFAULT 'full',
-                    project_total_episodes INTEGER NOT NULL DEFAULT 0,
-                    workflow_mode TEXT NOT NULL DEFAULT 'sequential',
-                    version_strategy TEXT NOT NULL DEFAULT 'current',
-                    version_manifest_json TEXT NOT NULL DEFAULT '{}',
-                    path TEXT NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    file_sha256 TEXT NOT NULL,
-                    audit_recorded_at REAL,
-                    UNIQUE(project_id, fingerprint, contract_version)
-                )
-                """
-            )
-            columns = {
-                str(row[1])
-                for row in connection.execute(
-                    "PRAGMA table_info(creative_production_exports)"
-                ).fetchall()
-            }
-            additions = {
-                "episode_numbers_json": "TEXT NOT NULL DEFAULT '[]'",
-                "export_scope": "TEXT NOT NULL DEFAULT 'full'",
-                "project_total_episodes": "INTEGER NOT NULL DEFAULT 0",
-                "workflow_mode": "TEXT NOT NULL DEFAULT 'sequential'",
-                "version_strategy": "TEXT NOT NULL DEFAULT 'current'",
-                "version_manifest_json": "TEXT NOT NULL DEFAULT '{}'",
-            }
-            for column, definition in additions.items():
-                if column not in columns:
-                    connection.execute(
-                        f"ALTER TABLE creative_production_exports "
-                        f"ADD COLUMN {column} {definition}"
-                    )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_creative_production_exports_project "
-                "ON creative_production_exports(project_id, created_at DESC, id)"
+    def _inspect(
+        self,
+        project_id: int,
+        episode_numbers: Iterable[int] | None,
+        version_manifest: dict[str, Any] | None,
+    ) -> tuple[Any, dict[str, Any] | None]:
+        """Resolve the locked snapshot from one consistent read of the store.
+
+        Snapshot resolution belongs to ``creative.production_export``; its
+        repository entry point takes the repository and, when the caller passes
+        one, the borrowed connection it must read through, so the project, the
+        resource heads and every selected version come from a single read
+        transaction. The connection is borrowed for the duration of the call
+        only and is never committed, rolled back or closed here.
+        """
+
+        with self.repository.connection_scope() as connection:
+            return _inspect_snapshot(
+                self.repository,
+                project_id,
+                episode_numbers,
+                version_manifest,
+                connection=connection,
             )
 
     # ---------------------------------------------------------------- preview
@@ -140,9 +129,7 @@ class ProductionExportService:
         version_manifest: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         requested = None if episode_numbers is None else list(episode_numbers)
-        inspection, package = _inspect_snapshot(
-            self.repository.db_path, project_id, requested, version_manifest
-        )
+        inspection, package = self._inspect(project_id, requested, version_manifest)
         result = inspection.preview(package)
         total = int(inspection.project["target_episode_count"])
         selected = (
@@ -180,17 +167,28 @@ class ProductionExportService:
         ExportBlocked/FingerprintConflict (409), ExportUnavailable (410) or
         AuditUnavailable (503). Never rebuilds a registered historical file.
         """
-        inspection, package = _inspect_snapshot(
-            self.repository.db_path, project_id, episode_numbers, version_manifest
+        inspection, package = self._inspect(
+            project_id, episode_numbers, version_manifest
         )
         if package is None:
             raise ExportBlocked("production export: locked inputs are incomplete")
         if package["fingerprint"] != expected_fingerprint:
             raise FingerprintConflict("production export: version changed since preview")
-        existing = self._find_row(project_id, package["fingerprint"])
+        existing = self.repository.find_production_export(
+            project_id,
+            package["fingerprint"],
+            contract_version=CONTRACT_VERSION,
+        )
         if existing is not None:
             self._verified_path(existing)
-            return self._ensure_reuse_audit(self._public(existing), actor, request), False
+            return (
+                self._ensure_reuse_audit(
+                    self.repository.production_export_public_record(existing),
+                    actor,
+                    request,
+                ),
+                False,
+            )
         export_id = str(uuid.uuid4())
         content = json.dumps(package, ensure_ascii=False, indent=2).encode("utf-8")
         provenance = package["provenance"]
@@ -201,55 +199,58 @@ class ProductionExportService:
         os.replace(temporary, path)
         created_at = time.time()
         try:
-            with self._connect() as connection:
-                connection.execute(
-                    """
-                    INSERT INTO creative_production_exports (
-                        id, project_id, fingerprint, contract_version,
-                        created_by, created_by_name, created_at, episode_count,
-                        episode_numbers_json, export_scope, project_total_episodes,
-                        workflow_mode, version_strategy, version_manifest_json,
-                        path, size_bytes, file_sha256
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        export_id,
-                        project_id,
-                        package["fingerprint"],
-                        CONTRACT_VERSION,
-                        actor.user_id,
-                        actor.display_name,
-                        created_at,
-                        len(selected_numbers),
-                        json.dumps(selected_numbers, ensure_ascii=False),
-                        provenance["export_scope"],
-                        provenance["project_total_episodes"],
-                        provenance["workflow_mode"],
-                        "custom" if version_manifest is not None else "current",
-                        json.dumps(package["version_manifest"], ensure_ascii=False),
-                        str(path),
-                        len(content),
-                        hashlib.sha256(content).hexdigest(),
+            stored = self.repository.record_production_export(
+                {
+                    "id": export_id,
+                    "project_id": project_id,
+                    "fingerprint": package["fingerprint"],
+                    "contract_version": CONTRACT_VERSION,
+                    "created_by": actor.user_id,
+                    "created_by_name": actor.display_name,
+                    "created_at": created_at,
+                    "episode_count": len(selected_numbers),
+                    "episode_numbers_json": selected_numbers,
+                    "export_scope": provenance["export_scope"],
+                    "project_total_episodes": provenance["project_total_episodes"],
+                    "workflow_mode": provenance["workflow_mode"],
+                    "version_strategy": (
+                        "custom" if version_manifest is not None else "current"
                     ),
-                )
-        except sqlite3.IntegrityError:
-            # A concurrent winner registered this version first; keep its file
-            # and remove only the artifact this request generated.
-            path.unlink(missing_ok=True)
-            winner = self._find_row(project_id, package["fingerprint"])
-            if winner is None:
-                raise
-            self._verified_path(winner)
-            return self._ensure_reuse_audit(self._public(winner), actor, request), False
+                    "version_manifest_json": package["version_manifest"],
+                    "path": str(path),
+                    "size_bytes": len(content),
+                    "file_sha256": hashlib.sha256(content).hexdigest(),
+                }
+            )
         except BaseException:
             path.unlink(missing_ok=True)
             raise
-        record = self._public(self._row(export_id))
+        if str(stored["id"]) != export_id:
+            # A concurrent winner registered this version first; the insert is
+            # idempotent on ``(project_id, fingerprint, contract_version)`` and
+            # returned the stored row. Keep its file and remove only the
+            # artifact this request generated.
+            path.unlink(missing_ok=True)
+            self._verified_path(stored)
+            return (
+                self._ensure_reuse_audit(
+                    self.repository.production_export_public_record(stored),
+                    actor,
+                    request,
+                ),
+                False,
+            )
+        record = self.repository.production_export_public_record(stored)
         self._audit(
             actor, "production_export.create", record, request,
             mark_recorded=export_id,
         )
-        return self._public(self._row(export_id)), True
+        return (
+            self.repository.production_export_public_record(
+                self.repository.get_production_export(export_id) or stored
+            ),
+            True,
+        )
 
     def _ensure_reuse_audit(
         self,
@@ -262,7 +263,9 @@ class ProductionExportService:
                 actor, "production_export.reuse", record, request,
                 mark_recorded=record["id"],
             )
-            return self._public(self._row(record["id"]))
+            return self.repository.production_export_public_record(
+                self.repository.get_production_export(record["id"]) or record
+            )
         self._audit(actor, "production_export.reuse", record, request)
         return record
 
@@ -273,26 +276,9 @@ class ProductionExportService:
     ) -> dict[str, Any]:
         page = max(1, int(page))
         page_size = min(max(1, int(page_size)), 100)
-        with self._connect() as connection:
-            total = connection.execute(
-                "SELECT COUNT(*) FROM creative_production_exports WHERE project_id = ?",
-                (project_id,),
-            ).fetchone()[0]
-            rows = connection.execute(
-                """
-                SELECT * FROM creative_production_exports
-                WHERE project_id = ?
-                ORDER BY created_at DESC, id DESC
-                LIMIT ? OFFSET ?
-                """,
-                (project_id, page_size, (page - 1) * page_size),
-            ).fetchall()
-        return {
-            "items": [self._public(dict(row)) for row in rows],
-            "total": int(total),
-            "page": page,
-            "page_size": page_size,
-        }
+        return self.repository.list_production_exports(
+            project_id, page=page, page_size=page_size
+        )
 
     # --------------------------------------------------------------- download
 
@@ -311,16 +297,18 @@ class ProductionExportService:
         same way as creation, keyed by the stored project rather than a client
         hint.
         """
-        row = self._row(export_id)
+        row = self.repository.get_production_export(export_id)
         if row is None:
             raise KeyError(export_id)
-        record = self._public(row)
-        with self._connect() as connection:
-            project = connection.execute(
-                "SELECT id, name FROM creative_projects WHERE id = ? AND deleted = 0",
-                (row["project_id"],),
-            ).fetchone()
-        if project is None:
+        record = self.repository.production_export_public_record(row)
+        with self.repository.connection_scope() as connection:
+            project_name = connection.execute(
+                select(creative_projects.c.name).where(
+                    creative_projects.c.id == int(row["project_id"]),
+                    creative_projects.c.deleted.is_(False),
+                )
+            ).scalar_one_or_none()
+        if project_name is None:
             raise KeyError(str(row["project_id"]))
         if can_access is not None and not can_access(int(row["project_id"])):
             raise PermissionError("production export project is outside the actor scope")
@@ -328,31 +316,13 @@ class ProductionExportService:
             raise AuditUnavailable("production export: create audit is still pending")
         path = self._verified_path(row)
         self._audit(actor, "production_export.download_started", record, request)
-        name = _safe_project_name(project["name"])
+        name = _safe_project_name(project_name)
         scope = _episode_scope_label(
             record["episode_numbers"], record["export_scope"]
         )
         return path, f"{name}_{scope}_生产包_{str(record['fingerprint'])[:12]}.json"
 
     # -------------------------------------------------------------- internals
-
-    def _find_row(self, project_id: int, fingerprint: str) -> dict[str, Any] | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT * FROM creative_production_exports
-                WHERE project_id = ? AND fingerprint = ? AND contract_version = ?
-                """,
-                (project_id, fingerprint, CONTRACT_VERSION),
-            ).fetchone()
-        return dict(row) if row is not None else None
-
-    def _row(self, export_id: str) -> dict[str, Any] | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM creative_production_exports WHERE id = ?", (export_id,)
-            ).fetchone()
-        return dict(row) if row is not None else None
 
     def _verified_path(self, record: dict[str, Any]) -> Path:
         try:
@@ -403,60 +373,7 @@ class ProductionExportService:
         except Exception as exc:
             raise AuditUnavailable("production export: audit storage is unavailable") from exc
         if mark_recorded is not None:
-            with self._connect() as connection:
-                connection.execute(
-                    "UPDATE creative_production_exports SET audit_recorded_at = ? WHERE id = ?",
-                    (time.time(), mark_recorded),
-                )
-
-    @staticmethod
-    def _public(record: dict[str, Any]) -> dict[str, Any]:
-        try:
-            episode_numbers = [
-                int(number)
-                for number in json.loads(record.get("episode_numbers_json") or "[]")
-            ]
-        except (TypeError, ValueError, json.JSONDecodeError):
-            episode_numbers = []
-        episode_count = int(record["episode_count"])
-        if not episode_numbers and episode_count:
-            episode_numbers = list(range(1, episode_count + 1))
-        project_total = int(record.get("project_total_episodes") or episode_count)
-        export_scope = str(record.get("export_scope") or "")
-        if export_scope not in {"full", "partial"}:
-            export_scope = (
-                "full"
-                if episode_numbers == list(range(1, project_total + 1))
-                else "partial"
-            )
-        try:
-            version_manifest = json.loads(
-                record.get("version_manifest_json") or "{}"
-            )
-            if not isinstance(version_manifest, dict):
-                version_manifest = {}
-        except (TypeError, ValueError, json.JSONDecodeError):
-            version_manifest = {}
-        return {
-            "id": record["id"],
-            "project_id": str(record["project_id"]),
-            "fingerprint": record["fingerprint"],
-            "contract_version": record["contract_version"],
-            "created_by": record["created_by"],
-            "created_by_name": record["created_by_name"],
-            "created_at": record["created_at"],
-            "episode_count": episode_count,
-            "episode_numbers": episode_numbers,
-            "export_scope": export_scope,
-            "project_total_episodes": project_total,
-            "workflow_mode": str(record.get("workflow_mode") or "sequential"),
-            "version_strategy": str(record.get("version_strategy") or "current"),
-            "version_manifest": version_manifest,
-            "size_bytes": record["size_bytes"],
-            "file_sha256": record["file_sha256"],
-            "audit_status": "recorded" if record.get("audit_recorded_at") is not None else "pending",
-            "download_url": f"/api/creative/production-exports/{record['id']}/download",
-        }
+            self.repository.mark_production_export_audited(mark_recorded)
 
 
 def _safe_project_name(name: str) -> str:

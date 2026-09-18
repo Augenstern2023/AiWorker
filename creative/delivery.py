@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import sqlite3
 import time
 import uuid
 from pathlib import Path
@@ -21,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from audit.service import AuditService
 from identity.dependencies import (
@@ -36,7 +36,7 @@ from .lifecycle_service import (
     script_resource_fingerprint,
     content_fingerprint as stage_content_fingerprint,
 )
-from .repository import CreativeRepository
+from .postgres_repository import PostgresCreativeRepository
 from .workflow_adapter import CreativeWorkflowAdapter
 
 
@@ -62,7 +62,7 @@ class DeliveryService:
         self,
         *,
         root: str | Path,
-        creative_repository: CreativeRepository,
+        creative_repository: PostgresCreativeRepository,
         workflow_repository: WorkflowRepository,
         audit_service: AuditService,
     ) -> None:
@@ -72,69 +72,6 @@ class DeliveryService:
         self.audit_service = audit_service
         self.delivery_dir = self.root / ".runtime" / "deliveries"
         self.delivery_dir.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
-
-    def _init_schema(self) -> None:
-        with self.creative_repository._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS creative_deliveries (
-                    id TEXT PRIMARY KEY,
-                    project_id INTEGER NOT NULL,
-                    stage TEXT NOT NULL,
-                    resource_type TEXT NOT NULL,
-                    resource_id TEXT NOT NULL,
-                    resource_version INTEGER NOT NULL,
-                    submission_id TEXT NOT NULL,
-                    submission_version INTEGER NOT NULL,
-                    format TEXT NOT NULL,
-                    content_fingerprint TEXT NOT NULL,
-                    actor_id TEXT NOT NULL,
-                    workflow_task_id TEXT,
-                    stage_content_fingerprint TEXT NOT NULL DEFAULT '',
-                    stage_export_recorded_at REAL,
-                    workflow_completed_at REAL,
-                    audit_recorded_at REAL,
-                    path TEXT NOT NULL,
-                    created_at REAL NOT NULL,
-                    FOREIGN KEY(project_id) REFERENCES creative_projects(id)
-                )
-                """
-            )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_creative_deliveries_created "
-                "ON creative_deliveries(created_at DESC, id)"
-            )
-            columns = {
-                row[1]
-                for row in connection.execute(
-                    "PRAGMA table_info(creative_deliveries)"
-                ).fetchall()
-            }
-            additions = {
-                "workflow_task_id": "TEXT",
-                "stage_content_fingerprint": "TEXT NOT NULL DEFAULT ''",
-                "stage_export_recorded_at": "REAL",
-                "workflow_completed_at": "REAL",
-                "audit_recorded_at": "REAL",
-                "resource_status": "TEXT NOT NULL DEFAULT ''",
-                "is_formal": "INTEGER NOT NULL DEFAULT 1",
-            }
-            for column, definition in additions.items():
-                if column not in columns:
-                    connection.execute(
-                        f"ALTER TABLE creative_deliveries ADD COLUMN {column} {definition}"
-                    )
-            connection.execute(
-                "DROP INDEX IF EXISTS uq_creative_delivery_request"
-            )
-            connection.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS uq_creative_delivery_request "
-                "ON creative_deliveries(project_id, stage, submission_id, format, is_formal)"
-            )
-            connection.execute(
-                "DROP INDEX IF EXISTS uq_creative_delivery_task"
-            )
 
     def create(
         self,
@@ -207,10 +144,9 @@ class DeliveryService:
         temporary.write_bytes(content)
         os.replace(temporary, path)
         created_at = time.time()
-        record = {
+        values = {
             "id": delivery_id,
-            "project_id": str(project_id),
-            "project_name": project["name"],
+            "project_id": project_id,
             "stage": stage,
             "resource_type": resource_type,
             "resource_id": resource_id,
@@ -218,44 +154,18 @@ class DeliveryService:
             "submission_id": source_key,
             "submission_version": resource_version,
             "format": format,
-            "fingerprint": fingerprint,
-            "actor_user_id": actor.user_id,
+            "content_fingerprint": fingerprint,
+            "actor_id": actor.user_id,
+            "workflow_task_id": task["id"] if task else None,
+            "stage_content_fingerprint": lifecycle_fingerprint,
+            "resource_status": resource_status,
+            "is_formal": is_formal,
             "path": str(path),
             "created_at": created_at,
         }
         try:
-            with self.creative_repository._connect() as connection:
-                connection.execute(
-                    """
-                    INSERT INTO creative_deliveries (
-                        id, project_id, stage, resource_type, resource_id,
-                        resource_version, submission_id, submission_version,
-                        format, content_fingerprint, actor_id, workflow_task_id,
-                        stage_content_fingerprint, resource_status, is_formal,
-                        path, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        delivery_id,
-                        project_id,
-                        stage,
-                        resource_type,
-                        resource_id,
-                        resource_version,
-                        source_key,
-                        resource_version,
-                        format,
-                        fingerprint,
-                        actor.user_id,
-                        task["id"] if task else None,
-                        lifecycle_fingerprint,
-                        resource_status,
-                        int(is_formal),
-                        str(path),
-                        created_at,
-                    ),
-                )
-        except sqlite3.IntegrityError:
+            stored = self.creative_repository.record_delivery(values)
+        except IntegrityError:
             path.unlink(missing_ok=True)
             existing = self._find_existing(
                 project_id, stage, source_key, format, is_formal=is_formal
@@ -268,19 +178,16 @@ class DeliveryService:
         except BaseException:
             path.unlink(missing_ok=True)
             raise
-        record.update(
-            {
-                "workflow_task_id": task["id"] if task else None,
-                "stage_content_fingerprint": lifecycle_fingerprint,
-                "resource_status": resource_status,
-                "is_formal": is_formal,
-                "stage_export_recorded_at": None,
-                "workflow_completed_at": None,
-                "audit_recorded_at": None,
-            }
-        )
+        if stored["id"] != delivery_id:
+            # A concurrent writer owns the named unique key, so the row that was
+            # just stored is the winner and the artifact written above is an
+            # orphan. The winner already points at its own file.
+            path.unlink(missing_ok=True)
+            return self._reconcile_delivery(
+                stored, page_authorized=page_authorized
+            )
         return self._reconcile_delivery(
-            record, request=request, page_authorized=page_authorized
+            stored, request=request, page_authorized=page_authorized
         )
 
     def list(
@@ -289,16 +196,7 @@ class DeliveryService:
         page_authorized: bool = False,
         project_authorizer: Callable[[str], bool] | None = None,
     ) -> list[dict[str, Any]]:
-        with self.creative_repository._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT d.*, p.name AS project_name
-                FROM creative_deliveries d
-                JOIN creative_projects p ON p.id = d.project_id
-                ORDER BY d.created_at DESC, d.id DESC
-                """
-            ).fetchall()
-        records = [self._public_record(dict(row)) for row in rows]
+        records = self.creative_repository.list_deliveries()
         if project_authorizer is not None:
             records = [
                 record
@@ -390,19 +288,9 @@ class DeliveryService:
         page_authorized: bool = False,
         project_authorizer: Callable[[str], bool] | None = None,
     ) -> dict[str, Any] | None:
-        with self.creative_repository._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT d.*, p.name AS project_name
-                FROM creative_deliveries d
-                JOIN creative_projects p ON p.id = d.project_id
-                WHERE d.id = ?
-                """,
-                (delivery_id,),
-            ).fetchone()
-        if row is None:
+        record = self.creative_repository.get_delivery(delivery_id)
+        if record is None:
             return None
-        record = self._public_record(dict(row))
         if project_authorizer is not None and not project_authorizer(
             str(record["project_id"])
         ):
@@ -415,18 +303,13 @@ class DeliveryService:
         self, project_id: int, stage: str, submission_id: str, format: str,
         *, is_formal: bool,
     ) -> dict[str, Any] | None:
-        with self.creative_repository._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT d.*, p.name AS project_name
-                FROM creative_deliveries d
-                JOIN creative_projects p ON p.id = d.project_id
-                WHERE d.project_id = ? AND d.stage = ?
-                  AND d.submission_id = ? AND d.format = ? AND d.is_formal = ?
-                """,
-                (project_id, stage, submission_id, format, int(is_formal)),
-            ).fetchone()
-        return self._public_record(dict(row)) if row is not None else None
+        return self.creative_repository.find_delivery(
+            project_id,
+            stage,
+            submission_id,
+            format,
+            is_formal=is_formal,
+        )
 
     def _resolve_delivery_task(
         self, project_id: int, workflow_task_id: str | None
@@ -677,24 +560,12 @@ class DeliveryService:
         }
         if column not in allowed:
             raise ValueError("invalid delivery reconciliation column")
-        with self.creative_repository._connect() as connection:
-            connection.execute(
-                f"UPDATE creative_deliveries SET {column} = ? WHERE id = ?",
-                (value, delivery_id),
-            )
+        self.creative_repository.mark_delivery_reconciled(
+            delivery_id, column, value
+        )
 
     def _get_unreconciled(self, delivery_id: str) -> dict[str, Any] | None:
-        with self.creative_repository._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT d.*, p.name AS project_name
-                FROM creative_deliveries d
-                JOIN creative_projects p ON p.id = d.project_id
-                WHERE d.id = ?
-                """,
-                (delivery_id,),
-            ).fetchone()
-        return self._public_record(dict(row)) if row is not None else None
+        return self.creative_repository.get_delivery(delivery_id)
 
     def download_path(
         self,
@@ -714,14 +585,6 @@ class DeliveryService:
         if path.parent != self.delivery_dir.resolve() or not path.is_file():
             raise FileNotFoundError(path)
         return path
-
-    @staticmethod
-    def _public_record(record: dict[str, Any]) -> dict[str, Any]:
-        record["project_id"] = str(record["project_id"])
-        record["fingerprint"] = record.pop("content_fingerprint")
-        record["actor_user_id"] = record.pop("actor_id")
-        record["is_formal"] = bool(record.get("is_formal"))
-        return record
 
     @staticmethod
     def _is_formal_resource(resource_status: str) -> bool:

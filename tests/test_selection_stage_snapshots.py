@@ -280,7 +280,9 @@ def test_selection_operator_adopts_topic_directly_with_snapshot_and_audit(
     app.state.audit_service = audit
     app.dependency_overrides[creative_api_principal] = lambda: principal
     app.dependency_overrides[current_principal] = lambda: principal
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(build_creative_router(
+        root=tmp_path, runtime_dir=runtime, repository=repository
+    ))
 
     response = TestClient(app).patch(
         f"/api/creative/topics/{topic['id']}",
@@ -463,7 +465,12 @@ def test_breakdown_generation_uses_material_snapshot_without_personnel_task(
     app.dependency_overrides[creative_api_principal] = lambda: principal
     app.dependency_overrides[current_principal] = lambda: principal
     app.include_router(
-        build_creative_router(root=tmp_path, runtime_dir=runtime, job_manager=manager)
+        build_creative_router(
+            root=tmp_path,
+            runtime_dir=runtime,
+            job_manager=manager,
+            repository=repository,
+        )
     )
 
     response = TestClient(app).post(
@@ -537,7 +544,9 @@ def test_selection_operator_completes_breakdown_without_approval(
     app.state.audit_service = audit
     app.dependency_overrides[creative_api_principal] = lambda: principal
     app.dependency_overrides[current_principal] = lambda: principal
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(build_creative_router(
+        root=tmp_path, runtime_dir=runtime, repository=repository
+    ))
 
     response = TestClient(app).post(
         f"/api/creative/breakdowns/{breakdown['id']}/lock"
@@ -595,7 +604,9 @@ def test_project_creation_is_idempotent_and_bootstraps_one_brief_pool_task(
     app.state.identity_permission_service = permission_service
     app.dependency_overrides[creative_api_principal] = lambda: principal
     app.dependency_overrides[current_principal] = lambda: principal
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(build_creative_router(
+        root=tmp_path, runtime_dir=runtime, repository=repository
+    ))
     client = TestClient(app)
     payload = {
         "topic_id": topic["id"],
@@ -670,7 +681,9 @@ def test_project_owner_creates_locked_topic_project_with_team_and_manages_it(
     app.state.audit_service = AuditService(identity)
     app.dependency_overrides[creative_api_principal] = lambda: owner
     app.dependency_overrides[current_principal] = lambda: owner
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(build_creative_router(
+        root=tmp_path, runtime_dir=runtime, repository=repository
+    ))
     client = TestClient(app)
     payload = {
         "name": "负责人创建的项目",

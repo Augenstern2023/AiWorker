@@ -48,9 +48,22 @@ class LifecycleJobManager:
         return [state.to_dict() for state in self.states]
 
 
-def build_client(tmp_path: Path) -> tuple[TestClient, CreativeRepository, LifecycleJobManager]:
+def build_client(
+    tmp_path: Path,
+    repository: CreativeRepository | None = None,
+) -> tuple[TestClient, CreativeRepository, LifecycleJobManager]:
+    """Build a creative API client over ``repository``.
+
+    The default stays on the frozen SQLite store for the suites that legitimately
+    cover it; callers exercising shapes only the PostgreSQL repository provides
+    (the free-mode transaction boundary and resource heads, for instance) inject
+    the ``postgres_creative`` fixture instead.
+    """
+
     runtime_dir = tmp_path / ".runtime"
     manager = LifecycleJobManager()
+    if repository is None:
+        repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
     app = FastAPI()
     principal = Principal(
         user_id="lifecycle-admin",
@@ -73,8 +86,9 @@ def build_client(tmp_path: Path) -> tuple[TestClient, CreativeRepository, Lifecy
             root=tmp_path,
             runtime_dir=runtime_dir,
             job_manager=manager,
+            repository=repository,
         )
-    return TestClient(app), CreativeRepository(runtime_dir / "creative" / "creative.db"), manager
+    return TestClient(app), repository, manager
 
 
 def test_generation_retry_route_uses_creative_application_service(tmp_path: Path):
@@ -328,9 +342,12 @@ def test_scene_script_download_api_returns_delivery_txt(tmp_path: Path):
     ],
 )
 def test_free_resources_keep_the_common_generated_content_download(
-    tmp_path: Path, stage: str, format: str
+    tmp_path: Path, postgres_creative, stage: str, format: str
 ):
-    client, repository, _ = build_client(tmp_path)
+    # Free-mode resources live behind the PostgreSQL repository's transaction and
+    # resource-head boundary, so both the seeding service and the router read the
+    # isolated PostgreSQL schema rather than the frozen SQLite store.
+    client, repository, _ = build_client(tmp_path, repository=postgres_creative)
     project = repository.create_original_project(
         seed_text="一个能看见记忆裂缝的女孩",
         name="记忆裂缝",
@@ -393,8 +410,10 @@ def test_free_resources_keep_the_common_generated_content_download(
     assert "attachment" in download.headers["content-disposition"]
 
 
-def test_free_workspace_downloads_selected_and_all_episode_heads(tmp_path: Path):
-    client, repository, _ = build_client(tmp_path)
+def test_free_workspace_downloads_selected_and_all_episode_heads(
+    tmp_path: Path, postgres_creative
+):
+    client, repository, _ = build_client(tmp_path, repository=postgres_creative)
     project = repository.create_original_project(
         seed_text="女孩能读取遗失的梦",
         name="梦境档案",

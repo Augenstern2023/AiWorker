@@ -947,10 +947,14 @@ def test_creative_generation_job_records_owner_project_task_link_and_audit(
     app = FastAPI()
     app.state.identity_permission_service = permissions
     app.state.audit_service = audit
-    register_creative_routes(
-        app, root=tmp_path, runtime_dir=runtime_dir, job_manager=manager
-    )
     repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
+    register_creative_routes(
+        app,
+        root=tmp_path,
+        runtime_dir=runtime_dir,
+        job_manager=manager,
+        repository=repository,
+    )
     topic = repository.upsert_topics(
         [
             {
@@ -1056,11 +1060,15 @@ def test_creative_generation_fails_closed_without_identity_configuration(
 ):
     runtime_dir = tmp_path / ".runtime"
     manager = RecordingJobManager()
+    repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
     app = FastAPI()
     register_creative_routes(
-        app, root=tmp_path, runtime_dir=runtime_dir, job_manager=manager
+        app,
+        root=tmp_path,
+        runtime_dir=runtime_dir,
+        job_manager=manager,
+        repository=repository,
     )
-    repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
     topic = repository.upsert_topics(
         [
             {

@@ -128,6 +128,7 @@ def original_client(
         build_creative_router(
             root=tmp_path,
             runtime_dir=runtime_dir,
+            repository=repository,
             workflow_repository=workflow,
         )
     )
@@ -190,7 +191,6 @@ def _run_original_blueprint_worker(
             "action": "blueprints",
             "project_id": project["id"],
             "count": 3,
-            "db_path": str(client.repository.db_path),
             "seed_id": frozen["id"],
             "market_context": [],
             "blocked_terms": [],
@@ -201,7 +201,7 @@ def _run_original_blueprint_worker(
             ),
         },
     )
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, client.repository))
     directions = client.repository.get_project(project["id"])["blueprints"]
     assert len(directions) == 3
     return directions[0]

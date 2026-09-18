@@ -423,9 +423,12 @@ def test_saving_changed_scene_script_creates_a_new_version(tmp_path) -> None:
 
 
 def test_draft_delivery_preview_does_not_export_or_complete_workflow(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, postgres_creative
 ) -> None:
-    repository = CreativeRepository(tmp_path / "creative.db")
+    # ``DeliveryService`` reads and writes deliveries through the PostgreSQL
+    # repository API, so the whole scenario seeds and asserts against the
+    # isolated PostgreSQL schema instead of the frozen SQLite store.
+    repository = postgres_creative
     topic = repository.upsert_topics([{
         "platform": "hg", "job_id": "job-1", "source_path": "rank.json",
         "captured_at": "2026-07-30", "title": "草稿交付剧", "description": "",

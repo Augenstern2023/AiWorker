@@ -6,16 +6,68 @@
 # GitHub: https://github.com/NanmiCoder
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
 
+"""Free-workflow resources on the PostgreSQL creative store.
+
+This module used to open the legacy SQLite store through the repository's
+private connection helper and drive it with raw positional-placeholder SQL. The
+runtime repository is now
+:class:`creative.postgres_repository.PostgresCreativeRepository`, which exposes
+no such helper at all: it offers
+:meth:`~creative.repositories.base.CreativeRepositoryBase.connection_scope` for
+borrowed reads and
+:meth:`~creative.repositories.base.CreativeRepositoryBase.transaction_scope` for
+writes that this service owns.
+
+The port keeps the legacy behaviour as the contract:
+
+* read paths prefer the repository's public methods and only fall back to
+  SQLAlchemy Core against :mod:`creative.database_schema` when the repository
+  exposes no method for the exact query (targeted resource-head reads, counts,
+  generation contexts, mode migrations);
+* every write runs inside ``transaction_scope`` so the transaction is committed
+  only when this service owns it; a caller-supplied connection is never
+  committed, rolled back or closed;
+* epoch ``time.time()`` timestamps become :func:`utc_now` aware datetimes, and
+  JSON payloads are bound as native mappings instead of ``json.dumps`` text,
+  because ``*_json`` columns are ``JSONB`` here;
+* the resource head compare-and-swap is delegated to
+  :meth:`~creative.repositories.versions.VersionsRepository._advance_resource_head_conn`,
+  the repository's race-safe port of the legacy unguarded head write.
+"""
+
 from __future__ import annotations
 
 import json
-import time
 import uuid
 from typing import Any
 
+from sqlalchemy import func, insert, select, update
+from sqlalchemy.engine import Connection
+
+from creative.database_schema import (
+    creative_blueprints,
+    creative_breakdowns,
+    creative_characters,
+    creative_episodes,
+    creative_generation_contexts,
+    creative_generation_operations,
+    creative_mode_migrations,
+    creative_projects,
+    creative_relationships,
+    creative_resource_heads,
+    creative_seeds,
+    creative_topics,
+    script_optimizations,
+    script_reviews,
+)
+from creative.legacy_sqlite_repository import canonical_request_hash
 from creative.outline_fields import outline_field_source_fingerprint
 from creative.prompt_templates import PROMPT_TEMPLATE_VERSION
-from creative.repository import CreativeRepository, canonical_request_hash
+from creative.repositories.base import (
+    CreativeRepositoryBase,
+    from_epoch_seconds,
+    utc_now,
+)
 
 
 FREE_SCOPE = "free"
@@ -39,11 +91,21 @@ ALLOWED_CONTEXT_REFS = {
 class FreeCreativeModeService:
     """Own free-mode resources without touching sequential authority pointers."""
 
-    def __init__(self, repository: CreativeRepository) -> None:
+    def __init__(self, repository: CreativeRepositoryBase) -> None:
         self.repository = repository
 
     @staticmethod
     def _loads(value: Any, fallback: Any) -> Any:
+        """Decode a JSON payload, or pass an already decoded JSONB value through.
+
+        The legacy store handed back ``*_json`` columns as text; PostgreSQL hands
+        back the mapping/sequence the ``JSONB`` column already decoded. Both
+        shapes must return the same value, so a mapping or list is returned
+        as-is instead of being re-parsed.
+        """
+
+        if isinstance(value, (dict, list)):
+            return value
         try:
             return json.loads(value or "")
         except (TypeError, json.JSONDecodeError):
@@ -56,50 +118,56 @@ class FreeCreativeModeService:
             raise ValueError("unsupported creative stage")
         return normalized
 
-    def _raw_project(self, conn: Any, project_id: int) -> dict[str, Any]:
-        row = conn.execute(
-            "SELECT * FROM creative_projects WHERE id = ? AND deleted = 0",
-            (int(project_id),),
-        ).fetchone()
+    def _raw_project(self, connection: Connection, project_id: int) -> dict[str, Any]:
+        """Read the one live project row the service authorises against."""
+
+        row = connection.execute(
+            select(creative_projects).where(
+                creative_projects.c.id == int(project_id),
+                creative_projects.c.deleted.is_(False),
+            )
+        ).mappings().first()
         if row is None:
             raise ValueError("创作项目不存在")
-        return dict(row)
+        return self.repository.row_dict(row)
 
     def assert_free_project(self, project_id: int) -> dict[str, Any]:
-        with self.repository._connect() as conn:
-            project = self._raw_project(conn, project_id)
+        with self.repository.connection_scope() as connection:
+            project = self._raw_project(connection, project_id)
         if str(project.get("workflow_mode") or "sequential") != FREE_SCOPE:
             raise ValueError("该操作仅支持自由创作项目")
         return project
 
     def list_heads(self, project_id: int) -> list[dict[str, Any]]:
         self.assert_free_project(project_id)
-        with self.repository._connect() as conn:
-            return [
-                dict(row)
-                for row in conn.execute(
-                    "SELECT * FROM creative_resource_heads WHERE project_id = ? "
-                    "AND resource_scope = 'free' ORDER BY stage, episode_number",
-                    (int(project_id),),
-                ).fetchall()
-            ]
+        # The repository exposes heads through the project aggregate, already
+        # scoped to the project's workflow mode (free here) and ordered by
+        # (stage, episode_number) exactly like the legacy query.
+        project = self.repository.get_project(project_id) or {}
+        return [dict(row) for row in project.get("resource_heads") or []]
 
     def get_head(
         self, project_id: int, stage: str, episode_number: int | None = None
     ) -> dict[str, Any] | None:
         stage = self._assert_stage(stage)
         number = int(episode_number or 0)
-        with self.repository._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM creative_resource_heads WHERE project_id = ? "
-                "AND resource_scope = 'free' AND stage = ? AND episode_number = ?",
-                (int(project_id), stage, number),
-            ).fetchone()
-        return dict(row) if row is not None else None
+        # A targeted read: the project aggregate would only expose heads of the
+        # project's current mode, while this lookup must always filter
+        # resource_scope = 'free' (and must not require the project to exist).
+        with self.repository.connection_scope() as connection:
+            row = connection.execute(
+                select(creative_resource_heads).where(
+                    creative_resource_heads.c.project_id == int(project_id),
+                    creative_resource_heads.c.resource_scope == FREE_SCOPE,
+                    creative_resource_heads.c.stage == stage,
+                    creative_resource_heads.c.episode_number == number,
+                )
+            ).mappings().first()
+        return self.repository.row_dict(row) if row is not None else None
 
-    @staticmethod
     def _set_head_conn(
-        conn: Any,
+        self,
+        connection: Connection,
         *,
         project_id: int,
         stage: str,
@@ -109,96 +177,73 @@ class FreeCreativeModeService:
         expected_revision: int,
         actor_user_id: str,
     ) -> dict[str, Any]:
-        row = conn.execute(
-            "SELECT revision FROM creative_resource_heads WHERE project_id = ? "
-            "AND resource_scope = 'free' AND stage = ? AND episode_number = ?",
-            (int(project_id), stage, int(episode_number)),
-        ).fetchone()
-        now = time.time()
-        if row is None:
-            if int(expected_revision) != 0:
-                raise ValueError("creative resource head changed")
-            revision = 1
-            conn.execute(
-                """
-                INSERT INTO creative_resource_heads (
-                    project_id, resource_scope, stage, episode_number,
-                    resource_ref, resource_version, revision, updated_at, updated_by
-                ) VALUES (?, 'free', ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    int(project_id), stage, int(episode_number), str(resource_ref),
-                    int(resource_version), revision, now, actor_user_id,
-                ),
-            )
-        else:
-            if int(row["revision"] or 0) != int(expected_revision):
-                raise ValueError("creative resource head changed")
-            revision = int(expected_revision) + 1
-            conn.execute(
-                """
-                UPDATE creative_resource_heads
-                SET resource_ref = ?, resource_version = ?, revision = ?,
-                    updated_at = ?, updated_by = ?
-                WHERE project_id = ? AND resource_scope = 'free'
-                    AND stage = ? AND episode_number = ?
-                """,
-                (
-                    str(resource_ref), int(resource_version), revision, now,
-                    actor_user_id, int(project_id), stage, int(episode_number),
-                ),
-            )
-        return {
-            "project_id": int(project_id),
-            "resource_scope": FREE_SCOPE,
-            "stage": stage,
-            "episode_number": int(episode_number),
-            "resource_ref": str(resource_ref),
-            "resource_version": int(resource_version),
-            "revision": revision,
-            "updated_at": now,
-            "updated_by": actor_user_id,
-        }
+        """Advance one free-mode head inside the caller's transaction.
+
+        Delegates to the repository's race-safe head writer: it takes the head
+        advisory lock and a ``SELECT ... FOR UPDATE`` before the
+        compare-and-swap, so concurrent writers cannot mint the same revision.
+        The returned mapping has the same shape the legacy helper produced,
+        including the epoch-second ``updated_at``.
+        """
+
+        return self.repository._advance_resource_head_conn(
+            connection,
+            project_id=int(project_id),
+            stage=stage,
+            resource_ref=str(resource_ref),
+            resource_version=int(resource_version),
+            expected_revision=int(expected_revision),
+            resource_scope=FREE_SCOPE,
+            episode_number=int(episode_number),
+            updated_by=actor_user_id,
+        )
 
     def _assert_head_resource(
         self,
-        conn: Any,
+        connection: Connection,
         project_id: int,
         stage: str,
         episode_number: int,
         resource_ref: str,
     ) -> int:
         if stage == "brief":
-            row = conn.execute(
-                "SELECT version FROM creative_blueprints WHERE id = ? AND project_id = ? "
-                "AND resource_scope = 'free'",
-                (int(resource_ref), int(project_id)),
-            ).fetchone()
+            version = connection.execute(
+                select(creative_blueprints.c.version).where(
+                    creative_blueprints.c.id == int(resource_ref),
+                    creative_blueprints.c.project_id == int(project_id),
+                    creative_blueprints.c.resource_scope == FREE_SCOPE,
+                )
+            ).scalar_one_or_none()
         elif stage == "characters":
-            row = conn.execute(
-                "SELECT MAX(version) AS version FROM creative_characters "
-                "WHERE project_id = ? AND batch_id = ? AND resource_scope = 'free'",
-                (int(project_id), str(resource_ref)),
-            ).fetchone()
-            if row is not None and row["version"] is None:
-                row = None
+            version = connection.execute(
+                select(func.max(creative_characters.c.version)).where(
+                    creative_characters.c.project_id == int(project_id),
+                    creative_characters.c.batch_id == str(resource_ref),
+                    creative_characters.c.resource_scope == FREE_SCOPE,
+                )
+            ).scalar_one()
         elif stage == "outline":
-            row = conn.execute(
-                "SELECT MAX(version) AS version FROM creative_episodes WHERE project_id = ? "
-                "AND stage = 'outline' AND batch_id = ? AND resource_scope = 'free'",
-                (int(project_id), str(resource_ref)),
-            ).fetchone()
-            if row is not None and row["version"] is None:
-                row = None
+            version = connection.execute(
+                select(func.max(creative_episodes.c.version)).where(
+                    creative_episodes.c.project_id == int(project_id),
+                    creative_episodes.c.stage == "outline",
+                    creative_episodes.c.batch_id == str(resource_ref),
+                    creative_episodes.c.resource_scope == FREE_SCOPE,
+                )
+            ).scalar_one()
         else:
-            row = conn.execute(
-                "SELECT version FROM creative_episodes WHERE id = ? AND project_id = ? "
-                "AND stage = ? AND episode_number = ? AND resource_scope = 'free'",
-                (int(resource_ref), int(project_id), stage, int(episode_number)),
-            ).fetchone()
-        if row is None:
+            version = connection.execute(
+                select(creative_episodes.c.version).where(
+                    creative_episodes.c.id == int(resource_ref),
+                    creative_episodes.c.project_id == int(project_id),
+                    creative_episodes.c.stage == stage,
+                    creative_episodes.c.episode_number == int(episode_number),
+                    creative_episodes.c.resource_scope == FREE_SCOPE,
+                )
+            ).scalar_one_or_none()
+        if version is None:
             raise ValueError("自由创作资源不存在或不属于当前模块")
-        return int(row["version"] or 1)
+        return int(version or 1)
 
     def set_head(
         self,
@@ -212,16 +257,15 @@ class FreeCreativeModeService:
     ) -> dict[str, Any]:
         stage = self._assert_stage(stage)
         number = int(episode_number or 0)
-        with self.repository._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            project = self._raw_project(conn, project_id)
+        with self.repository.transaction_scope() as connection:
+            project = self._raw_project(connection, project_id)
             if project.get("workflow_mode") != FREE_SCOPE:
                 raise ValueError("该操作仅支持自由创作项目")
             version = self._assert_head_resource(
-                conn, project_id, stage, number, resource_ref
+                connection, project_id, stage, number, resource_ref
             )
             return self._set_head_conn(
-                conn,
+                connection,
                 project_id=project_id,
                 stage=stage,
                 episode_number=number,
@@ -233,7 +277,7 @@ class FreeCreativeModeService:
 
     def _create_brief_conn(
         self,
-        conn: Any,
+        connection: Connection,
         *,
         project_id: int,
         content: dict[str, Any],
@@ -242,36 +286,46 @@ class FreeCreativeModeService:
         status: str,
         parent_id: int | None = None,
     ) -> tuple[int, int]:
-        now = time.time()
+        now = utc_now()
         candidate_group_id = uuid.uuid4().hex
         version = 1
         if parent_id is not None:
-            parent = conn.execute(
-                "SELECT candidate_group_id, version FROM creative_blueprints "
-                "WHERE id = ? AND project_id = ? AND resource_scope = 'free'",
-                (int(parent_id), int(project_id)),
-            ).fetchone()
+            parent = connection.execute(
+                select(
+                    creative_blueprints.c.candidate_group_id,
+                    creative_blueprints.c.version,
+                ).where(
+                    creative_blueprints.c.id == int(parent_id),
+                    creative_blueprints.c.project_id == int(project_id),
+                    creative_blueprints.c.resource_scope == FREE_SCOPE,
+                )
+            ).mappings().first()
             if parent is None:
                 raise ValueError("自由 Brief 父版本不存在")
             candidate_group_id = str(parent["candidate_group_id"])
             version = int(parent["version"] or 0) + 1
-        cursor = conn.execute(
-            """
-            INSERT INTO creative_blueprints (
-                project_id, candidate_group_id, version, parent_version_id,
-                status, content_json, risk_score, risk_level, difference_note,
-                source_refs_json, direction_type, generation_meta_json,
-                resource_scope, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, 0, 'low', '', ?, 'free', ?, 'free', ?, ?)
-            """,
-            (
-                int(project_id), candidate_group_id, version, parent_id, status,
-                json.dumps(content, ensure_ascii=False),
-                json.dumps(source_refs, ensure_ascii=False),
-                json.dumps(generation_meta, ensure_ascii=False), now, now,
-            ),
-        )
-        return int(cursor.lastrowid), version
+        resource_id = connection.execute(
+            insert(creative_blueprints)
+            .values(
+                project_id=int(project_id),
+                candidate_group_id=candidate_group_id,
+                version=version,
+                parent_version_id=parent_id,
+                status=status,
+                content_json=content,
+                risk_score=0,
+                risk_level="low",
+                difference_note="",
+                source_refs_json=source_refs,
+                direction_type=FREE_SCOPE,
+                generation_meta_json=generation_meta,
+                resource_scope=FREE_SCOPE,
+                created_at=now,
+                updated_at=now,
+            )
+            .returning(creative_blueprints.c.id)
+        ).scalar_one()
+        return int(resource_id), version
 
     def create_brief(
         self,
@@ -283,19 +337,21 @@ class FreeCreativeModeService:
         source_refs: dict[str, Any] | None = None,
         generation_meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        with self.repository._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            project = self._raw_project(conn, project_id)
+        with self.repository.transaction_scope() as connection:
+            project = self._raw_project(connection, project_id)
             if project.get("workflow_mode") != FREE_SCOPE:
                 raise ValueError("该操作仅支持自由创作项目")
-            current = conn.execute(
-                "SELECT resource_ref FROM creative_resource_heads WHERE project_id = ? "
-                "AND resource_scope = 'free' AND stage = 'brief' AND episode_number = 0",
-                (int(project_id),),
-            ).fetchone()
-            parent_id = int(current["resource_ref"]) if current is not None else None
+            current_ref = connection.execute(
+                select(creative_resource_heads.c.resource_ref).where(
+                    creative_resource_heads.c.project_id == int(project_id),
+                    creative_resource_heads.c.resource_scope == FREE_SCOPE,
+                    creative_resource_heads.c.stage == "brief",
+                    creative_resource_heads.c.episode_number == 0,
+                )
+            ).scalar_one_or_none()
+            parent_id = int(current_ref) if current_ref is not None else None
             resource_id, version = self._create_brief_conn(
-                conn,
+                connection,
                 project_id=project_id,
                 content=dict(content or {}),
                 source_refs=dict(source_refs or {}),
@@ -304,7 +360,7 @@ class FreeCreativeModeService:
                 parent_id=parent_id,
             )
             head = self._set_head_conn(
-                conn,
+                connection,
                 project_id=project_id,
                 stage="brief",
                 episode_number=0,
@@ -328,14 +384,13 @@ class FreeCreativeModeService:
         """Save independent directions atomically and select the first as current."""
         if not 1 <= len(contents) <= 5:
             raise ValueError("单次自由 Brief 生成数量必须在 1-5 之间")
-        with self.repository._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            project = self._raw_project(conn, project_id)
+        with self.repository.transaction_scope() as connection:
+            project = self._raw_project(connection, project_id)
             if project.get("workflow_mode") != FREE_SCOPE:
                 raise ValueError("该操作仅支持自由创作项目")
             resources = [
                 self._create_brief_conn(
-                    conn,
+                    connection,
                     project_id=project_id,
                     content=dict(content),
                     source_refs=dict(source_refs or {}),
@@ -346,7 +401,7 @@ class FreeCreativeModeService:
             ]
             resource_id, version = resources[0]
             head = self._set_head_conn(
-                conn,
+                connection,
                 project_id=project_id,
                 stage="brief",
                 episode_number=0,
@@ -373,86 +428,98 @@ class FreeCreativeModeService:
     ) -> dict[str, Any]:
         if not characters:
             characters = [{"name": "", "role": ""}]
-        with self.repository._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            project = self._raw_project(conn, project_id)
+        with self.repository.transaction_scope() as connection:
+            project = self._raw_project(connection, project_id)
             if project.get("workflow_mode") != FREE_SCOPE:
                 raise ValueError("该操作仅支持自由创作项目")
-            head_row = conn.execute(
-                "SELECT resource_ref FROM creative_resource_heads WHERE project_id = ? "
-                "AND resource_scope = 'free' AND stage = 'characters' AND episode_number = 0",
-                (int(project_id),),
-            ).fetchone()
-            parent_batch_id = str(head_row["resource_ref"]) if head_row is not None else ""
+            head_ref = connection.execute(
+                select(creative_resource_heads.c.resource_ref).where(
+                    creative_resource_heads.c.project_id == int(project_id),
+                    creative_resource_heads.c.resource_scope == FREE_SCOPE,
+                    creative_resource_heads.c.stage == "characters",
+                    creative_resource_heads.c.episode_number == 0,
+                )
+            ).scalar_one_or_none()
+            parent_batch_id = str(head_ref) if head_ref is not None else ""
             parent_characters = {
                 str(row["character_key"]): int(row["id"])
-                for row in conn.execute(
-                    "SELECT id, character_key FROM creative_characters WHERE project_id = ? "
-                    "AND batch_id = ? AND resource_scope = 'free'",
-                    (int(project_id), parent_batch_id),
-                ).fetchall()
+                for row in connection.execute(
+                    select(
+                        creative_characters.c.id,
+                        creative_characters.c.character_key,
+                    ).where(
+                        creative_characters.c.project_id == int(project_id),
+                        creative_characters.c.batch_id == parent_batch_id,
+                        creative_characters.c.resource_scope == FREE_SCOPE,
+                    )
+                ).mappings().all()
             } if parent_batch_id else {}
             parent_relationships = {
                 str(row["relationship_key"]): int(row["id"])
-                for row in conn.execute(
-                    "SELECT id, relationship_key FROM creative_relationships WHERE project_id = ? "
-                    "AND batch_id = ? AND resource_scope = 'free'",
-                    (int(project_id), parent_batch_id),
-                ).fetchall()
+                for row in connection.execute(
+                    select(
+                        creative_relationships.c.id,
+                        creative_relationships.c.relationship_key,
+                    ).where(
+                        creative_relationships.c.project_id == int(project_id),
+                        creative_relationships.c.batch_id == parent_batch_id,
+                        creative_relationships.c.resource_scope == FREE_SCOPE,
+                    )
+                ).mappings().all()
             } if parent_batch_id else {}
-            version = int(conn.execute(
-                "SELECT COALESCE(MAX(version), 0) + 1 AS version "
-                "FROM creative_characters WHERE project_id = ?",
-                (int(project_id),),
-            ).fetchone()["version"])
+            version = int(connection.execute(
+                select(
+                    func.coalesce(func.max(creative_characters.c.version), 0) + 1
+                ).where(creative_characters.c.project_id == int(project_id))
+            ).scalar_one())
             batch_id = uuid.uuid4().hex
-            now = time.time()
-            refs_json = json.dumps(source_refs or {}, ensure_ascii=False)
-            meta_json = json.dumps(generation_meta or {}, ensure_ascii=False)
+            now = utc_now()
+            refs_json = dict(source_refs or {})
+            meta_json = dict(generation_meta or {})
             for index, item in enumerate(characters, start=1):
                 character_key = str(
                     item.get("character_key")
                     or f"character-{index}-{uuid.uuid4().hex}"
                 )
-                conn.execute(
-                    """
-                    INSERT INTO creative_characters (
-                        project_id, batch_id, version, parent_version_id,
-                        character_key, status,
-                        content_json, source_refs_json, generation_meta_json,
-                        resource_scope, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, 'free', ?, ?)
-                    """,
-                    (
-                        int(project_id), batch_id, version,
-                        parent_characters.get(character_key), character_key,
-                        json.dumps(item.get("content") or item, ensure_ascii=False),
-                        refs_json, meta_json, now, now,
-                    ),
+                connection.execute(
+                    insert(creative_characters).values(
+                        project_id=int(project_id),
+                        batch_id=batch_id,
+                        version=version,
+                        parent_version_id=parent_characters.get(character_key),
+                        character_key=character_key,
+                        status="draft",
+                        content_json=dict(item.get("content") or item),
+                        source_refs_json=refs_json,
+                        generation_meta_json=meta_json,
+                        resource_scope=FREE_SCOPE,
+                        created_at=now,
+                        updated_at=now,
+                    )
                 )
             for index, item in enumerate(relationships, start=1):
                 relationship_key = str(
                     item.get("relationship_key")
                     or f"relationship-{index}-{uuid.uuid4().hex}"
                 )
-                conn.execute(
-                    """
-                    INSERT INTO creative_relationships (
-                        project_id, batch_id, version, parent_version_id,
-                        relationship_key, status,
-                        content_json, source_refs_json, generation_meta_json,
-                        resource_scope, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, 'free', ?, ?)
-                    """,
-                    (
-                        int(project_id), batch_id, version,
-                        parent_relationships.get(relationship_key), relationship_key,
-                        json.dumps(item.get("content") or item, ensure_ascii=False),
-                        refs_json, meta_json, now, now,
-                    ),
+                connection.execute(
+                    insert(creative_relationships).values(
+                        project_id=int(project_id),
+                        batch_id=batch_id,
+                        version=version,
+                        parent_version_id=parent_relationships.get(relationship_key),
+                        relationship_key=relationship_key,
+                        status="draft",
+                        content_json=dict(item.get("content") or item),
+                        source_refs_json=refs_json,
+                        generation_meta_json=meta_json,
+                        resource_scope=FREE_SCOPE,
+                        created_at=now,
+                        updated_at=now,
+                    )
                 )
             head = self._set_head_conn(
-                conn,
+                connection,
                 project_id=project_id,
                 stage="characters",
                 episode_number=0,
@@ -488,24 +555,32 @@ class FreeCreativeModeService:
         source_refs: dict[str, Any] | None = None,
         generation_meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        with self.repository._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            project = self._raw_project(conn, project_id)
+        with self.repository.transaction_scope() as connection:
+            project = self._raw_project(connection, project_id)
             if project.get("workflow_mode") != FREE_SCOPE:
                 raise ValueError("该操作仅支持自由创作项目")
-            head_row = conn.execute(
-                "SELECT resource_ref FROM creative_resource_heads WHERE project_id = ? "
-                "AND resource_scope = 'free' AND stage = 'outline' AND episode_number = 0",
-                (int(project_id),),
-            ).fetchone()
-            parent_batch_id = str(head_row["resource_ref"]) if head_row is not None else ""
+            head_ref = connection.execute(
+                select(creative_resource_heads.c.resource_ref).where(
+                    creative_resource_heads.c.project_id == int(project_id),
+                    creative_resource_heads.c.resource_scope == FREE_SCOPE,
+                    creative_resource_heads.c.stage == "outline",
+                    creative_resource_heads.c.episode_number == 0,
+                )
+            ).scalar_one_or_none()
+            parent_batch_id = str(head_ref) if head_ref is not None else ""
             parent_episodes = {
                 int(row["episode_number"]): int(row["id"])
-                for row in conn.execute(
-                    "SELECT id, episode_number FROM creative_episodes WHERE project_id = ? "
-                    "AND stage = 'outline' AND batch_id = ? AND resource_scope = 'free'",
-                    (int(project_id), parent_batch_id),
-                ).fetchall()
+                for row in connection.execute(
+                    select(
+                        creative_episodes.c.id,
+                        creative_episodes.c.episode_number,
+                    ).where(
+                        creative_episodes.c.project_id == int(project_id),
+                        creative_episodes.c.stage == "outline",
+                        creative_episodes.c.batch_id == parent_batch_id,
+                        creative_episodes.c.resource_scope == FREE_SCOPE,
+                    )
+                ).mappings().all()
             } if parent_batch_id else {}
             total = int(project["target_episode_count"])
             if not episodes:
@@ -513,15 +588,18 @@ class FreeCreativeModeService:
             numbers = sorted(int(item.get("episode") or 0) for item in episodes)
             if numbers != list(range(1, total + 1)):
                 raise ValueError("自由模式全剧大纲必须覆盖项目全部集数")
-            version = int(conn.execute(
-                "SELECT COALESCE(MAX(version), 0) + 1 AS version FROM creative_episodes "
-                "WHERE project_id = ? AND stage = 'outline'",
-                (int(project_id),),
-            ).fetchone()["version"])
+            version = int(connection.execute(
+                select(
+                    func.coalesce(func.max(creative_episodes.c.version), 0) + 1
+                ).where(
+                    creative_episodes.c.project_id == int(project_id),
+                    creative_episodes.c.stage == "outline",
+                )
+            ).scalar_one())
             batch_id = uuid.uuid4().hex
-            now = time.time()
-            refs_json = json.dumps(source_refs or {}, ensure_ascii=False)
-            meta_json = json.dumps(generation_meta or {}, ensure_ascii=False)
+            now = utc_now()
+            refs_json = dict(source_refs or {})
+            meta_json = dict(generation_meta or {})
             for item in sorted(episodes, key=lambda value: int(value.get("episode") or 0)):
                 number = int(item["episode"])
                 content = dict(item)
@@ -529,23 +607,25 @@ class FreeCreativeModeService:
                 content["series_arc"] = series_arc
                 if series_overview is not None:
                     content["series_overview"] = series_overview
-                conn.execute(
-                    """
-                    INSERT INTO creative_episodes (
-                        project_id, stage, episode_number, batch_id, version,
-                        parent_version_id, status, content_json, upstream_refs_json,
-                        generation_meta_json,
-                        resource_scope, created_at, updated_at
-                    ) VALUES (?, 'outline', ?, ?, ?, ?, 'draft', ?, ?, ?, 'free', ?, ?)
-                    """,
-                    (
-                        int(project_id), number, batch_id, version,
-                        parent_episodes.get(number),
-                        json.dumps(content, ensure_ascii=False), refs_json, meta_json, now, now,
-                    ),
+                connection.execute(
+                    insert(creative_episodes).values(
+                        project_id=int(project_id),
+                        stage="outline",
+                        episode_number=number,
+                        batch_id=batch_id,
+                        version=version,
+                        parent_version_id=parent_episodes.get(number),
+                        status="draft",
+                        content_json=content,
+                        upstream_refs_json=refs_json,
+                        generation_meta_json=meta_json,
+                        resource_scope=FREE_SCOPE,
+                        created_at=now,
+                        updated_at=now,
+                    )
                 )
             head = self._set_head_conn(
-                conn,
+                connection,
                 project_id=project_id,
                 stage="outline",
                 episode_number=0,
@@ -571,45 +651,54 @@ class FreeCreativeModeService:
         stage = self._assert_stage(stage)
         if stage not in {"beats", "script"}:
             raise ValueError("episode resource stage must be beats or script")
-        with self.repository._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            project = self._raw_project(conn, project_id)
+        with self.repository.transaction_scope() as connection:
+            project = self._raw_project(connection, project_id)
             if project.get("workflow_mode") != FREE_SCOPE:
                 raise ValueError("该操作仅支持自由创作项目")
             number = int(episode_number)
             if not 1 <= number <= int(project["target_episode_count"]):
                 raise ValueError("集数超出项目范围")
-            head_row = conn.execute(
-                "SELECT resource_ref FROM creative_resource_heads WHERE project_id = ? "
-                "AND resource_scope = 'free' AND stage = ? AND episode_number = ?",
-                (int(project_id), stage, number),
-            ).fetchone()
-            parent_id = int(head_row["resource_ref"]) if head_row is not None else None
-            version = int(conn.execute(
-                "SELECT COALESCE(MAX(version), 0) + 1 AS version FROM creative_episodes "
-                "WHERE project_id = ? AND stage = ? AND episode_number = ?",
-                (int(project_id), stage, number),
-            ).fetchone()["version"])
-            now = time.time()
+            head_ref = connection.execute(
+                select(creative_resource_heads.c.resource_ref).where(
+                    creative_resource_heads.c.project_id == int(project_id),
+                    creative_resource_heads.c.resource_scope == FREE_SCOPE,
+                    creative_resource_heads.c.stage == stage,
+                    creative_resource_heads.c.episode_number == number,
+                )
+            ).scalar_one_or_none()
+            parent_id = int(head_ref) if head_ref is not None else None
+            version = int(connection.execute(
+                select(
+                    func.coalesce(func.max(creative_episodes.c.version), 0) + 1
+                ).where(
+                    creative_episodes.c.project_id == int(project_id),
+                    creative_episodes.c.stage == stage,
+                    creative_episodes.c.episode_number == number,
+                )
+            ).scalar_one())
+            now = utc_now()
             batch_id = uuid.uuid4().hex
-            cursor = conn.execute(
-                """
-                INSERT INTO creative_episodes (
-                    project_id, stage, episode_number, batch_id, version,
-                    parent_version_id, status, content_json, upstream_refs_json,
-                    generation_meta_json, resource_scope, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, 'free', ?, ?)
-                """,
-                (
-                    int(project_id), stage, number, batch_id, version, parent_id,
-                    json.dumps(content or {}, ensure_ascii=False),
-                    json.dumps(source_refs or {}, ensure_ascii=False),
-                    json.dumps(generation_meta or {}, ensure_ascii=False), now, now,
-                ),
-            )
-            resource_id = int(cursor.lastrowid)
+            resource_id = int(connection.execute(
+                insert(creative_episodes)
+                .values(
+                    project_id=int(project_id),
+                    stage=stage,
+                    episode_number=number,
+                    batch_id=batch_id,
+                    version=version,
+                    parent_version_id=parent_id,
+                    status="draft",
+                    content_json=dict(content or {}),
+                    upstream_refs_json=dict(source_refs or {}),
+                    generation_meta_json=dict(generation_meta or {}),
+                    resource_scope=FREE_SCOPE,
+                    created_at=now,
+                    updated_at=now,
+                )
+                .returning(creative_episodes.c.id)
+            ).scalar_one())
             head = self._set_head_conn(
-                conn,
+                connection,
                 project_id=project_id,
                 stage=stage,
                 episode_number=number,
@@ -629,25 +718,34 @@ class FreeCreativeModeService:
         content: dict[str, Any],
     ) -> dict[str, Any]:
         stage = self._assert_stage(stage)
-        with self.repository._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            project = self._raw_project(conn, project_id)
+        with self.repository.transaction_scope() as connection:
+            project = self._raw_project(connection, project_id)
             if project.get("workflow_mode") != FREE_SCOPE:
                 raise ValueError("该操作仅支持自由创作项目")
-            now = time.time()
+            now = utc_now()
             if stage == "brief":
-                cursor = conn.execute(
-                    "UPDATE creative_blueprints SET content_json = ?, updated_at = ? "
-                    "WHERE id = ? AND project_id = ? AND resource_scope = 'free' AND status = 'draft'",
-                    (json.dumps(content, ensure_ascii=False), now, int(resource_ref), int(project_id)),
+                cursor = connection.execute(
+                    update(creative_blueprints)
+                    .where(
+                        creative_blueprints.c.id == int(resource_ref),
+                        creative_blueprints.c.project_id == int(project_id),
+                        creative_blueprints.c.resource_scope == FREE_SCOPE,
+                        creative_blueprints.c.status == "draft",
+                    )
+                    .values(content_json=dict(content), updated_at=now)
                 )
                 result_kind = "brief"
             elif stage in {"beats", "script"}:
-                cursor = conn.execute(
-                    "UPDATE creative_episodes SET content_json = ?, updated_at = ? "
-                    "WHERE id = ? AND project_id = ? AND stage = ? "
-                    "AND resource_scope = 'free' AND status = 'draft'",
-                    (json.dumps(content, ensure_ascii=False), now, int(resource_ref), int(project_id), stage),
+                cursor = connection.execute(
+                    update(creative_episodes)
+                    .where(
+                        creative_episodes.c.id == int(resource_ref),
+                        creative_episodes.c.project_id == int(project_id),
+                        creative_episodes.c.stage == stage,
+                        creative_episodes.c.resource_scope == FREE_SCOPE,
+                        creative_episodes.c.status == "draft",
+                    )
+                    .values(content_json=dict(content), updated_at=now)
                 )
                 result_kind = "episode"
             else:
@@ -666,40 +764,37 @@ class FreeCreativeModeService:
         item_id: int,
         content: dict[str, Any],
     ) -> dict[str, Any]:
-        tables = {
-            "brief": ("creative_blueprints", "brief"),
-            "character": ("creative_characters", "characters"),
-            "relationship": ("creative_relationships", "characters"),
-            "episode": ("creative_episodes", None),
+        tables: dict[str, tuple[Any, str | None]] = {
+            "brief": (creative_blueprints, "brief"),
+            "character": (creative_characters, "characters"),
+            "relationship": (creative_relationships, "characters"),
+            "episode": (creative_episodes, None),
         }
         if item_type not in tables:
             raise ValueError("unsupported free creative item type")
         table, expected_stage = tables[item_type]
-        with self.repository._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            project = self._raw_project(conn, project_id)
+        with self.repository.transaction_scope() as connection:
+            project = self._raw_project(connection, project_id)
             if project.get("workflow_mode") != FREE_SCOPE:
                 raise ValueError("该操作仅支持自由创作项目")
-            row = conn.execute(
-                f"SELECT * FROM {table} WHERE id = ? AND project_id = ? "
-                "AND resource_scope = 'free'",
-                (int(item_id), int(project_id)),
-            ).fetchone()
+            row = connection.execute(
+                select(table).where(
+                    table.c.id == int(item_id),
+                    table.c.project_id == int(project_id),
+                    table.c.resource_scope == FREE_SCOPE,
+                )
+            ).mappings().first()
             if row is None:
                 raise ValueError("自由创作资源不存在")
-            if expected_stage is not None and item_type == "brief":
-                stage = "brief"
-            elif expected_stage is not None:
-                stage = expected_stage
-            else:
-                stage = str(row["stage"])
+            stage = expected_stage if expected_stage is not None else str(row["stage"])
             if stage not in FREE_STAGES:
                 raise ValueError("自由创作资源类型错误")
             if row["status"] != "draft":
                 raise ValueError("已锁定的自由创作资源不能修改")
-            conn.execute(
-                f"UPDATE {table} SET content_json = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(content, ensure_ascii=False), time.time(), int(item_id)),
+            connection.execute(
+                update(table)
+                .where(table.c.id == int(item_id))
+                .values(content_json=dict(content), updated_at=utc_now())
             )
         if item_type == "brief":
             return self.repository.get_blueprint(item_id) or {}
@@ -807,63 +902,93 @@ class FreeCreativeModeService:
     ) -> dict[str, Any]:
         stage = self._assert_stage(stage)
         number = int(episode_number or 0)
-        with self.repository._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            project = self._raw_project(conn, project_id)
+        with self.repository.transaction_scope() as connection:
+            project = self._raw_project(connection, project_id)
             if project.get("workflow_mode") != FREE_SCOPE:
                 raise ValueError("该操作仅支持自由创作项目")
-            version = self._assert_head_resource(conn, project_id, stage, number, resource_ref)
-            now = time.time()
+            version = self._assert_head_resource(connection, project_id, stage, number, resource_ref)
+            now = utc_now()
             if stage == "brief":
-                cursor = conn.execute(
-                    "UPDATE creative_blueprints SET status = 'brief_locked', locked_at = ?, updated_at = ? "
-                    "WHERE id = ? AND project_id = ? AND resource_scope = 'free' "
-                    "AND status IN ('draft', 'brief_locked')",
-                    (now, now, int(resource_ref), int(project_id)),
+                cursor = connection.execute(
+                    update(creative_blueprints)
+                    .where(
+                        creative_blueprints.c.id == int(resource_ref),
+                        creative_blueprints.c.project_id == int(project_id),
+                        creative_blueprints.c.resource_scope == FREE_SCOPE,
+                        creative_blueprints.c.status.in_(("draft", "brief_locked")),
+                    )
+                    .values(status="brief_locked", locked_at=now, updated_at=now)
                 )
             elif stage == "characters":
-                count = conn.execute(
-                    "SELECT COUNT(*) AS count FROM creative_characters WHERE project_id = ? "
-                    "AND batch_id = ? AND resource_scope = 'free'",
-                    (int(project_id), str(resource_ref)),
-                ).fetchone()["count"]
+                count = connection.execute(
+                    select(func.count())
+                    .select_from(creative_characters)
+                    .where(
+                        creative_characters.c.project_id == int(project_id),
+                        creative_characters.c.batch_id == str(resource_ref),
+                        creative_characters.c.resource_scope == FREE_SCOPE,
+                    )
+                ).scalar_one()
                 if int(count) < 1:
                     raise ValueError("人物关系版本至少需要一个人物")
-                cursor = conn.execute(
-                    "UPDATE creative_characters SET status = 'locked', locked_at = ?, updated_at = ? "
-                    "WHERE project_id = ? AND batch_id = ? AND resource_scope = 'free'",
-                    (now, now, int(project_id), str(resource_ref)),
+                cursor = connection.execute(
+                    update(creative_characters)
+                    .where(
+                        creative_characters.c.project_id == int(project_id),
+                        creative_characters.c.batch_id == str(resource_ref),
+                        creative_characters.c.resource_scope == FREE_SCOPE,
+                    )
+                    .values(status="locked", locked_at=now, updated_at=now)
                 )
-                conn.execute(
-                    "UPDATE creative_relationships SET status = 'locked', locked_at = ?, updated_at = ? "
-                    "WHERE project_id = ? AND batch_id = ? AND resource_scope = 'free'",
-                    (now, now, int(project_id), str(resource_ref)),
+                connection.execute(
+                    update(creative_relationships)
+                    .where(
+                        creative_relationships.c.project_id == int(project_id),
+                        creative_relationships.c.batch_id == str(resource_ref),
+                        creative_relationships.c.resource_scope == FREE_SCOPE,
+                    )
+                    .values(status="locked", locked_at=now, updated_at=now)
                 )
             elif stage == "outline":
-                count = conn.execute(
-                    "SELECT COUNT(*) AS count FROM creative_episodes WHERE project_id = ? "
-                    "AND stage = 'outline' AND batch_id = ? AND resource_scope = 'free'",
-                    (int(project_id), str(resource_ref)),
-                ).fetchone()["count"]
+                count = connection.execute(
+                    select(func.count())
+                    .select_from(creative_episodes)
+                    .where(
+                        creative_episodes.c.project_id == int(project_id),
+                        creative_episodes.c.stage == "outline",
+                        creative_episodes.c.batch_id == str(resource_ref),
+                        creative_episodes.c.resource_scope == FREE_SCOPE,
+                    )
+                ).scalar_one()
                 if int(count) != int(project["target_episode_count"]):
                     raise ValueError("分集大纲不完整，不能锁定")
-                cursor = conn.execute(
-                    "UPDATE creative_episodes SET status = 'locked', locked_at = ?, updated_at = ? "
-                    "WHERE project_id = ? AND stage = 'outline' AND batch_id = ? "
-                    "AND resource_scope = 'free'",
-                    (now, now, int(project_id), str(resource_ref)),
+                cursor = connection.execute(
+                    update(creative_episodes)
+                    .where(
+                        creative_episodes.c.project_id == int(project_id),
+                        creative_episodes.c.stage == "outline",
+                        creative_episodes.c.batch_id == str(resource_ref),
+                        creative_episodes.c.resource_scope == FREE_SCOPE,
+                    )
+                    .values(status="locked", locked_at=now, updated_at=now)
                 )
             else:
-                cursor = conn.execute(
-                    "UPDATE creative_episodes SET status = 'locked', locked_at = ?, updated_at = ? "
-                    "WHERE id = ? AND project_id = ? AND stage = ? AND episode_number = ? "
-                    "AND resource_scope = 'free' AND status IN ('draft', 'locked')",
-                    (now, now, int(resource_ref), int(project_id), stage, number),
+                cursor = connection.execute(
+                    update(creative_episodes)
+                    .where(
+                        creative_episodes.c.id == int(resource_ref),
+                        creative_episodes.c.project_id == int(project_id),
+                        creative_episodes.c.stage == stage,
+                        creative_episodes.c.episode_number == number,
+                        creative_episodes.c.resource_scope == FREE_SCOPE,
+                        creative_episodes.c.status.in_(("draft", "locked")),
+                    )
+                    .values(status="locked", locked_at=now, updated_at=now)
                 )
             if cursor.rowcount < 1:
                 raise ValueError("自由创作资源不存在或无法锁定")
             head = self._set_head_conn(
-                conn,
+                connection,
                 project_id=project_id,
                 stage=stage,
                 episode_number=number,
@@ -886,9 +1011,8 @@ class FreeCreativeModeService:
         if stage not in {"beats", "script"}:
             raise ValueError("全集锁定仅支持 Beats 或场次剧本")
         label = "Beats" if stage == "beats" else "场次剧本"
-        with self.repository._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            project = self._raw_project(conn, project_id)
+        with self.repository.transaction_scope() as connection:
+            project = self._raw_project(connection, project_id)
             if project.get("workflow_mode") != FREE_SCOPE:
                 raise ValueError("该操作仅支持自由创作项目")
             total = int(project["target_episode_count"])
@@ -902,36 +1026,38 @@ class FreeCreativeModeService:
 
             records: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
             for episode_number in range(1, total + 1):
-                head_row = conn.execute(
-                    "SELECT * FROM creative_resource_heads WHERE project_id = ? "
-                    "AND resource_scope = 'free' AND stage = ? AND episode_number = ?",
-                    (int(project_id), stage, episode_number),
-                ).fetchone()
+                head_row = connection.execute(
+                    select(creative_resource_heads).where(
+                        creative_resource_heads.c.project_id == int(project_id),
+                        creative_resource_heads.c.resource_scope == FREE_SCOPE,
+                        creative_resource_heads.c.stage == stage,
+                        creative_resource_heads.c.episode_number == episode_number,
+                    )
+                ).mappings().first()
                 if head_row is None:
                     raise ValueError(f"第 {episode_number} 集尚未生成 {label}")
-                head = dict(head_row)
+                head = self.repository.row_dict(head_row)
                 if int(head["revision"]) != revisions[episode_number]:
                     raise ValueError(
                         f"第 {episode_number} 集{label} Head 已发生变化，请刷新后重试"
                     )
-                resource_row = conn.execute(
-                    "SELECT * FROM creative_episodes WHERE id = ? AND project_id = ? "
-                    "AND resource_scope = 'free' AND stage = ? AND episode_number = ?",
-                    (
-                        int(head["resource_ref"]),
-                        int(project_id),
-                        stage,
-                        episode_number,
-                    ),
-                ).fetchone()
+                resource_row = connection.execute(
+                    select(creative_episodes).where(
+                        creative_episodes.c.id == int(head["resource_ref"]),
+                        creative_episodes.c.project_id == int(project_id),
+                        creative_episodes.c.resource_scope == FREE_SCOPE,
+                        creative_episodes.c.stage == stage,
+                        creative_episodes.c.episode_number == episode_number,
+                    )
+                ).mappings().first()
                 if resource_row is None:
                     raise ValueError(f"第 {episode_number} 集当前 {label} 不存在")
-                resource = dict(resource_row)
+                resource = self.repository.row_dict(resource_row)
                 if resource["status"] not in {"draft", "locked", "approved"}:
                     raise ValueError(f"第 {episode_number} 集当前 {label} 无法锁定")
                 records.append((episode_number, head, resource))
 
-            now = time.time()
+            now = utc_now()
             locked_count = 0
             heads: list[dict[str, Any]] = []
             resource_ids: list[int] = []
@@ -941,16 +1067,19 @@ class FreeCreativeModeService:
                 if resource["status"] != "draft":
                     heads.append(head)
                     continue
-                cursor = conn.execute(
-                    "UPDATE creative_episodes SET status = 'locked', locked_at = ?, "
-                    "updated_at = ? WHERE id = ? AND status = 'draft'",
-                    (now, now, resource_id),
+                cursor = connection.execute(
+                    update(creative_episodes)
+                    .where(
+                        creative_episodes.c.id == resource_id,
+                        creative_episodes.c.status == "draft",
+                    )
+                    .values(status="locked", locked_at=now, updated_at=now)
                 )
                 if cursor.rowcount != 1:
                     raise ValueError(f"第 {episode_number} 集{label}锁定失败")
                 heads.append(
                     self._set_head_conn(
-                        conn,
+                        connection,
                         project_id=project_id,
                         stage=stage,
                         episode_number=episode_number,
@@ -970,14 +1099,18 @@ class FreeCreativeModeService:
             "heads": heads,
         }
 
-    def _latest_seed_conn(self, conn: Any, project_id: int) -> dict[str, Any]:
-        row = conn.execute(
-            "SELECT * FROM creative_seeds WHERE project_id = ? ORDER BY version DESC, id DESC LIMIT 1",
-            (int(project_id),),
-        ).fetchone()
+    def _latest_seed_conn(
+        self, connection: Connection, project_id: int
+    ) -> dict[str, Any]:
+        row = connection.execute(
+            select(creative_seeds)
+            .where(creative_seeds.c.project_id == int(project_id))
+            .order_by(creative_seeds.c.version.desc(), creative_seeds.c.id.desc())
+            .limit(1)
+        ).mappings().first()
         if row is None or len(str(row["seed_text"] or "").strip()) < 2:
             raise ValueError("自由创作项目缺少创作种子")
-        return dict(row)
+        return self.repository.row_dict(row)
 
     @staticmethod
     def _manifest_item(kind: str, ref: str, version: int, content: Any) -> dict[str, Any]:
@@ -1005,15 +1138,14 @@ class FreeCreativeModeService:
         invalid = supplied - ALLOWED_CONTEXT_REFS[stage]
         if invalid:
             raise ValueError(f"{stage} 不支持引用：{', '.join(sorted(invalid))}")
-        with self.repository._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            project = self._raw_project(conn, project_id)
+        with self.repository.transaction_scope() as connection:
+            project = self._raw_project(connection, project_id)
             if project.get("workflow_mode") != FREE_SCOPE:
                 raise ValueError("该操作仅支持自由创作项目")
             number = int(episode_number or 0)
             if stage in {"beats", "script"} and not 1 <= number <= int(project["target_episode_count"]):
                 raise ValueError("集数超出项目范围")
-            seed = self._latest_seed_conn(conn, project_id)
+            seed = self._latest_seed_conn(connection, project_id)
             snapshot: dict[str, Any] = {
                 "project": {
                     key: project.get(key)
@@ -1033,30 +1165,37 @@ class FreeCreativeModeService:
             manifest: dict[str, Any] = {}
             brief_id = context_refs.get("brief_id")
             if brief_id:
-                row = conn.execute(
-                    "SELECT * FROM creative_blueprints WHERE id = ? AND project_id = ? "
-                    "AND resource_scope = 'free'",
-                    (int(brief_id), int(project_id)),
-                ).fetchone()
+                row = connection.execute(
+                    select(creative_blueprints).where(
+                        creative_blueprints.c.id == int(brief_id),
+                        creative_blueprints.c.project_id == int(project_id),
+                        creative_blueprints.c.resource_scope == FREE_SCOPE,
+                    )
+                ).mappings().first()
                 if row is None or row["status"] not in LOCKED_STATUSES:
                     raise ValueError("只能引用同项目已锁定的自由 Brief")
+                row = self.repository.row_dict(row)
                 content = self._loads(row["content_json"], {})
                 snapshot["brief"] = content
                 manifest["brief"] = self._manifest_item("brief", str(row["id"]), int(row["version"]), content)
             character_batch_id = context_refs.get("character_batch_id")
             if character_batch_id:
-                character_rows = conn.execute(
-                    "SELECT * FROM creative_characters WHERE project_id = ? AND batch_id = ? "
-                    "AND resource_scope = 'free' ORDER BY id",
-                    (int(project_id), str(character_batch_id)),
-                ).fetchall()
+                character_rows = self.repository.rows_dict(connection.execute(
+                    select(creative_characters).where(
+                        creative_characters.c.project_id == int(project_id),
+                        creative_characters.c.batch_id == str(character_batch_id),
+                        creative_characters.c.resource_scope == FREE_SCOPE,
+                    ).order_by(creative_characters.c.id)
+                ).mappings().all())
                 if not character_rows or any(row["status"] not in LOCKED_STATUSES for row in character_rows):
                     raise ValueError("只能引用同项目已锁定的自由人物版本")
-                relationship_rows = conn.execute(
-                    "SELECT * FROM creative_relationships WHERE project_id = ? AND batch_id = ? "
-                    "AND resource_scope = 'free' ORDER BY id",
-                    (int(project_id), str(character_batch_id)),
-                ).fetchall()
+                relationship_rows = self.repository.rows_dict(connection.execute(
+                    select(creative_relationships).where(
+                        creative_relationships.c.project_id == int(project_id),
+                        creative_relationships.c.batch_id == str(character_batch_id),
+                        creative_relationships.c.resource_scope == FREE_SCOPE,
+                    ).order_by(creative_relationships.c.id)
+                ).mappings().all())
                 if any(row["status"] not in LOCKED_STATUSES for row in relationship_rows):
                     raise ValueError("只能引用同项目已锁定的自由人物版本")
                 characters = [self._loads(row["content_json"], {}) for row in character_rows]
@@ -1068,11 +1207,14 @@ class FreeCreativeModeService:
                 )
             outline_batch_id = context_refs.get("outline_batch_id")
             if outline_batch_id:
-                rows = conn.execute(
-                    "SELECT * FROM creative_episodes WHERE project_id = ? AND stage = 'outline' "
-                    "AND batch_id = ? AND resource_scope = 'free' ORDER BY episode_number",
-                    (int(project_id), str(outline_batch_id)),
-                ).fetchall()
+                rows = self.repository.rows_dict(connection.execute(
+                    select(creative_episodes).where(
+                        creative_episodes.c.project_id == int(project_id),
+                        creative_episodes.c.stage == "outline",
+                        creative_episodes.c.batch_id == str(outline_batch_id),
+                        creative_episodes.c.resource_scope == FREE_SCOPE,
+                    ).order_by(creative_episodes.c.episode_number)
+                ).mappings().all())
                 if not rows or any(row["status"] not in LOCKED_STATUSES for row in rows):
                     raise ValueError("只能引用同项目已锁定的自由大纲")
                 outlines = [self._loads(row["content_json"], {}) for row in rows]
@@ -1082,28 +1224,34 @@ class FreeCreativeModeService:
                 )
             beats_id = context_refs.get("beats_id")
             if beats_id:
-                row = conn.execute(
-                    "SELECT * FROM creative_episodes WHERE id = ? AND project_id = ? "
-                    "AND stage = 'beats' AND resource_scope = 'free'",
-                    (int(beats_id), int(project_id)),
-                ).fetchone()
+                row = connection.execute(
+                    select(creative_episodes).where(
+                        creative_episodes.c.id == int(beats_id),
+                        creative_episodes.c.project_id == int(project_id),
+                        creative_episodes.c.stage == "beats",
+                        creative_episodes.c.resource_scope == FREE_SCOPE,
+                    )
+                ).mappings().first()
                 if (
                     row is None
                     or row["status"] not in LOCKED_STATUSES
                     or int(row["episode_number"]) != number
                 ):
                     raise ValueError("只能引用当前集已锁定的自由 Beats")
+                row = self.repository.row_dict(row)
                 content = self._loads(row["content_json"], {})
                 snapshot["beats"] = content
                 manifest["beats"] = self._manifest_item(
                     "beats", str(row["id"]), int(row["version"]), content
                 )
             context_hash = canonical_request_hash(snapshot)
-            existing = conn.execute(
-                "SELECT * FROM creative_generation_contexts WHERE id = ?",
-                (str(context_id),),
-            ).fetchone()
-            if existing is not None:
+            existing_row = connection.execute(
+                select(creative_generation_contexts).where(
+                    creative_generation_contexts.c.id == str(context_id)
+                )
+            ).mappings().first()
+            if existing_row is not None:
+                existing = self.repository.row_dict(existing_row)
                 existing_episode = (
                     int(existing["episode_number"])
                     if existing["episode_number"] is not None
@@ -1117,29 +1265,30 @@ class FreeCreativeModeService:
                     or str(existing["context_hash"]) != context_hash
                 ):
                     raise ValueError("generation operation id was reused with different context")
-                return self._context_row(dict(existing))
-            conn.execute(
-                """
-                INSERT INTO creative_generation_contexts (
-                    id, project_id, target_stage, episode_number, seed_version_id,
-                    instruction, context_manifest_json, context_snapshot_json,
-                    context_hash, prompt_schema_version, created_by, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(context_id), int(project_id), stage,
-                    number if stage in {"beats", "script"} else None,
-                    int(seed["id"]), str(instruction or "").strip(),
-                    json.dumps(manifest, ensure_ascii=False),
-                    json.dumps(snapshot, ensure_ascii=False), context_hash,
-                    PROMPT_TEMPLATE_VERSION, actor_user_id, time.time(),
-                ),
+                return self._context_row(existing)
+            now = utc_now()
+            connection.execute(
+                insert(creative_generation_contexts).values(
+                    id=str(context_id),
+                    project_id=int(project_id),
+                    target_stage=stage,
+                    episode_number=number if stage in {"beats", "script"} else None,
+                    seed_version_id=int(seed["id"]),
+                    instruction=str(instruction or "").strip(),
+                    context_manifest_json=manifest,
+                    context_snapshot_json=snapshot,
+                    context_hash=context_hash,
+                    prompt_schema_version=PROMPT_TEMPLATE_VERSION,
+                    created_by=actor_user_id,
+                    created_at=now,
+                )
             )
-            row = conn.execute(
-                "SELECT * FROM creative_generation_contexts WHERE id = ?",
-                (str(context_id),),
-            ).fetchone()
-        return self._context_row(dict(row))
+            row = connection.execute(
+                select(creative_generation_contexts).where(
+                    creative_generation_contexts.c.id == str(context_id)
+                )
+            ).mappings().first()
+        return self._context_row(self.repository.row_dict(row))
 
     @classmethod
     def _context_row(cls, row: dict[str, Any]) -> dict[str, Any]:
@@ -1148,14 +1297,15 @@ class FreeCreativeModeService:
         return row
 
     def get_generation_context(self, context_id: str) -> dict[str, Any]:
-        with self.repository._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM creative_generation_contexts WHERE id = ?",
-                (str(context_id),),
-            ).fetchone()
+        with self.repository.connection_scope() as connection:
+            row = connection.execute(
+                select(creative_generation_contexts).where(
+                    creative_generation_contexts.c.id == str(context_id)
+                )
+            ).mappings().first()
         if row is None:
             raise ValueError("自由创作生成上下文不存在")
-        return self._context_row(dict(row))
+        return self._context_row(self.repository.row_dict(row))
 
     def context_options(self, project_id: int, episode_number: int | None = None) -> dict[str, Any]:
         self.assert_free_project(project_id)
@@ -1195,7 +1345,7 @@ class FreeCreativeModeService:
         }
 
     def _automatic_seed_text_conn(
-        self, conn: Any, project: dict[str, Any], seed_text: str = ""
+        self, connection: Connection, project: dict[str, Any], seed_text: str = ""
     ) -> str:
         supplied = str(seed_text or "").strip()
         if len(supplied) >= 2:
@@ -1203,13 +1353,16 @@ class FreeCreativeModeService:
         topic_id = project.get("topic_id")
         breakdown_id = project.get("breakdown_id")
         if topic_id is not None and breakdown_id is not None:
-            topic = conn.execute(
-                "SELECT * FROM creative_topics WHERE id = ?", (int(topic_id),)
-            ).fetchone()
-            breakdown = conn.execute(
-                "SELECT * FROM creative_breakdowns WHERE id = ?",
-                (int(breakdown_id),),
-            ).fetchone()
+            # Read inside the caller's transaction so the seed text is derived
+            # from the same snapshot as the write that stores it.
+            topic = connection.execute(
+                select(creative_topics).where(creative_topics.c.id == int(topic_id))
+            ).mappings().first()
+            breakdown = connection.execute(
+                select(creative_breakdowns).where(
+                    creative_breakdowns.c.id == int(breakdown_id)
+                )
+            ).mappings().first()
             if topic is not None and breakdown is not None:
                 resolved = self.repository._topic_based_seed_text(topic, breakdown)
                 if len(resolved.strip()) >= 2:
@@ -1217,43 +1370,52 @@ class FreeCreativeModeService:
         return f"项目：{str(project.get('name') or '自由创作').strip()}"[:500]
 
     def ensure_seed(self, project_id: int, seed_text: str = "") -> dict[str, Any]:
-        with self.repository._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            project = self._raw_project(conn, project_id)
-            row = conn.execute(
-                "SELECT * FROM creative_seeds WHERE project_id = ? ORDER BY version DESC, id DESC LIMIT 1",
-                (int(project_id),),
-            ).fetchone()
-            if row is None:
+        with self.repository.transaction_scope() as connection:
+            project = self._raw_project(connection, project_id)
+            seed_id = connection.execute(
+                select(creative_seeds.c.id)
+                .where(creative_seeds.c.project_id == int(project_id))
+                .order_by(creative_seeds.c.version.desc(), creative_seeds.c.id.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if seed_id is None:
                 resolved_seed_text = self._automatic_seed_text_conn(
-                    conn, project, seed_text
+                    connection, project, seed_text
                 )
-                now = time.time()
-                cursor = conn.execute(
-                    """
-                    INSERT INTO creative_seeds (
-                        project_id, version, status, seed_text, constraints_json,
-                        reference_refs_json, created_at, updated_at, locked_at
-                    ) VALUES (?, 1, 'frozen', ?, '{}', '[]', ?, ?, ?)
-                    """,
-                    (int(project_id), resolved_seed_text, now, now, now),
-                )
-                seed_id = int(cursor.lastrowid)
+                now = utc_now()
+                seed_id = int(connection.execute(
+                    insert(creative_seeds)
+                    .values(
+                        project_id=int(project_id),
+                        version=1,
+                        status="frozen",
+                        seed_text=resolved_seed_text,
+                        constraints_json={},
+                        reference_refs_json=[],
+                        created_at=now,
+                        updated_at=now,
+                        locked_at=now,
+                    )
+                    .returning(creative_seeds.c.id)
+                ).scalar_one())
             else:
-                seed_id = int(row["id"])
+                seed_id = int(seed_id)
         return self.repository.get_seed(seed_id) or {}
 
     def has_creative_resources(self, project_id: int) -> bool:
-        with self.repository._connect() as conn:
+        with self.repository.connection_scope() as connection:
             total = 0
             for table in (
-                "creative_blueprints", "creative_characters",
-                "creative_relationships", "creative_episodes",
+                creative_blueprints,
+                creative_characters,
+                creative_relationships,
+                creative_episodes,
             ):
-                total += int(conn.execute(
-                    f"SELECT COUNT(*) AS count FROM {table} WHERE project_id = ?",
-                    (int(project_id),),
-                ).fetchone()["count"])
+                total += int(connection.execute(
+                    select(func.count())
+                    .select_from(table)
+                    .where(table.c.project_id == int(project_id))
+                ).scalar_one())
         return total > 0
 
     def switch_empty_mode(
@@ -1267,106 +1429,152 @@ class FreeCreativeModeService:
     ) -> dict[str, Any]:
         if workflow_mode not in {SEQUENTIAL_SCOPE, FREE_SCOPE}:
             raise ValueError("invalid creative workflow mode")
-        with self.repository._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            project = self._raw_project(conn, project_id)
+        with self.repository.transaction_scope() as connection:
+            project = self._raw_project(connection, project_id)
             if int(project.get("mode_revision") or 0) != int(expected_mode_revision):
                 raise ValueError("creative workflow mode changed")
             current = str(project.get("workflow_mode") or SEQUENTIAL_SCOPE)
             if current == workflow_mode:
                 return self.repository.get_project(project_id) or project
             for table in (
-                "creative_blueprints", "creative_characters",
-                "creative_relationships", "creative_episodes",
+                creative_blueprints,
+                creative_characters,
+                creative_relationships,
+                creative_episodes,
             ):
-                count = int(conn.execute(
-                    f"SELECT COUNT(*) AS count FROM {table} WHERE project_id = ?",
-                    (int(project_id),),
-                ).fetchone()["count"])
+                count = int(connection.execute(
+                    select(func.count())
+                    .select_from(table)
+                    .where(table.c.project_id == int(project_id))
+                ).scalar_one())
                 if count:
                     raise ValueError("项目已有创作资源，只能通过迁移进入自由模式")
-            now = time.time()
+            now = utc_now()
             if workflow_mode == FREE_SCOPE:
-                seed = conn.execute(
-                    "SELECT id FROM creative_seeds WHERE project_id = ? "
-                    "ORDER BY version DESC, id DESC LIMIT 1",
-                    (int(project_id),),
-                ).fetchone()
+                seed = connection.execute(
+                    select(creative_seeds.c.id)
+                    .where(creative_seeds.c.project_id == int(project_id))
+                    .order_by(creative_seeds.c.version.desc(), creative_seeds.c.id.desc())
+                    .limit(1)
+                ).scalar_one_or_none()
                 if seed is None:
                     resolved_seed_text = self._automatic_seed_text_conn(
-                        conn, project, seed_text
+                        connection, project, seed_text
                     )
-                    conn.execute(
-                        """
-                        INSERT INTO creative_seeds (
-                            project_id, version, status, seed_text, constraints_json,
-                            reference_refs_json, created_at, updated_at, locked_at
-                        ) VALUES (?, 1, 'frozen', ?, '{}', '[]', ?, ?, ?)
-                        """,
-                        (int(project_id), resolved_seed_text, now, now, now),
+                    connection.execute(
+                        insert(creative_seeds).values(
+                            project_id=int(project_id),
+                            version=1,
+                            status="frozen",
+                            seed_text=resolved_seed_text,
+                            constraints_json={},
+                            reference_refs_json=[],
+                            created_at=now,
+                            updated_at=now,
+                            locked_at=now,
+                        )
                     )
-            cursor = conn.execute(
-                """
-                UPDATE creative_projects
-                SET workflow_mode = ?, mode_revision = mode_revision + 1,
-                    mode_changed_at = ?, mode_changed_by = ?, status = ?, updated_at = ?
-                WHERE id = ? AND mode_revision = ?
-                """,
-                (
-                    workflow_mode, now, actor_user_id,
-                    "free_active" if workflow_mode == FREE_SCOPE else "created",
-                    now, int(project_id), int(expected_mode_revision),
-                ),
+            cursor = connection.execute(
+                update(creative_projects)
+                .where(
+                    creative_projects.c.id == int(project_id),
+                    creative_projects.c.mode_revision == int(expected_mode_revision),
+                )
+                .values(
+                    workflow_mode=workflow_mode,
+                    mode_revision=creative_projects.c.mode_revision + 1,
+                    mode_changed_at=now,
+                    mode_changed_by=actor_user_id,
+                    status="free_active" if workflow_mode == FREE_SCOPE else "created",
+                    updated_at=now,
+                )
             )
             if cursor.rowcount != 1:
                 raise ValueError("creative workflow mode changed")
         return self.repository.get_project(project_id) or {}
 
     def migration_preview(self, project_id: int) -> dict[str, Any]:
-        with self.repository._connect() as conn:
-            project = self._raw_project(conn, project_id)
-            active_generation_count = int(conn.execute(
-                "SELECT COUNT(*) AS count FROM creative_generation_operations "
-                "WHERE project_id = ? AND status = 'active'",
-                (int(project_id),),
-            ).fetchone()["count"])
-            active_review_count = int(conn.execute(
-                "SELECT COUNT(*) AS count FROM script_reviews WHERE project_id = ? "
-                "AND status NOT IN ('completed', 'confirmed', 'cancelled', 'failed')",
-                (int(project_id),),
-            ).fetchone()["count"])
-            active_optimization_count = int(conn.execute(
-                "SELECT COUNT(*) AS count FROM script_optimizations WHERE project_id = ? "
-                "AND status NOT IN ('completed', 'cancelled', 'failed')",
-                (int(project_id),),
-            ).fetchone()["count"])
+        with self.repository.connection_scope() as connection:
+            project = self._raw_project(connection, project_id)
+            active_generation_count = int(connection.execute(
+                select(func.count())
+                .select_from(creative_generation_operations)
+                .where(
+                    creative_generation_operations.c.project_id == int(project_id),
+                    creative_generation_operations.c.status == "active",
+                )
+            ).scalar_one())
+            active_review_count = int(connection.execute(
+                select(func.count())
+                .select_from(script_reviews)
+                .where(
+                    script_reviews.c.project_id == int(project_id),
+                    script_reviews.c.status.not_in(
+                        ("completed", "confirmed", "cancelled", "failed")
+                    ),
+                )
+            ).scalar_one())
+            active_optimization_count = int(connection.execute(
+                select(func.count())
+                .select_from(script_optimizations)
+                .where(
+                    script_optimizations.c.project_id == int(project_id),
+                    script_optimizations.c.status.not_in(
+                        ("completed", "cancelled", "failed")
+                    ),
+                )
+            ).scalar_one())
             resource_counts = {
-                "brief": int(conn.execute(
-                    "SELECT COUNT(*) AS count FROM creative_blueprints WHERE project_id = ? "
-                    "AND resource_scope = 'sequential'", (int(project_id),)
-                ).fetchone()["count"]),
-                "characters": int(conn.execute(
-                    "SELECT COUNT(DISTINCT batch_id) AS count FROM creative_characters "
-                    "WHERE project_id = ? AND resource_scope = 'sequential'", (int(project_id),)
-                ).fetchone()["count"]),
-                "outline": int(conn.execute(
-                    "SELECT COUNT(DISTINCT batch_id) AS count FROM creative_episodes "
-                    "WHERE project_id = ? AND stage = 'outline' AND resource_scope = 'sequential'",
-                    (int(project_id),),
-                ).fetchone()["count"]),
-                "beats": int(conn.execute(
-                    "SELECT COUNT(*) AS count FROM creative_episodes WHERE project_id = ? "
-                    "AND stage = 'beats' AND resource_scope = 'sequential'", (int(project_id),)
-                ).fetchone()["count"]),
-                "script": int(conn.execute(
-                    "SELECT COUNT(*) AS count FROM creative_episodes WHERE project_id = ? "
-                    "AND stage = 'script' AND resource_scope = 'sequential'", (int(project_id),)
-                ).fetchone()["count"]),
+                "brief": int(connection.execute(
+                    select(func.count())
+                    .select_from(creative_blueprints)
+                    .where(
+                        creative_blueprints.c.project_id == int(project_id),
+                        creative_blueprints.c.resource_scope == "sequential",
+                    )
+                ).scalar_one()),
+                "characters": int(connection.execute(
+                    select(func.count(func.distinct(creative_characters.c.batch_id)))
+                    .select_from(creative_characters)
+                    .where(
+                        creative_characters.c.project_id == int(project_id),
+                        creative_characters.c.resource_scope == "sequential",
+                    )
+                ).scalar_one()),
+                "outline": int(connection.execute(
+                    select(func.count(func.distinct(creative_episodes.c.batch_id)))
+                    .select_from(creative_episodes)
+                    .where(
+                        creative_episodes.c.project_id == int(project_id),
+                        creative_episodes.c.stage == "outline",
+                        creative_episodes.c.resource_scope == "sequential",
+                    )
+                ).scalar_one()),
+                "beats": int(connection.execute(
+                    select(func.count())
+                    .select_from(creative_episodes)
+                    .where(
+                        creative_episodes.c.project_id == int(project_id),
+                        creative_episodes.c.stage == "beats",
+                        creative_episodes.c.resource_scope == "sequential",
+                    )
+                ).scalar_one()),
+                "script": int(connection.execute(
+                    select(func.count())
+                    .select_from(creative_episodes)
+                    .where(
+                        creative_episodes.c.project_id == int(project_id),
+                        creative_episodes.c.stage == "script",
+                        creative_episodes.c.resource_scope == "sequential",
+                    )
+                ).scalar_one()),
             }
-            seed = conn.execute(
-                "SELECT id FROM creative_seeds WHERE project_id = ? ORDER BY version DESC LIMIT 1",
-                (int(project_id),),
-            ).fetchone()
+            seed = connection.execute(
+                select(creative_seeds.c.id)
+                .where(creative_seeds.c.project_id == int(project_id))
+                .order_by(creative_seeds.c.version.desc())
+                .limit(1)
+            ).scalar_one_or_none()
         blockers: list[str] = []
         if project.get("workflow_mode", "sequential") != "sequential":
             blockers.append("项目已经是自由创作模式")
@@ -1416,47 +1624,48 @@ class FreeCreativeModeService:
             "created": False,
         }
 
-    @staticmethod
     def _create_free_project_copy_conn(
-        conn: Any,
+        self,
+        connection: Connection,
         *,
         source_project: dict[str, Any],
         operation_id: str,
         actor_user_id: str,
-        now: float,
+        now: Any,
     ) -> int:
-        cursor = conn.execute(
-            """
-            INSERT INTO creative_projects (
-                topic_id, breakdown_id, name, genre, target_platform,
-                target_audience, target_episode_count, episode_duration_seconds,
-                status, locked_brief_id, character_batch_id, outline_batch_id,
-                workflow_task_id, creation_workflow_task_id, creation_request_id,
-                created_by, deleted, creation_mode, bootstrap_status, revision,
-                workflow_mode, mode_revision, mode_changed_at, mode_changed_by,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'free_active', NULL, NULL, NULL,
-                      NULL, NULL, ?, ?, 0, ?, 'ready', 0, 'free', 0, ?, ?, ?, ?)
-            """,
-            (
-                source_project.get("topic_id"),
-                source_project.get("breakdown_id"),
-                f"{str(source_project.get('name') or '未命名项目').strip()}（自由副本）",
-                str(source_project.get("genre") or ""),
-                str(source_project.get("target_platform") or ""),
-                str(source_project.get("target_audience") or ""),
-                int(source_project.get("target_episode_count") or 20),
-                int(source_project.get("episode_duration_seconds") or 120),
-                f"free-migration:{operation_id}",
-                actor_user_id,
-                str(source_project.get("creation_mode") or "imitation"),
-                now,
-                actor_user_id,
-                now,
-                now,
-            ),
-        )
-        return int(cursor.lastrowid)
+        project_id = connection.execute(
+            insert(creative_projects)
+            .values(
+                topic_id=source_project.get("topic_id"),
+                breakdown_id=source_project.get("breakdown_id"),
+                name=f"{str(source_project.get('name') or '未命名项目').strip()}（自由副本）",
+                genre=str(source_project.get("genre") or ""),
+                target_platform=str(source_project.get("target_platform") or ""),
+                target_audience=str(source_project.get("target_audience") or ""),
+                target_episode_count=int(source_project.get("target_episode_count") or 20),
+                episode_duration_seconds=int(source_project.get("episode_duration_seconds") or 120),
+                status="free_active",
+                locked_brief_id=None,
+                character_batch_id=None,
+                outline_batch_id=None,
+                workflow_task_id=None,
+                creation_workflow_task_id=None,
+                creation_request_id=f"free-migration:{operation_id}",
+                created_by=actor_user_id,
+                deleted=False,
+                creation_mode=str(source_project.get("creation_mode") or "imitation"),
+                bootstrap_status="ready",
+                revision=0,
+                workflow_mode=FREE_SCOPE,
+                mode_revision=0,
+                mode_changed_at=now,
+                mode_changed_by=actor_user_id,
+                created_at=now,
+                updated_at=now,
+            )
+            .returning(creative_projects.c.id)
+        ).scalar_one()
+        return int(project_id)
 
     def migrate_to_free(
         self,
@@ -1467,11 +1676,13 @@ class FreeCreativeModeService:
         actor_user_id: str,
         seed_text: str = "",
     ) -> dict[str, Any]:
-        with self.repository._connect() as conn:
-            prior = conn.execute(
-                "SELECT * FROM creative_mode_migrations WHERE operation_id = ?",
-                (str(operation_id),),
-            ).fetchone()
+        with self.repository.connection_scope() as connection:
+            prior_row = connection.execute(
+                select(creative_mode_migrations).where(
+                    creative_mode_migrations.c.operation_id == str(operation_id)
+                )
+            ).mappings().first()
+        prior = self.repository.row_dict(prior_row) if prior_row is not None else None
         if prior is not None:
             if int(prior["project_id"]) != int(project_id):
                 raise ValueError("migration operation id belongs to another project")
@@ -1481,42 +1692,47 @@ class FreeCreativeModeService:
         preview = self.migration_preview(project_id)
         if preview["blockers"]:
             raise ValueError("；".join(preview["blockers"]))
-        with self.repository._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            existing = conn.execute(
-                "SELECT * FROM creative_mode_migrations WHERE operation_id = ?",
-                (str(operation_id),),
-            ).fetchone()
-            if existing is not None:
+        with self.repository.transaction_scope() as connection:
+            existing_row = connection.execute(
+                select(creative_mode_migrations).where(
+                    creative_mode_migrations.c.operation_id == str(operation_id)
+                )
+            ).mappings().first()
+            if existing_row is not None:
+                existing = self.repository.row_dict(existing_row)
                 if int(existing["project_id"]) != int(project_id):
                     raise ValueError("migration operation id belongs to another project")
                 if existing["status"] != "completed":
                     raise ValueError("creative mode migration is not complete")
                 return self._completed_migration_result(existing, operation_id)
-            project = self._raw_project(conn, project_id)
+            project = self._raw_project(connection, project_id)
             if project.get("workflow_mode", "sequential") != "sequential":
                 raise ValueError("项目已经是自由创作模式")
             if int(project.get("mode_revision") or 0) != int(expected_mode_revision):
                 raise ValueError("creative workflow mode changed")
-            seed = conn.execute(
-                "SELECT * FROM creative_seeds WHERE project_id = ? ORDER BY version DESC LIMIT 1",
-                (int(project_id),),
-            ).fetchone()
-            now = time.time()
-            conn.execute(
-                """
-                INSERT INTO creative_mode_migrations (
-                    operation_id, project_id, from_mode, to_mode, source_mode_revision,
-                    status, requested_by, created_at, updated_at
-                ) VALUES (?, ?, 'sequential', 'free', ?, 'pending', ?, ?, ?)
-                """,
-                (
-                    str(operation_id), int(project_id), int(expected_mode_revision),
-                    actor_user_id, now, now,
-                ),
+            seed_row = connection.execute(
+                select(creative_seeds)
+                .where(creative_seeds.c.project_id == int(project_id))
+                .order_by(creative_seeds.c.version.desc())
+                .limit(1)
+            ).mappings().first()
+            seed = self.repository.row_dict(seed_row) if seed_row is not None else None
+            now = utc_now()
+            connection.execute(
+                insert(creative_mode_migrations).values(
+                    operation_id=str(operation_id),
+                    project_id=int(project_id),
+                    from_mode="sequential",
+                    to_mode="free",
+                    source_mode_revision=int(expected_mode_revision),
+                    status="pending",
+                    requested_by=actor_user_id,
+                    created_at=now,
+                    updated_at=now,
+                )
             )
             target_project_id = self._create_free_project_copy_conn(
-                conn,
+                connection,
                 source_project=project,
                 operation_id=operation_id,
                 actor_user_id=actor_user_id,
@@ -1525,24 +1741,24 @@ class FreeCreativeModeService:
             resolved_seed_text = (
                 str(seed["seed_text"] or "").strip()
                 if seed is not None
-                else self._automatic_seed_text_conn(conn, project, seed_text)
+                else self._automatic_seed_text_conn(connection, project, seed_text)
             )
-            conn.execute(
-                """
-                INSERT INTO creative_seeds (
-                    project_id, version, status, seed_text, constraints_json,
-                    reference_refs_json, created_at, updated_at, locked_at
-                ) VALUES (?, 1, 'frozen', ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    target_project_id,
-                    resolved_seed_text,
-                    str(seed["constraints_json"] or "{}") if seed is not None else "{}",
-                    str(seed["reference_refs_json"] or "[]") if seed is not None else "[]",
-                    now,
-                    now,
-                    now,
-                ),
+            connection.execute(
+                insert(creative_seeds).values(
+                    project_id=target_project_id,
+                    version=1,
+                    status="frozen",
+                    seed_text=resolved_seed_text,
+                    constraints_json=(
+                        seed["constraints_json"] if seed is not None else {}
+                    ),
+                    reference_refs_json=(
+                        seed["reference_refs_json"] if seed is not None else []
+                    ),
+                    created_at=now,
+                    updated_at=now,
+                    locked_at=now,
+                )
             )
             mapping: dict[str, Any] = {
                 "project": {
@@ -1558,21 +1774,37 @@ class FreeCreativeModeService:
 
             brief_row = None
             if project.get("locked_brief_id"):
-                brief_row = conn.execute(
-                    "SELECT * FROM creative_blueprints WHERE id = ? AND project_id = ? "
-                    "AND resource_scope = 'sequential'",
-                    (int(project["locked_brief_id"]), int(project_id)),
-                ).fetchone()
+                brief_row = connection.execute(
+                    select(creative_blueprints).where(
+                        creative_blueprints.c.id == int(project["locked_brief_id"]),
+                        creative_blueprints.c.project_id == int(project_id),
+                        creative_blueprints.c.resource_scope == "sequential",
+                    )
+                ).mappings().first()
+                if brief_row is not None:
+                    brief_row = self.repository.row_dict(brief_row)
             if brief_row is None:
-                brief_row = conn.execute(
-                    "SELECT * FROM creative_blueprints WHERE project_id = ? "
-                    "AND resource_scope = 'sequential' ORDER BY version DESC, id DESC LIMIT 1",
-                    (int(project_id),),
-                ).fetchone()
+                latest_brief = connection.execute(
+                    select(creative_blueprints)
+                    .where(
+                        creative_blueprints.c.project_id == int(project_id),
+                        creative_blueprints.c.resource_scope == "sequential",
+                    )
+                    .order_by(
+                        creative_blueprints.c.version.desc(),
+                        creative_blueprints.c.id.desc(),
+                    )
+                    .limit(1)
+                ).mappings().first()
+                brief_row = (
+                    self.repository.row_dict(latest_brief)
+                    if latest_brief is not None
+                    else None
+                )
             if brief_row is not None:
                 content = self._loads(brief_row["content_json"], {})
                 new_id, version = self._create_brief_conn(
-                    conn,
+                    connection,
                     project_id=target_project_id,
                     content=content,
                     source_refs={
@@ -1584,163 +1816,220 @@ class FreeCreativeModeService:
                     status=str(brief_row["status"]),
                 )
                 self._set_head_conn(
-                    conn, project_id=target_project_id, stage="brief", episode_number=0,
+                    connection, project_id=target_project_id, stage="brief", episode_number=0,
                     resource_ref=str(new_id), resource_version=version,
                     expected_revision=0, actor_user_id=actor_user_id,
                 )
                 mapping["brief"] = {"source": int(brief_row["id"]), "target": new_id}
 
-            character_rows = conn.execute(
-                "SELECT * FROM creative_characters WHERE project_id = ? "
-                "AND resource_scope = 'sequential' ORDER BY version, id",
-                (int(project_id),),
-            ).fetchall()
+            character_rows = self.repository.rows_dict(connection.execute(
+                select(creative_characters)
+                .where(
+                    creative_characters.c.project_id == int(project_id),
+                    creative_characters.c.resource_scope == "sequential",
+                )
+                .order_by(creative_characters.c.version, creative_characters.c.id)
+            ).mappings().all())
             if project.get("character_batch_id"):
                 selected_characters = [
                     row for row in character_rows
                     if str(row["batch_id"]) == str(project["character_batch_id"])
                 ]
             else:
-                selected_characters = self._latest_group(list(character_rows), "batch_id")
+                selected_characters = self._latest_group(character_rows, "batch_id")
             if selected_characters:
                 source_batch = str(selected_characters[0]["batch_id"])
                 new_batch = uuid.uuid4().hex
-                version = int(conn.execute(
-                    "SELECT COALESCE(MAX(version), 0) + 1 AS version FROM creative_characters "
-                    "WHERE project_id = ?", (target_project_id,)
-                ).fetchone()["version"])
+                version = int(connection.execute(
+                    select(
+                        func.coalesce(func.max(creative_characters.c.version), 0) + 1
+                    ).where(creative_characters.c.project_id == target_project_id)
+                ).scalar_one())
                 for row in selected_characters:
-                    conn.execute(
-                        """
-                        INSERT INTO creative_characters (
-                            project_id, batch_id, version, character_key, status,
-                            content_json, source_refs_json, generation_meta_json,
-                            resource_scope, locked_at, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'free', ?, ?, ?)
-                        """,
-                        (
-                            target_project_id, new_batch, version, str(row["character_key"]),
-                            str(row["status"]), str(row["content_json"]),
-                            json.dumps({"migration_source_id": int(row["id"])}, ensure_ascii=False),
-                            json.dumps({"origin": "sequential_migration", "operation_id": operation_id}, ensure_ascii=False),
-                            row["locked_at"], now, now,
-                        ),
+                    connection.execute(
+                        insert(creative_characters).values(
+                            project_id=target_project_id,
+                            batch_id=new_batch,
+                            version=version,
+                            character_key=str(row["character_key"]),
+                            status=str(row["status"]),
+                            content_json=row["content_json"],
+                            source_refs_json={"migration_source_id": int(row["id"])},
+                            generation_meta_json={
+                                "origin": "sequential_migration",
+                                "operation_id": operation_id,
+                            },
+                            resource_scope=FREE_SCOPE,
+                            locked_at=from_epoch_seconds(row["locked_at"]),
+                            created_at=now,
+                            updated_at=now,
+                        )
                     )
-                relationship_rows = conn.execute(
-                    "SELECT * FROM creative_relationships WHERE project_id = ? AND batch_id = ? "
-                    "AND resource_scope = 'sequential' ORDER BY id",
-                    (int(project_id), source_batch),
-                ).fetchall()
+                relationship_rows = self.repository.rows_dict(connection.execute(
+                    select(creative_relationships)
+                    .where(
+                        creative_relationships.c.project_id == int(project_id),
+                        creative_relationships.c.batch_id == source_batch,
+                        creative_relationships.c.resource_scope == "sequential",
+                    )
+                    .order_by(creative_relationships.c.id)
+                ).mappings().all())
                 for row in relationship_rows:
-                    conn.execute(
-                        """
-                        INSERT INTO creative_relationships (
-                            project_id, batch_id, version, relationship_key, status,
-                            content_json, source_refs_json, generation_meta_json,
-                            resource_scope, locked_at, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'free', ?, ?, ?)
-                        """,
-                        (
-                            target_project_id, new_batch, version, str(row["relationship_key"]),
-                            str(row["status"]), str(row["content_json"]),
-                            json.dumps({"migration_source_id": int(row["id"])}, ensure_ascii=False),
-                            json.dumps({"origin": "sequential_migration", "operation_id": operation_id}, ensure_ascii=False),
-                            row["locked_at"], now, now,
-                        ),
+                    connection.execute(
+                        insert(creative_relationships).values(
+                            project_id=target_project_id,
+                            batch_id=new_batch,
+                            version=version,
+                            relationship_key=str(row["relationship_key"]),
+                            status=str(row["status"]),
+                            content_json=row["content_json"],
+                            source_refs_json={"migration_source_id": int(row["id"])},
+                            generation_meta_json={
+                                "origin": "sequential_migration",
+                                "operation_id": operation_id,
+                            },
+                            resource_scope=FREE_SCOPE,
+                            locked_at=from_epoch_seconds(row["locked_at"]),
+                            created_at=now,
+                            updated_at=now,
+                        )
                     )
                 self._set_head_conn(
-                    conn, project_id=target_project_id, stage="characters", episode_number=0,
+                    connection, project_id=target_project_id, stage="characters", episode_number=0,
                     resource_ref=new_batch, resource_version=version,
                     expected_revision=0, actor_user_id=actor_user_id,
                 )
                 mapping["characters"] = {"source": source_batch, "target": new_batch}
 
-            outline_rows = conn.execute(
-                "SELECT * FROM creative_episodes WHERE project_id = ? AND stage = 'outline' "
-                "AND resource_scope = 'sequential' ORDER BY version, episode_number, id",
-                (int(project_id),),
-            ).fetchall()
+            outline_rows = self.repository.rows_dict(connection.execute(
+                select(creative_episodes)
+                .where(
+                    creative_episodes.c.project_id == int(project_id),
+                    creative_episodes.c.stage == "outline",
+                    creative_episodes.c.resource_scope == "sequential",
+                )
+                .order_by(
+                    creative_episodes.c.version,
+                    creative_episodes.c.episode_number,
+                    creative_episodes.c.id,
+                )
+            ).mappings().all())
             if project.get("outline_batch_id"):
                 selected_outlines = [
                     row for row in outline_rows
                     if str(row["batch_id"]) == str(project["outline_batch_id"])
                 ]
             else:
-                selected_outlines = self._latest_group(list(outline_rows), "batch_id")
+                selected_outlines = self._latest_group(outline_rows, "batch_id")
             if selected_outlines:
                 source_batch = str(selected_outlines[0]["batch_id"])
                 new_batch = uuid.uuid4().hex
-                version = int(conn.execute(
-                    "SELECT COALESCE(MAX(version), 0) + 1 AS version FROM creative_episodes "
-                    "WHERE project_id = ? AND stage = 'outline'", (target_project_id,)
-                ).fetchone()["version"])
+                version = int(connection.execute(
+                    select(
+                        func.coalesce(func.max(creative_episodes.c.version), 0) + 1
+                    ).where(
+                        creative_episodes.c.project_id == target_project_id,
+                        creative_episodes.c.stage == "outline",
+                    )
+                ).scalar_one())
                 for row in selected_outlines:
-                    conn.execute(
-                        """
-                        INSERT INTO creative_episodes (
-                            project_id, stage, episode_number, batch_id, version,
-                            status, content_json, upstream_refs_json, generation_meta_json,
-                            resource_scope, locked_at, created_at, updated_at
-                        ) VALUES (?, 'outline', ?, ?, ?, ?, ?, ?, ?, 'free', ?, ?, ?)
-                        """,
-                        (
-                            target_project_id, int(row["episode_number"]), new_batch, version,
-                            str(row["status"]), str(row["content_json"]),
-                            json.dumps({"migration_source_refs": self._loads(row["upstream_refs_json"], {})}, ensure_ascii=False),
-                            json.dumps({"origin": "sequential_migration", "operation_id": operation_id, "migration_source_id": int(row["id"])}, ensure_ascii=False),
-                            row["locked_at"], now, now,
-                        ),
+                    connection.execute(
+                        insert(creative_episodes).values(
+                            project_id=target_project_id,
+                            stage="outline",
+                            episode_number=int(row["episode_number"]),
+                            batch_id=new_batch,
+                            version=version,
+                            status=str(row["status"]),
+                            content_json=row["content_json"],
+                            upstream_refs_json={
+                                "migration_source_refs": self._loads(
+                                    row["upstream_refs_json"], {}
+                                )
+                            },
+                            generation_meta_json={
+                                "origin": "sequential_migration",
+                                "operation_id": operation_id,
+                                "migration_source_id": int(row["id"]),
+                            },
+                            resource_scope=FREE_SCOPE,
+                            locked_at=from_epoch_seconds(row["locked_at"]),
+                            created_at=now,
+                            updated_at=now,
+                        )
                     )
                 self._set_head_conn(
-                    conn, project_id=target_project_id, stage="outline", episode_number=0,
+                    connection, project_id=target_project_id, stage="outline", episode_number=0,
                     resource_ref=new_batch, resource_version=version,
                     expected_revision=0, actor_user_id=actor_user_id,
                 )
                 mapping["outline"] = {"source": source_batch, "target": new_batch}
 
             for stage in ("beats", "script"):
-                rows = conn.execute(
-                    "SELECT * FROM creative_episodes WHERE project_id = ? AND stage = ? "
-                    "AND resource_scope = 'sequential' ORDER BY episode_number, version DESC, id DESC",
-                    (int(project_id), stage),
-                ).fetchall()
+                rows = self.repository.rows_dict(connection.execute(
+                    select(creative_episodes)
+                    .where(
+                        creative_episodes.c.project_id == int(project_id),
+                        creative_episodes.c.stage == stage,
+                        creative_episodes.c.resource_scope == "sequential",
+                    )
+                    .order_by(
+                        creative_episodes.c.episode_number,
+                        creative_episodes.c.version.desc(),
+                        creative_episodes.c.id.desc(),
+                    )
+                ).mappings().all())
                 selected: dict[int, Any] = {}
                 for row in rows:
                     selected.setdefault(int(row["episode_number"]), row)
                 for number, row in selected.items():
-                    version = int(conn.execute(
-                        "SELECT COALESCE(MAX(version), 0) + 1 AS version FROM creative_episodes "
-                        "WHERE project_id = ? AND stage = ? AND episode_number = ?",
-                        (target_project_id, stage, number),
-                    ).fetchone()["version"])
-                    cursor = conn.execute(
-                        """
-                        INSERT INTO creative_episodes (
-                            project_id, stage, episode_number, batch_id, version,
-                            status, content_json, upstream_refs_json, generation_meta_json,
-                            resource_scope, locked_at, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'free', ?, ?, ?)
-                        """,
-                        (
-                            target_project_id, stage, number, uuid.uuid4().hex, version,
-                            str(row["status"]), str(row["content_json"]),
-                            json.dumps({"migration_source_refs": self._loads(row["upstream_refs_json"], {})}, ensure_ascii=False),
-                            json.dumps({"origin": "sequential_migration", "operation_id": operation_id, "migration_source_id": int(row["id"])}, ensure_ascii=False),
-                            row["locked_at"], now, now,
-                        ),
-                    )
-                    new_id = int(cursor.lastrowid)
+                    version = int(connection.execute(
+                        select(
+                            func.coalesce(func.max(creative_episodes.c.version), 0) + 1
+                        ).where(
+                            creative_episodes.c.project_id == target_project_id,
+                            creative_episodes.c.stage == stage,
+                            creative_episodes.c.episode_number == number,
+                        )
+                    ).scalar_one())
+                    new_id = int(connection.execute(
+                        insert(creative_episodes)
+                        .values(
+                            project_id=target_project_id,
+                            stage=stage,
+                            episode_number=number,
+                            batch_id=uuid.uuid4().hex,
+                            version=version,
+                            status=str(row["status"]),
+                            content_json=row["content_json"],
+                            upstream_refs_json={
+                                "migration_source_refs": self._loads(
+                                    row["upstream_refs_json"], {}
+                                )
+                            },
+                            generation_meta_json={
+                                "origin": "sequential_migration",
+                                "operation_id": operation_id,
+                                "migration_source_id": int(row["id"]),
+                            },
+                            resource_scope=FREE_SCOPE,
+                            locked_at=from_epoch_seconds(row["locked_at"]),
+                            created_at=now,
+                            updated_at=now,
+                        )
+                        .returning(creative_episodes.c.id)
+                    ).scalar_one())
                     self._set_head_conn(
-                        conn, project_id=target_project_id, stage=stage, episode_number=number,
+                        connection, project_id=target_project_id, stage=stage, episode_number=number,
                         resource_ref=str(new_id), resource_version=version,
                         expected_revision=0, actor_user_id=actor_user_id,
                     )
                     mapping[stage][str(number)] = {"source": int(row["id"]), "target": new_id}
 
-            conn.execute(
-                "UPDATE creative_mode_migrations SET status = 'completed', mapping_json = ?, "
-                "updated_at = ? WHERE operation_id = ?",
-                (json.dumps(mapping, ensure_ascii=False), now, str(operation_id)),
+            connection.execute(
+                update(creative_mode_migrations)
+                .where(creative_mode_migrations.c.operation_id == str(operation_id))
+                .values(status="completed", mapping_json=mapping, updated_at=now)
             )
         return {
             "project": self.repository.get_project(target_project_id) or {},
@@ -1751,34 +2040,56 @@ class FreeCreativeModeService:
 
     def list_legacy_resources(self, project_id: int) -> dict[str, Any]:
         self.assert_free_project(project_id)
-        with self.repository._connect() as conn:
+        with self.repository.connection_scope() as connection:
             return {
                 "blueprints": [
-                    self.repository._blueprint(dict(row)) for row in conn.execute(
-                        "SELECT * FROM creative_blueprints WHERE project_id = ? "
-                        "AND resource_scope = 'sequential' ORDER BY id",
-                        (int(project_id),),
-                    ).fetchall()
+                    self.repository._blueprint(row) for row in connection.execute(
+                        select(creative_blueprints)
+                        .where(
+                            creative_blueprints.c.project_id == int(project_id),
+                            creative_blueprints.c.resource_scope == "sequential",
+                        )
+                        .order_by(creative_blueprints.c.id)
+                    ).mappings().all()
                 ],
                 "characters": [
-                    self.repository._creative_item(dict(row)) for row in conn.execute(
-                        "SELECT * FROM creative_characters WHERE project_id = ? "
-                        "AND resource_scope = 'sequential' ORDER BY version, id",
-                        (int(project_id),),
-                    ).fetchall()
+                    self.repository._creative_item(row) for row in connection.execute(
+                        select(creative_characters)
+                        .where(
+                            creative_characters.c.project_id == int(project_id),
+                            creative_characters.c.resource_scope == "sequential",
+                        )
+                        .order_by(
+                            creative_characters.c.version,
+                            creative_characters.c.id,
+                        )
+                    ).mappings().all()
                 ],
                 "relationships": [
-                    self.repository._creative_item(dict(row)) for row in conn.execute(
-                        "SELECT * FROM creative_relationships WHERE project_id = ? "
-                        "AND resource_scope = 'sequential' ORDER BY version, id",
-                        (int(project_id),),
-                    ).fetchall()
+                    self.repository._creative_item(row) for row in connection.execute(
+                        select(creative_relationships)
+                        .where(
+                            creative_relationships.c.project_id == int(project_id),
+                            creative_relationships.c.resource_scope == "sequential",
+                        )
+                        .order_by(
+                            creative_relationships.c.version,
+                            creative_relationships.c.id,
+                        )
+                    ).mappings().all()
                 ],
                 "episodes": [
-                    self.repository._episode(dict(row)) for row in conn.execute(
-                        "SELECT * FROM creative_episodes WHERE project_id = ? "
-                        "AND resource_scope = 'sequential' ORDER BY stage, episode_number, version",
-                        (int(project_id),),
-                    ).fetchall()
+                    self.repository._episode(row) for row in connection.execute(
+                        select(creative_episodes)
+                        .where(
+                            creative_episodes.c.project_id == int(project_id),
+                            creative_episodes.c.resource_scope == "sequential",
+                        )
+                        .order_by(
+                            creative_episodes.c.stage,
+                            creative_episodes.c.episode_number,
+                            creative_episodes.c.version,
+                        )
+                    ).mappings().all()
                 ],
             }

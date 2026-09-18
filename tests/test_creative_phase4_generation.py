@@ -1743,12 +1743,12 @@ def test_phase4_worker_persists_generation_and_report(tmp_path, monkeypatch):
         crawler_type="phase4_generate",
         extra={
             "action": "blueprints", "project_id": project["id"], "count": 3,
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             **generation_contract(repository, project["id"]),
         },
     )
 
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     detail = repository.get_project(project["id"])
     report = tmp_path / "data" / "creative" / "jobs" / job.job_id / "generation.json"
@@ -1779,13 +1779,13 @@ def test_phase4_worker_rejects_authority_change_at_persistence_boundary(
         crawler_type="phase4_generate",
         extra={
             "action": "blueprints", "project_id": project["id"], "count": 3,
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             **generation_contract(repository, project["id"]),
         },
     )
 
     with pytest.raises(ValueError, match="authority changed"):
-        asyncio.run(phase4_worker.run(job))
+        asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     assert repository.get_project(project["id"])["blueprints"] == []
 
@@ -1803,13 +1803,13 @@ def test_phase4_worker_does_not_persist_partial_blueprints_after_llm_failure(tmp
         crawler_type="phase4_generate",
         extra={
             "action": "blueprints", "project_id": project["id"], "count": 3,
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             **authority_extra(repository, project["id"]),
         },
     )
 
     with pytest.raises(Exception, match="结构校验"):
-        asyncio.run(phase4_worker.run(job))
+        asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     assert repository.get_project(project["id"])["blueprints"] == []
 
@@ -1844,13 +1844,12 @@ def test_phase4_worker_generates_overview_for_an_existing_draft_without_rewritin
             "action": "outline_overview",
             "project_id": project["id"],
                 "batch_id": batch["batch_id"],
-                "db_path": str(db_path),
                 "runtime_dir": str(tmp_path / ".runtime"),
                 **authority_extra(repository, project["id"]),
             },
     )
 
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     saved = repository.get_outline_batch(project["id"], batch["batch_id"])
     assert saved["series_overview"] == series_overview()
@@ -1887,14 +1886,13 @@ def test_phase4_worker_rejects_an_incomplete_outline_before_calling_the_model(
             "action": "outline_overview",
             "project_id": project["id"],
                 "batch_id": partial["batch_id"],
-                "db_path": str(db_path),
                 "runtime_dir": str(tmp_path / ".runtime"),
                 **authority_extra(repository, project["id"]),
             },
     )
 
     with pytest.raises(ValueError, match="完整覆盖"):
-        asyncio.run(phase4_worker.run(job))
+        asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     assert provider.calls == []
 
@@ -1935,14 +1933,13 @@ def test_phase4_worker_does_not_overwrite_an_overview_saved_during_generation(
             "action": "outline_overview",
             "project_id": project["id"],
                 "batch_id": batch["batch_id"],
-                "db_path": str(db_path),
                 "runtime_dir": str(tmp_path / ".runtime"),
                 **authority_extra(repository, project["id"]),
             },
     )
 
     with pytest.raises(ValueError, match="已存在"):
-        asyncio.run(phase4_worker.run(job))
+        asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     saved = repository.get_outline_batch(project["id"], batch["batch_id"])
     assert saved["series_overview"] == manual
@@ -1969,13 +1966,13 @@ def test_phase4_worker_preserves_completed_outline_chunks_after_a_later_failure(
         crawler_type="phase4_generate",
         extra={
             "action": "outlines", "project_id": project["id"],
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             **generation_contract(repository, project["id"]),
         },
     )
 
     with pytest.raises(Exception, match="结构校验"):
-        asyncio.run(phase4_worker.run(job))
+        asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     partial_outlines = [
         item for item in repository.get_project(project["id"])["episodes"]
@@ -2003,11 +2000,11 @@ def test_phase4_worker_continues_a_saved_outline_batch_after_a_failed_job(tmp_pa
     failed_job = CrawlJob(
         job_id="creative-worker-outline-failed",
         platform="creative", crawler_type="phase4_generate",
-        extra={"action": "outlines", "project_id": project["id"], "db_path": str(db_path),
+        extra={"action": "outlines", "project_id": project["id"],
                **generation_contract(repository, project["id"])},
     )
     with pytest.raises(Exception, match="结构校验"):
-        asyncio.run(phase4_worker.run(failed_job))
+        asyncio.run(phase4_worker._run_with_repository(failed_job, repository))
 
     class ResumedProviderWithRetryNotice(SequentialProvider):
         retry_callback = None
@@ -2032,12 +2029,12 @@ def test_phase4_worker_continues_a_saved_outline_batch_after_a_failed_job(tmp_pa
     resumed_job = CrawlJob(
         job_id="creative-worker-outline-resumed",
         platform="creative", crawler_type="phase4_generate",
-        extra={"action": "outlines", "project_id": project["id"], "db_path": str(db_path),
+        extra={"action": "outlines", "project_id": project["id"],
                "retry_of_job_id": "creative-worker-outline-failed",
                **generation_contract(repository, project["id"])},
     )
 
-    asyncio.run(phase4_worker.run(resumed_job))
+    asyncio.run(phase4_worker._run_with_repository(resumed_job, repository))
 
     outlines = [
         item for item in repository.get_project(project["id"])["episodes"]
@@ -2085,12 +2082,12 @@ def test_phase4_worker_retry_takes_over_failure_before_first_checkpoint(
         crawler_type="phase4_generate",
         extra={
             "action": "outlines", "project_id": project["id"],
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             **operation,
         },
     )
     with pytest.raises(RuntimeError, match="before checkpoint"):
-        asyncio.run(phase4_worker.run(failed_job))
+        asyncio.run(phase4_worker._run_with_repository(failed_job, repository))
 
     retry_provider = SequentialProvider([
         series_arc_payload(),
@@ -2103,13 +2100,13 @@ def test_phase4_worker_retry_takes_over_failure_before_first_checkpoint(
         crawler_type="phase4_generate",
         extra={
             "action": "outlines", "project_id": project["id"],
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             "retry_of_job_id": failed_job.job_id,
             **operation,
         },
     )
 
-    asyncio.run(phase4_worker.run(retry_job))
+    asyncio.run(phase4_worker._run_with_repository(retry_job, repository))
 
     outlines = [
         item for item in repository.get_project(project["id"])["episodes"]
@@ -2159,13 +2156,13 @@ def test_phase4_worker_retry_takes_over_expired_orphan_before_first_checkpoint(
         crawler_type="phase4_generate",
         extra={
             "action": "outlines", "project_id": project["id"],
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             "retry_of_job_id": "dead-outline-worker",
             **operation,
         },
     )
 
-    asyncio.run(phase4_worker.run(retry_job))
+    asyncio.run(phase4_worker._run_with_repository(retry_job, repository))
 
     outlines = [
         item for item in repository.get_project(project["id"])["episodes"]
@@ -2203,12 +2200,12 @@ def test_phase4_worker_saves_series_beats_in_ten_episode_checkpoints(tmp_path, m
         job_id="creative-worker-series-beats", platform="creative", crawler_type="phase4_generate",
         extra={
             "action": "beats", "series": True, "project_id": project["id"],
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             **generation_contract(repository, project["id"]),
         },
     )
 
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     beats = [item for item in repository.get_project(project["id"])["episodes"] if item["stage"] == "beats"]
     assert [item["episode_number"] for item in beats] == list(range(1, 13))
@@ -2243,12 +2240,12 @@ def test_phase4_worker_saves_series_scripts_after_all_current_beats_are_locked(t
         job_id="creative-worker-series-scripts", platform="creative", crawler_type="phase4_generate",
         extra={
             "action": "script", "series": True, "project_id": project["id"],
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             **generation_contract(repository, project["id"]),
         },
     )
 
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     scripts = [item for item in repository.get_project(project["id"])["episodes"] if item["stage"] == "script"]
     assert [item["episode_number"] for item in scripts] == list(range(1, 13))
@@ -2287,12 +2284,12 @@ def test_phase4_worker_surfaces_provider_retry_progress(tmp_path, monkeypatch):
         crawler_type="phase4_generate",
         extra={
             "action": "blueprints", "project_id": project["id"], "count": 3,
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             **authority_extra(repository, project["id"]),
         },
     )
 
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     retry_event = next(item for item in events if item["payload"].get("retry_attempt") == 1)
     assert retry_event["level"] == "warning"
@@ -2329,12 +2326,12 @@ def test_outline_worker_sets_reasoning_effort_and_maps_request_progress_events(t
         platform="creative",
         crawler_type="phase4_generate",
         extra={
-            "action": "outlines", "project_id": project["id"], "db_path": str(db_path),
+            "action": "outlines", "project_id": project["id"],
             "runtime_dir": str(tmp_path / ".runtime"), **generation_contract(repository, project["id"]),
         },
     )
 
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     assert provider.reasoning_effort == "high"
     request_events = [event for event in events if event["payload"].get("request_kind")]
@@ -2384,13 +2381,12 @@ def test_outline_worker_retry_progress_preserves_active_batch_telemetry(tmp_path
         extra={
             "action": "outlines",
             "project_id": project["id"],
-            "db_path": str(db_path),
             "runtime_dir": str(tmp_path / ".runtime"),
             **generation_contract(repository, project["id"]),
         },
     )
 
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     retries = [event["payload"] for event in events if event["payload"].get("retry_attempt")]
     assert [payload["request_kind"] for payload in retries] == ["outline_chunk"]
@@ -2432,12 +2428,12 @@ def test_outline_worker_falls_back_to_high_reasoning_and_warns_for_invalid_setti
         platform="creative",
         crawler_type="phase4_generate",
         extra={
-            "action": "outlines", "project_id": project["id"], "db_path": str(db_path),
+            "action": "outlines", "project_id": project["id"],
             "runtime_dir": str(tmp_path / ".runtime"), **generation_contract(repository, project["id"]),
         },
     )
 
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     assert provider.reasoning_effort == "high"
     warning = next(event for event in events if event["level"] == "warning")
@@ -2458,12 +2454,12 @@ def test_non_outline_worker_action_keeps_provider_reasoning_effort(tmp_path, mon
         crawler_type="phase4_generate",
         extra={
             "action": "blueprints", "project_id": project["id"], "count": 3,
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             **authority_extra(repository, project["id"]),
         },
     )
 
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     assert provider.reasoning_effort == "none"
 

@@ -121,9 +121,9 @@ def _review_job(tmp_path, source: dict, *, suffix: str) -> tuple[CrawlJob, int]:
         job_id=f"project-review-{suffix}",
         platform="creative",
         crawler_type="project_review",
-        extra={"review_id": review["id"], "db_path": str(db_path)},
+        extra={"review_id": review["id"]},
     )
-    return job, int(review["id"])
+    return job, int(review["id"]), repository
 
 
 def _capture_events(monkeypatch, worker) -> list[dict]:
@@ -154,7 +154,7 @@ async def test_worker_request_start_events_expose_safe_input_resource_refs(
     from project_review import worker
 
     source = _source()
-    job, _review_id = _review_job(tmp_path, source, suffix=f"refs-{request_kind}")
+    job, _review_id, repository = _review_job(tmp_path, source, suffix=f"refs-{request_kind}")
     provider = _Provider()
     emitted = _capture_events(monkeypatch, worker)
     monkeypatch.setattr(
@@ -166,7 +166,7 @@ async def test_worker_request_start_events_expose_safe_input_resource_refs(
     )
     monkeypatch.chdir(tmp_path)
 
-    await worker.run(job)
+    await worker._run_with_repository(job, repository)
 
     request_payloads = [
         item["payload"]
@@ -251,8 +251,7 @@ async def test_worker_checkpoints_failure_emits_safe_request_details_and_resumes
     from project_review import worker
 
     source = _source()
-    job, review_id = _review_job(tmp_path, source, suffix="episode-resume")
-    repository = CreativeRepository(job.extra["db_path"])
+    job, review_id, repository = _review_job(tmp_path, source, suffix="episode-resume")
     emitted = _capture_events(monkeypatch, worker)
     first = _Provider(fail_episode=7, retry_episode=7)
     monkeypatch.setattr(
@@ -265,7 +264,7 @@ async def test_worker_checkpoints_failure_emits_safe_request_details_and_resumes
     monkeypatch.chdir(tmp_path)
 
     with pytest.raises(RuntimeError, match="episode 7 failed"):
-        await worker.run(job)
+        await worker._run_with_repository(job, repository)
 
     failed = repository.get_script_review(review_id)
     assert failed is not None
@@ -306,7 +305,7 @@ async def test_worker_checkpoints_failure_emits_safe_request_details_and_resumes
         ),
     )
 
-    await worker.run(job)
+    await worker._run_with_repository(job, repository)
 
     unit_numbers = [
         request["current_unit"]["episode_number"]
@@ -355,8 +354,7 @@ async def test_worker_resume_reissues_only_missing_summary_stages(
     from project_review import worker
 
     source = _source()
-    job, review_id = _review_job(tmp_path, source, suffix=suffix)
-    repository = CreativeRepository(job.extra["db_path"])
+    job, review_id, repository = _review_job(tmp_path, source, suffix=suffix)
     _capture_events(monkeypatch, worker)
     monkeypatch.setattr(
         worker,
@@ -368,7 +366,7 @@ async def test_worker_resume_reissues_only_missing_summary_stages(
     monkeypatch.chdir(tmp_path)
 
     with pytest.raises(RuntimeError):
-        await worker.run(job)
+        await worker._run_with_repository(job, repository)
 
     assert repository.get_script_review(review_id)["status"] == "failed"
     resumed = _Provider()
@@ -380,7 +378,7 @@ async def test_worker_resume_reissues_only_missing_summary_stages(
         ),
     )
 
-    await worker.run(job)
+    await worker._run_with_repository(job, repository)
 
     assert [request["request_kind"] for request in resumed.requests] == expected_request_kinds
     assert [
@@ -412,12 +410,12 @@ async def test_worker_marks_located_review_failed_when_frozen_source_is_invalid(
         job_id="project-review-invalid-source",
         platform="creative",
         crawler_type="project_review",
-        extra={"review_id": review["id"], "db_path": str(db_path)},
+        extra={"review_id": review["id"]},
     )
     _capture_events(monkeypatch, worker)
 
     with pytest.raises(ValueError, match="冻结来源快照"):
-        await worker.run(job)
+        await worker._run_with_repository(job, repository)
 
     failed = repository.get_script_review(review["id"])
     assert failed is not None
@@ -431,8 +429,7 @@ async def test_worker_keeps_completed_report_resumable_when_artifact_write_fails
     from project_review import worker
 
     source = _source()
-    job, review_id = _review_job(tmp_path, source, suffix="artifact-failure")
-    repository = CreativeRepository(job.extra["db_path"])
+    job, review_id, repository = _review_job(tmp_path, source, suffix="artifact-failure")
     provider = _Provider()
     _capture_events(monkeypatch, worker)
     monkeypatch.setattr(
@@ -450,7 +447,7 @@ async def test_worker_keeps_completed_report_resumable_when_artifact_write_fails
     monkeypatch.chdir(tmp_path)
 
     with pytest.raises(OSError, match="disk full"):
-        await worker.run(job)
+        await worker._run_with_repository(job, repository)
 
     failed = repository.get_script_review(review_id)
     assert failed is not None

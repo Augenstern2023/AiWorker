@@ -294,6 +294,7 @@ def test_project_member_without_stage_permissions_can_generate_edit_and_complete
             root=tmp_path,
             runtime_dir=runtime,
             job_manager=manager,
+            repository=creative,
             workflow_repository=workflow,
         )
     )

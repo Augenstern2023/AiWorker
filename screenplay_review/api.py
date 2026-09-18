@@ -195,7 +195,6 @@ def build_script_review_router(
                 "review_id": review["id"],
                 "project_id": source.get("project_id"),
                 "created_by_user_id": principal.user_id,
-                "db_path": str(repository.db_path.resolve()),
                 "runtime_dir": str(Path(runtime_dir).resolve()),
             },
         }
@@ -368,11 +367,16 @@ def register_script_review_routes(
     *,
     runtime_dir: str | Path = ".runtime",
     job_manager: Any,
+    repository: CreativeRepository | None = None,
 ) -> None:
+    if repository is None:
+        raise ValueError(
+            "register_script_review_routes requires an injected creative repository"
+        )
     root = Path(runtime_dir)
     app.include_router(
         build_script_review_router(
-            CreativeRepository(root / "creative" / "creative.db"),
+            repository,
             job_manager,
             runtime_dir=root,
         )

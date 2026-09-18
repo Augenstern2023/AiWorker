@@ -13,8 +13,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from creative.postgres_repository import PostgresCreativeRepository
 from creative.repository import CreativeRepository
 from creative.transcript_assets import find_transcript_bundle, normalize_title
+from system_database import SystemDatabase, SystemDatabaseSettings
 
 
 class SelectionStageService:
@@ -171,17 +173,24 @@ class SelectionStageService:
         return skipped_paid, failed
 
 
-def record_source_readiness_for_job(job: Any) -> dict[str, Any] | None:
+def record_source_readiness_for_job(
+    job: Any, repository: CreativeRepository | None = None
+) -> dict[str, Any] | None:
     extra = job.extra or {}
     topic_id = int(extra.get("topic_id") or 0)
-    db_path = str(extra.get("creative_db_path") or "").strip()
-    if topic_id < 1 or not db_path:
+    if topic_id < 1:
         return None
     workspace_root = Path(str(extra.get("workspace_root") or ".")).resolve()
-    return SelectionStageService(
-        CreativeRepository(db_path), workspace_root
-    ).record_source_readiness(
-        topic_id,
-        source_job_id=str(job.job_id),
-        actor_user_id=str(extra.get("created_by_user_id") or "workflow:system"),
-    )
+    database: SystemDatabase | None = None
+    if repository is None:
+        database = SystemDatabase(SystemDatabaseSettings.from_environment())
+        repository = PostgresCreativeRepository(database)
+    try:
+        return SelectionStageService(repository, workspace_root).record_source_readiness(
+            topic_id,
+            source_job_id=str(job.job_id),
+            actor_user_id=str(extra.get("created_by_user_id") or "workflow:system"),
+        )
+    finally:
+        if database is not None:
+            database.dispose()

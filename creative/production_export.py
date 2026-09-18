@@ -19,8 +19,7 @@ Sequential projects use the active brief/cast/outline pointers; their beats and
 scripts use the latest locked/approved version. Free projects use the exact
 resource selected by each current free-mode head. Neither mode falls back from
 a draft or stale current selection to an older locked revision. Incomplete or
-stale inputs raise ValueError; absent or deleted projects raise KeyError;
-absent database files raise FileNotFoundError.
+stale inputs raise ValueError; absent or deleted projects raise KeyError.
 
 Passing a version_manifest opts into an explicit export-only snapshot. Standard
 projects still require every selected downstream resource to match its upstream
@@ -31,18 +30,51 @@ fingerprint is lowercase SHA256 of canonical UTF-8 JSON (sorted keys, compact
  separators, ensure_ascii=False), excluding fingerprint itself, recursively
  excluding timestamp metadata (keys ending _at, timestamp, timestamps) and raw
  *_json duplicates. Time/duration fields inside story content remain meaningful.
- No clock or machine-dependent database path is included in provenance.
+ No clock or database location is included in provenance.
+
+The reader is bound to the live PostgreSQL creative store through an injected
+repository: it never derives a database location, and there is no path to fall
+back to. Every statement runs on one borrowed connection -- the one the caller
+supplies, or the short-lived read connection ``repository.connection_scope()``
+opens -- so the project, the resource heads and every selected version come from
+a single consistent read. A borrowed connection is never committed, rolled back
+or closed here; only its owner decides when the read transaction ends.
+
+Rows keep the frozen SQLite shape its callers, fingerprints and the downstream
+adapter depend on: epoch-second timestamps plus raw ``*_json`` text, and the
+decoded alias without that suffix. PostgreSQL stores those values as
+``TIMESTAMPTZ`` and ``JSONB``, so :func:`_row` renders both back to the legacy
+shape before decoding, and accepts an already-legacy mapping unchanged.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
-import sqlite3
 from collections.abc import Iterable
-from pathlib import Path
+from datetime import datetime
 from typing import Any, Callable
 
+from sqlalchemy import select
+from sqlalchemy.engine import Connection
+
+from creative.database_schema import (
+    creative_blueprints,
+    creative_characters,
+    creative_episodes,
+    creative_projects,
+    creative_relationships,
+    creative_resource_heads,
+)
+from creative.repositories.base import epoch_seconds
+
 _LOCKED = {"locked", "approved"}
+
+#: The cast table per category, replacing the legacy f-string table name.
+_CAST_TABLES = {
+    "characters": creative_characters,
+    "relationships": creative_relationships,
+}
 
 
 def _digest(value: Any) -> str:
@@ -52,8 +84,34 @@ def _digest(value: Any) -> str:
     ).encode("utf-8")).hexdigest()
 
 
-def _row(raw: sqlite3.Row) -> dict[str, Any]:
-    result = dict(raw)
+def _columns(raw: Any) -> dict[str, Any]:
+    """Render one stored row into the frozen SQLite column shape.
+
+    ``TIMESTAMPTZ`` becomes the epoch seconds SQLite stored, and an already
+    parsed ``JSONB`` value is re-serialized so the ``*_json`` column stays text.
+    A legacy row (``sqlite3.Row``, plain mapping) is already in that shape and
+    is passed through unchanged, so one decoder serves both stores.
+    """
+
+    result: dict[str, Any] = {}
+    for key, value in dict(raw).items():
+        if isinstance(value, datetime):
+            result[key] = epoch_seconds(value)
+        elif (
+            key.endswith("_json")
+            and value is not None
+            and not isinstance(value, (str, bytes))
+        ):
+            result[key] = json.dumps(value, ensure_ascii=False)
+        elif isinstance(value, (dict, list)):
+            result[key] = copy.deepcopy(value)
+        else:
+            result[key] = value
+    return result
+
+
+def _row(raw: Any) -> dict[str, Any]:
+    result = _columns(raw)
     for key, value in tuple(result.items()):
         if key.endswith("_json"):
             try:
@@ -308,19 +366,22 @@ def _assert_requested_version(
 
 
 def _locked_cast_batches(
-    conn: sqlite3.Connection, project_id: int, resource_scope: str,
+    conn: Connection, project_id: int, resource_scope: str,
 ) -> list[tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]]:
     characters = []
     relationships = []
     for target, table in (
-        (characters, "creative_characters"),
-        (relationships, "creative_relationships"),
+        (characters, _CAST_TABLES["characters"]),
+        (relationships, _CAST_TABLES["relationships"]),
     ):
         for raw in conn.execute(
-            f"SELECT * FROM {table} WHERE project_id = ? "
-            "AND resource_scope = ? ORDER BY version, id",
-            (project_id, resource_scope),
-        ).fetchall():
+            select(table)
+            .where(
+                table.c.project_id == int(project_id),
+                table.c.resource_scope == resource_scope,
+            )
+            .order_by(table.c.version, table.c.id)
+        ).mappings().all():
             try:
                 target.append(_row(raw))
             except ValueError:
@@ -336,16 +397,23 @@ def _locked_cast_batches(
 
 
 def _locked_outline_batches(
-    conn: sqlite3.Connection, project_id: int, resource_scope: str,
+    conn: Connection, project_id: int, resource_scope: str,
     numbers: list[int],
 ) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
     rows = []
     for raw in conn.execute(
-        "SELECT * FROM creative_episodes WHERE project_id = ? "
-        "AND resource_scope = ? AND stage = 'outline' "
-        "ORDER BY version, episode_number, id",
-        (project_id, resource_scope),
-    ).fetchall():
+        select(creative_episodes)
+        .where(
+            creative_episodes.c.project_id == int(project_id),
+            creative_episodes.c.resource_scope == resource_scope,
+            creative_episodes.c.stage == "outline",
+        )
+        .order_by(
+            creative_episodes.c.version,
+            creative_episodes.c.episode_number,
+            creative_episodes.c.id,
+        )
+    ).mappings().all():
         try:
             rows.append(_row(raw))
         except ValueError:
@@ -363,7 +431,7 @@ def _locked_outline_batches(
 
 
 def _custom_free_snapshot(
-    conn: sqlite3.Connection,
+    conn: Connection,
     inspection: _Inspection,
     project: dict[str, Any],
     numbers: list[int],
@@ -373,17 +441,22 @@ def _custom_free_snapshot(
     heads = {
         (str(row["stage"]), int(row["episode_number"])): dict(row)
         for row in conn.execute(
-            "SELECT * FROM creative_resource_heads WHERE project_id = ? "
-            "AND resource_scope = 'free'",
-            (project_id,),
-        ).fetchall()
+            select(creative_resource_heads).where(
+                creative_resource_heads.c.project_id == project_id,
+                creative_resource_heads.c.resource_scope == "free",
+            )
+        ).mappings().all()
     }
     briefs = [
         _row(row) for row in conn.execute(
-            "SELECT * FROM creative_blueprints WHERE project_id = ? "
-            "AND resource_scope = 'free' AND status IN ('brief_locked', 'locked', 'approved')",
-            (project_id,),
-        ).fetchall()
+            select(creative_blueprints).where(
+                creative_blueprints.c.project_id == project_id,
+                creative_blueprints.c.resource_scope == "free",
+                creative_blueprints.c.status.in_(
+                    ("brief_locked", "locked", "approved")
+                ),
+            )
+        ).mappings().all()
     ]
     brief_request = _requested_manifest_item(manifest, "brief")
     brief_row = _select_resource(
@@ -448,11 +521,15 @@ def _custom_free_snapshot(
     ]
     episode_rows = []
     for raw in conn.execute(
-        "SELECT * FROM creative_episodes WHERE project_id = ? "
-        "AND resource_scope = 'free' AND stage IN ('beats', 'script') "
-        "AND status IN ('locked', 'approved') ORDER BY version, id",
-        (project_id,),
-    ).fetchall():
+        select(creative_episodes)
+        .where(
+            creative_episodes.c.project_id == project_id,
+            creative_episodes.c.resource_scope == "free",
+            creative_episodes.c.stage.in_(("beats", "script")),
+            creative_episodes.c.status.in_(("locked", "approved")),
+        )
+        .order_by(creative_episodes.c.version, creative_episodes.c.id)
+    ).mappings().all():
         try:
             episode_rows.append(_row(raw))
         except ValueError:
@@ -543,7 +620,7 @@ def _authority_matches(
 
 
 def _custom_sequential_snapshot(
-    conn: sqlite3.Connection,
+    conn: Connection,
     inspection: _Inspection,
     project: dict[str, Any],
     numbers: list[int],
@@ -552,11 +629,14 @@ def _custom_sequential_snapshot(
     project_id = int(project["id"])
     briefs = [
         _row(row) for row in conn.execute(
-            "SELECT * FROM creative_blueprints WHERE project_id = ? "
-            "AND resource_scope = 'sequential' "
-            "AND status IN ('brief_locked', 'locked', 'approved')",
-            (project_id,),
-        ).fetchall()
+            select(creative_blueprints).where(
+                creative_blueprints.c.project_id == project_id,
+                creative_blueprints.c.resource_scope == "sequential",
+                creative_blueprints.c.status.in_(
+                    ("brief_locked", "locked", "approved")
+                ),
+            )
+        ).mappings().all()
     ]
     brief_request = _requested_manifest_item(manifest, "brief")
     brief_row = _select_resource(
@@ -652,11 +732,15 @@ def _custom_sequential_snapshot(
     ]
     episode_rows = []
     for raw in conn.execute(
-        "SELECT * FROM creative_episodes WHERE project_id = ? "
-        "AND resource_scope = 'sequential' AND stage IN ('beats', 'script') "
-        "AND status IN ('locked', 'approved') ORDER BY version, id",
-        (project_id,),
-    ).fetchall():
+        select(creative_episodes)
+        .where(
+            creative_episodes.c.project_id == project_id,
+            creative_episodes.c.resource_scope == "sequential",
+            creative_episodes.c.stage.in_(("beats", "script")),
+            creative_episodes.c.status.in_(("locked", "approved")),
+        )
+        .order_by(creative_episodes.c.version, creative_episodes.c.id)
+    ).mappings().all():
         try:
             episode_rows.append(_row(raw))
         except ValueError:
@@ -785,7 +869,7 @@ def _candidate_item(
 
 
 def _version_candidates(
-    conn: sqlite3.Connection,
+    conn: Connection,
     project: dict[str, Any],
     package: dict[str, Any],
     numbers: list[int],
@@ -802,10 +886,14 @@ def _version_candidates(
     beats = {int(item["episode_number"]): item for item in package["beats"]}
     briefs = []
     for raw in conn.execute(
-        "SELECT * FROM creative_blueprints WHERE project_id = ? AND resource_scope = ? "
-        "AND status IN ('brief_locked', 'locked', 'approved') ORDER BY version DESC, id DESC",
-        (project_id, scope),
-    ).fetchall():
+        select(creative_blueprints)
+        .where(
+            creative_blueprints.c.project_id == project_id,
+            creative_blueprints.c.resource_scope == scope,
+            creative_blueprints.c.status.in_(("brief_locked", "locked", "approved")),
+        )
+        .order_by(creative_blueprints.c.version.desc(), creative_blueprints.c.id.desc())
+    ).mappings().all():
         try:
             briefs.append(_row(raw))
         except ValueError:
@@ -860,11 +948,15 @@ def _version_candidates(
         ))
     episode_rows = []
     for raw in conn.execute(
-        "SELECT * FROM creative_episodes WHERE project_id = ? AND resource_scope = ? "
-        "AND stage IN ('beats', 'script') AND status IN ('locked', 'approved') "
-        "ORDER BY version DESC, id DESC",
-        (project_id, scope),
-    ).fetchall():
+        select(creative_episodes)
+        .where(
+            creative_episodes.c.project_id == project_id,
+            creative_episodes.c.resource_scope == scope,
+            creative_episodes.c.stage.in_(("beats", "script")),
+            creative_episodes.c.status.in_(("locked", "approved")),
+        )
+        .order_by(creative_episodes.c.version.desc(), creative_episodes.c.id.desc())
+    ).mappings().all():
         try:
             episode_rows.append(_row(raw))
         except ValueError:
@@ -907,7 +999,7 @@ def _version_candidates(
 
 
 def _attach_version_selection(
-    conn: sqlite3.Connection,
+    conn: Connection,
     inspection: _Inspection,
     project: dict[str, Any],
     package: dict[str, Any] | None,
@@ -928,7 +1020,7 @@ def _attach_version_selection(
 
 
 def _inspect_free_snapshot(
-    conn: sqlite3.Connection,
+    conn: Connection,
     inspection: _Inspection,
     project: dict[str, Any],
     numbers: list[int],
@@ -938,10 +1030,11 @@ def _inspect_free_snapshot(
     heads = {
         (str(row["stage"]), int(row["episode_number"])): dict(row)
         for row in conn.execute(
-            "SELECT * FROM creative_resource_heads WHERE project_id = ? "
-            "AND resource_scope = 'free'",
-            (project_id,),
-        ).fetchall()
+            select(creative_resource_heads).where(
+                creative_resource_heads.c.project_id == project_id,
+                creative_resource_heads.c.resource_scope == "free",
+            )
+        ).mappings().all()
     }
 
     def read_brief() -> dict[str, Any]:
@@ -951,10 +1044,12 @@ def _inspect_free_snapshot(
         except (TypeError, ValueError) as exc:
             raise ValueError("brief: invalid resource head") from exc
         raw = conn.execute(
-            "SELECT * FROM creative_blueprints WHERE project_id = ? AND id = ? "
-            "AND resource_scope = 'free'",
-            (project_id, resource_id),
-        ).fetchone()
+            select(creative_blueprints).where(
+                creative_blueprints.c.project_id == project_id,
+                creative_blueprints.c.id == resource_id,
+                creative_blueprints.c.resource_scope == "free",
+            )
+        ).mappings().first()
         if raw is None:
             raise ValueError("brief: missing locked input")
         value = _row(raw)
@@ -967,13 +1062,18 @@ def _inspect_free_snapshot(
 
     def read_cast(category: str) -> list[dict[str, Any]]:
         head = _free_head(heads, "characters")
+        table = _CAST_TABLES[category]
         values = [
             _row(raw)
             for raw in conn.execute(
-                f"SELECT * FROM creative_{category} WHERE project_id = ? "
-                "AND batch_id = ? AND resource_scope = 'free' ORDER BY id",
-                (project_id, str(head["resource_ref"])),
-            ).fetchall()
+                select(table)
+                .where(
+                    table.c.project_id == project_id,
+                    table.c.batch_id == str(head["resource_ref"]),
+                    table.c.resource_scope == "free",
+                )
+                .order_by(table.c.id)
+            ).mappings().all()
         ]
         if category == "characters" and not values:
             raise ValueError("characters: missing locked input")
@@ -989,11 +1089,14 @@ def _inspect_free_snapshot(
     def read_outline(number: int) -> dict[str, Any]:
         head = _free_head(heads, "outline")
         raw = conn.execute(
-            "SELECT * FROM creative_episodes WHERE project_id = ? "
-            "AND stage = 'outline' AND episode_number = ? AND batch_id = ? "
-            "AND resource_scope = 'free'",
-            (project_id, number, str(head["resource_ref"])),
-        ).fetchone()
+            select(creative_episodes).where(
+                creative_episodes.c.project_id == project_id,
+                creative_episodes.c.stage == "outline",
+                creative_episodes.c.episode_number == number,
+                creative_episodes.c.batch_id == str(head["resource_ref"]),
+                creative_episodes.c.resource_scope == "free",
+            )
+        ).mappings().first()
         if raw is None:
             raise ValueError(f"outline: missing locked input for episode {number}")
         value = _row(raw)
@@ -1009,10 +1112,14 @@ def _inspect_free_snapshot(
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{stage}: invalid resource head for episode {number}") from exc
         raw = conn.execute(
-            "SELECT * FROM creative_episodes WHERE id = ? AND project_id = ? "
-            "AND stage = ? AND episode_number = ? AND resource_scope = 'free'",
-            (resource_id, project_id, stage, number),
-        ).fetchone()
+            select(creative_episodes).where(
+                creative_episodes.c.id == resource_id,
+                creative_episodes.c.project_id == project_id,
+                creative_episodes.c.stage == stage,
+                creative_episodes.c.episode_number == number,
+                creative_episodes.c.resource_scope == "free",
+            )
+        ).mappings().first()
         if raw is None:
             raise ValueError(f"{stage}: missing locked input for episode {number}")
         value = _row(raw)
@@ -1075,180 +1182,208 @@ def _inspect_free_snapshot(
 
 
 def _inspect_snapshot(
-    db_path: str | Path,
+    repository,
     project_id: int,
     episode_numbers: Iterable[int] | None = None,
     version_manifest: dict[str, Any] | None = None,
+    *,
+    connection: Connection | None = None,
 ) -> tuple[_Inspection, dict[str, Any] | None]:
-    path = Path(db_path).resolve()
-    if not path.is_file():
-        raise FileNotFoundError(path)
-    conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, isolation_level=None)
-    conn.row_factory = sqlite3.Row
+    """Read one validated snapshot through the repository's connection boundary.
+
+    ``connection`` is borrowed from ``repository.connection_scope()``: a caller
+    that already owns a read transaction passes its connection so the whole
+    snapshot is one consistent read, and a caller that does not is given a
+    short-lived connection the repository owns. Either way this function never
+    commits, rolls back or closes that connection -- only its owner ends it.
+    """
+
+    with repository.connection_scope(connection) as conn:
+        return _inspect_snapshot_conn(
+            conn, project_id, episode_numbers, version_manifest,
+        )
+
+
+def _inspect_snapshot_conn(
+    conn: Connection,
+    project_id: int,
+    episode_numbers: Iterable[int] | None,
+    version_manifest: dict[str, Any] | None,
+) -> tuple[_Inspection, dict[str, Any] | None]:
+    raw_project = conn.execute(
+        select(creative_projects).where(
+            creative_projects.c.id == int(project_id),
+            creative_projects.c.deleted.is_(False),
+        )
+    ).mappings().first()
+    if raw_project is None:
+        raise KeyError(project_id)
+    inspection = _Inspection(_columns(raw_project))
     try:
-        conn.execute("PRAGMA query_only = ON")
-        conn.execute("BEGIN")
-        raw_project = conn.execute(
-            "SELECT * FROM creative_projects WHERE id = ? AND deleted = 0", (project_id,)
-        ).fetchone()
-        if raw_project is None:
-            raise KeyError(project_id)
-        project = dict(raw_project)
-        inspection = _Inspection(project)
+        project = _row(raw_project)
+    except ValueError:
+        inspection.check('project', lambda: _row(raw_project))
+        return inspection, None
+    count = project["target_episode_count"]
+    if episode_numbers is None:
+        numbers = list(range(1, count + 1))
+    else:
+        if isinstance(episode_numbers, (str, bytes)):
+            raise ValueError("episode_numbers must contain positive integers")
         try:
-            project = _row(raw_project)
-        except ValueError as exc:
-            inspection.check('project', lambda: _row(raw_project))
-            return inspection, None
-        count = project["target_episode_count"]
-        if episode_numbers is None:
-            numbers = list(range(1, count + 1))
-        else:
-            if isinstance(episode_numbers, (str, bytes)):
-                raise ValueError("episode_numbers must contain positive integers")
-            try:
-                numbers = list(episode_numbers)
-            except TypeError as exc:
-                raise ValueError("episode_numbers must be iterable") from exc
-            if not numbers or any(type(n) is not int or not 1 <= n <= count for n in numbers):
-                raise ValueError("episode_numbers must contain integers in the project range")
-            numbers = sorted(set(numbers))
-        if not numbers:
-            def no_episodes():
-                raise ValueError("episode_numbers: project has no target episodes")
-            inspection.check('project', no_episodes)
-            return inspection, None
-        strategy = "custom" if version_manifest is not None else "current"
-        if version_manifest is not None and not isinstance(version_manifest, dict):
-            raise ValueError("version_manifest: must be an object")
-        if str(project.get("workflow_mode") or "sequential") == "free":
-            package = (
-                _custom_free_snapshot(
-                    conn, inspection, project, numbers, version_manifest or {},
-                )
-                if version_manifest is not None
-                else _inspect_free_snapshot(conn, inspection, project, numbers)
+            numbers = list(episode_numbers)
+        except TypeError as exc:
+            raise ValueError("episode_numbers must be iterable") from exc
+        if not numbers or any(type(n) is not int or not 1 <= n <= count for n in numbers):
+            raise ValueError("episode_numbers must contain integers in the project range")
+        numbers = sorted(set(numbers))
+    if not numbers:
+        def no_episodes():
+            raise ValueError("episode_numbers: project has no target episodes")
+        inspection.check('project', no_episodes)
+        return inspection, None
+    strategy = "custom" if version_manifest is not None else "current"
+    if version_manifest is not None and not isinstance(version_manifest, dict):
+        raise ValueError("version_manifest: must be an object")
+    if str(project.get("workflow_mode") or "sequential") == "free":
+        package = (
+            _custom_free_snapshot(
+                conn, inspection, project, numbers, version_manifest or {},
             )
-            _attach_version_selection(
-                conn, inspection, project, package, numbers, strategy,
-            )
-            return inspection, package
-        if version_manifest is not None:
-            package = _custom_sequential_snapshot(
-                conn, inspection, project, numbers, version_manifest,
-            )
-            _attach_version_selection(
-                conn, inspection, project, package, numbers, strategy,
-            )
-            return inspection, package
-        brief_row = conn.execute(
-            "SELECT * FROM creative_blueprints WHERE project_id = ? AND id = ?",
-            (project_id, project.get("locked_brief_id")),
-        ).fetchone()
-        def read_brief():
-            if brief_row is None:
-                raise ValueError("brief: missing locked input")
-            value = _row(brief_row)
-            _locked(value, 'brief')
-            _digest(value)
-            return value
-        brief = inspection.check('brief', read_brief)
-        cast: dict[str, list[dict[str, Any]]] = {}
-        for category in ("characters", "relationships"):
-            def read_cast():
-                values = [_row(raw) for raw in conn.execute(
-                    f"SELECT * FROM creative_{category} WHERE project_id = ? AND batch_id = ? ORDER BY id",
-                    (project_id, project.get('character_batch_id')),
-                )]
-                if category == 'characters' and not values:
-                    raise ValueError('characters: missing locked input')
-                for item in values:
-                    _locked(item, category)
-                    _refs(item, 'source_refs', {'brief_id': brief['id']}, category)
-                _digest(values)
-                return values
-            cast[category] = inspection.check(category, read_cast, dependencies=brief is not None)
-        placeholders = ",".join("?" for _ in numbers)
-        episodes = [dict(raw) for raw in conn.execute(
-            f"SELECT * FROM creative_episodes WHERE project_id = ? AND episode_number IN ({placeholders}) "
-            "AND status IN ('locked', 'approved') ORDER BY episode_number, version, id",
-            (project_id, *numbers),
-        )]
-        upstream_ready = brief is not None and all(value is not None for value in cast.values())
-        context = {
-            "brief_id": brief["id"], "brief_version": brief["version"],
-            "brief_content_fingerprint": _digest(brief["content"]),
-            "character_batch_id": project["character_batch_id"],
-            "character_content_fingerprint": _digest({
-                category: [{"id": r["id"], "version": r["version"], "content": r["content"]}
-                           for r in cast[category]]
-                for category in ("characters", "relationships")
-            }),
-        } if upstream_ready else {}
-        outlines, beats, scripts = [], [], []
-        for number in numbers:
-            def read_outline():
-                if not project.get('outline_batch_id'):
-                    raise ValueError('outline: missing locked input')
-                value = _row(_latest(episodes, 'outline', number, project['outline_batch_id']))
-                _refs(value, 'upstream_refs', {
-                    'brief_id': brief['id'], 'character_batch_id': project['character_batch_id'],
-                }, 'outline')
-                _digest(value)
-                return value
-            outline = inspection.check('outline', read_outline, number=number, dependencies=upstream_ready)
-            expected = dict(context, outline_batch_id=project['outline_batch_id'],
-                            outline_id=outline['id'], outline_version=outline['version']) if outline else {}
-            def read_beats():
-                value = _row(_latest(episodes, 'beats', number))
-                _authority(value, expected, outline)
-                _digest(value)
-                return value
-            beat = inspection.check('beats', read_beats, number=number, dependencies=outline is not None)
-            def read_script():
-                value = _row(_latest(episodes, 'script', number))
-                _authority(value, dict(expected, beats_id=beat['id'], beats_version=beat['version'],
-                                       beats_content_fingerprint=_digest(beat['content'])), outline)
-                _digest(value)
-                return value
-            script = inspection.check('script', read_script, number=number, dependencies=beat is not None)
-            outlines.append(outline)
-            beats.append(beat)
-            scripts.append(script)
-        if inspection.errors:
-            return inspection, None
-        package = {
-            "schemaVersion": "1.0", "sourceSystem": "AiWorker", "project": project,
-            "provenance": {
-                "project_id": project["id"], "project_revision": project.get("revision", 0),
-                "episode_numbers": numbers, "workflow_mode": "sequential",
-                **_scope_provenance(project, numbers),
-                "locked_brief_id": brief["id"],
-                "character_batch_id": project["character_batch_id"],
-                "outline_batch_id": project["outline_batch_id"],
-            },
-            "brief": brief, **cast, "outlines": outlines, "beats": beats, "scripts": scripts,
-        }
-        package["version_manifest"] = _package_version_manifest(package)
-        package["fingerprint"] = _digest(_fingerprint_payload(package))
+            if version_manifest is not None
+            else _inspect_free_snapshot(conn, inspection, project, numbers)
+        )
         _attach_version_selection(
             conn, inspection, project, package, numbers, strategy,
         )
         return inspection, package
-    finally:
-        if conn.in_transaction:
-            conn.rollback()
-        conn.close()
+    if version_manifest is not None:
+        package = _custom_sequential_snapshot(
+            conn, inspection, project, numbers, version_manifest,
+        )
+        _attach_version_selection(
+            conn, inspection, project, package, numbers, strategy,
+        )
+        return inspection, package
+    brief_row = conn.execute(
+        select(creative_blueprints).where(
+            creative_blueprints.c.project_id == int(project_id),
+            creative_blueprints.c.id == project.get("locked_brief_id"),
+        )
+    ).mappings().first()
+
+    def read_brief():
+        if brief_row is None:
+            raise ValueError("brief: missing locked input")
+        value = _row(brief_row)
+        _locked(value, 'brief')
+        _digest(value)
+        return value
+
+    brief = inspection.check('brief', read_brief)
+    cast: dict[str, list[dict[str, Any]]] = {}
+    for category, table in _CAST_TABLES.items():
+        def read_cast(category=category, table=table):
+            values = [_row(raw) for raw in conn.execute(
+                select(table).where(
+                    table.c.project_id == int(project_id),
+                    table.c.batch_id == project.get('character_batch_id'),
+                ).order_by(table.c.id)
+            ).mappings().all()]
+            if category == 'characters' and not values:
+                raise ValueError('characters: missing locked input')
+            for item in values:
+                _locked(item, category)
+                _refs(item, 'source_refs', {'brief_id': brief['id']}, category)
+            _digest(values)
+            return values
+        cast[category] = inspection.check(category, read_cast, dependencies=brief is not None)
+    episodes = [dict(raw) for raw in conn.execute(
+        select(creative_episodes).where(
+            creative_episodes.c.project_id == int(project_id),
+            creative_episodes.c.episode_number.in_(numbers),
+            creative_episodes.c.status.in_(('locked', 'approved')),
+        ).order_by(
+            creative_episodes.c.episode_number,
+            creative_episodes.c.version,
+            creative_episodes.c.id,
+        )
+    ).mappings().all()]
+    upstream_ready = brief is not None and all(value is not None for value in cast.values())
+    context = {
+        "brief_id": brief["id"], "brief_version": brief["version"],
+        "brief_content_fingerprint": _digest(brief["content"]),
+        "character_batch_id": project["character_batch_id"],
+        "character_content_fingerprint": _digest({
+            category: [{"id": r["id"], "version": r["version"], "content": r["content"]}
+                       for r in cast[category]]
+            for category in ("characters", "relationships")
+        }),
+    } if upstream_ready else {}
+    outlines, beats, scripts = [], [], []
+    for number in numbers:
+        def read_outline():
+            if not project.get('outline_batch_id'):
+                raise ValueError('outline: missing locked input')
+            value = _row(_latest(episodes, 'outline', number, project['outline_batch_id']))
+            _refs(value, 'upstream_refs', {
+                'brief_id': brief['id'], 'character_batch_id': project['character_batch_id'],
+            }, 'outline')
+            _digest(value)
+            return value
+        outline = inspection.check('outline', read_outline, number=number, dependencies=upstream_ready)
+        expected = dict(context, outline_batch_id=project['outline_batch_id'],
+                        outline_id=outline['id'], outline_version=outline['version']) if outline else {}
+        def read_beats():
+            value = _row(_latest(episodes, 'beats', number))
+            _authority(value, expected, outline)
+            _digest(value)
+            return value
+        beat = inspection.check('beats', read_beats, number=number, dependencies=outline is not None)
+        def read_script():
+            value = _row(_latest(episodes, 'script', number))
+            _authority(value, dict(expected, beats_id=beat['id'], beats_version=beat['version'],
+                                   beats_content_fingerprint=_digest(beat['content'])), outline)
+            _digest(value)
+            return value
+        script = inspection.check('script', read_script, number=number, dependencies=beat is not None)
+        outlines.append(outline)
+        beats.append(beat)
+        scripts.append(script)
+    if inspection.errors:
+        return inspection, None
+    package = {
+        "schemaVersion": "1.0", "sourceSystem": "AiWorker", "project": project,
+        "provenance": {
+            "project_id": project["id"], "project_revision": project.get("revision", 0),
+            "episode_numbers": numbers, "workflow_mode": "sequential",
+            **_scope_provenance(project, numbers),
+            "locked_brief_id": brief["id"],
+            "character_batch_id": project["character_batch_id"],
+            "outline_batch_id": project["outline_batch_id"],
+        },
+        "brief": brief, **cast, "outlines": outlines, "beats": beats, "scripts": scripts,
+    }
+    package["version_manifest"] = _package_version_manifest(package)
+    package["fingerprint"] = _digest(_fingerprint_payload(package))
+    _attach_version_selection(
+        conn, inspection, project, package, numbers, strategy,
+    )
+    return inspection, package
 
 
 def export_production_package(
-    db_path: str | Path, project_id: int,
+    repository,
+    project_id: int,
     episode_numbers: Iterable[int] | None = None,
     version_manifest: dict[str, Any] | None = None,
+    *,
+    connection: Connection | None = None,
 ) -> dict[str, Any]:
-    """Return one validated snapshot. Does not create files or alter SQLite."""
+    """Return one validated snapshot. Does not create files or alter the store."""
     inspection, package = _inspect_snapshot(
-        db_path, project_id, episode_numbers, version_manifest,
+        repository, project_id, episode_numbers, version_manifest,
+        connection=connection,
     )
     if inspection.errors:
         raise inspection.errors[0]
@@ -1256,10 +1391,14 @@ def export_production_package(
 
 
 def preview_production_package(
-    db_path: str | Path, project_id: int,
+    repository,
+    project_id: int,
     version_manifest: dict[str, Any] | None = None,
+    *,
+    connection: Connection | None = None,
 ) -> dict[str, Any]:
     inspection, package = _inspect_snapshot(
-        db_path, project_id, version_manifest=version_manifest,
+        repository, project_id, version_manifest=version_manifest,
+        connection=connection,
     )
     return inspection.preview(package)

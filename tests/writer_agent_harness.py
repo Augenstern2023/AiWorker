@@ -318,8 +318,13 @@ class DeterministicCreativeProvider:
 
 
 class DeterministicJobManager:
-    def __init__(self, provider: DeterministicCreativeProvider) -> None:
+    def __init__(
+        self,
+        provider: DeterministicCreativeProvider,
+        creative_repository: CreativeRepository,
+    ) -> None:
         self.provider = provider
+        self.creative_repository = creative_repository
         self.jobs: dict[str, dict[str, Any]] = {}
         self._by_operation: dict[str, str] = {}
         self._fail_once: set[str] = set()
@@ -387,7 +392,11 @@ class DeterministicJobManager:
             try:
                 data = dict(job["payload"])
                 data["job_id"] = job["job_id"]
-                asyncio.run(phase4_worker.run(CrawlJob.from_dict(data)))
+                asyncio.run(
+                    phase4_worker._run_with_repository(
+                        CrawlJob.from_dict(data), self.creative_repository
+                    )
+                )
             except Exception as exc:
                 job["error"] = repr(exc)
                 self._set_status(job, "failed")
@@ -473,7 +482,7 @@ class WriterAgentE2EHarness:
         transitions = TransitionService(harness.workflow_repository, creative_adapter=adapter)
         harness.original_project_service = OriginalProjectService(harness.creative_repository, harness.workflow_repository, MarketReferenceService(harness.creative_repository))
         harness.provider = DeterministicCreativeProvider()
-        harness.job_manager = DeterministicJobManager(harness.provider)
+        harness.job_manager = DeterministicJobManager(harness.provider, harness.creative_repository)
         harness.creative_service = CreativeApplicationService(harness.creative_repository, harness.workflow_repository, transitions, harness.job_manager, tmp_path, harness.original_project_service, adapter, permissions)
         harness.store = WriterAgentStore(tmp_path / "writer-agent.db")
         harness.job_bound = threading.Event()

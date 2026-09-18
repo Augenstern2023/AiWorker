@@ -407,6 +407,7 @@ def test_project_governance_http_matrix_and_five_stage_collaboration(
         build_creative_router(
             root=tmp_path,
             runtime_dir=runtime,
+            repository=creative,
             workflow_repository=workflow,
         )
     )

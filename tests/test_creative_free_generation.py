@@ -16,10 +16,10 @@ import pytest
 from core.job import CrawlJob
 from creative import free_phase4_worker
 from creative.free_mode_service import FreeCreativeModeService
-from creative.repository import CreativeRepository
+from creative.repositories.base import CreativeRepositoryBase
 
 
-def _free_project(repository: CreativeRepository) -> dict[str, Any]:
+def _free_project(repository: CreativeRepositoryBase) -> dict[str, Any]:
     project = repository.create_original_project(
         seed_text="一个能听见谎言的普通女孩",
         name="谎言回声",
@@ -65,13 +65,13 @@ def test_outline_export_includes_recorded_generation_model() -> None:
     ],
 )
 async def test_free_generation_works_without_upstream_resources_and_updates_head(
-    tmp_path,
+    postgres_creative,
     monkeypatch,
     action: str,
     stage: str,
     episode_number: int | None,
 ) -> None:
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    repository = postgres_creative
     project = _free_project(repository)
     service = FreeCreativeModeService(repository)
     context = service.create_generation_context(
@@ -175,9 +175,9 @@ async def test_free_generation_works_without_upstream_resources_and_updates_head
 
 @pytest.mark.asyncio
 async def test_free_generation_uses_selected_model_and_persists_attribution(
-    tmp_path, monkeypatch
+    postgres_creative, monkeypatch
 ) -> None:
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    repository = postgres_creative
     project = _free_project(repository)
     service = FreeCreativeModeService(repository)
     context = service.create_generation_context(
@@ -249,8 +249,8 @@ async def test_free_generation_uses_selected_model_and_persists_attribution(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("count", [1, 3, 5])
-async def test_free_brief_generation_preserves_requested_direction_count(tmp_path, monkeypatch, count):
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+async def test_free_brief_generation_preserves_requested_direction_count(postgres_creative, monkeypatch, count):
+    repository = postgres_creative
     project = _free_project(repository)
     service = FreeCreativeModeService(repository)
     context = service.create_generation_context(
@@ -301,8 +301,8 @@ async def test_free_brief_generation_preserves_requested_direction_count(tmp_pat
     assert service.get_head(project["id"], "brief")["revision"] == 1
 
 
-def test_free_brief_batch_preserves_existing_direction_and_rolls_back_on_conflict(tmp_path):
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+def test_free_brief_batch_preserves_existing_direction_and_rolls_back_on_conflict(postgres_creative):
+    repository = postgres_creative
     project = _free_project(repository)
     service = FreeCreativeModeService(repository)
     original = service.create_brief(
@@ -328,13 +328,13 @@ def test_free_brief_batch_preserves_existing_direction_and_rolls_back_on_conflic
 
 
 @pytest.mark.asyncio
-async def test_free_brief_api_forwards_direction_count(tmp_path):
+async def test_free_brief_api_forwards_direction_count(tmp_path, postgres_creative):
     from types import SimpleNamespace
     from unittest.mock import Mock
     from creative.api import build_creative_router
     from creative.schema import FreeCreativeGenerateRequest
 
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    repository = postgres_creative
     project = _free_project(repository)
     requests = []
 
@@ -365,12 +365,12 @@ async def test_free_brief_api_forwards_direction_count(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_free_generation_api_validates_and_hashes_selected_model(tmp_path):
+async def test_free_generation_api_validates_and_hashes_selected_model(tmp_path, postgres_creative):
     from unittest.mock import Mock
     from creative.api import build_creative_router
     from creative.schema import FreeCreativeGenerateRequest
 
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    repository = postgres_creative
     project = _free_project(repository)
     jobs = []
     resolved = []
@@ -418,12 +418,12 @@ async def test_free_generation_api_validates_and_hashes_selected_model(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_free_series_api_forwards_one_selected_model_to_all_episodes(tmp_path):
+async def test_free_series_api_forwards_one_selected_model_to_all_episodes(tmp_path, postgres_creative):
     from unittest.mock import Mock
     from creative.api import build_creative_router
     from creative.schema import FreeCreativeSeriesGenerateRequest
 
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    repository = postgres_creative
     project = _free_project(repository)
     jobs = []
 
@@ -463,10 +463,10 @@ async def test_free_series_api_forwards_one_selected_model_to_all_episodes(tmp_p
 
 @pytest.mark.asyncio
 async def test_free_beats_series_generates_every_episode_and_preserves_locked_versions(
-    tmp_path,
+    postgres_creative,
     monkeypatch,
 ) -> None:
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    repository = postgres_creative
     project = _free_project(repository)
     service = FreeCreativeModeService(repository)
     original = service.create_episode_resource(
@@ -575,10 +575,10 @@ async def test_free_beats_series_generates_every_episode_and_preserves_locked_ve
 
 @pytest.mark.asyncio
 async def test_free_beats_series_rejects_stale_episode_head_before_generation(
-    tmp_path,
+    postgres_creative,
     monkeypatch,
 ) -> None:
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    repository = postgres_creative
     project = _free_project(repository)
     service = FreeCreativeModeService(repository)
     contexts = {
@@ -644,10 +644,10 @@ async def test_free_beats_series_rejects_stale_episode_head_before_generation(
 
 @pytest.mark.asyncio
 async def test_free_script_series_generates_every_episode_and_updates_each_head(
-    tmp_path,
+    postgres_creative,
     monkeypatch,
 ) -> None:
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    repository = postgres_creative
     project = _free_project(repository)
     service = FreeCreativeModeService(repository)
     contexts = {

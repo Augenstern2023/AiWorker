@@ -12,9 +12,11 @@ import asyncio
 import json
 from pathlib import Path
 
+from sqlalchemy import text
+
 from core.job import CrawlJob
 from creative import breakdown_worker
-from creative.repository import CreativeRepository
+from creative.postgres_repository import PostgresCreativeRepository
 
 
 class Provider:
@@ -33,7 +35,7 @@ class SlowProvider(Provider):
         return self.response
 
 
-def seed_topic(repository: CreativeRepository) -> tuple[dict, dict]:
+def seed_topic(repository) -> tuple[dict, dict]:
     topic = repository.upsert_topics([{
         "platform": "hg", "job_id": "rank", "source_path": "rank.json",
         "captured_at": "2026-07-20", "title": "目标剧", "description": "",
@@ -94,9 +96,10 @@ def generated_payload(script_path: Path) -> dict:
     }
 
 
-def test_breakdown_worker_persists_personalized_draft_and_completion_event(tmp_path, monkeypatch):
-    db_path = tmp_path / ".runtime/creative/creative.db"
-    repository = CreativeRepository(db_path)
+def test_breakdown_worker_persists_personalized_draft_and_completion_event(
+    tmp_path, monkeypatch, worker_system_database
+):
+    repository = PostgresCreativeRepository(worker_system_database)
     topic, locked = seed_topic(repository)
     script_path = write_script(tmp_path)
     monkeypatch.setattr(breakdown_worker, "create_provider", lambda: Provider(generated_payload(script_path)))
@@ -105,19 +108,14 @@ def test_breakdown_worker_persists_personalized_draft_and_completion_event(tmp_p
     job = CrawlJob(
         job_id="breakdown-1", platform="creative", crawler_type="breakdown_generate",
         extra={
-            "topic_id": topic["id"], "db_path": str(db_path),
+            "topic_id": topic["id"],
             "runtime_dir": str(tmp_path / ".runtime"), "workspace_root": str(tmp_path),
         },
     )
 
     asyncio.run(breakdown_worker.run(job))
 
-    with repository._connect() as conn:
-        row = conn.execute(
-            "SELECT id FROM creative_breakdowns WHERE topic_id = ? ORDER BY version DESC LIMIT 1",
-            (topic["id"],),
-        ).fetchone()
-    draft = repository.get_breakdown(row["id"])
+    draft = repository.get_latest_breakdown(topic["id"])
     assert draft["status"] == "draft"
     assert draft["parent_version_id"] == locked["id"]
     assert draft["content"]["protagonist_identity"] == "苏软，穿书炮灰。"
@@ -130,9 +128,10 @@ def test_breakdown_worker_persists_personalized_draft_and_completion_event(tmp_p
     }
 
 
-def test_breakdown_worker_does_not_create_partial_draft_on_generation_failure(tmp_path, monkeypatch):
-    db_path = tmp_path / ".runtime/creative/creative.db"
-    repository = CreativeRepository(db_path)
+def test_breakdown_worker_does_not_create_partial_draft_on_generation_failure(
+    tmp_path, monkeypatch, worker_system_database
+):
+    repository = PostgresCreativeRepository(worker_system_database)
     topic, _ = seed_topic(repository)
     script_path = write_script(tmp_path)
     invalid = generated_payload(script_path)
@@ -140,7 +139,7 @@ def test_breakdown_worker_does_not_create_partial_draft_on_generation_failure(tm
     monkeypatch.setattr(breakdown_worker, "create_provider", lambda: Provider(invalid))
     job = CrawlJob(
         job_id="breakdown-failed", platform="creative", crawler_type="breakdown_generate",
-        extra={"topic_id": topic["id"], "db_path": str(db_path), "workspace_root": str(tmp_path)},
+        extra={"topic_id": topic["id"], "workspace_root": str(tmp_path)},
     )
 
     try:
@@ -148,14 +147,20 @@ def test_breakdown_worker_does_not_create_partial_draft_on_generation_failure(tm
     except Exception:
         pass
 
-    with repository._connect() as conn:
-        count = conn.execute("SELECT COUNT(*) FROM creative_breakdowns WHERE topic_id = ?", (topic["id"],)).fetchone()[0]
+    with worker_system_database.connection() as connection:
+        count = connection.execute(
+            text(
+                "SELECT COUNT(*) FROM creative_breakdowns WHERE topic_id = :topic_id"
+            ),
+            {"topic_id": topic["id"]},
+        ).scalar_one()
     assert count == 1
 
 
-def test_breakdown_worker_emits_model_analysis_heartbeats(tmp_path, monkeypatch):
-    db_path = tmp_path / ".runtime/creative/creative.db"
-    repository = CreativeRepository(db_path)
+def test_breakdown_worker_emits_model_analysis_heartbeats(
+    tmp_path, monkeypatch, worker_system_database
+):
+    repository = PostgresCreativeRepository(worker_system_database)
     topic, _ = seed_topic(repository)
     script_path = write_script(tmp_path)
     monkeypatch.setattr(breakdown_worker, "HEARTBEAT_SECONDS", 0.01)
@@ -164,7 +169,7 @@ def test_breakdown_worker_emits_model_analysis_heartbeats(tmp_path, monkeypatch)
     monkeypatch.setattr(breakdown_worker, "emit_event", lambda *args, **kwargs: events.append((args, kwargs)))
     job = CrawlJob(
         job_id="breakdown-heartbeat", platform="creative", crawler_type="breakdown_generate",
-        extra={"topic_id": topic["id"], "db_path": str(db_path), "workspace_root": str(tmp_path)},
+        extra={"topic_id": topic["id"], "workspace_root": str(tmp_path)},
     )
 
     asyncio.run(breakdown_worker.run(job))
@@ -175,9 +180,10 @@ def test_breakdown_worker_emits_model_analysis_heartbeats(tmp_path, monkeypatch)
     assert heartbeats[-1][6]["elapsed_seconds"] >= 0
 
 
-def test_breakdown_worker_materializes_downloaded_video_before_generation(tmp_path, monkeypatch):
-    db_path = tmp_path / ".runtime/creative/creative.db"
-    repository = CreativeRepository(db_path)
+def test_breakdown_worker_materializes_downloaded_video_before_generation(
+    tmp_path, monkeypatch, worker_system_database
+):
+    repository = PostgresCreativeRepository(worker_system_database)
     topic, locked = seed_topic(repository)
     video, source = write_video(tmp_path)
     script_path = video.with_name("script.md")
@@ -194,7 +200,7 @@ def test_breakdown_worker_materializes_downloaded_video_before_generation(tmp_pa
     job = CrawlJob(
         job_id="breakdown-video", platform="creative", crawler_type="breakdown_generate",
         extra={
-            "topic_id": topic["id"], "db_path": str(db_path),
+            "topic_id": topic["id"],
             "runtime_dir": str(tmp_path / ".runtime"), "workspace_root": str(tmp_path),
         },
     )

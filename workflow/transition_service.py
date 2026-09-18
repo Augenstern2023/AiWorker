@@ -44,7 +44,7 @@ class TransitionService:
             if isinstance(repository, WorkflowRepository)
             else WorkflowRepository(repository)
         )
-        self.creative_adapter = creative_adapter or self._default_creative_adapter()
+        self.creative_adapter = creative_adapter
 
     def complete_creative_without_review(
         self,
@@ -357,18 +357,6 @@ class TransitionService:
                         connection=connection,
                     )
 
-
-    def _default_creative_adapter(self) -> CreativeWorkflowAdapter | None:
-        system_path = getattr(self.repository.identity_repository, "db_path", None)
-        if system_path is None or system_path.parent.name != "system":
-            return None
-        creative_path = system_path.parent.parent / "creative" / "creative.db"
-        from creative.repository import CreativeRepository
-        from creative.workflow_adapter import CreativeWorkflowAdapter
-
-        return CreativeWorkflowAdapter(
-            CreativeRepository(creative_path), self.repository
-        )
 
     def reconcile_task(self, task_id: str) -> None:
         # Legacy records are migrated at router startup; active tasks no longer

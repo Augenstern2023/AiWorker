@@ -165,7 +165,9 @@ def test_five_role_workflow_isolated_audited_and_persistent(tmp_path: Path):
     app.state.identity_permission_service = permissions
     app.state.audit_service = audit
     app.include_router(build_workflow_router(workflow, transitions))
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(build_creative_router(
+        root=tmp_path, runtime_dir=runtime, repository=creative
+    ))
     app.include_router(
         build_delivery_router(
             DeliveryService(

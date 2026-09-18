@@ -32,6 +32,7 @@ from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.session_service import SessionService
 from system_database import SystemDatabase, SystemDatabaseSettings
+from tests.conftest import build_test_creative_repository
 from workflow.api import build_workflow_router
 from workflow.repository import WorkflowRepository
 
@@ -193,7 +194,11 @@ def test_screenwriter_creates_project_with_team_and_pool_tasks_idempotently(
     app.state.audit_service = AuditService(identity)
     app.dependency_overrides[creative_api_principal] = lambda: creator
     app.dependency_overrides[current_principal] = lambda: creator
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(
+        build_creative_router(
+            root=tmp_path, runtime_dir=runtime, repository=creative
+        )
+    )
     client = TestClient(app)
     payload = {
         "name": "编剧创建的项目",
@@ -401,7 +406,11 @@ def test_page_grant_replaces_project_create_permission_for_bound_endpoints(
     app.state.page_access_service = _AllowPageApi()
     app.dependency_overrides[creative_api_principal] = lambda: principal
     app.dependency_overrides[current_principal] = lambda: principal
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(
+        build_creative_router(
+            root=tmp_path, runtime_dir=runtime, repository=creative
+        )
+    )
     client = TestClient(app)
     created_project_ids: list[str] = []
     try:
@@ -474,7 +483,11 @@ def test_member_candidates_require_project_member_manage_permission(
     app.dependency_overrides[creative_api_principal] = lambda: principal
     app.dependency_overrides[current_principal] = lambda: principal
     app.include_router(
-        build_creative_router(root=tmp_path, runtime_dir=tmp_path / ".runtime")
+        build_creative_router(
+            root=tmp_path,
+            runtime_dir=tmp_path / ".runtime",
+            repository=build_test_creative_repository(tmp_path / ".runtime"),
+        )
     )
 
     response = TestClient(app).get(
@@ -691,7 +704,11 @@ def test_invalid_team_selection_leaves_no_partial_project(
     app.state.identity_permission_service = permissions
     app.dependency_overrides[creative_api_principal] = lambda: creator
     app.dependency_overrides[current_principal] = lambda: creator
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(
+        build_creative_router(
+            root=tmp_path, runtime_dir=runtime, repository=creative
+        )
+    )
 
     response = TestClient(app).post(
         f"/api/creative/topics/{topic['id']}/planning-assignment",
@@ -732,7 +749,11 @@ def test_project_creator_can_create_with_empty_member_lists(
     app.state.identity_permission_service = permissions
     app.dependency_overrides[creative_api_principal] = lambda: creator
     app.dependency_overrides[current_principal] = lambda: creator
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(
+        build_creative_router(
+            root=tmp_path, runtime_dir=runtime, repository=creative
+        )
+    )
 
     response = TestClient(app).post(
         f"/api/creative/topics/{topic['id']}/planning-assignment",
@@ -863,7 +884,11 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
     app.dependency_overrides[creative_api_principal] = lambda: creator
     app.dependency_overrides[current_principal] = lambda: creator
     app.include_router(build_workflow_router(workflow))
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(
+        build_creative_router(
+            root=tmp_path, runtime_dir=runtime, repository=creative
+        )
+    )
     client = TestClient(app, raise_server_exceptions=False)
     base_payload = {
         "topic_id": topic["id"],

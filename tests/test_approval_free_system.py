@@ -59,9 +59,11 @@ def test_default_permission_catalog_has_no_approval_permissions(
 
 def test_creative_lock_routes_are_available_without_approval_router(tmp_path: Path):
     runtime = tmp_path / ".runtime"
-    CreativeRepository(runtime / "creative/creative.db")
+    repository = CreativeRepository(runtime / "creative/creative.db")
     app = FastAPI()
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(
+        build_creative_router(root=tmp_path, runtime_dir=runtime, repository=repository)
+    )
     paths = {route.path for route in app.routes}
     assert "/api/creative/breakdowns/{breakdown_id}/lock" in paths
     assert "/api/creative/blueprints/{blueprint_id}/lock-brief" in paths

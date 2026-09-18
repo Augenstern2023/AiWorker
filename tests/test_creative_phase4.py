@@ -18,6 +18,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from core.job import CrawlJob
+from analysis.today_rank_service import TodayRankService
 from creative.api import (
     build_beats_markdown,
     build_creative_router,
@@ -201,7 +202,8 @@ def test_project_delete_api_removes_its_workflow_members_and_tasks(tmp_path: Pat
     app.dependency_overrides[creative_api_principal] = lambda: principal
     app.dependency_overrides[current_principal] = lambda: principal
     app.include_router(build_creative_router(
-        root=tmp_path, runtime_dir=runtime_dir, workflow_repository=workflow,
+        root=tmp_path, runtime_dir=runtime_dir, repository=repository,
+        workflow_repository=workflow,
     ))
     client = TestClient(app)
 
@@ -669,7 +671,8 @@ def test_locked_brief_version_api_creates_a_successor_brief_task(tmp_path: Path)
     app.dependency_overrides[creative_api_principal] = lambda: principal
     app.dependency_overrides[current_principal] = lambda: principal
     app.include_router(build_creative_router(
-        root=tmp_path, runtime_dir=runtime_dir, workflow_repository=workflow
+        root=tmp_path, runtime_dir=runtime_dir, repository=repository,
+        workflow_repository=workflow
     ))
     client = TestClient(app)
 
@@ -738,6 +741,7 @@ def build_phase4_client(
     tmp_path: Path,
     *,
     llm_provider_factory=None,
+    repository: CreativeRepository | None = None,
 ) -> tuple[TestClient, CreativeRepository, RecordingJobManager]:
     runtime_dir = tmp_path / ".runtime"
     manager = RecordingJobManager()
@@ -758,6 +762,11 @@ def build_phase4_client(
     permissions = PermissionService(identity, sessions)
     workflow = WorkflowRepository(identity)
     workflow.delete_project_data("1")
+    if repository is None:
+        # Free-mode stages need the repository transaction boundary, which only
+        # the PostgreSQL repository provides; callers that exercise them inject
+        # the isolated postgres_creative fixture instead of a SQLite store.
+        repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
     app = FastAPI()
     app.state.identity_permission_service = permissions
     register_creative_routes(
@@ -765,8 +774,12 @@ def build_phase4_client(
         root=tmp_path,
         runtime_dir=runtime_dir,
         job_manager=manager,
+        repository=repository,
         workflow_repository=workflow,
         llm_provider_factory=llm_provider_factory,
+        # The rank service is file backed so building the router never opens the
+        # ambient system database.
+        rank_service=TodayRankService.from_files(root=tmp_path),
     )
     session_app = FastAPI()
 
@@ -780,7 +793,7 @@ def build_phase4_client(
     client.workflow = workflow
     client.principal = permissions.principal_for_user(admin["id"], username)
     assert client.principal is not None
-    return client, CreativeRepository(runtime_dir / "creative" / "creative.db"), manager
+    return client, repository, manager
 
 
 def assign_phase4_task(
@@ -1135,10 +1148,13 @@ def seed_free_outline_for_api(
 
 def test_free_outline_field_rewrite_generates_and_applies_to_current_draft(
     tmp_path: Path,
+    postgres_creative,
 ):
     provider = InlineSequentialProvider([{"value": "记者在密室中找到被调包的原始卷宗"}])
     client, repository, _ = build_phase4_client(
-        tmp_path, llm_provider_factory=lambda: provider
+        tmp_path,
+        llm_provider_factory=lambda: provider,
+        repository=postgres_creative,
     )
     project, batch, head = seed_free_outline_for_api(
         client, repository, locked=False
@@ -1173,8 +1189,11 @@ def test_free_outline_field_rewrite_generates_and_applies_to_current_draft(
 
 def test_free_locked_outline_field_rewrite_derives_new_head_without_mutating_source(
     tmp_path: Path,
+    postgres_creative,
 ):
-    client, repository, _ = build_phase4_client(tmp_path)
+    client, repository, _ = build_phase4_client(
+        tmp_path, repository=postgres_creative
+    )
     project, locked, head = seed_free_outline_for_api(
         client, repository, locked=True
     )
@@ -1337,6 +1356,7 @@ def test_outline_overview_api_saves_and_starts_legacy_generation(tmp_path: Path)
     assert principal is not None
     workflow = WorkflowRepository(identity)
     manager = RecordingJobManager()
+    repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
     app = FastAPI()
     app.state.identity_permission_service = permissions
     app.dependency_overrides[creative_api_principal] = lambda: principal
@@ -1345,6 +1365,7 @@ def test_outline_overview_api_saves_and_starts_legacy_generation(tmp_path: Path)
         root=tmp_path,
         runtime_dir=runtime_dir,
         job_manager=manager,
+        repository=repository,
         workflow_repository=workflow,
     ))
     client = TestClient(app)
@@ -1358,7 +1379,6 @@ def test_outline_overview_api_saves_and_starts_legacy_generation(tmp_path: Path)
     client.cookies.set(sessions.cookie_name, raw_token)
     client.workflow = workflow
     client.principal = principal
-    repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
     app.state.workflow_identity_resolver = CreativeWorkflowAdapter(
         repository, workflow
     ).workflow_identity

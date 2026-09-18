@@ -47,6 +47,59 @@ class CreativeProjectAccessDenied(PermissionError):
     """Raised when the actor cannot write creative content for the project."""
 
 
+def build_generation_payload(
+    *,
+    project_id: int,
+    operation_id: str,
+    action: str = "blueprints",
+    normalized_stage: str = "brief",
+    created_by_user_id: str | None = None,
+    workflow_task_id: str | None = None,
+    generation_instruction: str = "",
+    source_authority: dict[str, Any] | None = None,
+    source_authority_sha256: str = "",
+    generation_request_hash: str = "",
+    retry_failed_operation: bool = False,
+    snapshot_extra: dict[str, Any] | None = None,
+    original_generation_extra: dict[str, Any] | None = None,
+    legacy_extra: dict[str, Any] | None = None,
+    runtime_dir: str | Path = ".runtime",
+) -> dict[str, Any]:
+    """Build the phase 4 worker payload.
+
+    The worker resolves its own repository from the shared system database, so
+    the payload carries business identity only: no database path, no database
+    URL and no credentials ever travel through a task file.
+    """
+
+    return {
+        "platform": "creative",
+        "crawler_type": "phase4_generate",
+        "keywords": [],
+        "save_data_option": "json",
+        "get_comments": False,
+        "get_sub_comments": False,
+        "extra": {
+            "action": action,
+            "normalized_stage": normalized_stage,
+            "project_id": project_id,
+            "created_by_user_id": created_by_user_id,
+            "workflow_task_id": workflow_task_id,
+            "operation_id": operation_id,
+            "generation_instruction": generation_instruction,
+            **(snapshot_extra or {}),
+            "source_authority": source_authority,
+            "source_authority_sha256": source_authority_sha256,
+            "authority_schema_version": 1,
+            "generation_request_hash": generation_request_hash,
+            "retry_failed_operation": bool(retry_failed_operation),
+            **(original_generation_extra or {}),
+            **(legacy_extra or {}),
+            "runtime_dir": str(Path(runtime_dir).resolve()),
+        },
+    }
+
+
 class CreativeApplicationService:
     def __init__(
         self,
@@ -1193,33 +1246,23 @@ class CreativeApplicationService:
             ),
         }
         generation_request_hash = canonical_request_hash(request_identity)
-        payload = {
-            "platform": "creative",
-            "crawler_type": "phase4_generate",
-            "keywords": [],
-            "save_data_option": "json",
-            "get_comments": False,
-            "get_sub_comments": False,
-            "extra": {
-                "action": worker_action,
-                "normalized_stage": stage,
-                "project_id": project_id,
-                "created_by_user_id": actor.user_id if actor is not None else None,
-                "workflow_task_id": workflow_task_id,
-                "operation_id": operation_id,
-                "generation_instruction": generation_instruction,
-                **snapshot_extra,
-                "source_authority": authority,
-                "source_authority_sha256": authority_sha,
-                "authority_schema_version": 1,
-                "generation_request_hash": generation_request_hash,
-                "retry_failed_operation": bool(retry_failed_operation),
-                **original_generation_extra,
-                **legacy_extra,
-                "db_path": str(self.repository.db_path.resolve()),
-                "runtime_dir": str(self.runtime_dir.resolve()),
-            },
-        }
+        payload = build_generation_payload(
+            project_id=project_id,
+            operation_id=operation_id,
+            action=worker_action,
+            normalized_stage=stage,
+            created_by_user_id=actor.user_id if actor is not None else None,
+            workflow_task_id=workflow_task_id,
+            generation_instruction=generation_instruction,
+            source_authority=authority,
+            source_authority_sha256=authority_sha,
+            generation_request_hash=generation_request_hash,
+            retry_failed_operation=retry_failed_operation,
+            snapshot_extra=snapshot_extra,
+            original_generation_extra=original_generation_extra,
+            legacy_extra=legacy_extra,
+            runtime_dir=self.runtime_dir,
+        )
         if actor is not None and workflow_task_id is not None:
             get_or_create = getattr(self.job_manager, "get_or_create_job", None)
             if callable(get_or_create):

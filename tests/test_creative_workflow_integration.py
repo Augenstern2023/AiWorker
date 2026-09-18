@@ -761,7 +761,7 @@ def test_creative_project_get_retries_pending_mirror(tmp_path: Path, monkeypatch
     app.dependency_overrides[creative_api_principal] = lambda: admin
     app.dependency_overrides[current_principal] = lambda: admin
     app.include_router(
-        build_creative_router(root=tmp_path, runtime_dir=runtime)
+        build_creative_router(root=tmp_path, runtime_dir=runtime, repository=creative)
     )
 
     response = TestClient(app).get(f"/api/creative/projects/{project_id}")

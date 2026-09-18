@@ -465,7 +465,7 @@ async def test_optimization_worker_generates_isolated_direct_script_draft(tmp_pa
 
     monkeypatch.setattr(optimization_worker, "create_provider", lambda: FakeProvider())
     monkeypatch.chdir(tmp_path)
-    await optimization_worker.run(CrawlJob(job_id="optimization-direct", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)}))
+    await optimization_worker._run_with_repository(CrawlJob(job_id="optimization-direct", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"]}), repository)
 
     completed = repository.get_script_optimization(optimization["id"])
     assert completed is not None
@@ -494,7 +494,7 @@ async def test_optimization_worker_generates_paired_structure_drafts(tmp_path, m
 
     monkeypatch.setattr(optimization_worker, "create_provider", lambda: FakeProvider())
     monkeypatch.chdir(tmp_path)
-    await optimization_worker.run(CrawlJob(job_id="optimization-structure", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)}))
+    await optimization_worker._run_with_repository(CrawlJob(job_id="optimization-structure", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"]}), repository)
 
     completed = repository.get_script_optimization(optimization["id"])
     assert completed is not None
@@ -522,7 +522,7 @@ async def test_optimization_worker_marks_task_failed_without_drafts(tmp_path, mo
 
     monkeypatch.setattr(optimization_worker, "create_provider", lambda: FailingProvider())
     with pytest.raises(RuntimeError, match="provider unavailable"):
-        await optimization_worker.run(CrawlJob(job_id="optimization-failed", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)}))
+        await optimization_worker._run_with_repository(CrawlJob(job_id="optimization-failed", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"]}), repository)
 
     failed = repository.get_script_optimization(optimization["id"])
     assert failed is not None
@@ -548,7 +548,7 @@ async def test_optimization_worker_rejects_a_task_when_review_source_has_changed
 
     monkeypatch.setattr(optimization_worker, "create_provider", lambda: FakeProvider())
     with pytest.raises(ValueError, match="剧本已更新"):
-        await optimization_worker.run(CrawlJob(job_id="optimization-stale", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)}))
+        await optimization_worker._run_with_repository(CrawlJob(job_id="optimization-stale", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"]}), repository)
 
     failed = repository.get_script_optimization(optimization["id"])
     assert failed is not None

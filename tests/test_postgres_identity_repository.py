@@ -39,6 +39,7 @@ from identity.session_service import SessionService
 from organization.service import DepartmentService
 from system_database import SystemDatabase, SystemDatabaseSettings
 from system_database.schema import project_members, roles, user_roles, users
+from tests.conftest import build_test_creative_repository
 from workflow.repository import WorkflowRepository
 from workflow.transition_service import TransitionService
 from web.navigation_service import NavigationService
@@ -532,6 +533,7 @@ def test_creative_routes_accept_the_postgres_workflow_repository(
         app,
         root=tmp_path,
         runtime_dir=tmp_path / ".runtime",
+        repository=build_test_creative_repository(tmp_path / ".runtime"),
         workflow_repository=WorkflowRepository(identity_repository),
     )
 

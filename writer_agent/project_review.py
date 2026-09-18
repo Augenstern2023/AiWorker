@@ -245,7 +245,6 @@ class ProjectReviewCoordinator:
                 "review_id": review["id"], "project_id": review["project_id"],
                 "created_by": created_by,
                 "created_by_user_id": created_by,
-                "db_path": str(Path(self.repository.db_path).resolve()),
                 "runtime_dir": str(self.runtime_dir.resolve()),
                 "retry_failed_operation": retry_failed_operation,
             },

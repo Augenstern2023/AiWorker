@@ -111,17 +111,20 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.Fixt
     permissions = PermissionService(identity, sessions)
     workflow = WorkflowRepository(identity)
     runtime_dir = tmp_path / "runtime"
+    repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
     app = FastAPI()
     app.state.identity_permission_service = permissions
     app.include_router(
         build_creative_router(
-            root=tmp_path, runtime_dir=runtime_dir, workflow_repository=workflow
+            root=tmp_path,
+            runtime_dir=runtime_dir,
+            repository=repository,
+            workflow_repository=workflow,
         )
     )
     owner_client = _client_for_user(app, sessions, owner["id"])
     owner_principal = permissions.principal_for_user(owner["id"], "original-owner")
     assert owner_principal is not None
-    repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
     # The workflow test database is shared while each creative SQLite database
     # is per-test. Avoid reusing a project_id from another test's workflow rows.
     with repository._connect() as connection:

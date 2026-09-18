@@ -404,17 +404,17 @@ async def test_review_worker_persists_ai_report_for_confirmation(tmp_path, monke
 
     monkeypatch.setattr(worker, "create_provider", lambda: FakeProvider())
     monkeypatch.chdir(tmp_path)
-    await worker.run(
+    await worker._run_with_repository(
         CrawlJob(
             job_id="review-job-1",
             platform="creative",
             crawler_type="screenplay_review",
             extra={
                 "review_id": review["id"],
-                "db_path": str(repository.db_path),
                 "runtime_dir": str(tmp_path / ".runtime"),
             },
-        )
+        ),
+        repository,
     )
 
     completed = repository.get_script_review(review["id"])
@@ -467,13 +467,14 @@ async def test_review_worker_keeps_a_viewable_checkpoint_when_multi_episode_revi
     monkeypatch.setattr(worker, "create_provider", lambda: InterruptedProvider())
     monkeypatch.chdir(tmp_path)
     with pytest.raises(RuntimeError, match="服务中断"):
-        await worker.run(
+        await worker._run_with_repository(
             CrawlJob(
                 job_id="review-checkpoint-job",
                 platform="creative",
                 crawler_type="screenplay_review",
-                extra={"review_id": review["id"], "db_path": str(repository.db_path)},
-            )
+                extra={"review_id": review["id"]},
+            ),
+            repository,
         )
 
     interrupted = repository.get_script_review(review["id"])

@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 import WebGUI
 
 from core.job import CrawlJob
+from analysis.today_rank_service import TodayRankService
 from creative.api import (
     build_creative_router,
     creative_api_authorization,
@@ -726,7 +727,11 @@ def test_global_project_owner_generates_for_project_without_membership(
             root=tmp_path,
             runtime_dir=runtime_dir,
             job_manager=manager,
+            repository=repository,
             workflow_repository=workflow,
+            # The rank service is file backed so building the router never opens
+            # the ambient system database.
+            rank_service=TodayRankService.from_files(root=tmp_path),
         )
     )
     client = _session_client(app)

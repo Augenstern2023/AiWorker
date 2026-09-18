@@ -80,6 +80,7 @@ from creative.schema import (
     SeedVersionRequest,
     WorkflowLinkRequest,
 )
+from analysis.today_rank_service import TodayRankService
 from creative.topic_service import TopicService
 from creative.transcript_assets import (
     find_downloaded_video_assets,
@@ -995,15 +996,17 @@ def build_creative_router(
     application_service: CreativeApplicationService | None = None,
     llm_provider_factory: Callable[[], Any] | None = None,
     llm_model_resolver: Callable[[str], dict[str, Any]] | None = None,
+    rank_service: TodayRankService | None = None,
 ) -> APIRouter:
     router = APIRouter(
         prefix="/api/creative",
         tags=["creative"],
         dependencies=[Depends(creative_api_authorization)],
     )
-    repository = repository or CreativeRepository(
-        Path(runtime_dir) / "creative" / "creative.db"
-    )
+    if repository is None:
+        raise ValueError(
+            "build_creative_router requires an injected creative repository"
+        )
 
     if workflow_repository is None:
         workflow_repository = WorkflowRepository(
@@ -1027,7 +1030,10 @@ def build_creative_router(
         else TransitionService(workflow_repository, creative_adapter=workflow_adapter)
     )
     workflow_transitions.migrate_pending_creative_approvals()
-    service = TopicService(str(root))
+    # The rank service opens the system rank store as soon as it is built, so a
+    # caller that must not touch that store (for example a unit test) injects its
+    # own file-backed service instead of letting the environment decide.
+    service = TopicService(str(root), rank_service=rank_service)
     workspace_root = Path(root).resolve()
     lifecycle_service = TopicLifecycleService(repository, workspace_root, job_manager)
     market_reference_service = MarketReferenceService(repository)
@@ -1876,11 +1882,13 @@ def build_creative_router(
     def batch_resource_for(table: str, item_id: int) -> str | None:
         if table not in {"creative_characters", "creative_relationships"}:
             raise ValueError("invalid creative table")
-        with repository._connect() as connection:
-            row = connection.execute(
-                f"SELECT project_id, batch_id FROM {table} WHERE id = ?",
-                (item_id,),
-            ).fetchone()
+        # The repository owns the query; the router never opens a connection of
+        # its own, so this works unchanged on PostgreSQL and SQLite alike.
+        row = (
+            repository.get_character(item_id)
+            if table == "creative_characters"
+            else repository.get_relationship(item_id)
+        )
         return f"{row['project_id']}:{row['batch_id']}" if row else None
 
     @router.post("/topics/generate")
@@ -1936,7 +1944,9 @@ def build_creative_router(
         if payload.platform not in {"dy", "hg"}:
             raise HTTPException(400, "platform must be dy or hg")
         try:
-            entry, response = service.find_rank_entry(payload.platform, payload.date, payload.record_id)
+            entry, response = service.find_rank_entry(
+                payload.platform, payload.date, payload.record_id
+            )
             topic = repository.adopt_rank_topic(
                 service.rank_entry_to_topic(entry, response), principal.user_id
             )
@@ -2479,7 +2489,6 @@ def build_creative_router(
             "get_sub_comments": False,
             "extra": {
                 "topic_id": payload.topic_id,
-                "db_path": str(repository.db_path.resolve()),
                 "runtime_dir": str(Path(runtime_dir).resolve()),
                 "workspace_root": str(workspace_root),
                 "transcript_coverage": coverage,
@@ -3429,7 +3438,6 @@ def build_creative_router(
                     "expected_head_revision": payload.expected_head_revision,
                     "count": payload.count if stage == "brief" else 1,
                     "llm_model_record_id": llm_model_record_id,
-                    "db_path": str(repository.db_path.resolve()),
                     "runtime_dir": str(Path(runtime_dir).resolve()),
                 },
             },
@@ -3527,7 +3535,6 @@ def build_creative_router(
                         for number, revision in expected_head_revisions.items()
                     },
                     "llm_model_record_id": llm_model_record_id,
-                    "db_path": str(repository.db_path.resolve()),
                     "runtime_dir": str(Path(runtime_dir).resolve()),
                 },
             },
@@ -4952,10 +4959,12 @@ def register_creative_routes(
     application_service: CreativeApplicationService | None = None,
     llm_provider_factory: Callable[[], Any] | None = None,
     llm_model_resolver: Callable[[str], dict[str, Any]] | None = None,
+    rank_service: TodayRankService | None = None,
 ) -> None:
-    repository = repository or CreativeRepository(
-        Path(runtime_dir) / "creative" / "creative.db"
-    )
+    if repository is None:
+        raise ValueError(
+            "register_creative_routes requires an injected creative repository"
+        )
     if workflow_repository is None:
         workflow_repository = WorkflowRepository(
             IdentityRepository(
@@ -4977,5 +4986,6 @@ def register_creative_routes(
             application_service=application_service,
             llm_provider_factory=llm_provider_factory,
             llm_model_resolver=llm_model_resolver,
+            rank_service=rank_service,
         )
     )

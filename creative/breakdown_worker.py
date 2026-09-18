@@ -20,9 +20,10 @@ from analysis.llm import create_llm_provider_from_config
 from core.events import emit_event
 from core.job import CrawlJob
 from creative.breakdown_service import generate_breakdown
-from creative.repository import CreativeRepository
+from creative.postgres_repository import PostgresCreativeRepository
 from creative.transcript_assets import find_downloaded_video_assets, find_transcript_bundle
 from creative.transcript_materializer import materialize_video_transcripts
+from system_database import SystemDatabase, SystemDatabaseSettings
 
 
 HEARTBEAT_SECONDS = 15.0
@@ -75,13 +76,21 @@ async def emit_analysis_heartbeats(job: CrawlJob, coverage: list[int], stop: asy
 
 
 async def run(job: CrawlJob) -> None:
+    """Worker entry point: own the shared database for exactly one job."""
+
+    database = SystemDatabase(SystemDatabaseSettings.from_environment())
+    try:
+        await _run_with_repository(job, PostgresCreativeRepository(database))
+    finally:
+        database.dispose()
+
+
+async def _run_with_repository(job: CrawlJob, repository: Any) -> None:
     extra = job.extra or {}
     topic_id = int(extra.get("topic_id") or 0)
     if topic_id < 1:
         raise ValueError("拆解生成任务缺少有效 topic_id")
-    db_path = Path(str(extra.get("db_path") or ".runtime/creative/creative.db"))
     workspace_root = Path(str(extra.get("workspace_root") or ".")).resolve()
-    repository = CreativeRepository(db_path)
     topic = repository.get_topic(topic_id)
     if not topic:
         raise ValueError("选题不存在")

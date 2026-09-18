@@ -239,7 +239,6 @@ def build_script_optimization_router(
                 "review_id": review_id,
                 "project_id": project["id"],
                 "created_by_user_id": principal.user_id,
-                "db_path": str(repository.db_path.resolve()),
                 "runtime_dir": str(Path(runtime_dir).resolve()),
                 "prompt_snapshot": prompt_snapshot,
                 "prompt_template_id": str(
@@ -513,11 +512,17 @@ def register_script_optimization_routes(
     *,
     runtime_dir: str | Path = ".runtime",
     job_manager: Any,
+    repository: CreativeRepository | None = None,
 ) -> None:
+    if repository is None:
+        raise ValueError(
+            "register_script_optimization_routes requires an injected "
+            "creative repository"
+        )
     root = Path(runtime_dir)
     app.include_router(
         build_script_optimization_router(
-            CreativeRepository(root / "creative" / "creative.db"),
+            repository,
             job_manager,
             runtime_dir=root,
         )

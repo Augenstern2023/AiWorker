@@ -82,6 +82,7 @@ from creative.original_project_service import OriginalProjectService
 from creative.project_creator_migration import migrate_project_creator_memberships
 from creative.project_prompt_service import ProjectPromptService
 from creative.production_exports import ProductionExportService
+from creative.postgres_repository import PostgresCreativeRepository
 from creative.production_exports_api import build_production_export_router
 from creative.repository import CreativeRepository, DownloadTopicDecisionConflict
 from creative.transcript_assets import normalize_title
@@ -530,9 +531,7 @@ identity_permission_service = PermissionService(
     identity_repository, identity_session_service
 )
 presence_service = PresenceService(identity_repository)
-creative_repository = CreativeRepository(
-    WORKSPACE_ROOT / ".runtime" / "creative" / "creative.db"
-)
+creative_repository = PostgresCreativeRepository(system_database)
 project_prompt_service = ProjectPromptService(creative_repository)
 service_instance_id = (
     os.getenv("AIWORKER_SERVICE_INSTANCE_ID", "").strip() or str(uuid.uuid4())
@@ -752,16 +751,19 @@ register_creative_routes(
     application_service=creative_application_service,
     llm_provider_factory=lambda: create_llm_provider_from_config(config),
     llm_model_resolver=llm_settings_repository.effective_model,
+    rank_service=today_rank_service,
 )
 register_script_review_routes(
     app,
     runtime_dir=Path(__file__).resolve().parent / ".runtime",
     job_manager=job_manager,
+    repository=creative_repository,
 )
 register_script_optimization_routes(
     app,
     runtime_dir=Path(__file__).resolve().parent / ".runtime",
     job_manager=job_manager,
+    repository=creative_repository,
 )
 register_writer_agent_routes(
     app,
@@ -2966,7 +2968,6 @@ async def create_hongguo_drama_job(
             "episode": payload.episode,
             "source_platform": provider_id,
             "provider_id": provider_id,
-            "creative_db_path": str(creative_repository.db_path.resolve()),
             "workspace_root": str(WORKSPACE_ROOT.resolve()),
             "created_by_user_id": actor.user_id,
             "legacy_workflow_task_id": payload.workflow_task_id,
@@ -3066,7 +3067,6 @@ async def create_hongguo_drama_download_job(
             "source_platform": provider_id,
             "provider_id": provider_id,
             "pause_path": str(job_manager.jobs_dir / f"{job_id}.pause"),
-            "creative_db_path": str(creative_repository.db_path.resolve()),
             "workspace_root": str(WORKSPACE_ROOT.resolve()),
             "created_by_user_id": actor.user_id,
             "legacy_workflow_task_id": None,
@@ -3130,7 +3130,6 @@ async def create_douyin_fallback_drama_job(
             "aweme_ids": aweme_ids,
             "fallback_reason": payload.fallback_reason.strip(),
             "pause_path": str(job_manager.jobs_dir / f"{job_id}.pause"),
-            "creative_db_path": str(creative_repository.db_path.resolve()),
             "workspace_root": str(WORKSPACE_ROOT.resolve()),
             "created_by_user_id": actor.user_id,
             "legacy_workflow_task_id": None,

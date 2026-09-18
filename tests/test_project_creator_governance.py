@@ -33,6 +33,18 @@ from workflow.repository import SYSTEM_ACTOR, WorkflowRepository
 from workflow.transition_service import TransitionService
 
 
+
+@pytest.fixture(autouse=True)
+def _use_postgres_creative(monkeypatch, postgres_creative):
+    """Exercise runtime behavior against the isolated PostgreSQL store."""
+    monkeypatch.setitem(
+        globals(), "CreativeRepository", lambda *_args, **_kwargs: postgres_creative
+    )
+    monkeypatch.setenv(
+        "AIWORKER_TEST_SYSTEM_DATABASE_URL", postgres_creative.database.settings.url
+    )
+
+
 def _role_user(
     identity: IdentityRepository, role_code: str, label: str
 ) -> dict:
@@ -337,12 +349,6 @@ def test_project_governance_http_matrix_and_five_stage_collaboration(
 
     runtime = tmp_path / ".runtime"
     creative = CreativeRepository(runtime / "creative/creative.db")
-    with creative._connect() as connection:
-        connection.execute(
-            "INSERT OR REPLACE INTO sqlite_sequence(name, seq) "
-            "VALUES ('creative_projects', ?)",
-            (1_200_000_000 + uuid.uuid4().int % 100_000_000,),
-        )
     topic = creative.upsert_topics(
         [
             {
@@ -407,17 +413,14 @@ def test_project_governance_http_matrix_and_five_stage_collaboration(
         build_creative_router(
             root=tmp_path,
             runtime_dir=runtime,
+            repository=creative,
             workflow_repository=workflow,
         )
     )
     client = TestClient(app, raise_server_exceptions=False)
 
     def cleanup() -> None:
-        for project_id in created_projects:
-            workflow.delete_project_data(project_id)
-        for user in users:
-            if identity.get_user(user["id"]) is not None:
-                identity.soft_delete_user(user["id"])
+        # The isolated schema fixture removes all test records.
         database.dispose()
 
     request.addfinalizer(cleanup)

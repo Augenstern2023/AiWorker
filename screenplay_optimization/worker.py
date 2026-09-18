@@ -22,8 +22,9 @@ from analysis.llm import create_llm_provider_from_config, get_llm_usage_snapshot
 from core.events import emit_event
 from core.job import CrawlJob
 from creative.llm_observability import dump_terminal_error, public_failure_summary
-from creative.repository import CreativeRepository
+from creative.postgres_repository import PostgresCreativeRepository
 from screenplay_review.service import build_project_source, source_fingerprint
+from system_database import SystemDatabase, SystemDatabaseSettings
 
 from .service import content_fingerprint, optimize_episode, report_findings
 
@@ -56,11 +57,19 @@ def _latest(project: dict[str, Any], stage: str, episode_number: int) -> dict[st
 
 async def run(job: CrawlJob) -> None:
     job._llm_usage_providers = []
+    database = SystemDatabase(SystemDatabaseSettings.from_environment())
+    try:
+        await _run_with_repository(job, PostgresCreativeRepository(database))
+    finally:
+        database.dispose()
+
+
+async def _run_with_repository(job: CrawlJob, repository: Any) -> None:
+    job._llm_usage_providers = []
     extra = job.extra or {}
     optimization_id = int(extra.get("optimization_id") or 0)
     if optimization_id < 1:
         raise ValueError("剧本优化任务缺少 optimization_id")
-    repository = CreativeRepository(Path(str(extra.get("db_path") or ".runtime/creative/creative.db")))
     optimization = repository.get_script_optimization(optimization_id)
     if not optimization:
         raise ValueError("优化任务不存在")

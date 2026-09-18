@@ -38,15 +38,41 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 from collections.abc import Iterable
-from pathlib import Path
-from typing import Any, Callable
+from contextlib import nullcontext
+from datetime import datetime, timezone
+from typing import Any, Callable, Mapping
 
+from sqlalchemy import text
+from sqlalchemy.engine import Connection
+
+from creative.postgres_repository import PostgresCreativeRepository
 from creative.script_service import normalize_script_content
 from creative.video_parameter_recommendation import build_video_parameter_source
 
 _LOCKED = {"locked", "approved"}
+
+
+class _ReadConnection:
+    """Small qmark-to-SQLAlchemy adapter for the read-only snapshot queries."""
+
+    def __init__(self, connection: Connection) -> None:
+        self._connection = connection
+
+    def execute(self, statement: str, parameters: Iterable[Any] = ()) -> Any:
+        values = tuple(parameters)
+        parts = statement.split("?")
+        if len(parts) - 1 != len(values):
+            if values:
+                raise ValueError("production export query parameter mismatch")
+            return self._connection.execute(text(statement)).mappings()
+        translated = parts[0]
+        bindings: dict[str, Any] = {}
+        for index, part in enumerate(parts[1:]):
+            key = f"p{index}"
+            translated += f":{key}{part}"
+            bindings[key] = values[index]
+        return self._connection.execute(text(translated), bindings).mappings()
 
 
 def _stage_edit_url(
@@ -85,14 +111,23 @@ def _digest(value: Any) -> str:
     ).encode("utf-8")).hexdigest()
 
 
-def _row(raw: sqlite3.Row) -> dict[str, Any]:
+def _row(raw: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(raw)
     for key, value in tuple(result.items()):
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            result[key] = value.timestamp()
+            value = result[key]
         if key.endswith("_json"):
             try:
-                parsed = json.loads(value)
+                parsed = json.loads(value) if isinstance(value, (str, bytes)) else value
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"invalid {key} on resource {result.get('id')}") from exc
+            if key == "content_json" and not isinstance(parsed, dict):
+                raise ValueError(f"invalid {key} on resource {result.get('id')}")
+            if not isinstance(value, (str, bytes)):
+                result[key] = json.dumps(parsed, ensure_ascii=False)
             result[key[:-5]] = parsed
     if "content" in result and not isinstance(result["content"], dict):
         raise ValueError(f"invalid content on resource {result.get('id')}")
@@ -228,7 +263,7 @@ def _scope_provenance(
 
 
 def _current_video_parameter_source(
-    conn: sqlite3.Connection, project: dict[str, Any],
+    conn: "_ReadConnection", project: dict[str, Any],
 ) -> dict[str, Any]:
     """Build the recommendation fingerprint from this same read transaction."""
     scope = "free" if str(project.get("workflow_mode")) == "free" else "sequential"
@@ -257,20 +292,15 @@ def _current_video_parameter_source(
 
 
 def _read_video_parameter_recommendation(
-    conn: sqlite3.Connection,
+    conn: "_ReadConnection",
     project: dict[str, Any],
     package: dict[str, Any],
 ) -> dict[str, Any]:
-    try:
-        raw = conn.execute(
-            "SELECT * FROM creative_video_parameter_recommendations "
-            "WHERE project_id = ?",
-            (int(project["id"]),),
-        ).fetchone()
-    except sqlite3.OperationalError as exc:
-        if "no such table" not in str(exc).lower():
-            raise
-        raw = None
+    raw = conn.execute(
+        "SELECT * FROM creative_video_parameter_recommendations "
+        "WHERE project_id = ?",
+        (int(project["id"]),),
+    ).fetchone()
     if raw is None:
         raise ValueError("video_parameters: missing recommendation")
     try:
@@ -288,10 +318,36 @@ def _read_video_parameter_recommendation(
     if not record["source_complete"]:
         raise ValueError("video_parameters: incomplete source")
 
-    source = _current_video_parameter_source(conn, project)
     expected_numbers = list(
         range(1, int(project.get("target_episode_count") or 0) + 1)
     )
+    selected_scripts = list(package.get("scripts") or [])
+    selected_numbers = [int(item.get("episode_number") or 0) for item in selected_scripts]
+    if selected_numbers == expected_numbers:
+        frozen_scripts = [
+            {
+                "id": int(item.get("id") or 0),
+                "episode_number": int(item.get("episode_number") or 0),
+                "version": int(item.get("version") or 0),
+                "status": str(item.get("status") or ""),
+                "content": normalize_script_content(item.get("content") or {}),
+            }
+            for item in selected_scripts
+        ]
+        fingerprint_payload = {
+            "project_id": int(project["id"]),
+            "target_platform": str(project.get("target_platform") or ""),
+            "target_episode_count": int(project.get("target_episode_count") or 0),
+            "scripts": frozen_scripts,
+        }
+        source = {
+            **fingerprint_payload,
+            "episode_numbers": selected_numbers,
+            "complete": bool(expected_numbers),
+            "fingerprint": _digest(fingerprint_payload),
+        }
+    else:
+        source = _current_video_parameter_source(conn, project)
     if (
         not source.get("complete")
         or list(record.get("source_episode_numbers") or []) != expected_numbers
@@ -325,7 +381,7 @@ def _read_video_parameter_recommendation(
 
 
 def _attach_video_parameter_recommendation(
-    conn: sqlite3.Connection,
+    conn: "_ReadConnection",
     inspection: _Inspection,
     project: dict[str, Any],
     package: dict[str, Any] | None,
@@ -480,7 +536,7 @@ def _assert_requested_version(
 
 
 def _locked_cast_batches(
-    conn: sqlite3.Connection, project_id: int, resource_scope: str,
+    conn: _ReadConnection, project_id: int, resource_scope: str,
 ) -> list[tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]]:
     characters = []
     relationships = []
@@ -508,7 +564,7 @@ def _locked_cast_batches(
 
 
 def _locked_outline_batches(
-    conn: sqlite3.Connection, project_id: int, resource_scope: str,
+    conn: _ReadConnection, project_id: int, resource_scope: str,
     numbers: list[int],
 ) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
     rows = []
@@ -535,7 +591,7 @@ def _locked_outline_batches(
 
 
 def _custom_free_snapshot(
-    conn: sqlite3.Connection,
+    conn: _ReadConnection,
     inspection: _Inspection,
     project: dict[str, Any],
     numbers: list[int],
@@ -715,7 +771,7 @@ def _authority_matches(
 
 
 def _custom_sequential_snapshot(
-    conn: sqlite3.Connection,
+    conn: _ReadConnection,
     inspection: _Inspection,
     project: dict[str, Any],
     numbers: list[int],
@@ -988,7 +1044,7 @@ def _candidate_item(
 
 
 def _version_candidates(
-    conn: sqlite3.Connection,
+    conn: _ReadConnection,
     project: dict[str, Any],
     package: dict[str, Any],
     numbers: list[int],
@@ -1110,7 +1166,7 @@ def _version_candidates(
 
 
 def _attach_version_selection(
-    conn: sqlite3.Connection,
+    conn: _ReadConnection,
     inspection: _Inspection,
     project: dict[str, Any],
     package: dict[str, Any] | None,
@@ -1131,7 +1187,7 @@ def _attach_version_selection(
 
 
 def _inspect_free_snapshot(
-    conn: sqlite3.Connection,
+    conn: _ReadConnection,
     inspection: _Inspection,
     project: dict[str, Any],
     numbers: list[int],
@@ -1278,21 +1334,23 @@ def _inspect_free_snapshot(
 
 
 def _inspect_snapshot(
-    db_path: str | Path,
+    repository: PostgresCreativeRepository,
     project_id: int,
     episode_numbers: Iterable[int] | None = None,
     version_manifest: dict[str, Any] | None = None,
+    *,
+    connection: Connection | None = None,
 ) -> tuple[_Inspection, dict[str, Any] | None]:
-    path = Path(db_path).resolve()
-    if not path.is_file():
-        raise FileNotFoundError(path)
-    conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, isolation_level=None)
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA query_only = ON")
-        conn.execute("BEGIN")
+    scope = (
+        repository.read_snapshot_scope()
+        if connection is None
+        else nullcontext(connection)
+    )
+    with scope as raw_connection:
+        conn = _ReadConnection(raw_connection)
         raw_project = conn.execute(
-            "SELECT * FROM creative_projects WHERE id = ? AND deleted = 0", (project_id,)
+            "SELECT * FROM creative_projects WHERE id = ? AND deleted = FALSE",
+            (project_id,),
         ).fetchone()
         if raw_project is None:
             raise KeyError(project_id)
@@ -1469,20 +1527,19 @@ def _inspect_snapshot(
             conn, inspection, project, package, numbers, strategy,
         )
         return inspection, package if video_parameters_ready else None
-    finally:
-        if conn.in_transaction:
-            conn.rollback()
-        conn.close()
 
 
 def export_production_package(
-    db_path: str | Path, project_id: int,
+    repository: PostgresCreativeRepository, project_id: int,
     episode_numbers: Iterable[int] | None = None,
     version_manifest: dict[str, Any] | None = None,
+    *,
+    connection: Connection | None = None,
 ) -> dict[str, Any]:
-    """Return one validated snapshot. Does not create files or alter SQLite."""
+    """Return one validated snapshot without altering the PostgreSQL store."""
     inspection, package = _inspect_snapshot(
-        db_path, project_id, episode_numbers, version_manifest,
+        repository, project_id, episode_numbers, version_manifest,
+        connection=connection,
     )
     if inspection.errors:
         raise inspection.errors[0]
@@ -1490,10 +1547,13 @@ def export_production_package(
 
 
 def preview_production_package(
-    db_path: str | Path, project_id: int,
+    repository: PostgresCreativeRepository, project_id: int,
     version_manifest: dict[str, Any] | None = None,
+    *,
+    connection: Connection | None = None,
 ) -> dict[str, Any]:
     inspection, package = _inspect_snapshot(
-        db_path, project_id, version_manifest=version_manifest,
+        repository, project_id, version_manifest=version_manifest,
+        connection=connection,
     )
     return inspection.preview(package)

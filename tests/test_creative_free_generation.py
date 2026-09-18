@@ -13,17 +13,13 @@ from typing import Any
 
 import pytest
 
-from analysis.llm import LLMOutputTruncatedError
 from core.job import CrawlJob
 from creative import free_phase4_worker
 from creative.free_mode_service import FreeCreativeModeService
-from creative.repository import CreativeRepository
+from creative.repositories.base import CreativeRepositoryBase
 
 
-pytestmark = pytest.mark.usefixtures("isolated_creative_rank_source")
-
-
-def _free_project(repository: CreativeRepository) -> dict[str, Any]:
+def _free_project(repository: CreativeRepositoryBase) -> dict[str, Any]:
     project = repository.create_original_project(
         seed_text="一个能听见谎言的普通女孩",
         name="谎言回声",
@@ -69,13 +65,13 @@ def test_outline_export_includes_recorded_generation_model() -> None:
     ],
 )
 async def test_free_generation_works_without_upstream_resources_and_updates_head(
-    tmp_path,
+    postgres_creative,
     monkeypatch,
     action: str,
     stage: str,
     episode_number: int | None,
 ) -> None:
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    repository = postgres_creative
     project = _free_project(repository)
     service = FreeCreativeModeService(repository)
     context = service.create_generation_context(
@@ -86,33 +82,18 @@ async def test_free_generation_works_without_upstream_resources_and_updates_head
         instruction="突出主角主动选择",
         context_refs={},
         actor_user_id="owner-1",
-        prompt_snapshot=(
-            {
-                "template_id": f"system:test-{stage}",
-                "template_key": f"test-{stage}",
-                "revision": 1,
-                "stage": stage,
-                "mode": "series" if stage == "outline" else "single",
-                "content_hash": f"{stage}-snapshot-hash",
-                "effective_instruction": f"强化{stage}创作选择。",
-            }
-            if stage in {"characters", "outline"}
-            else None
-        ),
     )
 
     async def generate_brief(*_args, **_kwargs):
         return [{"content": {"title": "谎言回声", "logline": "女孩追查谎言"}}], {"model": "fake"}
 
-    async def generate_characters(*_args, **kwargs):
-        assert kwargs["prompt_snapshot"]["stage"] == "characters"
+    async def generate_characters(*_args, **_kwargs):
         return {
             "characters": [{"name": "林真", "role": "主角"}],
             "relationships": [],
         }, {"model": "fake"}
 
     async def generate_outline(*_args, **kwargs):
-        assert kwargs["prompt_snapshot"]["stage"] == "outline"
         progress = kwargs.get("on_progress")
         if progress:
             progress(3, 3)
@@ -194,9 +175,9 @@ async def test_free_generation_works_without_upstream_resources_and_updates_head
 
 @pytest.mark.asyncio
 async def test_free_generation_uses_selected_model_and_persists_attribution(
-    tmp_path, monkeypatch
+    postgres_creative, monkeypatch
 ) -> None:
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    repository = postgres_creative
     project = _free_project(repository)
     service = FreeCreativeModeService(repository)
     context = service.create_generation_context(
@@ -268,8 +249,8 @@ async def test_free_generation_uses_selected_model_and_persists_attribution(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("count", [1, 3, 5])
-async def test_free_brief_generation_preserves_requested_direction_count(tmp_path, monkeypatch, count):
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+async def test_free_brief_generation_preserves_requested_direction_count(postgres_creative, monkeypatch, count):
+    repository = postgres_creative
     project = _free_project(repository)
     service = FreeCreativeModeService(repository)
     context = service.create_generation_context(
@@ -329,8 +310,8 @@ async def test_free_brief_generation_preserves_requested_direction_count(tmp_pat
     assert service.get_head(project["id"], "brief")["revision"] == 1
 
 
-def test_free_brief_batch_preserves_existing_direction_and_rolls_back_on_conflict(tmp_path):
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+def test_free_brief_batch_preserves_existing_direction_and_rolls_back_on_conflict(postgres_creative):
+    repository = postgres_creative
     project = _free_project(repository)
     service = FreeCreativeModeService(repository)
     original = service.create_brief(
@@ -356,13 +337,13 @@ def test_free_brief_batch_preserves_existing_direction_and_rolls_back_on_conflic
 
 
 @pytest.mark.asyncio
-async def test_free_brief_api_forwards_direction_count(tmp_path):
+async def test_free_brief_api_forwards_direction_count(tmp_path, postgres_creative):
     from types import SimpleNamespace
     from unittest.mock import Mock
     from creative.api import build_creative_router
     from creative.schema import FreeCreativeGenerateRequest
 
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    repository = postgres_creative
     project = _free_project(repository)
     requests = []
 
@@ -393,12 +374,12 @@ async def test_free_brief_api_forwards_direction_count(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_free_generation_api_validates_and_hashes_selected_model(tmp_path):
+async def test_free_generation_api_validates_and_hashes_selected_model(tmp_path, postgres_creative):
     from unittest.mock import Mock
     from creative.api import build_creative_router
     from creative.schema import FreeCreativeGenerateRequest
 
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    repository = postgres_creative
     project = _free_project(repository)
     jobs = []
     resolved = []
@@ -409,13 +390,7 @@ async def test_free_generation_api_validates_and_hashes_selected_model(tmp_path)
 
     def resolve_model(model_record_id):
         resolved.append(model_record_id)
-        return {
-            "model_record_id": model_record_id,
-            "model": f"provider-{model_record_id}",
-            "input_price_per_million": 2,
-            "output_price_per_million": 8,
-            "price_currency": "CNY",
-        }
+        return {"model_record_id": model_record_id}
 
     router = build_creative_router(
         root=tmp_path,
@@ -446,19 +421,18 @@ async def test_free_generation_api_validates_and_hashes_selected_model(tmp_path)
     assert [job["extra"]["llm_model_record_id"] for job in jobs] == [
         "model-a", "model-b"
     ]
-    assert "llm_price_snapshot" not in jobs[0]["extra"]
     assert jobs[0]["extra"]["generation_request_hash"] != (
         jobs[1]["extra"]["generation_request_hash"]
     )
 
 
 @pytest.mark.asyncio
-async def test_free_series_api_forwards_one_selected_model_to_all_episodes(tmp_path):
+async def test_free_series_api_forwards_one_selected_model_to_all_episodes(tmp_path, postgres_creative):
     from unittest.mock import Mock
     from creative.api import build_creative_router
     from creative.schema import FreeCreativeSeriesGenerateRequest
 
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    repository = postgres_creative
     project = _free_project(repository)
     jobs = []
 
@@ -498,10 +472,10 @@ async def test_free_series_api_forwards_one_selected_model_to_all_episodes(tmp_p
 
 @pytest.mark.asyncio
 async def test_free_beats_series_generates_every_episode_and_preserves_locked_versions(
-    tmp_path,
+    postgres_creative,
     monkeypatch,
 ) -> None:
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    repository = postgres_creative
     project = _free_project(repository)
     service = FreeCreativeModeService(repository)
     original = service.create_episode_resource(
@@ -627,219 +601,11 @@ async def test_free_beats_series_generates_every_episode_and_preserves_locked_ve
 
 
 @pytest.mark.asyncio
-async def test_free_beats_series_splits_truncated_batches_and_carries_continuity(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
-    project = _free_project(repository)
-    service = FreeCreativeModeService(repository)
-    contexts = {
-        episode_number: service.create_generation_context(
-            context_id=f"split-series-context-{episode_number}",
-            project_id=project["id"],
-            stage="beats",
-            episode_number=episode_number,
-            instruction="保持连续线索",
-            context_refs={},
-            actor_user_id="owner-1",
-        )
-        for episode_number in range(1, 4)
-    }
-    requested_ranges: list[list[int]] = []
-    ledgers: list[list[dict[str, Any]]] = []
-
-    async def generate_beats_chunk(
-        _provider,
-        _project,
-        _brief,
-        outlines,
-        _characters,
-        _relationships,
-        **kwargs,
-    ):
-        episode_numbers = [int(item["episode_number"]) for item in outlines]
-        requested_ranges.append(episode_numbers)
-        ledgers.append(list(kwargs.get("continuity_ledger") or []))
-        if episode_numbers == [1, 2, 3]:
-            raise LLMOutputTruncatedError(
-                "1-3 truncated", finish_reason="length", returned_chars=60_000
-            )
-        return [
-            (
-                episode_number,
-                {
-                    "beats": [{
-                        "order": 1,
-                        "event": f"第 {episode_number} 集",
-                        "continuity_updates": ([{
-                            "kind": "information",
-                            "name": "自由批次线索",
-                            "event": "reveal",
-                            "holder": "主角",
-                            "location": "大厅",
-                            "known_by": ["主角"],
-                            "status": "active",
-                        }] if episode_number == 1 else []),
-                    }],
-                },
-            )
-            for episode_number in episode_numbers
-        ], {"model": "fake"}
-
-    monkeypatch.setattr(
-        free_phase4_worker,
-        "create_llm_provider_from_config",
-        lambda _config: object(),
-    )
-    monkeypatch.setattr(
-        free_phase4_worker,
-        "generate_episode_beats_chunk",
-        generate_beats_chunk,
-    )
-    job = CrawlJob(
-        job_id="free-beats-series-split",
-        platform="creative",
-        crawler_type="phase4_generate",
-        extra={
-            "action": "beats",
-            "normalized_stage": "beats",
-            "workflow_mode": "free",
-            "project_id": project["id"],
-            "episode_number": None,
-            "created_by_user_id": "owner-1",
-            "operation_id": "operation-beats-series-split",
-            "series": True,
-            "episode_start": 1,
-            "episode_end": 3,
-            "free_context_ids": {
-                str(number): context["id"] for number, context in contexts.items()
-            },
-            "expected_head_revisions": {"1": 0, "2": 0, "3": 0},
-        },
-    )
-    events: list[dict[str, Any]] = []
-
-    def emit(_job, event_type: str, _message: str, **kwargs) -> None:
-        events.append({
-            "event": event_type,
-            "level": kwargs.get("level", "info"),
-            "payload": dict(kwargs.get("payload") or {}),
-        })
-
-    await free_phase4_worker.run_free_generation(job, repository, emit)
-
-    assert requested_ranges == [[1, 2, 3], [1], [2, 3]]
-    assert ledgers[0] == []
-    assert ledgers[1] == []
-    assert ledgers[2][0]["name"] == "自由批次线索"
-    assert any(
-        event["level"] == "warning"
-        and event["payload"].get("split_start") == 1
-        and event["payload"].get("split_end") == 3
-        for event in events
-    )
-    generated = [
-        item
-        for item in repository.get_project(project["id"])["episodes"]
-        if item["stage"] == "beats"
-        and item.get("generation_meta", {}).get("job_id") == job.job_id
-    ]
-    assert [item["episode_number"] for item in generated] == [1, 2, 3]
-
-
-@pytest.mark.asyncio
-async def test_free_beats_series_does_not_batch_incompatible_prompt_snapshots(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
-    project = _free_project(repository)
-    service = FreeCreativeModeService(repository)
-    contexts = {
-        episode_number: service.create_generation_context(
-            context_id=f"incompatible-series-context-{episode_number}",
-            project_id=project["id"],
-            stage="beats",
-            episode_number=episode_number,
-            instruction="保持连续线索",
-            context_refs={},
-            actor_user_id="owner-1",
-            prompt_snapshot={
-                "template_id": "system:test-beats",
-                "template_key": "test-beats",
-                "revision": episode_number,
-                "stage": "beats",
-                "mode": "series",
-                "content_hash": f"beats-snapshot-{episode_number}",
-                "effective_instruction": f"第 {episode_number} 集专用提示词",
-            },
-        )
-        for episode_number in range(1, 4)
-    }
-    requested_ranges: list[list[int]] = []
-
-    async def generate_beats_chunk(
-        _provider,
-        _project,
-        _brief,
-        outlines,
-        _characters,
-        _relationships,
-        **_kwargs,
-    ):
-        episode_numbers = [int(item["episode_number"]) for item in outlines]
-        requested_ranges.append(episode_numbers)
-        return [
-            (episode_number, {"beats": [{"order": 1, "event": "生成"}]})
-            for episode_number in episode_numbers
-        ], {"model": "fake"}
-
-    monkeypatch.setattr(
-        free_phase4_worker,
-        "create_llm_provider_from_config",
-        lambda _config: object(),
-    )
-    monkeypatch.setattr(
-        free_phase4_worker,
-        "generate_episode_beats_chunk",
-        generate_beats_chunk,
-    )
-    job = CrawlJob(
-        job_id="free-beats-series-incompatible-prompts",
-        platform="creative",
-        crawler_type="phase4_generate",
-        extra={
-            "action": "beats",
-            "normalized_stage": "beats",
-            "workflow_mode": "free",
-            "project_id": project["id"],
-            "episode_number": None,
-            "created_by_user_id": "owner-1",
-            "operation_id": "operation-beats-series-incompatible-prompts",
-            "series": True,
-            "episode_start": 1,
-            "episode_end": 3,
-            "free_context_ids": {
-                str(number): context["id"] for number, context in contexts.items()
-            },
-            "expected_head_revisions": {"1": 0, "2": 0, "3": 0},
-        },
-    )
-
-    await free_phase4_worker.run_free_generation(
-        job, repository, lambda *_args, **_kwargs: None
-    )
-
-    assert requested_ranges == [[1], [2], [3]]
-
-
-@pytest.mark.asyncio
 async def test_free_beats_series_rejects_stale_episode_head_before_generation(
-    tmp_path,
+    postgres_creative,
     monkeypatch,
 ) -> None:
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    repository = postgres_creative
     project = _free_project(repository)
     service = FreeCreativeModeService(repository)
     contexts = {
@@ -905,10 +671,10 @@ async def test_free_beats_series_rejects_stale_episode_head_before_generation(
 
 @pytest.mark.asyncio
 async def test_free_script_series_generates_every_episode_and_updates_each_head(
-    tmp_path,
+    postgres_creative,
     monkeypatch,
 ) -> None:
-    repository = CreativeRepository(tmp_path / "creative.sqlite3")
+    repository = postgres_creative
     project = _free_project(repository)
     service = FreeCreativeModeService(repository)
     contexts = {

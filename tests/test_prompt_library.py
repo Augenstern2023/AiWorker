@@ -9,10 +9,11 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import time
 
 import pytest
+from sqlalchemy import inspect
+from sqlalchemy.exc import OperationalError
 
 from creative.prompt_registry import (
     builtin_template,
@@ -29,6 +30,28 @@ from creative.prompt_templates import (
     script_messages,
 )
 from creative.repository import CreativeRepository
+
+
+@pytest.fixture(autouse=True)
+def _use_postgres_creative(monkeypatch, postgres_creative):
+    """Route historical constructor calls onto the isolated PostgreSQL store."""
+
+    monkeypatch.setitem(
+        globals(), "CreativeRepository", lambda *_args, **_kwargs: postgres_creative
+    )
+
+
+def test_prompt_immediate_transactions_serialize_and_release(postgres_creative):
+    store = PromptStore(postgres_creative)
+    with store._connect() as first:
+        first.execute("BEGIN IMMEDIATE")
+        with pytest.raises(OperationalError, match="lock timeout|锁超时"):
+            with store._connect() as second:
+                second.execute("SET LOCAL lock_timeout = '100ms'")
+                second.execute("BEGIN IMMEDIATE")
+    with store._connect() as released:
+        released.execute("SET LOCAL lock_timeout = '100ms'")
+        released.execute("BEGIN IMMEDIATE")
 
 
 def _project(repository: CreativeRepository, *, name: str = "模板测试项目") -> int:
@@ -49,7 +72,7 @@ def _project(repository: CreativeRepository, *, name: str = "模板测试项目"
 @pytest.fixture
 def prompt_store(tmp_path):
     repository = CreativeRepository(tmp_path / "creative.db")
-    return repository, PromptStore(repository.db_path)
+    return repository, PromptStore(repository)
 
 
 def test_catalog_seeds_four_selectable_system_templates(prompt_store):
@@ -67,20 +90,13 @@ def test_catalog_seeds_four_selectable_system_templates(prompt_store):
     assert all(len(item["content"]["dimensions"]) == 7 for item in catalog)
 
 
-def test_prompt_store_migrates_governance_columns_and_event_table(prompt_store):
-    _, store = prompt_store
-
-    with store._connect() as conn:
-        columns = {
-            row["name"]
-            for row in conn.execute(
-                "PRAGMA table_info(creative_prompt_templates)"
-            ).fetchall()
-        }
-        event_table = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' "
-            "AND name = 'creative_prompt_governance_events'"
-        ).fetchone()
+def test_prompt_store_uses_alembic_managed_governance_schema(prompt_store):
+    repository, store = prompt_store
+    schema = inspect(repository.database.engine)
+    columns = {
+        item["name"]
+        for item in schema.get_columns("creative_prompt_templates")
+    }
 
     assert {
         "governance_status",
@@ -90,48 +106,15 @@ def test_prompt_store_migrates_governance_columns_and_event_table(prompt_store):
         "governance_updated_by",
         "governance_updated_at",
     } <= columns
-    assert event_table is not None
+    assert schema.has_table("creative_prompt_governance_events")
     assert store.get_template_by_key("generic-vertical-short")[
         "approved_revision"
     ] == 1
 
 
-def test_prompt_store_upgrades_legacy_template_table_for_governance(tmp_path):
-    repository = CreativeRepository(tmp_path / "legacy-governance.db")
-    with repository._connect() as conn:
-        conn.execute(
-            """
-            CREATE TABLE creative_prompt_templates (
-                id TEXT PRIMARY KEY,
-                template_key TEXT NOT NULL UNIQUE,
-                title TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',
-                owner_scope TEXT NOT NULL,
-                owner_user_id TEXT NOT NULL DEFAULT '',
-                project_id INTEGER,
-                visibility TEXT NOT NULL DEFAULT 'private',
-                status TEXT NOT NULL DEFAULT 'active',
-                catalog_visible INTEGER NOT NULL DEFAULT 1,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            )
-            """
-        )
-
-    store = PromptStore(repository.db_path)
-
-    with store._connect() as conn:
-        columns = {
-            row["name"]
-            for row in conn.execute(
-                "PRAGMA table_info(creative_prompt_templates)"
-            ).fetchall()
-        }
-    assert "governance_status" in columns
-    assert "approved_revision" in columns
-    assert store.get_template_by_key("generic-vertical-short")[
-        "approved_revision"
-    ] == 1
+def test_prompt_store_rejects_non_postgresql_backend():
+    with pytest.raises(TypeError, match="PostgreSQL creative repository"):
+        PromptStore(object())
 
 
 def test_old_project_is_legacy_until_owner_enables_prompt_library(prompt_store):
@@ -765,7 +748,7 @@ def test_outline_binding_is_project_scoped_and_has_no_episode_override(prompt_st
         )
 
 
-def test_previous_binding_table_migrates_without_losing_existing_rows(prompt_store):
+def test_startup_adds_new_stage_bindings_without_losing_existing_rows(prompt_store):
     repository, store = prompt_store
     project_id = _project(repository)
     store.enable_project(project_id, actor_user_id="owner-1")
@@ -779,33 +762,7 @@ def test_previous_binding_table_migrates_without_losing_existing_rows(prompt_sto
         override={},
         actor_user_id="owner-1",
     )
-    with repository._connect() as conn:
-        conn.execute(
-            "ALTER TABLE creative_project_prompt_bindings "
-            "RENAME TO creative_project_prompt_bindings_v2"
-        )
-        conn.execute(
-            """
-            CREATE TABLE creative_project_prompt_bindings (
-                project_id INTEGER NOT NULL,
-                stage TEXT NOT NULL CHECK (stage IN ('brief', 'characters', 'beats', 'script')),
-                episode_number INTEGER NOT NULL DEFAULT 0,
-                template_id TEXT NOT NULL,
-                template_revision INTEGER NOT NULL,
-                override_json TEXT NOT NULL DEFAULT '{}',
-                updated_by TEXT NOT NULL DEFAULT '',
-                updated_at REAL NOT NULL,
-                PRIMARY KEY(project_id, stage, episode_number)
-            )
-            """
-        )
-        conn.execute(
-            "INSERT INTO creative_project_prompt_bindings "
-            "SELECT * FROM creative_project_prompt_bindings_v2 WHERE stage != 'outline'"
-        )
-        conn.execute("DROP TABLE creative_project_prompt_bindings_v2")
-
-    migrated = PromptStore(repository.db_path)
+    migrated = PromptStore(repository)
 
     assert migrated.binding(project_id, "beats", 0)["template_id"] == template["id"]
     assert migrated.binding(project_id, "brief", 0) is not None
@@ -845,7 +802,7 @@ def test_enabled_project_pins_only_new_character_stage_to_compatible_revision(
             ),
         )
 
-    migrated = PromptStore(repository.db_path)
+    migrated = PromptStore(repository)
 
     settings = migrated.project_settings(project_id)
     assert settings["default_template_revision"] == 1
@@ -885,7 +842,7 @@ def test_enabled_project_pins_only_new_outline_stage_to_compatible_revision(
             ),
         )
 
-    migrated = PromptStore(repository.db_path)
+    migrated = PromptStore(repository)
 
     settings = migrated.project_settings(project_id)
     assert settings["default_template_revision"] == 1
@@ -895,17 +852,11 @@ def test_enabled_project_pins_only_new_outline_stage_to_compatible_revision(
 
 
 @pytest.mark.parametrize("governance_status", ["pending_review", "deprecated", "archived"])
-@pytest.mark.parametrize("storage", ["file", "memory"])
 def test_startup_new_stage_never_binds_unapproved_or_retired_revision(
-    tmp_path, monkeypatch, governance_status, storage
+    tmp_path, governance_status
 ):
-    if storage == "memory":
-        connection = sqlite3.connect(":memory:")
-        connection.row_factory = sqlite3.Row
-        monkeypatch.setattr(CreativeRepository, "_connect", lambda _: connection)
-        monkeypatch.setattr(PromptStore, "_connect", lambda _: connection)
     repository = CreativeRepository(tmp_path / "legacy-governance.db")
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     project_id = _project(repository)
     template = store.create_template(
         title="旧版项目模板", description="启动补齐治理边界",
@@ -947,7 +898,7 @@ def test_startup_new_stage_never_binds_unapproved_or_retired_revision(
                 (governance_status, template["id"]),
             )
 
-    restarted = PromptStore(repository.db_path)
+    restarted = PromptStore(repository)
     snapshot = restarted.resolve_snapshot(
         project_id=project_id, stage="review", mode="single", actor_user_id="owner-1"
     )
@@ -956,10 +907,8 @@ def test_startup_new_stage_never_binds_unapproved_or_retired_revision(
     assert changed["shared_dna"] not in snapshot["effective_instruction"]
     assert restarted.binding(project_id, "beats", 0) == existing_binding
     assert restarted.project_settings(project_id)["default_template_revision"] == 1
-    again = PromptStore(repository.db_path)
+    again = PromptStore(repository)
     assert again.binding(project_id, "review", 0) == restarted.binding(project_id, "review", 0)
-    if storage == "memory":
-        connection.close()
 
 
 def test_script_snapshot_rejects_cross_stage_content_by_construction():
@@ -1248,17 +1197,10 @@ def test_bound_private_template_still_requires_owner(prompt_store, binding_kind,
         )
 
 
-def test_legacy_startup_preserves_custom_revisions_and_bindings(tmp_path):
+def test_repeated_startup_preserves_custom_revisions_and_bindings(tmp_path):
     repository = CreativeRepository(tmp_path / "legacy-startup.db")
     project_id = _project(repository)
-    with repository._connect() as conn:
-        assert (
-            conn.execute(
-                "SELECT name FROM sqlite_master WHERE name LIKE 'creative_prompt_%'"
-            ).fetchall()
-            == []
-        )
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     store.enable_project(project_id, actor_user_id="owner-1")
     for scope, stage, episode in [("user", "script", 1), ("project", "beats", 0)]:
         template = store.create_template(
@@ -1282,43 +1224,30 @@ def test_legacy_startup_preserves_custom_revisions_and_bindings(tmp_path):
         store.save_revision(
             template["id"], content, expected_revision=1, actor_user_id="owner-1"
         )
-    store = PromptStore(repository.db_path)
-    tables = [
-        "creative_prompt_template_revisions",
-        "creative_project_prompt_settings",
-        "creative_project_prompt_bindings",
-    ]
-    with store._connect() as conn:
-        before = {
-            table: [
-                tuple(row)
-                for row in conn.execute(f"SELECT * FROM {table} ORDER BY rowid")
-            ]
-            for table in tables
-        }
-        for column in [
-            "governance_status",
-            "governance_revision",
-            "approved_revision",
-            "governance_note",
-            "governance_updated_by",
-            "governance_updated_at",
-        ]:
-            conn.execute(f"ALTER TABLE creative_prompt_templates DROP COLUMN {column}")
+    expected_titles = {"保留 user", "保留 project"}
+    before_catalog = {
+        item["id"]: item
+        for item in store.list_catalog(
+            project_id=project_id, actor_user_id="owner-1"
+        )
+        if item["title"] in expected_titles
+    }
+    before_bindings = {
+        (stage, episode): store.binding(project_id, stage, episode)
+        for stage, episode in [("script", 1), ("beats", 0)]
+    }
     for _ in range(2):
-        store = PromptStore(repository.db_path)
-        with store._connect() as conn:
-            after = {
-                table: [
-                    tuple(row)
-                    for row in conn.execute(f"SELECT * FROM {table} ORDER BY rowid")
-                ]
-                for table in tables
-            }
-        assert after == before
-        assert {
-            item["title"]
+        store = PromptStore(repository)
+        after_catalog = {
+            item["id"]: item
             for item in store.list_catalog(
                 project_id=project_id, actor_user_id="owner-1"
             )
-        } >= {"保留 user", "保留 project"}
+            if item["title"] in expected_titles
+        }
+        after_bindings = {
+            (stage, episode): store.binding(project_id, stage, episode)
+            for stage, episode in [("script", 1), ("beats", 0)]
+        }
+        assert after_catalog == before_catalog
+        assert after_bindings == before_bindings

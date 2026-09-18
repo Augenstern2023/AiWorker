@@ -17,6 +17,7 @@ import json
 import re
 import time
 import uuid
+from collections.abc import Mapping
 from contextlib import nullcontext
 
 from identity.repository import IdentityRepository
@@ -82,10 +83,11 @@ class WorkflowRepository:
         expected_writer_external_fingerprint: str | None = None,
         writer_external_baseline_state: dict[str, Any] | None = None,
         writer_ownership_manifest: dict[str, Any] | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, int]:
         """Remove workflow records that belong exclusively to a deleted project."""
 
-        with self.identity_repository.transaction() as connection:
+        with self.identity_repository.transaction_scope(connection) as connection:
             self._lock_project_write(
                 connection, str(project_id), allow_deleting=True
             )
@@ -246,13 +248,14 @@ class WorkflowRepository:
         owner_token: str | None = None,
         requested_by: str = "",
         project_snapshot: dict[str, Any] | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         """Fence new workflow writes before either database deletes project data."""
 
         normalized_project_id = str(project_id)
         marker_owner = owner_token or f"legacy-project-deletion:{normalized_project_id}"
         marker_requester = requested_by or SYSTEM_ACTOR.user_id
-        with self.identity_repository.transaction() as connection:
+        with self.identity_repository.transaction_scope(connection) as connection:
             self._lock_project_write(
                 connection, normalized_project_id, allow_deleting=True
             )
@@ -295,10 +298,16 @@ class WorkflowRepository:
             ),
         )
 
-    def abort_project_deletion(self, project_id: str, *, owner_token: str) -> bool:
+    def abort_project_deletion(
+        self,
+        project_id: str,
+        *,
+        owner_token: str,
+        connection: Connection | None = None,
+    ) -> bool:
         """Release only the marker owned by an operation that never deleted Creative."""
 
-        with self.identity_repository.transaction() as connection:
+        with self.identity_repository.transaction_scope(connection) as connection:
             self._lock_project_write(
                 connection, str(project_id), allow_deleting=True
             )
@@ -311,11 +320,15 @@ class WorkflowRepository:
         return result.rowcount == 1
 
     def complete_project_deletion(
-        self, project_id: str, *, owner_token: str | None = None
+        self,
+        project_id: str,
+        *,
+        owner_token: str | None = None,
+        connection: Connection | None = None,
     ) -> None:
         """Release the workflow write fence after Creative clears its tombstone."""
 
-        with self.identity_repository.transaction() as connection:
+        with self.identity_repository.transaction_scope(connection) as connection:
             self._lock_project_write(
                 connection, str(project_id), allow_deleting=True
             )
@@ -733,6 +746,7 @@ class WorkflowRepository:
         expected_fingerprint: str,
         actor: Principal,
         writer_operation_id: str | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         """Restore workflow rows only when the action post-state still matches."""
 
@@ -743,7 +757,7 @@ class WorkflowRepository:
         if not isinstance(tables, dict):
             raise ValueError("rollback snapshot is invalid")
         actor_id = self._actor_id(actor)
-        with self.identity_repository.transaction() as connection:
+        with self.identity_repository.transaction_scope(connection) as connection:
             self._lock_project_write(connection, str(project_id))
             current = self._export_writer_rollback_state_conn(
                 connection, project_id
@@ -886,10 +900,11 @@ class WorkflowRepository:
         topic_id: int | None = None,
         due_at: str | None = None,
         actor: Principal | dict[str, Any],
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         task_id = str(uuid.uuid4())
         actor_id = self._actor_id(actor)
-        with self.identity_repository.transaction() as connection:
+        with self.identity_repository.transaction_scope(connection) as connection:
             if project_id is not None:
                 self._lock_project_write(connection, str(project_id))
             self._ensure_system_actor(connection, actor_id)
@@ -1087,10 +1102,11 @@ class WorkflowRepository:
         actor: Principal | dict[str, Any],
         project_id: str | None = None,
         workflow_scope: str | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         workflow_id = f"topic:{workflow_scope or topic_id}"
         actor_id = self._actor_id(actor)
-        with self.identity_repository.transaction() as connection:
+        with self.identity_repository.transaction_scope(connection) as connection:
             if project_id is not None:
                 self._lock_project_write(connection, str(project_id))
             existing = connection.exec_driver_sql(
@@ -1157,10 +1173,11 @@ class WorkflowRepository:
         *,
         actor: Principal | dict[str, Any],
         writer_operation_id: str | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         workflow_id = f"project:{project_id}"
         actor_id = self._actor_id(actor)
-        with self.identity_repository.transaction() as connection:
+        with self.identity_repository.transaction_scope(connection) as connection:
             self._lock_project_write(connection, str(project_id))
             self._ensure_system_actor(connection, actor_id)
             self._ensure_workflow(
@@ -1232,8 +1249,10 @@ class WorkflowRepository:
             )
             return self._require_task(connection, task_id)
 
-    def link_task_job(self, task_id: str, job_id: str) -> None:
-        with self.identity_repository.transaction() as connection:
+    def link_task_job(
+        self, task_id: str, job_id: str, *, connection: Connection | None = None
+    ) -> None:
+        with self.identity_repository.transaction_scope(connection) as connection:
             self._lock_task_project_write(connection, task_id)
             connection.exec_driver_sql(
                 "INSERT INTO workflow_task_jobs (task_id, job_id) VALUES (%s, %s)",
@@ -1249,9 +1268,10 @@ class WorkflowRepository:
         expected_task_type: str | None = None,
         expected_topic_id: int | None = None,
         require_creator_assignment: bool = False,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         creator_id = self._actor_id(creator)
-        with self.identity_repository.transaction() as connection:
+        with self.identity_repository.transaction_scope(connection) as connection:
             self._lock_project_write(connection, str(project_id))
             task = self._require_task(connection, task_id)
             if task["project_id"] not in {None, project_id}:
@@ -1429,9 +1449,14 @@ class WorkflowRepository:
         return updated
 
     def record_mirror_error(
-        self, task_id: str, submission: dict[str, Any], message: str
+        self,
+        task_id: str,
+        submission: dict[str, Any],
+        message: str,
+        *,
+        connection: Connection | None = None,
     ) -> None:
-        with self.identity_repository.transaction() as connection:
+        with self.identity_repository.transaction_scope(connection) as connection:
             self._lock_task_project_write(connection, task_id)
             self._ensure_system_actor(connection, SYSTEM_ACTOR.user_id)
             self._record_event(
@@ -1450,8 +1475,10 @@ class WorkflowRepository:
         actor: Principal,
         resource_type: str,
         resource_id: str,
+        *,
+        connection: Connection | None = None,
     ) -> None:
-        with self.identity_repository.transaction() as connection:
+        with self.identity_repository.transaction_scope(connection) as connection:
             task = self._lock_task_project_write(connection, task_id)
             self._record_event(
                 connection,
@@ -1468,8 +1495,10 @@ class WorkflowRepository:
         resource_type: str,
         resource_id: str,
         actor: Principal,
+        *,
+        connection: Connection | None = None,
     ) -> None:
-        with self.identity_repository.transaction() as connection:
+        with self.identity_repository.transaction_scope(connection) as connection:
             rows = connection.exec_driver_sql(
                 "SELECT * FROM workflow_submissions WHERE resource_type = %s "
                 "AND resource_id = %s AND status = 'approved'",
@@ -1485,8 +1514,9 @@ class WorkflowRepository:
             for row in rows:
                 before = self._submission_dict(row)
                 connection.exec_driver_sql(
-                    "UPDATE workflow_submissions SET status = 'superseded', updated_at = %s WHERE id = %s",
-                    (time.time(), before["id"]),
+                    "UPDATE workflow_submissions SET status = 'superseded', "
+                    "updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                    (before["id"],),
                 )
                 after = self.get_submission(before["id"], connection=connection)
                 self._record_event(
@@ -1827,9 +1857,10 @@ class WorkflowRepository:
         actor: Principal | dict[str, Any],
         *,
         writer_operation_id: str | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         actor_id = self._actor_id(actor)
-        with self.identity_repository.transaction() as connection:
+        with self.identity_repository.transaction_scope(connection) as connection:
             task = self._lock_task_project_write(connection, task_id)
             live_actor = self._live_actor(connection, actor_id)
             if (
@@ -1926,9 +1957,10 @@ class WorkflowRepository:
         actor: Principal | dict[str, Any],
         *,
         writer_operation_id: str | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         actor_id = self._actor_id(actor)
-        with self.identity_repository.transaction() as connection:
+        with self.identity_repository.transaction_scope(connection) as connection:
             task = self._lock_task_project_write(connection, task_id)
             live_actor = self._live_actor(connection, actor_id)
             transition_actor = dict(live_actor)
@@ -2108,13 +2140,14 @@ class WorkflowRepository:
         *,
         status: str = "active",
         allow_creator_bootstrap: bool = False,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         if status not in {"active", "inactive"}:
             raise ValueError("project member status must be active or inactive")
         if not project_role.strip():
             raise ValueError("project role is required")
         actor_id = self._actor_id(actor)
-        with self.identity_repository.transaction() as connection:
+        with self.identity_repository.transaction_scope(connection) as connection:
             self._lock_project_write(connection, str(project_id))
             live_actor = self._live_actor(connection, actor_id)
             has_members = connection.exec_driver_sql(
@@ -2301,11 +2334,16 @@ class WorkflowRepository:
             )
 
     def ensure_project_creator(
-        self, project_id: str, creator_user_id: str, actor: Principal | dict[str, Any]
+        self,
+        project_id: str,
+        creator_user_id: str,
+        actor: Principal | dict[str, Any],
+        *,
+        connection: Connection | None = None,
     ) -> dict[str, Any] | None:
         """Create a missing creator membership without reviving an inactive one."""
         actor_id = self._actor_id(actor)
-        with self.identity_repository.transaction() as connection:
+        with self.identity_repository.transaction_scope(connection) as connection:
             self._lock_project_write(connection, str(project_id))
             live_actor = self._live_actor(connection, actor_id)
             if actor_id != creator_user_id or not (
@@ -3066,7 +3104,10 @@ class WorkflowRepository:
 
     @staticmethod
     def _task_dict(row: Any) -> dict[str, Any]:
-        task = dict(row)
+        # Most callers hand over a ``.mappings()`` row, but the terminal
+        # delivery lookup in ``creative/delivery.py`` reads a plain cursor row.
+        # Accept both shapes rather than exploding on whichever one arrives.
+        task = dict(row if isinstance(row, Mapping) else row._mapping)
         task["assignee_user_id"] = task.pop("assignee_id")
         task["assigned_by_user_id"] = task.pop("assigned_by")
         task["local_project_id"] = WorkflowRepository.local_project_id(

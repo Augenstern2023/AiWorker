@@ -18,11 +18,29 @@
 
 # Copyright (c) 2025 relakkes@gmail.com
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
-"""Local operator entrypoint; does not expose filesystem paths over HTTP."""
+"""Local operator entrypoint; does not expose filesystem paths over HTTP.
+
+The bound project tree is still a filesystem path; the status document is now
+persisted in the migrated creative ``production_status`` table, so the store is
+addressed by ``--database-url`` (default ``AIWORKER_SYSTEM_DATABASE_URL``)
+instead of a SQLite file. Output and arguments are otherwise unchanged.
+"""
 import argparse
 import json
 
+from creative.postgres_repository import PostgresCreativeRepository
 from creative.production_status import sync_production_status
+from system_database import SystemDatabase, SystemDatabaseSettings
+
+
+def _repository(database_url: str | None) -> tuple[SystemDatabase, PostgresCreativeRepository]:
+    settings = (
+        SystemDatabaseSettings(url=database_url)
+        if database_url
+        else SystemDatabaseSettings.from_environment()
+    )
+    database = SystemDatabase(settings)
+    return database, PostgresCreativeRepository(database)
 
 
 def main():
@@ -30,9 +48,19 @@ def main():
     parser.add_argument('--project-root', required=True)
     parser.add_argument('--project-id', required=True, type=int)
     parser.add_argument('--fingerprint', required=True)
-    parser.add_argument('--status-db', default='.runtime/creative/production-status.db')
+    parser.add_argument(
+        '--database-url',
+        default=None,
+        help='创意库 PostgreSQL URL；默认取 AIWORKER_SYSTEM_DATABASE_URL',
+    )
     args = parser.parse_args()
-    result = sync_production_status(args.status_db, args.project_root, args.project_id, args.fingerprint)
+    database, repository = _repository(args.database_url)
+    try:
+        result = sync_production_status(
+            repository, args.project_root, args.project_id, args.fingerprint,
+        )
+    finally:
+        database.dispose()
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

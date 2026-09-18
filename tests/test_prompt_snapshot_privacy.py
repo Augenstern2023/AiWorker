@@ -36,12 +36,19 @@ from tests.test_script_optimizations import _project_with_review
 from tests.test_script_review_api import MembershipPermissionService
 
 
+@pytest.fixture(autouse=True)
+def _use_postgres_creative(monkeypatch, postgres_creative):
+    monkeypatch.setitem(
+        globals(), "CreativeRepository", lambda *_args, **_kwargs: postgres_creative
+    )
+
+
 SECRET = "ALICE_PRIVATE_INSTRUCTION_SENTINEL"
 pytestmark = pytest.mark.usefixtures("isolated_creative_rank_source")
 
 
 def _private_snapshot(repository, project_id, owner="alice"):
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     store.enable_project(project_id, actor_user_id=owner)
     template = store.create_template(
         title="私人模板", description="", content=builtin_template("generic-vertical-short"),

@@ -19,6 +19,13 @@ from creative.prompt_store import PromptStore
 from creative.repository import CreativeRepository
 
 
+@pytest.fixture(autouse=True)
+def _use_postgres_creative(monkeypatch, postgres_creative):
+    monkeypatch.setitem(
+        globals(), "CreativeRepository", lambda *_args, **_kwargs: postgres_creative
+    )
+
+
 @pytest.mark.parametrize("missing_key", ["input_reported_call_count", "output_reported_call_count"])
 def test_partial_worker_usage_lowers_coverage_without_token_backfill(tmp_path, missing_key):
     repository = CreativeRepository(tmp_path / "creative.db")
@@ -164,7 +171,7 @@ def _brief_signal(
 
 def test_observability_uses_real_usage_and_explains_regressions(tmp_path):
     repository = CreativeRepository(tmp_path / "creative.db")
-    PromptStore(repository.db_path)
+    PromptStore(repository)
     project_id = _project(repository)
     jobs = []
     for index in range(1, 6):
@@ -252,7 +259,7 @@ def test_observability_uses_real_usage_and_explains_regressions(tmp_path):
 
 def test_observability_hides_another_users_private_template(tmp_path):
     repository = CreativeRepository(tmp_path / "creative.db")
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     project_id = _project(repository)
     private = store.create_template(
         title="私人模板",

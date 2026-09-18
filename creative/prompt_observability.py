@@ -206,7 +206,7 @@ class PromptObservabilityService:
     def __init__(self, repository: Any, job_manager: Any) -> None:
         self.repository = repository
         self.job_manager = job_manager
-        self.store = PromptStore(repository.db_path)
+        self.store = PromptStore(repository)
 
     def report(
         self,
@@ -492,7 +492,8 @@ class PromptObservabilityService:
     @staticmethod
     def _table_exists(connection: Any, table: str) -> bool:
         return connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = current_schema() AND table_name = ?",
             (table,),
         ).fetchone() is not None
 

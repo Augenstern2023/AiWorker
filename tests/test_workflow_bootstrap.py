@@ -144,7 +144,9 @@ def test_topic_decision_approval_adopts_after_pending_bootstrap(tmp_path: Path):
     permissions = PermissionService(identity, sessions)
     app = FastAPI()
     app.state.identity_permission_service = permissions
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(build_creative_router(
+        root=tmp_path, runtime_dir=runtime, repository=creative
+    ))
     session_app = FastAPI()
 
     @session_app.get("/session")

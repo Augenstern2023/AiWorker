@@ -18,12 +18,22 @@
 
 # Copyright (c) 2025 relakkes@gmail.com
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
-"""Read-only downstream inspection, persisted separately from creative decisions."""
+"""Read-only downstream inspection, persisted with the creative store.
+
+The downstream project tree is still read from disk -- that is what this module
+inspects -- but the status document lives in the migrated creative schema, in
+``production_status``. Persistence therefore goes through the injected
+repository: this module owns no database location, opens no database file, and
+runs no DDL, because the table is created and versioned by the Alembic
+migration like every other creative table.
+"""
 from __future__ import annotations
 
 import json
 from pathlib import Path
-import sqlite3
+from typing import Any
+
+from sqlalchemy.engine import Connection
 
 
 def _inside(root: Path, relative: str) -> Path:
@@ -40,8 +50,25 @@ def _read(path: Path) -> dict:
     return value
 
 
-def sync_production_status(db_path, project_root, project_id: int, fingerprint: str) -> dict:
-    """Pull a bound project's status; no remote URLs, credentials or media calls."""
+def sync_production_status(
+    repository,
+    project_root,
+    project_id: int,
+    fingerprint: str,
+    *,
+    connection: Connection | None = None,
+) -> dict:
+    """Pull a bound project's status; no remote URLs, credentials or media calls.
+
+    ``repository`` is the injected creative repository and ``connection``, when
+    given, is a caller-owned connection the repository writes through; it is
+    never committed, rolled back or closed here. The document is stored with the
+    repository's ``record_production_status`` upsert, which replaces the legacy
+    ``CREATE TABLE IF NOT EXISTS`` + ``INSERT ... ON CONFLICT`` block: the table
+    now comes from the migration, and a repeat write for the same
+    ``(project_id, fingerprint)`` refreshes one single row.
+    """
+
     root = Path(project_root).resolve(strict=True)
     package = _read(_inside(root, '01-source/aiworker-production-package.json'))
     if (package.get('sourceSystem') != 'AiWorker'
@@ -86,17 +113,20 @@ def sync_production_status(db_path, project_root, project_id: int, fingerprint: 
         'episodes': episodes, 'issues': issues, 'progressMarkdown': progress,
         'verification': 'nonempty-files-only; media quality not verified',
     }
-    database = Path(db_path)
-    database.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(database) as connection:
-        connection.execute('CREATE TABLE IF NOT EXISTS production_status (project_id INTEGER NOT NULL, fingerprint TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(project_id, fingerprint))')
-        connection.execute('INSERT INTO production_status VALUES (?, ?, ?) ON CONFLICT(project_id,fingerprint) DO UPDATE SET payload=excluded.payload', (project_id, fingerprint, json.dumps(result, ensure_ascii=False, sort_keys=True)))
-    return get_production_status(database, project_id, fingerprint)
+    return repository.record_production_status(
+        int(project_id), str(fingerprint), result, connection=connection,
+    )
 
 
-def get_production_status(db_path, project_id: int, fingerprint: str) -> dict | None:
-    if not Path(db_path).is_file():
-        return None
-    with sqlite3.connect(Path(db_path).resolve().as_uri() + '?mode=ro', uri=True) as connection:
-        row = connection.execute('SELECT payload FROM production_status WHERE project_id=? AND fingerprint=?', (project_id, fingerprint)).fetchone()
-    return json.loads(row[0]) if row else None
+def get_production_status(
+    repository,
+    project_id: int,
+    fingerprint: str,
+    *,
+    connection: Connection | None = None,
+) -> dict[str, Any] | None:
+    """Return the stored status document, or ``None`` when never written."""
+
+    return repository.get_production_status(
+        int(project_id), str(fingerprint), connection=connection,
+    )

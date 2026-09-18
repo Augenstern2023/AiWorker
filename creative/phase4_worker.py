@@ -38,6 +38,7 @@ from creative.original_direction_service import (
     generate_original_directions,
 )
 from creative.outline_overview import normalize_series_overview
+from creative.postgres_repository import PostgresCreativeRepository
 from creative.prompt_templates import PROMPT_TEMPLATE_VERSION, series_overview_messages
 from creative.repository import (
     GENERATION_OPERATION_LEASE_SECONDS,
@@ -53,6 +54,7 @@ from creative.script_service import (
     generate_episode_script_chunk,
     generate_outline_bundle,
 )
+from system_database import SystemDatabase, SystemDatabaseSettings
 
 
 MAX_INLINE_SOURCE_SNAPSHOT_BYTES = 2 * 1024 * 1024
@@ -393,15 +395,13 @@ async def generate_series_overview(
     return overview, meta
 
 
-async def _run_once(job: CrawlJob) -> None:
+async def _run_once(job: CrawlJob, repository: CreativeRepository) -> None:
     extra = job.extra or {}
     action = str(extra.get("action") or "").strip()
     project_id = int(extra.get("project_id") or 0)
-    db_path = Path(str(extra.get("db_path") or ".runtime/creative/creative.db"))
     if action not in {"blueprints", "blueprint_variant", "characters", "outlines", "outline_overview", "beats", "script"} or project_id < 1:
         raise ValueError("Phase 4 任务缺少有效 action 或 project_id")
 
-    repository = CreativeRepository(db_path)
     if extra.get("workflow_mode") == "free":
         from creative.free_phase4_worker import run_free_generation
 
@@ -1136,6 +1136,15 @@ async def run(job: CrawlJob) -> None:
     # Runtime-only references survive asyncio.run exceptions; CrawlJob.to_dict
     # serializes declared dataclass fields only, never these providers.
     job._llm_usage_providers = []
+    database = SystemDatabase(SystemDatabaseSettings.from_environment())
+    try:
+        await _run_with_repository(job, PostgresCreativeRepository(database))
+    finally:
+        database.dispose()
+
+
+async def _run_with_repository(job: CrawlJob, repository: CreativeRepository) -> None:
+    job._llm_usage_providers = []
     extra = job.extra or {}
     action = str(extra.get("action") or "").strip()
     reserved_generation = extra.get("workflow_mode") != "free" and (
@@ -1149,9 +1158,7 @@ async def run(job: CrawlJob) -> None:
     heartbeat_stop = threading.Event()
     heartbeat: threading.Thread | None = None
     if reserved_generation and operation_id and request_hash and project_id > 0:
-        heartbeat_repository = CreativeRepository(
-            Path(str(extra.get("db_path") or ".runtime/creative/creative.db"))
-        )
+        heartbeat_repository = repository
 
         def renew_lease() -> None:
             heartbeat_interval = GENERATION_OPERATION_LEASE_SECONDS / 3
@@ -1175,19 +1182,11 @@ async def run(job: CrawlJob) -> None:
         )
     )
     try:
-        await _run_once(job)
+        await _run_once(job, repository)
     except Exception:
         if reserved_generation:
             if operation_id and request_hash and project_id > 0:
                 try:
-                    repository = CreativeRepository(
-                        Path(
-                            str(
-                                extra.get("db_path")
-                                or ".runtime/creative/creative.db"
-                            )
-                        )
-                    )
                     repository.fail_generation_operation(
                         operation_id=operation_id,
                         request_hash=request_hash,

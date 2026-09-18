@@ -19,6 +19,13 @@ from creative.prompt_store import PromptStore
 from creative.repository import CreativeRepository
 
 
+@pytest.fixture(autouse=True)
+def _use_postgres_creative(monkeypatch, postgres_creative):
+    monkeypatch.setitem(
+        globals(), "CreativeRepository", lambda *_args, **_kwargs: postgres_creative
+    )
+
+
 def _original_project(repository: CreativeRepository) -> dict:
     return repository.create_original_project(
         seed_text="女主看见预警弹幕后主动验证线索，收集证据逐级反杀仇人",
@@ -55,7 +62,7 @@ def test_recommendations_are_stable_explainable_and_match_project_style(tmp_path
 def test_recommendations_do_not_leak_another_users_private_template(tmp_path):
     repository = CreativeRepository(tmp_path / "creative.db")
     project = _original_project(repository)
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     private = store.create_template(
         title="其他人的弹幕模板",
         description="不可见",

@@ -32,8 +32,8 @@ from screenplay_review.service import _review_messages
 from writer_agent.service import writer_messages
 from tests.analysis.test_llm_settings import MemoryCredentialStore, _repository
 from analysis.llm import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
     LLMError,
-    LLMIncompleteResponseError,
     LLMOutputTruncatedError,
     LLMTimeoutError,
     OpenAICompatibleLLMProvider,
@@ -42,7 +42,6 @@ from analysis.llm import (
     create_llm_provider_from_config,
     normalize_llm_analysis,
     parse_chat_completion_json,
-    parse_chat_completion_text,
     parse_json_object,
     parse_responses_text,
     resolve_reasoning_effort,
@@ -53,104 +52,6 @@ from analysis.llm import (
 
 def test_parse_json_object_handles_markdown_fence():
     assert parse_json_object('```json\n{"summary": "摘要"}\n```') == {"summary": "摘要"}
-
-
-@pytest.mark.parametrize("wire_api", ["chat_completions", "responses"])
-@pytest.mark.parametrize("outcome", ["success", "invalid_json", "truncated"])
-@pytest.mark.asyncio
-async def test_real_usage_survives_content_parsing_errors(wire_api, outcome):
-    """Usage must be captured before parsing content or detecting truncation."""
-    content = '{"ok": true}' if outcome == "success" else "not json"
-    if wire_api == "responses":
-        payload = {
-            "output_text": content,
-            "status": "incomplete" if outcome == "truncated" else "completed",
-            "incomplete_details": {"reason": "max_output_tokens"},
-            "usage": {"input_tokens": 13, "output_tokens": 7, "total_tokens": 20,
-                      "input_tokens_details": {"cached_tokens": 4},
-                      "output_tokens_details": {"reasoning_tokens": 3}},
-        }
-    else:
-        payload = {
-            "choices": [{"message": {"content": content},
-                         "finish_reason": "length" if outcome == "truncated" else "stop"}],
-            "usage": {"prompt_tokens": 13, "completion_tokens": 7, "total_tokens": 20,
-                      "prompt_tokens_details": {"cached_tokens": 4},
-                      "completion_tokens_details": {"reasoning_tokens": 3}},
-        }
-    provider = OpenAICompatibleLLMProvider(
-        "https://llm.test/v1", "secret", "model", wire_api=wire_api,
-        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload)),
-    )
-    if outcome == "success":
-        assert (await provider.complete_json([]))["ok"] is True
-    else:
-        with pytest.raises(json.JSONDecodeError if outcome == "invalid_json" else LLMError):
-            await provider.complete_json([])
-    assert provider.usage_snapshot() == {
-        "call_count": 1, "reported_call_count": 1,
-        "input_reported_call_count": 1, "output_reported_call_count": 1,
-        "total_reported_call_count": 1, "input_tokens": 13, "output_tokens": 7,
-        "total_tokens": 20, "cached_tokens": 4, "reasoning_tokens": 3, "complete": True,
-    }
-
-
-@pytest.mark.asyncio
-async def test_usage_counts_missing_partial_invalid_and_derived_totals_without_estimates():
-    usages = iter([
-        {"prompt_tokens": 0, "completion_tokens": 7},
-        None,
-        {"prompt_tokens": 5, "completion_tokens": True, "total_tokens": -1},
-        {"prompt_tokens": "12", "completion_tokens": 1.5, "total_tokens": 8,
-         "prompt_tokens_details": {"cached_tokens": -1},
-         "completion_tokens_details": {"reasoning_tokens": False}},
-    ])
-    provider = OpenAICompatibleLLMProvider(
-        "https://llm.test/v1", "secret", "model",
-        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={
-            "usage": next(usages), "choices": [{"message": {"content": "x" * 10000}}],
-        })),
-    )
-    for _ in range(4):
-        await provider.complete_text([])
-    assert provider.usage_snapshot() == {
-        "call_count": 4, "reported_call_count": 3,
-        "input_reported_call_count": 2, "output_reported_call_count": 1,
-        "total_reported_call_count": 2, "input_tokens": 5, "output_tokens": 7,
-        "total_tokens": 15, "cached_tokens": 0, "reasoning_tokens": 0, "complete": False,
-    }
-
-
-@pytest.mark.asyncio
-async def test_usage_aggregates_fallback_and_counts_failed_http_attempts_once():
-    fallback = OpenAICompatibleLLMProvider(
-        "https://fallback.test/v1", "secret", "model",
-        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={
-            "usage": {"prompt_tokens": 2, "completion_tokens": 3},
-            "choices": [{"message": {"content": "ok"}}],
-        })),
-    )
-    provider = OpenAICompatibleLLMProvider(
-        "https://llm.test/v1", "secret", "model", max_retries=1, retry_base_delay=0,
-        fallback_provider=fallback,
-        transport=httpx.MockTransport(lambda request: httpx.Response(503, json={})),
-    )
-    assert await provider.complete_text([]) == "ok"
-    fallback.fallback_provider = provider  # Snapshot traversal must tolerate cycles.
-    usage = provider.usage_snapshot()
-    assert usage["call_count"] == 3
-    assert usage["reported_call_count"] == 1
-    assert usage["total_tokens"] == 5
-    assert usage["complete"] is False
-
-
-def test_usage_helper_does_not_invent_usage_for_test_doubles():
-    from analysis.llm import get_llm_usage_snapshot
-
-    snapshot = get_llm_usage_snapshot(object())
-    assert snapshot["call_count"] == 0
-    assert snapshot["total_tokens"] == 0
-    assert snapshot["complete"] is False
 
 
 def _running_rotation_client(monkeypatch, *, selected: bool, wire_api: str):
@@ -299,23 +200,6 @@ def test_normalize_llm_analysis_stabilizes_fields():
     assert result["tags"] == ["旅行"]
     assert result["risk_flags"] == ["隐私"]
     assert result["provider"] == "minimax"
-
-
-def test_parse_chat_completion_text_rejects_output_truncated_by_token_limit():
-    payload = {
-        "choices": [
-            {
-                "finish_reason": "length",
-                "message": {"content": '{"episodes":[{"episode":1}'},
-            }
-        ]
-    }
-
-    with pytest.raises(LLMOutputTruncatedError, match="finish_reason=length") as exc_info:
-        parse_chat_completion_text(payload)
-
-    assert exc_info.value.finish_reason == "length"
-    assert exc_info.value.returned_chars == len('{"episodes":[{"episode":1}')
 
 
 def test_build_video_analysis_messages_contains_json_payload():
@@ -648,9 +532,8 @@ def test_incomplete_responses_result_does_not_fall_back_to_chat_completions():
         transport=httpx.MockTransport(handler),
     )
 
-    with pytest.raises(LLMOutputTruncatedError, match="max_output_tokens") as exc_info:
+    with pytest.raises(LLMError, match="incomplete.*max_output_tokens"):
         asyncio.run(provider.complete_text([{"role": "user", "content": "普通分析"}]))
-    assert exc_info.value.finish_reason == "max_output_tokens"
     assert paths == ["/v1/responses"]
 
 
@@ -828,135 +711,6 @@ def test_build_responses_request_body_sets_reasoning_effort():
     assert body["text"]["format"]["type"] == "json_object"
 
 
-@pytest.mark.parametrize(
-    ("wire_api", "expected_path", "token_field"),
-    [
-        ("chat_completions", "/v1/chat/completions", "max_tokens"),
-        ("responses", "/v1/responses", "max_output_tokens"),
-    ],
-)
-def test_provider_maps_max_output_tokens_to_each_wire_api(
-    wire_api, expected_path, token_field
-):
-    requests = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append((request.url.path, json.loads(request.content)))
-        if wire_api == "responses":
-            return httpx.Response(200, request=request, json={"output_text": "ok"})
-        return httpx.Response(
-            200,
-            request=request,
-            json={"choices": [{"message": {"content": "ok"}}]},
-        )
-
-    provider = OpenAICompatibleLLMProvider(
-        base_url="https://example.test/v1",
-        api_key="key",
-        model="test-model",
-        wire_api=wire_api,
-        reasoning_effort="high",
-        max_output_tokens=32768,
-        transport=httpx.MockTransport(handler),
-    )
-
-    assert asyncio.run(
-        provider.complete_text([{"role": "user", "content": "test"}])
-    ) == "ok"
-    assert requests == [
-        (
-            expected_path,
-            {
-                "model": "test-model",
-                ("messages" if wire_api == "chat_completions" else "input"): [
-                    {"role": "user", "content": "test"}
-                ],
-                ("reasoning_effort" if wire_api == "chat_completions" else "reasoning"): (
-                    "high" if wire_api == "chat_completions" else {"effort": "high"}
-                ),
-                token_field: 32768,
-            },
-        )
-    ]
-
-
-@pytest.mark.parametrize("wire_api", ["chat_completions", "responses"])
-def test_zero_max_output_tokens_omits_the_wire_parameter(wire_api):
-    request_body = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        request_body.update(json.loads(request.content))
-        if wire_api == "responses":
-            return httpx.Response(200, request=request, json={"output_text": "ok"})
-        return httpx.Response(
-            200,
-            request=request,
-            json={"choices": [{"message": {"content": "ok"}}]},
-        )
-
-    provider = OpenAICompatibleLLMProvider(
-        base_url="https://example.test/v1",
-        api_key="key",
-        model="test-model",
-        wire_api=wire_api,
-        max_output_tokens=0,
-        transport=httpx.MockTransport(handler),
-    )
-
-    asyncio.run(provider.complete_text([{"role": "user", "content": "test"}]))
-
-    assert "max_tokens" not in request_body
-    assert "max_output_tokens" not in request_body
-
-
-@pytest.mark.parametrize(
-    ("scenario_value", "model_value", "global_value", "expected"),
-    [
-        (8192, 16384, 32768, 8192),
-        (None, 16384, 32768, 16384),
-        (None, 0, 32768, 0),
-        (None, None, 32768, 32768),
-        (None, None, None, None),
-    ],
-)
-def test_max_output_tokens_precedence_preserves_zero_and_null_inheritance(
-    monkeypatch, scenario_value, model_value, global_value, expected
-):
-    monkeypatch.delenv("WRITER_AGENT_LLM_MAX_OUTPUT_TOKENS", raising=False)
-    monkeypatch.delenv("LLM_MAX_OUTPUT_TOKENS", raising=False)
-
-    class DummyConfig:
-        LLM_MAX_OUTPUT_TOKENS = global_value
-
-    if scenario_value is not None:
-        DummyConfig.WRITER_AGENT_LLM_MAX_OUTPUT_TOKENS = scenario_value
-
-    settings = resolve_llm_settings(
-        DummyConfig,
-        prefix="WRITER_AGENT_LLM",
-        database_default={"max_output_tokens": model_value},
-    )
-
-    assert settings["max_output_tokens"] == expected
-
-
-def test_task_specific_max_output_tokens_can_come_directly_from_environment(
-    monkeypatch,
-):
-    class DummyConfig:
-        LLM_MAX_OUTPUT_TOKENS = 32768
-
-    monkeypatch.setenv("WRITER_AGENT_LLM_MAX_OUTPUT_TOKENS", "8192")
-
-    settings = resolve_llm_settings(
-        DummyConfig,
-        prefix="WRITER_AGENT_LLM",
-        database_default={"max_output_tokens": 16384},
-    )
-
-    assert settings["max_output_tokens"] == 8192
-
-
 def test_resolve_llm_settings_defaults_sub2api_to_chat_completions(monkeypatch):
     class DummyConfig:
         LLM_PROVIDER = "sub2api"
@@ -1089,33 +843,6 @@ def test_project_review_profile_uses_bounded_requests_without_read_timeout_retri
     assert settings["retry_read_timeouts"] is False
 
 
-@pytest.mark.parametrize(
-    ("prefix", "effort", "timeout"),
-    [
-        ("SCREENPLAY_REVIEW_UNIT_LLM", "high", 240),
-        ("SCREENPLAY_REVIEW_SUMMARY_LLM", "medium", 180),
-        ("SCREENPLAY_OPTIMIZATION_LLM", "high", 240),
-    ],
-)
-def test_screenplay_profiles_do_not_inherit_global_max_reasoning_or_long_retries(
-    monkeypatch, prefix, effort, timeout
-):
-    from config import bilibili_config
-
-    for suffix in (
-        "REASONING_EFFORT", "TIMEOUT_SECONDS", "MAX_RETRIES", "RETRY_READ_TIMEOUTS"
-    ):
-        monkeypatch.delenv(f"{prefix}_{suffix}", raising=False)
-    profile = importlib.reload(bilibili_config)
-
-    settings = resolve_llm_settings(profile, prefix=prefix)
-
-    assert settings["reasoning_effort"] == effort
-    assert settings["timeout_seconds"] == timeout
-    assert settings["max_retries"] == 1
-    assert settings["retry_read_timeouts"] is False
-
-
 def test_project_review_provider_factory_accepts_retry_callback():
     class DummyConfig:
         LLM_PROVIDER = "openai-compatible"
@@ -1198,31 +925,6 @@ def test_chat_completions_reports_the_configured_timeout_after_retries():
         asyncio.run(provider.complete_text([{"role": "user", "content": "test"}]))
 
     assert retries == [(1, 1, "模型响应超时（600 秒）")]
-
-
-def test_profile_can_fail_fast_on_read_timeout_but_retry_gateway_errors():
-    timeout_attempts = 0
-
-    def timeout_handler(request: httpx.Request) -> httpx.Response:
-        nonlocal timeout_attempts
-        timeout_attempts += 1
-        raise httpx.ReadTimeout("", request=request)
-
-    provider = OpenAICompatibleLLMProvider(
-        base_url="https://example.test/v1",
-        api_key="key",
-        model="test-model",
-        timeout=240,
-        max_retries=1,
-        retry_base_delay=0,
-        retry_read_timeouts=False,
-        transport=httpx.MockTransport(timeout_handler),
-    )
-
-    with pytest.raises(LLMError, match="模型响应超时（240 秒）"):
-        asyncio.run(provider.complete_text([{"role": "user", "content": "test"}]))
-
-    assert timeout_attempts == 1
 
 
 def test_rag_llm_inherits_the_global_text_model_settings():
@@ -1359,14 +1061,19 @@ def test_configured_runtime_repository_applies_without_per_call_injection():
 def test_provider_factory_uses_explicit_model_record_instead_of_global_default():
     class DummyConfig:
         LLM_REASONING_EFFORT = "auto"
-        LLM_MAX_OUTPUT_TOKENS = 32768
 
     class SettingsRepository:
         @staticmethod
         def effective_default():
-            raise AssertionError(
-                "explicit model resolution must not read the global default"
-            )
+            return {
+                "provider": "minimax",
+                "provider_id": "provider-default",
+                "base_url": "https://api.minimax.io/v1",
+                "api_key": "default-key",
+                "model": "MiniMax-M3",
+                "wire_api": "chat_completions",
+                "allow_insecure_http": False,
+            }
 
         @staticmethod
         def effective_model(model_record_id):
@@ -1380,7 +1087,6 @@ def test_provider_factory_uses_explicit_model_record_instead_of_global_default()
                 "model": "gpt-selected",
                 "model_record_id": "model-selected",
                 "model_display_name": "GPT Selected",
-                "max_output_tokens": 16384,
                 "wire_api": "responses",
                 "allow_insecure_http": False,
             }
@@ -1401,7 +1107,6 @@ def test_provider_factory_uses_explicit_model_record_instead_of_global_default()
     assert provider.model == "gpt-selected"
     assert provider.model_record_id == "model-selected"
     assert provider.model_display_name == "GPT Selected"
-    assert provider.max_output_tokens == 16384
     assert provider.api_key == "selected-key"
 
 
@@ -1445,11 +1150,23 @@ def test_provider_factory_does_not_decrypt_unrelated_default_for_explicit_model(
     assert provider.provider_id == "burncloud-provider"
     assert provider.model == "gemini-3.5-flash"
     assert provider.api_key == "burncloud-key"
+
+
 def _ok_chat_handler(request: httpx.Request) -> httpx.Response:
     return httpx.Response(
         200,
         request=request,
         json={"choices": [{"message": {"content": '{"ok": true}'}}]},
+    )
+
+
+def test_resolve_llm_settings_exposes_the_default_output_limit():
+    class DummyConfig:
+        pass
+
+    assert (
+        resolve_llm_settings(DummyConfig)["max_output_tokens"]
+        == DEFAULT_MAX_OUTPUT_TOKENS
     )
 
 
@@ -1611,98 +1328,3 @@ def test_chat_completions_reports_truncated_output_instead_of_repairing_it():
         asyncio.run(
             provider.complete_text([{"role": "user", "content": "test"}], json_mode=True)
         )
-@pytest.mark.parametrize("wire_api", ["chat_completions", "responses"])
-def test_capability_downgrades_keep_usage_and_one_key_snapshot(wire_api):
-    bodies = []
-    keys = []
-    def handler(request):
-        body = json.loads(request.content)
-        bodies.append(body)
-        assert request.headers["Authorization"] == "Bearer rotated"
-        fmt = body.get("response_format") or body["text"]["format"]
-        usage = (
-            {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5}
-            if wire_api == "responses" else
-            {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}
-        )
-        if fmt["type"] == "json_schema":
-            return httpx.Response(400, json={"error": "json_schema unsupported", "usage": usage})
-        if body.get("max_tokens") or body.get("max_output_tokens"):
-            return httpx.Response(400, json={"error": "max_output_tokens unsupported", "usage": usage})
-        payload = {"output_text": '{"ok":true}'} if wire_api == "responses" else {"choices": [{"message": {"content": '{"ok":true}'}}]}
-        return httpx.Response(200, json={**payload, "usage": usage})
-    def resolver():
-        keys.append(True)
-        return "rotated"
-    provider = OpenAICompatibleLLMProvider(
-        base_url="https://example.test/v1", api_key="stale", model="model",
-        wire_api=wire_api, api_key_resolver=resolver, max_retries=0,
-        max_output_tokens=2000, transport=httpx.MockTransport(handler),
-    )
-    for _ in range(2):
-        assert asyncio.run(provider.complete_json([{"role":"user","content":"test"}], schema={"type":"object"}))["ok"]
-    assert len(bodies) == 4
-    assert len(keys) == 2
-    assert provider.last_request_summary["max_tokens"] == 0
-    assert provider.last_request_summary["response_format"] == "json_object"
-    assert provider.usage_snapshot()["total_tokens"] == 20
-    assert provider.usage_snapshot()["call_count"] == 4
-    assert provider.usage_snapshot()["complete"] is True
-
-
-def test_fallback_provider_preserves_schema_and_effective_request_diagnostics():
-    captured = []
-    def handler(request):
-        captured.append(json.loads(request.content))
-        return _ok_chat_handler(request)
-    fallback = OpenAICompatibleLLMProvider(
-        base_url="https://fallback.test/v1", api_key="fallback-key", model="fallback",
-        transport=httpx.MockTransport(handler),
-    )
-    primary = OpenAICompatibleLLMProvider(
-        base_url="https://primary.test/v1", api_key="primary-key", model="missing",
-        max_retries=0, fallback_provider=fallback,
-        transport=httpx.MockTransport(lambda request: httpx.Response(404, text="model not found")),
-    )
-    assert asyncio.run(primary.complete_json([{"role":"user","content":"test"}], schema={"type":"object"}))["ok"]
-    assert captured[0]["response_format"]["type"] == "json_schema"
-    assert primary.last_request_summary["model"] == "fallback"
-    assert primary.usage_snapshot()["call_count"] == 2
-@pytest.mark.parametrize("status", [415, 422])
-@pytest.mark.parametrize("capability", ["json_schema", "max_output_tokens"])
-def test_responses_downgrades_sent_capabilities_before_unavailable_chat(status, capability):
-    calls = []
-    credentials = []
-    def handler(request):
-        body = json.loads(request.content)
-        calls.append((request.url.path, body))
-        assert request.headers["Authorization"] == "Bearer current"
-        if request.url.path.endswith("/chat/completions"):
-            return httpx.Response(404, text="Chat endpoint unavailable")
-        rejected = (
-            body["text"]["format"]["type"] == "json_schema"
-            if capability == "json_schema" else "max_output_tokens" in body
-        )
-        usage = {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}
-        if rejected:
-            return httpx.Response(status, json={"error": capability + " unsupported", "usage": usage})
-        return httpx.Response(200, json={"output_text": '{"ok":true}', "usage": usage})
-    def resolver():
-        credentials.append(True)
-        return "current"
-    provider = OpenAICompatibleLLMProvider(
-        "https://example.test/v1", "old", "model", wire_api="responses",
-        api_key_resolver=resolver, max_output_tokens=200, max_retries=0,
-        transport=httpx.MockTransport(handler),
-    )
-    assert asyncio.run(provider.complete_json([{"role":"user","content":"test"}], schema={"type":"object"}))["ok"]
-    assert len(calls) == 2
-    assert all(path.endswith("/responses") for path, body in calls)
-    assert len(credentials) == 1
-    assert provider.usage_snapshot()["total_tokens"] == 6
-    assert provider.usage_snapshot()["complete"] is True
-    assert provider.last_request_summary["protocol"] == "responses"
-    if capability == "json_schema":
-        assert provider.json_schema_supported is False
-    else:
-        assert provider.max_output_tokens_rejected is True

@@ -25,6 +25,13 @@ from identity.dependencies import current_principal
 from identity.schema import Principal
 
 
+@pytest.fixture(autouse=True)
+def _use_postgres_creative(monkeypatch, postgres_creative):
+    monkeypatch.setitem(
+        globals(), "CreativeRepository", lambda *_args, **_kwargs: postgres_creative
+    )
+
+
 SECRET = "PRIVATE_DELIVERY_INSTRUCTION_SENTINEL"
 
 
@@ -44,7 +51,7 @@ def delivery_environment(tmp_path):
         created_by="alice", creation_request_id="private-delivery", workflow_mode="free",
     )
     repository.mark_project_bootstrap_status(project["id"], "ready")
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     store.enable_project(project["id"], actor_user_id="alice")
     template = store.create_template(
         title="Alice 私人模板", description="", content=builtin_template("generic-vertical-short"),
@@ -85,12 +92,10 @@ def _create_delivery(environment, format, *, legacy=False, actor_id="alice"):
     )
     if legacy:
         with repository._connect() as conn:
-            columns = {row["name"] for row in conn.execute("PRAGMA table_info(creative_deliveries)")}
-            if "projection_source_json" in columns:
-                conn.execute(
-                    "UPDATE creative_deliveries SET projection_source_json = '{}' WHERE id = ?",
-                    (delivery["id"],),
-                )
+            conn.execute(
+                "UPDATE creative_deliveries SET projection_source_json = '{}' WHERE id = ?",
+                (delivery["id"],),
+            )
     return delivery
 
 

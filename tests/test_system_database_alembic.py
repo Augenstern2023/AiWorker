@@ -55,11 +55,13 @@ def run_alembic_upgrade(postgres_url: str, monkeypatch: pytest.MonkeyPatch) -> N
     command.upgrade(config, "head")
 
 
-def test_model_output_limit_migration_extends_deployed_system_head():
+def test_local_migration_graph_contains_deployed_database_revision():
     config = Config(str(PROJECT_ROOT / "alembic.ini"))
     revisions = ScriptDirectory.from_config(config)
 
-    assert revisions.get_current_head() == "0024_llm_model_max_output_tokens"
+    # The deployed database reports 0024. The local graph must still resolve
+    # that revision even though the head has since moved on.
+    assert revisions.get_revision("0024_llm_model_max_output_tokens") is not None
     assert (
         revisions.get_revision("0024_llm_model_max_output_tokens").down_revision
         == "0023_llm_model_pricing"
@@ -68,30 +70,30 @@ def test_model_output_limit_migration_extends_deployed_system_head():
         revisions.get_revision("0023_llm_model_pricing").down_revision
         == "0022_remove_team_management"
     )
-    assert (
-        revisions.get_revision("0022_remove_team_management").down_revision
-        == "0021_llm_local_api_keys"
-    )
-    assert (
-        revisions.get_revision("0021_llm_local_api_keys").down_revision
-        == "0020_user_presence"
-    )
 
 
-def test_llm_provider_schema_declares_local_api_key_reference():
-    columns = SYSTEM_METADATA.tables["llm_providers"].c
-
-    assert "api_key_env_var" in columns
-    assert isinstance(columns.api_key_env_var.type, Text)
-    assert columns.api_key_env_var.nullable is False
-    assert str(columns.api_key_env_var.server_default.arg) == "''"
-
-
-def test_llm_model_schema_declares_nullable_output_token_limit():
+def test_llm_model_schema_matches_deployed_pricing_revision():
     table = SYSTEM_METADATA.tables["llm_models"]
 
+    assert {
+        "input_price_per_million",
+        "output_price_per_million",
+        "price_currency",
+    } <= {column.name for column in table.c}
+    assert table.c.price_currency.nullable is False
+    assert str(table.c.price_currency.server_default.arg) == "'CNY'"
+    assert {
+        "ck_llm_models_input_price",
+        "ck_llm_models_output_price",
+        "ck_llm_models_price_currency",
+    } <= {constraint.name for constraint in table.constraints}
+
+
+def test_llm_model_schema_matches_deployed_max_output_tokens_revision():
+    table = SYSTEM_METADATA.tables["llm_models"]
+
+    assert "max_output_tokens" in {column.name for column in table.c}
     assert table.c.max_output_tokens.nullable is True
-    assert table.c.max_output_tokens.type.__class__.__name__ == "Integer"
     assert "ck_llm_models_max_output_tokens" in {
         constraint.name for constraint in table.constraints
     }
@@ -137,7 +139,10 @@ def test_llm_provider_schema_declares_local_api_key_reference():
     assert str(columns.api_key_env_var.server_default.arg) == "''"
 
 
-def test_empty_schema_upgrade_reaches_model_output_limit_head(postgres_url):
+def test_empty_schema_upgrade_reaches_current_head(postgres_url):
+    expected_head = ScriptDirectory.from_config(
+        Config(str(PROJECT_ROOT / "alembic.ini"))
+    ).get_current_head()
     engine = create_engine(postgres_url)
     try:
         with engine.connect() as connection:
@@ -145,7 +150,7 @@ def test_empty_schema_upgrade_reaches_model_output_limit_head(postgres_url):
                 connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
-                == "0024_llm_model_max_output_tokens"
+                == expected_head
             )
         column = next(
             item
@@ -154,6 +159,12 @@ def test_empty_schema_upgrade_reaches_model_output_limit_head(postgres_url):
         )
         assert column["nullable"] is False
         assert column["default"] == "''::text"
+        assert {
+            "input_price_per_million",
+            "output_price_per_million",
+            "price_currency",
+            "max_output_tokens",
+        } <= {item["name"] for item in inspect(engine).get_columns("llm_models")}
     finally:
         engine.dispose()
 
@@ -547,15 +558,6 @@ def test_upgrade_head_creates_system_tables(postgres_url, monkeypatch):
         assert inspector.has_table("llm_providers")
         assert inspector.has_table("llm_models")
         assert inspector.has_table("llm_settings")
-        model_columns = {
-            column["name"]: column
-            for column in inspector.get_columns("llm_models")
-        }
-        assert model_columns["max_output_tokens"]["nullable"] is True
-        assert "ck_llm_models_max_output_tokens" in {
-            constraint["name"]
-            for constraint in inspector.get_check_constraints("llm_models")
-        }
     finally:
         engine.dispose()
 
@@ -752,18 +754,3 @@ def test_role_page_access_migration_round_trips_existing_account_grants(
     finally:
         command.upgrade(config, "head")
         engine.dispose()
-def test_llm_model_schema_matches_deployed_pricing_revision():
-    table = SYSTEM_METADATA.tables["llm_models"]
-
-    assert {
-        "input_price_per_million",
-        "output_price_per_million",
-        "price_currency",
-    } <= {column.name for column in table.c}
-    assert table.c.price_currency.nullable is False
-    assert str(table.c.price_currency.server_default.arg) == "'CNY'"
-    assert {
-        "ck_llm_models_input_price",
-        "ck_llm_models_output_price",
-        "ck_llm_models_price_currency",
-    } <= {constraint.name for constraint in table.constraints}

@@ -32,6 +32,15 @@ from screenplay_review.service import build_project_source
 from core.job import CrawlJob
 
 
+
+@pytest.fixture(autouse=True)
+def _use_postgres_creative(monkeypatch, postgres_creative):
+    """Exercise runtime behavior against the isolated PostgreSQL store."""
+    monkeypatch.setitem(
+        globals(), "CreativeRepository", lambda *_args, **_kwargs: postgres_creative
+    )
+
+
 def _project_with_review(
     repository: CreativeRepository,
     episode_count: int = 1,
@@ -191,7 +200,7 @@ def test_optimization_api_maps_mode_and_freezes_selected_template(
     project, review, _ = _project_with_review(
         repository, change_route=change_route
     )
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     store.enable_project(project["id"], actor_user_id="admin-1")
 
     class FakeJobManager:
@@ -246,9 +255,11 @@ def test_optimization_api_maps_mode_and_freezes_selected_template(
 
 def test_optimization_task_keeps_generated_drafts_outside_project_versions(tmp_path) -> None:
     repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, _ = _project_with_review(repository)
+    original_episodes = repository.get_project(project["id"])["episodes"]
     task = repository.create_script_optimization(
-        review_id=12,
-        project_id=7,
+        review_id=review["id"],
+        project_id=project["id"],
         mode="direct",
         source_fingerprint="source-fingerprint",
         selected_findings=[{"ref": "core:0", "episode_numbers": [1]}],
@@ -262,7 +273,7 @@ def test_optimization_task_keeps_generated_drafts_outside_project_versions(tmp_p
             {
                 "episode_number": 1,
                 "kind": "script",
-                "source_episode_id": 101,
+                "source_episode_id": next(item["id"] for item in original_episodes if item["stage"] == "script"),
                 "source_fingerprint": "episode-fingerprint",
                 "content": {"episode_title": "优化稿", "scenes": []},
             }
@@ -272,14 +283,16 @@ def test_optimization_task_keeps_generated_drafts_outside_project_versions(tmp_p
     assert completed["status"] == "completed"
     assert completed["drafts"][0]["kind"] == "script"
     assert completed["drafts"][0]["status"] == "ready"
-    assert repository.get_project(7) is None
+    assert repository.get_project(project["id"])["episodes"] == original_episodes
 
 
 def test_structure_optimization_links_beats_and_script_drafts(tmp_path) -> None:
     repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, _ = _project_with_review(repository)
+    original_episodes = repository.get_project(project["id"])["episodes"]
     task = repository.create_script_optimization(
-        review_id=12,
-        project_id=7,
+        review_id=review["id"],
+        project_id=project["id"],
         mode="structure",
         source_fingerprint="source-fingerprint",
         selected_findings=[{"ref": "core:0", "episode_numbers": [1]}],
@@ -293,7 +306,7 @@ def test_structure_optimization_links_beats_and_script_drafts(tmp_path) -> None:
             {
                 "episode_number": 1,
                 "kind": "beats",
-                "source_episode_id": 51,
+                "source_episode_id": next(item["id"] for item in original_episodes if item["stage"] == "beats"),
                 "source_fingerprint": "beats-source",
                 "content": {"beats": []},
             },
@@ -753,7 +766,7 @@ async def test_optimization_worker_generates_isolated_direct_script_draft(tmp_pa
 
     monkeypatch.setattr(optimization_worker, "create_provider", lambda **_: FakeProvider())
     monkeypatch.chdir(tmp_path)
-    await optimization_worker.run(CrawlJob(job_id="optimization-direct", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)}))
+    await optimization_worker._run_with_repository(CrawlJob(job_id="optimization-direct", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"]}), repository)
 
     completed = repository.get_script_optimization(optimization["id"])
     assert completed is not None
@@ -782,7 +795,7 @@ async def test_optimization_worker_generates_paired_structure_drafts(tmp_path, m
 
     monkeypatch.setattr(optimization_worker, "create_provider", lambda **_: FakeProvider())
     monkeypatch.chdir(tmp_path)
-    await optimization_worker.run(CrawlJob(job_id="optimization-structure", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)}))
+    await optimization_worker._run_with_repository(CrawlJob(job_id="optimization-structure", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"]}), repository)
 
     completed = repository.get_script_optimization(optimization["id"])
     assert completed is not None
@@ -810,7 +823,7 @@ async def test_optimization_worker_marks_task_failed_without_drafts(tmp_path, mo
 
     monkeypatch.setattr(optimization_worker, "create_provider", lambda **_: FailingProvider())
     with pytest.raises(RuntimeError, match="provider unavailable"):
-        await optimization_worker.run(CrawlJob(job_id="optimization-failed", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)}))
+        await optimization_worker._run_with_repository(CrawlJob(job_id="optimization-failed", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"]}), repository)
 
     failed = repository.get_script_optimization(optimization["id"])
     assert failed is not None
@@ -855,7 +868,7 @@ async def test_optimization_worker_emits_safe_retry_progress(tmp_path, monkeypat
     await optimization_worker.run(CrawlJob(
         job_id="optimization-retry", platform="creative",
         crawler_type="screenplay_optimization",
-        extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)},
+        extra={"optimization_id": optimization["id"]},
     ))
 
     retry = next(item for item in events if "重试" in item["message"])
@@ -893,7 +906,7 @@ async def test_optimization_worker_keeps_first_episode_and_skips_it_on_resume(
     job = CrawlJob(
         job_id="optimization-resume", platform="creative",
         crawler_type="screenplay_optimization",
-        extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)},
+        extra={"optimization_id": optimization["id"]},
     )
     with pytest.raises(RuntimeError, match="second episode unavailable"):
         await optimization_worker.run(job)
@@ -946,7 +959,7 @@ async def test_structure_optimization_persists_each_complete_pair_before_next_ep
         await optimization_worker.run(CrawlJob(
             job_id="optimization-structure-partial", platform="creative",
             crawler_type="screenplay_optimization",
-            extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)},
+            extra={"optimization_id": optimization["id"]},
         ))
     failed = repository.get_script_optimization(optimization["id"])
     beats, script = failed["drafts"]
@@ -957,8 +970,10 @@ async def test_structure_optimization_persists_each_complete_pair_before_next_ep
 
 def test_optimization_episode_checkpoint_rejects_half_a_structure_pair(tmp_path) -> None:
     repository = CreativeRepository(tmp_path / "creative.db")
+    project, review, _ = _project_with_review(repository)
+    original_episodes = repository.get_project(project["id"])["episodes"]
     task = repository.create_script_optimization(
-        review_id=12, project_id=7, mode="structure", source_fingerprint="source",
+        review_id=review["id"], project_id=project["id"], mode="structure", source_fingerprint="source",
         selected_findings=[], target_episode_numbers=[1], created_by="writer-1",
     )
     repository.start_script_optimization(task["id"])
@@ -989,7 +1004,7 @@ async def test_optimization_worker_rejects_a_task_when_review_source_has_changed
 
     monkeypatch.setattr(optimization_worker, "create_provider", lambda **_: FakeProvider())
     with pytest.raises(ValueError, match="剧本已更新"):
-        await optimization_worker.run(CrawlJob(job_id="optimization-stale", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"], "db_path": str(repository.db_path)}))
+        await optimization_worker._run_with_repository(CrawlJob(job_id="optimization-stale", platform="creative", crawler_type="screenplay_optimization", extra={"optimization_id": optimization["id"]}), repository)
 
     failed = repository.get_script_optimization(optimization["id"])
     assert failed is not None

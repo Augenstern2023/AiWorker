@@ -16,6 +16,7 @@ import pytest
 
 from core.job import CrawlJob
 from creative.repository import CreativeRepository
+from creative.postgres_repository import PostgresCreativeRepository
 from screenplay_review.api import decode_script_upload
 from screenplay_review import worker
 from screenplay_review.service import (
@@ -28,6 +29,15 @@ from screenplay_review.service import (
     review_source,
     validate_review_request,
 )
+
+
+
+@pytest.fixture(autouse=True)
+def _use_postgres_creative(monkeypatch, postgres_creative):
+    """Exercise runtime behavior against the isolated PostgreSQL store."""
+    monkeypatch.setitem(
+        globals(), "CreativeRepository", lambda *_args, **_kwargs: postgres_creative
+    )
 
 
 def _script(episode_number: int, version: int, text: str) -> dict:
@@ -141,7 +151,7 @@ def test_project_source_freezes_the_locked_outline_beats_and_story_context() -> 
 
 def test_outline_reference_accepts_authority_hash_after_series_overview_changes() -> None:
     content = {"episode": 1, "core_event": "主角反击"}
-    fingerprint = CreativeRepository._outline_content_fingerprint(content)
+    fingerprint = PostgresCreativeRepository._outline_content_fingerprint(content)
     outline = {
         "id": 31,
         "version": 1,
@@ -369,6 +379,11 @@ def test_review_record_requires_fresh_source_before_human_confirmation(tmp_path)
 
 def test_pending_review_is_marked_stale_when_project_source_changes(tmp_path) -> None:
     repository = CreativeRepository(tmp_path / "creative.db")
+    with repository._connect() as connection:
+        connection.execute(
+            "INSERT INTO creative_projects (id, name, creation_mode, created_at, updated_at) "
+            "VALUES (9, 'Stale review project', 'original', NOW(), NOW())"
+        )
     source = build_text_source("主角在危机中反击。")
     review = repository.create_script_review(
         source_type="project",
@@ -457,17 +472,17 @@ async def test_review_worker_persists_ai_report_for_confirmation(tmp_path, monke
 
     monkeypatch.setattr(worker, "create_provider", lambda **_: FakeProvider())
     monkeypatch.chdir(tmp_path)
-    await worker.run(
+    await worker._run_with_repository(
         CrawlJob(
             job_id="review-job-1",
             platform="creative",
             crawler_type="screenplay_review",
             extra={
                 "review_id": review["id"],
-                "db_path": str(repository.db_path),
                 "runtime_dir": str(tmp_path / ".runtime"),
             },
-        )
+        ),
+        repository,
     )
 
     completed = repository.get_script_review(review["id"])
@@ -520,13 +535,14 @@ async def test_review_worker_keeps_a_viewable_checkpoint_when_multi_episode_revi
     monkeypatch.setattr(worker, "create_provider", lambda **_: InterruptedProvider())
     monkeypatch.chdir(tmp_path)
     with pytest.raises(RuntimeError, match="服务中断"):
-        await worker.run(
+        await worker._run_with_repository(
             CrawlJob(
                 job_id="review-checkpoint-job",
                 platform="creative",
                 crawler_type="screenplay_review",
-                extra={"review_id": review["id"], "db_path": str(repository.db_path)},
-            )
+                extra={"review_id": review["id"]},
+            ),
+            repository,
         )
 
     interrupted = repository.get_script_review(review["id"])

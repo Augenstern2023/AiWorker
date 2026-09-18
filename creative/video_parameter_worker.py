@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from pathlib import Path
 from typing import Any
 
 import config
@@ -18,13 +17,14 @@ import config
 from analysis.llm import create_llm_provider_from_config
 from core.events import emit_event
 from core.job import CrawlJob
-from creative.repository import CreativeRepository
+from creative.postgres_repository import PostgresCreativeRepository
 from creative.video_parameter_recommendation import (
     analyze_video_parameters,
     build_video_parameter_source,
     fallback_recommendation,
     video_parameter_analysis_deadline_seconds,
 )
+from system_database import SystemDatabase, SystemDatabaseSettings
 
 
 def emit(
@@ -46,13 +46,27 @@ def emit(
 
 
 async def run(job: CrawlJob) -> None:
+    database = SystemDatabase(SystemDatabaseSettings.from_environment())
+    repository = PostgresCreativeRepository(database)
+    try:
+        await _run_with_repository(job, repository)
+    except Exception as exc:
+        project_id = int((job.extra or {}).get("project_id") or 0)
+        if project_id > 0:
+            try:
+                repository.fail_video_parameter_recommendation(project_id, str(exc))
+            except Exception:
+                pass
+        raise
+    finally:
+        database.dispose()
+
+
+async def _run_with_repository(job: CrawlJob, repository: Any) -> None:
     extra = job.extra or {}
     project_id = int(extra.get("project_id") or 0)
     if project_id < 1:
         raise ValueError("视频参数分析任务缺少 project_id")
-    repository = CreativeRepository(
-        Path(str(extra.get("db_path") or ".runtime/creative/creative.db"))
-    )
     project = repository.get_project(project_id)
     if not project:
         raise ValueError("创作项目不存在")
@@ -147,14 +161,6 @@ def main() -> int:
     try:
         asyncio.run(run(job))
     except Exception as exc:
-        if project_id > 0:
-            try:
-                repository = CreativeRepository(
-                    Path(str((job.extra or {}).get("db_path") or ".runtime/creative/creative.db"))
-                )
-                repository.fail_video_parameter_recommendation(project_id, str(exc))
-            except Exception:
-                pass
         emit(job, "job_failed", str(exc), "error", {"project_id": project_id})
         return 1
     return 0

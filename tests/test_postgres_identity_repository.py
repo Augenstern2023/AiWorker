@@ -39,6 +39,7 @@ from identity.session_service import SessionService
 from organization.service import DepartmentService
 from system_database import SystemDatabase, SystemDatabaseSettings
 from system_database.schema import project_members, roles, user_roles, users
+from creative.repository import CreativeRepository
 from workflow.repository import WorkflowRepository
 from workflow.transition_service import TransitionService
 from web.navigation_service import NavigationService
@@ -262,7 +263,7 @@ def test_locked_beats_retry_completes_its_open_workflow_task(
             assert (resource_type, resource_id) == ("beats", "44")
             return "locked"
 
-        def beats_episode_progress(self, resource_id):
+        def beats_episode_progress(self, resource_id, *, connection=None):
             assert resource_id == "44"
             return {
                 "required_episodes": [2],
@@ -293,19 +294,25 @@ def test_user_contact_profile_migration_round_trips_on_the_isolated_postgres_dat
     command.upgrade(config, "0004_runtime_timestamptz_jsonb")
     command.upgrade(config, "head")
     engine = create_engine(postgres_url)
+    # PostgreSQL catalogs are database-wide, so the probe has to be scoped to
+    # this schema: an unscoped ``table_name = 'users'`` also matches the
+    # ``users`` table of every leftover ``test_*`` schema and turns
+    # ``scalar_one()`` into a MultipleResultsFound error.
     with engine.connect() as connection:
         columns = set(
             connection.execute(
                 text(
                     "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_name = 'users'"
+                    "WHERE table_name = 'users' "
+                    "AND table_schema = current_schema()"
                 )
             ).scalars()
         )
         gender_default = connection.execute(
             text(
                 "SELECT column_default FROM information_schema.columns "
-                "WHERE table_name = 'users' AND column_name = 'gender'"
+                "WHERE table_name = 'users' AND column_name = 'gender' "
+                "AND table_schema = current_schema()"
             )
         ).scalar_one()
     assert {"email", "phone", "gender"} <= columns
@@ -317,7 +324,8 @@ def test_user_contact_profile_migration_round_trips_on_the_isolated_postgres_dat
             connection.execute(
                 text(
                     "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_name = 'users'"
+                    "WHERE table_name = 'users' "
+                    "AND table_schema = current_schema()"
                 )
             ).scalars()
         )
@@ -532,6 +540,7 @@ def test_creative_routes_accept_the_postgres_workflow_repository(
         app,
         root=tmp_path,
         runtime_dir=tmp_path / ".runtime",
+        repository=CreativeRepository(database),
         workflow_repository=WorkflowRepository(identity_repository),
     )
 

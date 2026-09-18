@@ -42,11 +42,18 @@ from creative.schema import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _use_postgres_creative(monkeypatch, postgres_creative):
+    monkeypatch.setitem(
+        globals(), "CreativeRepository", lambda *_args, **_kwargs: postgres_creative
+    )
+
+
 pytestmark = pytest.mark.usefixtures("isolated_creative_rank_source")
 
 
 @pytest.fixture
-def permission_context(tmp_path):
+def permission_context(tmp_path, postgres_creative):
     engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'permissions.db'}")
     with engine.begin() as conn:
         conn.exec_driver_sql(
@@ -55,7 +62,7 @@ def permission_context(tmp_path):
     service = PermissionService(
         SimpleNamespace(connect=engine.begin), SimpleNamespace()
     )
-    repository = CreativeRepository(tmp_path / "creative.db")
+    repository = postgres_creative
     project = _prompt_project(repository)
     project_key = repository.workflow_project_id(project["id"])
     with engine.begin() as conn:
@@ -326,7 +333,7 @@ async def test_project_creation_api_enables_generic_template_by_default(tmp_path
         principal=_principal("owner-1", admin=True),
     )
 
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     settings = store.project_settings(project["id"])
     template = store.get_template(settings["default_template_id"])
     assert settings["enabled"] is True
@@ -353,7 +360,7 @@ async def test_old_project_upgrade_api_uses_classic_compatibility_template(tmp_p
         principal=_principal("owner-1", admin=True),
     )
 
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     template = store.get_template(result["default_template_id"])
     assert template["template_key"] == "classic-compatible"
 
@@ -363,7 +370,7 @@ async def test_enable_api_rejects_another_users_private_template(tmp_path):
     repository = CreativeRepository(tmp_path / "creative.sqlite3")
     topic_id, breakdown_id = _adopted_topic_and_breakdown(repository)
     project = repository.create_project(topic_id, breakdown_id, "越权项目", 1)
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     personal = store.create_template(
         title="甲的私人模板",
         description="",
@@ -466,7 +473,7 @@ async def test_import_preview_does_not_persist_until_user_confirms_creation(tmp_
             "SELECT COUNT(*) AS total FROM creative_prompt_templates"
         ).fetchone()["total"]
     assert after_confirm == before + 1
-    assert PromptStore(repository.db_path).project_settings(project["id"])["enabled"] is False
+    assert PromptStore(repository).project_settings(project["id"])["enabled"] is False
 
 
 @pytest.mark.asyncio
@@ -532,7 +539,7 @@ async def test_binding_api_requires_project_or_stage_authority(
     repository = CreativeRepository(tmp_path / "creative.sqlite3")
     topic_id, breakdown_id = _adopted_topic_and_breakdown(repository)
     project = repository.create_project(topic_id, breakdown_id, "权限项目", 1)
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     router, workflow, _ = _router(repository, tmp_path)
     endpoint = _endpoint(
         router, "/api/creative/projects/{project_id}/prompt-modules/{stage}", "PUT"
@@ -591,7 +598,7 @@ async def test_generation_api_freezes_server_resolved_prompt_snapshot(
         creation_request_id="prompt-snapshot-freeze",
         workflow_mode="free",
     )
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     store.enable_project(project["id"], actor_user_id="owner-1")
     jobs = []
 
@@ -660,7 +667,7 @@ def _prompt_project(repository: CreativeRepository):
         creation_request_id="prompt-api-project",
         workflow_mode="free",
     )
-    PromptStore(repository.db_path).enable_project(
+    PromptStore(repository).enable_project(
         project["id"], actor_user_id="owner-1"
     )
     return project
@@ -672,7 +679,7 @@ async def test_project_template_governance_api_exposes_impact_and_approves_revis
 ):
     repository = CreativeRepository(tmp_path / "creative.sqlite3")
     project = _prompt_project(repository)
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     template = store.create_template(
         title="API 治理模板",
         description="",
@@ -747,7 +754,7 @@ async def test_project_template_governance_api_exposes_impact_and_approves_revis
 async def test_project_template_governance_mutation_requires_project_manager(tmp_path):
     repository = CreativeRepository(tmp_path / "creative.sqlite3")
     project = _prompt_project(repository)
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     template = store.create_template(
         title="只有负责人可治理",
         description="",
@@ -789,7 +796,7 @@ async def test_project_template_governance_mutation_requires_project_manager(tmp
 async def test_prompt_marketplace_api_requires_review_and_installs_without_binding(tmp_path):
     repository = CreativeRepository(tmp_path / "creative.sqlite3")
     project = _prompt_project(repository)
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     personal = store.create_template(
         title="待发布个人模板",
         description="市场 API 验收",
@@ -919,7 +926,7 @@ async def test_independent_prompt_routes_enforce_membership_and_authority(
     permission_context, user_id, operation
 ):
     repository, project, router, app = permission_context
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     template = store.create_template(
         title="项目模板",
         description="",
@@ -1020,7 +1027,7 @@ async def test_private_template_cannot_leak_through_project_binding(
     permission_context, operation
 ):
     repository, project, router, app = permission_context
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     private = store.create_template(
         title="秘密模板",
         description="",
@@ -1098,7 +1105,7 @@ async def test_marketplace_install_and_rating_authority(
     permission_context, user_id, operation
 ):
     repository, project, router, app = permission_context
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     private = store.create_template(
         title="公开作品",
         description="",
@@ -1194,7 +1201,7 @@ async def test_project_template_cannot_be_used_in_another_project(
         creation_request_id="other-project-template",
         workflow_mode="free",
     )
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     foreign = store.create_template(
         title="他项目模板",
         description="",

@@ -163,7 +163,9 @@ def _seed_environment(tmp_path: Path):
         workflow_repository=workflow,
         audit_service=audit,
     )
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(build_creative_router(
+        root=tmp_path, runtime_dir=runtime, repository=creative
+    ))
     app.include_router(build_delivery_router(delivery_service))
     clients = {
         name: _login_client(app, sessions, user["id"])

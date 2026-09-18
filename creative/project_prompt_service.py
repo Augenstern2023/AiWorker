@@ -23,7 +23,7 @@ from creative.repository import CreativeRepository
 class ProjectPromptService:
     def __init__(self, repository: CreativeRepository) -> None:
         self.repository = repository
-        self.store = PromptStore(repository.db_path)
+        self.store = PromptStore(repository)
 
     def _project(self, project_id: int) -> dict[str, Any]:
         project = self.repository.get_project(int(project_id))

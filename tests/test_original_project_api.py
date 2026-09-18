@@ -26,12 +26,25 @@ from sqlalchemy.engine import make_url
 from creative.api import build_creative_router
 from creative.market_reference_service import MarketReferenceService
 from creative.repository import CreativeRepository
+from creative.postgres_repository import PostgresCreativeRepository
 from creative.workflow_identity import WorkflowIdentityResolver
 from identity.permission_service import PermissionService
 from identity.repository import IdentityRepository
 from identity.session_service import SessionService
 from system_database import SystemDatabase, SystemDatabaseSettings
 from workflow.repository import WorkflowRepository
+
+
+
+@pytest.fixture(autouse=True)
+def _use_postgres_creative(monkeypatch, postgres_creative):
+    """Exercise runtime behavior against the isolated PostgreSQL store."""
+    monkeypatch.setitem(
+        globals(), "CreativeRepository", lambda *_args, **_kwargs: postgres_creative
+    )
+    monkeypatch.setenv(
+        "AIWORKER_TEST_SYSTEM_DATABASE_URL", postgres_creative.database.settings.url
+    )
 
 
 def original_project_payload(creation_request_id: str) -> dict[str, object]:
@@ -111,24 +124,20 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.Fixt
     permissions = PermissionService(identity, sessions)
     workflow = WorkflowRepository(identity)
     runtime_dir = tmp_path / "runtime"
+    repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
     app = FastAPI()
     app.state.identity_permission_service = permissions
     app.include_router(
         build_creative_router(
-            root=tmp_path, runtime_dir=runtime_dir, workflow_repository=workflow
+            root=tmp_path,
+            runtime_dir=runtime_dir,
+            repository=repository,
+            workflow_repository=workflow,
         )
     )
     owner_client = _client_for_user(app, sessions, owner["id"])
     owner_principal = permissions.principal_for_user(owner["id"], "original-owner")
     assert owner_principal is not None
-    repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
-    # The workflow test database is shared while each creative SQLite database
-    # is per-test. Avoid reusing a project_id from another test's workflow rows.
-    with repository._connect() as connection:
-        connection.execute(
-            "INSERT OR REPLACE INTO sqlite_sequence(name, seq) VALUES ('creative_projects', ?)",
-            (int(uuid.uuid4().int % 1_000_000_000) + 1_000_000_000,),
-        )
     owner_client.repository = repository
     owner_client.workflow = workflow
     owner_client.principal = owner_principal
@@ -451,14 +460,14 @@ def test_project_delete_retries_cross_database_cleanup_from_durable_tombstone(
     project = create_original_project(client, "delete-saga")
     workflow_project_id = client.repository.workflow_project_id(project["id"])
     delete_workflow = client.workflow.delete_project_data
-    delete_creative = CreativeRepository.delete_project
+    delete_creative = PostgresCreativeRepository.delete_project
 
     def delete_creative_after_workflow_fence(repository, *args, **kwargs):
         assert client.workflow.is_project_deleting(workflow_project_id) is True
         return delete_creative(repository, *args, **kwargs)
 
     monkeypatch.setattr(
-        CreativeRepository, "delete_project", delete_creative_after_workflow_fence
+        PostgresCreativeRepository, "delete_project", delete_creative_after_workflow_fence
     )
     monkeypatch.setattr(
         client.workflow, "delete_project_data", FailOnce(delete_workflow)
@@ -604,7 +613,7 @@ def test_concurrent_original_create_reports_one_create_and_one_reuse(
     client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A race after the service pre-check must not produce two 201 responses."""
-    original_create = CreativeRepository.create_original_project
+    original_create = PostgresCreativeRepository.create_original_project
     both_prechecks_completed = threading.Barrier(2)
     original_resolve = MarketReferenceService.resolve
 
@@ -628,7 +637,7 @@ def test_concurrent_original_create_reports_one_create_and_one_reuse(
         return original_create(repository, **values)
 
     monkeypatch.setattr(
-        CreativeRepository, "create_original_project", create_after_both_prechecks
+        PostgresCreativeRepository, "create_original_project", create_after_both_prechecks
     )
 
     def post_original() -> object:
@@ -646,7 +655,7 @@ def test_concurrent_original_create_reports_one_create_and_one_reuse(
     assert len({response.json()["id"] for response in responses}) == 1
 
 
-def test_original_create_api_returns_503_then_retries_the_same_failed_project(
+def test_original_create_api_rolls_back_failed_bootstrap_then_retries(
     client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -667,7 +676,8 @@ def test_original_create_api_returns_503_then_retries_the_same_failed_project(
     assert failed.json()["detail"] == "原创项目初始化失败，请重试"
     assert hidden.status_code == 200, hidden.text
     assert hidden.json()["items"] == []
-    assert retried.status_code == 200, retried.text
+    # PostgreSQL rolls both domains back, so retry creates a fresh project.
+    assert retried.status_code == 201, retried.text
     assert retried.json()["bootstrap_status"] == "ready"
     assert len(client.repository.list_projects()) == 1
 

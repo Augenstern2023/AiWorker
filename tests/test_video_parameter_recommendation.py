@@ -21,7 +21,6 @@ from creative.api import (
     build_merged_script_download,
     video_parameter_export_record,
 )
-from creative.repository import CreativeRepository
 from creative.video_parameter_recommendation import (
     MODEL_CAPABILITIES,
     build_video_parameter_source,
@@ -145,8 +144,8 @@ def test_normalizer_keeps_each_model_inside_its_capability_matrix() -> None:
     assert seedance["clip_duration_seconds"] == 30
 
 
-def test_repository_persists_three_independent_confirmations(tmp_path) -> None:
-    repository = CreativeRepository(tmp_path / "creative.db")
+def test_repository_persists_three_independent_confirmations(postgres_creative) -> None:
+    repository = postgres_creative
     project = repository.create_original_project(
         seed_text="一个直播间复仇故事",
         name="直播反击",
@@ -301,9 +300,6 @@ async def test_video_parameter_worker_falls_back_at_total_deadline(monkeypatch) 
     completed: dict = {}
 
     class FakeRepository:
-        def __init__(self, _path) -> None:
-            pass
-
         def get_project(self, project_id: int) -> dict:
             assert project_id == project["id"]
             return project
@@ -321,7 +317,6 @@ async def test_video_parameter_worker_falls_back_at_total_deadline(monkeypatch) 
     async def never_finishes(_provider, _source):
         await asyncio.sleep(10)
 
-    monkeypatch.setattr(video_parameter_worker, "CreativeRepository", FakeRepository)
     monkeypatch.setattr(
         video_parameter_worker,
         "create_llm_provider_from_config",
@@ -344,11 +339,10 @@ async def test_video_parameter_worker_falls_back_at_total_deadline(monkeypatch) 
         extra={
             "project_id": project["id"],
             "source_fingerprint": source["fingerprint"],
-            "db_path": "unused.db",
         },
     )
 
-    await video_parameter_worker.run(job)
+    await video_parameter_worker._run_with_repository(job, FakeRepository())
 
     assert completed["recommendation"]["analysis_mode"] == "rules_fallback"
     assert "超过" in completed["recommendation"]["analysis_error"]

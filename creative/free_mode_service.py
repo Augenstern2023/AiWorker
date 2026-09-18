@@ -121,6 +121,21 @@ class FreeCreativeModeService:
         except (TypeError, json.JSONDecodeError):
             return fallback
 
+    @classmethod
+    def _native_json_row(cls, row: Any) -> dict[str, Any]:
+        """Convert compatibility-query JSON text back to repository values."""
+
+        result = dict(row)
+        for key, fallback in (
+            ("content_json", {}),
+            ("source_refs_json", {}),
+            ("generation_meta_json", {}),
+            ("upstream_refs_json", {}),
+        ):
+            if key in result:
+                result[key] = cls._loads(result[key], fallback)
+        return result
+
     @staticmethod
     def _assert_stage(stage: str) -> str:
         normalized = str(stage or "").strip().lower()
@@ -1469,6 +1484,11 @@ class FreeCreativeModeService:
                 "WHERE project_id = ? AND status = 'active'",
                 (int(project_id),),
             ).fetchone()["count"])
+            active_review_count = int(conn.execute(
+                "SELECT COUNT(*) AS count FROM script_reviews WHERE project_id = ? "
+                "AND status NOT IN ('completed', 'confirmed', 'cancelled', 'failed')",
+                (int(project_id),),
+            ).fetchone()["count"])
             active_optimization_count = int(conn.execute(
                 "SELECT COUNT(*) AS count FROM script_optimizations WHERE project_id = ? "
                 "AND status NOT IN ('completed', 'cancelled', 'failed')",
@@ -1506,6 +1526,8 @@ class FreeCreativeModeService:
             blockers.append("项目已经是自由创作模式")
         if active_generation_count:
             blockers.append("项目存在运行中的创作生成")
+        if active_review_count:
+            blockers.append("项目存在进行中的剧本审核")
         if active_optimization_count:
             blockers.append("项目存在进行中的剧本优化")
         return {
@@ -1569,7 +1591,7 @@ class FreeCreativeModeService:
                 workflow_mode, mode_revision, mode_changed_at, mode_changed_by,
                 created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'free_active', NULL, NULL, NULL,
-                      NULL, NULL, ?, ?, 0, ?, 'ready', 0, 'free', 0, ?, ?, ?, ?)
+                      NULL, NULL, ?, ?, FALSE, ?, 'ready', 0, 'free', 0, ?, ?, ?, ?)
             """,
             (
                 target_project_id,
@@ -1626,8 +1648,8 @@ class FreeCreativeModeService:
         preview = self.migration_preview(project_id)
         if preview["blockers"]:
             raise ValueError("；".join(preview["blockers"]))
-        # SQLite rolls AUTOINCREMENT back with the project. Reserve separately so
-        # external memberships can never attach to a later, unrelated project.
+        # Reserve and commit the sequence value before external memberships are
+        # copied, so a rolled-back project ID can never be reused later.
         target_project_id = self.repository.reserve_project_identity()
         compensations: list[dict[str, Any]] = []
         with self._migration_transaction(
@@ -1908,28 +1930,28 @@ class FreeCreativeModeService:
         with self.repository._connect() as conn:
             return {
                 "blueprints": [
-                    self.repository._blueprint(dict(row)) for row in conn.execute(
+                    self.repository._blueprint(self._native_json_row(row)) for row in conn.execute(
                         "SELECT * FROM creative_blueprints WHERE project_id = ? "
                         "AND resource_scope = 'sequential' ORDER BY id",
                         (int(project_id),),
                     ).fetchall()
                 ],
                 "characters": [
-                    self.repository._creative_item(dict(row)) for row in conn.execute(
+                    self.repository._creative_item(self._native_json_row(row)) for row in conn.execute(
                         "SELECT * FROM creative_characters WHERE project_id = ? "
                         "AND resource_scope = 'sequential' ORDER BY version, id",
                         (int(project_id),),
                     ).fetchall()
                 ],
                 "relationships": [
-                    self.repository._creative_item(dict(row)) for row in conn.execute(
+                    self.repository._creative_item(self._native_json_row(row)) for row in conn.execute(
                         "SELECT * FROM creative_relationships WHERE project_id = ? "
                         "AND resource_scope = 'sequential' ORDER BY version, id",
                         (int(project_id),),
                     ).fetchall()
                 ],
                 "episodes": [
-                    self.repository._episode(dict(row)) for row in conn.execute(
+                    self.repository._episode(self._native_json_row(row)) for row in conn.execute(
                         "SELECT * FROM creative_episodes WHERE project_id = ? "
                         "AND resource_scope = 'sequential' ORDER BY stage, episode_number, version",
                         (int(project_id),),

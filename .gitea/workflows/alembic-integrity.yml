@@ -52,3 +52,20 @@ jobs:
           tests/test_production_migration_guard.py
           tests/test_alembic_guard_configuration.py
           tests/test_system_database_alembic.py -q
+      # The creative store suites need the migrated schema, so they run after
+      # `alembic upgrade head`. These are the migration's own guarantees: the
+      # schema matches the declarations, the importer is lossless against a
+      # legacy source, the rollback exporter round-trips, and no runtime module
+      # can still reach the frozen SQLite store.
+      - name: Verify the creative PostgreSQL migration
+        run: >-
+          uv run pytest tests/test_creative_postgres_schema.py
+          tests/test_creative_sqlite_import.py
+          tests/test_creative_sqlite_rollback.py
+          tests/test_creative_runtime_postgres_only.py -q
+      # `check_alembic_integrity.py production` is deliberately NOT run here.
+      # It requires the checked-out branch to be `main` AND HEAD to equal
+      # manjuxuanpin/main, resolving that remote with `git ls-remote
+      # manjuxuanpin`. A CI push or pull-request checkout is a detached HEAD
+      # with no such remote, so the step could only ever fail. It is a local
+      # gate for the maintenance window, run from a synced main checkout.

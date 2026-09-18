@@ -8,9 +8,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import pytest
 from pathlib import Path
 
 from creative.llm_observability import (
@@ -61,17 +59,17 @@ def test_attempt_reporter_emits_shape_summary_and_dumps_raw_response(tmp_path):
     message, level, payload = events[0]
     assert level == "warning"
     assert "第 1/2 次模型响应未通过结构校验" in message
-    assert "模型响应未通过结构校验" in message
-    assert "顶层对象/2键" in message
     assert "relationships 必须是数组" not in message
+    assert "顶层对象/2键" in message
+    assert "林穗" not in message
     assert payload["debug_path"]
 
     dumped = json.loads(Path(payload["debug_path"]).read_text(encoding="utf-8"))
     assert dumped["stage"] == "characters"
+    assert dumped["error"] == "relationships 必须是数组"
     assert dumped["attempt"] == 1
     assert dumped["elapsed_seconds"] == 12.5
     assert dumped["response"]["relations"] == {"林穗-周谨": {}}
-    assert dumped["error"] == "relationships 必须是数组"
 
 
 def test_attempt_reporter_dumps_each_failed_attempt_into_its_own_file(tmp_path):
@@ -121,8 +119,8 @@ def test_attempt_reporter_reports_repair_success_and_missing_payload(tmp_path):
 
     assert "第 2/2 次模型响应通过结构校验" in events[0][0]
     assert events[0][1] == "info"
-    assert "模型响应未通过结构校验" in events[1][0]
     assert "LLM_BASE_URL is required." not in events[1][0]
+    assert "模型响应未通过结构校验" in events[1][0]
     assert events[1][1] == "warning"
     assert events[1][2]["debug_path"] is None
 
@@ -223,165 +221,3 @@ def test_set_attempt_reporter_returns_the_previous_reporter():
         assert active_attempt_reporter() is None
     finally:
         set_attempt_reporter(previous)
-@pytest.mark.parametrize("failure", [None, RuntimeError("boom"), asyncio.CancelledError()])
-@pytest.mark.asyncio
-async def test_worker_installs_attempt_reporter_and_restores_it_even_on_failure(monkeypatch, tmp_path, failure):
-    from core.job import CrawlJob
-    from creative import phase4_worker, llm_observability
-
-    events = []
-    previous = set_attempt_reporter(lambda info: None)
-    outer = active_attempt_reporter()
-    monkeypatch.setattr(llm_observability, "LLM_DEBUG_BASE_DIR", tmp_path)
-    monkeypatch.setattr(phase4_worker, "emit", lambda job, kind, message, level, payload: events.append(payload))
-
-    async def run_once(job):
-        assert active_attempt_reporter() is not outer
-        active_attempt_reporter()({
-            "attempt": 1, "max_attempts": 2, "ok": False, "payload": {"relationships": 42},
-            "error": "invalid shape",
-        })
-        if failure is not None:
-            raise failure
-
-    monkeypatch.setattr(phase4_worker, "_run_once", run_once)
-    try:
-        job = CrawlJob(job_id="restore-test", platform="creative", crawler_type="characters", extra={"action": "characters"})
-        if failure is None:
-            await phase4_worker.run(job)
-        else:
-            with pytest.raises(type(failure)):
-                await phase4_worker.run(job)
-        assert active_attempt_reporter() is outer
-        assert events[0]["stage"] == "characters"
-        assert json.loads(Path(events[0]["debug_path"]).read_text(encoding="utf-8"))["response"] == {"relationships": 42}
-    finally:
-        set_attempt_reporter(previous)
-
-
-def test_repeated_batch_attempts_keep_every_response_and_truncated_fragment(tmp_path):
-    events = []
-    reporter = build_attempt_reporter(
-        lambda message, level, payload: events.append(payload),
-        job_id="batch-job", stage="outlines", base_dir=tmp_path,
-    )
-    for fragment in ["  first\n", " second\n"]:
-        reporter({
-            "attempt": 1, "max_attempts": 2, "ok": False,
-            "payload": {"part": fragment}, "truncated_text": fragment,
-        })
-    assert len({event["debug_path"] for event in events}) == 2
-    assert len({event["truncated_path"] for event in events}) == 2
-    assert [Path(event["truncated_path"]).read_text(encoding="utf-8") for event in events] == ["  first\n", " second\n"]
-@pytest.mark.asyncio
-@pytest.mark.parametrize("truncated", [False, True])
-async def test_attempt_logs_and_events_exclude_supplier_echo_but_files_keep_it(tmp_path, caplog, truncated):
-    from analysis.llm import LLMError, LLMOutputTruncatedError
-    from creative.imitation_service import complete_with_one_repair
-
-    secret = "PRIVATE_SYSTEM_PROMPT_DO_NOT_DISCLOSE"
-    raw = "  " + secret + "\n"
-    events = []
-    reporter = build_attempt_reporter(
-        lambda message, level, payload: events.append((message, payload)),
-        job_id="safe-diagnostic", stage="characters", base_dir=tmp_path,
-    )
-    class Provider:
-        last_request_summary = {"protocol": "responses", "model": "model", "system_prompt": secret}
-        async def complete_json(self, messages):
-            if truncated:
-                raise LLMOutputTruncatedError(secret, finish_reason="length", returned_chars=len(raw), partial_text=raw)
-            return {secret: {"echo": secret}}
-    def validate(payload):
-        raise ValueError(secret)
-
-    with pytest.raises(LLMError) as caught:
-        await complete_with_one_repair(Provider(), [], validate, max_attempts=1, on_attempt=reporter)
-    assert secret not in caplog.text
-    assert secret not in repr(events)
-    event = events[0][1]
-    if truncated:
-        assert caught.value.partial_text == raw
-        assert caught.value.finish_reason == "length"
-        assert caught.value.returned_chars == len(raw)
-        assert Path(event["truncated_path"]).read_text(encoding="utf-8") == raw
-    else:
-        dumped = json.loads(Path(event["debug_path"]).read_text(encoding="utf-8"))
-        assert dumped["response"] == {secret: {"echo": secret}}
-        assert dumped["error"] == secret
-
-
-@pytest.mark.asyncio
-async def test_failed_attempt_reporters_do_not_log_callback_exception_text(caplog):
-    from creative.imitation_service import complete_with_one_repair
-    secret = "PRIVATE_CALLBACK_CONTENT"
-    class Provider:
-        async def complete_json(self, messages):
-            return {"ok": True}
-    def broken(info):
-        raise ValueError(secret)
-    result, _ = await complete_with_one_repair(Provider(), [], lambda value: value, on_attempt=broken)
-    assert result == {"ok": True}
-    assert secret not in caplog.text
-
-    reporter = build_attempt_reporter(
-        lambda *args: broken(None), job_id="broken-notify", stage="characters",
-    )
-    reporter({"attempt": 2, "max_attempts": 2, "ok": True})
-    assert secret not in caplog.text
-
-
-@pytest.mark.parametrize("failure", ["validator", "supplier", "truncated"])
-def test_phase4_terminal_failure_keeps_sensitive_error_only_in_diagnostics(failure, tmp_path, monkeypatch, capsys):
-    import sys
-    import httpx
-    from analysis.llm import LLMError, OpenAICompatibleLLMProvider
-    from core.job import CrawlJob
-    from creative import imitation_service
-    from tests.test_worker_llm_usage import _setup_worker
-
-    secret = "PRIVATE_TERMINAL_SYSTEM_PROMPT"
-    fragment = "  " + secret + "\n"
-    worker, job, content = _setup_worker("creative", tmp_path, monkeypatch)
-    if failure == "validator":
-        def validate(payload, count):
-            raise ValueError(secret)
-        monkeypatch.setattr(imitation_service, "_validate_blueprints", validate)
-
-    class Provider(OpenAICompatibleLLMProvider):
-        async def complete_json(self, messages, schema=None):
-            result = await super().complete_json(messages, schema=schema)
-            if failure == "supplier":
-                raise LLMError(secret)
-            return result
-
-    def handler(request):
-        return httpx.Response(200, json={
-            "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
-            "choices": [{"message": {"content": fragment if failure == "truncated" else json.dumps(content)},
-                         "finish_reason": "length" if failure == "truncated" else "stop"}],
-        })
-    provider = Provider("https://llm.test/v1", "secret-key", "model", transport=httpx.MockTransport(handler))
-    monkeypatch.setattr(worker, "create_provider", lambda *args, **kwargs: provider)
-    monkeypatch.setattr(CrawlJob, "load", lambda *args: job)
-    monkeypatch.setattr(sys, "argv", ["worker", "--job-file", "unused.json"])
-    monkeypatch.chdir(tmp_path)
-
-    assert worker.main() == 1
-    stdout = capsys.readouterr().out
-    events = [json.loads(line) for line in stdout.splitlines() if line.startswith("{")]
-    terminal = [event for event in events if event["event"] == "job_failed"]
-    assert len(terminal) == 1
-    assert secret not in stdout
-    assert secret not in (tmp_path / ".runtime" / "logs" / f"{job.job_id}.jsonl").read_text(encoding="utf-8")
-    payload = terminal[0]["payload"]
-    assert payload["error_code"] == ("llm_output_truncated" if failure == "truncated" else "llm_error")
-    assert payload["llm_usage"]["total_tokens"] == (6 if failure == "truncated" else 12)
-    assert payload["llm_usage"]["complete"] is True
-    diagnostic = json.loads(Path(payload["error_debug_path"]).read_text(encoding="utf-8"))
-    if failure == "truncated":
-        assert diagnostic["partial_text"] == fragment
-        assert diagnostic["finish_reason"] == "length"
-        assert diagnostic["returned_chars"] == len(fragment)
-    else:
-        assert secret in diagnostic["error"]

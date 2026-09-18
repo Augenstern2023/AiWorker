@@ -31,6 +31,9 @@ from json_repair import repair_json
 
 logger = logging.getLogger(__name__)
 
+# 单次调用的默认输出上限。0 表示不发送该参数、沿用网关默认值。
+DEFAULT_MAX_OUTPUT_TOKENS = 32768
+
 _CONFIGURED_LLM_SETTINGS_REPOSITORY: Any | None = None
 
 
@@ -808,9 +811,9 @@ def _max_retries(value: Any, default: int = 2) -> int:
         return default
 
 
-def _max_output_tokens(value: Any) -> int | None:
+def _max_output_tokens(value: Any) -> int:
     if value in (None, ""):
-        return None
+        return DEFAULT_MAX_OUTPUT_TOKENS
     try:
         normalized = int(value)
     except (TypeError, ValueError) as exc:

@@ -326,6 +326,22 @@ SELECT rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname = 'aiwor
 | 跨域引用 | 10 条边 / 99 个值 / 91 已解析 / 8 个已声明合法缺口 / **0 个未声明孤儿** |
 | 结论 | **PASS** |
 
+### 回退通路复验（切换后）
+
+对**切换后的生产数据**重跑一次 PostgreSQL → SQLite 导出器，确认回退通路仍然可用且无损：
+
+| 项目 | 结果 |
+|---|---|
+| 命令 | `uv run python scripts/rollback_creative_postgres_to_sqlite.py --destination <dir>/creative-post-cutover.db --rollback-dir <dir>` |
+| 报告 | `verified: true`，`published: true`，`problems: []` |
+| 表 / 行 | 38 张表 / 1926 行（1924 业务行 + 控制行 + 身份行） |
+| 产物 | 15 781 888 字节，`integrity_check = ok`，39 张表，SHA-256 `a5e964a8304e84893d593ceb143be785e5c5f84608a84941ab05b6489c86e49e`（与报告一致） |
+| store 身份 | 产物 `store_id` = `67707ae7-…`，与源一致 |
+| 抽查行数 | projects 18 / topics 652 / episodes 774 / characters 100 / relationships 127 / selection_stage_snapshots 65，与源逐表相同 |
+| 告警 | 仅 2 条：`creative_breakdowns.source_snapshot_id` 与 `script_optimizations.prompt_snapshot_json` 在冻结的旧 DDL 中未声明，导出时已补进回退表 |
+
+同时确认了导出器的一条安全护栏有效：目标路径若落在 `.runtime/creative`（正在使用的运行时目录）内，CLI 直接拒绝并返回退出码 2。
+
 **未完成、需在观察期内处理的部分：**
 
 - 第 3 步的完整业务冒烟（原创 / 仿写 / 完整剧本三种项目各跑一遍读取、生成、修订、锁定、审核、优化、交付、导出）尚未执行。

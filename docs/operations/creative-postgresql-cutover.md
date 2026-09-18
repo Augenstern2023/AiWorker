@@ -293,3 +293,28 @@ SELECT rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname = 'aiwor
 | identity sequence | 13 条序列的下一个 ID 全部大于已导入最大值 |
 | 跨域引用 | 99 个引用值 / 91 已解析 / 8 个已声明的合法历史缺口 / 0 未声明孤儿 |
 | 往返无损 | 线上 SQLite A → PostgreSQL → SQLite B：37/37 表行数、逐表规范化哈希、ID 区间、store 身份全部相同 |
+
+## 正式切换记录（2026-09-18）
+
+按本手册第 1–2 步在 `aiworker_system` 生产库执行。
+
+| 项目 | 结果 |
+|---|---|
+| 前置：Alembic | `0025_creative_schema_baseline`（head） |
+| 前置：写入方 | 无 `WebGUI.py` / worker 进程在跑；SQLite 已静默约 15 小时 |
+| 前置：目标创作表 | 仅 1 行 `creative_store_metadata`（应用自行写入的随机 `store_id`），无业务数据 |
+| SQLite 备份 | `.runtime/creative/creative.db.pre-cutover.20260918-104553.bak`，`integrity_check = ok`，SHA-256 `e9b2dd5b326e52d0d7f287247f217624d3a7b394c2c50bc74615ccfa7517e18a` |
+| PostgreSQL 备份 | `.runtime/creative/pg-cutover-20260918-104617.dump`（custom 格式，113 张表），18 239 597 字节，SHA-256 `4b99d5e1cadae071aa5a6b9896a2e7b502798cbedd47e31b21f7a3dc266d6d3d` |
+| `--check` | 退出码 0，`ok: true`，`problems: []`，`total_rows: 1924`，源 SHA-256 `47af06185892527e7af0f53707d6515515d13c2abde4deda93ed859a19878960` |
+| `--apply` | 退出码 0，`status: completed`，`ok: true`，`problems: []`，37 张表 |
+| `--verify` | 退出码 0，`status: verified`，`ok: true`，37/37 表逐表哈希一致，无 `problems` |
+| store 身份 | 生产 `store_id = 67707ae7-e8ec-4198-8ffd-706ced485d40`，与源一致（导入覆盖了应用生成的 `32394270-…`） |
+| 读路径冒烟 | `list_projects()` 18 个项目；`workflow_project_id()` = `creative:67707ae7-…:project:8`；主题可读；`schema_current = true` |
+| 唯一告警 | `production_status: absent from the legacy source; nothing to import`（该表在旧库中不存在，非错误） |
+
+**未完成、需在观察期内处理的部分：**
+
+- 第 3 步的完整业务冒烟（原创 / 仿写 / 完整剧本三种项目各跑一遍读取、生成、修订、锁定、审核、优化、交付、导出）尚未执行。
+- 第 4 步的 7 天观察期从本次导入起算，最早 **2026-09-25** 才能判定。
+- 第 6 步删除 `creative/legacy_sqlite_repository.py` 与 SQLite 运行分支必须等观察期结束；在此之前回退一律使用 PostgreSQL → SQLite 导出器生成新文件，不得直接启用封存库。
+

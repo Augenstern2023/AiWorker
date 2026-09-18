@@ -73,6 +73,40 @@ PRODUCTION_DATABASE_NAME = "aiworker_system"
 
 
 @pytest.fixture(autouse=True)
+def isolate_ambient_system_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the ambient system-database URL at the test database, never production.
+
+    Several production entry points read ``AIWORKER_SYSTEM_DATABASE_URL`` straight
+    from the environment rather than accepting an injected database: the creative
+    router builds ``TopicService`` (which reaches ``TodayRankService``), and both
+    ``build_creative_router`` and ``register_creative_routes`` build a default
+    ``WorkflowRepository``. A test that exercises those paths without injecting a
+    database would therefore open whatever the developer's shell happens to
+    point at, which in a real workspace is production.
+
+    Redirecting the variable to ``AIWORKER_TEST_SYSTEM_DATABASE_URL`` keeps those
+    tests honest without letting them near real data. ``isolated_system_database``
+    overrides the variable itself and is unaffected. When no test database is
+    configured the variable is left alone, so the guard below still fails loudly
+    instead of the suite silently inventing a target.
+    """
+
+    ambient = os.environ.get("AIWORKER_SYSTEM_DATABASE_URL")
+    if not ambient:
+        return
+    try:
+        url = make_url(ambient)
+    except Exception:  # pragma: no cover - a malformed URL is the guard's problem
+        return
+    if url.database != PRODUCTION_DATABASE_NAME:
+        return
+    replacement = os.environ.get("AIWORKER_TEST_SYSTEM_DATABASE_URL")
+    if not replacement:
+        return
+    monkeypatch.setenv("AIWORKER_SYSTEM_DATABASE_URL", replacement)
+
+
+@pytest.fixture(autouse=True)
 def refuse_production_database(monkeypatch: pytest.MonkeyPatch):
     """Fail any test that tries to open the real system database."""
 
@@ -133,6 +167,40 @@ def postgres_creative(isolated_system_database: SystemDatabase):
     from creative.postgres_repository import PostgresCreativeRepository
 
     return PostgresCreativeRepository(isolated_system_database)
+
+
+def build_test_creative_repository(runtime_dir: str | Path) -> "CreativeRepository":
+    """Build an explicit legacy SQLite creative repository for a test.
+
+    The creative router no longer derives a database location, so a test that
+    builds it must name the store it talks to. Tests keep exercising the frozen
+    SQLite implementation, at the path the removed derivation used to produce.
+    """
+
+    from creative.legacy_sqlite_repository import CreativeRepository
+
+    path = Path(runtime_dir) / "creative" / "creative.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return CreativeRepository(path)
+
+
+@pytest.fixture
+def worker_system_database(
+    isolated_system_database: SystemDatabase, monkeypatch: pytest.MonkeyPatch
+) -> SystemDatabase:
+    """Make worker-built databases resolve to the isolated schema.
+
+    Workers build their own ``SystemDatabase`` from the environment. Patching
+    ``from_environment`` keeps that lookup deterministic, so a worker test
+    never touches the ambient environment (and never the production store).
+    """
+
+    monkeypatch.setattr(
+        SystemDatabaseSettings,
+        "from_environment",
+        classmethod(lambda cls, environ=None: isolated_system_database.settings),
+    )
+    return isolated_system_database
 
 
 @pytest.fixture

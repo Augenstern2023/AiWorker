@@ -270,8 +270,10 @@ class VersionsRepository:
             resource_ref = create(connection)
             return self._hydrate_resource_ref(connection, project_id, resource_ref)
 
-    def get_blueprint(self, blueprint_id: int) -> dict[str, Any] | None:
-        with self.connection_scope() as connection:
+    def get_blueprint(
+        self, blueprint_id: int, *, connection: Connection | None = None
+    ) -> dict[str, Any] | None:
+        with self.connection_scope(connection) as connection:
             row = connection.execute(
                 select(creative_blueprints).where(
                     creative_blueprints.c.id == int(blueprint_id)
@@ -456,9 +458,13 @@ class VersionsRepository:
             raise ValueError("project revision changed")
 
     def _resource_with_project_revision(
-        self, resource: dict[str, Any], project_id: int
+        self,
+        resource: dict[str, Any],
+        project_id: int,
+        *,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
-        project = self.get_project(project_id)
+        project = self.get_project(project_id, connection=connection)
         result = dict(resource)
         result["revision"] = int((project or {}).get("revision") or 0)
         return result
@@ -470,6 +476,7 @@ class VersionsRepository:
         *,
         expected_revision: int | None = None,
         expected_authority: dict[str, Any] | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         current = self.get_blueprint(blueprint_id)
         if not current:
@@ -486,7 +493,7 @@ class VersionsRepository:
                 raise ValueError("只能锁定当前 Brief 的直接后继草稿")
         if current["status"] == "brief_locked":
             return self._resource_with_project_revision(
-                current, int(current["project_id"])
+                current, int(current["project_id"]), connection=connection
             )
         note = difference_note.strip() or str(
             current.get("difference_note") or ""
@@ -509,7 +516,11 @@ class VersionsRepository:
             }
         )
         now = utc_now()
-        with self.transaction_scope() as connection:
+        # ``caller_connection`` keeps the caller's handle across the ``as``
+        # rebinding below, where ``connection`` becomes the scoped one and dies
+        # with the block when this call owned it.
+        caller_connection = connection
+        with self.transaction_scope(caller_connection) as connection:
             authority = connection.execute(
                 select(
                     creative_projects.c.revision, creative_projects.c.locked_brief_id
@@ -570,7 +581,9 @@ class VersionsRepository:
             if cursor.rowcount != 1:
                 raise ValueError("project revision changed")
         return self._resource_with_project_revision(
-            self.get_blueprint(blueprint_id) or {}, int(current["project_id"])
+            self.get_blueprint(blueprint_id, connection=caller_connection) or {},
+            int(current["project_id"]),
+            connection=caller_connection,
         )
 
     def select_locked_brief(
@@ -855,8 +868,10 @@ class VersionsRepository:
             resource_ref = create(connection)
             return self._hydrate_resource_ref(connection, project_id, resource_ref)
 
-    def get_character_batch(self, project_id: int, batch_id: str) -> dict[str, Any]:
-        project = self.get_project(project_id)
+    def get_character_batch(
+        self, project_id: int, batch_id: str, *, connection: Connection | None = None
+    ) -> dict[str, Any]:
+        project = self.get_project(project_id, connection=connection)
         if not project:
             raise ValueError("创作项目不存在")
         return {
@@ -896,6 +911,7 @@ class VersionsRepository:
         *,
         expected_revision: int | None = None,
         expected_authority: dict[str, Any] | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         project = self.get_project(project_id)
         if not project:
@@ -907,9 +923,10 @@ class VersionsRepository:
         if project.get("character_batch_id") == batch_id and all(
             item.get("status") in _READABLE_STATUSES for item in batch["characters"]
         ):
-            return self._resource_with_project_revision(batch, project_id)
+            return self._resource_with_project_revision(batch, project_id, connection=connection)
         now = utc_now()
-        with self.transaction_scope() as connection:
+        caller_connection = connection
+        with self.transaction_scope(caller_connection) as connection:
             authority = connection.execute(
                 select(creative_projects.c.revision)
                 .where(
@@ -958,7 +975,9 @@ class VersionsRepository:
             if cursor.rowcount != 1:
                 raise ValueError("project revision changed")
         return self._resource_with_project_revision(
-            self.get_character_batch(project_id, batch_id), project_id
+            self.get_character_batch(project_id, batch_id, connection=caller_connection),
+            project_id,
+            connection=caller_connection,
         )
 
     def select_locked_character_batch(
@@ -1378,8 +1397,10 @@ class VersionsRepository:
             )
         return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
-    def get_outline_batch(self, project_id: int, batch_id: str) -> dict[str, Any]:
-        project = self.get_project(project_id)
+    def get_outline_batch(
+        self, project_id: int, batch_id: str, *, connection: Connection | None = None
+    ) -> dict[str, Any]:
+        project = self.get_project(project_id, connection=connection)
         if not project:
             raise ValueError("创作项目不存在")
         rows = [
@@ -1918,6 +1939,7 @@ class VersionsRepository:
         *,
         expected_revision: int | None = None,
         expected_authority: dict[str, Any] | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         project = self.get_project(project_id)
         if not project:
@@ -1934,10 +1956,13 @@ class VersionsRepository:
             item.get("status") in _READABLE_STATUSES for item in rows
         ):
             return self._resource_with_project_revision(
-                self.get_outline_batch(project_id, batch_id), project_id
+                self.get_outline_batch(project_id, batch_id, connection=connection),
+                project_id,
+                connection=connection,
             )
         now = utc_now()
-        with self.transaction_scope() as connection:
+        caller_connection = connection
+        with self.transaction_scope(caller_connection) as connection:
             authority = connection.execute(
                 select(creative_projects.c.revision)
                 .where(
@@ -1978,7 +2003,9 @@ class VersionsRepository:
             if cursor.rowcount != 1:
                 raise ValueError("project revision changed")
         return self._resource_with_project_revision(
-            self.get_outline_batch(project_id, batch_id), project_id
+            self.get_outline_batch(project_id, batch_id, connection=caller_connection),
+            project_id,
+            connection=caller_connection,
         )
 
     # -- beats and script ---------------------------------------------------
@@ -2647,8 +2674,10 @@ class VersionsRepository:
             )
         return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
-    def get_episode(self, episode_id: int) -> dict[str, Any] | None:
-        with self.connection_scope() as connection:
+    def get_episode(
+        self, episode_id: int, *, connection: Connection | None = None
+    ) -> dict[str, Any] | None:
+        with self.connection_scope(connection) as connection:
             row = connection.execute(
                 select(creative_episodes).where(
                     creative_episodes.c.id == int(episode_id)
@@ -2682,13 +2711,15 @@ class VersionsRepository:
         *,
         expected_revision: int | None = None,
         expected_authority: dict[str, Any] | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         episode = self.get_episode(episode_id)
         if not episode or episode["stage"] != "beats":
             raise ValueError("单集 Beats 不存在")
         validate_beats(episode.get("content") or {}, allow_legacy=True)
         now = utc_now()
-        with self.transaction_scope() as connection:
+        caller_connection = connection
+        with self.transaction_scope(caller_connection) as connection:
             self._assert_expected_revision(
                 self._operation_project(connection, int(episode["project_id"])),
                 expected_revision,
@@ -2701,7 +2732,7 @@ class VersionsRepository:
                 .where(creative_episodes.c.id == int(episode_id))
                 .values(status="locked", locked_at=now, updated_at=now)
             )
-        return self.get_episode(episode_id) or {}
+        return self.get_episode(episode_id, connection=caller_connection) or {}
 
     def batch_lockable_episode_beats(self, project_id: int) -> list[dict[str, Any]]:
         """Return the latest compatible Beats draft for every project episode."""
@@ -2764,13 +2795,14 @@ class VersionsRepository:
         return drafts
 
     def lock_current_episode_beats_batch(
-        self, project_id: int
+        self, project_id: int, *, connection: Connection | None = None
     ) -> list[dict[str, Any]]:
         """Atomically lock all Beats drafts returned by batch_lockable_episode_beats."""
         drafts = self.batch_lockable_episode_beats(project_id)
         now = utc_now()
         ids = [int(item["id"]) for item in drafts]
-        with self.transaction_scope() as connection:
+        caller_connection = connection
+        with self.transaction_scope(caller_connection) as connection:
             connection.execute(
                 update(creative_episodes)
                 .where(
@@ -2780,7 +2812,10 @@ class VersionsRepository:
                 )
                 .values(status="locked", locked_at=now, updated_at=now)
             )
-        return [self.get_episode(episode_id) or {} for episode_id in ids]
+        return [
+            self.get_episode(episode_id, connection=caller_connection) or {}
+            for episode_id in ids
+        ]
 
     def lock_episode_script(
         self,
@@ -2788,12 +2823,14 @@ class VersionsRepository:
         *,
         expected_revision: int | None = None,
         expected_authority: dict[str, Any] | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         episode = self.get_episode(episode_id)
         if not episode or episode["stage"] != "script":
             raise ValueError("单集场次剧本不存在")
         now = utc_now()
-        with self.transaction_scope() as connection:
+        caller_connection = connection
+        with self.transaction_scope(caller_connection) as connection:
             self._assert_expected_revision(
                 self._operation_project(connection, int(episode["project_id"])),
                 expected_revision,
@@ -2806,7 +2843,7 @@ class VersionsRepository:
                 .where(creative_episodes.c.id == int(episode_id))
                 .values(status="locked", locked_at=now, updated_at=now)
             )
-        return self.get_episode(episode_id) or {}
+        return self.get_episode(episode_id, connection=caller_connection) or {}
 
     # -- resource heads -----------------------------------------------------
 

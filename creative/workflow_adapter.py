@@ -435,16 +435,25 @@ class CreativeWorkflowAdapter:
                     )
                 ).scalars().all()
                 superseded_resources.extend(str(old_id) for old_id in rows)
-        for old_resource_id in dict.fromkeys(superseded_resources):
-            self.workflow_repository.supersede_resource_approvals(
-                resource_type, old_resource_id, actor
-            )
-        if requested_submission["id"] != submission["id"]:
-            self.workflow_repository.supersede_resource_approvals(
-                requested_submission["resource_type"],
-                requested_submission["resource_id"],
-                actor,
-            )
+
+            # The workflow supersede writes join the same transaction as the
+            # creative status changes above. Moving them outside the scope would
+            # let a workflow failure leave Creative superseded with the workflow
+            # registry still approving the old version.
+            for old_resource_id in dict.fromkeys(superseded_resources):
+                self.workflow_repository.supersede_resource_approvals(
+                    resource_type,
+                    old_resource_id,
+                    actor,
+                    connection=connection,
+                )
+            if requested_submission["id"] != submission["id"]:
+                self.workflow_repository.supersede_resource_approvals(
+                    requested_submission["resource_type"],
+                    requested_submission["resource_id"],
+                    actor,
+                    connection=connection,
+                )
         if project_revision is None:
             return submission
         result = dict(submission)
@@ -467,10 +476,15 @@ class CreativeWorkflowAdapter:
                 resource_type, old_id, "returned", connection=connection
             )
             new_id = self._clone(resource_type, old_id, task_id, connection)
-        self.workflow_repository.update_submission_resource_id(
-            new_draft["id"], new_id, connection=conn
-        )
-        updated = self.workflow_repository.get_submission(new_draft["id"], connection=conn)
+            # The submission repoint belongs to the same transaction: outside it
+            # a failure would leave the cloned creative draft unreachable from
+            # the workflow submission that is supposed to reference it.
+            self.workflow_repository.update_submission_resource_id(
+                new_draft["id"], new_id, connection=connection
+            )
+            updated = self.workflow_repository.get_submission(
+                new_draft["id"], connection=connection
+            )
         assert updated is not None
         return updated
 
@@ -494,6 +508,7 @@ class CreativeWorkflowAdapter:
         difference_note: str = "",
         expected_project_revision: int | None = None,
         expected_authority: dict[str, Any] | None = None,
+        connection: Connection | None = None,
     ) -> dict:
         """Lock an assigned creative version without creating a submission."""
         if resource_type not in APPROVAL_FREE_RESOURCE_TYPES:
@@ -504,13 +519,14 @@ class CreativeWorkflowAdapter:
         snapshot = self.snapshot(resource_type, resource_id)
         self._assert_current_upstream(resource_type, resource_id, snapshot)
         self._assert_brief_risk(resource_type, resource_id)
-
+        join = self._joined_kwargs(connection)
         if resource_type == "brief":
             resource = self.creative_repository.lock_brief(
                 int(resource_id),
                 difference_note,
                 expected_revision=expected_project_revision,
                 expected_authority=expected_authority,
+                **join,
             )
         elif resource_type == "characters":
             project_id, batch_id = self._batch_key(resource_id)
@@ -519,6 +535,7 @@ class CreativeWorkflowAdapter:
                 batch_id,
                 expected_revision=expected_project_revision,
                 expected_authority=expected_authority,
+                **join,
             )
         elif resource_type == "outline":
             project_id, batch_id = self._batch_key(resource_id)
@@ -527,23 +544,44 @@ class CreativeWorkflowAdapter:
                 batch_id,
                 expected_revision=expected_project_revision,
                 expected_authority=expected_authority,
+                **join,
             )
         elif resource_type == "beats":
             resource = self.creative_repository.lock_episode_beats(
                 int(resource_id),
                 expected_revision=expected_project_revision,
                 expected_authority=expected_authority,
+                **join,
             )
         else:
             resource = self.creative_repository.lock_episode_script(
                 int(resource_id),
                 expected_revision=expected_project_revision,
                 expected_authority=expected_authority,
+                **join,
             )
         return {"resource": resource, "snapshot": snapshot}
 
+    def _joined_kwargs(self, connection: Connection | None) -> dict[str, Any]:
+        """Forward a caller's connection only to a store that can join it.
+
+        The frozen SQLite repository owns its writes internally and declares no
+        ``connection`` parameter, so it must be called exactly as before.
+        """
+
+        if connection is None or not hasattr(
+            self.creative_repository, "transaction_scope"
+        ):
+            return {}
+        return {"connection": connection}
+
     def lock_beats_batch_without_review(
-        self, task_id: str, project_id: int, actor: Principal
+        self,
+        task_id: str,
+        project_id: int,
+        actor: Principal,
+        *,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         """Validate every current Beats draft before one repository-level batch lock."""
         drafts = self.creative_repository.batch_lockable_episode_beats(project_id)
@@ -555,7 +593,9 @@ class CreativeWorkflowAdapter:
             snapshot = self.snapshot("beats", resource_id)
             self._assert_current_upstream("beats", resource_id, snapshot)
             snapshots.append(snapshot)
-        resources = self.creative_repository.lock_current_episode_beats_batch(project_id)
+        resources = self.creative_repository.lock_current_episode_beats_batch(
+            project_id, **self._joined_kwargs(connection)
+        )
         return {"resources": resources, "snapshots": snapshots}
 
     def lock_submitted_without_review(
@@ -848,15 +888,18 @@ class CreativeWorkflowAdapter:
             raise ValueError("creative resource type mismatch")
         return resource
 
-    def beats_episode_progress(self, resource_id: str) -> dict[str, Any]:
+    def beats_episode_progress(
+        self, resource_id: str, *, connection: Connection | None = None
+    ) -> dict[str, Any]:
         """Return current-outline coverage, treating this completion as accepted."""
+        join = self._joined_kwargs(connection)
         episode = self._required(
-            self.creative_repository.get_episode(int(resource_id))
+            self.creative_repository.get_episode(int(resource_id), **join)
         )
         if episode["stage"] != "beats":
             raise ValueError("beats resource must reference a beats episode")
         project = self._required(
-            self.creative_repository.get_project(int(episode["project_id"]))
+            self.creative_repository.get_project(int(episode["project_id"]), **join)
         )
         outline_batch_id = project.get("outline_batch_id")
         required = {
@@ -881,11 +924,18 @@ class CreativeWorkflowAdapter:
             "complete": bool(required) and required <= approved,
         }
 
-    def script_episode_progress(self, resource_id: str) -> dict[str, Any]:
-        episode = self._required(self.creative_repository.get_episode(int(resource_id)))
+    def script_episode_progress(
+        self, resource_id: str, *, connection: Connection | None = None
+    ) -> dict[str, Any]:
+        join = self._joined_kwargs(connection)
+        episode = self._required(
+            self.creative_repository.get_episode(int(resource_id), **join)
+        )
         if episode["stage"] != "script":
             raise ValueError("script resource must reference a script episode")
-        project = self._required(self.creative_repository.get_project(int(episode["project_id"])))
+        project = self._required(
+            self.creative_repository.get_project(int(episode["project_id"]), **join)
+        )
         required = {
             int(item["episode_number"])
             for item in project.get("episodes", [])

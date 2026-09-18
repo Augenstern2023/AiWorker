@@ -13,6 +13,7 @@ import json
 import os
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 
@@ -163,8 +164,34 @@ class DeliveryService:
             "path": str(path),
             "created_at": created_at,
         }
+        # The artifact is written outside the transaction on purpose: a rolled
+        # back row must not leave a file behind, and a file must never be the
+        # only surviving half of a delivery. Every write that can fail together
+        # (delivery row, reconciliation stamps, stage export, workflow
+        # completion, audit) happens on this one connection, and the artifact is
+        # unlinked if that transaction does not commit.
         try:
-            stored = self.creative_repository.record_delivery(values)
+            with self._write_transaction() as connection:
+                stored = self.creative_repository.record_delivery(
+                    values, connection=connection
+                )
+                if stored["id"] != delivery_id:
+                    # A concurrent writer owns the named unique key, so the row
+                    # that was just stored is the winner and the artifact
+                    # written above is an orphan. The winner already points at
+                    # its own file.
+                    path.unlink(missing_ok=True)
+                    return self._reconcile_delivery(
+                        stored,
+                        page_authorized=page_authorized,
+                        connection=connection,
+                    )
+                return self._reconcile_delivery(
+                    stored,
+                    request=request,
+                    page_authorized=page_authorized,
+                    connection=connection,
+                )
         except IntegrityError:
             path.unlink(missing_ok=True)
             existing = self._find_existing(
@@ -178,17 +205,6 @@ class DeliveryService:
         except BaseException:
             path.unlink(missing_ok=True)
             raise
-        if stored["id"] != delivery_id:
-            # A concurrent writer owns the named unique key, so the row that was
-            # just stored is the winner and the artifact written above is an
-            # orphan. The winner already points at its own file.
-            path.unlink(missing_ok=True)
-            return self._reconcile_delivery(
-                stored, page_authorized=page_authorized
-            )
-        return self._reconcile_delivery(
-            stored, request=request, page_authorized=page_authorized
-        )
 
     def list(
         self,
@@ -382,15 +398,39 @@ class DeliveryService:
         *,
         request: Request | None = None,
         page_authorized: bool = False,
+        connection: Any | None = None,
     ) -> dict[str, Any]:
         path = Path(record["path"]).resolve()
         if path.parent != self.delivery_dir.resolve() or not path.is_file():
             raise FileNotFoundError(path)
         is_formal = bool(record.get("is_formal"))
+        with self._write_transaction(connection) as active:
+            self._reconcile_delivery_rows(
+                record,
+                request=request,
+                page_authorized=page_authorized,
+                is_formal=is_formal,
+                connection=active,
+            )
+            refreshed = self._get_unreconciled(record["id"], connection=active)
+        assert refreshed is not None
+        return refreshed
+
+    def _reconcile_delivery_rows(
+        self,
+        record: dict[str, Any],
+        *,
+        request: Request | None,
+        page_authorized: bool,
+        is_formal: bool,
+        connection: Any,
+    ) -> None:
+        """Perform every cross-domain write of a reconciliation on one connection."""
+
         if is_formal and not record.get("workflow_task_id"):
             task = self._resolve_delivery_task(int(record["project_id"]), None)
             self._mark_reconciled(
-                record["id"], "workflow_task_id", task["id"]
+                record["id"], "workflow_task_id", task["id"], connection=connection
             )
             record["workflow_task_id"] = task["id"]
         if not record.get("stage_content_fingerprint"):
@@ -411,44 +451,59 @@ class DeliveryService:
             elif record["stage"] == "script":
                 fingerprint = script_resource_fingerprint(snapshot)
             self._mark_reconciled(
-                record["id"], "stage_content_fingerprint", fingerprint
+                record["id"],
+                "stage_content_fingerprint",
+                fingerprint,
+                connection=connection,
             )
             record["stage_content_fingerprint"] = fingerprint
         if is_formal:
-            self._record_stage_export(record)
-            self._complete_workflow_task(record, page_authorized=page_authorized)
-        self._record_audit(record, request=request)
-        refreshed = self._get_unreconciled(record["id"])
-        assert refreshed is not None
-        return refreshed
+            self._record_stage_export(record, connection=connection)
+            self._complete_workflow_task(
+                record, page_authorized=page_authorized, connection=connection
+            )
+        self._record_audit(record, request=request, connection=connection)
 
-    def _record_stage_export(self, record: dict[str, Any]) -> None:
+    def _record_stage_export(
+        self, record: dict[str, Any], *, connection: Any
+    ) -> None:
         if record.get("stage_export_recorded_at") is not None:
             return
         if record["stage"] in {"beats", "script"}:
             fingerprint = record["stage_content_fingerprint"]
             if not self.creative_repository.has_stage_export(
-                int(record["project_id"]), record["stage"], fingerprint
+                int(record["project_id"]),
+                record["stage"],
+                fingerprint,
+                connection=connection,
             ):
                 self.creative_repository.record_stage_export(
                     int(record["project_id"]),
                     record["stage"],
                     record["format"],
                     fingerprint,
+                    connection=connection,
                 )
+        record["stage_export_recorded_at"] = time.time()
         self._mark_reconciled(
-            record["id"], "stage_export_recorded_at", time.time()
+            record["id"],
+            "stage_export_recorded_at",
+            record["stage_export_recorded_at"],
+            connection=connection,
         )
 
     def _complete_workflow_task(
-        self, record: dict[str, Any], *, page_authorized: bool = False
+        self,
+        record: dict[str, Any],
+        *,
+        page_authorized: bool = False,
+        connection: Any = None,
     ) -> None:
         if record.get("workflow_completed_at") is not None:
             return
-        repository = self.workflow_repository.identity_repository
-        with repository.transaction() as connection:
+        with self._write_transaction(connection) as active:
             task = self.workflow_repository._require_task(
-                connection, record["workflow_task_id"]
+                active, record["workflow_task_id"]
             )
             if (
                 task["task_type"] != "delivery"
@@ -461,7 +516,7 @@ class DeliveryService:
                 if task["status"] not in {"pool", "assigned", "in_progress"}:
                     raise ValueError("delivery workflow task cannot be completed")
                 actor = self.workflow_repository._live_actor(
-                    connection, record["actor_user_id"]
+                    active, record["actor_user_id"]
                 )
                 if not actor["is_system_admin"] and not page_authorized:
                     raise PermissionError(
@@ -471,7 +526,7 @@ class DeliveryService:
                     task["id"],
                     "deliver",
                     actor,
-                    connection=connection,
+                    connection=active,
                     event_type="delivery.complete",
                     details={
                         "delivery_id": record["id"],
@@ -483,7 +538,7 @@ class DeliveryService:
                     ),
                 )
             else:
-                event = connection.execute(
+                event = active.execute(
                     text(
                         "SELECT 1 FROM workflow_task_events "
                         "WHERE task_id = :task_id "
@@ -493,13 +548,13 @@ class DeliveryService:
                 ).fetchone()
                 if event is None:
                     actor = self.workflow_repository._live_actor(
-                        connection, record["actor_user_id"]
+                        active, record["actor_user_id"]
                     )
                     self.workflow_repository.record_task_event_in_transaction(
                         task["id"],
                         "delivery.complete",
                         actor,
-                        connection=connection,
+                        connection=active,
                         details={
                             "delivery_id": record["id"],
                             "stage": record["stage"],
@@ -507,12 +562,20 @@ class DeliveryService:
                             "reconciled": True,
                         },
                     )
-        self._mark_reconciled(
-            record["id"], "workflow_completed_at", time.time()
-        )
+            record["workflow_completed_at"] = time.time()
+            self._mark_reconciled(
+                record["id"],
+                "workflow_completed_at",
+                record["workflow_completed_at"],
+                connection=active,
+            )
 
     def _record_audit(
-        self, record: dict[str, Any], *, request: Request | None
+        self,
+        record: dict[str, Any],
+        *,
+        request: Request | None,
+        connection: Any = None,
     ) -> None:
         if record.get("audit_recorded_at") is not None:
             return
@@ -520,36 +583,42 @@ class DeliveryService:
             action="delivery.create", target_id=record["id"]
         )
         if not existing:
-            repository = self.workflow_repository.identity_repository
-            with repository.connect() as connection:
+            with self._write_transaction(connection) as active:
                 actor_data = self.workflow_repository._live_actor(
-                    connection, record["actor_user_id"]
+                    active, record["actor_user_id"]
                 )
-            actor = Principal(
-                user_id=actor_data["user_id"],
-                username="delivery-actor",
-                display_name="Delivery Actor",
-                role_codes=tuple(actor_data["role_codes"]),
-                permissions=frozenset(actor_data["permissions"]),
-                data_scope="all",
-                session_id="delivery-reconciliation",
-            )
-            self.audit_service.record(
-                actor=actor,
-                action="delivery.create",
-                target_type="delivery",
-                target_id=record["id"],
-                project_id=str(record["project_id"]),
-                before=None,
-                after=record,
-                reason=None,
-                result="success",
-                request=request,
-            )
-        self._mark_reconciled(record["id"], "audit_recorded_at", time.time())
+                actor = Principal(
+                    user_id=actor_data["user_id"],
+                    username="delivery-actor",
+                    display_name="Delivery Actor",
+                    role_codes=tuple(actor_data["role_codes"]),
+                    permissions=frozenset(actor_data["permissions"]),
+                    data_scope="all",
+                    session_id="delivery-reconciliation",
+                )
+                self.audit_service.record(
+                    actor=actor,
+                    action="delivery.create",
+                    target_type="delivery",
+                    target_id=record["id"],
+                    project_id=str(record["project_id"]),
+                    before=None,
+                    after=record,
+                    reason=None,
+                    result="success",
+                    request=request,
+                    connection=active,
+                )
+                record["audit_recorded_at"] = time.time()
+                self._mark_reconciled(
+                    record["id"],
+                    "audit_recorded_at",
+                    record["audit_recorded_at"],
+                    connection=active,
+                )
 
     def _mark_reconciled(
-        self, delivery_id: str, column: str, value: Any
+        self, delivery_id: str, column: str, value: Any, *, connection: Any = None
     ) -> None:
         allowed = {
             "workflow_task_id",
@@ -561,11 +630,34 @@ class DeliveryService:
         if column not in allowed:
             raise ValueError("invalid delivery reconciliation column")
         self.creative_repository.mark_delivery_reconciled(
-            delivery_id, column, value
+            delivery_id, column, value, connection=connection
         )
 
-    def _get_unreconciled(self, delivery_id: str) -> dict[str, Any] | None:
-        return self.creative_repository.get_delivery(delivery_id)
+    def _get_unreconciled(
+        self, delivery_id: str, *, connection: Any = None
+    ) -> dict[str, Any] | None:
+        return self.creative_repository.get_delivery(
+            delivery_id, connection=connection
+        )
+
+    @contextmanager
+    def _write_transaction(self, connection: Any = None):
+        """Own one cross-domain transaction, or join the caller's.
+
+        An externally supplied connection is yielded untouched so the caller
+        keeps ownership of commit, rollback and close, which is what lets
+        ``create`` keep the artifact and the delivery rows in step.
+        """
+
+        if connection is not None:
+            yield connection
+            return
+        scope = getattr(self.creative_repository, "transaction_scope", None)
+        if callable(scope):
+            with scope() as active:
+                yield active
+            return
+        yield None
 
     def download_path(
         self,

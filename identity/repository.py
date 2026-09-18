@@ -69,6 +69,24 @@ class IdentityRepository:
         with self.connect() as owned_connection:
             yield owned_connection
 
+    @contextmanager
+    def transaction_scope(
+        self, connection: Connection | None = None
+    ) -> Iterator[Connection]:
+        """Join the caller's transaction, or own a committed one.
+
+        An externally supplied connection is never committed, rolled back or
+        closed here; the caller owns its transaction. Without one this is the
+        same short-lived committed transaction :meth:`connect` already yields,
+        so a caller that does not coordinate keeps the previous behaviour.
+        """
+
+        if connection is not None:
+            yield connection
+            return
+        with self.connect() as owned_connection:
+            yield owned_connection
+
     # ------------------------------------------------------------------ seed
 
     def seed_defaults(self) -> None:

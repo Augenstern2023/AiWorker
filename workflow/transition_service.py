@@ -64,8 +64,11 @@ class TransitionService:
         if resource_type not in {"brief", "characters", "outline", "beats", "script"}:
             raise ValueError("resource type requires its configured workflow")
 
-        try:
-            completed = self.creative_adapter.lock_without_review(
+        with self.repository.identity_repository.transaction() as connection:
+            # The creative lock joins this transaction, so a failed workflow
+            # write rolls the locked resource back with it instead of leaving a
+            # locked draft that only the resume path below could repair.
+            completed = self._lock_creative_without_review(
                 task_id,
                 resource_type,
                 resource_id,
@@ -73,18 +76,8 @@ class TransitionService:
                 difference_note=difference_note,
                 expected_project_revision=expected_project_revision,
                 expected_authority=expected_authority,
+                connection=connection,
             )
-        except ValueError as exc:
-            # A prior request may have locked the resource before a later
-            # workflow write failed. Resume only that specific partial state.
-            if (
-                str(exc) != "creative resource is immutable after completion"
-                or self.creative_adapter.domain_status(resource_type, resource_id)
-                not in {"locked", "brief_locked"}
-            ):
-                raise
-            completed = {"resource": {"id": resource_id, "status": "locked"}}
-        with self.repository.identity_repository.transaction() as connection:
             task = self.repository.transition_task_in_transaction(
                 task_id,
                 "complete_work",
@@ -106,9 +99,13 @@ class TransitionService:
             beats_progress = None
             if resource_type in {"beats", "script"}:
                 beats_progress = (
-                    self.creative_adapter.beats_episode_progress(resource_id)
+                    self.creative_adapter.beats_episode_progress(
+                        resource_id, connection=connection
+                    )
                     if resource_type == "beats"
-                    else self.creative_adapter.script_episode_progress(resource_id)
+                    else self.creative_adapter.script_episode_progress(
+                        resource_id, connection=connection
+                    )
                 )
                 if not beats_progress["complete"]:
                     connection.execute(
@@ -165,6 +162,46 @@ class TransitionService:
             result["beats_progress"] = beats_progress
         return result
 
+    def _lock_creative_without_review(
+        self,
+        task_id: str,
+        resource_type: str,
+        resource_id: str,
+        actor: Principal,
+        *,
+        difference_note: str,
+        expected_project_revision: int | None,
+        expected_authority: dict[str, Any] | None,
+        connection: Any,
+    ) -> dict[str, Any]:
+        """Lock one creative resource on the caller's connection.
+
+        A request that predates the shared transaction may have locked the
+        resource and then failed its workflow write, so that one partial state
+        is resumed instead of raising. The guard runs before any write, which
+        keeps the caller's transaction usable when it returns.
+        """
+
+        try:
+            return self.creative_adapter.lock_without_review(
+                task_id,
+                resource_type,
+                resource_id,
+                actor,
+                difference_note=difference_note,
+                expected_project_revision=expected_project_revision,
+                expected_authority=expected_authority,
+                connection=connection,
+            )
+        except ValueError as exc:
+            if (
+                str(exc) != "creative resource is immutable after completion"
+                or self.creative_adapter.domain_status(resource_type, resource_id)
+                not in {"locked", "brief_locked"}
+            ):
+                raise
+            return {"resource": {"id": resource_id, "status": "locked"}}
+
     def reconcile_creative_without_review(
         self, task_id: str, resource_type: str, resource_id: str
     ) -> dict[str, Any] | None:
@@ -211,11 +248,13 @@ class TransitionService:
         """Lock all validated current Beats drafts, then complete the shared workflow task once."""
         if self.creative_adapter is None:
             raise RuntimeError("creative workflow adapter is not configured")
-        completed = self.creative_adapter.lock_beats_batch_without_review(
-            task_id, project_id, actor
-        )
-        resources = completed["resources"]
         with self.repository.identity_repository.transaction() as connection:
+            # Same boundary as the single-resource path: the batch lock joins
+            # the workflow transaction, so neither half can outlive the other.
+            completed = self.creative_adapter.lock_beats_batch_without_review(
+                task_id, project_id, actor, connection=connection
+            )
+            resources = completed["resources"]
             task = self.repository.transition_task_in_transaction(
                 task_id,
                 "complete_work",
@@ -228,7 +267,9 @@ class TransitionService:
                 },
                 event_type="creative.lock.batch",
             )
-            beats_progress = self.creative_adapter.beats_episode_progress(str(resources[0]["id"]))
+            beats_progress = self.creative_adapter.beats_episode_progress(
+                str(resources[0]["id"]), connection=connection
+            )
             if not beats_progress["complete"]:
                 connection.execute(
                     update(workflow_tasks)

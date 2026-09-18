@@ -99,9 +99,14 @@ class RecordingWorkflowRepository:
         return self.latest
 
     def supersede_resource_approvals(
-        self, resource_type: str, resource_id: str, actor: Principal
+        self,
+        resource_type: str,
+        resource_id: str,
+        actor: Principal,
+        *,
+        connection: Any = None,
     ) -> None:
-        del actor
+        del actor, connection
         self.superseded.append((resource_type, resource_id))
 
     def record_legacy_force(

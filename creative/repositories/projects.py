@@ -239,10 +239,15 @@ class ProjectsRepository:
         return self.get_project(int(row[0])) if row is not None else None
 
     def reconcile_project_workflow_task(
-        self, workflow_task_id: str, project_id: int
+        self,
+        workflow_task_id: str,
+        project_id: int,
+        *,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         now = utc_now()
-        with self.transaction_scope() as connection:
+        caller_connection = connection
+        with self.transaction_scope(caller_connection) as connection:
             # Lock order: this repair sweeps the rows of two different projects,
             # so it takes the single store-scoped advisory lock (never a
             # project-scoped one) and therefore cannot deadlock with another
@@ -298,7 +303,7 @@ class ProjectsRepository:
                     updated_at=now,
                 )
             )
-        project = self.get_project(project_id)
+        project = self.get_project(project_id, connection=caller_connection)
         if project is None:
             raise ValueError("system-bound creative project does not exist")
         return project
@@ -513,6 +518,7 @@ class ProjectsRepository:
         created_by: str,
         creation_request_id: str,
         workflow_mode: str = "sequential",
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         project, _ = self.ensure_original_project(
             seed_text=seed_text,
@@ -527,6 +533,7 @@ class ProjectsRepository:
             created_by=created_by,
             creation_request_id=creation_request_id,
             workflow_mode=workflow_mode,
+            connection=connection,
         )
         return project
 
@@ -545,6 +552,7 @@ class ProjectsRepository:
         created_by: str,
         creation_request_id: str,
         workflow_mode: str = "sequential",
+        connection: Connection | None = None,
     ) -> tuple[dict[str, Any], bool]:
         if not 1 <= int(target_episode_count) <= 100:
             raise ValueError("目标集数必须在 1-100 之间")
@@ -556,7 +564,14 @@ class ProjectsRepository:
             raise ValueError("invalid creative workflow mode")
         now = utc_now()
         normalized_request_id = creation_request_id.strip()
-        with self.transaction_scope() as connection:
+        # Joining the caller's connection puts the creative project row, its
+        # seed and the workflow bootstrap in one transaction; the read-back at
+        # the end of this method therefore has to run on that same connection.
+        # ``caller_connection`` survives the ``as`` rebinding below: when it is
+        # None this method owned and already closed its transaction, so the
+        # read-back must open a fresh connection rather than reuse that handle.
+        caller_connection = connection
+        with self.transaction_scope(caller_connection) as connection:
             if normalized_request_id:
                 # Lock order: the creation-request advisory lock is taken before
                 # the existence probe, so the find-or-insert pair is atomic and
@@ -616,7 +631,10 @@ class ProjectsRepository:
                     now=now,
                     workflow_mode=workflow_mode,
                 )
-        return self.get_project(project_id) or {}, created
+        return (
+            self.get_project(project_id, connection=caller_connection) or {},
+            created,
+        )
 
     @staticmethod
     def _insert_original_project(
@@ -675,11 +693,21 @@ class ProjectsRepository:
         return int(project_id), True
 
     def mark_project_bootstrap_status(
-        self, project_id: int, status: str
+        self,
+        project_id: int,
+        status: str,
+        *,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         if status not in {"pending", "ready", "failed"}:
             raise ValueError("invalid bootstrap status")
-        with self.transaction_scope() as connection:
+        # The read-back runs on ``caller_connection`` when the caller supplied
+        # one, so it observes the status this call just wrote inside the
+        # caller's still-open transaction; with no caller connection it opens a
+        # fresh connection after this method's own transaction committed,
+        # exactly as before.
+        caller_connection = connection
+        with self.transaction_scope(caller_connection) as connection:
             connection.execute(
                 update(creative_projects)
                 .where(
@@ -688,7 +716,7 @@ class ProjectsRepository:
                 )
                 .values(bootstrap_status=status, updated_at=utc_now())
             )
-        return self.get_project(project_id) or {}
+        return self.get_project(project_id, connection=caller_connection) or {}
 
     # -- seeds ---------------------------------------------------------------
 
@@ -886,8 +914,13 @@ class ProjectsRepository:
             ).scalars().all()
         return [self.get_project(int(value)) or {} for value in rows]
 
-    def get_project(self, project_id: int) -> dict[str, Any] | None:
-        with self.connection_scope() as connection:
+    def get_project(
+        self, project_id: int, *, connection: Connection | None = None
+    ) -> dict[str, Any] | None:
+        # ``connection`` lets a caller inside its own transaction read back the
+        # rows it has not committed yet (uncommitted writes are invisible to a
+        # second connection, even inside the same transaction block).
+        with self.connection_scope(connection) as connection:
             row = connection.execute(
                 select(
                     creative_projects,

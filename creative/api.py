@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import csv
 from datetime import datetime
 from io import BytesIO, StringIO
@@ -17,6 +18,7 @@ import json
 import logging
 from pathlib import Path
 import re
+import time
 from typing import Any, Callable
 from urllib.parse import quote
 import uuid
@@ -25,6 +27,8 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, 
 from fastapi.responses import JSONResponse, StreamingResponse
 from openpyxl import Workbook
 from pydantic import BaseModel, Field
+
+import config
 
 from creative.hit_breakdown import breakdown_field_guide, personalize_breakdown_field_guide
 from creative.application_service import (
@@ -50,6 +54,14 @@ from creative.script_service import normalize_script_content, rewrite_outline_fi
 from creative.selection_stage_service import SelectionStageService
 from creative.workflow_adapter import CreativeWorkflowAdapter
 from creative.workflow_identity import WorkflowIdentityResolver
+from creative.video_parameter_recommendation import (
+    MODEL_CAPABILITIES,
+    SCENARIOS,
+    attach_recommendation_staleness,
+    build_video_parameter_source,
+    fallback_recommendation,
+    video_parameter_analysis_deadline_seconds,
+)
 
 from creative.schema import (
     BlueprintDeriveRequest,
@@ -92,6 +104,7 @@ from creative.schema import (
     PromptTemplateRevisionRequest,
     ProjectCreateRequest,
     ProjectUpdateRequest,
+    VideoParameterConfirmRequest,
     SeedUpdateRequest,
     SeedVersionRequest,
     WorkflowLinkRequest,
@@ -126,6 +139,7 @@ _MODE_MIGRATION_PREVIEW_TIMEOUT_SECONDS = 8.0
 _MODE_MIGRATION_NON_BLOCKING_JOB_TYPES = frozenset({
     "project_review",
     "screenplay_review",
+    "video_parameter_recommendation",
 })
 
 
@@ -217,6 +231,7 @@ def uses_project_member_stage_authorization(path: str, method: str) -> bool:
             r"/(?:"
             r"free|blueprints|briefs|seeds|characters|character-batches|outlines|"
             r"beats|scripts|episodes/\d+/(?:beats|scripts)|generation-jobs|"
+            r"video-parameter-recommendation|"
             r"prompt-library|prompt-marketplace|prompt-modules|prompt-system|"
             r"workflow-tasks/(?:brief|characters|outline|beats|script)"
             r")(?:/|$)",
@@ -678,6 +693,150 @@ def script_download_filename(
     return f"{safe_name}第{episode_number}集场次剧本v{version}.{format}"
 
 
+def build_video_parameter_recommendation_text(
+    record: dict[str, Any] | None,
+) -> str:
+    if not record or not isinstance(record.get("recommendation"), dict):
+        return ""
+    recommendation = record["recommendation"]
+    models = recommendation.get("models") or {}
+    confirmed = record.get("confirmed") or {}
+    if not models or record.get("export_model_keys") == []:
+        return ""
+    lines = ["==================== AI 视频规格建议 ===================="]
+    status_bits = [
+        f"分析覆盖：{len(record.get('source_episode_numbers') or [])} 集",
+        "完整全剧" if record.get("source_complete") else "部分剧本",
+    ]
+    if record.get("stale"):
+        status_bits.append("剧本已变化，建议已过期")
+    if recommendation.get("analysis_mode") == "rules_fallback":
+        status_bits.append("规则默认建议（未完成 AI 剧本分析）")
+    lines.extend([" · ".join(status_bits), ""])
+    scenario_labels = {"platform_fit": "当前平台适配", "content_optimal": "内容最优"}
+    export_model_keys = record.get("export_model_keys")
+    for vendor, keys in (
+        ("MiniMax", ("minimax_h3", "minimax_h3_max")),
+        ("Seedance", ("seedance_2_5",)),
+    ):
+        lines.append(f"【{vendor}】")
+        for key in keys:
+            if isinstance(export_model_keys, list) and key not in export_model_keys:
+                continue
+            model = models.get(key) or {}
+            capability = model.get("capability") or MODEL_CAPABILITIES.get(key, {})
+            if not model:
+                continue
+            lines.append(
+                f"- {capability.get('display_name') or key}"
+                f"（{capability.get('model_id') or '-'}）"
+            )
+            selected = confirmed.get(key)
+            if isinstance(selected, dict) and isinstance(selected.get("profile"), dict):
+                state = "本次导出" if selected.get("export_adjusted") else "已确认"
+                profiles = [(str(selected.get("scenario") or ""), selected["profile"], state)]
+            else:
+                profiles = [
+                    (scenario, profile, "未确认")
+                    for scenario, profile in (model.get("scenarios") or {}).items()
+                    if isinstance(profile, dict)
+                ]
+            for scenario, profile, state in profiles:
+                orientation = "竖屏" if profile.get("orientation") == "portrait" else "横屏"
+                fps = (profile.get("fps") or {}).get("value")
+                fps_text = f"，{fps} FPS" if fps else ""
+                delivery = profile.get("delivery") or {}
+                lines.append(
+                    f"  · {scenario_labels.get(scenario, scenario)} [{state}]："
+                    f"{orientation} {profile.get('ratio') or '-'}，"
+                    f"生成档位 {profile.get('resolution_tier') or '-'}，"
+                    f"建议单片段 {profile.get('clip_duration_seconds') or '-'} 秒"
+                    f"{fps_text}，交付母版 {delivery.get('master_resolution') or '-'}"
+                )
+                rationale = str(profile.get("rationale") or "").strip()
+                if rationale:
+                    lines.append(f"    理由：{rationale}")
+                risks = profile.get("special_scene_risks") or []
+                for risk in risks[:3]:
+                    episode = int(risk.get("episode_number") or 0)
+                    prefix = f"第 {episode} 集" if episode else "特殊场景"
+                    lines.append(
+                        f"    风险：{prefix} {risk.get('scene') or ''}："
+                        f"{risk.get('risk') or ''}；建议 {risk.get('suggestion') or ''}"
+                    )
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def video_parameter_export_record(
+    record: dict[str, Any] | None, raw_options: str
+) -> dict[str, Any] | None:
+    """Apply validated, export-only ratio and resolution choices."""
+
+    if not record or not raw_options:
+        return record
+    try:
+        payload = json.loads(raw_options)
+    except json.JSONDecodeError as exc:
+        raise ValueError("视频尺寸导出参数不是有效 JSON") from exc
+    raw_models = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(raw_models, list) or len(raw_models) > len(MODEL_CAPABILITIES):
+        raise ValueError("视频尺寸导出参数无效")
+    recommendation = record.get("recommendation") or {}
+    models = recommendation.get("models") or {}
+    confirmed: dict[str, Any] = {}
+    selected_keys: list[str] = []
+    for raw in raw_models:
+        if not isinstance(raw, dict):
+            raise ValueError("视频尺寸导出参数无效")
+        model_key = str(raw.get("model_key") or "")
+        scenario = str(raw.get("scenario") or "platform_fit")
+        ratio = str(raw.get("ratio") or "")
+        resolution = str(raw.get("resolution_tier") or "")
+        capability = MODEL_CAPABILITIES.get(model_key)
+        model = models.get(model_key) if isinstance(models.get(model_key), dict) else None
+        if capability is None or model is None or scenario not in SCENARIOS:
+            raise ValueError("视频尺寸导出型号或方案无效")
+        if ratio not in {"9:16", "16:9"}:
+            raise ValueError("视频尺寸导出画幅无效")
+        if resolution not in capability["resolution_tiers"]:
+            raise ValueError("视频尺寸导出分辨率不受目标模型支持")
+        current_confirmed = (record.get("confirmed") or {}).get(model_key) or {}
+        if (
+            current_confirmed.get("scenario") == scenario
+            and isinstance(current_confirmed.get("profile"), dict)
+        ):
+            base_profile = current_confirmed["profile"]
+        else:
+            base_profile = ((model.get("scenarios") or {}).get(scenario))
+        if not isinstance(base_profile, dict):
+            raise ValueError("视频尺寸导出建议不存在")
+        profile = deepcopy(base_profile)
+        profile["ratio"] = ratio
+        profile["orientation"] = "portrait" if ratio == "9:16" else "landscape"
+        profile["resolution_tier"] = resolution
+        delivery = dict(profile.get("delivery") or {})
+        delivery.update(
+            {
+                "ratio": ratio,
+                "orientation": profile["orientation"],
+                "master_resolution": "1080×1920" if ratio == "9:16" else "1920×1080",
+            }
+        )
+        profile["delivery"] = delivery
+        confirmed[model_key] = {
+            "scenario": scenario,
+            "profile": profile,
+            "capability": model.get("capability") or capability,
+            "export_adjusted": True,
+        }
+        selected_keys.append(model_key)
+    viewed = deepcopy(record)
+    viewed["confirmed"] = confirmed
+    viewed["export_model_keys"] = selected_keys
+    return viewed
+
+
 def build_merged_script_download(project: dict[str, Any]) -> tuple[str, str]:
     """Build one TXT download from scripts compatible with the current project context."""
     target_episode_count = int(project.get("target_episode_count") or 0)
@@ -758,7 +917,13 @@ def build_merged_script_download(project: dict[str, Any]) -> tuple[str, str]:
                 ]
             )
         )
-    return filename, "\n\n".join(sections).rstrip() + "\n"
+    recommendation_text = build_video_parameter_recommendation_text(
+        project.get("video_parameter_recommendation")
+    )
+    body = "\n\n".join(sections).rstrip() + "\n"
+    if recommendation_text:
+        body = f"{recommendation_text}\n{body}"
+    return filename, body
 
 
 def current_episode_download_items(
@@ -895,6 +1060,7 @@ def build_episode_selection_download(
     stage: str,
     episode_numbers: list[int] | None,
     format: str,
+    video_parameter_record: dict[str, Any] | None = None,
 ) -> tuple[str, bytes, str]:
     """Build a writer-facing download for selected current episode resources."""
 
@@ -916,14 +1082,17 @@ def build_episode_selection_download(
         raise ValueError(f"尚无可下载的{ {'outline': '分集大纲', 'beats': 'Beats', 'script': '场次剧本'}[stage] }")
 
     if format == "json":
-        body = json.dumps(
-            {
+        payload = {
                 "project_id": project["id"],
                 "project_name": project["name"],
                 "stage": stage,
                 "episode_numbers": requested,
                 "content": items,
-            },
+            }
+        if stage == "script" and video_parameter_record:
+            payload["video_parameter_recommendation"] = video_parameter_record
+        body = json.dumps(
+            payload,
             ensure_ascii=False,
             indent=2,
         ).encode("utf-8")
@@ -948,7 +1117,13 @@ def build_episode_selection_download(
             )
             for number in requested
         ]
-        body = ("\n\n".join(sections).rstrip() + "\n").encode("utf-8")
+        text = "\n\n".join(sections).rstrip() + "\n"
+        recommendation_text = build_video_parameter_recommendation_text(
+            video_parameter_record
+        )
+        if recommendation_text:
+            text = f"{recommendation_text}\n{text}"
+        body = text.encode("utf-8")
         media_type = "text/plain; charset=utf-8"
 
     project_name = str(project.get("topic_title") or project.get("name") or "项目").strip()
@@ -1371,6 +1546,25 @@ def build_creative_router(
             )
         ):
             raise HTTPException(403, "只能访问当前分配或管理的项目")
+
+    def assert_project_content_write_access(
+        request: Request, project_id: int, principal: Principal
+    ) -> None:
+        if principal.is_system_admin:
+            return
+        permission_service = getattr(
+            request.app.state, "identity_permission_service", None
+        )
+        if not isinstance(permission_service, PermissionService):
+            raise HTTPException(500, "identity permission service is not configured")
+        scoped_project_id = workflow_project_id(project_id)
+        active_member = workflow_repository.is_active_project_member(
+            scoped_project_id, principal
+        )
+        if not permission_service.can_create_project_content(
+            principal, scoped_project_id, active_member=active_member
+        ):
+            raise HTTPException(403, "只有项目编剧成员可以分析或确认视频参数")
 
     def assert_project_owner_preview_access(
         request: Request, project_id: int, principal: Principal
@@ -4440,6 +4634,9 @@ def build_creative_router(
     ):
         assert_project_owner_preview_access(request, project_id, principal)
         project = project_or_404(project_id)
+        project["video_parameter_recommendation"] = attach_recommendation_staleness(
+            project, project.get("video_parameter_recommendation")
+        )
         try:
             filename, body = build_merged_script_download(project)
         except ValueError as exc:
@@ -4454,6 +4651,184 @@ def build_creative_router(
             },
         )
 
+    def video_parameter_recommendation_view(
+        project: dict[str, Any]
+    ) -> dict[str, Any]:
+        record = repository.get_video_parameter_recommendation(int(project["id"]))
+        deadline_seconds = video_parameter_analysis_deadline_seconds(config)
+        job_view: dict[str, Any] | None = None
+
+        def complete_timeout_fallback(reason: str) -> dict[str, Any]:
+            latest = repository.get_video_parameter_recommendation(
+                int(project["id"])
+            )
+            if latest and latest.get("status") not in {"queued", "running"}:
+                return latest
+            try:
+                source = build_video_parameter_source(project)
+                expected = str(
+                    (((job_view or {}).get("job") or {}).get("extra") or {}).get(
+                        "source_fingerprint"
+                    )
+                    or ""
+                )
+                if expected and expected != source["fingerprint"]:
+                    return repository.fail_video_parameter_recommendation(
+                        int(project["id"]),
+                        "剧本已变化，请重新发起视频参数分析",
+                    )
+                return repository.complete_video_parameter_recommendation(
+                    int(project["id"]),
+                    source_fingerprint=source["fingerprint"],
+                    source_episode_numbers=source["episode_numbers"],
+                    source_complete=source["complete"],
+                    recommendation=fallback_recommendation(source, reason),
+                )
+            except ValueError as exc:
+                return repository.fail_video_parameter_recommendation(
+                    int(project["id"]), str(exc)
+                )
+
+        if (
+            record
+            and record.get("status") in {"queued", "running"}
+            and record.get("job_id")
+            and job_manager is not None
+        ):
+            try:
+                job = job_manager.get_job(str(record["job_id"]))
+                job_view = {
+                    key: job.get(key)
+                    for key in (
+                        "job_id", "status", "message", "progress", "started_at",
+                        "finished_at", "job",
+                    )
+                }
+                job_status = str(job.get("status") or "")
+                if job_status in {"failed", "cancelled"}:
+                    record = repository.fail_video_parameter_recommendation(
+                        int(project["id"]),
+                        str(job.get("message") or "视频参数分析任务失败"),
+                    )
+                elif job_status == "succeeded":
+                    record = complete_timeout_fallback(
+                        "AI 分析任务未返回有效结果，已自动生成规则建议"
+                    )
+            except JobNotFoundError:
+                record = repository.fail_video_parameter_recommendation(
+                    int(project["id"]), "视频参数分析任务已不存在"
+                )
+            except Exception:
+                pass
+        if record and record.get("status") in {"queued", "running"}:
+            elapsed = max(0.0, time.time() - float(record.get("updated_at") or 0))
+            if elapsed >= deadline_seconds + 15:
+                record = complete_timeout_fallback(
+                    f"AI 分析超过 {deadline_seconds} 秒，已自动生成规则建议"
+                )
+        return {
+            "project_id": int(project["id"]),
+            "capabilities": MODEL_CAPABILITIES,
+            "scenarios": list(SCENARIOS),
+            "analysis_deadline_seconds": deadline_seconds,
+            "job": {
+                key: value
+                for key, value in (job_view or {}).items()
+                if key != "job"
+            } or None,
+            "record": attach_recommendation_staleness(project, record),
+        }
+
+    @router.get("/projects/{project_id}/video-parameter-recommendation")
+    async def get_video_parameter_recommendation(
+        project_id: int,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        assert_project_read_access(request, project_id, principal)
+        return video_parameter_recommendation_view(project_or_404(project_id))
+
+    @router.post(
+        "/projects/{project_id}/video-parameter-recommendation/analyze",
+        status_code=202,
+    )
+    async def analyze_project_video_parameters(
+        project_id: int,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        assert_project_read_access(request, project_id, principal)
+        assert_project_content_write_access(request, project_id, principal)
+        project = project_or_404(project_id)
+        try:
+            source = build_video_parameter_source(project)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        existing = repository.get_video_parameter_recommendation(project_id)
+        if existing and existing.get("status") in {"queued", "running"}:
+            return video_parameter_recommendation_view(project)
+        if job_manager is None:
+            raise HTTPException(503, "后台任务服务不可用")
+        repository.queue_video_parameter_recommendation(
+            project_id, created_by=principal.user_id
+        )
+        payload = {
+            "platform": "creative",
+            "crawler_type": "video_parameter_recommendation",
+            "keywords": [],
+            "save_data_option": "json",
+            "get_comments": False,
+            "get_sub_comments": False,
+            "extra": {
+                "project_id": project_id,
+                "source_fingerprint": source["fingerprint"],
+                "created_by_user_id": principal.user_id,
+                "db_path": str(repository.db_path.resolve()),
+                "runtime_dir": str(Path(runtime_dir).resolve()),
+            },
+        }
+        try:
+            state = job_manager.create_job(
+                payload,
+                created_by_user_id=principal.user_id,
+                project_id=project_id,
+            )
+        except JobConflictError as exc:
+            repository.fail_video_parameter_recommendation(project_id, str(exc))
+            raise HTTPException(409, str(exc)) from exc
+        except Exception as exc:
+            repository.fail_video_parameter_recommendation(project_id, str(exc))
+            raise HTTPException(503, "无法创建视频参数分析任务") from exc
+        repository.set_video_parameter_recommendation_job(
+            project_id, str(state.job_id)
+        )
+        return video_parameter_recommendation_view(project)
+
+    @router.post("/projects/{project_id}/video-parameter-recommendation/confirm")
+    async def confirm_project_video_parameters(
+        project_id: int,
+        payload: VideoParameterConfirmRequest,
+        request: Request,
+        principal: Principal = Depends(current_principal),
+    ):
+        assert_project_read_access(request, project_id, principal)
+        assert_project_content_write_access(request, project_id, principal)
+        project = project_or_404(project_id)
+        try:
+            source = build_video_parameter_source(project)
+            if source["fingerprint"] != payload.source_fingerprint:
+                raise ValueError("剧本已变化，请重新分析后再确认")
+            repository.confirm_video_parameter_recommendation(
+                project_id,
+                model_key=payload.model_key,
+                scenario=payload.scenario,
+                source_fingerprint=payload.source_fingerprint,
+                confirmed_by=principal.user_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return video_parameter_recommendation_view(project)
+
     @router.get("/projects/{project_id}/episodes/download")
     async def download_project_episode_selection(
         project_id: int,
@@ -4461,6 +4836,7 @@ def build_creative_router(
         stage: str = Query(...),
         episodes: str = Query("all", min_length=1),
         format: str = Query("md"),
+        video_parameters: str = Query("", max_length=10_000),
         principal: Principal = Depends(current_principal),
     ):
         assert_project_owner_preview_access(request, project_id, principal)
@@ -4485,8 +4861,20 @@ def build_creative_router(
         else:
             raise HTTPException(422, "episodes 必须是 all 或逗号分隔的集数")
         try:
+            export_video_parameters = None
+            if stage == "script":
+                current_record = attach_recommendation_staleness(
+                    project, project.get("video_parameter_recommendation")
+                )
+                export_video_parameters = video_parameter_export_record(
+                    current_record, video_parameters
+                )
             filename, body, media_type = build_episode_selection_download(
-                project, stage, episode_numbers, format
+                project,
+                stage,
+                episode_numbers,
+                format,
+                video_parameter_record=export_video_parameters,
             )
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from exc
@@ -5596,6 +5984,26 @@ def build_creative_router(
             raise HTTPException(404, "creative resource or workflow task not found") from exc
         except (PermissionError, ValueError) as exc:
             raise HTTPException(409 if isinstance(exc, ValueError) else 403, str(exc)) from exc
+
+    @router.post("/projects/{project_id}/scripts/lock")
+    async def lock_project_scripts_batch(
+        project_id: int,
+        payload: CreativeLockRequest,
+        principal: Principal = Depends(current_principal),
+    ):
+        project_or_404(project_id)
+        try:
+            return workflow_transitions.complete_creative_scripts_batch_without_review(
+                payload.workflow_task_id, project_id, principal
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                404, "creative resource or workflow task not found"
+            ) from exc
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
 
     @router.get("/projects/{project_id}/export")

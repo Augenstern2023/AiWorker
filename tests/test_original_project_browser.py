@@ -178,6 +178,44 @@ def test_shared_project_table_exposes_mode_source_and_stage_columns() -> None:
         assert label in html
 
 
+def test_project_list_links_open_the_projects_current_stage() -> None:
+    expected_urls = {
+        "created": "/planning/projects/9/brief",
+        "direction_review": "/planning/projects/9/brief",
+        "brief_locked": "/planning/projects/9/characters",
+        "brief_approved": "/planning/projects/9/characters",
+        "characters_draft": "/planning/projects/9/characters",
+        "characters_locked": "/writing/projects/9/outlines?episode=all",
+        "characters_approved": "/writing/projects/9/outlines?episode=all",
+        "outline_draft": "/writing/projects/9/outlines?episode=all",
+        "outline_locked": "/writing/projects/9/episodes/1/beats?episode=all",
+        "outline_approved": "/writing/projects/9/episodes/1/beats?episode=all",
+        "beats_in_progress": "/writing/projects/9/episodes/1/beats?episode=all",
+        "script_in_progress": "/writing/projects/9/episodes/1/scripts?episode=all",
+        "scripts_in_progress": "/writing/projects/9/episodes/1/scripts?episode=all",
+        "completed": "/writing/projects/9/episodes/1/scripts?episode=all",
+    }
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content('<body data-workspace-page="planning-projects"></body>')
+        page.add_script_tag(content=_source("static/js/common/creative.js"))
+        page.add_script_tag(content=_source("static/js/common/tasks.js"))
+        actual_urls = page.evaluate(
+            """statuses => {
+                const workspace = appData();
+                return Object.fromEntries(statuses.map(status => [
+                    status,
+                    workspace.creativeProjectStageUrl({id: 9, status})
+                ]));
+            }""",
+            list(expected_urls),
+        )
+        browser.close()
+
+    assert actual_urls == expected_urls
+
+
 @pytest.mark.parametrize(
     ("workspace_page", "expected_project_url"),
     (

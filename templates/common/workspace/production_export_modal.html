@@ -4,7 +4,7 @@
         <div class="modal-content">
             <div class="modal-header">
                 <div>
-                    <h5 class="modal-title" id="productionExportModalLabel">导出生产项目包</h5>
+                    <h5 class="modal-title" id="productionExportModalLabel">导出项目文档包</h5>
                     <div class="small text-muted" id="production-export-project-name" aria-live="polite"></div>
                 </div>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
@@ -27,7 +27,7 @@
                 <div class="tab-content">
                     <div class="tab-pane fade show active" id="production-export-pane-check" role="tabpanel"
                          aria-labelledby="production-export-tab-check">
-                        <div class="alert alert-secondary small mb-3">可导出全剧或指定集的锁定版本，格式固定为 JSON。导出不等于生产审批，仅打包创作资料。</div>
+                        <div class="alert alert-secondary small mb-3">可将全剧或指定集的锁定版本整理为 ZIP：仿写项目包含原剧拆解；Brief、人物和人物关系为独立 Markdown；分集大纲、Beats 与剧本按集拆分；每集剧本开头附全剧视频生成规格建议。导出前会检查规格建议是否存在、完整且未过期。导出不等于生产审批。</div>
                         <div class="border rounded p-3 mb-3" id="production-export-version-section">
                             <div class="row g-2 align-items-end">
                                 <div class="col-md-5">
@@ -117,7 +117,7 @@
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">关闭</button>
-                <button type="button" class="btn btn-primary" id="production-export-generate" type="button" disabled>生成生产包</button>
+                <button type="button" class="btn btn-primary" id="production-export-generate" disabled>生成项目文档包</button>
             </div>
         </div>
     </div>

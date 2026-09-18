@@ -533,7 +533,6 @@ async def test_binding_api_requires_project_or_stage_authority(
     topic_id, breakdown_id = _adopted_topic_and_breakdown(repository)
     project = repository.create_project(topic_id, breakdown_id, "权限项目", 1)
     store = PromptStore(repository.db_path)
-    store.enable_project(project["id"], actor_user_id="owner-1")
     router, workflow, _ = _router(repository, tmp_path)
     endpoint = _endpoint(
         router, "/api/creative/projects/{project_id}/prompt-modules/{stage}", "PUT"
@@ -558,6 +557,10 @@ async def test_binding_api_requires_project_or_stage_authority(
         principal=_principal("writer-1", permissions={permission}),
     )
     assert workflow.is_active_project_member.called
+    settings = store.project_settings(project["id"])
+    default_template = store.get_template(settings["default_template_id"])
+    assert settings["enabled"] is True
+    assert default_template["template_key"] == "classic-compatible"
     assert saved["effective"]["template_key"] == "urban-identity-romcom"
 
 

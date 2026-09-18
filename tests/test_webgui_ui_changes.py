@@ -576,7 +576,8 @@ def test_free_multi_episode_workspaces_offer_atomic_series_locking():
     assert "canBatchLockProjectEpisodes(stage)" in creative
     assert "全集完成并锁定" in beats
     assert "全集完成并锁定" in scripts
-    assert "completeFreeProjectEpisodeSeries('script')" in scripts
+    assert 'completeProjectScriptsBatch' in scripts
+    assert "return this.completeFreeProjectEpisodeSeries('script')" in creative
 
 
 def test_beats_workspace_uses_an_episode_selector_to_review_series_drafts():
@@ -869,7 +870,7 @@ def test_webgui_registers_phase4_routes_and_flat_project_workspace():
     assert "creative-workspace-scroll" not in html
     assert 'class="table table-sm table-hover align-middle mb-4"' not in html
     assert "creativeWorkspace.projects[0]?.id" in html
-    assert ':href="`/planning/projects/${project.id}/brief`"' in html
+    assert ':href="creativeProjectStageUrl(project)"' in html
     assert "--bs-table-active-color: var(--text);" in html
 
 
@@ -927,7 +928,7 @@ def test_project_table_shares_original_mode_source_and_open_action():
     assert "创作来源" in project_table
     assert "更新时间/操作" in project_table
     assert 'class="project-name-button"' in project_table
-    assert ':href="`/planning/projects/${project.id}/brief`"' in project_table
+    assert project_table.count(':href="creativeProjectStageUrl(project)"') == 2
     assert ".creative-project-row.table-active" in html
     assert ".project-name-button:focus-visible" in html
     assert 'colspan="6"' in project_table
@@ -1560,13 +1561,20 @@ def test_scene_script_workspace_calls_generation_a_regeneration_when_locked_beat
     assert 'x-text="creativeActionRunning(\'script\') ? \'生成中\' : projectScriptGenerationActionLabel()"' in scripts
 
 
-def test_scene_script_workspace_only_locks_free_mode_versions():
+def test_scene_script_workspace_locks_standard_and_free_mode_versions():
     creative = _source("static/js/common/creative.js")
     scripts = _source("templates/common/workspace/project_scripts.html")
 
-    assert 'x-show="isFreeCreativeProject()" @click="completeProjectScript"' in scripts
-    assert "if (!item || !this.isFreeCreativeProject()) return;" in creative
-    assert "await this.lockFreeCreativeResource('script'" in creative
+    assert '@click="completeProjectScript"' in scripts
+    assert 'x-show="isFreeCreativeProject()" @click="completeProjectScript"' not in scripts
+    assert "await this.lockFreeCreativeResource(" in creative
+    assert "'script', String(item.id), item.episode_number" in creative
+    assert "await this.completeCreativeResource(" in creative
+    assert "'script', item.id, this.creativeWorkspace.project.id" in creative
+    assert "async completeProjectScriptsBatch()" in creative
+    assert "/scripts/lock`" in creative
+    assert '@click="completeProjectScriptsBatch"' in scripts
+    assert "批量完成并锁定" in scripts
     assert 'x-show="!isFreeCreativeProject()" :href="mergedScriptDownloadUrl()"' in scripts
     assert "selectedProjectScript().version" in scripts
 
@@ -3250,6 +3258,12 @@ def test_admin_users_uses_set_button_loading():
 def test_admin_users_template_has_skeleton():
     html = _source("templates/admin/users.html")
     assert "ui-skeleton" in html
+
+
+def test_admin_users_presence_column_shows_the_full_last_online_time():
+    html = _source("templates/admin/users.html")
+    assert ".presence-column { width: 220px; min-width: 220px; white-space: nowrap; }" in html
+    assert "text-overflow: ellipsis" not in html
 
 
 def test_admin_audit_uses_set_button_loading():

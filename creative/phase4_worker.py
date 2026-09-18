@@ -19,7 +19,11 @@ from typing import Any
 
 import config
 
-from analysis.llm import create_llm_provider_from_config, get_llm_usage_snapshot
+from analysis.llm import (
+    LLMOutputTruncatedError,
+    create_llm_provider_from_config,
+    get_llm_usage_snapshot,
+)
 from core.events import emit_event
 from core.job import CrawlJob
 from creative.imitation_service import complete_with_one_repair, generate_blueprints
@@ -852,52 +856,14 @@ async def _run_once(job: CrawlJob) -> None:
             if action == "script"
             else BEATS_SERIES_CHUNK_SIZE
         )
-        for start in range(
-            completed + 1, total_episodes + 1, series_chunk_size
-        ):
-            end = min(total_episodes, start + series_chunk_size - 1)
-            retry_completed = start - 1
-            await wait_if_paused(job)
-            outlines = [
-                item for item in project["episodes"]
-                if item["stage"] == "outline"
-                and item.get("batch_id") == project.get("outline_batch_id")
-                and start <= int(item["episode_number"]) <= end
-                and item.get("status") in {"locked", "approved"}
-            ]
-            if sorted(int(item["episode_number"]) for item in outlines) != list(range(start, end + 1)):
-                raise ValueError(f"未找到第 {start}-{end} 集的锁定大纲")
-            if action == "beats":
-                prior = repository.compatible_locked_beats(
-                    project, range(1, start)
-                ) + generated_beats
-                checkpoint_items, meta = await generate_episode_beats_chunk(
-                    provider, project, brief, outlines, characters, relationships,
-                    continuity_ledger=build_continuity_ledger(prior),
-                    prompt_snapshot=prompt_snapshot or None,
-                )
-            else:
-                selected_beats = {
-                    int(item["episode_number"]): item
-                    for item in repository.compatible_locked_beats(
-                        project, range(start, end + 1)
-                    )
-                }
-                if sorted(selected_beats) != list(range(start, end + 1)):
-                    raise ValueError(
-                        f"未找到第 {start}-{end} 集的当前兼容 locked Beats"
-                    )
-                beats_by_episode = {
-                    episode_number: selected_beats[episode_number]["content"]
-                    for episode_number in range(start, end + 1)
-                }
-                checkpoint_items, meta = await generate_episode_script_chunk(
-                    provider, project, brief, outlines, characters, relationships, beats_by_episode,
-                    continuity_ledger=_continuity_ledger_through(
-                        project, start - 1, repository=repository
-                    ),
-                    prompt_snapshot=prompt_snapshot or None,
-                )
+
+        async def save_series_checkpoint(
+            checkpoint_start: int,
+            checkpoint_end: int,
+            checkpoint_items: list[tuple[int, dict[str, Any]]],
+            meta: dict[str, Any],
+        ) -> None:
+            nonlocal series_batch_id
             if generation_reservation is not None:
                 repository.validate_generation_reservation(
                     operation_id=str(extra["operation_id"]),
@@ -906,14 +872,19 @@ async def _run_once(job: CrawlJob) -> None:
                     owner_id=job.job_id,
                 )
             saved = repository.save_episode_generation_checkpoint(
-                project_id, action, checkpoint_items, job.job_id,
+                project_id,
+                action,
+                checkpoint_items,
+                job.job_id,
                 {
                     **_generation_meta(meta, extra),
                     "series_generation": True,
                     "chunk_size": series_chunk_size,
-                    "checkpoint_start": start,
-                    "checkpoint_end": end,
-                    "checkpoint_episode_count": end,
+                    "preferred_chunk_size": series_chunk_size,
+                    "actual_chunk_size": checkpoint_end - checkpoint_start + 1,
+                    "checkpoint_start": checkpoint_start,
+                    "checkpoint_end": checkpoint_end,
+                    "checkpoint_episode_count": checkpoint_end,
                 },
                 workflow_task_id=str(extra.get("workflow_task_id") or "") or None,
                 batch_id=series_batch_id,
@@ -926,9 +897,135 @@ async def _run_once(job: CrawlJob) -> None:
             if action == "beats":
                 generated_beats.extend(saved)
             emit(
-                job, "progress", f"已生成并保存第 {start}-{end} 集{'Beats' if action == 'beats' else '场次剧本'}",
-                payload={"stage": action, "completed": end, "total": total_episodes, "chunk_start": start, "chunk_end": end},
+                job,
+                "progress",
+                f"已生成并保存第 {checkpoint_start}-{checkpoint_end} 集"
+                f"{'Beats' if action == 'beats' else '场次剧本'}",
+                payload={
+                    "stage": action,
+                    "completed": checkpoint_end,
+                    "total": total_episodes,
+                    "chunk_start": checkpoint_start,
+                    "chunk_end": checkpoint_end,
+                    "preferred_chunk_size": series_chunk_size,
+                },
             )
+
+        def locked_outlines_for_range(
+            range_start: int, range_end: int
+        ) -> list[dict[str, Any]]:
+            selected = [
+                item
+                for item in project["episodes"]
+                if item["stage"] == "outline"
+                and item.get("batch_id") == project.get("outline_batch_id")
+                and range_start <= int(item["episode_number"]) <= range_end
+                and item.get("status") in {"locked", "approved"}
+            ]
+            if sorted(int(item["episode_number"]) for item in selected) != list(
+                range(range_start, range_end + 1)
+            ):
+                raise ValueError(
+                    f"未找到第 {range_start}-{range_end} 集的锁定大纲"
+                )
+            return selected
+
+        async def generate_and_save_beats_range(
+            range_start: int, range_end: int
+        ) -> None:
+            nonlocal retry_completed
+            retry_completed = range_start - 1
+            await wait_if_paused(job)
+            outlines = locked_outlines_for_range(range_start, range_end)
+            prior = repository.compatible_locked_beats(
+                project, range(1, range_start)
+            ) + generated_beats
+            try:
+                checkpoint_items, meta = await generate_episode_beats_chunk(
+                    provider,
+                    project,
+                    brief,
+                    outlines,
+                    characters,
+                    relationships,
+                    continuity_ledger=build_continuity_ledger(prior),
+                    prompt_snapshot=prompt_snapshot or None,
+                )
+            except LLMOutputTruncatedError as exc:
+                if range_start == range_end:
+                    raise LLMOutputTruncatedError(
+                        f"第 {range_start} 集 Beats 生成仍达到模型输出上限；"
+                        "请提高模型输出上限或减少单集字段内容",
+                        finish_reason=exc.finish_reason,
+                        returned_chars=exc.returned_chars,
+                    ) from exc
+                midpoint = (range_start + range_end - 1) // 2
+                emit(
+                    job,
+                    "progress",
+                    f"第 {range_start}-{range_end} 集 Beats 输出达到上限，"
+                    f"自动拆分为第 {range_start}-{midpoint} 集和"
+                    f"第 {midpoint + 1}-{range_end} 集",
+                    "warning",
+                    {
+                        "stage": action,
+                        "completed": range_start - 1,
+                        "total": total_episodes,
+                        "split_start": range_start,
+                        "split_end": range_end,
+                        "left_start": range_start,
+                        "left_end": midpoint,
+                        "right_start": midpoint + 1,
+                        "right_end": range_end,
+                        "finish_reason": exc.finish_reason,
+                        "returned_chars": exc.returned_chars,
+                    },
+                )
+                await generate_and_save_beats_range(range_start, midpoint)
+                await generate_and_save_beats_range(midpoint + 1, range_end)
+                return
+            await save_series_checkpoint(
+                range_start, range_end, checkpoint_items, meta
+            )
+
+        for start in range(
+            completed + 1, total_episodes + 1, series_chunk_size
+        ):
+            end = min(total_episodes, start + series_chunk_size - 1)
+            retry_completed = start - 1
+            if action == "beats":
+                await generate_and_save_beats_range(start, end)
+                continue
+            await wait_if_paused(job)
+            outlines = locked_outlines_for_range(start, end)
+            selected_beats = {
+                int(item["episode_number"]): item
+                for item in repository.compatible_locked_beats(
+                    project, range(start, end + 1)
+                )
+            }
+            if sorted(selected_beats) != list(range(start, end + 1)):
+                raise ValueError(
+                    f"未找到第 {start}-{end} 集的当前兼容 locked Beats"
+                )
+            beats_by_episode = {
+                episode_number: selected_beats[episode_number]["content"]
+                for episode_number in range(start, end + 1)
+            }
+            checkpoint_items, meta = await generate_episode_script_chunk(
+                provider,
+                project,
+                brief,
+                outlines,
+                characters,
+                relationships,
+                beats_by_episode,
+                continuity_ledger=_continuity_ledger_through(
+                    project, start - 1, repository=repository
+                ),
+                prompt_snapshot=prompt_snapshot or None,
+            )
+            await save_series_checkpoint(start, end, checkpoint_items, meta)
         result = {
             "action": action, "series_generation": True, "batch_id": series_batch_id,
             "episode_count": total_episodes, "resumed_from_episode": completed,

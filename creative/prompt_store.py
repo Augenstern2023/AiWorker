@@ -1586,7 +1586,7 @@ class PromptStore:
         actor_user_id: str = "",
     ) -> dict[str, Any] | None:
         settings = self.project_settings(project_id)
-        if not settings.get("enabled"):
+        if not settings.get("enabled") and not run_template_key:
             return None
         binding = self.binding(project_id, stage, episode_number)
         if binding is None:

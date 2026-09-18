@@ -283,6 +283,9 @@ _PAGE_API_ROUTES: dict[str, tuple[ApiRoute, ...]] = {
     + _CREATIVE_JOB_MONITOR,
     "/writing/projects/{project_id}/episodes/{episode_number}/scripts": (
         ("GET", "/api/creative/projects/{project_id}"),
+        ("GET", "/api/creative/projects/{project_id}/video-parameter-recommendation"),
+        ("POST", "/api/creative/projects/{project_id}/video-parameter-recommendation/analyze"),
+        ("POST", "/api/creative/projects/{project_id}/video-parameter-recommendation/confirm"),
         ("GET", "/api/creative/projects/{project_id}/episodes/{episode_number}/optimization-drafts"),
         ("POST", "/api/creative/projects/{project_id}/episodes/{episode_number}/scripts/generate"),
         ("POST", "/api/creative/projects/{project_id}/episodes/{episode_number}/scripts"),

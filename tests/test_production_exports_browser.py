@@ -139,7 +139,7 @@ def mount(page: Page, *, preview: dict, history: dict, export: dict | None = Non
               return delay({{ok: true, status: 201, json: () => Promise.resolve({{export: window.__fixtures.export, created: true}})}});
             }}
             if (url.includes('/download')) {{
-              return delay({{ok: true, headers: {{get: () => "attachment; filename*=UTF-8''%E5%AF%BB%E6%89%BE%E7%9C%9F%E7%9B%B8_%E7%94%9F%E4%BA%A7%E5%8C%85_abcabcabcabc.json"}}, blob: () => Promise.resolve(new Blob(['{{}}'], {{type: 'application/json'}}))}});
+              return delay({{ok: true, headers: {{get: () => "attachment; filename*=UTF-8''%E5%AF%BB%E6%89%BE%E7%9C%9F%E7%9B%B8_%E9%A1%B9%E7%9B%AE%E6%96%87%E6%A1%A3%E5%8C%85_abcabcabcabc.zip"}}, blob: () => Promise.resolve(new Blob(['PK'], {{type: 'application/zip'}}))}});
             }}
             return delay({{ok: false, status: 500, json: () => Promise.resolve({{}})}});
           }}
@@ -163,7 +163,7 @@ def mount(page: Page, *, preview: dict, history: dict, export: dict | None = Non
           }},
           setButtonLoading(button, opts) {{
             button.disabled = opts.loading;
-            button.textContent = opts.loading ? (opts.label || '处理中…') : '生成生产包';
+            button.textContent = opts.loading ? (opts.label || '处理中…') : '生成项目文档包';
           }},
           showToast(opts) {{ window.__lastToast = opts; }},
           announce() {{}},
@@ -191,7 +191,8 @@ def test_open_show_check_and_generate(page: Page) -> None:
                ], "issues": []}
     history = {"items": [], "total": 0, "page": 1, "page_size": 20}
     export = {"id": "e1", "project_id": "3", "fingerprint": preview["fingerprint"],
-              "contract_version": "1.0", "created_by": "owner", "created_by_name": "负责人",
+              "contract_version": "2.4", "artifact_format": "zip", "media_type": "application/zip",
+              "created_by": "owner", "created_by_name": "负责人",
               "created_at": 1, "episode_count": 2, "size_bytes": 100,
               "file_sha256": "deadbeef", "audit_status": "recorded",
               "download_url": "/api/creative/production-exports/e1/download"}
@@ -206,7 +207,7 @@ def test_open_show_check_and_generate(page: Page) -> None:
     page.wait_for_function(
         "() => document.querySelector('#production-export-check-status').textContent.includes('全部检查通过')"
     )
-    assert page.locator("#production-export-check-status").inner_text() == "全部检查通过，可生成锁定版本的生产包。"
+    assert page.locator("#production-export-check-status").inner_text() == "全部检查通过，可生成锁定版本的项目文档包。"
     assert "剧目拆解" in page.locator("#production-export-stages").inner_text()
 
     generate = page.locator("#production-export-generate")
@@ -214,7 +215,7 @@ def test_open_show_check_and_generate(page: Page) -> None:
     generate.click()
     page.wait_for_function("() => !document.querySelector('#production-export-result').classList.contains('d-none')")
     result_text = page.locator("#production-export-result").inner_text()
-    assert "生产包已生成并锁定版本" in result_text
+    assert "项目文档包已生成并锁定版本" in result_text
     assert "仅导出创作资料，尚未开始生产" in result_text
     # The result panel shows the fingerprint's leading 12 characters.
     assert "abcabcabcabc" in result_text
@@ -529,5 +530,5 @@ def test_download_uses_server_fingerprint_name(page: Page) -> None:
     page.locator("#production-export-history-list button").first.click()
     page.wait_for_function("() => (window.__downloads || []).length >= 1")
     name = page.evaluate("() => window.__downloads[0].name")
-    assert name.endswith(".json")
+    assert name.endswith(".zip")
     assert "寻找真相" in name

@@ -24,12 +24,59 @@ def test_preview_matches_export_without_exposing_content(db):
     assert result['ready'] is True
     assert result['fingerprint'] == package['fingerprint']
     assert result['issues'] == []
-    assert len(result['stages']) == 9
+    assert len(result['stages']) == 10
     assert all(item['state'] == 'ready' for item in result['stages'])
     assert result['version_selection']['strategy'] == 'current'
     assert result['version_selection']['manifest'] == package['version_manifest']
     assert result['version_selection']['candidates']['brief'][0]['selected'] is True
     assert '寻找真相' not in str(result)
+
+
+def test_preview_blocks_missing_video_parameter_recommendation(db):
+    with sqlite3.connect(db) as connection:
+        connection.execute("DELETE FROM creative_video_parameter_recommendations")
+
+    result = preview(db)
+
+    assert result["ready"] is False
+    issue = next(
+        item for item in result["issues"] if item["stage"] == "video_parameters"
+    )
+    assert issue["code"] == "missing_video_parameters"
+    assert issue["edit_url"] == "/writing/projects/1/episodes/1/scripts"
+
+
+def test_preview_blocks_stale_video_parameter_recommendation(db):
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "UPDATE creative_video_parameter_recommendations "
+            "SET source_fingerprint = ?",
+            ("0" * 64,),
+        )
+
+    result = preview(db)
+
+    assert result["ready"] is False
+    issue = next(
+        item for item in result["issues"] if item["stage"] == "video_parameters"
+    )
+    assert issue["code"] == "stale_video_parameters"
+
+
+def test_preview_blocks_partial_video_parameter_recommendation(db):
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "UPDATE creative_video_parameter_recommendations "
+            "SET source_episode_numbers_json = '[1]', source_complete = 0"
+        )
+
+    result = preview(db)
+
+    assert result["ready"] is False
+    issue = next(
+        item for item in result["issues"] if item["stage"] == "video_parameters"
+    )
+    assert issue["code"] == "incomplete_video_parameters"
 
 
 def test_free_custom_version_selection_is_explicitly_warned(free_db):

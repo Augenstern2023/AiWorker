@@ -10,6 +10,7 @@
         outline: '分集大纲',
         beats: '单集节拍',
         script: '场次剧本',
+        video_parameters: '视频生成规格',
     };
     const PAGE_SIZE = 20;
 
@@ -443,7 +444,7 @@
         elements.stages.appendChild(table);
 
         if (payload.ready && payload.fingerprint) {
-            setCheckStatus('全部检查通过，可生成锁定版本的生产包。');
+            setCheckStatus('全部检查通过，可生成锁定版本的项目文档包。');
             elements.generate.disabled = generateInFlight;
         } else {
             setCheckStatus('存在阻塞项，请先在对应页面完成并锁定内容。');
@@ -547,7 +548,8 @@
             version.appendChild(code);
 
             const scope = document.createElement('td');
-            scope.textContent = `${scopeLabel(record)} · ${formatSize(record.size_bytes)}`;
+            const format = String(record.artifact_format || 'json').toUpperCase();
+            scope.textContent = `${scopeLabel(record)} · ${format} · ${formatSize(record.size_bytes)}`;
 
             const state = document.createElement('td');
             state.appendChild(historyStateCell(record));
@@ -633,8 +635,10 @@
             if (!response.ok) {
                 throw new Error(await readDetail(response, '下载失败，请稍后重试'));
             }
-            let filename = `${projectName}_${scopeLabel(record)}_生产包_`
-                + `${shortFingerprint(record.fingerprint)}.json`;
+            const artifactFormat = record.artifact_format || 'zip';
+            const packageLabel = artifactFormat === 'zip' ? '项目文档包' : '生产包';
+            let filename = `${projectName}_${scopeLabel(record)}_${packageLabel}_`
+                + `${shortFingerprint(record.fingerprint)}.${artifactFormat}`;
             const disposition = response.headers.get('content-disposition') || '';
             const match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
             if (match) filename = decodeURIComponent(match[1]);
@@ -684,7 +688,7 @@
                     },
                 ));
             if (!activeProject || activeProject.id !== project.id) return;
-            if (!response.ok) throw new Error(await readDetail(response, '生成生产包失败，请稍后重试'));
+            if (!response.ok) throw new Error(await readDetail(response, '生成项目文档包失败，请稍后重试'));
             const payload = await response.json();
             const record = payload.export;
             currentFingerprint = record.fingerprint;
@@ -693,16 +697,16 @@
             const done = document.createElement('div');
             done.className = 'fw-semibold';
             done.textContent = payload.created
-                ? '生产包已生成并锁定版本。'
-                : '该版本已有生产包，直接复用原产物。';
+                ? '项目文档包已生成并锁定版本。'
+                : '该版本已有项目文档包，直接复用原产物。';
             const detail = document.createElement('div');
             detail.className = 'small mt-1';
             detail.textContent = `指纹 ${shortFingerprint(record.fingerprint)} · ${scopeLabel(record)} · `
-                + `${formatSize(record.size_bytes)}。仅导出创作资料，尚未开始生产。`;
+                + `ZIP · ${formatSize(record.size_bytes)}。仅导出创作资料，尚未开始生产。`;
             const link = document.createElement('a');
             link.className = 'btn btn-sm btn-success mt-2';
             link.href = record.download_url;
-            link.textContent = '下载生产包';
+            link.textContent = '下载 ZIP 文档包';
             link.addEventListener('click', (event) => {
                 event.preventDefault();
                 downloadExport(record);
@@ -712,7 +716,7 @@
                 requestUi().showToast({
                     kind: 'success',
                     title: '导出成功',
-                    message: '已锁定版本的生产包可下载；仅导出创作资料，尚未开始生产。',
+                    message: '已锁定版本的 ZIP 文档包可下载；仅导出创作资料，尚未开始生产。',
                 });
             }
             loadHistory(1);
@@ -721,7 +725,7 @@
             if (!activeProject || activeProject.id !== project.id) return;
             currentFingerprint = null;
             elements.generate.disabled = true;
-            showError(elements.error, reason.message || '生成生产包失败，请稍后重试');
+            showError(elements.error, reason.message || '生成项目文档包失败，请稍后重试');
             // A version conflict means the earlier preview no longer matches, so
             // require a fresh confirmation instead of exporting an unreviewed version.
             loadPreview();

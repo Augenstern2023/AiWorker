@@ -73,6 +73,7 @@ _WRITER_PROJECT_DELETION_TABLES = (
     "creative_prompt_governance_events",
     "creative_prompt_market_installations",
     "creative_prompt_market_ratings",
+    "creative_video_parameter_recommendations",
 )
 _WRITER_PROJECT_EXTERNAL_TABLES = (
     "creative_stage_exports",
@@ -785,6 +786,26 @@ class CreativeRepository:
                     project_id INTEGER NOT NULL, stage TEXT NOT NULL, format TEXT NOT NULL,
                     content_fingerprint TEXT NOT NULL, exported_at REAL NOT NULL,
                     FOREIGN KEY(project_id) REFERENCES creative_projects(id)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS creative_video_parameter_recommendations (
+                    project_id INTEGER PRIMARY KEY,
+                    status TEXT NOT NULL DEFAULT 'idle'
+                        CHECK (status IN ('idle', 'queued', 'running', 'ready', 'failed')),
+                    job_id TEXT NOT NULL DEFAULT '',
+                    source_fingerprint TEXT NOT NULL DEFAULT '',
+                    source_episode_numbers_json TEXT NOT NULL DEFAULT '[]',
+                    source_complete INTEGER NOT NULL DEFAULT 0,
+                    recommendation_json TEXT NOT NULL DEFAULT '{}',
+                    confirmed_json TEXT NOT NULL DEFAULT '{}',
+                    analysis_mode TEXT NOT NULL DEFAULT '',
+                    analysis_error TEXT NOT NULL DEFAULT '',
+                    created_by TEXT NOT NULL DEFAULT '',
+                    generated_at REAL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES creative_projects(id) ON DELETE CASCADE
                 )
             """)
             conn.execute("""
@@ -2749,6 +2770,142 @@ class CreativeRepository:
         ):
             raise ValueError("generation operation reservation changed")
 
+    def get_video_parameter_recommendation(
+        self, project_id: int
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM creative_video_parameter_recommendations "
+                "WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+        return self._video_parameter_recommendation(dict(row)) if row else None
+
+    def queue_video_parameter_recommendation(
+        self, project_id: int, *, created_by: str
+    ) -> dict[str, Any]:
+        if not self.get_project(project_id):
+            raise ValueError("创作项目不存在")
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO creative_video_parameter_recommendations (
+                    project_id, status, job_id, created_by, created_at, updated_at
+                ) VALUES (?, 'queued', '', ?, ?, ?)
+                ON CONFLICT(project_id) DO UPDATE SET
+                    status = 'queued', job_id = '', analysis_error = '',
+                    created_by = excluded.created_by, updated_at = excluded.updated_at
+                """,
+                (project_id, created_by, now, now),
+            )
+        return self.get_video_parameter_recommendation(project_id) or {}
+
+    def set_video_parameter_recommendation_job(
+        self, project_id: int, job_id: str
+    ) -> dict[str, Any]:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE creative_video_parameter_recommendations "
+                "SET job_id = ?, updated_at = ? WHERE project_id = ?",
+                (str(job_id), time.time(), project_id),
+            )
+        return self.get_video_parameter_recommendation(project_id) or {}
+
+    def start_video_parameter_recommendation(self, project_id: int) -> dict[str, Any]:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE creative_video_parameter_recommendations "
+                "SET status = 'running', analysis_error = '', updated_at = ? "
+                "WHERE project_id = ?",
+                (time.time(), project_id),
+            )
+        return self.get_video_parameter_recommendation(project_id) or {}
+
+    def complete_video_parameter_recommendation(
+        self,
+        project_id: int,
+        *,
+        source_fingerprint: str,
+        source_episode_numbers: list[int],
+        source_complete: bool,
+        recommendation: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = time.time()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE creative_video_parameter_recommendations
+                SET status = 'ready', source_fingerprint = ?,
+                    source_episode_numbers_json = ?, source_complete = ?,
+                    recommendation_json = ?, analysis_mode = ?, analysis_error = ?,
+                    generated_at = ?, updated_at = ?
+                WHERE project_id = ?
+                """,
+                (
+                    str(source_fingerprint),
+                    json.dumps(source_episode_numbers, ensure_ascii=False),
+                    int(bool(source_complete)),
+                    json.dumps(recommendation, ensure_ascii=False),
+                    str(recommendation.get("analysis_mode") or ""),
+                    str(recommendation.get("analysis_error") or ""),
+                    now,
+                    now,
+                    project_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("视频参数推荐记录不存在")
+        return self.get_video_parameter_recommendation(project_id) or {}
+
+    def fail_video_parameter_recommendation(
+        self, project_id: int, error: str
+    ) -> dict[str, Any]:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE creative_video_parameter_recommendations "
+                "SET status = 'failed', analysis_error = ?, updated_at = ? "
+                "WHERE project_id = ?",
+                (str(error)[:2000], time.time(), project_id),
+            )
+        return self.get_video_parameter_recommendation(project_id) or {}
+
+    def confirm_video_parameter_recommendation(
+        self,
+        project_id: int,
+        *,
+        model_key: str,
+        scenario: str,
+        source_fingerprint: str,
+        confirmed_by: str,
+    ) -> dict[str, Any]:
+        record = self.get_video_parameter_recommendation(project_id)
+        if not record or record.get("status") != "ready":
+            raise ValueError("当前没有可确认的视频参数建议")
+        if str(record.get("source_fingerprint") or "") != str(source_fingerprint):
+            raise ValueError("剧本已变化，请重新分析后再确认")
+        recommendation = record.get("recommendation") or {}
+        model = (recommendation.get("models") or {}).get(model_key)
+        profile = ((model or {}).get("scenarios") or {}).get(scenario)
+        if not isinstance(profile, dict):
+            raise ValueError("视频参数建议不存在")
+        confirmed = dict(record.get("confirmed") or {})
+        confirmed[model_key] = {
+            "scenario": scenario,
+            "profile": profile,
+            "capability": (model or {}).get("capability") or {},
+            "source_fingerprint": source_fingerprint,
+            "confirmed_by": confirmed_by,
+            "confirmed_at": time.time(),
+        }
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE creative_video_parameter_recommendations "
+                "SET confirmed_json = ?, updated_at = ? WHERE project_id = ?",
+                (json.dumps(confirmed, ensure_ascii=False), time.time(), project_id),
+            )
+        return self.get_video_parameter_recommendation(project_id) or {}
+
     def update_project(
         self,
         project_id: int,
@@ -3435,6 +3592,10 @@ class CreativeRepository:
             conn.execute("DELETE FROM script_optimizations WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM script_reviews WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_stage_exports WHERE project_id = ?", (project_id,))
+            conn.execute(
+                "DELETE FROM creative_video_parameter_recommendations WHERE project_id = ?",
+                (project_id,),
+            )
             conn.execute("DELETE FROM creative_operation_results WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_generation_operations WHERE project_id = ?", (project_id,))
             conn.execute("DELETE FROM creative_generation_contexts WHERE project_id = ?", (project_id,))
@@ -3543,6 +3704,16 @@ class CreativeRepository:
                     (project_id, resource_scope),
                 ).fetchall()
             ]
+            video_parameter_row = conn.execute(
+                "SELECT * FROM creative_video_parameter_recommendations "
+                "WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()
+            project["video_parameter_recommendation"] = (
+                self._video_parameter_recommendation(dict(video_parameter_row))
+                if video_parameter_row
+                else None
+            )
             if project["creation_mode"] == "original":
                 project["topic"] = {}
                 project["breakdown"] = {}
@@ -6678,6 +6849,84 @@ class CreativeRepository:
             )
         return [self.get_episode(episode_id) or {} for episode_id in ids]
 
+    def batch_lockable_episode_scripts(
+        self, project_id: int
+    ) -> list[dict[str, Any]]:
+        """Return the current-compatible Script draft for every project episode."""
+        project = self.get_project(project_id)
+        if not project:
+            raise ValueError("创作项目不存在")
+
+        selected: list[dict[str, Any]] = []
+        missing: list[int] = []
+        stale: list[int] = []
+        for episode_number in range(1, int(project["target_episode_count"]) + 1):
+            self._locked_beats_for_episode(project, episode_number)
+            candidates = [
+                item
+                for item in project.get("episodes", [])
+                if item.get("stage") == "script"
+                and int(item.get("episode_number") or 0) == episode_number
+                and item.get("status") in {"draft", "locked", "approved"}
+            ]
+            if not candidates:
+                missing.append(episode_number)
+                continue
+            compatible = [
+                item
+                for item in candidates
+                if self.episode_generation_refs_match(
+                    project,
+                    "script",
+                    episode_number,
+                    item.get("upstream_refs"),
+                )
+            ]
+            if not compatible:
+                stale.append(episode_number)
+                continue
+            selected.append(
+                max(
+                    compatible,
+                    key=lambda value: (
+                        int(value.get("version") or 0),
+                        int(value["id"]),
+                    ),
+                )
+            )
+
+        if missing:
+            raise ValueError(
+                f"以下集数缺少当前版本场次剧本草稿：{'、'.join(map(str, missing))}"
+            )
+        if stale:
+            raise ValueError(
+                f"以下集数场次剧本引用的 Beats 已过期：{'、'.join(map(str, stale))}"
+            )
+        drafts = [item for item in selected if item.get("status") == "draft"]
+        if not drafts:
+            raise ValueError("当前没有可批量锁定的场次剧本草稿")
+        return drafts
+
+    def lock_current_episode_scripts_batch(
+        self, project_id: int
+    ) -> list[dict[str, Any]]:
+        """Atomically lock all current-compatible Script drafts."""
+        drafts = self.batch_lockable_episode_scripts(project_id)
+        now = time.time()
+        ids = [int(item["id"]) for item in drafts]
+        placeholders = ", ".join("?" for _ in ids)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                f"UPDATE creative_episodes "
+                f"SET status = 'locked', locked_at = ?, updated_at = ? "
+                f"WHERE stage = 'script' AND status = 'draft' "
+                f"AND id IN ({placeholders})",
+                (now, now, *ids),
+            )
+        return [self.get_episode(episode_id) or {} for episode_id in ids]
+
     def lock_episode_script(
         self,
         episode_id: int,
@@ -6837,6 +7086,18 @@ class CreativeRepository:
             row["content"] = normalize_script_content(row["content"])
         row["upstream_refs"] = json.loads(row.pop("upstream_refs_json") or "{}")
         row["generation_meta"] = json.loads(row.pop("generation_meta_json") or "{}")
+        return row
+
+    @staticmethod
+    def _video_parameter_recommendation(row: dict[str, Any]) -> dict[str, Any]:
+        row["source_episode_numbers"] = json.loads(
+            row.pop("source_episode_numbers_json", "[]") or "[]"
+        )
+        row["recommendation"] = json.loads(
+            row.pop("recommendation_json", "{}") or "{}"
+        )
+        row["confirmed"] = json.loads(row.pop("confirmed_json", "{}") or "{}")
+        row["source_complete"] = bool(row.get("source_complete"))
         return row
 
     @staticmethod

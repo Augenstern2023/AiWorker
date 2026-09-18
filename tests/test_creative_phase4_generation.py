@@ -1962,6 +1962,70 @@ def test_batch_lock_beats_locks_all_current_drafts_and_skips_existing_locked_ite
     assert repository.get_episode(second["id"])["status"] == "locked"
 
 
+def test_batch_lock_scripts_locks_all_current_drafts_and_skips_locked_items(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = seed_worker_project(repository, episode_count=2)
+    brief = repository.create_blueprints(
+        project["id"], [{"content": {"title": "方向"}}]
+    )[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(
+        project["id"], [{"name": "主角"}], []
+    )
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(
+        project["id"], [outline_episode(1), outline_episode(2)], "全剧弧线"
+    )
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    for episode_number in (1, 2):
+        beats = repository.create_episode_beats(
+            project["id"], episode_number, valid_beat_content()
+        )
+        repository.lock_episode_beats(beats["id"])
+    first = repository.create_episode_script(
+        project["id"], 1, valid_script_content(1)
+    )
+    second = repository.create_episode_script(
+        project["id"], 2, valid_script_content(2)
+    )
+    repository.lock_episode_script(first["id"])
+
+    locked = repository.lock_current_episode_scripts_batch(project["id"])
+
+    assert [item["episode_number"] for item in locked] == [2]
+    assert repository.get_episode(second["id"])["status"] == "locked"
+
+
+def test_batch_lock_scripts_preflights_all_episodes_before_writing(tmp_path):
+    repository = CreativeRepository(tmp_path / "creative.db")
+    project = seed_worker_project(repository, episode_count=2)
+    brief = repository.create_blueprints(
+        project["id"], [{"content": {"title": "方向"}}]
+    )[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(
+        project["id"], [{"name": "主角"}], []
+    )
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(
+        project["id"], [outline_episode(1), outline_episode(2)], "全剧弧线"
+    )
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    for episode_number in (1, 2):
+        beats = repository.create_episode_beats(
+            project["id"], episode_number, valid_beat_content()
+        )
+        repository.lock_episode_beats(beats["id"])
+    first = repository.create_episode_script(
+        project["id"], 1, valid_script_content(1)
+    )
+
+    with pytest.raises(ValueError, match="第.*2.*集数缺少|以下集数缺少"):
+        repository.lock_current_episode_scripts_batch(project["id"])
+
+    assert repository.get_episode(first["id"])["status"] == "draft"
+
+
 def test_phase4_worker_persists_generation_and_report(tmp_path, monkeypatch):
     db_path = tmp_path / ".runtime" / "creative" / "creative.db"
     repository = CreativeRepository(db_path)
@@ -2448,6 +2512,175 @@ def test_phase4_worker_saves_series_beats_in_ten_episode_checkpoints(tmp_path, m
     assert len(provider.calls) == 2
     assert any(item["payload"].get("completed") == 10 for item in events)
     assert any(item["payload"].get("completed") == 12 for item in events)
+
+
+def test_phase4_worker_splits_truncated_series_beats_and_checkpoints_children(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / ".runtime" / "creative" / "creative.db"
+    repository = CreativeRepository(db_path)
+    project = seed_worker_project(repository)
+    repository.update_project(project["id"], {"target_episode_count": 10})
+    brief = repository.create_blueprints(
+        project["id"], [{"content": {"title": "方向"}}]
+    )[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(
+        project["id"], [{"name": "主角"}], []
+    )
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(
+        project["id"],
+        [outline_episode(number) for number in range(1, 11)],
+        "全剧弧线",
+    )
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    first_half_content = valid_beat_content()
+    first_half_content["beats"][0]["continuity_updates"] = [{
+        "kind": "information",
+        "name": "五集检查点线索",
+        "event": "reveal",
+        "holder": "主角",
+        "location": "大厅",
+        "known_by": ["主角"],
+        "status": "active",
+    }]
+    provider = SequentialProvider([
+        LLMOutputTruncatedError(
+            "1-10 truncated", finish_reason="length", returned_chars=120_000
+        ),
+        {
+            "episodes": [
+                {"episode": number, **first_half_content}
+                for number in range(1, 6)
+            ]
+        },
+        {
+            "episodes": [
+                {"episode": number, **valid_beat_content()}
+                for number in range(6, 11)
+            ]
+        },
+    ])
+    events = []
+    monkeypatch.setattr(phase4_worker, "create_provider", lambda: provider)
+    monkeypatch.setattr(
+        phase4_worker,
+        "emit",
+        lambda job, event, message, level="info", payload=None: events.append(
+            {
+                "event": event,
+                "message": message,
+                "level": level,
+                "payload": payload or {},
+            }
+        ),
+    )
+    job = CrawlJob(
+        job_id="creative-worker-series-beats-split",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "beats",
+            "series": True,
+            "project_id": project["id"],
+            "db_path": str(db_path),
+            "runtime_dir": str(tmp_path / ".runtime"),
+            **generation_contract(
+                repository, project["id"], "worker-generation-operation-split"
+            ),
+        },
+    )
+
+    asyncio.run(phase4_worker.run(job))
+
+    beats = [
+        item
+        for item in repository.get_project(project["id"])["episodes"]
+        if item["stage"] == "beats"
+    ]
+    assert [item["episode_number"] for item in beats] == list(range(1, 11))
+    assert len({item["batch_id"] for item in beats}) == 1
+    assert len(provider.calls) == 3
+    assert "五集检查点线索" in provider.calls[2][1]["content"]
+    assert [
+        item["payload"].get("completed")
+        for item in events
+        if item["event"] == "progress" and "chunk_end" in item["payload"]
+    ] == [5, 10]
+    assert any(
+        item["level"] == "warning"
+        and item["payload"].get("split_start") == 1
+        and item["payload"].get("split_end") == 10
+        and item["payload"].get("left_end") == 5
+        and item["payload"].get("right_start") == 6
+        for item in events
+    )
+
+
+def test_phase4_worker_keeps_left_beats_checkpoint_when_single_episode_truncates(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / ".runtime" / "creative" / "creative.db"
+    repository = CreativeRepository(db_path)
+    project = seed_worker_project(repository)
+    repository.update_project(project["id"], {"target_episode_count": 2})
+    brief = repository.create_blueprints(
+        project["id"], [{"content": {"title": "方向"}}]
+    )[0]
+    repository.lock_brief(brief["id"])
+    characters = repository.create_character_batch(
+        project["id"], [{"name": "主角"}], []
+    )
+    repository.lock_character_batch(project["id"], characters["batch_id"])
+    outlines = repository.create_outline_batch(
+        project["id"],
+        [outline_episode(1), outline_episode(2)],
+        "全剧弧线",
+    )
+    repository.lock_outline_batch(project["id"], outlines["batch_id"])
+    provider = SequentialProvider([
+        LLMOutputTruncatedError(
+            "1-2 truncated", finish_reason="length", returned_chars=50_000
+        ),
+        {"episodes": [{"episode": 1, **valid_beat_content()}]},
+        LLMOutputTruncatedError(
+            "2 truncated", finish_reason="max_tokens", returned_chars=30_000
+        ),
+    ])
+    monkeypatch.setattr(phase4_worker, "create_provider", lambda: provider)
+    monkeypatch.setattr(phase4_worker, "emit", lambda *_args, **_kwargs: None)
+    job = CrawlJob(
+        job_id="creative-worker-series-beats-single-truncated",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "action": "beats",
+            "series": True,
+            "project_id": project["id"],
+            "db_path": str(db_path),
+            "runtime_dir": str(tmp_path / ".runtime"),
+            **generation_contract(
+                repository,
+                project["id"],
+                "worker-generation-operation-single-truncated",
+            ),
+        },
+    )
+
+    with pytest.raises(
+        LLMOutputTruncatedError,
+        match="第 2 集 Beats 生成仍达到模型输出上限",
+    ):
+        asyncio.run(phase4_worker.run(job))
+
+    beats = [
+        item
+        for item in repository.get_project(project["id"])["episodes"]
+        if item["stage"] == "beats"
+    ]
+    assert [item["episode_number"] for item in beats] == [1]
+    assert len(provider.calls) == 3
 
 
 def test_phase4_worker_saves_series_scripts_in_two_episode_chunks(tmp_path, monkeypatch):

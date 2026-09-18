@@ -184,7 +184,7 @@ def build_production_export_router(service: ProductionExportService) -> APIRoute
         principal: Principal = Depends(current_principal),
     ) -> FileResponse:
         try:
-            path, filename = service.download_target(
+            path, filename, media_type = service.download_target(
                 export_id,
                 principal,
                 request,
@@ -212,7 +212,7 @@ def build_production_export_router(service: ProductionExportService) -> APIRoute
         disposition = f"attachment; filename*=UTF-8''{quote(filename)}"
         return FileResponse(
             path,
-            media_type="application/json",
+            media_type=media_type,
             headers={
                 "content-disposition": disposition,
                 "cache-control": "no-store",

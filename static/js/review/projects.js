@@ -91,9 +91,9 @@
                 const exportButton = document.createElement('button');
                 exportButton.type = 'button';
                 exportButton.className = 'btn btn-sm btn-outline-success me-1';
-                exportButton.title = '导出生产项目包';
-                exportButton.setAttribute('aria-label', `导出${project.name}的生产项目包`);
-                exportButton.innerHTML = '<i class="bi bi-box-arrow-up" aria-hidden="true"></i><span class="visually-hidden">导出生产项目包</span>';
+                exportButton.title = '导出项目文档包';
+                exportButton.setAttribute('aria-label', `导出${project.name}的项目文档包`);
+                exportButton.innerHTML = '<i class="bi bi-box-arrow-up" aria-hidden="true"></i><span class="visually-hidden">导出项目文档包</span>';
                 exportButton.addEventListener('click', () => {
                     window.aiworkerProductionExport.open(project.id, {
                         projectName: project.name,

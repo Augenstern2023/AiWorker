@@ -345,7 +345,7 @@ window.aiworkerModules.push(() => ({
 
                 openCreativeProject(project) {
                     if (!project?.id) return;
-                    window.location.assign(`/planning/projects/${project.id}/brief`);
+                    window.location.assign(this.creativeProjectStageUrl(project));
                 },
 
                 async openCreativeTaskSetup() {
@@ -379,6 +379,9 @@ window.aiworkerModules.push(() => ({
                             Math.max(1, Number(selectedEpisode || 1)),
                             Number(data.target_episode_count || 1)
                         );
+                        if (this.page === 'writing-scripts') {
+                            await this.loadVideoParameterRecommendation();
+                        }
                     } catch (e) {
                         this.creativeWorkspace.error = e.message || '读取项目失败';
                     }
@@ -394,8 +397,38 @@ window.aiworkerModules.push(() => ({
                     return {
                         created: '待生成方向', direction_review: '方向评审', brief_locked: 'Brief 已锁定',
                         characters_draft: '人物草稿', characters_locked: '人物已锁定', outline_draft: '大纲草稿',
-                        outline_locked: '大纲已锁定', beats_in_progress: 'Beats 制作中', archived: '已归档'
+                        outline_locked: '大纲已锁定', beats_in_progress: 'Beats 制作中',
+                        script_in_progress: '场次剧本制作中', scripts_in_progress: '场次剧本制作中',
+                        completed: '已完成', archived: '已归档'
                     }[status] || status || '-';
+                },
+
+                creativeProjectStageUrl(project) {
+                    const projectId = encodeURIComponent(String(project?.id || ''));
+                    if (!projectId) return '#';
+                    const stage = {
+                        created: 'brief',
+                        direction_review: 'brief',
+                        brief_locked: 'characters',
+                        brief_approved: 'characters',
+                        characters_draft: 'characters',
+                        characters_locked: 'outline',
+                        characters_approved: 'outline',
+                        outline_draft: 'outline',
+                        outline_locked: 'beats',
+                        outline_approved: 'beats',
+                        beats_in_progress: 'beats',
+                        script_in_progress: 'script',
+                        scripts_in_progress: 'script',
+                        completed: 'script',
+                    }[project?.status] || 'brief';
+                    return {
+                        brief: `/planning/projects/${projectId}/brief`,
+                        characters: `/planning/projects/${projectId}/characters`,
+                        outline: `/writing/projects/${projectId}/outlines?episode=all`,
+                        beats: `/writing/projects/${projectId}/episodes/1/beats?episode=all`,
+                        script: `/writing/projects/${projectId}/episodes/1/scripts?episode=all`,
+                    }[stage];
                 },
 
                 creativeProjectModeLabel(project) {
@@ -1091,6 +1124,200 @@ window.aiworkerModules.push(() => ({
                     return this.projectEpisodeScript(this.creativeWorkspace.selectedEpisode);
                 },
 
+                videoParameterModelKeys() {
+                    return ['minimax_h3', 'minimax_h3_max', 'seedance_2_5'];
+                },
+
+                videoParameterScenarioKeys() {
+                    return ['platform_fit', 'content_optimal'];
+                },
+
+                videoParameterScenarioLabel(scenario) {
+                    return {platform_fit: '当前平台适配', content_optimal: '内容最优'}[scenario] || scenario;
+                },
+
+                videoParameterOrientationLabel(profile) {
+                    return profile?.orientation === 'portrait' ? '竖屏' : '横屏';
+                },
+
+                videoParameterModel(modelKey) {
+                    return this.creativeWorkspace.videoParameters.record?.recommendation?.models?.[modelKey] || null;
+                },
+
+                videoParameterProfile(modelKey, scenario) {
+                    return this.videoParameterModel(modelKey)?.scenarios?.[scenario] || null;
+                },
+
+                confirmedVideoParameter(modelKey) {
+                    return this.creativeWorkspace.videoParameters.record?.confirmed?.[modelKey] || null;
+                },
+
+                videoParameterIsConfirmed(modelKey, scenario) {
+                    return this.confirmedVideoParameter(modelKey)?.scenario === scenario;
+                },
+
+                videoParameterCanWrite() {
+                    return !Boolean(this.creativeWorkspace.project?.preview_only);
+                },
+
+                videoParameterAnalysisRunning() {
+                    return ['queued', 'running'].includes(
+                        this.creativeWorkspace.videoParameters.record?.status
+                    );
+                },
+
+                videoParameterElapsedSeconds() {
+                    if (!this.videoParameterAnalysisRunning()) return 0;
+                    const startedAt = Number(
+                        this.creativeWorkspace.videoParameters.record?.updated_at || 0
+                    );
+                    if (!startedAt) return 0;
+                    return Math.max(0, Math.floor(Date.now() / 1000 - startedAt));
+                },
+
+                videoParameterRemainingSeconds() {
+                    const deadline = Math.max(
+                        15,
+                        Number(this.creativeWorkspace.videoParameters.analysisDeadlineSeconds || 60)
+                    );
+                    return Math.max(0, deadline - this.videoParameterElapsedSeconds());
+                },
+
+                videoParameterAnalysisProgress() {
+                    const state = this.creativeWorkspace.videoParameters;
+                    const completed = Number(state.job?.progress?.completed);
+                    const total = Number(state.job?.progress?.total);
+                    if (Number.isFinite(completed) && Number.isFinite(total) && total > 0) {
+                        return Math.max(8, Math.min(95, Math.round(completed / total * 100)));
+                    }
+                    const deadline = Math.max(15, Number(state.analysisDeadlineSeconds || 60));
+                    return Math.max(
+                        8,
+                        Math.min(95, Math.round(this.videoParameterElapsedSeconds() / deadline * 100))
+                    );
+                },
+
+                videoParameterAnalysisMessage() {
+                    return this.creativeWorkspace.videoParameters.job?.message
+                        || '正在读取全剧构图、场景规模和镜头节奏';
+                },
+
+                videoParameterSourceCount() {
+                    return this.projectStageEpisodeItems('script').length;
+                },
+
+                videoParameterSourceComplete() {
+                    const total = Number(this.creativeWorkspace.project?.target_episode_count || 0);
+                    return total > 0 && this.videoParameterSourceCount() >= total;
+                },
+
+                scheduleVideoParameterPoll() {
+                    const state = this.creativeWorkspace.videoParameters;
+                    if (state.pollTimer) window.clearTimeout(state.pollTimer);
+                    if (!this.videoParameterAnalysisRunning()) {
+                        state.pollTimer = null;
+                        return;
+                    }
+                    state.pollTimer = window.setTimeout(
+                        () => this.loadVideoParameterRecommendation({allowAuto: false}),
+                        2000
+                    );
+                },
+
+                async loadVideoParameterRecommendation({allowAuto = true} = {}) {
+                    const projectId = Number(this.creativeWorkspace.project?.id || 0);
+                    if (!projectId || this.page !== 'writing-scripts') return;
+                    const state = this.creativeWorkspace.videoParameters;
+                    if (state.loading) return;
+                    state.loading = true;
+                    state.error = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/video-parameter-recommendation`
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '读取视频参数建议失败');
+                        state.record = data.record || null;
+                        state.capabilities = data.capabilities || {};
+                        state.scenarios = data.scenarios || [];
+                        state.job = data.job || null;
+                        state.analysisDeadlineSeconds = Number(
+                            data.analysis_deadline_seconds || 60
+                        );
+                        const shouldAuto = allowAuto
+                            && !state.autoRequested
+                            && !state.record
+                            && this.videoParameterSourceComplete()
+                            && this.videoParameterCanWrite();
+                        if (shouldAuto) {
+                            state.autoRequested = true;
+                            await this.analyzeVideoParameters({automatic: true});
+                            return;
+                        }
+                    } catch (error) {
+                        state.error = error.message || '读取视频参数建议失败';
+                    } finally {
+                        state.loading = false;
+                        this.scheduleVideoParameterPoll();
+                    }
+                },
+
+                async analyzeVideoParameters({automatic = false} = {}) {
+                    const projectId = Number(this.creativeWorkspace.project?.id || 0);
+                    const state = this.creativeWorkspace.videoParameters;
+                    if (!projectId || !this.videoParameterSourceCount() || state.analyzing) return;
+                    state.analyzing = true;
+                    state.error = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/video-parameter-recommendation/analyze`,
+                            {method: 'POST'}
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '启动视频参数分析失败');
+                        state.record = data.record || null;
+                        state.capabilities = data.capabilities || state.capabilities;
+                        state.job = data.job || null;
+                        state.analysisDeadlineSeconds = Number(
+                            data.analysis_deadline_seconds || state.analysisDeadlineSeconds || 60
+                        );
+                        this.showCreativeNotice(
+                            automatic ? '全剧已完成，正在自动分析视频规格' : '已启动视频参数分析'
+                        );
+                    } catch (error) {
+                        state.error = error.message || '启动视频参数分析失败';
+                    } finally {
+                        state.analyzing = false;
+                        this.scheduleVideoParameterPoll();
+                    }
+                },
+
+                async confirmVideoParameter(modelKey, scenario) {
+                    const projectId = Number(this.creativeWorkspace.project?.id || 0);
+                    const state = this.creativeWorkspace.videoParameters;
+                    const fingerprint = String(state.record?.source_fingerprint || '');
+                    if (!projectId || !fingerprint || state.confirming) return;
+                    state.confirming = `${modelKey}:${scenario}`;
+                    state.error = '';
+                    try {
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/video-parameter-recommendation/confirm`,
+                            {
+                                method: 'POST', headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({model_key: modelKey, scenario, source_fingerprint: fingerprint})
+                            }
+                        );
+                        const data = await response.json();
+                        if (!response.ok) throw new Error(data.detail || '确认视频参数失败');
+                        state.record = data.record || null;
+                        this.showCreativeNotice('视频参数建议已确认');
+                    } catch (error) {
+                        state.error = error.message || '确认视频参数失败';
+                    } finally {
+                        state.confirming = '';
+                    }
+                },
+
                 projectScriptGenerationActionLabel() {
                     const episode = Number(this.creativeWorkspace.selectedEpisode || 0);
                     const hasPriorScript = (this.creativeWorkspace.project?.episodes || []).some(item =>
@@ -1277,7 +1504,28 @@ window.aiworkerModules.push(() => ({
                     return {outline: '分集大纲', beats: 'Beats', script: '场次剧本'}[stage] || stage;
                 },
 
-                openEpisodeDownload(stage) {
+                videoParameterExportDefaults() {
+                    const record = this.creativeWorkspace.videoParameters.record;
+                    if (!record?.recommendation?.models) return [];
+                    return this.videoParameterModelKeys().map(modelKey => {
+                        const model = record.recommendation.models[modelKey];
+                        const confirmed = record.confirmed?.[modelKey];
+                        const scenario = confirmed?.scenario || 'platform_fit';
+                        const profile = confirmed?.profile || model?.scenarios?.[scenario];
+                        if (!profile) return null;
+                        return {
+                            modelKey,
+                            displayName: model.capability?.display_name || modelKey,
+                            enabled: true,
+                            scenario,
+                            ratio: profile.ratio,
+                            resolutionTier: profile.resolution_tier,
+                            resolutionOptions: [...(model.capability?.resolution_tiers || [])],
+                        };
+                    }).filter(Boolean);
+                },
+
+                openEpisodeDownload(stage, {forceAll = false} = {}) {
                     const available = this.projectStageEpisodeItems(stage)
                         .map(item => Number(item.episode_number))
                         .filter(number => number > 0);
@@ -1286,12 +1534,13 @@ window.aiworkerModules.push(() => ({
                         return;
                     }
                     const selected = Number(this.creativeWorkspace.selectedEpisode);
-                    const initial = selected > 0 && available.includes(selected) ? [selected] : [...available];
+                    const initial = !forceAll && selected > 0 && available.includes(selected) ? [selected] : [...available];
                     this.creativeWorkspace.episodeDownload = {
                         stage,
                         selectedEpisodes: initial,
                         allEpisodes: initial.length === available.length,
                         format: stage === 'script' ? 'txt' : 'md',
+                        videoModels: stage === 'script' ? this.videoParameterExportDefaults() : [],
                     };
                     this.modal('creativeEpisodeDownloadModal')?.show();
                 },
@@ -1334,6 +1583,18 @@ window.aiworkerModules.push(() => ({
                         episodes: state.allEpisodes ? 'all' : selected.join(','),
                         format: state.format,
                     });
+                    if (state.stage === 'script' && (state.videoModels || []).length) {
+                        params.set('video_parameters', JSON.stringify({
+                            models: state.videoModels
+                                .filter(item => item.enabled)
+                                .map(item => ({
+                                    model_key: item.modelKey,
+                                    scenario: item.scenario,
+                                    ratio: item.ratio,
+                                    resolution_tier: item.resolutionTier,
+                                })),
+                        }));
+                    }
                     const modalElement = document.getElementById('creativeEpisodeDownloadModal');
                     if (modalElement?.contains(document.activeElement)) {
                         document.activeElement.blur();
@@ -2212,32 +2473,6 @@ window.aiworkerModules.push(() => ({
                     }
                 },
 
-                async enableCurrentProjectPromptLibrary() {
-                    const state = this.creativeWorkspace.promptLibrary;
-                    const projectId = this.creativeWorkspace.project?.id;
-                    if (!projectId || state.saving) return;
-                    state.saving = true;
-                    state.error = '';
-                    try {
-                        const response = await aiworkerApi.request(
-                            `/api/creative/projects/${projectId}/prompt-system/enable`,
-                            {
-                                method: 'POST',
-                                headers: {'Content-Type': 'application/json'},
-                                body: JSON.stringify({template_key: 'classic-compatible'}),
-                            }
-                        );
-                        const data = await response.json();
-                        if (!response.ok) throw new Error(data.detail || '升级模板系统失败');
-                        await this.loadProjectPromptModule(state.stage);
-                        this.showCreativeNotice('项目已升级到提示词模板系统');
-                    } catch (error) {
-                        state.error = error.message || '升级模板系统失败';
-                    } finally {
-                        state.saving = false;
-                    }
-                },
-
                 promptRunSelection(stage) {
                     return this.creativeWorkspace.promptLibrary?.runSelections?.[stage] || null;
                 },
@@ -2263,7 +2498,7 @@ window.aiworkerModules.push(() => ({
                         customRequirements: String(state.customRequirements || '').trim(),
                     };
                     this.promptLibraryModal?.hide();
-                    this.showCreativeNotice(`${template.title}将在下次${this.promptStageLabel(state.stage)}生成中使用`);
+                    this.showCreativeNotice(`${template.title}将在下次${this.promptStageLabel(state.stage)}生成中使用，已有内容不变`);
                 },
 
                 async savePromptBinding() {
@@ -2273,6 +2508,12 @@ window.aiworkerModules.push(() => ({
                     if (!projectId || !template || state.saving) return;
                     const episodeNumber = ['beats', 'script'].includes(state.stage) && state.scope === 'episode'
                         ? Number(this.creativeWorkspace.selectedEpisode || 0) : 0;
+                    const defaultScope = episodeNumber > 0
+                        ? `第 ${episodeNumber} 集${this.promptStageLabel(state.stage)}默认模板`
+                        : `${this.promptStageLabel(state.stage)}阶段默认模板`;
+                    if (!state.settings?.enabled && !window.confirm(
+                        `保存后将启用模板设置，并把“${template.title}”设为${defaultScope}。只影响之后新生成的内容，不会修改已有内容。是否继续？`
+                    )) return;
                     state.saving = true;
                     state.error = '';
                     try {
@@ -2291,9 +2532,10 @@ window.aiworkerModules.push(() => ({
                         );
                         const data = await response.json();
                         if (!response.ok) throw new Error(data.detail || '保存提示词模板失败');
+                        state.settings = data.settings || state.settings;
                         state.effective = data.effective || state.effective;
                         this.promptLibraryModal?.hide();
-                        this.showCreativeNotice('提示词模板设置已保存');
+                        this.showCreativeNotice('提示词模板默认设置已保存，只影响之后新生成的内容');
                     } catch (error) {
                         state.error = error.message || '保存提示词模板失败';
                     } finally {
@@ -3608,12 +3850,62 @@ window.aiworkerModules.push(() => ({
 
                 async completeProjectScript() {
                     const item = this.selectedProjectScript();
-                    if (!item || !this.isFreeCreativeProject()) return;
+                    if (!item) return;
                     try {
-                        await this.lockFreeCreativeResource('script', String(item.id), item.episode_number);
+                        if (this.isFreeCreativeProject()) {
+                            await this.lockFreeCreativeResource(
+                                'script', String(item.id), item.episode_number
+                            );
+                        } else {
+                            await this.completeCreativeResource(
+                                'script', item.id, this.creativeWorkspace.project.id
+                            );
+                        }
                         await this.selectCreativeProject(this.creativeWorkspace.project.id);
                         this.showCreativeNotice('场次剧本已完成并锁定');
                     } catch (error) { this.creativeWorkspace.error = error.message || '完成场次剧本失败'; }
+                },
+
+                async completeProjectScriptsBatch() {
+                    if (this.isFreeCreativeProject()) {
+                        return this.completeFreeProjectEpisodeSeries('script');
+                    }
+                    const items = this.batchLockableProjectEpisodes('script');
+                    if (!items.length || !this.canBatchLockProjectEpisodes('script')) return;
+                    const episodes = items
+                        .map(item => Number(item.episode_number))
+                        .sort((a, b) => a - b);
+                    const scope = episodes.length === 1
+                        ? `第 ${episodes[0]} 集`
+                        : `第 ${episodes[0]}-${episodes.at(-1)} 集`;
+                    if (!window.confirm(
+                        `将完成并锁定 ${scope}，共 ${episodes.length} 集当前场次剧本草稿。`
+                        + '已锁定集会跳过，锁定后不能直接编辑。是否继续？'
+                    )) return;
+                    try {
+                        const projectId = this.creativeWorkspace.project.id;
+                        const task = await this.resolveCreativeWorkflowTask(
+                            'script', projectId
+                        );
+                        const response = await aiworkerApi.request(
+                            `/api/creative/projects/${projectId}/scripts/lock`,
+                            {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({workflow_task_id: task.id}),
+                            }
+                        );
+                        const payload = await response.json();
+                        if (!response.ok) {
+                            throw new Error(payload.detail || '批量锁定场次剧本失败');
+                        }
+                        await this.selectCreativeProject(projectId);
+                        this.showCreativeNotice(
+                            `已完成并锁定 ${payload.resources?.length || episodes.length} 集场次剧本`
+                        );
+                    } catch (error) {
+                        this.creativeWorkspace.error = error.message || '批量锁定场次剧本失败';
+                    }
                 },
 
                 async lockFreeCreativeResource(stage, resourceRef, episodeNumber = 0) {

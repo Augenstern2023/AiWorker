@@ -248,13 +248,11 @@ class ProjectPromptService:
         actor_user_id: str,
     ) -> dict[str, Any]:
         self._project(project_id)
-        settings = self.store.project_settings(project_id)
-        if not settings.get("enabled"):
-            raise ValueError("项目尚未启用提示词模板库")
         template = self.store.get_template_by_key(template_key)
         if template is None:
             raise ValueError("模板不存在")
         revision = self.store.get_revision(template["id"], template_revision)
+        settings = self.store.project_settings(project_id)
         binding = self.store.set_binding(
             project_id=project_id,
             stage=stage,
@@ -264,8 +262,18 @@ class ProjectPromptService:
             override=override,
             actor_user_id=actor_user_id,
         )
+        if not settings.get("enabled"):
+            # Keep legacy projects on their original prompts until the first
+            # persistent choice. Saving a default is the explicit opt-in and the
+            # compatibility default preserves all other stages.
+            self.store.enable_project(
+                project_id,
+                actor_user_id=actor_user_id,
+                template_key="classic-compatible",
+            )
         return {
             "binding": binding,
+            "settings": self.store.project_settings(project_id),
             "effective": self.store.resolve_snapshot(
                 project_id=project_id,
                 stage=stage,

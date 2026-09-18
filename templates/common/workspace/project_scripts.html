@@ -19,10 +19,110 @@
             <button class="btn btn-primary btn-sm" @click="generateProjectScript" :disabled="creativeWorkspace.selectedEpisode === 0 || creativeActionDisabled('script') || (isFreeCreativeProject() && !freeStageCan('script', 'can_generate'))"><i class="bi bi-magic me-1"></i><span x-text="creativeActionRunning('script') ? '生成中' : projectScriptGenerationActionLabel()"></span></button>
             <button class="btn btn-outline-light btn-sm" x-show="isFreeCreativeProject()" @click="createFreeBlankResource('script')" :disabled="creativeWorkspace.selectedEpisode === 0 || !freeStageCan('script', 'can_create_blank')"><i class="bi bi-plus-lg me-1"></i>空白版本</button>
             <button class="btn btn-outline-primary btn-sm" @click="generateProjectScriptsSeries" :disabled="creativeActionDisabled('script', {series: true}) || (!isFreeCreativeProject() && !canGenerateProjectScriptsSeries())" :title="projectScriptsSeriesBlockReason()"><i class="bi bi-collection-play me-1"></i><span x-text="creativeActionRunning('script') ? '全剧生成中' : seriesGenerationActionLabel('script')"></span></button>
-            <button class="btn btn-warning btn-sm" x-show="isFreeCreativeProject()" @click="completeFreeProjectEpisodeSeries('script')" :disabled="creativeActionDisabled('script') || !canBatchLockProjectEpisodes('script')" title="完成并锁定当前全部场次剧本草稿"><i class="bi bi-lock-fill me-1"></i>全集完成并锁定</button>
+            <button class="btn btn-warning btn-sm" @click="completeProjectScriptsBatch" :disabled="creativeActionDisabled('script') || !canBatchLockProjectEpisodes('script')" title="完成并锁定当前全部场次剧本草稿"><i class="bi bi-lock-fill me-1"></i><span x-text="isFreeCreativeProject() ? '全集完成并锁定' : '批量完成并锁定'"></span></button>
             <button class="btn btn-outline-secondary btn-sm" type="button" x-show="projectStageEpisodeItems('script').length" @click="openEpisodeDownload('script')" title="选择多集或全集下载"><i class="bi bi-download me-1"></i>多集/全集下载</button>
         </div>
     </div>
+
+    <section class="card border-secondary mb-3" x-show="videoParameterSourceCount() > 0" x-cloak aria-labelledby="video-parameter-heading">
+        <div class="card-header d-flex justify-content-between align-items-start gap-3 flex-wrap">
+            <div>
+                <h6 id="video-parameter-heading" class="mb-1"><i class="bi bi-aspect-ratio me-1"></i>AI 视频规格建议</h6>
+                <div class="small text-muted">
+                    基于当前有效场次剧本分析 · <span x-text="`已覆盖 ${videoParameterSourceCount()}/${Number(creativeWorkspace.project.target_episode_count || 0)} 集`"></span>
+                    <span class="badge text-bg-warning ms-1" x-show="creativeWorkspace.videoParameters.record?.stale">剧本已变化</span>
+                    <span class="badge text-bg-secondary ms-1" x-show="creativeWorkspace.videoParameters.record?.recommendation?.analysis_mode === 'rules_fallback'">规则默认建议</span>
+                </div>
+            </div>
+            <button class="btn btn-outline-info btn-sm" type="button"
+                    @click="analyzeVideoParameters()"
+                    :disabled="creativeWorkspace.videoParameters.analyzing || videoParameterAnalysisRunning() || !videoParameterCanWrite()">
+                <span class="spinner-border spinner-border-sm me-1" x-show="creativeWorkspace.videoParameters.analyzing || videoParameterAnalysisRunning()"></span>
+                <i class="bi bi-stars me-1" x-show="!creativeWorkspace.videoParameters.analyzing && !videoParameterAnalysisRunning()"></i>
+                <span x-text="videoParameterAnalysisRunning() ? '分析中' : (creativeWorkspace.videoParameters.record ? '重新分析' : '分析视频参数')"></span>
+            </button>
+        </div>
+        <div class="card-body">
+            <div class="alert alert-danger py-2" x-show="creativeWorkspace.videoParameters.error" x-text="creativeWorkspace.videoParameters.error"></div>
+            <div class="alert alert-warning py-2" x-show="creativeWorkspace.videoParameters.record?.status === 'failed'">
+                <i class="bi bi-exclamation-triangle me-1"></i>
+                <span x-text="creativeWorkspace.videoParameters.record?.analysis_error || '视频规格分析未完成，请重新分析'"></span>
+            </div>
+            <div class="py-2" x-show="videoParameterAnalysisRunning()">
+                <div class="d-flex justify-content-between gap-3 text-muted small mb-2">
+                    <span><i class="bi bi-hourglass-split me-1"></i><span x-text="videoParameterAnalysisMessage()"></span></span>
+                    <span class="text-nowrap" x-text="videoParameterRemainingSeconds() > 0 ? `最迟 ${videoParameterRemainingSeconds()} 秒后完成` : '正在切换规则建议'"></span>
+                </div>
+                <div class="progress" role="progressbar" aria-label="视频规格分析进度" :aria-valuenow="videoParameterAnalysisProgress()" aria-valuemin="0" aria-valuemax="100" style="height: 6px;">
+                    <div class="progress-bar progress-bar-striped progress-bar-animated" :style="`width: ${videoParameterAnalysisProgress()}%`"></div>
+                </div>
+                <div class="small text-muted mt-2">AI 分析最多等待 <span x-text="creativeWorkspace.videoParameters.analysisDeadlineSeconds"></span> 秒；超时后自动生成可用的规则建议，不会一直等待。</div>
+            </div>
+            <div class="small text-muted py-2" x-show="!creativeWorkspace.videoParameters.record && !videoParameterAnalysisRunning()">
+                全剧完成后会首次自动分析；剧本尚未完整时也可以手动分析已有内容。
+            </div>
+            <template x-if="creativeWorkspace.videoParameters.record?.recommendation?.models">
+                <div>
+                    <template x-for="vendor in [{name: 'MiniMax', keys: ['minimax_h3', 'minimax_h3_max']}, {name: 'Seedance', keys: ['seedance_2_5']}]" :key="vendor.name">
+                        <div class="mb-4">
+                            <h6 class="border-bottom pb-2" x-text="vendor.name"></h6>
+                            <template x-for="modelKey in vendor.keys" :key="modelKey">
+                                <div class="border border-secondary rounded p-3 mb-3" x-show="videoParameterModel(modelKey)">
+                                    <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
+                                        <div>
+                                            <span class="fw-semibold" x-text="videoParameterModel(modelKey)?.capability?.display_name"></span>
+                                            <code class="small ms-1" x-text="videoParameterModel(modelKey)?.capability?.model_id"></code>
+                                        </div>
+                                        <span class="badge text-bg-success" x-show="confirmedVideoParameter(modelKey)" x-text="confirmedVideoParameter(modelKey) ? `已确认 · ${videoParameterScenarioLabel(confirmedVideoParameter(modelKey).scenario)}` : ''"></span>
+                                    </div>
+                                    <div class="small text-muted mb-3" x-text="`模型能力：${(videoParameterModel(modelKey)?.capability?.resolution_tiers || []).join(' / ')} · 单片段 ${videoParameterModel(modelKey)?.capability?.duration_seconds?.min}-${videoParameterModel(modelKey)?.capability?.duration_seconds?.max} 秒 · ${(videoParameterModel(modelKey)?.capability?.supported_ratios || []).join('、')}`"></div>
+                                    <div class="row g-3">
+                                        <template x-for="scenario in videoParameterScenarioKeys()" :key="`${modelKey}:${scenario}`">
+                                            <div class="col-xl-6" x-show="videoParameterProfile(modelKey, scenario)">
+                                                <div class="h-100 rounded border p-3" :class="videoParameterIsConfirmed(modelKey, scenario) ? 'border-success bg-success bg-opacity-10' : 'border-secondary'">
+                                                    <div class="d-flex justify-content-between align-items-center mb-2">
+                                                        <span class="fw-semibold" x-text="videoParameterScenarioLabel(scenario)"></span>
+                                                        <span class="small text-muted" x-text="`可信评分 ${Math.round(Number(videoParameterProfile(modelKey, scenario)?.confidence || 0) * 100)}%`"></span>
+                                                    </div>
+                                                    <div class="d-flex flex-wrap gap-2 mb-2">
+                                                        <span class="badge text-bg-primary" x-text="videoParameterOrientationLabel(videoParameterProfile(modelKey, scenario))"></span>
+                                                        <span class="badge text-bg-secondary" x-text="videoParameterProfile(modelKey, scenario)?.ratio"></span>
+                                                        <span class="badge text-bg-secondary" x-text="`生成 ${videoParameterProfile(modelKey, scenario)?.resolution_tier}`"></span>
+                                                        <span class="badge text-bg-secondary" x-text="`${videoParameterProfile(modelKey, scenario)?.clip_duration_seconds} 秒/片段`"></span>
+                                                        <span class="badge text-bg-secondary" x-show="videoParameterProfile(modelKey, scenario)?.fps?.value" x-text="`${videoParameterProfile(modelKey, scenario)?.fps?.value} FPS`"></span>
+                                                    </div>
+                                                    <div class="small mb-2"><span class="text-muted">交付母版：</span><span x-text="videoParameterProfile(modelKey, scenario)?.delivery?.master_resolution"></span></div>
+                                                    <p class="small mb-2" x-text="videoParameterProfile(modelKey, scenario)?.rationale"></p>
+                                                    <ul class="small text-muted ps-3 mb-2" x-show="(videoParameterProfile(modelKey, scenario)?.evidence || []).length">
+                                                        <template x-for="item in (videoParameterProfile(modelKey, scenario)?.evidence || [])" :key="item"><li x-text="item"></li></template>
+                                                    </ul>
+                                                    <details class="small mb-3" x-show="(videoParameterProfile(modelKey, scenario)?.special_scene_risks || []).length">
+                                                        <summary>特殊场景构图风险</summary>
+                                                        <ul class="ps-3 mt-2 mb-0">
+                                                            <template x-for="risk in (videoParameterProfile(modelKey, scenario)?.special_scene_risks || [])" :key="`${risk.episode_number}:${risk.scene}`">
+                                                                <li><span x-text="risk.episode_number ? `第 ${risk.episode_number} 集` : '特殊场景'"></span> · <span x-text="risk.risk"></span>；<span x-text="risk.suggestion"></span></li>
+                                                            </template>
+                                                        </ul>
+                                                    </details>
+                                                    <button class="btn btn-sm" type="button"
+                                                            :class="videoParameterIsConfirmed(modelKey, scenario) ? 'btn-success' : 'btn-outline-success'"
+                                                            @click="confirmVideoParameter(modelKey, scenario)"
+                                                            :disabled="creativeWorkspace.videoParameters.record?.stale || !videoParameterCanWrite() || creativeWorkspace.videoParameters.confirming || videoParameterIsConfirmed(modelKey, scenario)">
+                                                        <span class="spinner-border spinner-border-sm me-1" x-show="creativeWorkspace.videoParameters.confirming === `${modelKey}:${scenario}`"></span>
+                                                        <span x-text="videoParameterIsConfirmed(modelKey, scenario) ? '已确认' : '确认此方案'"></span>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </template>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                    </template>
+                </div>
+            </template>
+        </div>
+    </section>
 
     <div x-show="creativeWorkspace.selectedEpisode === 0" x-cloak>
         <template x-for="item in projectStageEpisodeItems('script')" :key="`all-script-${item.id}`">
@@ -52,10 +152,10 @@
                 <span class="fw-semibold" x-text="`第 ${creativeWorkspace.selectedEpisode} 集 · v${selectedProjectScript().version} · ${creativeWorkflowStatusLabel(selectedProjectScript().status)}`"></span>
                 <div class="d-flex gap-2">
                     <button class="btn btn-outline-light btn-sm" @click="saveProjectEpisode(selectedProjectScript())" :disabled="!creativeResourceEditable(selectedProjectScript())"><i class="bi bi-save me-1"></i>保存</button>
-                    <button class="btn btn-warning btn-sm" x-show="isFreeCreativeProject()" @click="completeProjectScript" :disabled="!creativeResourceEditable(selectedProjectScript())"><i class="bi bi-lock-fill me-1"></i>完成并锁定</button>
+                    <button class="btn btn-warning btn-sm" @click="completeProjectScript" :disabled="!creativeResourceEditable(selectedProjectScript())"><i class="bi bi-lock-fill me-1"></i>完成并锁定</button>
                     <button class="btn btn-outline-info btn-sm" x-show="isFreeCreativeProject() && ['locked', 'approved'].includes(selectedProjectScript().status)" @click="createFreeResourceRevision('script')" :disabled="!freeStageCan('script', 'can_create_revision')"><i class="bi bi-files me-1"></i>创建修订版</button>
                     <button class="btn btn-outline-info btn-sm" type="button" @click="openEpisodeDownload('script')" title="多集或全集剧本下载"><i class="bi bi-download me-1"></i>剧本下载</button>
-                    <a class="btn btn-outline-info btn-sm" x-show="!isFreeCreativeProject()" :href="mergedScriptDownloadUrl()" title="合并下载全部已生成场次剧本"><i class="bi bi-collection me-1"></i>全集下载</a>
+                    <a class="btn btn-outline-info btn-sm" x-show="!isFreeCreativeProject()" :href="mergedScriptDownloadUrl()" title="按已确认或默认推荐尺寸合并下载全部场次剧本"><i class="bi bi-collection me-1"></i>全集下载</a>
                     <a class="btn btn-outline-secondary btn-sm" :href="`/api/creative/projects/${creativeWorkspace.project.id}/generated-content/download?stage=script&resource_id=${selectedProjectScript().id}&format=txt`" title="下载本集 TXT"><i class="bi bi-download me-1"></i>本集下载</a>
                 </div>
             </div>

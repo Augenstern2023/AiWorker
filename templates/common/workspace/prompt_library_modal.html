@@ -18,10 +18,9 @@
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
             </div>
             <div class="modal-body">
-                <div class="alert alert-warning" x-show="!creativeWorkspace.promptLibrary.settings?.enabled" x-cloak>
-                    <div class="fw-semibold">这是旧项目，仍在使用原有硬编码提示词。</div>
-                    <div class="small mt-1">主动升级后会先使用经典兼容模板，已有内容不会被重新生成。</div>
-                    <button class="btn btn-warning btn-sm mt-2" type="button" @click="enableCurrentProjectPromptLibrary" :disabled="creativeWorkspace.promptLibrary.saving">升级到模板系统</button>
+                <div class="alert alert-info" x-show="!creativeWorkspace.promptLibrary.settings?.enabled" x-cloak>
+                    <div class="fw-semibold">这是旧项目，当前默认仍使用原有提示词。</div>
+                    <div class="small mt-1">“仅下次生成使用”不会改变项目设置；首次“保存默认设置”会同时启用模板设置。两种操作都只影响之后新生成的内容，不会修改已有内容。</div>
                 </div>
 
                 <div class="text-center text-muted py-4" x-show="creativeWorkspace.promptLibrary.loading">正在读取模板库…</div>
@@ -484,11 +483,25 @@
                         <div class="row g-2">
                             <template x-for="template in orderedPromptTemplates()" :key="template.id">
                                 <div class="col-md-6">
-                                    <label class="card h-100 prompt-template-card" :class="creativeWorkspace.promptLibrary.selectedTemplateKey === template.template_key ? 'border-primary' : 'border-secondary'">
+                                    <label class="card h-100 prompt-template-card"
+                                           style="cursor:pointer"
+                                           role="button"
+                                           tabindex="0"
+                                           :aria-pressed="creativeWorkspace.promptLibrary.selectedTemplateKey === template.template_key"
+                                           :class="creativeWorkspace.promptLibrary.selectedTemplateKey === template.template_key ? 'border-primary shadow-sm' : 'border-secondary'"
+                                           @click="selectPromptTemplate(template)"
+                                           @keydown.enter.prevent="selectPromptTemplate(template)"
+                                           @keydown.space.prevent="selectPromptTemplate(template)">
                                         <div class="card-body p-3">
                                             <div class="d-flex gap-2 align-items-start">
-                                                <input class="form-check-input mt-1" type="radio" name="prompt-template" :value="template.template_key" x-model="creativeWorkspace.promptLibrary.selectedTemplateKey" @change="selectPromptTemplate(template)">
-                                                <div>
+                                                <input class="visually-hidden" type="radio" name="prompt-template" :value="template.template_key" x-model="creativeWorkspace.promptLibrary.selectedTemplateKey" @change="selectPromptTemplate(template)">
+                                                <span class="d-inline-flex align-items-center justify-content-center flex-shrink-0 rounded-2 border mt-1"
+                                                      style="width:1.25rem;height:1.25rem;transition:background-color .15s ease,border-color .15s ease,box-shadow .15s ease"
+                                                      :class="creativeWorkspace.promptLibrary.selectedTemplateKey === template.template_key ? 'bg-primary border-primary text-white shadow-sm' : 'bg-body-tertiary border-secondary text-muted'"
+                                                      aria-hidden="true">
+                                                    <span class="fw-bold" style="font-size:.8rem;line-height:1" x-show="creativeWorkspace.promptLibrary.selectedTemplateKey === template.template_key">✓</span>
+                                                </span>
+                                                <div class="flex-grow-1">
                                                     <div class="d-flex flex-wrap align-items-center gap-1">
                                                         <span class="fw-semibold" x-text="template.title"></span>
                                                         <span class="badge text-bg-primary" x-show="promptRecommendation(template)" x-text="promptRecommendationLabel(template)"></span>
@@ -518,6 +531,76 @@
                             <div class="small text-muted">当前有效模板</div>
                             <div class="fw-semibold" x-text="creativeWorkspace.promptLibrary.effective?.title || '尚未选择'"></div>
                             <hr>
+                            <template x-if="selectedPromptTemplate()">
+                                <section data-prompt-template-details aria-live="polite">
+                                    <div class="d-flex justify-content-between align-items-start gap-2">
+                                        <div>
+                                            <div class="small text-muted">所选模板详情</div>
+                                            <div class="fw-semibold" x-text="selectedPromptTemplate().title"></div>
+                                        </div>
+                                        <div class="d-flex gap-1">
+                                            <span class="badge text-bg-secondary" x-text="promptTemplateOwnerLabel(selectedPromptTemplate().owner_scope)"></span>
+                                            <span class="badge text-bg-info" x-text="`v${selectedPromptTemplate().revision}`"></span>
+                                        </div>
+                                    </div>
+                                    <div class="small text-muted mt-2" x-text="selectedPromptTemplate().description || '暂无模板说明'"></div>
+                                    <div class="mt-3">
+                                        <div class="small fw-semibold mb-1">七维风格</div>
+                                        <dl class="row g-1 small mb-0">
+                                            <template x-for="key in ['format','genre','audience','story_engine','emotion','pacing','expression']" :key="`prompt-detail-${key}`">
+                                                <div class="col-12 d-flex gap-2">
+                                                    <dt class="text-muted flex-shrink-0" style="width:5rem" x-text="promptDimensionLabel(key)"></dt>
+                                                    <dd class="mb-0" x-text="selectedPromptTemplate().content?.dimensions?.[key] || '未设置'"></dd>
+                                                </div>
+                                            </template>
+                                        </dl>
+                                    </div>
+                                    <div class="mt-3">
+                                        <div class="small fw-semibold">共享作品 DNA</div>
+                                        <div class="small mt-1 text-break" style="white-space:pre-wrap" x-text="selectedPromptTemplate().content?.shared_dna || '未设置'"></div>
+                                    </div>
+                                    <div class="mt-3">
+                                        <div class="small fw-semibold" x-text="`${promptStageLabel(creativeWorkspace.promptLibrary.stage)}阶段规则`"></div>
+                                        <template x-for="mode in ['single','series','rewrite','repair']" :key="`prompt-detail-mode-${mode}`">
+                                            <div class="mt-2" x-show="selectedPromptTemplate().content?.stage_rules?.[creativeWorkspace.promptLibrary.stage]?.[mode]">
+                                                <div class="small text-muted" x-text="promptModeLabel(mode, creativeWorkspace.promptLibrary.stage)"></div>
+                                                <div class="small text-break" style="white-space:pre-wrap" x-text="selectedPromptTemplate().content?.stage_rules?.[creativeWorkspace.promptLibrary.stage]?.[mode]"></div>
+                                            </div>
+                                        </template>
+                                    </div>
+                                    <details class="mt-3">
+                                        <summary class="small fw-semibold">查看全部阶段规则、参数和示例</summary>
+                                        <div class="mt-2">
+                                            <template x-for="stageEntry in Object.entries(selectedPromptTemplate().content?.stage_rules || {})" :key="`prompt-detail-stage-${stageEntry[0]}`">
+                                                <div class="border-top pt-2 mt-2">
+                                                    <div class="small fw-semibold" x-text="promptStageLabel(stageEntry[0])"></div>
+                                                    <template x-for="modeEntry in Object.entries(stageEntry[1] || {})" :key="`prompt-detail-stage-${stageEntry[0]}-${modeEntry[0]}`">
+                                                        <div class="mt-2">
+                                                            <div class="small text-muted" x-text="promptModeLabel(modeEntry[0], stageEntry[0])"></div>
+                                                            <div class="small text-break" style="white-space:pre-wrap" x-text="modeEntry[1]"></div>
+                                                        </div>
+                                                    </template>
+                                                </div>
+                                            </template>
+                                        </div>
+                                        <div class="small fw-semibold mt-3">模板参数</div>
+                                        <pre class="small bg-body-tertiary border rounded p-2 mt-1 mb-0 text-wrap" x-text="JSON.stringify(selectedPromptTemplate().content?.parameters || {}, null, 2)"></pre>
+                                        <div class="small fw-semibold mt-3">模板示例</div>
+                                        <div class="small text-muted mt-1" x-show="!(selectedPromptTemplate().content?.examples || []).length">未提供示例</div>
+                                        <template x-for="(example, index) in (selectedPromptTemplate().content?.examples || [])" :key="`prompt-detail-example-${index}`">
+                                            <div class="border rounded p-2 mt-2">
+                                                <div class="d-flex justify-content-between gap-2">
+                                                    <span class="small fw-semibold" x-text="example.label || `示例 ${index + 1}`"></span>
+                                                    <span class="badge" :class="example.include_in_context ? 'text-bg-success' : 'text-bg-secondary'" x-text="example.include_in_context ? '参与生成' : '仅作说明'"></span>
+                                                </div>
+                                                <div class="small text-break mt-1" style="white-space:pre-wrap" x-text="example.text || ''"></div>
+                                            </div>
+                                        </template>
+                                    </details>
+                                </section>
+                            </template>
+                            <div class="small text-muted" x-show="!selectedPromptTemplate()">点击左侧模板即可查看详细内容并选中它。</div>
+                            <hr>
                             <label class="form-label fw-semibold">应用范围</label>
                             <div class="form-check">
                                 <input class="form-check-input" type="radio" id="promptScopeStage" value="stage" x-model="creativeWorkspace.promptLibrary.scope">
@@ -530,13 +613,6 @@
                             <label class="form-label fw-semibold mt-3" for="promptCustomRequirements">自定义创作要求</label>
                             <textarea id="promptCustomRequirements" class="form-control" rows="5" maxlength="4000" x-model="creativeWorkspace.promptLibrary.customRequirements" placeholder="例如：强化高压选择的代价；减少内心独白。"></textarea>
                             <div class="small text-muted mt-2">单次使用不会修改项目或阶段默认设置。</div>
-                            <template x-if="selectedPromptTemplate()">
-                                <details class="mt-3">
-                                    <summary class="small fw-semibold">查看模板说明</summary>
-                                    <div class="small mt-2" x-text="selectedPromptTemplate().content?.shared_dna"></div>
-                                    <div class="small text-muted mt-2" x-text="selectedPromptTemplate().content?.stage_rules?.[creativeWorkspace.promptLibrary.stage]?.single"></div>
-                                </details>
-                            </template>
                         </div>
                     </div>
                 </div>
@@ -589,8 +665,8 @@
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">关闭</button>
                 {% if prompt_library_surface == 'picker' %}
-                <button type="button" class="btn btn-outline-primary" x-show="creativeWorkspace.promptLibrary.settings?.enabled" @click="usePromptForNextGeneration" :disabled="!creativeWorkspace.promptLibrary.selectedTemplateKey">仅下次生成使用</button>
-                <button type="button" class="btn btn-primary" x-show="creativeWorkspace.promptLibrary.settings?.enabled" @click="savePromptBinding" :disabled="creativeWorkspace.promptLibrary.saving || !creativeWorkspace.promptLibrary.selectedTemplateKey">保存默认设置</button>
+                <button type="button" class="btn btn-outline-primary" @click="usePromptForNextGeneration" :disabled="!creativeWorkspace.promptLibrary.selectedTemplateKey">仅下次生成使用</button>
+                <button type="button" class="btn btn-primary" @click="savePromptBinding" :disabled="creativeWorkspace.promptLibrary.saving || !creativeWorkspace.promptLibrary.selectedTemplateKey">保存默认设置</button>
                 {% endif %}
             </div>
         </div>

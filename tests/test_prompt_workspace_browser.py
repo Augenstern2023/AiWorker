@@ -132,3 +132,35 @@ def test_prompt_center_and_effects_open_focused_panels_without_browser_errors():
         assert effects_errors == [], "\n".join(effects_errors)
 
         browser.close()
+
+
+def test_prompt_picker_card_click_selects_template_and_reveals_full_details():
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            '<main x-data="appData()" '
+            'x-init="creativeWorkspace.project = {id: 9, target_episode_count: 20}; '
+            "creativeWorkspace.promptLibrary.stage = 'brief'; "
+            "creativeWorkspace.promptLibrary.settings = {enabled: true}; "
+            "creativeWorkspace.promptLibrary.templates = [window.__promptTemplate]; "
+            "creativeWorkspace.promptLibrary.effective = window.__promptTemplate\">"
+            f"{_modal('picker')}</main>"
+        )
+        page_errors = _install_workspace_runtime(page)
+
+        card = page.locator(".prompt-template-card")
+        card.click()
+
+        page.get_by_text("所选模板详情", exact=True).wait_for()
+        assert page.locator('input[name="prompt-template"]').is_checked()
+        indicator = card.locator('[aria-hidden="true"]').first
+        assert "bg-primary" in (indicator.get_attribute("class") or "")
+        assert indicator.inner_text() == "✓"
+        details = page.locator("[data-prompt-template-details]")
+        assert "我的强钩子模板" in details.inner_text()
+        assert "开场快速建立未完成动作。" in details.inner_text()
+        assert "生成 Brief" in details.inner_text()
+        assert page_errors == [], "\n".join(page_errors)
+
+        browser.close()

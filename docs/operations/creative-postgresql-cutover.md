@@ -312,6 +312,20 @@ SELECT rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname = 'aiwor
 | 读路径冒烟 | `list_projects()` 18 个项目；`workflow_project_id()` = `creative:67707ae7-…:project:8`；主题可读；`schema_current = true` |
 | 唯一告警 | `production_status: absent from the legacy source; nothing to import`（该表在旧库中不存在，非错误） |
 
+### 切换后独立复核
+
+上述结果来自导入器自身；下表是**独立于 `--verify`** 的复核，直接从生产库与封存源重新推导目标关心的四件事（ID、版本链、workflow 身份、跨域引用）：
+
+| 检查项 | 结果 |
+|---|---|
+| store 身份 | 生产 `67707ae7-…` = 源，一致 |
+| 逐表行数 | 36 张表比对，**0 处不一致** |
+| 项目 | 18 个；其中 17 个带 `workflow_task_id`，15 个可解析（差额即下方 2 个已声明缺口） |
+| 身份样例 | `creative:67707ae7-…:project:1` / `:project:2` |
+| ID 保持 | `creative_topics` 4186/4186、`creative_projects` 19/19、`creative_episodes` 774/774、`creative_characters` 100/100、`creative_relationships` 127/127，全部一致 |
+| 跨域引用 | 10 条边 / 99 个值 / 91 已解析 / 8 个已声明合法缺口 / **0 个未声明孤儿** |
+| 结论 | **PASS** |
+
 **未完成、需在观察期内处理的部分：**
 
 - 第 3 步的完整业务冒烟（原创 / 仿写 / 完整剧本三种项目各跑一遍读取、生成、修订、锁定、审核、优化、交付、导出）尚未执行。

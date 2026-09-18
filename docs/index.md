@@ -6,6 +6,30 @@
 - [短剧选品平台 PRD 实施文档](../improve/壹凡短剧选品平台PRD实施文档.md) - 已实施的五角色、本地认证、任务池、审批和交付边界
 - [角色职能工作流设计](superpowers/specs/2026-07-22-role-responsibility-workflow-design.md) - 角色权限、页面路由、状态机与数据迁移设计
 - [角色职能工作流实施计划](superpowers/plans/2026-07-22-role-responsibility-workflow.md) - 分阶段实现和验证清单
+- [创作域 PostgreSQL 切换 Runbook](operations/creative-postgresql-cutover.md) - 正式切换步骤、强制停止条件与七天观察期
+- [创作域跨域引用审计](operations/creative-cross-domain-reference-audit.md) - 用户与工作流引用的分类、合法历史缺口及其理由
+- [创作域 PostgreSQL 迁移计划](superpowers/plans/2026-09-15-creative-postgresql-migration.md) - 创作数据从 SQLite 迁移到 PostgreSQL 的完整任务清单
+
+## 创作数据迁移
+
+创作数据（选题、拆解、创作项目与版本）现在与系统数据一起存放在 PostgreSQL。历史 SQLite
+库 `.runtime/creative/creative.db` 只作为迁移源保留。相关命令：
+
+```shell
+# 只读校验源，不触碰 PostgreSQL
+uv run python scripts/migrate_creative_sqlite_to_postgres.py --source .runtime/creative/creative.db --check
+
+# 单事务导入（外部目标需先 alembic upgrade head）
+uv run python scripts/migrate_creative_sqlite_to_postgres.py --source .runtime/creative/creative.db --apply
+
+# 独立复核：重新读取源并要求逐表哈希一致
+uv run python scripts/migrate_creative_sqlite_to_postgres.py --source .runtime/creative/creative.db --verify
+
+# 七天观察期内的无损回退导出（只写新路径）
+uv run python scripts/rollback_creative_postgres_to_sqlite.py --destination .runtime/rollback/creative.db --rollback-dir .runtime/rollback
+```
+
+正式切换请严格按 [Runbook](operations/creative-postgresql-cutover.md) 执行。
 
 ## 本地协作入口
 

@@ -38,6 +38,15 @@ def creative_backend_from_environment() -> str:
     return value or SQLITE_BACKEND
 
 
+def normalize_creative_backend(backend: str | None) -> str:
+    """Validate an explicitly chosen back end name."""
+
+    normalized = str(backend or "").strip().lower()
+    if normalized not in {SQLITE_BACKEND, POSTGRESQL_BACKEND}:
+        raise ValueError("AIWORKER_CREATIVE_STORAGE must be sqlite or postgresql")
+    return normalized
+
+
 def build_creative_repository(
     database: SystemDatabase,
     *,
@@ -46,19 +55,51 @@ def build_creative_repository(
 ):
     """Build a creative repository for an explicitly chosen back end."""
 
-    normalized = str(backend or "").strip().lower()
+    normalized = normalize_creative_backend(backend)
     if normalized == POSTGRESQL_BACKEND:
         return PostgresCreativeRepository(database)
-    if normalized == SQLITE_BACKEND:
-        from creative.legacy_sqlite_repository import LegacySQLiteCreativeRepository
+    if legacy_sqlite_path is None:
+        raise ValueError("the sqlite back end requires an explicit legacy_sqlite_path")
+    from creative.legacy_sqlite_repository import LegacySQLiteCreativeRepository
 
-        path = (
-            Path(legacy_sqlite_path)
-            if legacy_sqlite_path is not None
-            else DEFAULT_LEGACY_SQLITE_PATH
+    return LegacySQLiteCreativeRepository(Path(legacy_sqlite_path))
+
+
+def build_runtime_creative_repository(
+    database: SystemDatabase,
+    *,
+    legacy_sqlite_path: Path | str | None = None,
+):
+    """Build the repository the runtime must use, honouring the storage switch.
+
+    Selecting PostgreSQL never falls back to SQLite. An unreachable or
+    un-migrated target is a hard failure: quietly serving a stale SQLite store
+    after the cutover would split one creative dataset across two databases, and
+    the divergence would only surface once both had been written to.
+
+    Selecting SQLite likewise requires an explicit path. The runtime must never
+    guess a location, because the guess that is right today is the one that
+    silently reads a frozen file tomorrow.
+    """
+
+    backend = normalize_creative_backend(creative_backend_from_environment())
+    if backend == POSTGRESQL_BACKEND:
+        health = database.health()
+        if not health.reachable or not health.schema_current:
+            raise RuntimeError(
+                "creative PostgreSQL is unavailable "
+                f"(reachable={health.reachable}, schema_current={health.schema_current}, "
+                f"revision={health.current_revision})"
+            )
+        return PostgresCreativeRepository(database)
+    if legacy_sqlite_path is None:
+        raise RuntimeError(
+            "creative SQLite storage is selected but no explicit database path was "
+            "given; configure AIWORKER_CREATIVE_STORAGE=postgresql or pass a path"
         )
-        return LegacySQLiteCreativeRepository(path)
-    raise ValueError("AIWORKER_CREATIVE_STORAGE must be sqlite or postgresql")
+    return build_creative_repository(
+        database, backend=backend, legacy_sqlite_path=legacy_sqlite_path
+    )
 
 
 __all__ = [
@@ -67,5 +108,7 @@ __all__ = [
     "SQLITE_BACKEND",
     "STORAGE_ENVIRONMENT_VARIABLE",
     "build_creative_repository",
+    "build_runtime_creative_repository",
     "creative_backend_from_environment",
+    "normalize_creative_backend",
 ]

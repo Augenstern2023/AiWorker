@@ -368,6 +368,98 @@ def test_sqlite_selection_is_never_implicit(isolated_system_database: SystemData
 
 
 # ---------------------------------------------------------------------------
+# the runtime storage switch
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_selection_never_falls_back_to_sqlite(monkeypatch):
+    """An unusable PostgreSQL target must fail loudly, not read a frozen store."""
+
+    from types import SimpleNamespace
+
+    from creative.repository_factory import build_runtime_creative_repository
+
+    class UnavailableDatabase:
+        def health(self):
+            return SimpleNamespace(
+                reachable=False, schema_current=False, current_revision=None
+            )
+
+    monkeypatch.setenv("AIWORKER_CREATIVE_STORAGE", "postgresql")
+    with pytest.raises(RuntimeError, match="creative PostgreSQL is unavailable"):
+        build_runtime_creative_repository(UnavailableDatabase())
+
+
+def test_runtime_selection_refuses_a_schema_behind_head(
+    monkeypatch, isolated_system_database: SystemDatabase
+):
+    """Reachable is not enough: a stale schema is still a hard failure."""
+
+    from types import SimpleNamespace
+
+    from creative.repository_factory import build_runtime_creative_repository
+
+    class StaleDatabase:
+        def health(self):
+            return SimpleNamespace(
+                reachable=True,
+                schema_current=False,
+                current_revision="0024_llm_model_max_output_tokens",
+            )
+
+    monkeypatch.setenv("AIWORKER_CREATIVE_STORAGE", "postgresql")
+    with pytest.raises(RuntimeError, match="creative PostgreSQL is unavailable"):
+        build_runtime_creative_repository(StaleDatabase())
+
+
+def test_runtime_selection_builds_postgresql_when_healthy(
+    monkeypatch, isolated_system_database: SystemDatabase
+):
+    from creative.repository_factory import build_runtime_creative_repository
+
+    monkeypatch.setenv("AIWORKER_CREATIVE_STORAGE", "postgresql")
+    repository = build_runtime_creative_repository(isolated_system_database)
+    assert isinstance(repository, PostgresCreativeRepository)
+    assert repository.database is isolated_system_database
+
+
+def test_runtime_selection_requires_an_explicit_sqlite_path(
+    monkeypatch, isolated_system_database: SystemDatabase
+):
+    """The runtime must never guess where the legacy store lives."""
+
+    from creative.repository_factory import build_runtime_creative_repository
+
+    monkeypatch.setenv("AIWORKER_CREATIVE_STORAGE", "sqlite")
+    with pytest.raises(RuntimeError, match="no explicit database path"):
+        build_runtime_creative_repository(isolated_system_database)
+
+
+def test_runtime_selection_builds_sqlite_only_when_given_a_path(
+    monkeypatch, tmp_path: Path, isolated_system_database: SystemDatabase
+):
+    from creative.repository_factory import build_runtime_creative_repository
+
+    monkeypatch.setenv("AIWORKER_CREATIVE_STORAGE", "sqlite")
+    path = tmp_path / "creative.db"
+    repository = build_runtime_creative_repository(
+        isolated_system_database, legacy_sqlite_path=path
+    )
+    assert path.is_file()
+    assert repository.store_id
+
+
+def test_runtime_selection_rejects_an_unknown_backend(
+    monkeypatch, isolated_system_database: SystemDatabase
+):
+    from creative.repository_factory import build_runtime_creative_repository
+
+    monkeypatch.setenv("AIWORKER_CREATIVE_STORAGE", "mysql")
+    with pytest.raises(ValueError, match="must be sqlite or postgresql"):
+        build_runtime_creative_repository(isolated_system_database)
+
+
+# ---------------------------------------------------------------------------
 # surface parity groundwork
 # ---------------------------------------------------------------------------
 

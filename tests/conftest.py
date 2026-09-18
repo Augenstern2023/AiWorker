@@ -65,6 +65,33 @@ def project_root_path():
     return project_root
 
 
+# The real system database. Tests must never open it: the migration CLI and the
+# creative workers read AIWORKER_SYSTEM_DATABASE_URL from the environment, so a
+# test that forgets to inject an isolated database could otherwise write straight
+# into production. This guard exists because that actually happened once.
+PRODUCTION_DATABASE_NAME = "aiworker_system"
+
+
+@pytest.fixture(autouse=True)
+def refuse_production_database(monkeypatch: pytest.MonkeyPatch):
+    """Fail any test that tries to open the real system database."""
+
+    original_init = SystemDatabase.__init__
+
+    def guarded_init(self, settings, *args, **kwargs):
+        url = make_url(settings.url)
+        if url.database == PRODUCTION_DATABASE_NAME:
+            raise AssertionError(
+                "tests must not open the production system database "
+                f"{PRODUCTION_DATABASE_NAME!r}; use the isolated_system_database "
+                "fixture or an explicitly injected repository"
+            )
+        return original_init(self, settings, *args, **kwargs)
+
+    monkeypatch.setattr(SystemDatabase, "__init__", guarded_init)
+    yield
+
+
 @pytest.fixture
 def isolated_system_database(
     monkeypatch: pytest.MonkeyPatch,

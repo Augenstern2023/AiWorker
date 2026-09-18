@@ -12,7 +12,7 @@ import json
 from typing import Any
 
 
-PROMPT_TEMPLATE_VERSION = "phase4-v5"
+PROMPT_TEMPLATE_VERSION = "phase4-v6"
 BREAKDOWN_PROMPT_TEMPLATE_VERSION = "transcript-breakdown-v1"
 ORIGINAL_PROMPT_TEMPLATE_VERSION = "original-direction-v1"
 ORIGINAL_VARIANT_PROMPT_TEMPLATE_VERSION = "original-direction-variant-v1"
@@ -105,9 +105,15 @@ def character_messages(
     return _messages(
         _with_project_style(
         "根据已锁定 Brief 生成人物卡和人物关系。返回 characters 和 relationships 数组。"
+        "顶层必须返回 JSON 对象，严格使用 "
+        '{"characters": [...], "relationships": [...]} 两个键，不得直接输出数组，'
+        "不得改名、嵌套进其他对象或使用中文键名。characters 与 relationships 都必须是 JSON 数组；"
+        "没有人物关系时返回空数组 []，不得返回对象、字符串或 null。"
         "人物包含 name、age_range、identity、external_tags、desire、secret、growth_arc、"
         "dialogue_style、appearance_prompt、voice_prompt、action_goal、fear_of_loss、behavioral_contradiction、"
-        "pressure_response、bottom_line；关系包含 from、to、relation、conflict、change_arc。"
+        "pressure_response、bottom_line；external_tags 是字符串数组，其余字段是非空字符串。"
+        "relationships 每项必须包含 from、to、relation、conflict、change_arc 五个字符串字段，"
+        "from 与 to 必须是 characters 中出现的角色名；主角与每一个有互动的主要人物至少一条关系。"
         "为反派写出软肋、分歧或代价来源；为主角写出高压下可能做出的不够正确的选择。" + DRAMA_CONSTRAINTS,
         prompt_snapshot,
         ),

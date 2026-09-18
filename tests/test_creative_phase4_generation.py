@@ -18,7 +18,7 @@ from typing import Any
 import httpx
 import pytest
 
-from analysis.llm import LLMOutputTruncatedError
+from analysis.llm import LLMError, LLMOutputTruncatedError
 from core.job import CrawlJob
 from creative import api as creative_api
 from creative import phase4_worker
@@ -377,6 +377,213 @@ async def test_character_generation_requires_actionable_character_fields():
     assert bundle["characters"][0]["action_goal"] == "当众说服居民接受调解"
     assert len(provider.calls) == 2
     assert "反派每两集至少暴露一次软肋" in provider.calls[0][0]["content"]
+
+
+def character_payload(**overrides):
+    payload = {
+        "name": "林穗", "age_range": "18-22", "identity": "冲喜新娘",
+        "external_tags": ["隐忍"], "desire": "立户", "secret": "前世记忆",
+        "growth_arc": "从被安排到自主选择", "dialogue_style": "简短克制",
+        "appearance_prompt": "山村少女", "voice_prompt": "清亮偏冷",
+        "action_goal": "拿到宅基地", "fear_of_loss": "失去唯一住处",
+        "behavioral_contradiction": "越害怕越强硬", "pressure_response": "先退一步再反击",
+        "bottom_line": "不连累无辜者",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def relationship_payload(**overrides):
+    payload = {
+        "from": "林穗", "to": "周谨", "relation": "名义夫妻",
+        "conflict": "恩义与婚姻拉扯", "change_arc": "对抗转并肩",
+    }
+    payload.update(overrides)
+    return payload
+
+
+@pytest.mark.asyncio
+async def test_character_bundle_normalizes_relationships_keyed_by_character_pair():
+    provider = SequentialProvider([{
+        "characters": [character_payload()],
+        "relationships": {"林穗-周谨": relationship_payload()},
+    }])
+
+    bundle, _ = await generate_character_bundle(provider, {"name": "项目"}, {"title": "Brief"})
+
+    assert [item["relation"] for item in bundle["relationships"]] == ["名义夫妻"]
+
+
+@pytest.mark.asyncio
+async def test_character_bundle_normalizes_a_single_relationship_object():
+    provider = SequentialProvider([{
+        "characters": [character_payload()],
+        "relationships": relationship_payload(),
+    }])
+
+    bundle, _ = await generate_character_bundle(provider, {"name": "项目"}, {"title": "Brief"})
+
+    assert len(bundle["relationships"]) == 1
+    assert bundle["relationships"][0]["to"] == "周谨"
+
+
+@pytest.mark.asyncio
+async def test_character_bundle_accepts_chinese_and_alias_keys():
+    provider = SequentialProvider([{
+        "人物卡": [character_payload()],
+        "人物关系": {"林穗-周谨": relationship_payload()},
+    }])
+
+    bundle, _ = await generate_character_bundle(provider, {"name": "项目"}, {"title": "Brief"})
+
+    assert bundle["characters"][0]["name"] == "林穗"
+    assert len(bundle["relationships"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_character_bundle_keeps_an_explicitly_empty_relationship_list():
+    provider = SequentialProvider([{
+        "characters": [character_payload()],
+        "relationships": [],
+    }])
+
+    bundle, _ = await generate_character_bundle(provider, {"name": "项目"}, {"title": "Brief"})
+
+    assert bundle["relationships"] == []
+
+
+@pytest.mark.asyncio
+async def test_character_bundle_rejects_a_relationship_scalar_after_the_repair_attempt():
+    provider = SequentialProvider([
+        {"characters": [character_payload()], "relationships": "林穗与周谨是夫妻"},
+        {"characters": [character_payload()], "relationships": "仍然是字符串"},
+    ])
+
+    with pytest.raises(LLMError, match="relationships 必须是数组"):
+        await generate_character_bundle(provider, {"name": "项目"}, {"title": "Brief"})
+
+    assert len(provider.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_character_bundle_stops_immediately_after_a_truncated_response():
+    class TruncatingProvider:
+        provider_name = "test-llm"
+
+        def __init__(self):
+            self.calls = 0
+
+        async def complete_json(self, messages):
+            self.calls += 1
+            raise LLMOutputTruncatedError(
+                "模型输出被输出上限截断（finish_reason=length，已返回 120 字符）。",
+                partial_text='{"characters": [{"name": "林穗"',
+            )
+
+    provider = TruncatingProvider()
+    attempts = []
+
+    with pytest.raises(LLMOutputTruncatedError, match="截断"):
+        await generate_character_bundle(
+            provider, {"name": "项目"}, {"title": "Brief"}, on_attempt=attempts.append
+        )
+
+    assert provider.calls == 1
+    assert [item["ok"] for item in attempts] == [False]
+    assert "截断" in attempts[0]["error"]
+    assert attempts[0]["truncated_text"].startswith('{"characters"')
+
+
+@pytest.mark.asyncio
+async def test_character_bundle_reports_the_request_parameters_it_sent():
+    class RecordingProvider:
+        provider_name = "test-llm"
+        last_request_summary = {
+            "protocol": "chat_completions",
+            "model": "claude-sonnet-5",
+            "max_tokens": 32768,
+            "reasoning_effort": "high",
+            "response_format": "json_schema",
+            "input_chars": 15000,
+        }
+
+        async def complete_json(self, messages):
+            return {
+                "characters": [character_payload()],
+                "relationships": [relationship_payload()],
+            }
+
+    attempts = []
+
+    await generate_character_bundle(
+        RecordingProvider(), {"name": "项目"}, {"title": "Brief"}, on_attempt=attempts.append
+    )
+
+    assert attempts[0]["request"]["max_tokens"] == 32768
+    assert attempts[0]["request"]["reasoning_effort"] == "high"
+    assert attempts[0]["request"]["protocol"] == "chat_completions"
+
+
+@pytest.mark.asyncio
+async def test_character_bundle_requests_a_strict_schema_from_schema_aware_providers():
+    class SchemaAwareProvider:
+        provider_name = "test-llm"
+
+        def __init__(self):
+            self.schemas = []
+
+        async def complete_json(self, messages, schema=None):
+            self.schemas.append(schema)
+            return {
+                "characters": [character_payload()],
+                "relationships": [relationship_payload()],
+            }
+
+    provider = SchemaAwareProvider()
+
+    bundle, _ = await generate_character_bundle(provider, {"name": "项目"}, {"title": "Brief"})
+
+    assert provider.schemas[0]["required"] == ["characters", "relationships"]
+    assert set(
+        provider.schemas[0]["properties"]["relationships"]["items"]["required"]
+    ) == {"from", "to", "relation", "conflict", "change_arc"}
+    assert (
+        provider.schemas[0]["properties"]["characters"]["items"]["properties"]["external_tags"]["type"]
+        == "array"
+    )
+    assert bundle["relationships"][0]["relation"] == "名义夫妻"
+
+
+@pytest.mark.asyncio
+async def test_character_bundle_reports_attempts_and_repair_shape_to_the_callback():
+    provider = SequentialProvider([
+        {"characters": [character_payload()], "relationships": 42},
+        {"characters": [character_payload()], "relationships": [relationship_payload()]},
+    ])
+    attempts = []
+
+    bundle, meta = await generate_character_bundle(
+        provider, {"name": "项目"}, {"title": "Brief"}, on_attempt=attempts.append
+    )
+
+    assert [item["attempt"] for item in attempts] == [1, 2]
+    assert [item["ok"] for item in attempts] == [False, True]
+    assert attempts[0]["max_attempts"] == 2
+    assert "relationships 必须是数组" in attempts[0]["error"]
+    assert attempts[0]["elapsed_seconds"] >= 0
+    assert attempts[0]["payload"]["relationships"] == 42
+    assert meta["repair_attempted"] is True
+    assert "relationships(int)" in provider.calls[1][-1]["content"]
+    assert bundle["relationships"][0]["relation"] == "名义夫妻"
+
+
+def test_character_messages_declare_the_top_level_json_contract():
+    system = character_messages({"project": {"name": "项目"}})[0]["content"]
+
+    assert '{"characters": [...], "relationships": [...]}' in system
+    assert "不得直接输出数组" in system
+    assert "没有人物关系时返回空数组" in system
+    assert "external_tags 是字符串数组" in system
 
 
 def outline_episode(number: int) -> dict:

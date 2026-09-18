@@ -13,7 +13,7 @@ import importlib.util
 from contextlib import contextmanager
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.pool import StaticPool
 
 
@@ -35,7 +35,7 @@ def test_provider_presets_define_environment_variable_names():
     assert module.PROVIDER_PRESETS["custom"]["env_key"] == ""
 
 
-@pytest.mark.parametrize("value", ["", "1BAD", "HAS-DASH", "HAS SPACE"])
+@pytest.mark.parametrize("value", ["1BAD", "HAS-DASH", "HAS SPACE"])
 def test_custom_provider_rejects_invalid_environment_variable_name(value):
     """Would catch an unusable environment lookup name being persisted."""
 
@@ -133,7 +133,23 @@ class _TestDatabase:
             yield connection
 
 
-def _repository():
+class MemoryCredentialStore:
+    """In-memory credential vault used to prove every read is live."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+
+    def get(self, provider_id: str) -> str | None:
+        return self.values.get(provider_id)
+
+    def set(self, provider_id: str, api_key: str) -> None:
+        self.values[provider_id] = api_key
+
+    def delete(self, provider_id: str) -> None:
+        self.values.pop(provider_id, None)
+
+
+def _repository(*, credential_store=None):
     module = _settings_module()
     schema = importlib.import_module("system_database.schema")
     tables = [
@@ -146,7 +162,209 @@ def _repository():
     )
     database = _TestDatabase()
     schema.SYSTEM_METADATA.create_all(database.engine, tables=tables)
-    return module.LLMSettingsRepository(database)
+    if credential_store is None:
+        return module.LLMSettingsRepository(database)
+    return module.LLMSettingsRepository(database, credential_store=credential_store)
+
+
+def test_repository_reads_replaced_vault_secret_without_restart(monkeypatch):
+    """Would catch caching a credential-store value after the first request."""
+
+    monkeypatch.setenv("ROTATION_FALLBACK_KEY", "environment-secret")
+    vault = MemoryCredentialStore()
+    repository = _repository(credential_store=vault)
+    provider = repository.create_provider(
+        name="Rotation",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+        api_key_env_var="ROTATION_FALLBACK_KEY",
+    )
+
+    vault.set(provider["id"], "first-secret")
+    assert repository.provider_connection(provider["id"])["api_key"] == "first-secret"
+
+    vault.set(provider["id"], "second-secret")
+    assert repository.provider_connection(provider["id"])["api_key"] == "second-secret"
+
+
+def test_repository_clears_vault_secret_and_falls_back_to_environment(monkeypatch):
+    """Would catch clearing a vault key leaving the provider without its fallback."""
+
+    monkeypatch.setenv("CLEAR_FALLBACK_KEY", "environment-secret")
+    vault = MemoryCredentialStore()
+    repository = _repository(credential_store=vault)
+    provider = repository.create_provider(
+        name="Clear fallback",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+        api_key_env_var="CLEAR_FALLBACK_KEY",
+    )
+    repository.replace_api_key(provider["id"], "vault-secret")
+
+    repository.clear_api_key(provider["id"])
+
+    assert repository.provider_connection(provider["id"])["api_key"] == "environment-secret"
+
+
+def test_repository_prefers_vault_and_reports_safe_credential_status(monkeypatch):
+    """Would catch runtime paths bypassing vault precedence or leaking its value."""
+
+    monkeypatch.setenv("PREFERRED_FALLBACK_KEY", "environment-secret")
+    vault = MemoryCredentialStore()
+    repository = _repository(credential_store=vault)
+    provider = repository.create_provider(
+        name="Preferred vault",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+        api_key_env_var="PREFERRED_FALLBACK_KEY",
+    )
+    model = repository.create_model(provider["id"], model_id="model-a")
+    repository.replace_api_key(provider["id"], "vault-secret")
+    repository.set_default_model(model["id"])
+
+    settings = repository.settings_payload()
+    catalog = repository.available_models_payload()
+
+    assert repository.effective_default()["api_key"] == "vault-secret"
+    assert repository.effective_model(model["id"])["api_key"] == "vault-secret"
+    assert catalog["items"][0]["id"] == model["id"]
+    assert settings["providers"][0]["credential_source"] == "credential_store"
+    assert settings["providers"][0]["credential_status"] == "configured"
+    assert "vault-secret" not in repr(settings)
+    assert "vault-secret" not in repr(catalog)
+
+
+def test_repository_uses_environment_without_a_credential_store(monkeypatch):
+    """Would catch requiring a vault for existing environment-only deployments."""
+
+    monkeypatch.setenv("ENVIRONMENT_ONLY_KEY", "environment-secret")
+    repository = _repository()
+    provider = repository.create_provider(
+        name="Environment only",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+        api_key_env_var="ENVIRONMENT_ONLY_KEY",
+    )
+
+    assert repository.provider_connection(provider["id"])["api_key"] == "environment-secret"
+    assert repository.settings_payload()["providers"][0]["credential_source"] == "environment"
+
+
+def test_two_repositories_share_live_credential_store(monkeypatch):
+    """Would catch Web and Worker repository instances seeing different credentials."""
+
+    monkeypatch.delenv("SHARED_STORE_KEY", raising=False)
+    vault = MemoryCredentialStore()
+    web_repository = _repository(credential_store=vault)
+    provider = web_repository.create_provider(
+        name="Shared store",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+        api_key_env_var="SHARED_STORE_KEY",
+    )
+    module = _settings_module()
+    worker_repository = module.LLMSettingsRepository(
+        web_repository.database, credential_store=vault
+    )
+
+    web_repository.replace_api_key(provider["id"], "web-rotated-secret")
+
+    assert worker_repository.provider_connection(provider["id"])["api_key"] == "web-rotated-secret"
+
+
+def test_custom_provider_allows_empty_environment_variable_when_vault_exists():
+    """Would catch requiring an unused environment fallback for a vault-only provider."""
+
+    vault = MemoryCredentialStore()
+    repository = _repository(credential_store=vault)
+    provider = repository.create_provider(
+        name="Vault only",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+    )
+    repository.replace_api_key(provider["id"], "vault-secret")
+
+    assert repository.provider_connection(provider["id"])["api_key"] == "vault-secret"
+
+
+def test_runtime_credential_queries_do_not_select_legacy_ciphertext():
+    """Would catch runtime credential paths loading api_key_encrypted from PostgreSQL."""
+
+    module = _settings_module()
+    vault = MemoryCredentialStore()
+    repository = _repository(credential_store=vault)
+    provider = repository.create_provider(
+        name="Minimal columns",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+    )
+    model = repository.create_model(provider["id"], model_id="model-a")
+    vault.set(provider["id"], "vault-secret")
+    with repository.database.transaction() as connection:
+        connection.execute(
+            module.llm_providers.update()
+            .where(module.llm_providers.c.id == provider["id"])
+            .values(api_key_encrypted="legacy-unreadable-value")
+        )
+
+    statements: list[str] = []
+
+    def capture_select(_connection, _cursor, statement, _parameters, _context, _many):
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(repository.database.engine, "before_cursor_execute", capture_select)
+    try:
+        repository.set_default_model(model["id"])
+        repository.provider_connection(provider["id"])
+        repository.effective_default()
+        repository.effective_model(model["id"])
+        repository.settings_payload()
+    finally:
+        event.remove(repository.database.engine, "before_cursor_execute", capture_select)
+
+    assert statements
+    assert all("api_key_encrypted" not in statement for statement in statements)
+
+
+def test_delete_provider_keeps_database_deletion_when_vault_cleanup_fails(caplog):
+    """Would catch a keyring cleanup error rolling back an already-deleted provider."""
+
+    module = _settings_module()
+    deleted_provider_ids: list[str] = []
+
+    class FailingDeleteStore(MemoryCredentialStore):
+        def delete(self, provider_id: str) -> None:
+            deleted_provider_ids.append(provider_id)
+            raise module.LLMCredentialStoreError("cleanup-sentinel")
+
+    repository = _repository(credential_store=FailingDeleteStore())
+    provider = repository.create_provider(
+        name="Cleanup failure",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+    )
+
+    deleted = repository.delete_provider(provider["id"])
+
+    assert deleted["id"] == provider["id"]
+    assert deleted_provider_ids == [provider["id"]]
+    warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert provider["id"] in warnings[0].getMessage()
+    assert warnings[0].exc_info is None
+    assert warnings[0].stack_info is None
+    assert "cleanup-sentinel" not in caplog.text
+    with pytest.raises(module.LLMSettingsError, match="提供商不存在"):
+        repository.provider_connection(provider["id"])
 
 
 def test_repository_returns_environment_credential_status(monkeypatch):

@@ -222,8 +222,28 @@ uv run python scripts/upgrade_production_database.py
 ## 配置与凭证安全
 
 - 外部服务地址、激活码、Cookie、模型密钥等仅保存在本机配置或环境变量中。
+- Web GUI 的 LLM 页面密钥保存在当前 Windows 用户的 Windows Credential Manager；保存后，Web
+  进程和已经运行的 Worker 在下一次模型调用时都会读取新密钥，无需重启；已在途的请求继续使用
+  发出时的凭据。无法使用凭据库或尚未
+  保存页面密钥时，系统继续使用该提供商配置的 API Key 环境变量作为兜底。
+- 远程 HTTP 页面不得提交 LLM 密钥。若通过 HTTPS 反向代理提供远程管理页面，代理必须受信任，
+  并正确传递原始请求 scheme 和客户端地址；否则传输守卫会拒绝请求，以避免将密钥暴露在不可信
+  的 HTTP 链路上。
 - 不要将包含真实凭证的 `data.json`、`.env`、浏览器数据或运行日志提交到 Git。
 - 榜单快照、评论和转写存在来源限制；拆解页面会保留证据与风险说明，不应将推断内容表述为平台事实。
+
+### HTTPS 反向代理与 LLM 密钥
+
+默认 `uv run WebGUI.py` 直接监听 8899，不适合让远程客户端提交 LLM 密钥。远程管理必须先在
+受控边缘代理终止 HTTPS，再只允许固定反代地址向 Uvicorn 传递 forwarded headers。本机反代可用：
+
+```powershell
+uv run uvicorn WebGUI:app --host 127.0.0.1 --port 8899 --proxy-headers --forwarded-allow-ips 127.0.0.1
+```
+
+将 `--forwarded-allow-ips` 替换为实际的固定反代 IP；严禁使用 `*`。边缘代理必须先剥离客户端
+自带的 `Forwarded` 和 `X-Forwarded-*` headers，再重写由代理可信计算的 scheme 与 client 地址。
+只有这条受信任链路可以让应用的 HTTPS/loopback 密钥传输守卫安全地判定请求来源。
 
 ## 项目结构
 

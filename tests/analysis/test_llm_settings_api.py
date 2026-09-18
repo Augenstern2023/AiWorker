@@ -23,7 +23,7 @@ from identity.schema import Principal
 from identity.dependencies import current_principal
 from analysis.llm import OpenAICompatibleLLMProvider
 
-from tests.analysis.test_llm_settings import _repository
+from tests.analysis.test_llm_settings import MemoryCredentialStore, _repository
 
 
 class _LocalLLMHandler(BaseHTTPRequestHandler):
@@ -73,6 +73,168 @@ def _api_module():
     spec = importlib.util.find_spec("analysis.llm_settings_api")
     assert spec is not None, "analysis.llm_settings_api must expose the management service"
     return importlib.import_module("analysis.llm_settings_api")
+
+
+def _loopback_test_client(app: FastAPI) -> TestClient:
+    """Give TestClient the loopback peer address its base URL represents."""
+
+    @app.middleware("http")
+    async def represent_loopback_client(request, call_next):
+        request.scope["client"] = ("127.0.0.1", 50000)
+        return await call_next(request)
+
+    return TestClient(app, base_url="http://127.0.0.1")
+
+
+@pytest.mark.parametrize("case", ["credential-array", "test-missing-model", "nested-extra"])
+def test_secret_route_validation_never_reflects_any_request_input(case):
+    """Catch secrets reflected through whole-body or unrelated-field 422 inputs."""
+    module = _api_module()
+    repository = _repository(credential_store=MemoryCredentialStore())
+    provider = repository.create_provider(
+        name="Validation", preset="custom", base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+    )
+    app = FastAPI()
+    app.include_router(module.build_llm_settings_router(
+        module.LLMSettingsService(repository), _RecordingAudit(),
+        administrator_dependency=lambda: _admin(),
+    ))
+    client = _loopback_test_client(app)
+    secret = "validation-sentinel"
+    if case == "credential-array":
+        response = client.put(
+            f"/api/llm/providers/{provider['id']}/credential", json=[{"api_key": secret}],
+        )
+    elif case == "test-missing-model":
+        response = client.post("/api/llm/test", json={"api_key": secret})
+    else:
+        response = client.put(
+            f"/api/llm/providers/{provider['id']}/credential",
+            json={"api_key": secret, "extra": {"nested": {"api_key": secret}}},
+        )
+    assert response.status_code == 422
+    assert secret not in response.text
+    assert isinstance(response.json()["detail"], str)
+
+
+@pytest.mark.parametrize(("method", "suffix", "body"), [
+    ("PUT", "/credential", {"api_key": "missing-provider-sentinel"}),
+    ("DELETE", "/credential", None),
+    ("PUT", "", {"name": "Missing"}),
+    ("DELETE", "", None),
+    ("POST", "/models", {"model_id": "test-model"}),
+    ("POST", "/models/sync", None),
+    ("POST", "/test", {"model_id": "test-model"}),
+])
+def test_provider_routes_return_404_when_provider_is_missing(method, suffix, body):
+    """Catch missing resources being mapped to a generic bad-request response."""
+    module = _api_module()
+    app = FastAPI()
+    audit = _RecordingAudit()
+    app.include_router(module.build_llm_settings_router(
+        module.LLMSettingsService(_repository(credential_store=MemoryCredentialStore())),
+        audit, administrator_dependency=lambda: _admin(),
+    ))
+    provider_id = "10000000-0000-0000-0000-000000000000"
+    url = f"/api/llm/providers/{provider_id}{suffix}"
+    if suffix == "/test":
+        url = "/api/llm/test"
+        body = {**body, "provider_id": provider_id}
+    response = _loopback_test_client(app).request(method, url, json=body)
+    assert response.status_code == 404
+    assert "missing-provider-sentinel" not in response.text
+    assert audit.events == []
+
+
+@pytest.mark.parametrize("transient", [False, True], ids=["saved", "transient"])
+@pytest.mark.parametrize("wire_api", ["chat_completions", "responses"])
+def test_connection_api_discards_upstream_authorization_echo(transient, wire_api):
+    """Catch arbitrary upstream content exposing a saved or temporary credential."""
+    module = _api_module()
+    vault = MemoryCredentialStore()
+    repository = _repository(credential_store=vault)
+    provider = repository.create_provider(
+        name="Echo", preset="custom", base_url="https://llm.example.test/v1",
+        wire_api=wire_api,
+    )
+    repository.replace_api_key(provider["id"], "saved-echo-sentinel")
+
+    def handler(request):
+        echoed = request.headers["Authorization"]
+        return httpx.Response(200, json={
+            "output_text": echoed, "choices": [{"message": {"content": echoed}}],
+        })
+
+    audit = _RecordingAudit()
+    app = FastAPI()
+    app.include_router(module.build_llm_settings_router(
+        module.LLMSettingsService(repository, transport=httpx.MockTransport(handler)),
+        audit, administrator_dependency=lambda: _admin(),
+    ))
+    body = {"provider_id": provider["id"], "model_id": "test-model"}
+    if transient:
+        body["api_key"] = "transient-echo-sentinel"
+    response = _loopback_test_client(app).post("/api/llm/test", json=body)
+    assert response.status_code == 200
+    for secret in ("saved-echo-sentinel", "transient-echo-sentinel"):
+        assert secret not in response.text
+        assert secret not in repr(audit.events)
+    assert set(response.json()) == {"status", "message", "latency_ms"}
+    assert response.json()["status"] == "success"
+
+
+@pytest.mark.parametrize("environment_present", [False, True], ids=["missing-env", "old-env"])
+def test_connection_draft_environment_cannot_override_vault(monkeypatch, environment_present):
+    """Catch draft env taking priority over a saved vault value or blocking it."""
+    module = _api_module()
+    monkeypatch.delenv("DRAFT_FALLBACK_KEY", raising=False)
+    if environment_present:
+        monkeypatch.setenv("DRAFT_FALLBACK_KEY", "old-env-sentinel")
+    repository = _repository(credential_store=MemoryCredentialStore())
+    provider = repository.create_provider(
+        name="Vault Priority", preset="custom", base_url="https://llm.example.test/v1",
+        wire_api="chat_completions", api_key_env_var="DRAFT_FALLBACK_KEY",
+    )
+    repository.replace_api_key(provider["id"], "vault-priority-sentinel")
+    sent_headers = []
+
+    def handler(request):
+        sent_headers.append(request.headers["Authorization"])
+        return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+
+    app = FastAPI()
+    app.include_router(module.build_llm_settings_router(
+        module.LLMSettingsService(repository, transport=httpx.MockTransport(handler)),
+        _RecordingAudit(), administrator_dependency=lambda: _admin(),
+    ))
+    response = _loopback_test_client(app).post("/api/llm/test", json={
+        "provider_id": provider["id"], "model_id": "test-model",
+        "api_key_env_var": "DRAFT_FALLBACK_KEY",
+    })
+    assert response.status_code == 200
+    assert sent_headers == ["Bearer vault-priority-sentinel"]
+
+
+@pytest.mark.asyncio
+async def test_connection_malformed_response_uses_safe_error_without_cause():
+    """Catch upstream refusal details leaking through parser exception chains."""
+    module = _api_module()
+
+    def handler(request):
+        return httpx.Response(200, json={
+            "status": "incomplete",
+            "incomplete_details": {"reason": request.headers["Authorization"]},
+        })
+
+    service = module.LLMSettingsService(_repository(), transport=httpx.MockTransport(handler))
+    with pytest.raises(module.LLMSettingsError, match="模型服务返回格式无效") as caught:
+        await service.test_connection(
+            base_url="https://llm.example.test/v1", api_key="malformed-sentinel",
+            model_id="test-model", wire_api="responses",
+        )
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
 
 
 @pytest.mark.asyncio
@@ -156,7 +318,7 @@ async def test_connection_uses_unsaved_draft_and_returns_latency_without_secret(
 
     assert requests[0].url.path == expected_path
     assert result["status"] == "success"
-    assert result["response_preview"] == "OK"
+    assert "response_preview" not in result
     assert result["latency_ms"] >= 0
     assert "draft-secret" not in repr(result)
 
@@ -178,7 +340,7 @@ async def test_connection_ignores_unreachable_system_proxy(
     )
 
     assert result["status"] == "success"
-    assert result["response_preview"] == "OK"
+    assert "response_preview" not in result
 
 
 @pytest.mark.asyncio
@@ -358,6 +520,370 @@ def test_provider_routes_accept_environment_variable_and_reject_plaintext_key(
         "llm.model.create",
         "llm.default_model.update",
     ]
+
+
+def test_provider_metadata_update_rejects_plaintext_key():
+    """Would catch the credential route being bypassed through provider metadata."""
+
+    module = _api_module()
+    repository = _repository()
+    provider = repository.create_provider(
+        name="Metadata Provider",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+    )
+    app = FastAPI()
+    app.include_router(
+        module.build_llm_settings_router(
+            module.LLMSettingsService(repository),
+            _RecordingAudit(),
+            administrator_dependency=lambda: _admin(),
+        )
+    )
+
+    response = TestClient(app).put(
+        f"/api/llm/providers/{provider['id']}",
+        json={"api_key": "metadata-secret"},
+    )
+
+    assert response.status_code == 400
+    assert "metadata-secret" not in response.text
+
+
+def test_system_administrator_rotates_credential_without_secret_exposure(
+    monkeypatch,
+):
+    """Would catch rotation leaking a key or returning a cached credential."""
+
+    monkeypatch.setenv("ROTATION_API_FALLBACK", "environment-secret")
+    module = _api_module()
+    vault = MemoryCredentialStore()
+    repository = _repository(credential_store=vault)
+    provider = repository.create_provider(
+        name="Rotatable Provider",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+        api_key_env_var="ROTATION_API_FALLBACK",
+    )
+    audit = _RecordingAudit()
+    app = FastAPI()
+    app.include_router(
+        module.build_llm_settings_router(
+            module.LLMSettingsService(repository),
+            audit,
+            administrator_dependency=lambda: _admin(),
+        )
+    )
+
+    response = _loopback_test_client(app).put(
+        f"/api/llm/providers/{provider['id']}/credential",
+        json={"api_key": "rotated-secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "provider_id": provider["id"],
+        "credential_status": "configured",
+        "credential_source": "credential_store",
+    }
+    assert repository.provider_connection(provider["id"])["api_key"] == "rotated-secret"
+    assert audit.events[-1]["action"] == "llm.provider.credential.replace"
+    assert audit.events[-1]["before"] == {
+        "provider_id": provider["id"],
+        "credential_status": "configured",
+        "credential_source": "environment",
+    }
+    assert audit.events[-1]["after"] == response.json()
+    assert "rotated-secret" not in response.text
+    assert "rotated-secret" not in repr(audit.events)
+
+
+def test_non_loopback_http_cannot_submit_provider_secret():
+    """Would catch a remote HTTP request being allowed to carry a provider key."""
+
+    module = _api_module()
+    repository = _repository(credential_store=MemoryCredentialStore())
+    provider = repository.create_provider(
+        name="Transport Provider",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+    )
+    app = FastAPI()
+    app.include_router(
+        module.build_llm_settings_router(
+            module.LLMSettingsService(repository),
+            _RecordingAudit(),
+            administrator_dependency=lambda: _admin(),
+        )
+    )
+
+    response = TestClient(app, base_url="http://testserver").put(
+        f"/api/llm/providers/{provider['id']}/credential",
+        json={"api_key": "never-log-this"},
+    )
+
+    assert response.status_code == 400
+    assert "本机或 HTTPS" in response.json()["detail"]
+    assert "never-log-this" not in response.text
+
+
+def test_https_can_submit_provider_secret():
+    """Would catch the transport guard rejecting a secure remote request."""
+
+    module = _api_module()
+    vault = MemoryCredentialStore()
+    repository = _repository(credential_store=vault)
+    provider = repository.create_provider(
+        name="HTTPS Provider",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+    )
+    app = FastAPI()
+    app.include_router(
+        module.build_llm_settings_router(
+            module.LLMSettingsService(repository),
+            _RecordingAudit(),
+            administrator_dependency=lambda: _admin(),
+        )
+    )
+
+    response = TestClient(app, base_url="https://admin.example.test").put(
+        f"/api/llm/providers/{provider['id']}/credential",
+        json={"api_key": "https-only-secret"},
+    )
+
+    assert response.status_code == 200
+    assert vault.get(provider["id"]) == "https-only-secret"
+    assert "https-only-secret" not in response.text
+
+
+def test_non_administrator_cannot_rotate_provider_credential():
+    """Would catch ordinary users gaining access to the credential route."""
+
+    module = _api_module()
+    repository = _repository(credential_store=MemoryCredentialStore())
+    provider = repository.create_provider(
+        name="Restricted Provider",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+    )
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = _non_admin
+    app.include_router(
+        module.build_llm_settings_router(
+            module.LLMSettingsService(repository), _RecordingAudit()
+        )
+    )
+
+    response = _loopback_test_client(app).put(
+        f"/api/llm/providers/{provider['id']}/credential",
+        json={"api_key": "forbidden-secret"},
+    )
+
+    assert response.status_code == 403
+    assert "forbidden-secret" not in response.text
+
+
+@pytest.mark.parametrize("api_key", ["", " "])
+def test_provider_credential_requires_non_empty_secret(api_key):
+    """Would catch the credential route accepting an empty key."""
+
+    module = _api_module()
+    repository = _repository(credential_store=MemoryCredentialStore())
+    provider = repository.create_provider(
+        name="Validated Provider",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+    )
+    app = FastAPI()
+    app.include_router(
+        module.build_llm_settings_router(
+            module.LLMSettingsService(repository),
+            _RecordingAudit(),
+            administrator_dependency=lambda: _admin(),
+        )
+    )
+
+    response = _loopback_test_client(app).put(
+        f"/api/llm/providers/{provider['id']}/credential",
+        json={"api_key": api_key},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "API Key 格式无效"}
+
+
+def test_credential_store_failure_is_unavailable_without_secret_exposure():
+    """Would catch a vault write failure becoming a client error or leaking its key."""
+
+    module = _api_module()
+
+    class FailingStore(MemoryCredentialStore):
+        def set(self, provider_id: str, api_key: str) -> None:
+            del provider_id, api_key
+            raise module.LLMCredentialStoreError("系统凭据库不可用")
+
+    repository = _repository(credential_store=FailingStore())
+    provider = repository.create_provider(
+        name="Unavailable Vault",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+    )
+    app = FastAPI()
+    app.include_router(
+        module.build_llm_settings_router(
+            module.LLMSettingsService(repository),
+            _RecordingAudit(),
+            administrator_dependency=lambda: _admin(),
+        )
+    )
+
+    response = _loopback_test_client(app).put(
+        f"/api/llm/providers/{provider['id']}/credential",
+        json={"api_key": "write-failure-secret"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "系统凭据库不可用"
+    assert "write-failure-secret" not in response.text
+
+
+def test_clearing_credential_falls_back_to_environment_without_secret_exposure(
+    monkeypatch,
+):
+    """Would catch clearing a vault credential preventing environment fallback."""
+
+    monkeypatch.setenv("CLEAR_ROUTE_FALLBACK", "environment-fallback-secret")
+    module = _api_module()
+    vault = MemoryCredentialStore()
+    repository = _repository(credential_store=vault)
+    provider = repository.create_provider(
+        name="Clearable Provider",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+        api_key_env_var="CLEAR_ROUTE_FALLBACK",
+    )
+    repository.replace_api_key(provider["id"], "stored-secret")
+    audit = _RecordingAudit()
+    app = FastAPI()
+    app.include_router(
+        module.build_llm_settings_router(
+            module.LLMSettingsService(repository),
+            audit,
+            administrator_dependency=lambda: _admin(),
+        )
+    )
+
+    response = _loopback_test_client(app).delete(
+        f"/api/llm/providers/{provider['id']}/credential"
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "provider_id": provider["id"],
+        "credential_status": "configured",
+        "credential_source": "environment",
+    }
+    assert repository.provider_connection(provider["id"])["api_key"] == (
+        "environment-fallback-secret"
+    )
+    assert audit.events[-1]["action"] == "llm.provider.credential.clear"
+    assert audit.events[-1]["before"] == {
+        "provider_id": provider["id"],
+        "credential_status": "configured",
+        "credential_source": "credential_store",
+    }
+    assert audit.events[-1]["after"] == response.json()
+    assert "stored-secret" not in response.text
+    assert "stored-secret" not in repr(audit.events)
+
+
+def test_connection_test_accepts_transient_secret_without_persisting_it():
+    """Would catch a submitted test credential being retained by the repository."""
+
+    module = _api_module()
+    vault = MemoryCredentialStore()
+    repository = _repository(credential_store=vault)
+    provider = repository.create_provider(
+        name="Transient Test Provider",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer transient-secret"
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "OK"}}]}
+        )
+
+    audit = _RecordingAudit()
+    app = FastAPI()
+    app.include_router(
+        module.build_llm_settings_router(
+            module.LLMSettingsService(
+                repository, transport=httpx.MockTransport(handler)
+            ),
+            audit,
+            administrator_dependency=lambda: _admin(),
+        )
+    )
+
+    response = _loopback_test_client(app).post(
+        "/api/llm/test",
+        json={
+            "provider_id": provider["id"],
+            "api_key": "transient-secret",
+            "model_id": "test-model",
+        },
+    )
+
+    assert response.status_code == 200
+    assert vault.get(provider["id"]) is None
+    assert "transient-secret" not in response.text
+    assert "transient-secret" not in repr(audit.events)
+
+
+@pytest.mark.parametrize("api_key", ["", " "])
+def test_connection_test_rejects_blank_transient_secret_without_reflection(api_key):
+    """Would catch invalid transient keys reaching the connection service."""
+
+    module = _api_module()
+    repository = _repository(credential_store=MemoryCredentialStore())
+    provider = repository.create_provider(
+        name="Transient Validation Provider",
+        preset="custom",
+        base_url="https://llm.example.test/v1",
+        wire_api="chat_completions",
+    )
+    app = FastAPI()
+    app.include_router(
+        module.build_llm_settings_router(
+            module.LLMSettingsService(repository),
+            _RecordingAudit(),
+            administrator_dependency=lambda: _admin(),
+        )
+    )
+
+    response = _loopback_test_client(app).post(
+        "/api/llm/test",
+        json={
+            "provider_id": provider["id"],
+            "api_key": api_key,
+            "model_id": "test-model",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "API Key 格式无效"}
 
 
 def test_model_delete_route_removes_non_default_and_rejects_default(monkeypatch):
@@ -590,7 +1116,7 @@ def test_route_can_test_an_environment_variable_before_saving_provider_changes(
     )
 
     assert response.status_code == 200
-    assert response.json()["response_preview"] == "OK"
+    assert "response_preview" not in response.json()
 
 
 def test_route_uses_saved_provider_environment_variable(monkeypatch):

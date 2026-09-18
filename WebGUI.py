@@ -70,7 +70,7 @@ from analysis.llm import (
     configure_llm_settings_repository,
     create_llm_provider_from_config,
 )
-from analysis.llm_settings import LLMSettingsRepository
+from analysis.llm_settings import web_settings_repository
 from analysis.llm_settings_api import LLMSettingsService, build_llm_settings_router
 from analysis.today_rank_api import register_today_rank_routes
 from analysis.today_rank_service import TodayRankService
@@ -540,7 +540,7 @@ audit_service = AuditService(
     service_instance_id=service_instance_id,
     creative_store_id=creative_repository.store_id,
 )
-llm_settings_repository = LLMSettingsRepository(system_database)
+llm_settings_repository = web_settings_repository(system_database)
 legacy_llm_import = llm_settings_repository.import_legacy(config)
 if legacy_llm_import.get("imported"):
     audit_service.record(

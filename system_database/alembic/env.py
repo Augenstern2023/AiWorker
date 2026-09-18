@@ -15,9 +15,11 @@ from sqlalchemy import engine_from_config, pool
 from system_database.config import SystemDatabaseSettings
 from system_database.schema import SYSTEM_METADATA
 
+from creative.database_schema import CREATIVE_METADATA
+
 
 config = context.config
-target_metadata = SYSTEM_METADATA
+target_metadata = (SYSTEM_METADATA, CREATIVE_METADATA)
 
 
 def _database_url() -> str:

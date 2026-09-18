@@ -128,6 +128,9 @@ LLM_ALLOW_INSECURE_HTTP = os.getenv("LLM_ALLOW_INSECURE_HTTP", "")
 LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", "180"))
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
 LLM_RETRY_BASE_DELAY = float(os.getenv("LLM_RETRY_BASE_DELAY", "1"))
+# 单次模型调用的输出上限（token）。0 表示不发送该参数、沿用网关默认上限。
+# 取 32768 是为给「高推理 + 结构化输出」留出余量；网关若拒绝该值会自动降级为不发送。
+LLM_MAX_OUTPUT_TOKENS = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "32768"))
 PROJECT_REVIEW_LLM_REASONING_EFFORT = _env_choice(
     "PROJECT_REVIEW_LLM_REASONING_EFFORT",
     "high",

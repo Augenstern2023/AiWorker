@@ -235,10 +235,11 @@ class LLMSettingsService:
         )
         try:
             # Validate the protocol, but never return untrusted upstream text.
+            # 连接测试只校验协议：16 token 的探测被截断属正常，不应判为格式无效。
             if wire_api == "responses":
                 parse_responses_text(payload)
             else:
-                parse_chat_completion_text(payload)
+                parse_chat_completion_text(payload, reject_truncated=False)
         except (LLMError, TypeError, ValueError, AttributeError):
             raise LLMSettingsError("模型服务返回格式无效") from None
         return {

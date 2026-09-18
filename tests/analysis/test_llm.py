@@ -32,7 +32,9 @@ from screenplay_review.service import _review_messages
 from writer_agent.service import writer_messages
 from tests.analysis.test_llm_settings import MemoryCredentialStore, _repository
 from analysis.llm import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
     LLMError,
+    LLMOutputTruncatedError,
     LLMTimeoutError,
     OpenAICompatibleLLMProvider,
     build_responses_request_body,
@@ -1146,3 +1148,181 @@ def test_provider_factory_does_not_decrypt_unrelated_default_for_explicit_model(
     assert provider.provider_id == "burncloud-provider"
     assert provider.model == "gemini-3.5-flash"
     assert provider.api_key == "burncloud-key"
+
+
+def _ok_chat_handler(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        200,
+        request=request,
+        json={"choices": [{"message": {"content": '{"ok": true}'}}]},
+    )
+
+
+def test_resolve_llm_settings_exposes_the_default_output_limit():
+    class DummyConfig:
+        pass
+
+    assert (
+        resolve_llm_settings(DummyConfig)["max_output_tokens"]
+        == DEFAULT_MAX_OUTPUT_TOKENS
+    )
+
+
+def test_resolve_llm_settings_reads_a_configured_output_limit():
+    class DummyConfig:
+        LLM_MAX_OUTPUT_TOKENS = 9000
+
+    assert resolve_llm_settings(DummyConfig)["max_output_tokens"] == 9000
+
+
+def test_chat_completions_sends_the_configured_output_limit():
+    request_body = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_body.update(json.loads(request.content))
+        return _ok_chat_handler(request)
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://example.test/v1",
+        api_key="key",
+        model="test-model",
+        max_output_tokens=24576,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert asyncio.run(
+        provider.complete_text([{"role": "user", "content": "test"}], json_mode=True)
+    ) == '{"ok": true}'
+    assert request_body["max_tokens"] == 24576
+    assert provider.last_request_summary["max_tokens"] == 24576
+    assert provider.last_request_summary["protocol"] == "chat_completions"
+    assert provider.last_request_summary["response_format"] == "json_object"
+
+
+@pytest.mark.parametrize(
+    "rejection",
+    [
+        "max_tokens is too large for this model",
+        "This model's maximum context length is 16384 tokens.",
+    ],
+)
+def test_chat_completions_drops_the_output_limit_when_the_gateway_rejects_it(rejection):
+    request_bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_bodies.append(json.loads(request.content))
+        if "max_tokens" in request_bodies[-1]:
+            return httpx.Response(400, request=request, text=rejection)
+        return _ok_chat_handler(request)
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://example.test/v1",
+        api_key="key",
+        model="test-model",
+        max_retries=0,
+        max_output_tokens=64000,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert asyncio.run(
+        provider.complete_text([{"role": "user", "content": "test"}], json_mode=True)
+    ) == '{"ok": true}'
+    assert "max_tokens" in request_bodies[0]
+    assert "max_tokens" not in request_bodies[1]
+    assert provider.max_output_tokens_rejected is True
+
+
+def test_chat_completions_requests_a_strict_json_schema_when_supported():
+    request_body = {}
+    schema = {
+        "type": "object",
+        "required": ["characters"],
+        "properties": {"characters": {"type": "array"}},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_body.update(json.loads(request.content))
+        return _ok_chat_handler(request)
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://example.test/v1",
+        api_key="key",
+        model="test-model",
+        max_output_tokens=0,
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = asyncio.run(
+        provider.complete_json([{"role": "user", "content": "test"}], schema=schema)
+    )
+
+    assert result["ok"] is True
+    response_format = request_body["response_format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["strict"] is True
+    assert response_format["json_schema"]["schema"] == schema
+    assert "max_tokens" not in request_body
+    assert provider.last_request_summary["response_format"] == "json_schema"
+
+
+def test_chat_completions_falls_back_to_json_object_when_the_schema_is_rejected():
+    request_bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        request_bodies.append(body)
+        if body["response_format"]["type"] == "json_schema":
+            return httpx.Response(
+                400,
+                request=request,
+                text="response_format json_schema is not supported",
+            )
+        return _ok_chat_handler(request)
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://example.test/v1",
+        api_key="key",
+        model="test-model",
+        max_retries=0,
+        max_output_tokens=0,
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = asyncio.run(
+        provider.complete_json([{"role": "user", "content": "test"}], schema={"type": "object"})
+    )
+
+    assert result["ok"] is True
+    assert request_bodies[0]["response_format"]["type"] == "json_schema"
+    assert request_bodies[1]["response_format"] == {"type": "json_object"}
+    assert provider.json_schema_supported is False
+
+
+def test_chat_completions_reports_truncated_output_instead_of_repairing_it():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": '{"characters": [{"name": "林穗"'},
+                        "finish_reason": "length",
+                    }
+                ]
+            },
+        )
+
+    provider = OpenAICompatibleLLMProvider(
+        base_url="https://example.test/v1",
+        api_key="key",
+        model="test-model",
+        max_retries=0,
+        max_output_tokens=0,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(LLMOutputTruncatedError, match="截断"):
+        asyncio.run(
+            provider.complete_text([{"role": "user", "content": "test"}], json_mode=True)
+        )

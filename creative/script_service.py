@@ -46,7 +46,9 @@ def _project_context(project: dict[str, Any]) -> dict[str, Any]:
     return {key: project.get(key) for key in keys}
 
 
-def _require_fields(item: dict[str, Any], required: set[str], label: str) -> dict[str, Any]:
+def _require_fields(
+    item: dict[str, Any], required: set[str] | frozenset[str], label: str
+) -> dict[str, Any]:
     missing = required - set(item)
     if missing:
         raise ValueError(f"{label}缺少字段：{sorted(missing)}")
@@ -73,23 +75,129 @@ def _normalize_scene_number(value: Any, field_label: str) -> int:
     return number
 
 
+CHARACTER_FIELDS = frozenset({
+    "name", "age_range", "identity", "external_tags", "desire", "secret",
+    "growth_arc", "dialogue_style", "appearance_prompt", "voice_prompt", "action_goal",
+    "fear_of_loss", "behavioral_contradiction", "pressure_response", "bottom_line",
+})
+RELATIONSHIP_FIELDS = frozenset({"from", "to", "relation", "conflict", "change_arc"})
+
+# 模型偶发会把键名写成近义词或中文，这里按别名兜住，避免整套人物卡被丢弃。
+CHARACTER_KEY_ALIASES = ("characters", "character_cards", "roles", "人物卡", "人物")
+RELATIONSHIP_KEY_ALIASES = (
+    "relationships", "relations", "character_relationships", "relationship", "人物关系",
+)
+
+CHARACTER_BUNDLE_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["characters", "relationships"],
+    "properties": {
+        "characters": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": sorted(CHARACTER_FIELDS),
+                "properties": {
+                    field: (
+                        {"type": "array", "items": {"type": "string"}}
+                        if field == "external_tags"
+                        else {"type": "string"}
+                    )
+                    for field in sorted(CHARACTER_FIELDS)
+                },
+            },
+        },
+        "relationships": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": sorted(RELATIONSHIP_FIELDS),
+                "properties": {
+                    field: {"type": "string"} for field in sorted(RELATIONSHIP_FIELDS)
+                },
+            },
+        },
+    },
+}
+
+
+def _first_present(payload: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in payload and payload[key] is not None:
+            return payload[key]
+    return None
+
+
+def _normalize_object_list(
+    value: Any, *, item_fields: frozenset[str]
+) -> list[Any] | None:
+    """把模型常见的偏离形态归一化成人/关系数组；无法识别为数组时返回 None。
+
+    接受的形态：数组原样返回；对象按「单条记录」或「键值映射」两种语义展开；
+    null 与空串视为空数组；字符串若是 JSON 数组则解析。字段是否齐全仍由
+    `_require_fields` 严格校验，这里只放宽形状。
+    """
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+    if isinstance(value, dict):
+        if not value:
+            return []
+        if item_fields & set(value):
+            return [dict(value)]
+        return list(value.values())
+    if isinstance(value, list):
+        return value
+    return None
+
+
+def _require_object_items(items: list[Any], label: str) -> list[dict[str, Any]]:
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError(f"{label}每一项必须是对象")
+    return items
+
+
 def _validate_character_bundle(payload: dict[str, Any]) -> dict[str, Any]:
-    characters = payload.get("characters")
-    relationships = payload.get("relationships")
-    if not isinstance(characters, list) or not characters:
+    if not isinstance(payload, dict):
+        raise ValueError("人物与人物关系必须返回 JSON 对象")
+    characters = _normalize_object_list(
+        _first_present(payload, CHARACTER_KEY_ALIASES), item_fields=CHARACTER_FIELDS
+    )
+    relationships = _normalize_object_list(
+        _first_present(payload, RELATIONSHIP_KEY_ALIASES), item_fields=RELATIONSHIP_FIELDS
+    )
+    if characters is None:
+        raise ValueError("characters 必须是数组")
+    if not characters:
         raise ValueError("characters 至少包含一个人物")
-    if not isinstance(relationships, list):
+    if relationships is None:
         raise ValueError("relationships 必须是数组")
-    character_fields = {
-        "name", "age_range", "identity", "external_tags", "desire", "secret",
-        "growth_arc", "dialogue_style", "appearance_prompt", "voice_prompt", "action_goal",
-        "fear_of_loss", "behavioral_contradiction", "pressure_response", "bottom_line",
-    }
-    relationship_fields = {"from", "to", "relation", "conflict", "change_arc"}
-    return {
-        "characters": [_require_fields(item, character_fields, "人物卡") for item in characters],
-        "relationships": [_require_fields(item, relationship_fields, "人物关系") for item in relationships],
-    }
+    characters = [
+        _require_fields(item, CHARACTER_FIELDS, "人物卡")
+        for item in _require_object_items(characters, "人物卡")
+    ]
+    relationships = [
+        _require_fields(item, RELATIONSHIP_FIELDS, "人物关系")
+        for item in _require_object_items(relationships, "人物关系")
+    ]
+    # 空关系本身合法（例如全剧只有一个人物），但多人物却没有关系通常是模型漏输出，
+    # 记一条告警便于事后定位，不因此判定任务失败。
+    if not relationships and len(characters) > 1:
+        logger.warning(
+            "人物关系为空：%s 张人物卡未产出任何关系，可能为模型漏输出", len(characters)
+        )
+    return {"characters": characters, "relationships": relationships}
 
 
 def _validate_series_arc(payload: dict[str, Any]) -> dict[str, Any]:
@@ -368,11 +476,15 @@ async def generate_character_bundle(
     provider: Any,
     project: dict[str, Any],
     brief: dict[str, Any],
+    *,
+    on_attempt: Callable[[dict[str, Any]], Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     bundle, meta = await complete_with_one_repair(
         provider,
         character_messages({"project": _project_context(project), "locked_brief": brief}),
         _validate_character_bundle,
+        on_attempt=on_attempt,
+        json_schema=CHARACTER_BUNDLE_JSON_SCHEMA,
     )
     meta["prompt_template_version"] = PROMPT_TEMPLATE_VERSION
     return bundle, meta

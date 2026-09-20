@@ -563,7 +563,9 @@ class JobManager:
         elif not job_types - _CONCURRENT_SCREENPLAY_OPTIMIZATION_TYPES:
             existing_identity = str(existing_extra.get("optimization_id") or "").strip()
             incoming_identity = str(incoming_extra.get("optimization_id") or "").strip()
-        elif not job_types - _CONCURRENT_VIDEO_PARAMETER_TYPES:
+        elif job_types & _CONCURRENT_VIDEO_PARAMETER_TYPES:
+            if existing.crawler_type != incoming.crawler_type:
+                return True
             existing_identity = str(existing_extra.get("project_id") or "").strip()
             incoming_identity = str(incoming_extra.get("project_id") or "").strip()
         else:

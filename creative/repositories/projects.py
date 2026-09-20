@@ -1171,6 +1171,30 @@ class ProjectsRepository:
         )
         return self.get_video_parameter_recommendation(project_id) or {}
 
+    def restore_video_parameter_recommendation(
+        self, project_id: int
+    ) -> dict[str, Any] | None:
+        """Restore the last usable recommendation after launch was rejected."""
+
+        record = self.get_video_parameter_recommendation(project_id)
+        recommendation = (record or {}).get("recommendation")
+        if (
+            not record
+            or record.get("status") not in {"queued", "failed"}
+            or not record.get("source_fingerprint")
+            or not isinstance(recommendation, dict)
+            or not recommendation
+        ):
+            return None
+        self._update_video_parameter_recommendation(
+            project_id,
+            {
+                "status": "ready",
+                "analysis_error": str(recommendation.get("analysis_error") or ""),
+            },
+        )
+        return self.get_video_parameter_recommendation(project_id)
+
     def confirm_video_parameter_recommendation(
         self,
         project_id: int,

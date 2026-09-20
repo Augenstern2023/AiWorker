@@ -416,6 +416,78 @@ def test_job_manager_allows_independent_creative_generation_jobs(
     assert another_project.job_id == "outlines-project-2"
 
 
+def test_video_parameter_analysis_can_run_with_active_creative_generation(
+    monkeypatch, tmp_path
+):
+    """Read-only analysis must not inherit the platform-wide creative lock."""
+    monkeypatch.setattr(
+        "runtime.job_manager.launch_worker", lambda *_args, **_kwargs: FakeProcess()
+    )
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    generation = CrawlJob(
+        job_id="script-episode-10",
+        platform="creative",
+        crawler_type="phase4_generate",
+        extra={
+            "project_id": 3,
+            "action": "script",
+            "episode_number": 10,
+        },
+    )
+    manager.jobs[generation.job_id] = JobState(job=generation, status="running")
+    manager.processes[generation.job_id] = FakeProcess()
+
+    analysis = manager.start_job(
+        CrawlJob(
+            job_id="video-parameters-project-3",
+            platform="creative",
+            crawler_type="video_parameter_recommendation",
+            extra={"project_id": 3},
+        ),
+        start_monitor=False,
+    )
+
+    assert analysis.job_id == "video-parameters-project-3"
+
+
+def test_video_parameter_analysis_remains_project_scoped(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "runtime.job_manager.launch_worker", lambda *_args, **_kwargs: FakeProcess()
+    )
+    manager = JobManager(runtime_dir=tmp_path, cwd=tmp_path)
+    existing = CrawlJob(
+        job_id="video-parameters-project-3",
+        platform="creative",
+        crawler_type="video_parameter_recommendation",
+        extra={"project_id": 3},
+    )
+    manager.jobs[existing.job_id] = JobState(job=existing, status="running")
+    manager.processes[existing.job_id] = FakeProcess()
+
+    with pytest.raises(JobConflictError, match="platform 'creative'"):
+        manager.start_job(
+            CrawlJob(
+                job_id="video-parameters-project-3-duplicate",
+                platform="creative",
+                crawler_type="video_parameter_recommendation",
+                extra={"project_id": 3},
+            ),
+            start_monitor=False,
+        )
+
+    independent = manager.start_job(
+        CrawlJob(
+            job_id="video-parameters-project-4",
+            platform="creative",
+            crawler_type="video_parameter_recommendation",
+            extra={"project_id": 4},
+        ),
+        start_monitor=False,
+    )
+
+    assert independent.job_id == "video-parameters-project-4"
+
+
 @pytest.mark.parametrize(
     ("extra", "duplicate_extra"),
     [

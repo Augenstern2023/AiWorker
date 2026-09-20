@@ -142,6 +142,29 @@ _MODE_MIGRATION_NON_BLOCKING_JOB_TYPES = frozenset({
     "screenplay_review",
     "video_parameter_recommendation",
 })
+_CREATIVE_PLATFORM_BUSY_ERROR = "platform 'creative' already has a running job"
+
+
+def _recover_transient_video_parameter_conflict(
+    repository: Any,
+    project_id: int,
+    record: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Recover a retained recommendation polluted by the old platform lock."""
+
+    if (
+        record
+        and record.get("status") == "failed"
+        and str(record.get("analysis_error") or "")
+        == _CREATIVE_PLATFORM_BUSY_ERROR
+    ):
+        if record.get("source_fingerprint") and record.get("recommendation"):
+            return (
+                repository.restore_video_parameter_recommendation(project_id)
+                or record
+            )
+        return None
+    return record
 
 
 class TopicGenerateRequest(BaseModel):
@@ -4683,6 +4706,9 @@ def build_creative_router(
         project: dict[str, Any]
     ) -> dict[str, Any]:
         record = repository.get_video_parameter_recommendation(int(project["id"]))
+        record = _recover_transient_video_parameter_conflict(
+            repository, int(project["id"]), record
+        )
         deadline_seconds = video_parameter_analysis_deadline_seconds(config)
         job_view: dict[str, Any] | None = None
 
@@ -4821,7 +4847,8 @@ def build_creative_router(
                 project_id=project_id,
             )
         except JobConflictError as exc:
-            repository.fail_video_parameter_recommendation(project_id, str(exc))
+            if repository.restore_video_parameter_recommendation(project_id) is None:
+                repository.fail_video_parameter_recommendation(project_id, str(exc))
             raise HTTPException(409, str(exc)) from exc
         except Exception as exc:
             repository.fail_video_parameter_recommendation(project_id, str(exc))

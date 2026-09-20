@@ -17,6 +17,7 @@ import pytest
 
 from analysis.llm import resolve_llm_settings
 from creative.api import (
+    _recover_transient_video_parameter_conflict,
     build_episode_selection_download,
     build_merged_script_download,
     video_parameter_export_record,
@@ -192,6 +193,108 @@ def test_repository_persists_three_independent_confirmations(postgres_creative) 
 
     repository.queue_video_parameter_recommendation(project["id"], created_by="writer-1")
     assert set(repository.get_video_parameter_recommendation(project["id"])["confirmed"]) == set(MODEL_CAPABILITIES)
+
+
+def test_repository_restores_previous_recommendation_after_job_conflict(
+    postgres_creative,
+) -> None:
+    repository = postgres_creative
+    project = repository.create_original_project(
+        seed_text="一个直播间复仇故事",
+        name="视频参数冲突恢复",
+        target_episode_count=1,
+        target_platform="dy",
+        genre="都市",
+        target_audience="年轻用户",
+        constraints={},
+        reference_refs=[],
+        created_by="writer-1",
+        creation_request_id="video-parameters-conflict-recovery",
+    )
+    source = {
+        "fingerprint": "b" * 64,
+        "episode_numbers": [1],
+        "complete": True,
+        "target_platform": "dy",
+        "scripts": [],
+    }
+    recommendation = fallback_recommendation(source)
+    repository.queue_video_parameter_recommendation(
+        project["id"], created_by="writer-1"
+    )
+    ready = repository.complete_video_parameter_recommendation(
+        project["id"],
+        source_fingerprint=source["fingerprint"],
+        source_episode_numbers=[1],
+        source_complete=True,
+        recommendation=recommendation,
+    )
+
+    repository.queue_video_parameter_recommendation(
+        project["id"], created_by="writer-1"
+    )
+    repository.fail_video_parameter_recommendation(
+        project["id"], "platform 'creative' already has a running job"
+    )
+    restored = repository.restore_video_parameter_recommendation(project["id"])
+
+    assert restored is not None
+    assert restored["status"] == "ready"
+    assert restored["analysis_error"] == recommendation["analysis_error"]
+    assert restored["recommendation"] == recommendation
+    assert restored["generated_at"] == ready["generated_at"]
+
+
+def test_transient_conflict_recovery_keeps_a_previous_recommendation() -> None:
+    recovered = {
+        "project_id": 23,
+        "status": "ready",
+        "analysis_error": "",
+        "recommendation": {"models": {"minimax_h3": {}}},
+    }
+
+    class FakeRepository:
+        restored_project_id = 0
+
+        def restore_video_parameter_recommendation(self, project_id: int):
+            self.restored_project_id = project_id
+            return recovered
+
+    repository = FakeRepository()
+    result = _recover_transient_video_parameter_conflict(
+        repository,
+        23,
+        {
+            "project_id": 23,
+            "status": "failed",
+            "analysis_error": "platform 'creative' already has a running job",
+            "source_fingerprint": "c" * 64,
+            "recommendation": {"models": {"minimax_h3": {}}},
+        },
+    )
+
+    assert result == recovered
+    assert repository.restored_project_id == 23
+
+
+def test_transient_conflict_without_a_previous_recommendation_is_hidden() -> None:
+    class FakeRepository:
+        def restore_video_parameter_recommendation(self, _project_id: int):
+            raise AssertionError("empty conflicts must not be restored as ready")
+
+    result = _recover_transient_video_parameter_conflict(
+        FakeRepository(),
+        3,
+        {
+            "project_id": 3,
+            "status": "failed",
+            "analysis_error": "platform 'creative' already has a running job",
+            "source_fingerprint": "",
+            "recommendation": {},
+        },
+    )
+
+    assert result is None
 
 
 def test_merged_script_download_adds_model_grouped_recommendations() -> None:

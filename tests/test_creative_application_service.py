@@ -26,8 +26,8 @@ from identity.schema import Principal
 
 
 @pytest.fixture
-def creative_context(tmp_path: Path) -> SimpleNamespace:
-    repository = CreativeRepository(tmp_path / "creative.db")
+def creative_context(tmp_path: Path, postgres_creative) -> SimpleNamespace:
+    repository = postgres_creative
     workflow = MagicMock()
     workflow.ensure_project_task.return_value = {
         "id": "brief-task",

@@ -12,7 +12,11 @@ from typing import Any, Callable
 
 import config
 
-from analysis.llm import LLMOutputTruncatedError, create_llm_provider_from_config
+from analysis.llm import (
+    LLMOutputTruncatedError,
+    create_llm_provider_from_config,
+    get_llm_usage_snapshot,
+)
 from core.job import CrawlJob
 from creative.free_mode_service import FreeCreativeModeService
 from creative.original_direction_service import generate_original_directions
@@ -65,7 +69,9 @@ def _llm_generation_meta(
 
 
 def _usage_payload(job: CrawlJob, payload: dict[str, Any]) -> dict[str, Any]:
-    return dict(payload)
+    return {**payload, "llm_usage": get_llm_usage_snapshot(
+        *getattr(job, "_llm_usage_providers", ())
+    )}
 
 
 def _prompt_inputs(
@@ -176,6 +182,7 @@ async def _run_free_episode_series(
         contexts[episode_number] = context
 
     provider = _create_generation_provider(extra)
+    job._llm_usage_providers.append(provider)
     llm_meta = _llm_generation_meta(
         provider, str(extra.get("llm_model_record_id") or "")
     )
@@ -440,6 +447,7 @@ async def run_free_generation(
     repository: CreativeRepository,
     emit: Callable[..., None],
 ) -> None:
+    job._llm_usage_providers = []
     extra = dict(job.extra or {})
     action = str(extra.get("action") or "")
     stage = str(extra.get("normalized_stage") or "")
@@ -505,6 +513,7 @@ async def run_free_generation(
     )
     project.update(snapshot.get("project") or {})
     provider = _create_generation_provider(extra)
+    job._llm_usage_providers.append(provider)
     meta_base = {
         **_llm_generation_meta(
             provider, str(extra.get("llm_model_record_id") or "")

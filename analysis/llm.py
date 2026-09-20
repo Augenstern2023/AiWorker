@@ -31,10 +31,8 @@ from json_repair import repair_json
 
 logger = logging.getLogger(__name__)
 
-# 单次调用的输出上限。网关默认值往往远小于创作长文所需，因此显式声明并允许配置覆盖；
-# 0 表示不发送该参数、沿用网关默认值。
+# 单次调用的默认输出上限。0 表示不发送该参数、沿用网关默认值。
 DEFAULT_MAX_OUTPUT_TOKENS = 32768
-TRUNCATED_FINISH_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
 
 _CONFIGURED_LLM_SETTINGS_REPOSITORY: Any | None = None
 
@@ -118,17 +116,15 @@ class LLMOutputTruncatedError(LLMIncompleteResponseError):
     def __init__(
         self,
         message: str,
-        partial_text: str = "",
         *,
-        finish_reason: str = "",
+        finish_reason: str,
         returned_chars: int = 0,
+        partial_text: str = "",
     ) -> None:
         super().__init__(message)
-        self.partial_text = str(partial_text or "")
         self.finish_reason = str(finish_reason or "").strip().lower()
-        self.returned_chars = max(
-            0, int(returned_chars or len(self.partial_text))
-        )
+        self.returned_chars = max(0, int(returned_chars or 0))
+        self.partial_text = partial_text
 
 
 class LLMRefusalError(LLMError):
@@ -138,6 +134,62 @@ class LLMRefusalError(LLMError):
 class LLMProvider:
     async def analyze_video(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         raise NotImplementedError
+
+
+_USAGE_COUNTERS = (
+    "call_count", "reported_call_count", "input_reported_call_count",
+    "output_reported_call_count", "total_reported_call_count", "input_tokens",
+    "output_tokens", "total_tokens", "cached_tokens", "reasoning_tokens",
+)
+
+
+def _usage_integer(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def get_llm_usage_snapshot(*providers: Any) -> dict[str, Any]:
+    """Merge actual provider counters once per instance, including fallbacks.
+
+    Unsupported providers contribute no tokens and prevent complete coverage.
+    No provider references or credentials escape into the returned snapshot.
+    """
+    result = dict.fromkeys(_USAGE_COUNTERS, 0)
+    visited: set[int] = set()
+    supported = True
+
+    def collect(provider: Any) -> None:
+        nonlocal supported
+        if id(provider) in visited:
+            return
+        visited.add(id(provider))
+        if isinstance(provider, OpenAICompatibleLLMProvider):
+            snapshot = provider._usage
+        else:
+            reader = getattr(provider, "usage_snapshot", None)
+            snapshot = reader() if callable(reader) else None
+            if not isinstance(snapshot, dict):
+                supported = False
+                return
+            supported = supported and snapshot.get("complete") is True
+        for key in _USAGE_COUNTERS:
+            value = _usage_integer(snapshot.get(key))
+            if value is None:
+                supported = False
+            else:
+                result[key] += value
+        fallback = getattr(provider, "fallback_provider", None)
+        if fallback is not None:
+            collect(fallback)
+
+    for provider in providers:
+        collect(provider)
+    result["complete"] = supported and result["call_count"] > 0 and all(
+        result[key] == result["call_count"] for key in (
+            "reported_call_count", "input_reported_call_count",
+            "output_reported_call_count", "total_reported_call_count",
+        )
+    )
+    return result
 
 
 class OpenAICompatibleLLMProvider(LLMProvider):
@@ -178,11 +230,43 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         self.retry_read_timeouts = bool(retry_read_timeouts)
         self.transport = transport
         self.retry_callback = retry_callback
-        # 网关能力探测结果：一旦被拒就降级，避免每次调用都失败一次。
+        self._usage = dict.fromkeys(_USAGE_COUNTERS, 0)
         self.json_schema_supported = True
         self.max_output_tokens_rejected = False
-        # 最近一次请求的实际参数，供任务日志确认「我们到底发了什么」。
         self.last_request_summary: Dict[str, Any] = {}
+
+    def usage_snapshot(self) -> dict[str, Any]:
+        return get_llm_usage_snapshot(self)
+
+    def _record_usage(self, payload: Any, *, responses: bool) -> None:
+        usage = payload.get("usage") if isinstance(payload, dict) else None
+        if not isinstance(usage, dict):
+            return
+        input_key = "input_tokens" if responses else "prompt_tokens"
+        output_key = "output_tokens" if responses else "completion_tokens"
+        values = {
+            "input_tokens": _usage_integer(usage.get(input_key)),
+            "output_tokens": _usage_integer(usage.get(output_key)),
+            "total_tokens": _usage_integer(usage.get("total_tokens")),
+        }
+        if values["total_tokens"] is None and all(
+            values[key] is not None for key in ("input_tokens", "output_tokens")
+        ):
+            values["total_tokens"] = values["input_tokens"] + values["output_tokens"]
+        if any(value is not None for value in values.values()):
+            self._usage["reported_call_count"] += 1
+        for key, value in values.items():
+            if value is not None:
+                self._usage[key] += value
+                self._usage[key.replace("_tokens", "_reported_call_count")] += 1
+        for detail_key, token_key in (
+            (f"{input_key}_details", "cached_tokens"),
+            (f"{output_key}_details", "reasoning_tokens"),
+        ):
+            details = usage.get(detail_key)
+            value = _usage_integer(details.get(token_key)) if isinstance(details, dict) else None
+            if value is not None:
+                self._usage[token_key] += value
 
     async def analyze_video(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         result = await self.complete_json(build_video_analysis_messages(payload))
@@ -220,11 +304,23 @@ class OpenAICompatibleLLMProvider(LLMProvider):
                     return await self._complete_text_with_model(self.fallback_model, messages, json_mode, api_key, json_schema)
                 except Exception as fallback_exc:
                     if self.fallback_provider and is_model_unavailable_exception(fallback_exc):
-                        return await self.fallback_provider.complete_text(messages, json_mode)
+                        return await self._complete_fallback_text(messages, json_mode, json_schema)
                     raise
             if self.fallback_provider and is_model_unavailable_exception(exc):
-                return await self.fallback_provider.complete_text(messages, json_mode)
+                return await self._complete_fallback_text(messages, json_mode, json_schema)
             raise
+
+    async def _complete_fallback_text(
+        self, messages: List[Dict[str, str]], json_mode: bool,
+        json_schema: Dict[str, Any] | None,
+    ) -> str:
+        fallback = self.fallback_provider
+        try:
+            if isinstance(fallback, OpenAICompatibleLLMProvider):
+                return await fallback.complete_text(messages, json_mode, json_schema)
+            return await fallback.complete_text(messages, json_mode)
+        finally:
+            self.last_request_summary = dict(getattr(fallback, "last_request_summary", None) or {})
 
     def _effective_json_schema(
         self, json_schema: Dict[str, Any] | None
@@ -233,7 +329,7 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             return None
         return json_schema
 
-    def _effective_max_output_tokens(self) -> int:
+    def _effective_max_output_tokens(self) -> int | None:
         return 0 if self.max_output_tokens_rejected else self.max_output_tokens
 
     async def _complete_text_with_model(self, model: str, messages: List[Dict[str, str]], json_mode: bool, api_key: str, json_schema: Dict[str, Any] | None = None) -> str:
@@ -242,7 +338,7 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         try:
             return await self._request_text(model, messages, json_mode, api_key, schema, max_output_tokens)
         except Exception as exc:
-            if schema is not None and is_json_schema_unsupported_exception(exc):
+            if json_mode and schema and is_json_schema_unsupported_exception(exc):
                 self.json_schema_supported = False
                 logger.warning(
                     "网关不接受 response_format=json_schema，已回退为 json_object：%s", exc
@@ -262,17 +358,25 @@ class OpenAICompatibleLLMProvider(LLMProvider):
                 )
             raise
 
-    async def _request_text(self, model: str, messages: List[Dict[str, str]], json_mode: bool, api_key: str, json_schema: Dict[str, Any] | None, max_output_tokens: int) -> str:
+    async def _request_text(self, model: str, messages: List[Dict[str, str]], json_mode: bool, api_key: str, json_schema: Dict[str, Any] | None, max_output_tokens: int | None) -> str:
         if self.wire_api == "responses":
             try:
                 return await self._complete_responses_text(messages, json_mode, model, api_key, json_schema, max_output_tokens)
             except Exception as exc:
+                # Capability rejection belongs to the outer bounded downgrade
+                # loop. Only unsupported protocols should fall back to Chat.
+                if (
+                    json_mode and json_schema and is_json_schema_unsupported_exception(exc)
+                ) or (
+                    max_output_tokens and is_max_output_tokens_unsupported_exception(exc)
+                ):
+                    raise
                 if not is_responses_api_unsupported_exception(exc):
                     raise
                 return await self._complete_chat_completions_text(messages, json_mode, model, api_key, json_schema, max_output_tokens)
         return await self._complete_chat_completions_text(messages, json_mode, model, api_key, json_schema, max_output_tokens)
 
-    async def _complete_responses_text(self, messages: List[Dict[str, str]], json_mode: bool, model: str, api_key: str, json_schema: Dict[str, Any] | None = None, max_output_tokens: int = 0) -> str:
+    async def _complete_responses_text(self, messages: List[Dict[str, str]], json_mode: bool, model: str, api_key: str, json_schema: Dict[str, Any] | None = None, max_output_tokens: int | None = None) -> str:
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -300,7 +404,7 @@ class OpenAICompatibleLLMProvider(LLMProvider):
             ) from exc
         return parse_responses_text(payload)
 
-    async def _complete_chat_completions_text(self, messages: List[Dict[str, str]], json_mode: bool, model: str, api_key: str, json_schema: Dict[str, Any] | None = None, max_output_tokens: int = 0) -> str:
+    async def _complete_chat_completions_text(self, messages: List[Dict[str, str]], json_mode: bool, model: str, api_key: str, json_schema: Dict[str, Any] | None = None, max_output_tokens: int | None = None) -> str:
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -335,7 +439,15 @@ class OpenAICompatibleLLMProvider(LLMProvider):
         ) as client:
             for attempt in range(self.max_retries + 1):
                 try:
+                    self._usage["call_count"] += 1
                     response = await client.post(endpoint, headers=headers, json=request_body)
+                    # Account for the supplier response before content parsing,
+                    # truncation checks, or HTTP errors can leave this attempt.
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        payload = None
+                    self._record_usage(payload, responses=endpoint.endswith("/responses"))
                     response.raise_for_status()
                     return response
                 except Exception as exc:
@@ -418,7 +530,7 @@ def is_max_output_tokens_unsupported_exception(exc: Exception) -> bool:
     """网关不接受显式输出上限（超出模型上限或挤爆上下文）时，退回网关默认值重试一次。"""
     if not isinstance(exc, httpx.HTTPStatusError):
         return False
-    if int(exc.response.status_code) not in {400, 422}:
+    if int(exc.response.status_code) not in {400, 415, 422}:
         return False
     text = _rejection_text(exc)
     return any(
@@ -605,14 +717,13 @@ def resolve_llm_settings(
         if scenario_environment_value is not None:
             scenario_max_output_tokens = scenario_environment_value
     model_max_output_tokens = database_default.get("max_output_tokens")
-    has_global_max_output_tokens = hasattr(config_module, "LLM_MAX_OUTPUT_TOKENS")
-    global_max_output_tokens = getattr(config_module, "LLM_MAX_OUTPUT_TOKENS", None)
+    global_max_output_tokens = getattr(
+        config_module, "LLM_MAX_OUTPUT_TOKENS", None
+    )
     if global_max_output_tokens in (None, ""):
         global_environment_value = os.getenv("LLM_MAX_OUTPUT_TOKENS")
         if global_environment_value is not None:
             global_max_output_tokens = global_environment_value
-        elif not has_global_max_output_tokens:
-            global_max_output_tokens = DEFAULT_MAX_OUTPUT_TOKENS
     if scenario_max_output_tokens not in (None, ""):
         max_output_tokens_value = scenario_max_output_tokens
     elif model_max_output_tokens is not None:
@@ -700,9 +811,9 @@ def _max_retries(value: Any, default: int = 2) -> int:
         return default
 
 
-def _max_output_tokens(value: Any) -> int | None:
+def _max_output_tokens(value: Any) -> int:
     if value in (None, ""):
-        return None
+        return DEFAULT_MAX_OUTPUT_TOKENS
     try:
         normalized = int(value)
     except (TypeError, ValueError) as exc:
@@ -790,7 +901,7 @@ def build_chat_completions_request_body(
     messages: List[Dict[str, str]],
     json_mode: bool = False,
     reasoning_effort: str = "",
-    max_output_tokens: int = 0,
+    max_output_tokens: int | None = None,
     json_schema: Dict[str, Any] | None = None,
     json_schema_name: str = "response",
 ) -> Dict[str, Any]:
@@ -814,7 +925,7 @@ def build_chat_completions_request_body(
             }
         else:
             body["response_format"] = {"type": "json_object"}
-    if max_output_tokens:
+    if max_output_tokens and max_output_tokens > 0:
         body["max_tokens"] = int(max_output_tokens)
     return body
 
@@ -882,7 +993,7 @@ def build_responses_request_body(
     if reasoning_effort:
         body["reasoning"] = {"effort": reasoning_effort}
     if max_output_tokens and max_output_tokens > 0:
-        body["max_output_tokens"] = int(max_output_tokens)
+        body["max_output_tokens"] = max_output_tokens
     return body
 
 
@@ -907,35 +1018,31 @@ def parse_chat_completion_json(response_json: Dict[str, Any]) -> Dict[str, Any]:
     return parse_json_object(parse_chat_completion_text(response_json))
 
 
-def parse_chat_completion_text(
-    response_json: Dict[str, Any], *, reject_truncated: bool = True
-) -> str:
+def parse_chat_completion_text(response_json: Dict[str, Any], *, reject_truncated: bool = True) -> str:
     choices = response_json.get("choices") or []
     if not choices:
         raise LLMError("LLM response has no choices.")
 
-    choice = choices[0] if isinstance(choices[0], dict) else {}
+    choice = choices[0]
+    finish_reason = str(choice.get("finish_reason") or "").strip().lower()
     message = choice.get("message") or {}
     content = message.get("content", "")
     if isinstance(content, list):
         content = "".join(item.get("text", "") if isinstance(item, dict) else str(item) for item in content)
-    text = str(content).strip()
-    # 被输出上限截断的响应，JSON 一定不完整；过去由 repair_json 静默补齐成
-    # 「结构校验失败」，掩盖了真正的原因，这里直接说清楚。连通性探测等只校验协议
-    # 的场景可用 reject_truncated=False 保持宽松。
-    finish_reason = str(choice.get("finish_reason") or "").strip().lower()
-    if reject_truncated and finish_reason in TRUNCATED_FINISH_REASONS:
+    if reject_truncated and finish_reason in {"length", "max_tokens", "max_output_tokens"}:
+        returned_chars = len(str(content))
         raise LLMOutputTruncatedError(
-            f"模型输出被输出上限截断（finish_reason={finish_reason}，已返回 {len(text)} 字符）。"
-            "请提高输出上限或缩小单次生成范围后重试。",
-            partial_text=text,
+            "模型输出被输出上限截断"
+            f"（finish_reason={finish_reason}，已返回 {returned_chars} 字符）",
             finish_reason=finish_reason,
-            returned_chars=len(text),
+            returned_chars=returned_chars,
+            partial_text=str(content),
         )
-    return text
+
+    return str(content).strip()
 
 
-def parse_responses_text(response_json: Dict[str, Any]) -> str:
+def parse_responses_text(response_json: Dict[str, Any], *, reject_truncated: bool = True) -> str:
     if response_json.get("status") == "incomplete":
         details = response_json.get("incomplete_details") or {}
         reason = (
@@ -956,11 +1063,14 @@ def parse_responses_text(response_json: Dict[str, Any]) -> str:
                     and content.get("type") in {"output_text", "text"}
                 )
             returned_chars = len(partial_text)
+            if not reject_truncated:
+                return partial_text.strip()
             raise LLMOutputTruncatedError(
                 "模型输出被输出上限截断"
                 f"（incomplete_reason={normalized_reason}，已返回 {returned_chars} 字符）",
                 finish_reason=normalized_reason,
                 returned_chars=returned_chars,
+                partial_text=partial_text,
             )
         raise LLMIncompleteResponseError(
             f"Responses API response is incomplete: {reason}."

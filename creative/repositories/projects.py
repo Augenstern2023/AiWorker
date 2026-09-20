@@ -46,7 +46,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
@@ -61,6 +61,7 @@ from creative.database_schema import (
     creative_resource_heads,
     creative_seeds,
     creative_topics,
+    creative_video_parameter_recommendations,
 )
 from creative.repositories.base import from_epoch_seconds, utc_now
 from creative.script_service import normalize_script_content
@@ -162,6 +163,19 @@ class ProjectsRepository:
             connection, f"creative-store:{self.store_id}:{purpose}"
         )
 
+    def reserve_project_identity(self) -> int:
+        """Commit a project ID before exposing it to external membership writes."""
+
+        with self.transaction_scope() as connection:
+            return int(
+                connection.execute(
+                    text(
+                        "SELECT nextval(pg_get_serial_sequence("
+                        "'creative_projects', 'id'))"
+                    )
+                ).scalar_one()
+            )
+
     # -- project workflow identity ------------------------------------------
 
     def project_workflow_identity_evidence(
@@ -239,10 +253,15 @@ class ProjectsRepository:
         return self.get_project(int(row[0])) if row is not None else None
 
     def reconcile_project_workflow_task(
-        self, workflow_task_id: str, project_id: int
+        self,
+        workflow_task_id: str,
+        project_id: int,
+        *,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         now = utc_now()
-        with self.transaction_scope() as connection:
+        caller_connection = connection
+        with self.transaction_scope(caller_connection) as connection:
             # Lock order: this repair sweeps the rows of two different projects,
             # so it takes the single store-scoped advisory lock (never a
             # project-scoped one) and therefore cannot deadlock with another
@@ -298,7 +317,7 @@ class ProjectsRepository:
                     updated_at=now,
                 )
             )
-        project = self.get_project(project_id)
+        project = self.get_project(project_id, connection=caller_connection)
         if project is None:
             raise ValueError("system-bound creative project does not exist")
         return project
@@ -513,6 +532,7 @@ class ProjectsRepository:
         created_by: str,
         creation_request_id: str,
         workflow_mode: str = "sequential",
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         project, _ = self.ensure_original_project(
             seed_text=seed_text,
@@ -527,6 +547,7 @@ class ProjectsRepository:
             created_by=created_by,
             creation_request_id=creation_request_id,
             workflow_mode=workflow_mode,
+            connection=connection,
         )
         return project
 
@@ -545,6 +566,7 @@ class ProjectsRepository:
         created_by: str,
         creation_request_id: str,
         workflow_mode: str = "sequential",
+        connection: Connection | None = None,
     ) -> tuple[dict[str, Any], bool]:
         if not 1 <= int(target_episode_count) <= 100:
             raise ValueError("目标集数必须在 1-100 之间")
@@ -556,7 +578,14 @@ class ProjectsRepository:
             raise ValueError("invalid creative workflow mode")
         now = utc_now()
         normalized_request_id = creation_request_id.strip()
-        with self.transaction_scope() as connection:
+        # Joining the caller's connection puts the creative project row, its
+        # seed and the workflow bootstrap in one transaction; the read-back at
+        # the end of this method therefore has to run on that same connection.
+        # ``caller_connection`` survives the ``as`` rebinding below: when it is
+        # None this method owned and already closed its transaction, so the
+        # read-back must open a fresh connection rather than reuse that handle.
+        caller_connection = connection
+        with self.transaction_scope(caller_connection) as connection:
             if normalized_request_id:
                 # Lock order: the creation-request advisory lock is taken before
                 # the existence probe, so the find-or-insert pair is atomic and
@@ -616,7 +645,10 @@ class ProjectsRepository:
                     now=now,
                     workflow_mode=workflow_mode,
                 )
-        return self.get_project(project_id) or {}, created
+        return (
+            self.get_project(project_id, connection=caller_connection) or {},
+            created,
+        )
 
     @staticmethod
     def _insert_original_project(
@@ -675,11 +707,21 @@ class ProjectsRepository:
         return int(project_id), True
 
     def mark_project_bootstrap_status(
-        self, project_id: int, status: str
+        self,
+        project_id: int,
+        status: str,
+        *,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         if status not in {"pending", "ready", "failed"}:
             raise ValueError("invalid bootstrap status")
-        with self.transaction_scope() as connection:
+        # The read-back runs on ``caller_connection`` when the caller supplied
+        # one, so it observes the status this call just wrote inside the
+        # caller's still-open transaction; with no caller connection it opens a
+        # fresh connection after this method's own transaction committed,
+        # exactly as before.
+        caller_connection = connection
+        with self.transaction_scope(caller_connection) as connection:
             connection.execute(
                 update(creative_projects)
                 .where(
@@ -688,7 +730,7 @@ class ProjectsRepository:
                 )
                 .values(bootstrap_status=status, updated_at=utc_now())
             )
-        return self.get_project(project_id) or {}
+        return self.get_project(project_id, connection=caller_connection) or {}
 
     # -- seeds ---------------------------------------------------------------
 
@@ -886,8 +928,13 @@ class ProjectsRepository:
             ).scalars().all()
         return [self.get_project(int(value)) or {} for value in rows]
 
-    def get_project(self, project_id: int) -> dict[str, Any] | None:
-        with self.connection_scope() as connection:
+    def get_project(
+        self, project_id: int, *, connection: Connection | None = None
+    ) -> dict[str, Any] | None:
+        # ``connection`` lets a caller inside its own transaction read back the
+        # rows it has not committed yet (uncommitted writes are invisible to a
+        # second connection, even inside the same transaction block).
+        with self.connection_scope(connection) as connection:
             row = connection.execute(
                 select(
                     creative_projects,
@@ -981,6 +1028,19 @@ class ProjectsRepository:
                     )
                 ).mappings().all()
             ]
+            video_parameter_row = connection.execute(
+                select(creative_video_parameter_recommendations).where(
+                    creative_video_parameter_recommendations.c.project_id
+                    == int(project_id)
+                )
+            ).mappings().one_or_none()
+            project["video_parameter_recommendation"] = (
+                self._video_parameter_recommendation(
+                    self.row_dict(video_parameter_row)
+                )
+                if video_parameter_row is not None
+                else None
+            )
             if project["creation_mode"] == "original":
                 project["topic"] = {}
                 project["breakdown"] = {}
@@ -995,6 +1055,160 @@ class ProjectsRepository:
                 project["seed"] = self._seed(self.row_dict(seed)) if seed else None
         project["allowed_actions"] = self._allowed_project_actions(project)
         return project
+
+    # -- video generation parameters --------------------------------------
+
+    def get_video_parameter_recommendation(
+        self, project_id: int
+    ) -> dict[str, Any] | None:
+        with self.connection_scope() as connection:
+            row = connection.execute(
+                select(creative_video_parameter_recommendations).where(
+                    creative_video_parameter_recommendations.c.project_id
+                    == int(project_id)
+                )
+            ).mappings().one_or_none()
+        return (
+            self._video_parameter_recommendation(self.row_dict(row))
+            if row is not None
+            else None
+        )
+
+    def queue_video_parameter_recommendation(
+        self, project_id: int, *, created_by: str
+    ) -> dict[str, Any]:
+        if not self.get_project(project_id):
+            raise ValueError("创作项目不存在")
+        now = utc_now()
+        statement = pg_insert(creative_video_parameter_recommendations).values(
+            project_id=int(project_id),
+            status="queued",
+            job_id="",
+            created_by=created_by,
+            created_at=now,
+            updated_at=now,
+        )
+        with self.transaction_scope() as connection:
+            connection.execute(
+                statement.on_conflict_do_update(
+                    index_elements=["project_id"],
+                    set_={
+                        "status": "queued",
+                        "job_id": "",
+                        "analysis_error": "",
+                        "created_by": statement.excluded.created_by,
+                        "updated_at": statement.excluded.updated_at,
+                    },
+                )
+            )
+        return self.get_video_parameter_recommendation(project_id) or {}
+
+    def set_video_parameter_recommendation_job(
+        self, project_id: int, job_id: str
+    ) -> dict[str, Any]:
+        self._update_video_parameter_recommendation(
+            project_id, {"job_id": str(job_id)}
+        )
+        return self.get_video_parameter_recommendation(project_id) or {}
+
+    def start_video_parameter_recommendation(self, project_id: int) -> dict[str, Any]:
+        self._update_video_parameter_recommendation(
+            project_id, {"status": "running", "analysis_error": ""}
+        )
+        return self.get_video_parameter_recommendation(project_id) or {}
+
+    def complete_video_parameter_recommendation(
+        self,
+        project_id: int,
+        *,
+        source_fingerprint: str,
+        source_episode_numbers: list[int],
+        source_complete: bool,
+        recommendation: dict[str, Any],
+    ) -> dict[str, Any]:
+        values = {
+            "status": "ready",
+            "source_fingerprint": str(source_fingerprint),
+            "source_episode_numbers_json": list(source_episode_numbers),
+            "source_complete": bool(source_complete),
+            "recommendation_json": dict(recommendation),
+            "analysis_mode": str(recommendation.get("analysis_mode") or ""),
+            "analysis_error": str(recommendation.get("analysis_error") or ""),
+            "generated_at": utc_now(),
+        }
+        if not self._update_video_parameter_recommendation(project_id, values):
+            raise ValueError("视频参数推荐记录不存在")
+        return self.get_video_parameter_recommendation(project_id) or {}
+
+    def fail_video_parameter_recommendation(
+        self, project_id: int, error: str
+    ) -> dict[str, Any]:
+        self._update_video_parameter_recommendation(
+            project_id,
+            {"status": "failed", "analysis_error": str(error)[:2000]},
+        )
+        return self.get_video_parameter_recommendation(project_id) or {}
+
+    def confirm_video_parameter_recommendation(
+        self,
+        project_id: int,
+        *,
+        model_key: str,
+        scenario: str,
+        source_fingerprint: str,
+        confirmed_by: str,
+    ) -> dict[str, Any]:
+        with self.transaction_scope() as connection:
+            row = connection.execute(
+                select(creative_video_parameter_recommendations)
+                .where(
+                    creative_video_parameter_recommendations.c.project_id
+                    == int(project_id)
+                )
+                .with_for_update()
+            ).mappings().one_or_none()
+            if row is None or row["status"] != "ready":
+                raise ValueError("当前没有可确认的视频参数建议")
+            if str(row["source_fingerprint"] or "") != str(source_fingerprint):
+                raise ValueError("剧本已变化，请重新分析后再确认")
+            recommendation = row["recommendation_json"] or {}
+            model = (recommendation.get("models") or {}).get(model_key)
+            profile = ((model or {}).get("scenarios") or {}).get(scenario)
+            if not isinstance(profile, dict):
+                raise ValueError("视频参数建议不存在")
+            confirmed = dict(row["confirmed_json"] or {})
+            confirmed[model_key] = {
+                "scenario": scenario,
+                "profile": profile,
+                "capability": (model or {}).get("capability") or {},
+                "source_fingerprint": source_fingerprint,
+                "confirmed_by": confirmed_by,
+                "confirmed_at": utc_now().timestamp(),
+            }
+            connection.execute(
+                update(creative_video_parameter_recommendations)
+                .where(
+                    creative_video_parameter_recommendations.c.project_id
+                    == int(project_id)
+                )
+                .values(confirmed_json=confirmed, updated_at=utc_now())
+            )
+        return self.get_video_parameter_recommendation(project_id) or {}
+
+    def _update_video_parameter_recommendation(
+        self, project_id: int, values: dict[str, Any]
+    ) -> bool:
+        with self.transaction_scope() as connection:
+            updated = connection.execute(
+                update(creative_video_parameter_recommendations)
+                .where(
+                    creative_video_parameter_recommendations.c.project_id
+                    == int(project_id)
+                )
+                .values(**values, updated_at=utc_now())
+                .returning(creative_video_parameter_recommendations.c.project_id)
+            ).scalar_one_or_none()
+        return updated is not None
 
     def update_project(
         self,
@@ -1190,6 +1404,17 @@ class ProjectsRepository:
             result["content"] = normalize_script_content(result["content"])
         result["upstream_refs"] = result.pop("upstream_refs_json") or {}
         result["generation_meta"] = result.pop("generation_meta_json") or {}
+        return result
+
+    @classmethod
+    def _video_parameter_recommendation(cls, row: Any) -> dict[str, Any]:
+        result = cls.row_dict(row)
+        result["source_episode_numbers"] = (
+            result.pop("source_episode_numbers_json") or []
+        )
+        result["recommendation"] = result.pop("recommendation_json") or {}
+        result["confirmed"] = result.pop("confirmed_json") or {}
+        result["source_complete"] = bool(result.get("source_complete"))
         return result
 
     @staticmethod

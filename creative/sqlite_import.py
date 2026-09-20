@@ -68,18 +68,64 @@ EMPTY_WHEN_ABSENT_TABLES: frozenset[str] = frozenset({"production_status"})
 #: Columns whose values point at rows owned by other domains (users, workflow
 #: tasks, submissions). They are deliberately not foreign keys, so the importer
 #: has to classify them instead of relying on the database.
+#:
+#: The parent columns are the real primary keys of the production system schema
+#: (``users.id`` and ``workflow_tasks.id``), verified against a live database.
+#: ``submission_id`` points at the workflow submission table, which does not
+#: exist in the current system schema; it is kept so a future table is covered.
 CROSS_DOMAIN_REFERENCE_COLUMNS: tuple[tuple[str, str, str], ...] = (
-    ("created_by", "users", "user_id"),
-    ("actor_id", "users", "user_id"),
-    ("actor_user_id", "users", "user_id"),
-    ("workflow_task_id", "workflow_tasks", "task_id"),
-    ("submission_id", "workflow_submissions", "submission_id"),
+    ("created_by", "users", "id"),
+    ("actor_id", "users", "id"),
+    ("actor_user_id", "users", "id"),
+    ("workflow_task_id", "workflow_tasks", "id"),
+    ("submission_id", "workflow_submissions", "id"),
 )
 
-#: ``(table, column)`` pairs whose unresolved references are legitimate
-#: historical gaps rather than orphans. Task 15's cross-domain audit document
-#: is what fills this in; empty means every unresolved reference is fatal.
-LEGAL_HISTORICAL_GAP_REFERENCES: frozenset[tuple[str, str]] = frozenset()
+#: ``(table, column, value)`` triples whose unresolved references are legitimate
+#: historical gaps rather than orphans. The declaration is deliberately
+#: value-level: naming only the column would also accept a future reference that
+#: is genuinely broken. Every entry is justified in
+#: ``docs/operations/creative-cross-domain-reference-audit.md``.
+LEGAL_HISTORICAL_GAP_REFERENCES: frozenset[tuple[str, str, str]] = frozenset(
+    {
+        # Non-user sentinels written before user identity was enforced.
+        ("creative_projects", "created_by", "local"),
+        ("creative_prompt_template_revisions", "created_by", "system"),
+        # Users removed from the system after these rows were written.
+        (
+            "selection_stage_snapshots",
+            "actor_user_id",
+            "34773a8a-0e17-4295-a30c-c54ddf21771d",
+        ),
+        (
+            "selection_stage_snapshots",
+            "actor_user_id",
+            "4581b90a-4743-4bc4-b7d8-75ce6359c8e5",
+        ),
+        # Workflow tasks that no longer exist; both projects keep their own
+        # creation_request_id, so the project identity is still recoverable.
+        (
+            "creative_projects",
+            "workflow_task_id",
+            "036fc64d-bf63-4a3b-97a4-e1d05ef1aca0",
+        ),
+        (
+            "creative_projects",
+            "workflow_task_id",
+            "f2942f4b-0638-4d95-88bf-23dde8bb5941",
+        ),
+        (
+            "creative_blueprints",
+            "workflow_task_id",
+            "036fc64d-bf63-4a3b-97a4-e1d05ef1aca0",
+        ),
+        (
+            "creative_blueprints",
+            "workflow_task_id",
+            "f2942f4b-0638-4d95-88bf-23dde8bb5941",
+        ),
+    }
+)
 
 
 class CreativeImportError(ValueError):
@@ -879,7 +925,7 @@ def inspect_cross_domain_references(
                     legal = tuple(
                         value
                         for value in unresolved
-                        if (spec.name, column) in LEGAL_HISTORICAL_GAP_REFERENCES
+                        if (spec.name, column, value) in LEGAL_HISTORICAL_GAP_REFERENCES
                     )
                     reports.append(
                         CrossDomainReferenceReport(

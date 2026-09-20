@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +19,7 @@ from fastapi.testclient import TestClient
 
 from creative.repository import CreativeRepository
 from creative.prompt_store import PromptStore
+from creative.prompt_registry import builtin_template
 from identity.dependencies import current_principal
 from identity.permission_service import PermissionService
 from identity.schema import Principal
@@ -33,6 +36,47 @@ class FakeJobManager:
     def create_job(self, payload: dict):
         self.payloads.append(payload)
         return SimpleNamespace(job_id="review-job-1")
+
+
+@pytest.mark.parametrize("selection", ["binding", "temporary"])
+def test_review_job_rejects_another_members_private_template(tmp_path, selection):
+    repository = CreativeRepository(tmp_path / "private-review.db")
+    project = _reviewable_project(repository)
+    store = PromptStore(repository.db_path)
+    store.enable_project(project["id"], actor_user_id="private-owner")
+    private = store.create_template(
+        title="私人审核",
+        description="",
+        content=builtin_template("generic-vertical-short"),
+        owner_scope="user",
+        owner_user_id="private-owner",
+    )
+    if selection == "binding":
+        store.set_binding(
+            project_id=project["id"],
+            stage="review",
+            episode_number=0,
+            template_id=private["id"],
+            template_revision=1,
+            override={},
+            actor_user_id="private-owner",
+        )
+    jobs = FakeJobManager()
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = _admin_principal
+    app.include_router(build_script_review_router(repository, jobs))
+    payload = {
+        "source_type": "project",
+        "mode": "single",
+        "project_id": project["id"],
+        "episode_numbers": [1],
+    }
+    if selection == "temporary":
+        payload["prompt_template_key"] = private["template_key"]
+    response = TestClient(app).post("/api/script-reviews", json=payload)
+    assert response.status_code == 403
+    assert repository.list_script_reviews(project_ids={project["id"]}) == []
+    assert jobs.payloads == []
 
 
 class MembershipPermissionService(PermissionService):
@@ -53,6 +97,152 @@ class MembershipPermissionService(PermissionService):
         self, principal: Principal, project_id: str
     ) -> bool:
         return False
+
+
+@pytest.mark.parametrize(
+    "history",
+    ["current", "legacy", "deleted-template", "legacy-deleted", "legacy-deleted-nonowner"],
+)
+def test_private_review_history_and_retry_remain_owner_only(tmp_path, history):
+    repository = CreativeRepository(tmp_path / "history.db")
+    project = _reviewable_project(repository)
+    prompts = PromptStore(repository.db_path)
+    owner = _principal()
+    prompts.enable_project(project["id"], actor_user_id=owner.user_id)
+    private = prompts.create_template(
+        title="私人历史",
+        description="",
+        content=builtin_template("generic-vertical-short"),
+        owner_scope="user",
+        owner_user_id=owner.user_id,
+    )
+
+    class RetryJobs(FakeJobManager):
+        def retry(self, job_id):
+            return SimpleNamespace(job_id="retried-private-review")
+
+    jobs = RetryJobs()
+    current = [owner]
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = lambda: current[0]
+    app.state.identity_permission_service = MembershipPermissionService(
+        {repository.workflow_project_id(project["id"])}
+    )
+    app.include_router(build_script_review_router(repository, jobs))
+    client = TestClient(app)
+    created = client.post(
+        "/api/script-reviews",
+        json={
+            "source_type": "project",
+            "mode": "single",
+            "project_id": project["id"],
+            "episode_numbers": [1],
+            "prompt_template_key": private["template_key"],
+        },
+    )
+    assert created.status_code == 201, created.text
+    review_id = created.json()["review"]["id"]
+    frozen = repository.get_script_review(review_id)["source_payload"]
+    if history.startswith("legacy"):
+        for key in ("owner_scope", "owner_user_id", "project_id"):
+            frozen["prompt_snapshot"].pop(key, None)
+        with repository._connect() as conn:
+            conn.execute(
+                "UPDATE script_reviews SET source_payload_json = ? WHERE id = ?",
+                (json.dumps(frozen), review_id),
+            )
+    if "deleted" in history:
+        with prompts._connect() as conn:
+            conn.execute(
+                "DELETE FROM creative_prompt_template_revisions WHERE template_id = ?",
+                (private["id"],),
+            )
+            conn.execute(
+                "DELETE FROM creative_prompt_templates WHERE id = ?", (private["id"],)
+            )
+    repository.fail_script_review(review_id, "retryable")
+    current[0] = replace(owner, user_id="another-active-member")
+    if history == "legacy-deleted-nonowner":
+        # Before privacy enforcement, a nonowner could create a review using
+        # another member's private binding. Creator identity proves no ownership.
+        with repository._connect() as conn:
+            conn.execute(
+                "UPDATE script_reviews SET created_by = ? WHERE id = ?",
+                (current[0].user_id, review_id),
+            )
+    assert client.get(f"/api/script-reviews/{review_id}").status_code == 403
+    assert client.post(f"/api/script-reviews/{review_id}/retry").status_code == 403
+    assert client.get("/api/script-reviews").json()["items"] == []
+    assert repository.get_script_review(review_id)["status"] == "failed"
+    current[0] = owner
+    expected_status = 403 if history.startswith("legacy-deleted") else 200
+    assert client.get(f"/api/script-reviews/{review_id}").status_code == expected_status
+    assert (
+        client.post(f"/api/script-reviews/{review_id}/retry").status_code
+        == expected_status
+    )
+    if not history.startswith("legacy"):
+        snapshot = frozen["prompt_snapshot"]
+        assert snapshot["owner_scope"] == "user"
+        assert snapshot["owner_user_id"] == owner.user_id
+        assert snapshot["project_id"] is None
+
+
+def test_review_router_reuses_prompt_store_across_records_and_requests(
+    tmp_path, monkeypatch
+):
+    repository = CreativeRepository(tmp_path / "review-lifecycle.db")
+    project = _reviewable_project(repository)
+    prompts = PromptStore(repository.db_path)
+    owner = _principal()
+    prompts.enable_project(project["id"], actor_user_id=owner.user_id)
+    private = prompts.create_template(
+        title="私人审核",
+        description="",
+        content=builtin_template("generic-vertical-short"),
+        owner_scope="user",
+        owner_user_id=owner.user_id,
+    )
+    initializations = []
+    original_init = PromptStore.__init__
+
+    def counted_init(store, db_path):
+        initializations.append(db_path)
+        original_init(store, db_path)
+
+    monkeypatch.setattr(PromptStore, "__init__", counted_init)
+    current = [owner]
+    app = FastAPI()
+    app.dependency_overrides[current_principal] = lambda: current[0]
+    app.state.identity_permission_service = MembershipPermissionService(
+        {repository.workflow_project_id(project["id"])}
+    )
+    app.include_router(build_script_review_router(repository, FakeJobManager()))
+    client = TestClient(app)
+    public_ids = set()
+    for index in range(4):
+        payload = {
+            "source_type": "project",
+            "mode": "single",
+            "project_id": project["id"],
+            "episode_numbers": [1],
+        }
+        if index == 3:
+            payload["prompt_template_key"] = private["template_key"]
+        created = client.post("/api/script-reviews", json=payload)
+        assert created.status_code == 201, created.text
+        review_id = created.json()["review"]["id"]
+        if index != 3:
+            public_ids.add(review_id)
+    current[0] = replace(owner, user_id="another-active-member")
+    for _ in range(3):
+        listed = client.get("/api/script-reviews")
+        assert listed.status_code == 200
+        assert {item["id"] for item in listed.json()["items"]} == public_ids
+        for public_id in public_ids:
+            assert client.get(f"/api/script-reviews/{public_id}").status_code == 200
+        assert client.get(f"/api/script-reviews/{review_id}").status_code == 403
+    assert len(initializations) == 1
 
 
 def _reviewable_project(repository: CreativeRepository) -> dict:

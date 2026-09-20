@@ -33,7 +33,10 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from creative.postgres_repository import PostgresCreativeRepository
-from creative.repositories.deliveries import DeliveriesRepository
+from creative.repositories.deliveries import (
+    PRODUCTION_EXPORT_CONTRACT_VERSION,
+    DeliveriesRepository,
+)
 
 #: Every method this suite exercises; used to detect that the mixin is wired.
 _REQUIRED_METHODS: tuple[str, ...] = (
@@ -126,7 +129,7 @@ def production_export_values(
         "id": export_id,
         "project_id": project_id,
         "fingerprint": fingerprint,
-        "contract_version": "1.0",
+        "contract_version": PRODUCTION_EXPORT_CONTRACT_VERSION,
         "created_by": "user-1",
         "created_by_name": "User One",
         "created_at": 1_700_000_100.0,

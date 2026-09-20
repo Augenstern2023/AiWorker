@@ -118,6 +118,7 @@ Deliberate interface details for the later cutover:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
@@ -146,7 +147,7 @@ from creative.repositories.base import from_epoch_seconds, utc_now
 
 #: Mirrors ``creative.production_exports.CONTRACT_VERSION``; the production
 #: export identity is ``project id + fingerprint + contract version``.
-PRODUCTION_EXPORT_CONTRACT_VERSION = "1.0"
+PRODUCTION_EXPORT_CONTRACT_VERSION = "2.4"
 
 #: Columns of the named unique index ``uq_creative_delivery_request``.
 _DELIVERY_REQUEST_KEY: tuple[str, ...] = (
@@ -251,6 +252,8 @@ _PRODUCTION_EXPORT_COLUMNS: tuple[Any, ...] = (
     creative_production_exports.c.workflow_mode,
     creative_production_exports.c.version_strategy,
     creative_production_exports.c.version_manifest_json,
+    creative_production_exports.c.artifact_format,
+    creative_production_exports.c.media_type,
 )
 
 _PRODUCTION_EXPORT_REQUIRED_FIELDS: tuple[str, ...] = (
@@ -465,6 +468,34 @@ class DeliveriesRepository:
         with self.connection_scope(connection) as active:
             row = active.execute(statement).mappings().one_or_none()
         return self.delivery_public_record(self.row_dict(row)) if row is not None else None
+
+    def get_delivery_projection_source(
+        self, delivery_id: str, *, connection: Connection | None = None
+    ) -> dict[str, Any]:
+        """Return the immutable payload used for reader-specific projection."""
+
+        with self.connection_scope(connection) as active:
+            source = active.execute(
+                select(creative_deliveries.c.projection_source_json).where(
+                    creative_deliveries.c.id == str(delivery_id)
+                )
+            ).scalar_one_or_none()
+        if not isinstance(source, Mapping):
+            return {}
+        if source.get("schema_version") == "delivery-projection-v1":
+            try:
+                project = json.loads(str(source["project_json"]))
+                payload = json.loads(str(source["payload_json"]))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                return {}
+            if not isinstance(project, dict) or not isinstance(payload, dict):
+                return {}
+            return {"project": project, "payload": payload}
+        project = source.get("project")
+        payload = source.get("payload")
+        if not isinstance(project, Mapping) or not isinstance(payload, Mapping):
+            return {}
+        return {"project": dict(project), "payload": dict(payload)}
 
     def list_deliveries(
         self,
@@ -753,6 +784,16 @@ class DeliveriesRepository:
         version_manifest = record.get("version_manifest_json") or {}
         if not isinstance(version_manifest, dict):
             version_manifest = {}
+        artifact_format = str(record.get("artifact_format") or "").lower()
+        if artifact_format not in {"json", "zip"}:
+            artifact_format = (
+                "zip" if str(record.get("path") or "").lower().endswith(".zip") else "json"
+            )
+        media_type = str(record.get("media_type") or "")
+        if not media_type:
+            media_type = (
+                "application/zip" if artifact_format == "zip" else "application/json"
+            )
         return {
             "id": record["id"],
             "project_id": str(record["project_id"]),
@@ -768,6 +809,8 @@ class DeliveriesRepository:
             "workflow_mode": str(record.get("workflow_mode") or "sequential"),
             "version_strategy": str(record.get("version_strategy") or "current"),
             "version_manifest": version_manifest,
+            "artifact_format": artifact_format,
+            "media_type": media_type,
             "size_bytes": record["size_bytes"],
             "file_sha256": record["file_sha256"],
             "audit_status": (
@@ -818,6 +861,8 @@ class DeliveriesRepository:
             "workflow_mode": str(values.get("workflow_mode") or "sequential"),
             "version_strategy": str(values.get("version_strategy") or "current"),
             "version_manifest_json": version_manifest,
+            "artifact_format": str(values.get("artifact_format") or "json"),
+            "media_type": str(values.get("media_type") or "application/json"),
         }
 
     # ------------------------------------------------------- production status

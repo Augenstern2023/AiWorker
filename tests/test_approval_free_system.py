@@ -21,7 +21,6 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from creative.api import build_creative_router
-from creative.repository import CreativeRepository
 from identity.repository import IdentityRepository
 from workflow.api import build_workflow_router
 from workflow.repository import WorkflowRepository
@@ -57,11 +56,16 @@ def test_default_permission_catalog_has_no_approval_permissions(
     assert "version.return" not in codes
 
 
-def test_creative_lock_routes_are_available_without_approval_router(tmp_path: Path):
+def test_creative_lock_routes_are_available_without_approval_router(
+    tmp_path: Path, postgres_creative, isolated_creative_rank_source
+):
     runtime = tmp_path / ".runtime"
-    CreativeRepository(runtime / "creative/creative.db")
     app = FastAPI()
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(
+        build_creative_router(
+            root=tmp_path, runtime_dir=runtime, repository=postgres_creative
+        )
+    )
     paths = {route.path for route in app.routes}
     assert "/api/creative/breakdowns/{breakdown_id}/lock" in paths
     assert "/api/creative/blueprints/{blueprint_id}/lock-brief" in paths

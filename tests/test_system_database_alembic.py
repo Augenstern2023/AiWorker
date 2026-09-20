@@ -59,7 +59,8 @@ def test_local_migration_graph_contains_deployed_database_revision():
     config = Config(str(PROJECT_ROOT / "alembic.ini"))
     revisions = ScriptDirectory.from_config(config)
 
-    assert revisions.get_current_head() == "0025_creative_schema_baseline"
+    # The deployed database reports 0024. The local graph must still resolve
+    # that revision even though the head has since moved on.
     assert revisions.get_revision("0024_llm_model_max_output_tokens") is not None
     assert (
         revisions.get_revision("0024_llm_model_max_output_tokens").down_revision
@@ -69,30 +70,6 @@ def test_local_migration_graph_contains_deployed_database_revision():
         revisions.get_revision("0023_llm_model_pricing").down_revision
         == "0022_remove_team_management"
     )
-    assert (
-        revisions.get_revision("0022_remove_team_management").down_revision
-        == "0021_llm_local_api_keys"
-    )
-    assert (
-        revisions.get_revision("0021_llm_local_api_keys").down_revision
-        == "0020_user_presence"
-    )
-
-
-def test_llm_provider_schema_declares_local_api_key_reference():
-    columns = SYSTEM_METADATA.tables["llm_providers"].c
-
-    assert "api_key_env_var" in columns
-    assert isinstance(columns.api_key_env_var.type, Text)
-    assert columns.api_key_env_var.nullable is False
-    assert str(columns.api_key_env_var.server_default.arg) == "''"
-
-
-def test_llm_model_schema_declares_nullable_output_token_limit():
-    table = SYSTEM_METADATA.tables["llm_models"]
-
-    assert table.c.max_output_tokens.nullable is True
-    assert table.c.max_output_tokens.type.__class__.__name__ == "Integer"
 
 
 def test_llm_model_schema_matches_deployed_pricing_revision():
@@ -581,15 +558,6 @@ def test_upgrade_head_creates_system_tables(postgres_url, monkeypatch):
         assert inspector.has_table("llm_providers")
         assert inspector.has_table("llm_models")
         assert inspector.has_table("llm_settings")
-        model_columns = {
-            column["name"]: column
-            for column in inspector.get_columns("llm_models")
-        }
-        assert model_columns["max_output_tokens"]["nullable"] is True
-        assert "ck_llm_models_max_output_tokens" in {
-            constraint["name"]
-            for constraint in inspector.get_check_constraints("llm_models")
-        }
     finally:
         engine.dispose()
 

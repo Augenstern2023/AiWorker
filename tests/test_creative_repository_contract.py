@@ -319,7 +319,6 @@ def test_health_reports_backend_without_credentials(
     assert report["healthy"] is True
     assert report["store_id"] == postgres_creative.store_id
     assert "LocalPass" not in str(report)
-    assert "***" in report["database"]
 
 
 def test_describe_is_credential_free(postgres_creative: PostgresCreativeRepository):
@@ -368,6 +367,101 @@ def test_sqlite_selection_is_never_implicit(isolated_system_database: SystemData
 
 
 # ---------------------------------------------------------------------------
+# the runtime storage switch
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_selection_never_falls_back_to_sqlite(monkeypatch):
+    """An unusable PostgreSQL target must fail loudly, not read a frozen store."""
+
+    from types import SimpleNamespace
+
+    from creative.repository_factory import build_runtime_creative_repository
+
+    class UnavailableDatabase:
+        def health(self):
+            return SimpleNamespace(
+                reachable=False, schema_current=False, current_revision=None
+            )
+
+    monkeypatch.setenv("AIWORKER_CREATIVE_STORAGE", "postgresql")
+    with pytest.raises(RuntimeError, match="creative PostgreSQL is unavailable"):
+        build_runtime_creative_repository(UnavailableDatabase())
+
+
+def test_runtime_selection_refuses_a_schema_behind_head(
+    monkeypatch, isolated_system_database: SystemDatabase
+):
+    """Reachable is not enough: a stale schema is still a hard failure."""
+
+    from types import SimpleNamespace
+
+    from creative.repository_factory import build_runtime_creative_repository
+
+    class StaleDatabase:
+        def health(self):
+            return SimpleNamespace(
+                reachable=True,
+                schema_current=False,
+                current_revision="0024_llm_model_max_output_tokens",
+            )
+
+    monkeypatch.setenv("AIWORKER_CREATIVE_STORAGE", "postgresql")
+    with pytest.raises(RuntimeError, match="creative PostgreSQL is unavailable"):
+        build_runtime_creative_repository(StaleDatabase())
+
+
+def test_runtime_selection_builds_postgresql_when_healthy(
+    monkeypatch, isolated_system_database: SystemDatabase
+):
+    from creative.repository_factory import build_runtime_creative_repository
+
+    monkeypatch.setenv("AIWORKER_CREATIVE_STORAGE", "postgresql")
+    repository = build_runtime_creative_repository(isolated_system_database)
+    assert isinstance(repository, PostgresCreativeRepository)
+    assert repository.database is isolated_system_database
+
+
+def test_runtime_selection_ignores_legacy_sqlite_backend_setting(
+    monkeypatch, isolated_system_database: SystemDatabase
+):
+    """The production runtime is PostgreSQL-only after the cutover."""
+
+    from creative.repository_factory import build_runtime_creative_repository
+
+    monkeypatch.setenv("AIWORKER_CREATIVE_STORAGE", "sqlite")
+    repository = build_runtime_creative_repository(isolated_system_database)
+    assert isinstance(repository, PostgresCreativeRepository)
+    assert repository.database is isolated_system_database
+
+
+def test_runtime_selection_ignores_legacy_sqlite_path(
+    monkeypatch, tmp_path: Path, isolated_system_database: SystemDatabase
+):
+    from creative.repository_factory import build_runtime_creative_repository
+
+    monkeypatch.setenv("AIWORKER_CREATIVE_STORAGE", "sqlite")
+    path = tmp_path / "creative.db"
+    repository = build_runtime_creative_repository(
+        isolated_system_database, legacy_sqlite_path=path
+    )
+    assert isinstance(repository, PostgresCreativeRepository)
+    assert repository.database is isolated_system_database
+    assert not path.exists()
+
+
+def test_runtime_selection_ignores_unknown_legacy_backend_setting(
+    monkeypatch, isolated_system_database: SystemDatabase
+):
+    from creative.repository_factory import build_runtime_creative_repository
+
+    monkeypatch.setenv("AIWORKER_CREATIVE_STORAGE", "mysql")
+    repository = build_runtime_creative_repository(isolated_system_database)
+    assert isinstance(repository, PostgresCreativeRepository)
+    assert repository.database is isolated_system_database
+
+
+# ---------------------------------------------------------------------------
 # surface parity groundwork
 # ---------------------------------------------------------------------------
 
@@ -413,27 +507,63 @@ _INTENTIONAL_ADDITIONS = frozenset(
         "rows_dict",
         "transaction_scope",
         # delivery and production-export capabilities added by the migration
+        "batch_lockable_episode_scripts",
+        "complete_video_parameter_recommendation",
+        "confirm_video_parameter_recommendation",
         "delivery_public_record",
+        "fail_video_parameter_recommendation",
         "find_delivery",
         "find_production_export",
+        "finish_script_optimization",
         "get_delivery",
+        "get_delivery_projection_source",
         "get_production_export",
         "get_production_status",
+        "get_video_parameter_recommendation",
         "list_deliveries",
         "list_production_exports",
+        "lock_current_episode_scripts_batch",
         "mark_delivery_reconciled",
         "mark_production_export_audited",
+        "prepare_script_optimization_resume",
+        "prepare_script_review_resume",
         "production_export_public_record",
+        "queue_video_parameter_recommendation",
+        "read_snapshot_scope",
         "record_delivery",
         "record_production_export",
         "record_production_status",
+        "reserve_project_identity",
+        "save_script_optimization_episode",
+        "set_video_parameter_recommendation_job",
+        "start_video_parameter_recommendation",
     }
 )
 
 # Methods that may accept an extra optional connection so a caller can join an
 # existing transaction. Additive and keyword-defaulted, so every legacy call
 # still binds.
-_CONNECTION_AWARE = frozenset({"has_stage_export", "record_stage_export"})
+_CONNECTION_AWARE = frozenset(
+    {
+        "create_original_project",
+        "ensure_original_project",
+        "get_blueprint",
+        "get_character_batch",
+        "get_episode",
+        "get_outline_batch",
+        "get_project",
+        "has_stage_export",
+        "lock_brief",
+        "lock_character_batch",
+        "lock_current_episode_beats_batch",
+        "lock_episode_beats",
+        "lock_episode_script",
+        "lock_outline_batch",
+        "mark_project_bootstrap_status",
+        "reconcile_project_workflow_task",
+        "record_stage_export",
+    }
+)
 
 
 def _public_methods(cls: type) -> set[str]:

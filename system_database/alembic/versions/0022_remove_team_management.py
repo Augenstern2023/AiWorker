@@ -5,6 +5,7 @@
 # Repository: https://github.com/NanmiCoder/MediaCrawler
 # GitHub: https://github.com/NanmiCoder
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
+#
 
 """Remove retired team catalogs and grants without deleting identity records.
 
@@ -96,11 +97,7 @@ def downgrade() -> None:
                 "SELECT id, :code, :scope FROM roles "
                 "WHERE lower(code) = :role_code AND is_system = 1 "
                 "ON CONFLICT (role_id, permission_code) DO NOTHING"
-            ).bindparams(
-                code=code,
-                scope="managed_projects",
-                role_code="project_owner",
-            )
+            ).bindparams(code=code, scope="managed_projects", role_code="project_owner")
         )
 
     for identifier, parent, label, icon, route, order, hide in (
@@ -129,8 +126,7 @@ def downgrade() -> None:
                 "INSERT INTO navigation_items "
                 "(id, parent_id, label, icon, route, required_permission, sort_order, "
                 "is_enabled, is_system, hide_for_system_admin) "
-                "VALUES (:id, :parent, :label, :icon, :route, :permission, "
-                ":sort_order, 1, 1, :hide) "
+                "VALUES (:id, :parent, :label, :icon, :route, :permission, :sort_order, 1, 1, :hide) "
                 "ON CONFLICT (id) DO NOTHING"
             ).bindparams(
                 id=identifier,

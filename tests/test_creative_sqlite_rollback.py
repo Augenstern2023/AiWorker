@@ -310,11 +310,11 @@ def test_rollback_round_trip_is_lossless_per_table(
         assert report.digests[table] == source_inspection.digests[table]
 
     assert _store_id(destination) == _store_id(legacy_creative_db) == STORE_ID
-    # The frozen legacy DDL lags PostgreSQL in exactly two places; the export
-    # widens those tables and says so rather than dropping the columns.
+    # The frozen legacy DDL still lacks the breakdown snapshot reference; the
+    # export widens that table and says so rather than dropping the column.
     joined_warnings = "\n".join(report.warnings)
     assert "creative_breakdowns.source_snapshot_id" in joined_warnings
-    assert "script_optimizations.prompt_snapshot_json" in joined_warnings
+    assert "script_optimizations.prompt_snapshot_json" not in joined_warnings
     # The export is genuinely complete: every declared table is present.
     exported_tables = set(_sqlite_table_names(destination))
     for table in SPEC_BY_NAME:
@@ -657,11 +657,11 @@ def _cli_module():
     return module
 
 
-def _cli_app():
+def _cli_app(module=None):
     import typer
 
     app = typer.Typer(add_completion=False)
-    app.command()(_cli_module().main)
+    app.command()((module or _cli_module()).main)
     return app
 
 
@@ -703,8 +703,14 @@ def test_cli_rejects_a_destination_outside_the_rollback_directory(tmp_path: Path
 
 def test_cli_rejects_the_sealed_legacy_store(tmp_path: Path):
     module = _cli_module()
-    app = _cli_app()
-    sealed_store = module.PROJECT_ROOT / ".runtime" / "creative" / "creative.db"
+    original_refusal_reason = module._refusal_reason
+    module._refusal_reason = lambda destination, rollback_dir: original_refusal_reason(
+        destination, rollback_dir, project_root=tmp_path
+    )
+    app = _cli_app(module)
+    sealed_store = tmp_path / ".runtime" / "creative" / "creative.db"
+    sealed_store.parent.mkdir(parents=True)
+    sealed_store.write_bytes(b"sealed legacy store")
     before = sha256_file(sealed_store)
 
     result = _cli_runner().invoke(
@@ -713,7 +719,7 @@ def test_cli_rejects_the_sealed_legacy_store(tmp_path: Path):
             "--destination",
             str(sealed_store),
             "--rollback-dir",
-            str(module.PROJECT_ROOT / ".runtime"),
+            str(tmp_path / ".runtime"),
         ],
     )
 
@@ -721,7 +727,7 @@ def test_cli_rejects_the_sealed_legacy_store(tmp_path: Path):
     assert "refusing to write" in _plain_output(result)
     assert sha256_file(sealed_store) == before
     assert not list(
-        (module.PROJECT_ROOT / ".runtime" / "creative").glob(f"*{TEMPORARY_SUFFIX}")
+        (tmp_path / ".runtime" / "creative").glob(f"*{TEMPORARY_SUFFIX}")
     )
 
 

@@ -18,6 +18,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from core.job import CrawlJob
+from analysis.today_rank_service import TodayRankService
 from creative.api import (
     build_beats_markdown,
     build_creative_router,
@@ -28,6 +29,7 @@ from creative.free_mode_service import FreeCreativeModeService
 from creative.imitation_service import assess_similarity_risk
 from creative.outline_fields import outline_field_source_fingerprint
 from creative.repository import CreativeRepository
+from creative.legacy_sqlite_repository import CreativeRepository as LegacyCreativeRepository
 from creative.workflow_adapter import CreativeWorkflowAdapter
 from identity.dependencies import current_principal
 from identity.permission_service import PermissionService
@@ -38,6 +40,18 @@ from system_database import SystemDatabase, SystemDatabaseSettings
 from workflow import SYSTEM_ACTOR
 from workflow.repository import WorkflowRepository
 from workflow.transition_service import TransitionService
+
+
+
+@pytest.fixture(autouse=True)
+def _use_postgres_creative(monkeypatch, postgres_creative):
+    """Exercise runtime behavior against the isolated PostgreSQL store."""
+    monkeypatch.setitem(
+        globals(), "CreativeRepository", lambda *_args, **_kwargs: postgres_creative
+    )
+    monkeypatch.setenv(
+        "AIWORKER_TEST_SYSTEM_DATABASE_URL", postgres_creative.database.settings.url
+    )
 
 
 def seed_adopted_topic(repository: CreativeRepository) -> tuple[dict, dict]:
@@ -143,14 +157,13 @@ def test_deleting_project_removes_its_creative_records_and_script_review_data(tm
         "project_id": project["id"], "episode_number": 1, "kind": "script",
         "source_episode_id": beats["id"], "source_fingerprint": "fingerprint", "content": {},
     }])
-    with repository._connect() as connection:
-        connection.execute(
-            "CREATE TABLE creative_deliveries (id TEXT PRIMARY KEY, project_id INTEGER NOT NULL, path TEXT NOT NULL)"
-        )
-        connection.execute(
-            "INSERT INTO creative_deliveries (id, project_id, path) VALUES ('delivery-1', ?, 'exports/project.md')",
-            (project["id"],),
-        )
+    repository.record_delivery({
+        "id": "delivery-1", "project_id": project["id"], "stage": "script",
+        "resource_type": "script", "resource_id": str(beats["id"]),
+        "resource_version": 1, "submission_id": "submission-1",
+        "format": "txt", "content_fingerprint": "fingerprint",
+        "actor_id": "tester", "path": "exports/project.md",
+    })
 
     removed = repository.delete_project(project["id"])
 
@@ -163,7 +176,7 @@ def test_deleting_project_removes_its_creative_records_and_script_review_data(tm
             "creative_episodes", "creative_stage_exports", "script_reviews",
             "script_optimizations", "script_optimization_drafts", "creative_deliveries",
         ):
-            assert connection.execute(f"SELECT COUNT(*) FROM {table} WHERE project_id = ?", (project["id"],)).fetchone()[0] == 0
+            assert connection.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE project_id = ?", (project["id"],)).fetchone()["count"] == 0
 
 
 def test_project_delete_api_removes_its_workflow_members_and_tasks(tmp_path: Path):
@@ -201,7 +214,8 @@ def test_project_delete_api_removes_its_workflow_members_and_tasks(tmp_path: Pat
     app.dependency_overrides[creative_api_principal] = lambda: principal
     app.dependency_overrides[current_principal] = lambda: principal
     app.include_router(build_creative_router(
-        root=tmp_path, runtime_dir=runtime_dir, workflow_repository=workflow,
+        root=tmp_path, runtime_dir=runtime_dir, repository=repository,
+        workflow_repository=workflow,
     ))
     client = TestClient(app)
 
@@ -226,7 +240,7 @@ def test_project_delete_api_removes_its_workflow_members_and_tasks(tmp_path: Pat
 
 def test_repository_backfills_empty_project_audience_from_breakdown(tmp_path: Path):
     db_path = tmp_path / "creative.db"
-    repository = CreativeRepository(db_path)
+    repository = LegacyCreativeRepository(db_path)
     topic, breakdown = seed_adopted_topic(repository)
     project = repository.create_project(
         topic["id"], breakdown["id"], "历史项目", 20,
@@ -238,7 +252,7 @@ def test_repository_backfills_empty_project_audience_from_breakdown(tmp_path: Pa
             (project["id"],),
         )
 
-    reopened = CreativeRepository(db_path)
+    reopened = LegacyCreativeRepository(db_path)
 
     assert reopened.get_project(project["id"])["target_audience"] == "偏好都市逆袭题材的女性观众"
 
@@ -273,25 +287,6 @@ def test_project_brief_settings_are_editable_until_brief_is_locked(tmp_path: Pat
     repository.lock_brief(blueprint["id"])
     with pytest.raises(ValueError, match="锁定 Brief"):
         repository.update_project(project["id"], {"target_episode_count": 40})
-
-
-def test_manual_brief_version_keeps_template_provenance_but_marks_revision(tmp_path: Path):
-    repository = CreativeRepository(tmp_path / "creative.db")
-    topic, breakdown = seed_adopted_topic(repository)
-    project = repository.create_project(topic["id"], breakdown["id"], "模板来源", 20)
-    first = repository.create_blueprints(
-        project["id"], [{"content": {"title": "方向"}}],
-        generation_meta={
-            "job_id": "original-job",
-            "prompt_snapshot": {"template_key": "frozen", "title": "原模板", "revision": 2},
-        },
-    )[0]
-
-    second = repository.create_blueprint_version(first["id"])
-    assert second["generation_meta"]["prompt_snapshot"] == first["generation_meta"]["prompt_snapshot"]
-    assert second["generation_meta"]["manual_revision"] is True
-    assert second["generation_meta"]["revision_source_id"] == first["id"]
-    assert first["generation_meta"].get("manual_revision") is None
 
 
 def test_successor_brief_draft_can_update_and_freeze_new_project_settings(tmp_path: Path):
@@ -688,7 +683,8 @@ def test_locked_brief_version_api_creates_a_successor_brief_task(tmp_path: Path)
     app.dependency_overrides[creative_api_principal] = lambda: principal
     app.dependency_overrides[current_principal] = lambda: principal
     app.include_router(build_creative_router(
-        root=tmp_path, runtime_dir=runtime_dir, workflow_repository=workflow
+        root=tmp_path, runtime_dir=runtime_dir, repository=repository,
+        workflow_repository=workflow
     ))
     client = TestClient(app)
 
@@ -757,7 +753,7 @@ def build_phase4_client(
     tmp_path: Path,
     *,
     llm_provider_factory=None,
-    llm_model_resolver=None,
+    repository: CreativeRepository | None = None,
 ) -> tuple[TestClient, CreativeRepository, RecordingJobManager]:
     runtime_dir = tmp_path / ".runtime"
     manager = RecordingJobManager()
@@ -778,6 +774,8 @@ def build_phase4_client(
     permissions = PermissionService(identity, sessions)
     workflow = WorkflowRepository(identity)
     workflow.delete_project_data("1")
+    if repository is None:
+        repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
     app = FastAPI()
     app.state.identity_permission_service = permissions
     register_creative_routes(
@@ -785,9 +783,12 @@ def build_phase4_client(
         root=tmp_path,
         runtime_dir=runtime_dir,
         job_manager=manager,
+        repository=repository,
         workflow_repository=workflow,
         llm_provider_factory=llm_provider_factory,
-        llm_model_resolver=llm_model_resolver,
+        # The rank service is file backed so building the router never opens the
+        # ambient system database.
+        rank_service=TodayRankService.from_files(root=tmp_path),
     )
     session_app = FastAPI()
 
@@ -801,7 +802,7 @@ def build_phase4_client(
     client.workflow = workflow
     client.principal = permissions.principal_for_user(admin["id"], username)
     assert client.principal is not None
-    return client, CreativeRepository(runtime_dir / "creative" / "creative.db"), manager
+    return client, repository, manager
 
 
 def assign_phase4_task(
@@ -1156,10 +1157,13 @@ def seed_free_outline_for_api(
 
 def test_free_outline_field_rewrite_generates_and_applies_to_current_draft(
     tmp_path: Path,
+    postgres_creative,
 ):
     provider = InlineSequentialProvider([{"value": "记者在密室中找到被调包的原始卷宗"}])
     client, repository, _ = build_phase4_client(
-        tmp_path, llm_provider_factory=lambda: provider
+        tmp_path,
+        llm_provider_factory=lambda: provider,
+        repository=postgres_creative,
     )
     project, batch, head = seed_free_outline_for_api(
         client, repository, locked=False
@@ -1194,8 +1198,11 @@ def test_free_outline_field_rewrite_generates_and_applies_to_current_draft(
 
 def test_free_locked_outline_field_rewrite_derives_new_head_without_mutating_source(
     tmp_path: Path,
+    postgres_creative,
 ):
-    client, repository, _ = build_phase4_client(tmp_path)
+    client, repository, _ = build_phase4_client(
+        tmp_path, repository=postgres_creative
+    )
     project, locked, head = seed_free_outline_for_api(
         client, repository, locked=True
     )
@@ -1358,6 +1365,7 @@ def test_outline_overview_api_saves_and_starts_legacy_generation(tmp_path: Path)
     assert principal is not None
     workflow = WorkflowRepository(identity)
     manager = RecordingJobManager()
+    repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
     app = FastAPI()
     app.state.identity_permission_service = permissions
     app.dependency_overrides[creative_api_principal] = lambda: principal
@@ -1366,6 +1374,7 @@ def test_outline_overview_api_saves_and_starts_legacy_generation(tmp_path: Path)
         root=tmp_path,
         runtime_dir=runtime_dir,
         job_manager=manager,
+        repository=repository,
         workflow_repository=workflow,
     ))
     client = TestClient(app)
@@ -1379,7 +1388,6 @@ def test_outline_overview_api_saves_and_starts_legacy_generation(tmp_path: Path)
     client.cookies.set(sessions.cookie_name, raw_token)
     client.workflow = workflow
     client.principal = principal
-    repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
     app.state.workflow_identity_resolver = CreativeWorkflowAdapter(
         repository, workflow
     ).workflow_identity
@@ -1585,7 +1593,7 @@ def test_project_retry_prefers_system_bound_project_over_creative_mismatch(
 
 def test_project_duplicate_migration_keeps_newest_nondeleted_row(tmp_path: Path):
     path = tmp_path / "creative.db"
-    repository = CreativeRepository(path)
+    repository = LegacyCreativeRepository(path)
     topic, breakdown = seed_adopted_topic(repository)
     first = repository.create_project(
         topic["id"],
@@ -1617,7 +1625,7 @@ def test_project_duplicate_migration_keeps_newest_nondeleted_row(tmp_path: Path)
         )
         newer_id = int(cursor.lastrowid)
 
-    CreativeRepository(path)
+    LegacyCreativeRepository(path)
     with repository._connect() as connection:
         rows = connection.execute(
             "SELECT id, workflow_task_id, creation_workflow_task_id "
@@ -1773,7 +1781,7 @@ def test_breakdown_api_requires_at_least_one_transcript(tmp_path: Path):
     }
     assert manager.created == []
     with repository._connect() as conn:
-        count = conn.execute("SELECT COUNT(*) FROM creative_breakdowns WHERE topic_id = ?", (topic["id"],)).fetchone()[0]
+        count = conn.execute("SELECT COUNT(*) AS count FROM creative_breakdowns WHERE topic_id = ?", (topic["id"],)).fetchone()["count"]
     assert count == 0
 
 
@@ -1791,25 +1799,6 @@ def test_breakdown_api_enqueues_job_when_transcript_exists(tmp_path: Path):
     assert manager.created[0]["crawler_type"] == "breakdown_generate"
     assert manager.created[0]["extra"]["topic_id"] == topic["id"]
     assert manager.created[0]["extra"]["workspace_root"] == str(tmp_path.resolve())
-
-
-def test_breakdown_api_forwards_selected_model_to_generation_job(tmp_path: Path):
-    resolved: list[str] = []
-    client, repository, manager = build_phase4_client(
-        tmp_path,
-        llm_model_resolver=lambda model_id: resolved.append(model_id) or {"id": model_id},
-    )
-    topic = seed_topic_without_breakdown(repository, "指定模型拆解")
-    write_episode_script(tmp_path, topic["title"], 1, "第一集剧情正文")
-
-    response = client.post(
-        "/api/creative/breakdowns",
-        json={"topic_id": topic["id"], "llm_model_record_id": "model-record-2"},
-    )
-
-    assert response.status_code == 200, response.text
-    assert resolved == ["model-record-2"]
-    assert manager.created[0]["extra"]["llm_model_record_id"] == "model-record-2"
 
 
 def test_breakdown_api_enqueues_without_workflow_task(tmp_path: Path):

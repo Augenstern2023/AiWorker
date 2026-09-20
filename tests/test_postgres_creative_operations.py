@@ -485,8 +485,9 @@ def test_hydrate_operation_result_restores_the_operation_revision(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("nested", [[1, 2], [{"created_at": NOW}]])
 def test_side_effect_reservation_finalize_and_replay(
-    postgres_creative, isolated_system_database
+    postgres_creative, isolated_system_database, nested
 ):
     project_id = create_project(isolated_system_database)
 
@@ -500,9 +501,9 @@ def test_side_effect_reservation_finalize_and_replay(
     assert reserved == {"state": "reserved", "owner_id": "owner-a"}
 
     finalized = postgres_creative.finalize_side_effect_operation(
-        operation_id="op-se", owner_id="owner-a", result={"value": 1, "nested": [1, 2]}
+        operation_id="op-se", owner_id="owner-a", result={"value": 1, "nested": nested}
     )
-    assert finalized == {"value": 1, "nested": [1, 2]}
+    assert finalized == {"value": 1, "nested": nested}
 
     replay = postgres_creative.reserve_side_effect_operation(
         operation_id="op-se",
@@ -511,7 +512,10 @@ def test_side_effect_reservation_finalize_and_replay(
         request_hash="hash-1",
         owner_id="owner-b",
     )
-    assert replay == {"state": "complete", "result": {"value": 1, "nested": [1, 2]}}
+    assert replay == {
+        "state": "complete",
+        "result": {"value": 1, "nested": json.loads(json.dumps(nested, default=str))},
+    }
 
     with pytest.raises(ValueError) as error:
         postgres_creative.reserve_side_effect_operation(
@@ -1499,8 +1503,19 @@ def test_writer_project_deletion_fingerprint_tracks_dependent_rows(
     before = postgres_creative.writer_project_deletion_fingerprint(project_id)
     assert before == postgres_creative.writer_project_deletion_fingerprint(project_id)
 
+    postgres_creative.queue_video_parameter_recommendation(
+        project_id, created_by="writer-1"
+    )
+    with_video_parameters = postgres_creative.writer_project_deletion_fingerprint(
+        project_id
+    )
+    assert with_video_parameters != before
+
     create_episode(isolated_system_database, project_id)
-    assert postgres_creative.writer_project_deletion_fingerprint(project_id) != before
+    assert (
+        postgres_creative.writer_project_deletion_fingerprint(project_id)
+        != with_video_parameters
+    )
 
 
 def test_writer_action_workflow_task_ids(

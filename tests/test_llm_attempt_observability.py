@@ -59,12 +59,14 @@ def test_attempt_reporter_emits_shape_summary_and_dumps_raw_response(tmp_path):
     message, level, payload = events[0]
     assert level == "warning"
     assert "第 1/2 次模型响应未通过结构校验" in message
-    assert "relationships 必须是数组" in message
-    assert "relations(对象/1键)" in message
+    assert "relationships 必须是数组" not in message
+    assert "顶层对象/2键" in message
+    assert "林穗" not in message
     assert payload["debug_path"]
 
     dumped = json.loads(Path(payload["debug_path"]).read_text(encoding="utf-8"))
     assert dumped["stage"] == "characters"
+    assert dumped["error"] == "relationships 必须是数组"
     assert dumped["attempt"] == 1
     assert dumped["elapsed_seconds"] == 12.5
     assert dumped["response"]["relations"] == {"林穗-周谨": {}}
@@ -117,7 +119,8 @@ def test_attempt_reporter_reports_repair_success_and_missing_payload(tmp_path):
 
     assert "第 2/2 次模型响应通过结构校验" in events[0][0]
     assert events[0][1] == "info"
-    assert "LLM_BASE_URL is required." in events[1][0]
+    assert "LLM_BASE_URL is required." not in events[1][0]
+    assert "模型响应未通过结构校验" in events[1][0]
     assert events[1][1] == "warning"
     assert events[1][2]["debug_path"] is None
 

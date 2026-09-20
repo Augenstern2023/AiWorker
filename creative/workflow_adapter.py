@@ -8,17 +8,25 @@
 
 from __future__ import annotations
 
-import json
-import sqlite3
-import time
 import uuid
-from pathlib import Path
+from datetime import datetime
 from typing import Any
 
+from sqlalchemy import func, insert, select, update
+from sqlalchemy.engine import Connection
+
+from creative.database_schema import (
+    creative_blueprints,
+    creative_breakdowns,
+    creative_characters,
+    creative_episodes,
+    creative_projects,
+    creative_relationships,
+)
+from creative.repositories.base import CreativeRepositoryBase, utc_now
 from identity.schema import Principal
 from workflow.repository import SYSTEM_ACTOR, WorkflowRepository
 
-from .repository import CreativeRepository
 from .workflow_identity import WorkflowIdentityResolver
 
 
@@ -34,14 +42,12 @@ class CreativeWorkflowAdapter:
 
     def __init__(
         self,
-        creative_repository: CreativeRepository | str | Path,
+        creative_repository: CreativeRepositoryBase,
         workflow_repository: WorkflowRepository,
     ) -> None:
-        self.creative_repository = (
-            creative_repository
-            if isinstance(creative_repository, CreativeRepository)
-            else CreativeRepository(creative_repository)
-        )
+        # The adapter never builds a store of its own: the caller injects the
+        # one runtime creative repository (PostgreSQL in production).
+        self.creative_repository = creative_repository
         self.workflow_repository = workflow_repository
         self.workflow_identity = WorkflowIdentityResolver(
             self.creative_repository, self.workflow_repository
@@ -173,14 +179,12 @@ class CreativeWorkflowAdapter:
             submission_id, actor, content_snapshot=snapshot
         )
         try:
-            with self.creative_repository._connect() as connection:
-                self.set_domain_status(
-                    resource_type,
-                    resource_id,
-                    "submitted",
-                    conn=connection,
-                    workflow_task_id=task["id"],
-                )
+            self.set_domain_status(
+                resource_type,
+                resource_id,
+                "submitted",
+                workflow_task_id=task["id"],
+            )
         except Exception as exc:
             self._record_mirror_error(submitted, exc)
         return submitted
@@ -199,9 +203,8 @@ class CreativeWorkflowAdapter:
         self,
         submission: dict,
         actor: Principal,
-        conn: sqlite3.Connection | None = None,
+        conn: Connection | None = None,
     ) -> dict:
-        del conn
         requested_submission = submission
         authoritative = self._authoritative_approved_submission(
             submission["resource_type"], submission["resource_id"]
@@ -212,51 +215,79 @@ class CreativeWorkflowAdapter:
         resource_id = submission["resource_id"]
         self._validate_type(resource_type)
         self.assert_approvable(submission)
-        now = time.time()
+        now = utc_now()
         superseded_resources: list[str] = []
         project_revision: int | None = None
-        with self.creative_repository._connect() as connection:
-            self.set_domain_status(resource_type, resource_id, "approved", conn=connection)
+        with self.creative_repository.transaction_scope(conn) as connection:
+            self.set_domain_status(
+                resource_type, resource_id, "approved", connection=connection
+            )
             if resource_type == "breakdown":
                 item = self._required(
                     self.creative_repository.get_breakdown(int(resource_id))
                 )
+                topic_id = int(item["topic_id"])
                 old_rows = connection.execute(
-                    "SELECT id FROM creative_breakdowns WHERE topic_id = ? AND id <> ? AND status = 'approved'",
-                    (item["topic_id"], int(resource_id)),
-                ).fetchall()
-                superseded_resources.extend(str(row["id"]) for row in old_rows)
+                    select(creative_breakdowns.c.id).where(
+                        creative_breakdowns.c.topic_id == topic_id,
+                        creative_breakdowns.c.id != int(resource_id),
+                        creative_breakdowns.c.status == "approved",
+                    )
+                ).scalars().all()
+                superseded_resources.extend(str(old_id) for old_id in old_rows)
                 connection.execute(
-                    "UPDATE creative_breakdowns SET status = 'superseded', updated_at = ? "
-                    "WHERE topic_id = ? AND id <> ? AND status = 'approved'",
-                    (now, item["topic_id"], int(resource_id)),
+                    update(creative_breakdowns)
+                    .where(
+                        creative_breakdowns.c.topic_id == topic_id,
+                        creative_breakdowns.c.id != int(resource_id),
+                        creative_breakdowns.c.status == "approved",
+                    )
+                    .values(status="superseded", updated_at=now)
                 )
             elif resource_type == "brief":
-                item = self._required(self.creative_repository.get_blueprint(int(resource_id)))
+                item = self._required(
+                    self.creative_repository.get_blueprint(int(resource_id))
+                )
                 content = dict(submission["content_snapshot"]["content"])
                 connection.execute(
-                    "UPDATE creative_blueprints SET content_json = ?, updated_at = ? WHERE id = ?",
-                    (json.dumps(content, ensure_ascii=False), now, int(resource_id)),
+                    update(creative_blueprints)
+                    .where(creative_blueprints.c.id == int(resource_id))
+                    .values(content_json=content, updated_at=now)
                 )
                 project = connection.execute(
-                    "SELECT locked_brief_id, revision FROM creative_projects WHERE id = ?",
-                    (item["project_id"],),
-                ).fetchone()
+                    select(
+                        creative_projects.c.locked_brief_id,
+                        creative_projects.c.revision,
+                    ).where(creative_projects.c.id == int(item["project_id"]))
+                ).mappings().first()
                 old_id = project["locked_brief_id"] if project else None
                 expected_revision = int(project["revision"]) if project else -1
                 switching = not old_id or int(old_id) != int(resource_id)
                 if old_id and switching:
                     connection.execute(
-                        "UPDATE creative_blueprints SET status = 'superseded', updated_at = ? WHERE id = ? AND status = 'approved'",
-                        (now, old_id),
+                        update(creative_blueprints)
+                        .where(
+                            creative_blueprints.c.id == int(old_id),
+                            creative_blueprints.c.status == "approved",
+                        )
+                        .values(status="superseded", updated_at=now)
                     )
                     superseded_resources.append(str(old_id))
                 if switching:
                     cursor = connection.execute(
-                        "UPDATE creative_projects SET locked_brief_id = ?, character_batch_id = NULL, "
-                        "outline_batch_id = NULL, status = 'brief_approved', revision = revision + 1, "
-                        "updated_at = ? WHERE id = ? AND revision = ?",
-                        (int(resource_id), now, item["project_id"], expected_revision),
+                        update(creative_projects)
+                        .where(
+                            creative_projects.c.id == int(item["project_id"]),
+                            creative_projects.c.revision == expected_revision,
+                        )
+                        .values(
+                            locked_brief_id=int(resource_id),
+                            character_batch_id=None,
+                            outline_batch_id=None,
+                            status="brief_approved",
+                            revision=creative_projects.c.revision + 1,
+                            updated_at=now,
+                        )
                     )
                     if cursor.rowcount != 1:
                         raise ValueError("project revision changed")
@@ -266,21 +297,33 @@ class CreativeWorkflowAdapter:
             elif resource_type == "characters":
                 project_id, batch_id = self._batch_key(resource_id)
                 project = connection.execute(
-                    "SELECT character_batch_id, revision FROM creative_projects WHERE id = ?",
-                    (project_id,),
-                ).fetchone()
+                    select(
+                        creative_projects.c.character_batch_id,
+                        creative_projects.c.revision,
+                    ).where(creative_projects.c.id == project_id)
+                ).mappings().first()
                 old_batch = project["character_batch_id"] if project else None
                 expected_revision = int(project["revision"]) if project else -1
                 switching = not old_batch or old_batch != batch_id
                 if old_batch and switching:
-                    self._set_batch_status(connection, "characters", project_id, old_batch, "superseded")
+                    self._set_batch_status(
+                        connection, "characters", project_id, old_batch, "superseded"
+                    )
                     superseded_resources.append(f"{project_id}:{old_batch}")
                 if switching:
                     cursor = connection.execute(
-                        "UPDATE creative_projects SET character_batch_id = ?, outline_batch_id = NULL, "
-                        "status = 'characters_approved', revision = revision + 1, updated_at = ? "
-                        "WHERE id = ? AND revision = ?",
-                        (batch_id, now, project_id, expected_revision),
+                        update(creative_projects)
+                        .where(
+                            creative_projects.c.id == project_id,
+                            creative_projects.c.revision == expected_revision,
+                        )
+                        .values(
+                            character_batch_id=batch_id,
+                            outline_batch_id=None,
+                            status="characters_approved",
+                            revision=creative_projects.c.revision + 1,
+                            updated_at=now,
+                        )
                     )
                     if cursor.rowcount != 1:
                         raise ValueError("project revision changed")
@@ -290,20 +333,32 @@ class CreativeWorkflowAdapter:
             elif resource_type == "outline":
                 project_id, batch_id = self._batch_key(resource_id)
                 project = connection.execute(
-                    "SELECT outline_batch_id, revision FROM creative_projects WHERE id = ?",
-                    (project_id,),
-                ).fetchone()
+                    select(
+                        creative_projects.c.outline_batch_id,
+                        creative_projects.c.revision,
+                    ).where(creative_projects.c.id == project_id)
+                ).mappings().first()
                 old_batch = project["outline_batch_id"] if project else None
                 expected_revision = int(project["revision"]) if project else -1
                 switching = not old_batch or old_batch != batch_id
                 if old_batch and switching:
-                    self._set_batch_status(connection, "outline", project_id, old_batch, "superseded")
+                    self._set_batch_status(
+                        connection, "outline", project_id, old_batch, "superseded"
+                    )
                     superseded_resources.append(f"{project_id}:{old_batch}")
                 if switching:
                     cursor = connection.execute(
-                        "UPDATE creative_projects SET outline_batch_id = ?, status = 'outline_approved', "
-                        "revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?",
-                        (batch_id, now, project_id, expected_revision),
+                        update(creative_projects)
+                        .where(
+                            creative_projects.c.id == project_id,
+                            creative_projects.c.revision == expected_revision,
+                        )
+                        .values(
+                            outline_batch_id=batch_id,
+                            status="outline_approved",
+                            revision=creative_projects.c.revision + 1,
+                            updated_at=now,
+                        )
                     )
                     if cursor.rowcount != 1:
                         raise ValueError("project revision changed")
@@ -312,63 +367,93 @@ class CreativeWorkflowAdapter:
                     project_revision = expected_revision
             elif resource_type == "beats":
                 episode = self._required(self.creative_repository.get_episode(int(resource_id)))
+                episode_criteria = (
+                    creative_episodes.c.project_id == int(episode["project_id"]),
+                    creative_episodes.c.stage == "beats",
+                    creative_episodes.c.episode_number == int(episode["episode_number"]),
+                    creative_episodes.c.id != int(resource_id),
+                    creative_episodes.c.status == "approved",
+                )
                 old_rows = connection.execute(
-                    "SELECT id FROM creative_episodes WHERE project_id = ? AND stage = 'beats' "
-                    "AND episode_number = ? AND id <> ? AND status = 'approved'",
-                    (episode["project_id"], episode["episode_number"], int(resource_id)),
-                ).fetchall()
-                superseded_resources.extend(str(row["id"]) for row in old_rows)
+                    select(creative_episodes.c.id).where(*episode_criteria)
+                ).scalars().all()
+                superseded_resources.extend(str(old_id) for old_id in old_rows)
                 connection.execute(
-                    "UPDATE creative_episodes SET status = 'superseded', updated_at = ? "
-                    "WHERE project_id = ? AND stage = 'beats' AND episode_number = ? "
-                    "AND id <> ? AND status = 'approved'",
-                    (now, episode["project_id"], episode["episode_number"], int(resource_id)),
+                    update(creative_episodes)
+                    .where(*episode_criteria)
+                    .values(status="superseded", updated_at=now)
                 )
             if resource_type == "breakdown":
                 rows = connection.execute(
-                    "SELECT id FROM creative_breakdowns WHERE topic_id = ? AND status = 'superseded'",
-                    (item["topic_id"],),
-                ).fetchall()
-                superseded_resources.extend(str(row["id"]) for row in rows)
+                    select(creative_breakdowns.c.id).where(
+                        creative_breakdowns.c.topic_id == topic_id,
+                        creative_breakdowns.c.status == "superseded",
+                    )
+                ).scalars().all()
+                superseded_resources.extend(str(old_id) for old_id in rows)
             elif resource_type == "brief":
                 rows = connection.execute(
-                    "SELECT id FROM creative_blueprints WHERE project_id = ? AND status = 'superseded'",
-                    (item["project_id"],),
-                ).fetchall()
-                superseded_resources.extend(str(row["id"]) for row in rows)
+                    select(creative_blueprints.c.id).where(
+                        creative_blueprints.c.project_id == int(item["project_id"]),
+                        creative_blueprints.c.status == "superseded",
+                    )
+                ).scalars().all()
+                superseded_resources.extend(str(old_id) for old_id in rows)
             elif resource_type == "characters":
                 rows = connection.execute(
-                    "SELECT DISTINCT batch_id FROM creative_characters WHERE project_id = ? AND status = 'superseded'",
-                    (project_id,),
-                ).fetchall()
+                    select(creative_characters.c.batch_id)
+                    .where(
+                        creative_characters.c.project_id == project_id,
+                        creative_characters.c.status == "superseded",
+                    )
+                    .distinct()
+                ).scalars().all()
                 superseded_resources.extend(
-                    f"{project_id}:{row['batch_id']}" for row in rows
+                    f"{project_id}:{batch}" for batch in rows
                 )
             elif resource_type == "outline":
                 rows = connection.execute(
-                    "SELECT DISTINCT batch_id FROM creative_episodes WHERE project_id = ? AND stage = 'outline' AND status = 'superseded'",
-                    (project_id,),
-                ).fetchall()
+                    select(creative_episodes.c.batch_id)
+                    .where(
+                        creative_episodes.c.project_id == project_id,
+                        creative_episodes.c.stage == "outline",
+                        creative_episodes.c.status == "superseded",
+                    )
+                    .distinct()
+                ).scalars().all()
                 superseded_resources.extend(
-                    f"{project_id}:{row['batch_id']}" for row in rows
+                    f"{project_id}:{batch}" for batch in rows
                 )
             elif resource_type == "beats":
                 rows = connection.execute(
-                    "SELECT id FROM creative_episodes WHERE project_id = ? AND stage = 'beats' "
-                    "AND episode_number = ? AND status = 'superseded'",
-                    (episode["project_id"], episode["episode_number"]),
-                ).fetchall()
-                superseded_resources.extend(str(row["id"]) for row in rows)
-        for old_resource_id in dict.fromkeys(superseded_resources):
-            self.workflow_repository.supersede_resource_approvals(
-                resource_type, old_resource_id, actor
-            )
-        if requested_submission["id"] != submission["id"]:
-            self.workflow_repository.supersede_resource_approvals(
-                requested_submission["resource_type"],
-                requested_submission["resource_id"],
-                actor,
-            )
+                    select(creative_episodes.c.id).where(
+                        creative_episodes.c.project_id == int(episode["project_id"]),
+                        creative_episodes.c.stage == "beats",
+                        creative_episodes.c.episode_number
+                        == int(episode["episode_number"]),
+                        creative_episodes.c.status == "superseded",
+                    )
+                ).scalars().all()
+                superseded_resources.extend(str(old_id) for old_id in rows)
+
+            # The workflow supersede writes join the same transaction as the
+            # creative status changes above. Moving them outside the scope would
+            # let a workflow failure leave Creative superseded with the workflow
+            # registry still approving the old version.
+            for old_resource_id in dict.fromkeys(superseded_resources):
+                self.workflow_repository.supersede_resource_approvals(
+                    resource_type,
+                    old_resource_id,
+                    actor,
+                    connection=connection,
+                )
+            if requested_submission["id"] != submission["id"]:
+                self.workflow_repository.supersede_resource_approvals(
+                    requested_submission["resource_type"],
+                    requested_submission["resource_id"],
+                    actor,
+                    connection=connection,
+                )
         if project_revision is None:
             return submission
         result = dict(submission)
@@ -380,19 +465,26 @@ class CreativeWorkflowAdapter:
         submission: dict,
         new_draft: dict,
         actor: Principal,
-        conn: sqlite3.Connection | None = None,
+        conn: Connection | None = None,
     ) -> dict:
         del actor
         resource_type = submission["resource_type"]
         old_id = submission["resource_id"]
         task_id = submission["task_id"]
-        with self.creative_repository._connect() as connection:
-            self.set_domain_status(resource_type, old_id, "returned", conn=connection)
+        with self.creative_repository.transaction_scope(conn) as connection:
+            self.set_domain_status(
+                resource_type, old_id, "returned", connection=connection
+            )
             new_id = self._clone(resource_type, old_id, task_id, connection)
-        self.workflow_repository.update_submission_resource_id(
-            new_draft["id"], new_id, connection=conn
-        )
-        updated = self.workflow_repository.get_submission(new_draft["id"], connection=conn)
+            # The submission repoint belongs to the same transaction: outside it
+            # a failure would leave the cloned creative draft unreachable from
+            # the workflow submission that is supposed to reference it.
+            self.workflow_repository.update_submission_resource_id(
+                new_draft["id"], new_id, connection=connection
+            )
+            updated = self.workflow_repository.get_submission(
+                new_draft["id"], connection=connection
+            )
         assert updated is not None
         return updated
 
@@ -416,6 +508,7 @@ class CreativeWorkflowAdapter:
         difference_note: str = "",
         expected_project_revision: int | None = None,
         expected_authority: dict[str, Any] | None = None,
+        connection: Connection | None = None,
     ) -> dict:
         """Lock an assigned creative version without creating a submission."""
         if resource_type not in APPROVAL_FREE_RESOURCE_TYPES:
@@ -426,13 +519,14 @@ class CreativeWorkflowAdapter:
         snapshot = self.snapshot(resource_type, resource_id)
         self._assert_current_upstream(resource_type, resource_id, snapshot)
         self._assert_brief_risk(resource_type, resource_id)
-
+        join = self._joined_kwargs(connection)
         if resource_type == "brief":
             resource = self.creative_repository.lock_brief(
                 int(resource_id),
                 difference_note,
                 expected_revision=expected_project_revision,
                 expected_authority=expected_authority,
+                **join,
             )
         elif resource_type == "characters":
             project_id, batch_id = self._batch_key(resource_id)
@@ -441,6 +535,7 @@ class CreativeWorkflowAdapter:
                 batch_id,
                 expected_revision=expected_project_revision,
                 expected_authority=expected_authority,
+                **join,
             )
         elif resource_type == "outline":
             project_id, batch_id = self._batch_key(resource_id)
@@ -449,23 +544,44 @@ class CreativeWorkflowAdapter:
                 batch_id,
                 expected_revision=expected_project_revision,
                 expected_authority=expected_authority,
+                **join,
             )
         elif resource_type == "beats":
             resource = self.creative_repository.lock_episode_beats(
                 int(resource_id),
                 expected_revision=expected_project_revision,
                 expected_authority=expected_authority,
+                **join,
             )
         else:
             resource = self.creative_repository.lock_episode_script(
                 int(resource_id),
                 expected_revision=expected_project_revision,
                 expected_authority=expected_authority,
+                **join,
             )
         return {"resource": resource, "snapshot": snapshot}
 
+    def _joined_kwargs(self, connection: Connection | None) -> dict[str, Any]:
+        """Forward a caller's connection only to a store that can join it.
+
+        The frozen SQLite repository owns its writes internally and declares no
+        ``connection`` parameter, so it must be called exactly as before.
+        """
+
+        if connection is None or not hasattr(
+            self.creative_repository, "transaction_scope"
+        ):
+            return {}
+        return {"connection": connection}
+
     def lock_beats_batch_without_review(
-        self, task_id: str, project_id: int, actor: Principal
+        self,
+        task_id: str,
+        project_id: int,
+        actor: Principal,
+        *,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         """Validate every current Beats draft before one repository-level batch lock."""
         drafts = self.creative_repository.batch_lockable_episode_beats(project_id)
@@ -477,7 +593,9 @@ class CreativeWorkflowAdapter:
             snapshot = self.snapshot("beats", resource_id)
             self._assert_current_upstream("beats", resource_id, snapshot)
             snapshots.append(snapshot)
-        resources = self.creative_repository.lock_current_episode_beats_batch(project_id)
+        resources = self.creative_repository.lock_current_episode_beats_batch(
+            project_id, **self._joined_kwargs(connection)
+        )
         return {"resources": resources, "snapshots": snapshots}
 
     def lock_scripts_batch_without_review(
@@ -575,13 +693,9 @@ class CreativeWorkflowAdapter:
                 "superseded",
             }:
                 if self.domain_status(resource_type, resource_id) != submission["status"]:
-                    with self.creative_repository._connect() as connection:
-                        self.set_domain_status(
-                            resource_type,
-                            resource_id,
-                            submission["status"],
-                            conn=connection,
-                        )
+                    self.set_domain_status(
+                        resource_type, resource_id, submission["status"]
+                    )
         except Exception as exc:
             self._record_mirror_error(submission, exc)
 
@@ -701,31 +815,33 @@ class CreativeWorkflowAdapter:
         resource_id: str,
         actor: Principal,
     ) -> None:
-        with self.creative_repository._connect() as connection:
-            if resource_type == "breakdown":
-                row = connection.execute(
-                    "SELECT workflow_task_id FROM creative_breakdowns WHERE id = ?",
-                    (int(resource_id),),
-                ).fetchone()
-            elif resource_type == "brief":
-                row = connection.execute(
-                    "SELECT workflow_task_id FROM creative_blueprints WHERE id = ?",
-                    (int(resource_id),),
-                ).fetchone()
-            elif resource_type in {"characters", "outline"}:
-                project_id, batch_id = self._batch_key(resource_id)
-                table = "creative_characters" if resource_type == "characters" else "creative_episodes"
-                stage = "" if resource_type == "characters" else " AND stage = 'outline'"
-                row = connection.execute(
-                    f"SELECT workflow_task_id FROM {table} WHERE project_id = ? AND batch_id = ?{stage} LIMIT 1",
-                    (project_id, batch_id),
-                ).fetchone()
+        if resource_type == "breakdown":
+            item = self.creative_repository.get_breakdown(int(resource_id))
+            task_id = str((item or {}).get("workflow_task_id") or "")
+        elif resource_type == "brief":
+            item = self.creative_repository.get_blueprint(int(resource_id))
+            task_id = str((item or {}).get("workflow_task_id") or "")
+        elif resource_type in {"characters", "outline"}:
+            project_id, batch_id = self._batch_key(resource_id)
+            if resource_type == "characters":
+                rows = self.creative_repository.get_character_batch(
+                    project_id, batch_id
+                )["characters"]
             else:
-                row = connection.execute(
-                    "SELECT workflow_task_id FROM creative_episodes WHERE id = ? AND stage = ?",
-                    (int(resource_id), resource_type),
-                ).fetchone()
-        task_id = str(row["workflow_task_id"] or "") if row else ""
+                rows = self.creative_repository.get_outline_batch(
+                    project_id, batch_id
+                )["episodes"]
+            task_id = str((rows[0].get("workflow_task_id") if rows else "") or "")
+        else:
+            item = self.creative_repository.get_episode(int(resource_id))
+            task_id = str(
+                (
+                    item.get("workflow_task_id")
+                    if item is not None and item.get("stage") == resource_type
+                    else ""
+                )
+                or ""
+            )
         if not task_id:
             raise ValueError("强制操作需要关联工作任务以记录审计")
         self.workflow_repository.record_legacy_force(
@@ -734,35 +850,33 @@ class CreativeWorkflowAdapter:
 
     def domain_status(self, resource_type: str, resource_id: str) -> str:
         self._validate_type(resource_type)
-        with self.creative_repository._connect() as connection:
-            if resource_type == "breakdown":
-                row = connection.execute(
-                    "SELECT status FROM creative_breakdowns WHERE id = ?", (int(resource_id),)
-                ).fetchone()
-            elif resource_type == "brief":
-                row = connection.execute(
-                    "SELECT status FROM creative_blueprints WHERE id = ?", (int(resource_id),)
-                ).fetchone()
-            elif resource_type == "characters":
-                project_id, batch_id = self._batch_key(resource_id)
-                row = connection.execute(
-                    "SELECT status FROM creative_characters WHERE project_id = ? AND batch_id = ? LIMIT 1",
-                    (project_id, batch_id),
-                ).fetchone()
-            elif resource_type == "outline":
-                project_id, batch_id = self._batch_key(resource_id)
-                row = connection.execute(
-                    "SELECT status FROM creative_episodes WHERE project_id = ? AND stage = 'outline' AND batch_id = ? LIMIT 1",
-                    (project_id, batch_id),
-                ).fetchone()
-            else:
-                row = connection.execute(
-                    "SELECT status FROM creative_episodes WHERE id = ? AND stage = ?",
-                    (int(resource_id), resource_type),
-                ).fetchone()
-        if row is None:
+        status: Any = None
+        if resource_type == "breakdown":
+            item = self.creative_repository.get_breakdown(int(resource_id))
+            status = item["status"] if item else None
+        elif resource_type == "brief":
+            item = self.creative_repository.get_blueprint(int(resource_id))
+            status = item["status"] if item else None
+        elif resource_type == "characters":
+            project_id, batch_id = self._batch_key(resource_id)
+            batch = self.creative_repository.get_character_batch(project_id, batch_id)
+            item = (batch["characters"] or [None])[0]
+            status = item["status"] if item else None
+        elif resource_type == "outline":
+            project_id, batch_id = self._batch_key(resource_id)
+            batch = self.creative_repository.get_outline_batch(project_id, batch_id)
+            item = (batch["episodes"] or [None])[0]
+            status = item["status"] if item else None
+        else:
+            item = self.creative_repository.get_episode(int(resource_id))
+            status = (
+                item["status"]
+                if item is not None and item.get("stage") == resource_type
+                else None
+            )
+        if status is None:
             raise KeyError(resource_id)
-        return str(row["status"])
+        return str(status)
 
     def locked_resource(self, resource_type: str, resource_id: str) -> dict:
         """Return the persisted resource body for completion reconciliation."""
@@ -792,15 +906,18 @@ class CreativeWorkflowAdapter:
             raise ValueError("creative resource type mismatch")
         return resource
 
-    def beats_episode_progress(self, resource_id: str) -> dict[str, Any]:
+    def beats_episode_progress(
+        self, resource_id: str, *, connection: Connection | None = None
+    ) -> dict[str, Any]:
         """Return current-outline coverage, treating this completion as accepted."""
+        join = self._joined_kwargs(connection)
         episode = self._required(
-            self.creative_repository.get_episode(int(resource_id))
+            self.creative_repository.get_episode(int(resource_id), **join)
         )
         if episode["stage"] != "beats":
             raise ValueError("beats resource must reference a beats episode")
         project = self._required(
-            self.creative_repository.get_project(int(episode["project_id"]))
+            self.creative_repository.get_project(int(episode["project_id"]), **join)
         )
         outline_batch_id = project.get("outline_batch_id")
         required = {
@@ -825,11 +942,18 @@ class CreativeWorkflowAdapter:
             "complete": bool(required) and required <= approved,
         }
 
-    def script_episode_progress(self, resource_id: str) -> dict[str, Any]:
-        episode = self._required(self.creative_repository.get_episode(int(resource_id)))
+    def script_episode_progress(
+        self, resource_id: str, *, connection: Connection | None = None
+    ) -> dict[str, Any]:
+        join = self._joined_kwargs(connection)
+        episode = self._required(
+            self.creative_repository.get_episode(int(resource_id), **join)
+        )
         if episode["stage"] != "script":
             raise ValueError("script resource must reference a script episode")
-        project = self._required(self.creative_repository.get_project(int(episode["project_id"])))
+        project = self._required(
+            self.creative_repository.get_project(int(episode["project_id"]), **join)
+        )
         required = {
             int(item["episode_number"])
             for item in project.get("episodes", [])
@@ -854,40 +978,82 @@ class CreativeWorkflowAdapter:
         resource_id: str,
         status: str,
         *,
-        conn: sqlite3.Connection,
+        connection: Connection | None = None,
         workflow_task_id: str | None = None,
     ) -> None:
-        now = time.time()
-        task_sql = ", workflow_task_id = COALESCE(?, workflow_task_id)"
-        if resource_type == "breakdown":
-            conn.execute(
-                f"UPDATE creative_breakdowns SET status = ?, updated_at = ?{task_sql} WHERE id = ?",
-                (status, now, workflow_task_id, int(resource_id)),
-            )
-        elif resource_type == "brief":
-            conn.execute(
-                f"UPDATE creative_blueprints SET status = ?, updated_at = ?{task_sql} WHERE id = ?",
-                (status, now, workflow_task_id, int(resource_id)),
-            )
-        elif resource_type == "characters":
-            project_id, batch_id = self._batch_key(resource_id)
-            for table in ("creative_characters", "creative_relationships"):
-                conn.execute(
-                    f"UPDATE {table} SET status = ?, updated_at = ?{task_sql} WHERE project_id = ? AND batch_id = ?",
-                    (status, now, workflow_task_id, project_id, batch_id),
+        now = utc_now()
+        with self.creative_repository.transaction_scope(connection) as connection:
+            if resource_type == "breakdown":
+                self._update_status(
+                    connection,
+                    creative_breakdowns,
+                    creative_breakdowns.c.id == int(resource_id),
+                    status,
+                    now,
+                    workflow_task_id,
                 )
-        elif resource_type == "outline":
-            project_id, batch_id = self._batch_key(resource_id)
-            conn.execute(
-                f"UPDATE creative_episodes SET status = ?, updated_at = ?{task_sql} "
-                "WHERE project_id = ? AND stage = 'outline' AND batch_id = ?",
-                (status, now, workflow_task_id, project_id, batch_id),
-            )
-        else:
-            conn.execute(
-                f"UPDATE creative_episodes SET status = ?, updated_at = ?{task_sql} WHERE id = ? AND stage = ?",
-                (status, now, workflow_task_id, int(resource_id), resource_type),
-            )
+            elif resource_type == "brief":
+                self._update_status(
+                    connection,
+                    creative_blueprints,
+                    creative_blueprints.c.id == int(resource_id),
+                    status,
+                    now,
+                    workflow_task_id,
+                )
+            elif resource_type == "characters":
+                project_id, batch_id = self._batch_key(resource_id)
+                for table in (creative_characters, creative_relationships):
+                    self._update_status(
+                        connection,
+                        table,
+                        (table.c.project_id == project_id, table.c.batch_id == batch_id),
+                        status,
+                        now,
+                        workflow_task_id,
+                    )
+            elif resource_type == "outline":
+                project_id, batch_id = self._batch_key(resource_id)
+                self._update_status(
+                    connection,
+                    creative_episodes,
+                    (
+                        creative_episodes.c.project_id == project_id,
+                        creative_episodes.c.stage == "outline",
+                        creative_episodes.c.batch_id == batch_id,
+                    ),
+                    status,
+                    now,
+                    workflow_task_id,
+                )
+            else:
+                self._update_status(
+                    connection,
+                    creative_episodes,
+                    (
+                        creative_episodes.c.id == int(resource_id),
+                        creative_episodes.c.stage == resource_type,
+                    ),
+                    status,
+                    now,
+                    workflow_task_id,
+                )
+
+    @staticmethod
+    def _update_status(
+        connection: Connection,
+        table: Any,
+        criteria: tuple[Any, ...] | Any,
+        status: str,
+        now: datetime,
+        workflow_task_id: str | None,
+    ) -> None:
+        if not isinstance(criteria, tuple):
+            criteria = (criteria,)
+        values: dict[str, Any] = {"status": status, "updated_at": now}
+        if workflow_task_id:
+            values["workflow_task_id"] = workflow_task_id
+        connection.execute(update(table).where(*criteria).values(**values))
 
     def _assert_task(
         self, task_id: str, resource_type: str, resource_id: str, actor: Principal
@@ -1026,140 +1192,354 @@ class CreativeWorkflowAdapter:
         resource_type: str,
         resource_id: str,
         workflow_task_id: str,
-        connection: sqlite3.Connection,
+        connection: Connection | None = None,
     ) -> str:
-        now = time.time()
-        if resource_type == "breakdown":
+        now = utc_now()
+        with self.creative_repository.transaction_scope(connection) as connection:
+            if resource_type == "breakdown":
+                return self._clone_breakdown(
+                    resource_id, workflow_task_id, connection, now
+                )
+            if resource_type == "brief":
+                return self._clone_brief(resource_id, workflow_task_id, connection, now)
+            if resource_type == "characters":
+                return self._clone_character_batch(
+                    resource_id, workflow_task_id, connection, now
+                )
+            if resource_type == "outline":
+                return self._clone_outline_batch(
+                    resource_id, workflow_task_id, connection, now
+                )
+            if resource_type not in {"beats", "script"}:
+                raise ValueError("unsupported episode resource type")
             source = connection.execute(
-                "SELECT * FROM creative_breakdowns WHERE id = ?", (int(resource_id),)
-            ).fetchone()
-            existing = connection.execute(
-                "SELECT id FROM creative_breakdowns WHERE parent_version_id = ? AND status = 'draft' ORDER BY id DESC LIMIT 1",
-                (int(resource_id),),
-            ).fetchone()
-            if existing:
-                return str(existing["id"])
-            version = connection.execute(
-                "SELECT COALESCE(MAX(version), 0) + 1 FROM creative_breakdowns WHERE topic_id = ?",
-                (source["topic_id"],),
-            ).fetchone()[0]
-            cursor = connection.execute(
-                "INSERT INTO creative_breakdowns (topic_id, version, parent_version_id, status, content_json, "
-                "field_sources_json, risks_json, workflow_task_id, created_at, updated_at) "
-                "VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)",
-                (source["topic_id"], version, int(resource_id), source["content_json"], source["field_sources_json"],
-                 source["risks_json"], workflow_task_id, now, now),
+                select(creative_episodes).where(
+                    creative_episodes.c.id == int(resource_id),
+                    creative_episodes.c.stage == resource_type,
+                )
+            ).mappings().first()
+            if source is None:
+                raise KeyError(resource_id)
+            existing = self._existing_episode_draft(
+                connection,
+                parent_version_id=int(resource_id),
+                stage=resource_type,
             )
-            return str(cursor.lastrowid)
-        if resource_type == "brief":
-            source = connection.execute(
-                "SELECT * FROM creative_blueprints WHERE id = ?", (int(resource_id),)
-            ).fetchone()
-            existing = connection.execute(
-                "SELECT id FROM creative_blueprints WHERE parent_version_id = ? AND status = 'draft' ORDER BY id DESC LIMIT 1",
-                (int(resource_id),),
-            ).fetchone()
-            if existing:
-                return str(existing["id"])
-            version = connection.execute(
-                "SELECT COALESCE(MAX(version), 0) + 1 FROM creative_blueprints WHERE project_id = ? AND candidate_group_id = ?",
-                (source["project_id"], source["candidate_group_id"]),
-            ).fetchone()[0]
-            cursor = connection.execute(
-                "INSERT INTO creative_blueprints (project_id, candidate_group_id, version, parent_version_id, status, "
-                "content_json, risk_score, risk_level, difference_note, source_refs_json, generation_meta_json, "
-                "workflow_task_id, created_at, updated_at) VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (source["project_id"], source["candidate_group_id"], version, int(resource_id), source["content_json"],
-                 source["risk_score"], source["risk_level"], source["difference_note"], source["source_refs_json"],
-                 source["generation_meta_json"], workflow_task_id, now, now),
+            if existing is not None:
+                return str(existing)
+            version = self._next_episode_version(
+                connection,
+                project_id=int(source["project_id"]),
+                stage=resource_type,
+                episode_number=int(source["episode_number"]),
             )
-            return str(cursor.lastrowid)
-        if resource_type == "characters":
-            return self._clone_character_batch(resource_id, workflow_task_id, connection, now)
-        if resource_type == "outline":
-            return self._clone_outline_batch(resource_id, workflow_task_id, connection, now)
-        if resource_type not in {"beats", "script"}:
-            raise ValueError("unsupported episode resource type")
+            new_id = self._insert_episode(
+                connection,
+                project_id=int(source["project_id"]),
+                stage=resource_type,
+                episode_number=int(source["episode_number"]),
+                batch_id=uuid.uuid4().hex,
+                version=version,
+                parent_version_id=int(resource_id),
+                content_json=source["content_json"],
+                upstream_refs_json=source["upstream_refs_json"],
+                generation_meta_json=source["generation_meta_json"],
+                workflow_task_id=workflow_task_id,
+                now=now,
+                resource_scope=source["resource_scope"],
+            )
+            return str(new_id)
+
+    def _clone_breakdown(
+        self, resource_id: str, workflow_task_id: str, connection: Connection, now: datetime
+    ) -> str:
         source = connection.execute(
-            "SELECT * FROM creative_episodes WHERE id = ? AND stage = ?",
-            (int(resource_id), resource_type),
-        ).fetchone()
+            select(creative_breakdowns).where(
+                creative_breakdowns.c.id == int(resource_id)
+            )
+        ).mappings().first()
         if source is None:
             raise KeyError(resource_id)
         existing = connection.execute(
-            "SELECT id FROM creative_episodes WHERE parent_version_id = ? AND stage = ? AND status = 'draft' ORDER BY id DESC LIMIT 1",
-            (int(resource_id), resource_type),
-        ).fetchone()
-        if existing:
-            return str(existing["id"])
-        version = connection.execute(
-            "SELECT COALESCE(MAX(version), 0) + 1 FROM creative_episodes WHERE project_id = ? AND stage = ? AND episode_number = ?",
-            (source["project_id"], resource_type, source["episode_number"]),
-        ).fetchone()[0]
-        cursor = connection.execute(
-            "INSERT INTO creative_episodes (project_id, stage, episode_number, batch_id, version, parent_version_id, "
-            "status, content_json, upstream_refs_json, generation_meta_json, workflow_task_id, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)",
-            (source["project_id"], resource_type, source["episode_number"], uuid.uuid4().hex, version, int(resource_id),
-             source["content_json"], source["upstream_refs_json"], source["generation_meta_json"], workflow_task_id, now, now),
+            select(creative_breakdowns.c.id)
+            .where(
+                creative_breakdowns.c.parent_version_id == int(resource_id),
+                creative_breakdowns.c.status == "draft",
+            )
+            .order_by(creative_breakdowns.c.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing is not None:
+            return str(existing)
+        version = int(
+            connection.execute(
+                select(func.coalesce(func.max(creative_breakdowns.c.version), 0)).where(
+                    creative_breakdowns.c.topic_id == source["topic_id"]
+                )
+            ).scalar_one()
+        ) + 1
+        new_id = connection.execute(
+            insert(creative_breakdowns)
+            .values(
+                topic_id=int(source["topic_id"]),
+                version=version,
+                parent_version_id=int(resource_id),
+                status="draft",
+                content_json=source["content_json"],
+                field_sources_json=source["field_sources_json"],
+                risks_json=source["risks_json"],
+                workflow_task_id=workflow_task_id,
+                created_at=now,
+                updated_at=now,
+            )
+            .returning(creative_breakdowns.c.id)
+        ).scalar_one()
+        return str(new_id)
+
+    def _clone_brief(
+        self, resource_id: str, workflow_task_id: str, connection: Connection, now: datetime
+    ) -> str:
+        source = connection.execute(
+            select(creative_blueprints).where(
+                creative_blueprints.c.id == int(resource_id)
+            )
+        ).mappings().first()
+        if source is None:
+            raise KeyError(resource_id)
+        existing = connection.execute(
+            select(creative_blueprints.c.id)
+            .where(
+                creative_blueprints.c.parent_version_id == int(resource_id),
+                creative_blueprints.c.status == "draft",
+            )
+            .order_by(creative_blueprints.c.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing is not None:
+            return str(existing)
+        version = self._next_blueprint_version(
+            connection,
+            project_id=int(source["project_id"]),
+            candidate_group_id=source["candidate_group_id"],
         )
-        return str(cursor.lastrowid)
+        new_id = connection.execute(
+            insert(creative_blueprints)
+            .values(
+                project_id=int(source["project_id"]),
+                candidate_group_id=source["candidate_group_id"],
+                version=version,
+                parent_version_id=int(resource_id),
+                status="draft",
+                content_json=source["content_json"],
+                risk_score=source["risk_score"],
+                risk_level=source["risk_level"],
+                difference_note=source["difference_note"],
+                source_refs_json=source["source_refs_json"],
+                generation_meta_json=source["generation_meta_json"],
+                direction_type=source["direction_type"],
+                resource_scope=source["resource_scope"],
+                workflow_task_id=workflow_task_id,
+                created_at=now,
+                updated_at=now,
+            )
+            .returning(creative_blueprints.c.id)
+        ).scalar_one()
+        return str(new_id)
 
     def _clone_character_batch(self, resource_id, task_id, connection, now) -> str:
         project_id, batch_id = self._batch_key(resource_id)
         new_batch = uuid.uuid4().hex
-        rows = connection.execute(
-            "SELECT * FROM creative_characters WHERE project_id = ? AND batch_id = ? ORDER BY id",
-            (project_id, batch_id),
-        ).fetchall()
         existing = connection.execute(
-            "SELECT batch_id FROM creative_characters WHERE project_id = ? AND parent_version_id IN "
-            "(SELECT id FROM creative_characters WHERE project_id = ? AND batch_id = ?) AND status = 'draft' LIMIT 1",
-            (project_id, project_id, batch_id),
-        ).fetchone()
+            select(creative_characters.c.batch_id)
+            .where(
+                creative_characters.c.project_id == project_id,
+                creative_characters.c.parent_version_id.in_(
+                    select(creative_characters.c.id).where(
+                        creative_characters.c.project_id == project_id,
+                        creative_characters.c.batch_id == batch_id,
+                    )
+                ),
+                creative_characters.c.status == "draft",
+            )
+            .limit(1)
+        ).scalar_one_or_none()
         if existing:
-            return f"{project_id}:{existing['batch_id']}"
-        version = max((row["version"] for row in rows), default=0) + 1
-        for table, key in (("creative_characters", "character_key"), ("creative_relationships", "relationship_key")):
+            return f"{project_id}:{existing}"
+        rows = connection.execute(
+            select(creative_characters)
+            .where(
+                creative_characters.c.project_id == project_id,
+                creative_characters.c.batch_id == batch_id,
+            )
+            .order_by(creative_characters.c.id)
+        ).mappings().all()
+        version = max((int(row["version"]) for row in rows), default=0) + 1
+        for table, key in (
+            (creative_characters, "character_key"),
+            (creative_relationships, "relationship_key"),
+        ):
             source_rows = connection.execute(
-                f"SELECT * FROM {table} WHERE project_id = ? AND batch_id = ? ORDER BY id",
-                (project_id, batch_id),
-            ).fetchall()
-            for source in source_rows:
-                connection.execute(
-                    f"INSERT INTO {table} (project_id, batch_id, version, parent_version_id, {key}, status, content_json, "
-                    "source_refs_json, generation_meta_json, workflow_task_id, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)",
-                    (project_id, new_batch, version, source["id"], source[key], source["content_json"],
-                     source["source_refs_json"], source["generation_meta_json"], task_id, now, now),
-                )
+                select(table)
+                .where(table.c.project_id == project_id, table.c.batch_id == batch_id)
+                .order_by(table.c.id)
+            ).mappings().all()
+            if not source_rows:
+                continue
+            connection.execute(
+                insert(table),
+                [
+                    {
+                        "project_id": project_id,
+                        "batch_id": new_batch,
+                        "version": version,
+                        "parent_version_id": int(row["id"]),
+                        key: row[key],
+                        "status": "draft",
+                        "content_json": row["content_json"],
+                        "source_refs_json": row["source_refs_json"],
+                        "generation_meta_json": row["generation_meta_json"],
+                        "resource_scope": row["resource_scope"],
+                        "workflow_task_id": task_id,
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                    for row in source_rows
+                ],
+            )
         return f"{project_id}:{new_batch}"
 
     def _clone_outline_batch(self, resource_id, task_id, connection, now) -> str:
         project_id, batch_id = self._batch_key(resource_id)
         rows = connection.execute(
-            "SELECT * FROM creative_episodes WHERE project_id = ? AND stage = 'outline' AND batch_id = ? ORDER BY id",
-            (project_id, batch_id),
-        ).fetchall()
+            select(creative_episodes)
+            .where(
+                creative_episodes.c.project_id == project_id,
+                creative_episodes.c.stage == "outline",
+                creative_episodes.c.batch_id == batch_id,
+            )
+            .order_by(creative_episodes.c.id)
+        ).mappings().all()
         existing = connection.execute(
-            "SELECT batch_id FROM creative_episodes WHERE project_id = ? AND stage = 'outline' AND parent_version_id IN "
-            "(SELECT id FROM creative_episodes WHERE project_id = ? AND stage = 'outline' AND batch_id = ?) "
-            "AND status = 'draft' LIMIT 1",
-            (project_id, project_id, batch_id),
-        ).fetchone()
+            select(creative_episodes.c.batch_id)
+            .where(
+                creative_episodes.c.project_id == project_id,
+                creative_episodes.c.stage == "outline",
+                creative_episodes.c.parent_version_id.in_(
+                    select(creative_episodes.c.id).where(
+                        creative_episodes.c.project_id == project_id,
+                        creative_episodes.c.stage == "outline",
+                        creative_episodes.c.batch_id == batch_id,
+                    )
+                ),
+                creative_episodes.c.status == "draft",
+            )
+            .limit(1)
+        ).scalar_one_or_none()
         if existing:
-            return f"{project_id}:{existing['batch_id']}"
+            return f"{project_id}:{existing}"
         new_batch = uuid.uuid4().hex
-        version = max((row["version"] for row in rows), default=0) + 1
+        version = max((int(row["version"]) for row in rows), default=0) + 1
         for source in rows:
-            connection.execute(
-                "INSERT INTO creative_episodes (project_id, stage, episode_number, batch_id, version, parent_version_id, "
-                "status, content_json, upstream_refs_json, generation_meta_json, workflow_task_id, created_at, updated_at) "
-                "VALUES (?, 'outline', ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)",
-                (project_id, source["episode_number"], new_batch, version, source["id"], source["content_json"],
-                 source["upstream_refs_json"], source["generation_meta_json"], task_id, now, now),
+            self._insert_episode(
+                connection,
+                project_id=project_id,
+                stage="outline",
+                episode_number=int(source["episode_number"]),
+                batch_id=new_batch,
+                version=version,
+                parent_version_id=int(source["id"]),
+                content_json=source["content_json"],
+                upstream_refs_json=source["upstream_refs_json"],
+                generation_meta_json=source["generation_meta_json"],
+                workflow_task_id=task_id,
+                now=now,
+                resource_scope=source["resource_scope"],
             )
         return f"{project_id}:{new_batch}"
+
+    @staticmethod
+    def _insert_episode(
+        connection: Connection,
+        *,
+        project_id: int,
+        stage: str,
+        episode_number: int,
+        batch_id: str,
+        version: int,
+        parent_version_id: int,
+        content_json: Any,
+        upstream_refs_json: Any,
+        generation_meta_json: Any,
+        workflow_task_id: str | None,
+        now: datetime,
+        resource_scope: str | None = None,
+    ) -> int:
+        values: dict[str, Any] = {
+            "project_id": project_id,
+            "stage": stage,
+            "episode_number": episode_number,
+            "batch_id": batch_id,
+            "version": version,
+            "parent_version_id": parent_version_id,
+            "status": "draft",
+            "content_json": content_json,
+            "upstream_refs_json": upstream_refs_json,
+            "generation_meta_json": generation_meta_json,
+            "workflow_task_id": workflow_task_id,
+            "created_at": now,
+            "updated_at": now,
+        }
+        if resource_scope is not None:
+            values["resource_scope"] = resource_scope
+        return int(
+            connection.execute(
+                insert(creative_episodes).values(**values).returning(creative_episodes.c.id)
+            ).scalar_one()
+        )
+
+    @staticmethod
+    def _existing_episode_draft(
+        connection: Connection, *, parent_version_id: int, stage: str
+    ) -> str | None:
+        return connection.execute(
+            select(creative_episodes.c.id)
+            .where(
+                creative_episodes.c.parent_version_id == parent_version_id,
+                creative_episodes.c.stage == stage,
+                creative_episodes.c.status == "draft",
+            )
+            .order_by(creative_episodes.c.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+
+    @staticmethod
+    def _next_blueprint_version(
+        connection: Connection, *, project_id: int, candidate_group_id: Any
+    ) -> int:
+        latest = connection.execute(
+            select(func.coalesce(func.max(creative_blueprints.c.version), 0)).where(
+                creative_blueprints.c.project_id == project_id,
+                creative_blueprints.c.candidate_group_id == candidate_group_id,
+            )
+        ).scalar_one()
+        return int(latest) + 1
+
+    @staticmethod
+    def _next_episode_version(
+        connection: Connection,
+        *,
+        project_id: int,
+        stage: str,
+        episode_number: int,
+    ) -> int:
+        latest = connection.execute(
+            select(func.coalesce(func.max(creative_episodes.c.version), 0)).where(
+                creative_episodes.c.project_id == project_id,
+                creative_episodes.c.stage == stage,
+                creative_episodes.c.episode_number == episode_number,
+            )
+        ).scalar_one()
+        return int(latest) + 1
 
     def _retry_mirror(self, resource_type: str, resource_id: str) -> None:
         self.reconcile_resource(resource_type, resource_id)
@@ -1178,18 +1558,31 @@ class CreativeWorkflowAdapter:
             pass
 
     @staticmethod
-    def _set_batch_status(connection, resource_type, project_id, batch_id, status):
-        now = time.time()
+    def _set_batch_status(
+        connection: Connection,
+        resource_type,
+        project_id,
+        batch_id,
+        status,
+        now: datetime | None = None,
+    ):
+        timestamp = now or utc_now()
         if resource_type == "characters":
-            for table in ("creative_characters", "creative_relationships"):
+            for table in (creative_characters, creative_relationships):
                 connection.execute(
-                    f"UPDATE {table} SET status = ?, updated_at = ? WHERE project_id = ? AND batch_id = ?",
-                    (status, now, project_id, batch_id),
+                    update(table)
+                    .where(table.c.project_id == project_id, table.c.batch_id == batch_id)
+                    .values(status=status, updated_at=timestamp)
                 )
         else:
             connection.execute(
-                "UPDATE creative_episodes SET status = ?, updated_at = ? WHERE project_id = ? AND stage = 'outline' AND batch_id = ?",
-                (status, now, project_id, batch_id),
+                update(creative_episodes)
+                .where(
+                    creative_episodes.c.project_id == project_id,
+                    creative_episodes.c.stage == "outline",
+                    creative_episodes.c.batch_id == batch_id,
+                )
+                .values(status=status, updated_at=timestamp)
             )
 
     @staticmethod

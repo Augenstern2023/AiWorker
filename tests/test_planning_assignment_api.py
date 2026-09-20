@@ -36,6 +36,18 @@ from workflow.api import build_workflow_router
 from workflow.repository import WorkflowRepository
 
 
+
+@pytest.fixture(autouse=True)
+def _use_postgres_creative(monkeypatch, postgres_creative):
+    """Exercise runtime behavior against the isolated PostgreSQL store."""
+    monkeypatch.setitem(
+        globals(), "CreativeRepository", lambda *_args, **_kwargs: postgres_creative
+    )
+    monkeypatch.setenv(
+        "AIWORKER_TEST_SYSTEM_DATABASE_URL", postgres_creative.database.settings.url
+    )
+
+
 class _AllowPageApi:
     @staticmethod
     def can_call_page_api(principal, method: str, path: str) -> bool:
@@ -119,12 +131,7 @@ def test_screenwriter_creates_project_with_team_and_pool_tasks_idempotently(
     workflow = WorkflowRepository(identity)
 
     def cleanup_postgres() -> None:
-        project_id = cleanup["project_id"]
-        if project_id is not None:
-            workflow.delete_project_data(str(project_id))
-        for user_id in cleanup["user_ids"]:
-            if identity.get_user(str(user_id)) is not None:
-                identity.soft_delete_user(str(user_id))
+        # The isolated schema fixture removes all test records.
         database.dispose()
 
     request.addfinalizer(cleanup_postgres)
@@ -173,16 +180,6 @@ def test_screenwriter_creates_project_with_team_and_pool_tasks_idempotently(
 
     creative = CreativeRepository(runtime / "creative/creative.db")
     project_sequence = 1_000_000_000 + (uuid.uuid4().int % 1_000_000_000)
-    with creative._connect() as connection:
-        cursor = connection.execute(
-            "UPDATE sqlite_sequence SET seq = ? WHERE name = 'creative_projects'",
-            (project_sequence,),
-        )
-        if cursor.rowcount == 0:
-            connection.execute(
-                "INSERT INTO sqlite_sequence(name, seq) VALUES ('creative_projects', ?)",
-                (project_sequence,),
-            )
     topic = _topic(creative)
     creative.update_topic(topic["id"], "adopted")
     breakdown = creative.create_breakdown(topic["id"], {"title": topic["title"]}, {}, [])
@@ -193,7 +190,11 @@ def test_screenwriter_creates_project_with_team_and_pool_tasks_idempotently(
     app.state.audit_service = AuditService(identity)
     app.dependency_overrides[creative_api_principal] = lambda: creator
     app.dependency_overrides[current_principal] = lambda: creator
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(
+        build_creative_router(
+            root=tmp_path, runtime_dir=runtime, repository=creative
+        )
+    )
     client = TestClient(app)
     payload = {
         "name": "编剧创建的项目",
@@ -382,8 +383,7 @@ def test_page_grant_replaces_project_create_permission_for_bound_endpoints(
     user = _create_role_user(identity, ("selection_operator",), "只读选题用户")
 
     def cleanup_postgres() -> None:
-        if identity.get_user(user["id"]) is not None:
-            identity.soft_delete_user(user["id"])
+        # The isolated schema fixture removes all test records.
         database.dispose()
 
     request.addfinalizer(cleanup_postgres)
@@ -401,7 +401,11 @@ def test_page_grant_replaces_project_create_permission_for_bound_endpoints(
     app.state.page_access_service = _AllowPageApi()
     app.dependency_overrides[creative_api_principal] = lambda: principal
     app.dependency_overrides[current_principal] = lambda: principal
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(
+        build_creative_router(
+            root=tmp_path, runtime_dir=runtime, repository=creative
+        )
+    )
     client = TestClient(app)
     created_project_ids: list[str] = []
     try:
@@ -459,8 +463,7 @@ def test_member_candidates_require_project_member_manage_permission(
     user = _create_role_user(identity, (role["code"],), "最小项目创建者")
 
     def cleanup_postgres() -> None:
-        if identity.get_user(user["id"]) is not None:
-            identity.soft_delete_user(user["id"])
+        # The isolated schema fixture removes all test records.
         database.dispose()
 
     request.addfinalizer(cleanup_postgres)
@@ -474,7 +477,11 @@ def test_member_candidates_require_project_member_manage_permission(
     app.dependency_overrides[creative_api_principal] = lambda: principal
     app.dependency_overrides[current_principal] = lambda: principal
     app.include_router(
-        build_creative_router(root=tmp_path, runtime_dir=tmp_path / ".runtime")
+        build_creative_router(
+            root=tmp_path,
+            runtime_dir=tmp_path / ".runtime",
+            repository=CreativeRepository(tmp_path / ".runtime"),
+        )
     )
 
     response = TestClient(app).get(
@@ -498,9 +505,7 @@ def test_project_stage_task_creation_is_concurrency_safe(
     workflow = WorkflowRepository(identity)
 
     def cleanup_postgres() -> None:
-        workflow.delete_project_data(project_id)
-        if identity.get_user(user["id"]) is not None:
-            identity.soft_delete_user(user["id"])
+        # The isolated schema fixture removes all test records.
         database.dispose()
 
     request.addfinalizer(cleanup_postgres)
@@ -543,10 +548,7 @@ def test_unassigned_writer_claims_only_idle_established_writing_stage(
     busy_writer_user = _create_role_user(identity, ("screenwriter",), "在岗编剧")
 
     def cleanup_postgres() -> None:
-        workflow.delete_project_data(project_id)
-        for user in (owner_user, writer_user, busy_writer_user):
-            if identity.get_user(user["id"]) is not None:
-                identity.soft_delete_user(user["id"])
+        # The isolated schema fixture removes all test records.
         database.dispose()
 
     request.addfinalizer(cleanup_postgres)
@@ -612,10 +614,7 @@ def test_only_one_outside_writer_can_claim_parallel_pools_for_same_stage(
     )
 
     def cleanup_postgres() -> None:
-        workflow.delete_project_data(project_id)
-        for user in (owner_user, *writer_users):
-            if identity.get_user(user["id"]) is not None:
-                identity.soft_delete_user(user["id"])
+        # The isolated schema fixture removes all test records.
         database.dispose()
 
     request.addfinalizer(cleanup_postgres)
@@ -673,9 +672,7 @@ def test_invalid_team_selection_leaves_no_partial_project(
     invalid_user = _create_role_user(identity, ("selection_operator",), "无效成员")
 
     def cleanup_postgres() -> None:
-        for user in (creator_user, invalid_user):
-            if identity.get_user(user["id"]) is not None:
-                identity.soft_delete_user(user["id"])
+        # The isolated schema fixture removes all test records.
         database.dispose()
 
     request.addfinalizer(cleanup_postgres)
@@ -691,7 +688,11 @@ def test_invalid_team_selection_leaves_no_partial_project(
     app.state.identity_permission_service = permissions
     app.dependency_overrides[creative_api_principal] = lambda: creator
     app.dependency_overrides[current_principal] = lambda: creator
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(
+        build_creative_router(
+            root=tmp_path, runtime_dir=runtime, repository=creative
+        )
+    )
 
     response = TestClient(app).post(
         f"/api/creative/topics/{topic['id']}/planning-assignment",
@@ -714,8 +715,7 @@ def test_project_creator_can_create_with_empty_member_lists(
     creator_user = _create_role_user(identity, ("screenwriter",), "空成员创建编剧")
 
     def cleanup_postgres() -> None:
-        if identity.get_user(creator_user["id"]) is not None:
-            identity.soft_delete_user(creator_user["id"])
+        # The isolated schema fixture removes all test records.
         database.dispose()
 
     request.addfinalizer(cleanup_postgres)
@@ -732,7 +732,11 @@ def test_project_creator_can_create_with_empty_member_lists(
     app.state.identity_permission_service = permissions
     app.dependency_overrides[creative_api_principal] = lambda: creator
     app.dependency_overrides[current_principal] = lambda: creator
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(
+        build_creative_router(
+            root=tmp_path, runtime_dir=runtime, repository=creative
+        )
+    )
 
     response = TestClient(app).post(
         f"/api/creative/topics/{topic['id']}/planning-assignment",
@@ -760,20 +764,7 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
     workflow_ids: list[str] = []
 
     def cleanup_postgres() -> None:
-        creative_repository = CreativeRepository(runtime / "creative/creative.db")
-        creative_projects = creative_repository.list_projects()
-        for item in creative_projects:
-            workflow.delete_project_data(
-                creative_repository.workflow_project_id(item["id"])
-            )
-        with identity.transaction() as connection:
-            for workflow_id in workflow_ids:
-                connection.exec_driver_sql(
-                    "DELETE FROM workflow_instances WHERE id = %s", (workflow_id,)
-                )
-        for user in (creator_user, victim_user, admin_user):
-            if identity.get_user(user["id"]) is not None:
-                identity.soft_delete_user(user["id"])
+        # The isolated schema fixture removes all test records.
         database.dispose()
 
     request.addfinalizer(cleanup_postgres)
@@ -782,17 +773,6 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
     admin = permissions.principal_for_user(admin_user["id"], "admin-session")
     assert creator is not None and admin is not None
     creative = CreativeRepository(runtime / "creative/creative.db")
-    with creative._connect() as connection:
-        project_sequence = 1_500_000_000 + (uuid.uuid4().int % 100_000_000)
-        cursor = connection.execute(
-            "UPDATE sqlite_sequence SET seq = ? WHERE name = 'creative_projects'",
-            (project_sequence,),
-        )
-        if cursor.rowcount == 0:
-            connection.execute(
-                "INSERT INTO sqlite_sequence(name, seq) VALUES ('creative_projects', ?)",
-                (project_sequence,),
-            )
     topic = _topic(creative)
     creative.update_topic(topic["id"], "adopted")
     breakdown = creative.create_breakdown(topic["id"], {"title": topic["title"]}, {}, [])
@@ -863,7 +843,11 @@ def test_direct_project_creation_rejects_foreign_task_and_initializes_own_task(
     app.dependency_overrides[creative_api_principal] = lambda: creator
     app.dependency_overrides[current_principal] = lambda: creator
     app.include_router(build_workflow_router(workflow))
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(
+        build_creative_router(
+            root=tmp_path, runtime_dir=runtime, repository=creative
+        )
+    )
     client = TestClient(app, raise_server_exceptions=False)
     base_payload = {
         "topic_id": topic["id"],

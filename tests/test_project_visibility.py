@@ -70,7 +70,9 @@ def test_global_project_owner_locks_breakdown_without_approval(tmp_path: Path):
     breakdown = creative.create_breakdown(topic["id"], {"title": topic["title"]}, {}, [])
     app = FastAPI()
     app.state.identity_permission_service = permissions
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(build_creative_router(
+        root=tmp_path, runtime_dir=runtime, repository=creative
+    ))
     client = _client(app, sessions, owner["id"])
 
     response = client.post(f"/api/creative/breakdowns/{breakdown['id']}/lock")
@@ -119,7 +121,9 @@ def test_project_author_owns_drafts_and_managed_reader_sees_approved_only(
     workflow = WorkflowRepository(identity)
     app = FastAPI()
     app.state.identity_permission_service = permissions
-    app.include_router(build_creative_router(root=tmp_path, runtime_dir=runtime))
+    app.include_router(build_creative_router(
+        root=tmp_path, runtime_dir=runtime, repository=creative
+    ))
     clients = {
         name: _client(app, sessions, user["id"])
         for name, user in users.items()

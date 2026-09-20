@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from collections.abc import Callable
+from contextlib import contextmanager
 from typing import Any
 
 from creative.outline_fields import outline_field_source_fingerprint
@@ -42,12 +44,97 @@ class FreeCreativeModeService:
     def __init__(self, repository: CreativeRepository) -> None:
         self.repository = repository
 
+    @contextmanager
+    def _migration_transaction(
+        self,
+        project_id: int,
+        operation_id: str,
+        compensations: list[dict[str, Any]],
+        rollback_members: Callable[[dict[str, Any]], None] | None,
+    ):
+        try:
+            with self.repository._connect() as conn:
+                yield conn
+        except BaseException as exc:
+            if (
+                compensations
+                and self.completed_migration(project_id, operation_id) is None
+            ):
+                # Persist outside the rolled-back project transaction BEFORE cleanup.
+                with self.repository._connect() as conn:
+                    conn.execute(
+                        "INSERT INTO creative_mode_migration_compensations "
+                        "(operation_id, project_id, payload_json, last_error, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (
+                            operation_id,
+                            project_id,
+                            json.dumps(compensations),
+                            str(exc),
+                            time.time(),
+                        ),
+                    )
+                self.recover_migration_compensation(
+                    project_id, operation_id, rollback_members
+                )
+            raise
+
+    def recover_migration_compensation(
+        self,
+        project_id: int,
+        operation_id: str,
+        rollback_members: Callable[[dict[str, Any]], None] | None,
+    ) -> None:
+        with self.repository._connect() as conn:
+            pending = conn.execute(
+                "SELECT * FROM creative_mode_migration_compensations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+        if pending is None:
+            return
+        if int(pending["project_id"]) != int(project_id):
+            raise ValueError("migration operation id belongs to another project")
+        if rollback_members is None:
+            raise ValueError("迁移成员补偿服务不可用，请稍后重试")
+        try:
+            for compensation in reversed(json.loads(pending["payload_json"])):
+                rollback_members(compensation)
+        except BaseException as exc:
+            with self.repository._connect() as conn:
+                conn.execute(
+                    "UPDATE creative_mode_migration_compensations SET last_error = ? "
+                    "WHERE operation_id = ?",
+                    (str(exc), operation_id),
+                )
+            raise
+        with self.repository._connect() as conn:
+            conn.execute(
+                "DELETE FROM creative_mode_migration_compensations "
+                "WHERE operation_id = ? AND project_id = ? AND payload_json = ?",
+                (operation_id, project_id, pending["payload_json"]),
+            )
+
     @staticmethod
     def _loads(value: Any, fallback: Any) -> Any:
         try:
             return json.loads(value or "")
         except (TypeError, json.JSONDecodeError):
             return fallback
+
+    @classmethod
+    def _native_json_row(cls, row: Any) -> dict[str, Any]:
+        """Convert compatibility-query JSON text back to repository values."""
+
+        result = dict(row)
+        for key, fallback in (
+            ("content_json", {}),
+            ("source_refs_json", {}),
+            ("generation_meta_json", {}),
+            ("upstream_refs_json", {}),
+        ):
+            if key in result:
+                result[key] = cls._loads(result[key], fallback)
+        return result
 
     @staticmethod
     def _assert_stage(stage: str) -> str:
@@ -1397,6 +1484,11 @@ class FreeCreativeModeService:
                 "WHERE project_id = ? AND status = 'active'",
                 (int(project_id),),
             ).fetchone()["count"])
+            active_review_count = int(conn.execute(
+                "SELECT COUNT(*) AS count FROM script_reviews WHERE project_id = ? "
+                "AND status NOT IN ('completed', 'confirmed', 'cancelled', 'failed')",
+                (int(project_id),),
+            ).fetchone()["count"])
             active_optimization_count = int(conn.execute(
                 "SELECT COUNT(*) AS count FROM script_optimizations WHERE project_id = ? "
                 "AND status NOT IN ('completed', 'cancelled', 'failed')",
@@ -1434,6 +1526,8 @@ class FreeCreativeModeService:
             blockers.append("项目已经是自由创作模式")
         if active_generation_count:
             blockers.append("项目存在运行中的创作生成")
+        if active_review_count:
+            blockers.append("项目存在进行中的剧本审核")
         if active_optimization_count:
             blockers.append("项目存在进行中的剧本优化")
         return {
@@ -1480,6 +1574,7 @@ class FreeCreativeModeService:
     def _create_free_project_copy_conn(
         conn: Any,
         *,
+        target_project_id: int,
         source_project: dict[str, Any],
         operation_id: str,
         actor_user_id: str,
@@ -1488,17 +1583,18 @@ class FreeCreativeModeService:
         cursor = conn.execute(
             """
             INSERT INTO creative_projects (
-                topic_id, breakdown_id, name, genre, target_platform,
+                id, topic_id, breakdown_id, name, genre, target_platform,
                 target_audience, target_episode_count, episode_duration_seconds,
                 status, locked_brief_id, character_batch_id, outline_batch_id,
                 workflow_task_id, creation_workflow_task_id, creation_request_id,
                 created_by, deleted, creation_mode, bootstrap_status, revision,
                 workflow_mode, mode_revision, mode_changed_at, mode_changed_by,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'free_active', NULL, NULL, NULL,
-                      NULL, NULL, ?, ?, 0, ?, 'ready', 0, 'free', 0, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'free_active', NULL, NULL, NULL,
+                      NULL, NULL, ?, ?, FALSE, ?, 'ready', 0, 'free', 0, ?, ?, ?, ?)
             """,
             (
+                target_project_id,
                 source_project.get("topic_id"),
                 source_project.get("breakdown_id"),
                 f"{str(source_project.get('name') or '未命名项目').strip()}（自由副本）",
@@ -1518,15 +1614,9 @@ class FreeCreativeModeService:
         )
         return int(cursor.lastrowid)
 
-    def migrate_to_free(
-        self,
-        *,
-        project_id: int,
-        expected_mode_revision: int,
-        operation_id: str,
-        actor_user_id: str,
-        seed_text: str = "",
-    ) -> dict[str, Any]:
+    def completed_migration(
+        self, project_id: int, operation_id: str
+    ) -> dict[str, Any] | None:
         with self.repository._connect() as conn:
             prior = conn.execute(
                 "SELECT * FROM creative_mode_migrations WHERE operation_id = ?",
@@ -1538,10 +1628,33 @@ class FreeCreativeModeService:
             if prior["status"] != "completed":
                 raise ValueError("creative mode migration is not complete")
             return self._completed_migration_result(prior, operation_id)
+        return None
+
+    def migrate_to_free(
+        self,
+        *,
+        project_id: int,
+        expected_mode_revision: int,
+        operation_id: str,
+        actor_user_id: str,
+        seed_text: str = "",
+        copy_members: Callable[[int], dict[str, Any]] | None = None,
+        rollback_members: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        prior = self.completed_migration(project_id, operation_id)
+        if prior is not None:
+            return prior
+        self.recover_migration_compensation(project_id, operation_id, rollback_members)
         preview = self.migration_preview(project_id)
         if preview["blockers"]:
             raise ValueError("；".join(preview["blockers"]))
-        with self.repository._connect() as conn:
+        # Reserve and commit the sequence value before external memberships are
+        # copied, so a rolled-back project ID can never be reused later.
+        target_project_id = self.repository.reserve_project_identity()
+        compensations: list[dict[str, Any]] = []
+        with self._migration_transaction(
+            project_id, operation_id, compensations, rollback_members
+        ) as conn:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 "SELECT * FROM creative_mode_migrations WHERE operation_id = ?",
@@ -1577,6 +1690,7 @@ class FreeCreativeModeService:
             )
             target_project_id = self._create_free_project_copy_conn(
                 conn,
+                target_project_id=target_project_id,
                 source_project=project,
                 operation_id=operation_id,
                 actor_user_id=actor_user_id,
@@ -1802,6 +1916,8 @@ class FreeCreativeModeService:
                 "updated_at = ? WHERE operation_id = ?",
                 (json.dumps(mapping, ensure_ascii=False), now, str(operation_id)),
             )
+            if copy_members is not None:
+                compensations.append(copy_members(target_project_id))
         return {
             "project": self.repository.get_project(target_project_id) or {},
             "mapping": mapping,
@@ -1814,28 +1930,28 @@ class FreeCreativeModeService:
         with self.repository._connect() as conn:
             return {
                 "blueprints": [
-                    self.repository._blueprint(dict(row)) for row in conn.execute(
+                    self.repository._blueprint(self._native_json_row(row)) for row in conn.execute(
                         "SELECT * FROM creative_blueprints WHERE project_id = ? "
                         "AND resource_scope = 'sequential' ORDER BY id",
                         (int(project_id),),
                     ).fetchall()
                 ],
                 "characters": [
-                    self.repository._creative_item(dict(row)) for row in conn.execute(
+                    self.repository._creative_item(self._native_json_row(row)) for row in conn.execute(
                         "SELECT * FROM creative_characters WHERE project_id = ? "
                         "AND resource_scope = 'sequential' ORDER BY version, id",
                         (int(project_id),),
                     ).fetchall()
                 ],
                 "relationships": [
-                    self.repository._creative_item(dict(row)) for row in conn.execute(
+                    self.repository._creative_item(self._native_json_row(row)) for row in conn.execute(
                         "SELECT * FROM creative_relationships WHERE project_id = ? "
                         "AND resource_scope = 'sequential' ORDER BY version, id",
                         (int(project_id),),
                     ).fetchall()
                 ],
                 "episodes": [
-                    self.repository._episode(dict(row)) for row in conn.execute(
+                    self.repository._episode(self._native_json_row(row)) for row in conn.execute(
                         "SELECT * FROM creative_episodes WHERE project_id = ? "
                         "AND resource_scope = 'sequential' ORDER BY stage, episode_number, version",
                         (int(project_id),),

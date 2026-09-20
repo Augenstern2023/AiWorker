@@ -90,7 +90,7 @@ def test_creative_metadata_covers_every_legacy_sqlite_table():
 
 def test_creative_table_inventory_is_partitioned():
     assert CREATIVE_BUSINESS_TABLES & CREATIVE_CONTROL_TABLES == frozenset()
-    assert len(CREATIVE_BUSINESS_TABLES) == 37
+    assert len(CREATIVE_BUSINESS_TABLES) == 38
     assert CREATIVE_CONTROL_TABLES == frozenset({"creative_database_import_runs"})
 
 
@@ -176,10 +176,14 @@ def test_named_constraints_used_by_repositories_exist():
 # ---------------------------------------------------------------------------
 
 
-def test_alembic_head_is_single_creative_baseline():
+def test_alembic_head_includes_video_parameters_and_zip_exports():
     revisions = ScriptDirectory.from_config(Config(str(PROJECT_ROOT / "alembic.ini")))
 
-    assert revisions.get_current_head() == "0025_creative_schema_baseline"
+    assert revisions.get_current_head() == "0026_video_params_zip_exports"
+    assert (
+        revisions.get_revision("0026_video_params_zip_exports").down_revision
+        == "0025_creative_schema_baseline"
+    )
     assert (
         revisions.get_revision("0025_creative_schema_baseline").down_revision
         == "0024_llm_model_max_output_tokens"

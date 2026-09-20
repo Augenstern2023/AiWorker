@@ -33,6 +33,18 @@ from workflow.api import build_workflow_router
 from workflow.repository import WorkflowRepository
 
 
+
+@pytest.fixture(autouse=True)
+def _use_postgres_creative(monkeypatch, postgres_creative):
+    """Exercise runtime behavior against the isolated PostgreSQL store."""
+    monkeypatch.setitem(
+        globals(), "CreativeRepository", lambda *_args, **_kwargs: postgres_creative
+    )
+    monkeypatch.setenv(
+        "AIWORKER_TEST_SYSTEM_DATABASE_URL", postgres_creative.database.settings.url
+    )
+
+
 class FixedProvider:
     provider_name = "fixed"
 
@@ -115,12 +127,6 @@ def original_client(
     workflow = WorkflowRepository(identity)
     runtime_dir = tmp_path / "runtime"
     repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
-    with repository._connect() as connection:
-        connection.execute(
-            "INSERT OR REPLACE INTO sqlite_sequence(name, seq) VALUES "
-            "('creative_projects', ?)",
-            (int(uuid.uuid4().int % 1_000_000_000) + 1_000_000_000,),
-        )
     app = FastAPI()
     app.state.identity_permission_service = permissions
     app.include_router(build_workflow_router(workflow))
@@ -128,6 +134,7 @@ def original_client(
         build_creative_router(
             root=tmp_path,
             runtime_dir=runtime_dir,
+            repository=repository,
             workflow_repository=workflow,
         )
     )
@@ -190,7 +197,6 @@ def _run_original_blueprint_worker(
             "action": "blueprints",
             "project_id": project["id"],
             "count": 3,
-            "db_path": str(client.repository.db_path),
             "seed_id": frozen["id"],
             "market_context": [],
             "blocked_terms": [],
@@ -201,7 +207,7 @@ def _run_original_blueprint_worker(
             ),
         },
     )
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, client.repository))
     directions = client.repository.get_project(project["id"])["blueprints"]
     assert len(directions) == 3
     return directions[0]

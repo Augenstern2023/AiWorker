@@ -370,6 +370,38 @@ class ReviewsRepository:
                 raise ValueError("审核记录不存在")
         return self._script_review(self.row_dict(resumed)) if resumed is not None else {}
 
+    def prepare_script_review_resume(self, review_id: int) -> dict[str, Any]:
+        """Requeue a failed formal review while preserving its checkpoint."""
+
+        with self.transaction_scope() as connection:
+            row = connection.execute(
+                select(script_reviews)
+                .where(script_reviews.c.id == int(review_id))
+                .with_for_update()
+            ).mappings().one_or_none()
+            if row is None:
+                raise ValueError("审核记录不存在")
+            review = self.row_dict(row)
+            if _is_project_long_review(review):
+                raise ValueError("完整项目审核必须从项目审核入口恢复")
+            status = str(review["status"])
+            if status in {"queued", "running"}:
+                return self._script_review(review)
+            if status != "failed":
+                raise ValueError("只有失败的剧本审核可以继续")
+            connection.execute(
+                update(script_reviews)
+                .where(
+                    script_reviews.c.id == int(review_id),
+                    script_reviews.c.status == "failed",
+                )
+                .values(status="queued", error="", updated_at=utc_now())
+            )
+            resumed = connection.execute(
+                select(script_reviews).where(script_reviews.c.id == int(review_id))
+            ).mappings().one()
+        return self._script_review(self.row_dict(resumed))
+
     def checkpoint_script_review(
         self, review_id: int, report: dict[str, Any]
     ) -> dict[str, Any]:
@@ -484,6 +516,7 @@ class ReviewsRepository:
         selected_findings: list[dict[str, Any]],
         target_episode_numbers: list[int],
         created_by: str,
+        prompt_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         now = utc_now()
         with self.transaction_scope() as connection:
@@ -496,6 +529,7 @@ class ReviewsRepository:
                     source_fingerprint=source_fingerprint,
                     selected_findings_json=jsonb_copy(selected_findings),
                     target_episode_numbers_json=jsonb_copy(target_episode_numbers),
+                    prompt_snapshot_json=jsonb_copy(prompt_snapshot or {}),
                     created_by=created_by,
                     created_at=now,
                     updated_at=now,
@@ -560,6 +594,134 @@ class ReviewsRepository:
         self, optimization_id: int, job_id: str
     ) -> dict[str, Any]:
         return self._update_script_optimization(optimization_id, {"job_id": job_id})
+
+    def prepare_script_optimization_resume(
+        self, optimization_id: int
+    ) -> dict[str, Any]:
+        """Claim one failed task without removing completed episode drafts."""
+
+        with self.transaction_scope() as connection:
+            updated = connection.execute(
+                update(script_optimizations)
+                .where(
+                    script_optimizations.c.id == int(optimization_id),
+                    script_optimizations.c.status == "failed",
+                )
+                .values(status="queued", error="", updated_at=utc_now())
+                .returning(script_optimizations.c.id)
+            ).scalar_one_or_none()
+            if updated is None:
+                raise ValueError("只有失败的优化任务可以继续生成")
+        return self.get_script_optimization(optimization_id) or {}
+
+    def save_script_optimization_episode(
+        self,
+        optimization_id: int,
+        episode_number: int,
+        drafts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Commit a whole episode before the next model request starts."""
+
+        now = utc_now()
+        with self.transaction_scope() as connection:
+            row = connection.execute(
+                select(script_optimizations)
+                .where(script_optimizations.c.id == int(optimization_id))
+                .with_for_update()
+            ).mappings().one_or_none()
+            if row is None or row["status"] != "running":
+                raise ValueError("优化任务未运行，无法保存草稿")
+            targets = row["target_episode_numbers_json"] or []
+            if int(episode_number) not in targets:
+                raise ValueError("优化草稿不在任务目标集数中")
+            expected = {"beats", "script"} if row["mode"] == "structure" else {"script"}
+            if len(drafts) != len(expected) or {
+                str(draft.get("kind") or "") for draft in drafts
+            } != expected or any(
+                int(draft.get("episode_number") or 0) != int(episode_number)
+                for draft in drafts
+            ):
+                raise ValueError("当前集优化草稿不完整")
+            existing = connection.execute(
+                select(script_optimization_drafts.c.kind).where(
+                    script_optimization_drafts.c.optimization_id
+                    == int(optimization_id),
+                    script_optimization_drafts.c.episode_number
+                    == int(episode_number),
+                )
+            ).scalars().all()
+            if existing:
+                if len(existing) != len(expected) or set(existing) != expected:
+                    raise ValueError("当前集已有不完整的优化草稿")
+            else:
+                inserted: dict[str, int] = {}
+                for draft in drafts:
+                    kind = str(draft["kind"])
+                    draft_id = connection.execute(
+                        insert(script_optimization_drafts)
+                        .values(
+                            optimization_id=int(optimization_id),
+                            project_id=int(row["project_id"]),
+                            episode_number=int(episode_number),
+                            kind=kind,
+                            source_episode_id=draft.get("source_episode_id"),
+                            source_fingerprint=str(
+                                draft.get("source_fingerprint") or ""
+                            ),
+                            content_json=jsonb_copy(draft.get("content") or {}),
+                            peer_draft_id=None,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                        .returning(script_optimization_drafts.c.id)
+                    ).scalar_one()
+                    inserted[kind] = int(draft_id)
+                if row["mode"] == "structure":
+                    connection.execute(
+                        update(script_optimization_drafts)
+                        .where(script_optimization_drafts.c.id == inserted["beats"])
+                        .values(peer_draft_id=inserted["script"])
+                    )
+                    connection.execute(
+                        update(script_optimization_drafts)
+                        .where(script_optimization_drafts.c.id == inserted["script"])
+                        .values(peer_draft_id=inserted["beats"])
+                    )
+                connection.execute(
+                    update(script_optimizations)
+                    .where(script_optimizations.c.id == int(optimization_id))
+                    .values(updated_at=now)
+                )
+        return self.get_script_optimization(optimization_id) or {}
+
+    def finish_script_optimization(self, optimization_id: int) -> dict[str, Any]:
+        """Mark complete only after every target episode is checkpointed."""
+
+        with self.transaction_scope() as connection:
+            row = connection.execute(
+                select(script_optimizations)
+                .where(script_optimizations.c.id == int(optimization_id))
+                .with_for_update()
+            ).mappings().one_or_none()
+            if row is None or row["status"] != "running":
+                raise ValueError("优化任务未运行")
+            expected = {"beats", "script"} if row["mode"] == "structure" else {"script"}
+            for number in row["target_episode_numbers_json"] or []:
+                kinds = connection.execute(
+                    select(script_optimization_drafts.c.kind).where(
+                        script_optimization_drafts.c.optimization_id
+                        == int(optimization_id),
+                        script_optimization_drafts.c.episode_number == int(number),
+                    )
+                ).scalars().all()
+                if len(kinds) != len(expected) or set(kinds) != expected:
+                    raise ValueError(f"第 {number} 集优化草稿尚未完成")
+            connection.execute(
+                update(script_optimizations)
+                .where(script_optimizations.c.id == int(optimization_id))
+                .values(status="completed", error="", updated_at=utc_now())
+            )
+        return self.get_script_optimization(optimization_id) or {}
 
     def complete_script_optimization(
         self, optimization_id: int, drafts: list[dict[str, Any]]
@@ -768,6 +930,10 @@ class ReviewsRepository:
         target_episode_numbers = row.pop("target_episode_numbers_json")
         row["target_episode_numbers"] = (
             [] if target_episode_numbers in (None, "") else target_episode_numbers
+        )
+        prompt_snapshot = row.pop("prompt_snapshot_json", None)
+        row["prompt_snapshot"] = (
+            {} if prompt_snapshot in (None, "") else prompt_snapshot
         )
         return row
 

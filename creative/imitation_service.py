@@ -20,17 +20,10 @@ from analysis.llm import (
     LLMOutputTruncatedError,
     is_retryable_llm_exception,
 )
-from creative.llm_observability import (
-    active_attempt_reporter,
-    summarize_payload_shape,
-    truncate_text,
-)
+from creative.llm_observability import active_attempt_reporter, summarize_payload_shape, summarize_payload_metadata
 from creative.prompt_templates import blueprint_messages, repair_messages
 
-
 logger = logging.getLogger(__name__)
-
-RAW_RESPONSE_LOG_LIMIT = 4000
 
 
 def _flatten_text(value: Any) -> str:
@@ -125,22 +118,18 @@ async def _report_attempt(
         if inspect.isawaitable(outcome):
             await outcome
     except Exception:
-        logger.warning("模型结构校验尝试上报失败", exc_info=True)
+        logger.warning("模型结构校验尝试上报失败")
 
 
 def _log_attempt_failure(
     attempt: int, max_attempts: int, exc: Exception, payload: Any
 ) -> None:
-    raw = (
-        json.dumps(payload, ensure_ascii=False) if payload is not None else ""
-    )
     logger.warning(
-        "模型响应未通过结构校验（第 %s/%s 次）：%s；%s；原始响应：%s",
+        "模型响应未通过结构校验（第 %s/%s 次）：%s；%s",
         attempt,
         max_attempts,
-        exc,
-        summarize_payload_shape(payload),
-        truncate_text(raw, RAW_RESPONSE_LOG_LIMIT),
+        "输出被截断" if isinstance(exc, LLMOutputTruncatedError) else "响应结构无效",
+        summarize_payload_metadata(payload),
     )
 
 
@@ -189,6 +178,7 @@ async def complete_with_one_repair(
                         getattr(provider, "last_request_summary", None) or {}
                     ),
                     "truncated_text": str(getattr(exc, "partial_text", "") or ""),
+                    "output_truncated": isinstance(exc, LLMOutputTruncatedError),
                 },
             )
             # 输出被截断属于调用参数问题，重发同一份请求只会再被截断一次；

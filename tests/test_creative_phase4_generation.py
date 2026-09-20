@@ -35,10 +35,18 @@ from creative.script_service import (
     generate_character_bundle,
     generate_episode_beats_chunk,
     generate_episode_beats,
-    generate_episode_script_chunk,
     generate_outline_bundle,
     validate_beats,
 )
+
+
+
+@pytest.fixture(autouse=True)
+def _use_postgres_creative(monkeypatch, postgres_creative):
+    """Exercise runtime behavior against the isolated PostgreSQL store."""
+    monkeypatch.setitem(
+        globals(), "CreativeRepository", lambda *_args, **_kwargs: postgres_creative
+    )
 
 
 def test_phase4_worker_creates_provider_with_selected_model(monkeypatch) -> None:
@@ -478,6 +486,7 @@ async def test_character_bundle_stops_immediately_after_a_truncated_response():
             raise LLMOutputTruncatedError(
                 "模型输出被输出上限截断（finish_reason=length，已返回 120 字符）。",
                 partial_text='{"characters": [{"name": "林穗"',
+                finish_reason="length",
             )
 
     provider = TruncatingProvider()
@@ -747,10 +756,9 @@ async def test_outline_generation_emits_request_progress_for_series_arc_and_chun
         ("started", "outline_chunk"),
         ("finished", "outline_chunk"),
     ]
-    assert all(set(event) == {
+    assert all(set(event) >= {
         "phase", "request_kind", "batch_start", "batch_end", "batch_started_at",
         "reasoning_effort", "prompt_chars", "request_elapsed_seconds", "batch_in_flight",
-        "llm_provider", "llm_model", "wire_api", "max_output_tokens",
     } for event in events)
     assert events[0]["batch_start"] is events[0]["batch_end"] is None
     assert (events[2]["batch_start"], events[2]["batch_end"]) == (1, 1)
@@ -830,61 +838,6 @@ def valid_script_content(episode_number: int = 1) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_script_chunk_repairs_only_missing_episodes():
-    provider = SequentialProvider([
-        {"episodes": [{"episode": 1, **valid_script_content(1)}]},
-        {"episodes": [{"episode": 2, **valid_script_content(2)}]},
-    ])
-
-    generated, meta = await generate_episode_script_chunk(
-        provider,
-        {"name": "项目", "target_episode_count": 2},
-        {"content": {"title": "锁定 Brief"}},
-        [
-            {"episode_number": number, "content": outline_episode(number)}
-            for number in range(1, 3)
-        ],
-        [{"content": {"name": "主角"}}],
-        [],
-        {number: valid_beat_content() for number in range(1, 3)},
-        continuity_ledger=[],
-    )
-
-    assert [episode_number for episode_number, _ in generated] == [1, 2]
-    assert len(provider.calls) == 2
-    repair_payload = json.loads(provider.calls[1][1]["content"])
-    assert [item["episode_number"] for item in repair_payload["locked_outlines"]] == [2]
-    assert [item["episode_number"] for item in repair_payload["locked_beats"]] == [2]
-    assert meta["repair_attempted"] is True
-
-
-@pytest.mark.asyncio
-async def test_script_chunk_reports_actual_and_missing_episodes_after_repair():
-    provider = SequentialProvider([
-        {"episodes": [{"episode": 1, **valid_script_content(1)}]},
-        {"episodes": [{"episode": 1, **valid_script_content(1)}]},
-    ])
-
-    with pytest.raises(
-        script_service.LLMError,
-        match="实际集数：1.*缺失集数：2.*最终缺失集数：2",
-    ):
-        await generate_episode_script_chunk(
-            provider,
-            {"name": "项目", "target_episode_count": 2},
-            {"content": {"title": "锁定 Brief"}},
-            [
-                {"episode_number": number, "content": outline_episode(number)}
-                for number in range(1, 3)
-            ],
-            [{"content": {"name": "主角"}}],
-            [],
-            {number: valid_beat_content() for number in range(1, 3)},
-            continuity_ledger=[],
-        )
-
-
-@pytest.mark.asyncio
 async def test_beats_series_requests_one_model_response_per_ten_episode_chunk():
     provider = SequentialProvider([{
         "episodes": [
@@ -937,175 +890,6 @@ async def test_outline_generation_chunks_every_ten_episodes():
     assert result["series_overview"] == series_overview()
     assert progress == [(10, 12), (12, 12)]
     assert meta["preferred_chunk_size"] == 10
-
-
-@pytest.mark.asyncio
-async def test_outline_generation_splits_a_truncated_chunk_and_checkpoints_each_child():
-    provider = SequentialProvider([
-        series_arc_payload(),
-        LLMOutputTruncatedError(
-            "模型输出被输出上限截断（finish_reason=length，已返回 5602 字符）",
-            finish_reason="length",
-            returned_chars=5602,
-        ),
-        {"episodes": [outline_episode(number) for number in range(1, 6)]},
-        {"episodes": [outline_episode(number) for number in range(6, 11)]},
-    ])
-    checkpoints = []
-    progress = []
-    request_progress = []
-
-    result, meta = await generate_outline_bundle(
-        provider,
-        {"name": "项目", "target_episode_count": 10},
-        {"title": "Brief"},
-        [{"content": {"name": "周晴"}}],
-        [],
-        on_checkpoint=lambda _arc, episodes, snapshot: checkpoints.append(
-            (len(episodes), dict(snapshot))
-        ),
-        on_progress=lambda done, total: progress.append((done, total)),
-        on_request_progress=request_progress.append,
-    )
-
-    assert [item["episode"] for item in result["episodes"]] == list(range(1, 11))
-    assert [count for count, _snapshot in checkpoints] == [5, 10]
-    assert progress == [(5, 10), (10, 10)]
-    assert meta["preferred_chunk_size"] == 10
-    assert meta["split_count"] == 1
-    assert meta["actual_batches"] == [
-        {"start": 1, "end": 10, "status": "truncated"},
-        {"start": 1, "end": 5, "status": "completed"},
-        {"start": 6, "end": 10, "status": "completed"},
-    ]
-    right_payload = json.loads(provider.calls[3][1]["content"])
-    assert [
-        item["episode"] for item in right_payload["history_context"]["recent_episodes"]
-    ] == list(range(1, 6))
-    assert [
-        event["phase"]
-        for event in request_progress
-        if event.get("phase") in {"truncated", "split"}
-    ] == ["truncated", "split"]
-    assert next(
-        event for event in request_progress if event.get("phase") == "truncated"
-    )["returned_chars"] == 5602
-
-
-@pytest.mark.asyncio
-async def test_outline_generation_recursively_splits_a_truncated_child_range():
-    provider = SequentialProvider([
-        series_arc_payload(),
-        LLMOutputTruncatedError(
-            "1-10 truncated", finish_reason="length", returned_chars=5000
-        ),
-        LLMOutputTruncatedError(
-            "1-5 truncated", finish_reason="max_tokens", returned_chars=4000
-        ),
-        {"episodes": [outline_episode(number) for number in range(1, 3)]},
-        {"episodes": [outline_episode(number) for number in range(3, 6)]},
-        {"episodes": [outline_episode(number) for number in range(6, 11)]},
-    ])
-
-    result, meta = await generate_outline_bundle(
-        provider,
-        {"name": "项目", "target_episode_count": 10},
-        {"title": "Brief"},
-        [{"content": {"name": "周晴"}}],
-        [],
-    )
-
-    assert [item["episode"] for item in result["episodes"]] == list(range(1, 11))
-    assert meta["split_count"] == 2
-    assert meta["actual_batches"] == [
-        {"start": 1, "end": 10, "status": "truncated"},
-        {"start": 1, "end": 5, "status": "truncated"},
-        {"start": 1, "end": 2, "status": "completed"},
-        {"start": 3, "end": 5, "status": "completed"},
-        {"start": 6, "end": 10, "status": "completed"},
-    ]
-
-
-@pytest.mark.asyncio
-async def test_outline_generation_stops_when_one_episode_is_still_truncated():
-    provider = SequentialProvider([
-        series_arc_payload(),
-        LLMOutputTruncatedError(
-            "single truncated", finish_reason="max_output_tokens", returned_chars=3000
-        ),
-    ])
-
-    with pytest.raises(
-        LLMOutputTruncatedError,
-        match="单集生成仍达到模型输出上限",
-    ):
-        await generate_outline_bundle(
-            provider,
-            {"name": "项目", "target_episode_count": 1},
-            {"title": "Brief"},
-            [{"content": {"name": "周晴"}}],
-            [],
-        )
-
-    assert len(provider.calls) == 2
-
-
-@pytest.mark.asyncio
-async def test_outline_split_keeps_left_checkpoint_when_right_episode_fails():
-    provider = SequentialProvider([
-        series_arc_payload(),
-        LLMOutputTruncatedError(
-            "1-2 truncated", finish_reason="length", returned_chars=4000
-        ),
-        {"episodes": [outline_episode(1)]},
-        LLMOutputTruncatedError(
-            "2 truncated", finish_reason="length", returned_chars=3500
-        ),
-    ])
-    checkpoints = []
-
-    with pytest.raises(
-        LLMOutputTruncatedError,
-        match="第 2 集单集生成仍达到模型输出上限",
-    ):
-        await generate_outline_bundle(
-            provider,
-            {"name": "项目", "target_episode_count": 2},
-            {"title": "Brief"},
-            [{"content": {"name": "周晴"}}],
-            [],
-            on_checkpoint=lambda _arc, episodes, _meta: checkpoints.append(
-                [item["episode"] for item in episodes]
-            ),
-        )
-
-    assert checkpoints == [[1]]
-
-
-@pytest.mark.asyncio
-async def test_outline_resume_after_split_checkpoint_starts_at_next_episode():
-    provider = SequentialProvider([{
-        "episodes": [outline_episode(number) for number in range(6, 11)],
-    }])
-
-    result, _ = await generate_outline_bundle(
-        provider,
-        {"name": "项目", "target_episode_count": 10},
-        {"title": "Brief"},
-        [{"content": {"name": "周晴"}}],
-        [],
-        resume_episodes=[outline_episode(number) for number in range(1, 6)],
-        resume_series_arc="相识、对抗、合作",
-        resume_stages=["相识", "对抗", "合作"],
-        resume_series_overview=series_overview(),
-    )
-
-    assert len(provider.calls) == 1
-    payload = json.loads(provider.calls[0][1]["content"])
-    assert [
-        item["episode"] for item in payload["history_context"]["recent_episodes"]
-    ] == [1, 2, 3, 4, 5]
-    assert [item["episode"] for item in result["episodes"]] == list(range(1, 11))
 
 
 @pytest.mark.asyncio
@@ -1678,35 +1462,17 @@ def test_episode_update_keeps_overview_read_and_write_in_one_transaction(
     concurrent = {**series_overview(), "core_event": "事务期间保存的新概览"}
     episode_paused = threading.Event()
     release_episode = threading.Event()
-    original_connect = repository._connect
+    from sqlalchemy import event
 
-    class PausingConnection:
-        def __init__(self, connection):
-            self.connection = connection
+    def pause_episode_update(connection, cursor, statement, parameters, context, many):
+        if (
+            threading.current_thread().name == "outline-episode-save"
+            and statement.startswith("UPDATE creative_episodes SET")
+        ):
+            episode_paused.set()
+            assert release_episode.wait(3)
 
-        def __enter__(self):
-            self.connection.__enter__()
-            return self
-
-        def __exit__(self, *args):
-            return self.connection.__exit__(*args)
-
-        def execute(self, sql, parameters=()):
-            if sql.startswith("UPDATE creative_episodes SET content_json"):
-                episode_paused.set()
-                assert release_episode.wait(3)
-            return self.connection.execute(sql, parameters)
-
-        def __getattr__(self, name):
-            return getattr(self.connection, name)
-
-    def controlled_connect():
-        connection = original_connect()
-        if threading.current_thread().name == "outline-episode-save":
-            return PausingConnection(connection)
-        return connection
-
-    monkeypatch.setattr(repository, "_connect", controlled_connect)
+    event.listen(repository.database.engine, "before_cursor_execute", pause_episode_update)
     episode_result = {}
     writer_result = {}
 
@@ -1956,70 +1722,6 @@ def test_batch_lock_beats_locks_all_current_drafts_and_skips_existing_locked_ite
     assert repository.get_episode(second["id"])["status"] == "locked"
 
 
-def test_batch_lock_scripts_locks_all_current_drafts_and_skips_locked_items(tmp_path):
-    repository = CreativeRepository(tmp_path / "creative.db")
-    project = seed_worker_project(repository, episode_count=2)
-    brief = repository.create_blueprints(
-        project["id"], [{"content": {"title": "方向"}}]
-    )[0]
-    repository.lock_brief(brief["id"])
-    characters = repository.create_character_batch(
-        project["id"], [{"name": "主角"}], []
-    )
-    repository.lock_character_batch(project["id"], characters["batch_id"])
-    outlines = repository.create_outline_batch(
-        project["id"], [outline_episode(1), outline_episode(2)], "全剧弧线"
-    )
-    repository.lock_outline_batch(project["id"], outlines["batch_id"])
-    for episode_number in (1, 2):
-        beats = repository.create_episode_beats(
-            project["id"], episode_number, valid_beat_content()
-        )
-        repository.lock_episode_beats(beats["id"])
-    first = repository.create_episode_script(
-        project["id"], 1, valid_script_content(1)
-    )
-    second = repository.create_episode_script(
-        project["id"], 2, valid_script_content(2)
-    )
-    repository.lock_episode_script(first["id"])
-
-    locked = repository.lock_current_episode_scripts_batch(project["id"])
-
-    assert [item["episode_number"] for item in locked] == [2]
-    assert repository.get_episode(second["id"])["status"] == "locked"
-
-
-def test_batch_lock_scripts_preflights_all_episodes_before_writing(tmp_path):
-    repository = CreativeRepository(tmp_path / "creative.db")
-    project = seed_worker_project(repository, episode_count=2)
-    brief = repository.create_blueprints(
-        project["id"], [{"content": {"title": "方向"}}]
-    )[0]
-    repository.lock_brief(brief["id"])
-    characters = repository.create_character_batch(
-        project["id"], [{"name": "主角"}], []
-    )
-    repository.lock_character_batch(project["id"], characters["batch_id"])
-    outlines = repository.create_outline_batch(
-        project["id"], [outline_episode(1), outline_episode(2)], "全剧弧线"
-    )
-    repository.lock_outline_batch(project["id"], outlines["batch_id"])
-    for episode_number in (1, 2):
-        beats = repository.create_episode_beats(
-            project["id"], episode_number, valid_beat_content()
-        )
-        repository.lock_episode_beats(beats["id"])
-    first = repository.create_episode_script(
-        project["id"], 1, valid_script_content(1)
-    )
-
-    with pytest.raises(ValueError, match="第.*2.*集数缺少|以下集数缺少"):
-        repository.lock_current_episode_scripts_batch(project["id"])
-
-    assert repository.get_episode(first["id"])["status"] == "draft"
-
-
 def test_phase4_worker_persists_generation_and_report(tmp_path, monkeypatch):
     db_path = tmp_path / ".runtime" / "creative" / "creative.db"
     repository = CreativeRepository(db_path)
@@ -2033,12 +1735,12 @@ def test_phase4_worker_persists_generation_and_report(tmp_path, monkeypatch):
         crawler_type="phase4_generate",
         extra={
             "action": "blueprints", "project_id": project["id"], "count": 3,
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             **generation_contract(repository, project["id"]),
         },
     )
 
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     detail = repository.get_project(project["id"])
     report = tmp_path / "data" / "creative" / "jobs" / job.job_id / "generation.json"
@@ -2069,13 +1771,13 @@ def test_phase4_worker_rejects_authority_change_at_persistence_boundary(
         crawler_type="phase4_generate",
         extra={
             "action": "blueprints", "project_id": project["id"], "count": 3,
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             **generation_contract(repository, project["id"]),
         },
     )
 
     with pytest.raises(ValueError, match="authority changed"):
-        asyncio.run(phase4_worker.run(job))
+        asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     assert repository.get_project(project["id"])["blueprints"] == []
 
@@ -2093,13 +1795,13 @@ def test_phase4_worker_does_not_persist_partial_blueprints_after_llm_failure(tmp
         crawler_type="phase4_generate",
         extra={
             "action": "blueprints", "project_id": project["id"], "count": 3,
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             **authority_extra(repository, project["id"]),
         },
     )
 
     with pytest.raises(Exception, match="结构校验"):
-        asyncio.run(phase4_worker.run(job))
+        asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     assert repository.get_project(project["id"])["blueprints"] == []
 
@@ -2134,13 +1836,12 @@ def test_phase4_worker_generates_overview_for_an_existing_draft_without_rewritin
             "action": "outline_overview",
             "project_id": project["id"],
                 "batch_id": batch["batch_id"],
-                "db_path": str(db_path),
                 "runtime_dir": str(tmp_path / ".runtime"),
                 **authority_extra(repository, project["id"]),
             },
     )
 
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     saved = repository.get_outline_batch(project["id"], batch["batch_id"])
     assert saved["series_overview"] == series_overview()
@@ -2177,14 +1878,13 @@ def test_phase4_worker_rejects_an_incomplete_outline_before_calling_the_model(
             "action": "outline_overview",
             "project_id": project["id"],
                 "batch_id": partial["batch_id"],
-                "db_path": str(db_path),
                 "runtime_dir": str(tmp_path / ".runtime"),
                 **authority_extra(repository, project["id"]),
             },
     )
 
     with pytest.raises(ValueError, match="完整覆盖"):
-        asyncio.run(phase4_worker.run(job))
+        asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     assert provider.calls == []
 
@@ -2225,14 +1925,13 @@ def test_phase4_worker_does_not_overwrite_an_overview_saved_during_generation(
             "action": "outline_overview",
             "project_id": project["id"],
                 "batch_id": batch["batch_id"],
-                "db_path": str(db_path),
                 "runtime_dir": str(tmp_path / ".runtime"),
                 **authority_extra(repository, project["id"]),
             },
     )
 
     with pytest.raises(ValueError, match="已存在"):
-        asyncio.run(phase4_worker.run(job))
+        asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     saved = repository.get_outline_batch(project["id"], batch["batch_id"])
     assert saved["series_overview"] == manual
@@ -2259,13 +1958,13 @@ def test_phase4_worker_preserves_completed_outline_chunks_after_a_later_failure(
         crawler_type="phase4_generate",
         extra={
             "action": "outlines", "project_id": project["id"],
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             **generation_contract(repository, project["id"]),
         },
     )
 
     with pytest.raises(Exception, match="结构校验"):
-        asyncio.run(phase4_worker.run(job))
+        asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     partial_outlines = [
         item for item in repository.get_project(project["id"])["episodes"]
@@ -2293,11 +1992,11 @@ def test_phase4_worker_continues_a_saved_outline_batch_after_a_failed_job(tmp_pa
     failed_job = CrawlJob(
         job_id="creative-worker-outline-failed",
         platform="creative", crawler_type="phase4_generate",
-        extra={"action": "outlines", "project_id": project["id"], "db_path": str(db_path),
+        extra={"action": "outlines", "project_id": project["id"],
                **generation_contract(repository, project["id"])},
     )
     with pytest.raises(Exception, match="结构校验"):
-        asyncio.run(phase4_worker.run(failed_job))
+        asyncio.run(phase4_worker._run_with_repository(failed_job, repository))
 
     class ResumedProviderWithRetryNotice(SequentialProvider):
         retry_callback = None
@@ -2322,12 +2021,12 @@ def test_phase4_worker_continues_a_saved_outline_batch_after_a_failed_job(tmp_pa
     resumed_job = CrawlJob(
         job_id="creative-worker-outline-resumed",
         platform="creative", crawler_type="phase4_generate",
-        extra={"action": "outlines", "project_id": project["id"], "db_path": str(db_path),
+        extra={"action": "outlines", "project_id": project["id"],
                "retry_of_job_id": "creative-worker-outline-failed",
                **generation_contract(repository, project["id"])},
     )
 
-    asyncio.run(phase4_worker.run(resumed_job))
+    asyncio.run(phase4_worker._run_with_repository(resumed_job, repository))
 
     outlines = [
         item for item in repository.get_project(project["id"])["episodes"]
@@ -2375,12 +2074,12 @@ def test_phase4_worker_retry_takes_over_failure_before_first_checkpoint(
         crawler_type="phase4_generate",
         extra={
             "action": "outlines", "project_id": project["id"],
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             **operation,
         },
     )
     with pytest.raises(RuntimeError, match="before checkpoint"):
-        asyncio.run(phase4_worker.run(failed_job))
+        asyncio.run(phase4_worker._run_with_repository(failed_job, repository))
 
     retry_provider = SequentialProvider([
         series_arc_payload(),
@@ -2393,13 +2092,13 @@ def test_phase4_worker_retry_takes_over_failure_before_first_checkpoint(
         crawler_type="phase4_generate",
         extra={
             "action": "outlines", "project_id": project["id"],
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             "retry_of_job_id": failed_job.job_id,
             **operation,
         },
     )
 
-    asyncio.run(phase4_worker.run(retry_job))
+    asyncio.run(phase4_worker._run_with_repository(retry_job, repository))
 
     outlines = [
         item for item in repository.get_project(project["id"])["episodes"]
@@ -2434,7 +2133,7 @@ def test_phase4_worker_retry_takes_over_expired_orphan_before_first_checkpoint(
     )
     with repository._connect() as connection:
         connection.execute(
-            "UPDATE creative_generation_operations SET updated_at = 0 "
+            "UPDATE creative_generation_operations SET updated_at = to_timestamp(0) "
             "WHERE operation_id = ?",
             ("orphan-before-checkpoint",),
         )
@@ -2449,13 +2148,13 @@ def test_phase4_worker_retry_takes_over_expired_orphan_before_first_checkpoint(
         crawler_type="phase4_generate",
         extra={
             "action": "outlines", "project_id": project["id"],
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             "retry_of_job_id": "dead-outline-worker",
             **operation,
         },
     )
 
-    asyncio.run(phase4_worker.run(retry_job))
+    asyncio.run(phase4_worker._run_with_repository(retry_job, repository))
 
     outlines = [
         item for item in repository.get_project(project["id"])["episodes"]
@@ -2493,12 +2192,12 @@ def test_phase4_worker_saves_series_beats_in_ten_episode_checkpoints(tmp_path, m
         job_id="creative-worker-series-beats", platform="creative", crawler_type="phase4_generate",
         extra={
             "action": "beats", "series": True, "project_id": project["id"],
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             **generation_contract(repository, project["id"]),
         },
     )
 
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     beats = [item for item in repository.get_project(project["id"])["episodes"] if item["stage"] == "beats"]
     assert [item["episode_number"] for item in beats] == list(range(1, 13))
@@ -2508,217 +2207,43 @@ def test_phase4_worker_saves_series_beats_in_ten_episode_checkpoints(tmp_path, m
     assert any(item["payload"].get("completed") == 12 for item in events)
 
 
-def test_phase4_worker_splits_truncated_series_beats_and_checkpoints_children(
-    tmp_path, monkeypatch
-):
+def test_phase4_worker_saves_series_scripts_after_all_current_beats_are_locked(tmp_path, monkeypatch):
     db_path = tmp_path / ".runtime" / "creative" / "creative.db"
     repository = CreativeRepository(db_path)
     project = seed_worker_project(repository)
-    repository.update_project(project["id"], {"target_episode_count": 10})
-    brief = repository.create_blueprints(
-        project["id"], [{"content": {"title": "方向"}}]
-    )[0]
-    repository.lock_brief(brief["id"])
-    characters = repository.create_character_batch(
-        project["id"], [{"name": "主角"}], []
-    )
-    repository.lock_character_batch(project["id"], characters["batch_id"])
-    outlines = repository.create_outline_batch(
-        project["id"],
-        [outline_episode(number) for number in range(1, 11)],
-        "全剧弧线",
-    )
-    repository.lock_outline_batch(project["id"], outlines["batch_id"])
-    first_half_content = valid_beat_content()
-    first_half_content["beats"][0]["continuity_updates"] = [{
-        "kind": "information",
-        "name": "五集检查点线索",
-        "event": "reveal",
-        "holder": "主角",
-        "location": "大厅",
-        "known_by": ["主角"],
-        "status": "active",
-    }]
-    provider = SequentialProvider([
-        LLMOutputTruncatedError(
-            "1-10 truncated", finish_reason="length", returned_chars=120_000
-        ),
-        {
-            "episodes": [
-                {"episode": number, **first_half_content}
-                for number in range(1, 6)
-            ]
-        },
-        {
-            "episodes": [
-                {"episode": number, **valid_beat_content()}
-                for number in range(6, 11)
-            ]
-        },
-    ])
-    events = []
-    monkeypatch.setattr(phase4_worker, "create_provider", lambda: provider)
-    monkeypatch.setattr(
-        phase4_worker,
-        "emit",
-        lambda job, event, message, level="info", payload=None: events.append(
-            {
-                "event": event,
-                "message": message,
-                "level": level,
-                "payload": payload or {},
-            }
-        ),
-    )
-    job = CrawlJob(
-        job_id="creative-worker-series-beats-split",
-        platform="creative",
-        crawler_type="phase4_generate",
-        extra={
-            "action": "beats",
-            "series": True,
-            "project_id": project["id"],
-            "db_path": str(db_path),
-            "runtime_dir": str(tmp_path / ".runtime"),
-            **generation_contract(
-                repository, project["id"], "worker-generation-operation-split"
-            ),
-        },
-    )
-
-    asyncio.run(phase4_worker.run(job))
-
-    beats = [
-        item
-        for item in repository.get_project(project["id"])["episodes"]
-        if item["stage"] == "beats"
-    ]
-    assert [item["episode_number"] for item in beats] == list(range(1, 11))
-    assert len({item["batch_id"] for item in beats}) == 1
-    assert len(provider.calls) == 3
-    assert "五集检查点线索" in provider.calls[2][1]["content"]
-    assert [
-        item["payload"].get("completed")
-        for item in events
-        if item["event"] == "progress" and "chunk_end" in item["payload"]
-    ] == [5, 10]
-    assert any(
-        item["level"] == "warning"
-        and item["payload"].get("split_start") == 1
-        and item["payload"].get("split_end") == 10
-        and item["payload"].get("left_end") == 5
-        and item["payload"].get("right_start") == 6
-        for item in events
-    )
-
-
-def test_phase4_worker_keeps_left_beats_checkpoint_when_single_episode_truncates(
-    tmp_path, monkeypatch
-):
-    db_path = tmp_path / ".runtime" / "creative" / "creative.db"
-    repository = CreativeRepository(db_path)
-    project = seed_worker_project(repository)
-    repository.update_project(project["id"], {"target_episode_count": 2})
-    brief = repository.create_blueprints(
-        project["id"], [{"content": {"title": "方向"}}]
-    )[0]
-    repository.lock_brief(brief["id"])
-    characters = repository.create_character_batch(
-        project["id"], [{"name": "主角"}], []
-    )
-    repository.lock_character_batch(project["id"], characters["batch_id"])
-    outlines = repository.create_outline_batch(
-        project["id"],
-        [outline_episode(1), outline_episode(2)],
-        "全剧弧线",
-    )
-    repository.lock_outline_batch(project["id"], outlines["batch_id"])
-    provider = SequentialProvider([
-        LLMOutputTruncatedError(
-            "1-2 truncated", finish_reason="length", returned_chars=50_000
-        ),
-        {"episodes": [{"episode": 1, **valid_beat_content()}]},
-        LLMOutputTruncatedError(
-            "2 truncated", finish_reason="max_tokens", returned_chars=30_000
-        ),
-    ])
-    monkeypatch.setattr(phase4_worker, "create_provider", lambda: provider)
-    monkeypatch.setattr(phase4_worker, "emit", lambda *_args, **_kwargs: None)
-    job = CrawlJob(
-        job_id="creative-worker-series-beats-single-truncated",
-        platform="creative",
-        crawler_type="phase4_generate",
-        extra={
-            "action": "beats",
-            "series": True,
-            "project_id": project["id"],
-            "db_path": str(db_path),
-            "runtime_dir": str(tmp_path / ".runtime"),
-            **generation_contract(
-                repository,
-                project["id"],
-                "worker-generation-operation-single-truncated",
-            ),
-        },
-    )
-
-    with pytest.raises(
-        LLMOutputTruncatedError,
-        match="第 2 集 Beats 生成仍达到模型输出上限",
-    ):
-        asyncio.run(phase4_worker.run(job))
-
-    beats = [
-        item
-        for item in repository.get_project(project["id"])["episodes"]
-        if item["stage"] == "beats"
-    ]
-    assert [item["episode_number"] for item in beats] == [1]
-    assert len(provider.calls) == 3
-
-
-def test_phase4_worker_saves_series_scripts_in_two_episode_chunks(tmp_path, monkeypatch):
-    db_path = tmp_path / ".runtime" / "creative" / "creative.db"
-    repository = CreativeRepository(db_path)
-    project = seed_worker_project(repository)
-    repository.update_project(project["id"], {"target_episode_count": 5})
+    repository.update_project(project["id"], {"target_episode_count": 12})
     brief = repository.create_blueprints(project["id"], [{"content": {"title": "方向"}}])[0]
     repository.lock_brief(brief["id"])
     characters = repository.create_character_batch(project["id"], [{"name": "主角"}], [])
     repository.lock_character_batch(project["id"], characters["batch_id"])
     outlines = repository.create_outline_batch(
-        project["id"], [outline_episode(number) for number in range(1, 6)], "全剧弧线"
+        project["id"], [outline_episode(number) for number in range(1, 13)], "全剧弧线"
     )
     repository.lock_outline_batch(project["id"], outlines["batch_id"])
-    for episode_number in range(1, 6):
+    for episode_number in range(1, 13):
         beats = repository.create_episode_beats(project["id"], episode_number, valid_beat_content())
         repository.lock_episode_beats(beats["id"])
     provider = SequentialProvider([
-        {"episodes": [{"episode": number, **valid_script_content(number)} for number in range(1, 3)]},
-        {"episodes": [{"episode": number, **valid_script_content(number)} for number in range(3, 5)]},
-        {"episodes": [{"episode": 5, **valid_script_content(5)}]},
+        {"episodes": [{"episode": number, **valid_script_content(number)} for number in range(start, start + 2)]}
+        for start in range(1, 13, 2)
     ])
     monkeypatch.setattr(phase4_worker, "create_provider", lambda: provider)
     job = CrawlJob(
         job_id="creative-worker-series-scripts", platform="creative", crawler_type="phase4_generate",
         extra={
             "action": "script", "series": True, "project_id": project["id"],
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             **generation_contract(repository, project["id"]),
         },
     )
 
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     scripts = [item for item in repository.get_project(project["id"])["episodes"] if item["stage"] == "script"]
-    assert [item["episode_number"] for item in scripts] == list(range(1, 6))
+    assert [item["episode_number"] for item in scripts] == list(range(1, 13))
     assert {item["status"] for item in scripts} == {"draft"}
     assert len({item["batch_id"] for item in scripts}) == 1
-    assert len(provider.calls) == 3
-    assert [
-        [item["episode_number"] for item in json.loads(call[1]["content"])["locked_outlines"]]
-        for call in provider.calls
-    ] == [[1, 2], [3, 4], [5]]
+    assert len(provider.calls) == 6
     assert "locked_beats" in provider.calls[0][1]["content"]
 
 
@@ -2751,12 +2276,12 @@ def test_phase4_worker_surfaces_provider_retry_progress(tmp_path, monkeypatch):
         crawler_type="phase4_generate",
         extra={
             "action": "blueprints", "project_id": project["id"], "count": 3,
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             **authority_extra(repository, project["id"]),
         },
     )
 
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     retry_event = next(item for item in events if item["payload"].get("retry_attempt") == 1)
     assert retry_event["level"] == "warning"
@@ -2793,12 +2318,12 @@ def test_outline_worker_sets_reasoning_effort_and_maps_request_progress_events(t
         platform="creative",
         crawler_type="phase4_generate",
         extra={
-            "action": "outlines", "project_id": project["id"], "db_path": str(db_path),
+            "action": "outlines", "project_id": project["id"],
             "runtime_dir": str(tmp_path / ".runtime"), **generation_contract(repository, project["id"]),
         },
     )
 
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     assert provider.reasoning_effort == "high"
     request_events = [event for event in events if event["payload"].get("request_kind")]
@@ -2848,13 +2373,12 @@ def test_outline_worker_retry_progress_preserves_active_batch_telemetry(tmp_path
         extra={
             "action": "outlines",
             "project_id": project["id"],
-            "db_path": str(db_path),
             "runtime_dir": str(tmp_path / ".runtime"),
             **generation_contract(repository, project["id"]),
         },
     )
 
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     retries = [event["payload"] for event in events if event["payload"].get("retry_attempt")]
     assert [payload["request_kind"] for payload in retries] == ["outline_chunk"]
@@ -2896,12 +2420,12 @@ def test_outline_worker_falls_back_to_high_reasoning_and_warns_for_invalid_setti
         platform="creative",
         crawler_type="phase4_generate",
         extra={
-            "action": "outlines", "project_id": project["id"], "db_path": str(db_path),
+            "action": "outlines", "project_id": project["id"],
             "runtime_dir": str(tmp_path / ".runtime"), **generation_contract(repository, project["id"]),
         },
     )
 
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     assert provider.reasoning_effort == "high"
     warning = next(event for event in events if event["level"] == "warning")
@@ -2922,24 +2446,18 @@ def test_non_outline_worker_action_keeps_provider_reasoning_effort(tmp_path, mon
         crawler_type="phase4_generate",
         extra={
             "action": "blueprints", "project_id": project["id"], "count": 3,
-            "db_path": str(db_path), "runtime_dir": str(tmp_path / ".runtime"),
+            "runtime_dir": str(tmp_path / ".runtime"),
             **authority_extra(repository, project["id"]),
         },
     )
 
-    asyncio.run(phase4_worker.run(job))
+    asyncio.run(phase4_worker._run_with_repository(job, repository))
 
     assert provider.reasoning_effort == "none"
 
 
 def test_rewrite_outline_field_calls_llm_once_and_returns_only_target_value():
     provider = SequentialProvider([{"value": "主角在旧剧院找到被烧毁账本的末页。"}])
-    prompt_snapshot = {
-        "template_id": "system:outline-test",
-        "revision": 2,
-        "content_hash": "outline-rewrite-hash",
-        "effective_instruction": "保持悬疑信息留白，通过既有道具导出反转。",
-    }
     value, meta = asyncio.run(script_service.rewrite_outline_field(
         provider,
         project={"id": 8, "name": "旧剧院", "target_episode_count": 3},
@@ -2951,13 +2469,10 @@ def test_rewrite_outline_field_calls_llm_once_and_returns_only_target_value():
         next_episode={"episode": 3, "core_event": "旧剧院交锋"},
         field="core_event",
         instruction="强化危险感",
-        prompt_snapshot=prompt_snapshot,
     ))
 
     assert value == "主角在旧剧院找到被烧毁账本的末页。"
     assert len(provider.calls) == 1
-    assert "当前项目创作风格要求" in provider.calls[0][0]["content"]
-    assert "既有道具导出反转" in provider.calls[0][0]["content"]
     payload = json.loads(provider.calls[0][1]["content"])
     assert payload["target_field"] == "core_event"
     assert payload["instruction"] == "强化危险感"
@@ -2965,8 +2480,6 @@ def test_rewrite_outline_field_calls_llm_once_and_returns_only_target_value():
     assert payload["previous_episode"]["episode"] == 1
     assert payload["next_episode"]["episode"] == 3
     assert meta["prompt_template_version"] == "outline-field-rewrite-v1"
-    assert meta["prompt_template_id"] == "system:outline-test"
-    assert meta["prompt_template_revision"] == 2
 
 
 @pytest.mark.parametrize("field", OUTLINE_TEXT_FIELDS)

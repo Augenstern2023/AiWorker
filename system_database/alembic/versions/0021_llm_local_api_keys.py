@@ -5,6 +5,7 @@
 # Repository: https://github.com/NanmiCoder/MediaCrawler
 # GitHub: https://github.com/NanmiCoder
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
+#
 
 """Add a local environment-variable reference for provider API keys."""
 

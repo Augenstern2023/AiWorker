@@ -16,6 +16,13 @@ from creative.prompt_store import PromptStore
 from creative.repository import CreativeRepository
 
 
+@pytest.fixture(autouse=True)
+def _use_postgres_creative(monkeypatch, postgres_creative):
+    monkeypatch.setitem(
+        globals(), "CreativeRepository", lambda *_args, **_kwargs: postgres_creative
+    )
+
+
 def _project(
     repository: CreativeRepository, *, name: str, actor: str, request_id: str
 ) -> dict:
@@ -75,7 +82,7 @@ def test_marketplace_moderates_frozen_personal_template_and_installs_copy(tmp_pa
         actor="manager-2",
         request_id="market-target",
     )
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     personal = store.create_template(
         title="我的节奏模板",
         description="发布前仍是私人模板",
@@ -209,7 +216,7 @@ def test_marketplace_requires_rights_and_uses_installed_one_user_rating(tmp_path
         actor="viewer-3",
         request_id="rating-other",
     )
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     personal = store.create_template(
         title="评分模板",
         description="",
@@ -334,7 +341,7 @@ def test_marketplace_rejects_non_original_without_verifiable_source(tmp_path):
         actor="author-1",
         request_id="license-source",
     )
-    store = PromptStore(repository.db_path)
+    store = PromptStore(repository)
     personal = store.create_template(
         title="授权改编模板",
         description="",

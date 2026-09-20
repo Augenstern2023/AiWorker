@@ -73,11 +73,11 @@ AiWorker 由两层组成：底层是 MediaCrawler 派生的**通用采集层**�
 │  main.py -> CrawlerFactory -> media_platform/{xhs,dy,ks,bili,wb,tieba,zhihu}/              │
 │  base/ base_crawler、store/、database/、proxy/、cache/、tools/（CDP/Playwright）             │
 └─────────────────────────────── 数据层 ────────────────────────────────────────────────────┘
-   PostgreSQL（system_database，Alembic 迁移）   SQLite（.runtime/creative/creative.db）    data/ 文件
+   PostgreSQL（系统数据 + 创作数据，system_database，Alembic 迁移）          data/ 文件
 ```
 
 - **系统数据**：账号、角色、权限、部门、任务、审批、审计等保存在 PostgreSQL（`system_database`），由 Alembic 迁移维护。
-- **创意数据**：选题、拆解、创作版本保存在 `.runtime/creative/creative.db`（SQLite）。
+- **创意数据**：选题、拆解、创作项目与版本同样保存在 PostgreSQL（`system_database` 的创作表），与系统数据共用一个数据库和一套 Alembic 迁移，不再使用 SQLite。历史文件 `.runtime/creative/creative.db` 只作为迁移源保留。
 - **采集数据**：爬取内容、剧目媒体、转写脚本、分析报告、导出文件保存在 `data/`。
 
 ## 环境要求
@@ -169,8 +169,8 @@ uv run main.py --platform xhs --lt qrcode --type creator
 | 路径 | 内容 |
 | --- | --- |
 | `data/` | 爬取数据、剧目媒体、转写脚本、分析报告和导出文件 |
-| `.runtime/` | 任务状态、创意数据库、日志和临时运行数据 |
-| `.runtime/creative/creative.db` | 选题、拆解、创作项目与版本的 SQLite 数据库 |
+| `.runtime/` | 任务状态、日志和临时运行数据 |
+| `.runtime/creative/creative.db` | 历史创作数据的 SQLite 迁移源（切换后不再写入） |
 | `backups/` | 生成配置的备份文件 |
 | `browser_data/` | CDP 浏览器用户数据 |
 | `docs/` | 产品、实施、导出和架构文档 |

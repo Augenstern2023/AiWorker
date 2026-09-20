@@ -20,13 +20,15 @@ JSON, regardless of how PostgreSQL represents them internally.
 from __future__ import annotations
 
 import copy
+import json
+import re
 import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import RowMapping, select
+from sqlalchemy import RowMapping, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
@@ -36,6 +38,116 @@ from system_database import SystemDatabase
 
 
 STORE_ID_KEY = "store_id"
+
+_IDENTITY_TABLES = {
+    "creative_blueprints",
+    "creative_characters",
+    "creative_episodes",
+    "creative_projects",
+    "creative_relationships",
+    "creative_seeds",
+}
+
+
+def _legacy_value(value: Any) -> Any:
+    """Expose PostgreSQL values through the old row-oriented service contract."""
+
+    if isinstance(value, datetime):
+        return epoch_seconds(value)
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return value
+
+
+class _LegacyResult:
+    """Minimal sqlite cursor-shaped wrapper used by the free-mode service.
+
+    Free mode predates the repository split and contains a sizeable set of
+    transaction-local SQL queries. Keeping those queries on the repository's
+    PostgreSQL transaction boundary avoids a second persistence path while the
+    service is decomposed into repository methods.
+    """
+
+    def __init__(self, result: Any, *, returns_identity: bool = False) -> None:
+        self.rowcount = int(result.rowcount or 0)
+        self.lastrowid: int | None = None
+        self._rows: list[dict[str, Any]] | None = None
+        self._index = 0
+        if result.returns_rows:
+            rows = [
+                {key: _legacy_value(value) for key, value in dict(row).items()}
+                for row in result.mappings().all()
+            ]
+            if returns_identity and rows:
+                self.lastrowid = int(rows[0]["id"])
+                rows = []
+            self._rows = rows
+
+    def fetchone(self) -> dict[str, Any] | None:
+        if not self._rows or self._index >= len(self._rows):
+            return None
+        row = self._rows[self._index]
+        self._index += 1
+        return row
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        if not self._rows:
+            return []
+        rows = self._rows[self._index :]
+        self._index = len(self._rows)
+        return rows
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+
+class _LegacyConnection:
+    """Translate qmark SQL onto one PostgreSQL SQLAlchemy transaction."""
+
+    def __init__(self, connection: Connection) -> None:
+        self._connection = connection
+
+    @staticmethod
+    def _statement(statement: str, values: tuple[Any, ...]) -> tuple[str, dict[str, Any]]:
+        stripped = statement.strip()
+        if stripped.upper() == "BEGIN IMMEDIATE":
+            return "", {}
+        # The only SQLite boolean literal left in the free-mode query set.
+        statement = re.sub(r"\bdeleted\s*=\s*0\b", "deleted = FALSE", statement)
+        parts = statement.split("?")
+        if len(parts) - 1 != len(values):
+            raise ValueError("creative query parameter mismatch")
+        bindings: dict[str, Any] = {}
+        translated = parts[0]
+        for index, part in enumerate(parts[1:]):
+            key = f"p{index}"
+            translated += f":{key}{part}"
+            value = values[index]
+            # Legacy services use epoch floats. PostgreSQL stores TIMESTAMPTZ.
+            if isinstance(value, float) and value > 1_000_000_000:
+                value = from_epoch_seconds(value)
+            bindings[key] = value
+        return translated, bindings
+
+    def execute(self, statement: str, parameters: Sequence[Any] = ()) -> _LegacyResult:
+        sql, bindings = self._statement(statement, tuple(parameters))
+        if not sql:
+            # SQLite's BEGIN IMMEDIATE serialized every writer before it read
+            # MAX(version) or a resource head. One transaction-scoped advisory
+            # lock preserves that guarantee for this compatibility query set.
+            return _LegacyResult(
+                self._connection.execute(
+                    text("SELECT pg_advisory_xact_lock(593245723510639777)")
+                )
+            )
+        match = re.match(r"\s*INSERT\s+INTO\s+([a-z_]+)", sql, re.IGNORECASE)
+        returns_identity = bool(match and match.group(1).lower() in _IDENTITY_TABLES)
+        if returns_identity and not re.search(r"\bRETURNING\b", sql, re.IGNORECASE):
+            sql = f"{sql.rstrip().rstrip(';')} RETURNING id"
+        return _LegacyResult(
+            self._connection.execute(text(sql), bindings),
+            returns_identity=returns_identity,
+        )
 
 
 def utc_now() -> datetime:
@@ -116,6 +228,27 @@ class CreativeRepositoryBase:
             return
         with self.database.transaction() as owned:
             yield owned
+
+    @contextmanager
+    def _connect(self) -> Iterator[_LegacyConnection]:
+        """Provide the legacy cursor shape over a PostgreSQL transaction only.
+
+        This private compatibility boundary exists for ``free_mode_service``;
+        it neither opens nor knows about a SQLite database.
+        """
+
+        with self.transaction_scope() as connection:
+            yield _LegacyConnection(connection)
+
+    @contextmanager
+    def read_snapshot_scope(self) -> Iterator[Connection]:
+        """Open one repeatable-read transaction for a multi-query snapshot."""
+
+        with self.database.engine.connect().execution_options(
+            isolation_level="REPEATABLE READ"
+        ) as connection:
+            with connection.begin():
+                yield connection
 
     # -- outbound conversions ----------------------------------------------
 

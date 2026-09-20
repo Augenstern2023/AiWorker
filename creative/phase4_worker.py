@@ -19,16 +19,26 @@ from typing import Any
 
 import config
 
-from analysis.llm import LLMOutputTruncatedError, create_llm_provider_from_config
+from analysis.llm import (
+    LLMOutputTruncatedError,
+    create_llm_provider_from_config,
+    get_llm_usage_snapshot,
+)
 from core.events import emit_event
 from core.job import CrawlJob
 from creative.imitation_service import complete_with_one_repair, generate_blueprints
-from creative.llm_observability import build_attempt_reporter, set_attempt_reporter
+from creative.llm_observability import (
+    build_attempt_reporter,
+    dump_terminal_error,
+    public_failure_summary,
+    set_attempt_reporter,
+)
 from creative.original_direction_service import (
     derive_original_direction,
     generate_original_directions,
 )
 from creative.outline_overview import normalize_series_overview
+from creative.postgres_repository import PostgresCreativeRepository
 from creative.prompt_templates import PROMPT_TEMPLATE_VERSION, series_overview_messages
 from creative.repository import (
     GENERATION_OPERATION_LEASE_SECONDS,
@@ -44,6 +54,7 @@ from creative.script_service import (
     generate_episode_script_chunk,
     generate_outline_bundle,
 )
+from system_database import SystemDatabase, SystemDatabaseSettings
 
 
 MAX_INLINE_SOURCE_SNAPSHOT_BYTES = 2 * 1024 * 1024
@@ -93,7 +104,9 @@ def emit(job: CrawlJob, event: str, message: str, level: str = "info", payload: 
 
 
 def _usage_payload(job: CrawlJob, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    return dict(payload or {})
+    return {**(payload or {}), "llm_usage": get_llm_usage_snapshot(
+        *getattr(job, "_llm_usage_providers", ())
+    )}
 
 
 def _resolve_outline_reasoning_effort(job: CrawlJob) -> str:
@@ -382,15 +395,13 @@ async def generate_series_overview(
     return overview, meta
 
 
-async def _run_once(job: CrawlJob) -> None:
+async def _run_once(job: CrawlJob, repository: CreativeRepository) -> None:
     extra = job.extra or {}
     action = str(extra.get("action") or "").strip()
     project_id = int(extra.get("project_id") or 0)
-    db_path = Path(str(extra.get("db_path") or ".runtime/creative/creative.db"))
     if action not in {"blueprints", "blueprint_variant", "characters", "outlines", "outline_overview", "beats", "script"} or project_id < 1:
         raise ValueError("Phase 4 任务缺少有效 action 或 project_id")
 
-    repository = CreativeRepository(db_path)
     if extra.get("workflow_mode") == "free":
         from creative.free_phase4_worker import run_free_generation
 
@@ -469,10 +480,11 @@ async def _run_once(job: CrawlJob) -> None:
                 job,
                 "job_finished",
                 "创作内容生成已完成，返回幂等结果",
-                payload=generation_reservation["result"],
+                payload=_usage_payload(job, generation_reservation["result"]),
             )
             return
     provider = _create_generation_provider(extra)
+    job._llm_usage_providers.append(provider)
     extra.update(
         _provider_generation_meta(
             provider, str(extra.get("llm_model_record_id") or "")
@@ -1121,6 +1133,18 @@ async def _run_once(job: CrawlJob) -> None:
 
 
 async def run(job: CrawlJob) -> None:
+    # Runtime-only references survive asyncio.run exceptions; CrawlJob.to_dict
+    # serializes declared dataclass fields only, never these providers.
+    job._llm_usage_providers = []
+    database = SystemDatabase(SystemDatabaseSettings.from_environment())
+    try:
+        await _run_with_repository(job, PostgresCreativeRepository(database))
+    finally:
+        database.dispose()
+
+
+async def _run_with_repository(job: CrawlJob, repository: CreativeRepository) -> None:
+    job._llm_usage_providers = []
     extra = job.extra or {}
     action = str(extra.get("action") or "").strip()
     reserved_generation = extra.get("workflow_mode") != "free" and (
@@ -1134,9 +1158,7 @@ async def run(job: CrawlJob) -> None:
     heartbeat_stop = threading.Event()
     heartbeat: threading.Thread | None = None
     if reserved_generation and operation_id and request_hash and project_id > 0:
-        heartbeat_repository = CreativeRepository(
-            Path(str(extra.get("db_path") or ".runtime/creative/creative.db"))
-        )
+        heartbeat_repository = repository
 
         def renew_lease() -> None:
             heartbeat_interval = GENERATION_OPERATION_LEASE_SECONDS / 3
@@ -1152,7 +1174,6 @@ async def run(job: CrawlJob) -> None:
 
         heartbeat = threading.Thread(target=renew_lease, daemon=True)
         heartbeat.start()
-    # 结构校验的每次尝试都写进任务日志与调试文件，失败时才能看到模型真实返回。
     previous_reporter = set_attempt_reporter(
         build_attempt_reporter(
             lambda message, level, payload: emit(job, "log", message, level, payload),
@@ -1161,19 +1182,11 @@ async def run(job: CrawlJob) -> None:
         )
     )
     try:
-        await _run_once(job)
+        await _run_once(job, repository)
     except Exception:
         if reserved_generation:
             if operation_id and request_hash and project_id > 0:
                 try:
-                    repository = CreativeRepository(
-                        Path(
-                            str(
-                                extra.get("db_path")
-                                or ".runtime/creative/creative.db"
-                            )
-                        )
-                    )
                     repository.fail_generation_operation(
                         operation_id=operation_id,
                         request_hash=request_hash,
@@ -1201,12 +1214,14 @@ def main() -> int:
     try:
         asyncio.run(run(job))
     except Exception as exc:
+        error_code, message = public_failure_summary(exc)
+        error_debug_path = dump_terminal_error(job.job_id, exc)
         emit(
             job,
             "job_failed",
-            str(exc),
+            message,
             "error",
-            _usage_payload(job),
+            _usage_payload(job, {"error_code": error_code, "error_debug_path": error_debug_path}),
         )
         return 1
     return 0

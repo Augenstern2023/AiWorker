@@ -81,6 +81,7 @@ def build_script_review_router(
     runtime_dir: str | Path = ".runtime",
 ) -> APIRouter:
     router = APIRouter(prefix="/api/script-reviews", tags=["script-reviews"])
+    prompt_service = ProjectPromptService(repository)
 
     def assert_permission(principal: Principal, permission: str) -> None:
         if not principal.is_system_admin and permission not in principal.permissions:
@@ -117,6 +118,10 @@ def build_script_review_router(
     def can_read_review(
         request: Request, principal: Principal, review: dict[str, Any]
     ) -> bool:
+        if not prompt_service.can_access_review_prompt(
+            review, principal.user_id
+        ):
+            return False
         project_id = review.get("project_id")
         if project_id is None:
             return principal.is_system_admin or review.get("created_by") == principal.user_id
@@ -185,7 +190,7 @@ def build_script_review_router(
     ) -> dict[str, Any]:
         source = dict(source)
         if source_type == "project":
-            prompt_snapshot = ProjectPromptService(repository).resolve_generation_snapshot(
+            prompt_snapshot = prompt_service.resolve_generation_snapshot(
                 project_id=int(source["project_id"]),
                 stage="review",
                 series=str(source["mode"]) != "single",
@@ -217,7 +222,6 @@ def build_script_review_router(
                 "review_id": review["id"],
                 "project_id": source.get("project_id"),
                 "created_by_user_id": principal.user_id,
-                "db_path": str(repository.db_path.resolve()),
                 "runtime_dir": str(Path(runtime_dir).resolve()),
                 "prompt_snapshot": source.get("prompt_snapshot"),
                 "prompt_template_id": str(
@@ -447,11 +451,16 @@ def register_script_review_routes(
     *,
     runtime_dir: str | Path = ".runtime",
     job_manager: Any,
+    repository: CreativeRepository | None = None,
 ) -> None:
+    if repository is None:
+        raise ValueError(
+            "register_script_review_routes requires an injected creative repository"
+        )
     root = Path(runtime_dir)
     app.include_router(
         build_script_review_router(
-            CreativeRepository(root / "creative" / "creative.db"),
+            repository,
             job_manager,
             runtime_dir=root,
         )

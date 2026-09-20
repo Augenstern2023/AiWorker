@@ -32,6 +32,18 @@ from workflow.api import build_workflow_router
 from workflow.repository import SYSTEM_ACTOR, WorkflowRepository
 
 
+
+@pytest.fixture(autouse=True)
+def _use_postgres_creative(monkeypatch, postgres_creative):
+    """Exercise runtime behavior against the isolated PostgreSQL store."""
+    monkeypatch.setitem(
+        globals(), "CreativeRepository", lambda *_args, **_kwargs: postgres_creative
+    )
+    monkeypatch.setenv(
+        "AIWORKER_TEST_SYSTEM_DATABASE_URL", postgres_creative.database.settings.url
+    )
+
+
 def _postgres_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[SystemDatabase, IdentityRepository]:
@@ -105,10 +117,7 @@ def test_active_project_members_can_collaborate_on_any_stage_task(
     )
 
     def cleanup() -> None:
-        workflow.delete_project_data(project_id)
-        for user in users:
-            if identity.get_user(user["id"]) is not None:
-                identity.soft_delete_user(user["id"])
+        # The isolated schema fixture removes all test records.
         database.dispose()
 
     request.addfinalizer(cleanup)
@@ -254,11 +263,7 @@ def test_project_member_without_stage_permissions_can_generate_edit_and_complete
     project_id = str(project["id"])
 
     def cleanup() -> None:
-        workflow.delete_project_data(project_id)
-        for user in users:
-            if identity.get_user(user["id"]) is not None:
-                identity.soft_delete_user(user["id"])
-        identity.soft_delete_role(collaborator_role["id"])
+        # The isolated schema fixture removes all test records.
         database.dispose()
 
     request.addfinalizer(cleanup)
@@ -294,6 +299,7 @@ def test_project_member_without_stage_permissions_can_generate_edit_and_complete
             root=tmp_path,
             runtime_dir=runtime,
             job_manager=manager,
+            repository=creative,
             workflow_repository=workflow,
         )
     )

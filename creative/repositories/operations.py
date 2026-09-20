@@ -112,6 +112,7 @@ Deliberate divergences from the legacy implementation
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Callable, Sequence
 from datetime import datetime
@@ -208,6 +209,15 @@ _WRITER_PROJECT_DELETION_TABLES = (
     "script_optimization_drafts",
     "creative_deliveries",
     "creative_production_exports",
+    "creative_video_parameter_recommendations",
+    "creative_project_prompt_bindings",
+    "creative_project_prompt_settings",
+    "creative_prompt_templates",
+    "creative_prompt_governance_events",
+    "creative_prompt_iteration_drafts",
+    "creative_prompt_market_installations",
+    "creative_prompt_market_ratings",
+    "creative_prompt_ab_experiments",
 )
 _WRITER_PROJECT_EXTERNAL_TABLES = (
     "creative_stage_exports",
@@ -860,7 +870,9 @@ class OperationsRepository:
             connection.execute(
                 update(creative_operation_results)
                 .where(creative_operation_results.c.operation_id == operation_id)
-                .values(resource_ref_json=result)
+                # Workflow results contain datetime values. Preserve the legacy
+                # snapshot encoding before passing the object to JSONB.
+                .values(resource_ref_json=json.loads(json.dumps(result, default=str)))
             )
         return dict(result)
 
@@ -1512,6 +1524,47 @@ class OperationsRepository:
                 self.row_dict(item)
                 for item in connection.execute(statement).mappings().all()
             ]
+
+        # Project-owned prompt templates and A/B experiments have dependent
+        # rows whose tables do not carry ``project_id`` themselves. Those rows
+        # are nevertheless removed by the explicit template cleanup or by
+        # ``ON DELETE CASCADE`` when the project is deleted, so they belong in
+        # the optimistic deletion fingerprint as well.
+        owned_template_ids = [
+            str(item["id"])
+            for item in tables.get("creative_prompt_templates", [])
+        ]
+        revision_table = _creative_table("creative_prompt_template_revisions")
+        revision_statement = select(revision_table).where(
+            revision_table.c.template_id.in_(owned_template_ids)
+        )
+        if owned_template_ids:
+            revision_statement = revision_statement.order_by(
+                *_rollback_order(revision_table)
+            )
+            revision_rows = connection.execute(revision_statement).mappings().all()
+        else:
+            revision_rows = []
+        tables["creative_prompt_template_revisions"] = [
+            self.row_dict(item) for item in revision_rows
+        ]
+
+        experiment_ids = [
+            str(item["id"])
+            for item in tables.get("creative_prompt_ab_experiments", [])
+        ]
+        arm_table = _creative_table("creative_prompt_ab_arms")
+        arm_statement = select(arm_table).where(
+            arm_table.c.experiment_id.in_(experiment_ids)
+        )
+        if experiment_ids:
+            arm_statement = arm_statement.order_by(*_rollback_order(arm_table))
+            arm_rows = connection.execute(arm_statement).mappings().all()
+        else:
+            arm_rows = []
+        tables["creative_prompt_ab_arms"] = [
+            self.row_dict(item) for item in arm_rows
+        ]
         payload = {"project_id": int(project_id), "tables": tables}
         return {**payload, "fingerprint": canonical_request_hash(payload)}
 

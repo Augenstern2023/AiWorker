@@ -29,6 +29,7 @@ from openpyxl import Workbook
 from pydantic import BaseModel, Field
 
 import config
+from analysis.today_rank_service import TodayRankService
 
 from creative.hit_breakdown import breakdown_field_guide, personalize_breakdown_field_guide
 from creative.application_service import (
@@ -48,6 +49,7 @@ from creative.outline_overview import SERIES_OVERVIEW_FIELD_LABELS, read_series_
 from creative.prompt_marketplace import PromptMarketplaceService
 from creative.prompt_observability import PromptObservabilityService
 from creative.project_prompt_service import ProjectPromptService
+from creative.prompt_response import prompt_projection_route
 from creative.repository import CreativeRepository, TopicDecisionConflict, canonical_request_hash
 from creative.script_service import normalize_script_content, rewrite_outline_field, validate_script
 from creative.selection_stage_service import SelectionStageService
@@ -1195,15 +1197,15 @@ def build_creative_router(
     application_service: CreativeApplicationService | None = None,
     llm_provider_factory: Callable[[], Any] | None = None,
     llm_model_resolver: Callable[[str], dict[str, Any]] | None = None,
+    rank_service: TodayRankService | None = None,
 ) -> APIRouter:
     router = APIRouter(
         prefix="/api/creative",
         tags=["creative"],
         dependencies=[Depends(creative_api_authorization)],
     )
-    repository = repository or CreativeRepository(
-        Path(runtime_dir) / "creative" / "creative.db"
-    )
+    if repository is None:
+        raise ValueError("build_creative_router requires an injected creative repository")
 
     if workflow_repository is None:
         workflow_repository = WorkflowRepository(
@@ -1227,7 +1229,7 @@ def build_creative_router(
         else TransitionService(workflow_repository, creative_adapter=workflow_adapter)
     )
     workflow_transitions.migrate_pending_creative_approvals()
-    service = TopicService(str(root))
+    service = TopicService(str(root), rank_service=rank_service)
     workspace_root = Path(root).resolve()
     lifecycle_service = TopicLifecycleService(repository, workspace_root, job_manager)
     market_reference_service = MarketReferenceService(repository)
@@ -1741,6 +1743,7 @@ def build_creative_router(
         *,
         managed_preview: bool = False,
     ) -> dict[str, Any]:
+        project = project_prompt_service.public_projection(project, principal.user_id, project["id"])
         if principal.is_system_admin:
             return project
         has_active_membership = any(
@@ -1993,6 +1996,17 @@ def build_creative_router(
             return
         raise HTTPException(403, "只有项目负责人可以管理项目模板")
 
+    def assert_prompt_project_read_access(
+        request: Request, project_id: int, principal: Principal
+    ) -> None:
+        if can_manage_prompt_project(request, project_id, principal):
+            return
+        if workflow_repository.is_active_project_member(
+            workflow_project_id(project_id), principal
+        ):
+            return
+        raise HTTPException(403, "只能访问当前参与或管理项目的模板")
+
     def assert_prompt_stage_manager(
         request: Request, project_id: int, stage: str, principal: Principal
     ) -> None:
@@ -2026,6 +2040,8 @@ def build_creative_router(
             return
         raise HTTPException(403, "只有项目负责人或当前阶段负责人可以修改模板")
 
+    router.route_class = prompt_projection_route(project_prompt_service, optional_principal)
+
     @router.get("/projects/{project_id}/prompt-marketplace")
     async def get_project_prompt_marketplace(
         project_id: int,
@@ -2037,7 +2053,7 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
+        assert_prompt_project_read_access(request, project_id, principal)
         try:
             result = prompt_marketplace_service.marketplace(
                 project_id=project_id,
@@ -2066,7 +2082,7 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
+        assert_prompt_project_read_access(request, project_id, principal)
         try:
             return prompt_marketplace_service.submit(
                 project_id=project_id,
@@ -2101,7 +2117,7 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
+        assert_prompt_project_read_access(request, project_id, principal)
         try:
             return prompt_marketplace_service.moderate(
                 submission_id=submission_id,
@@ -2128,7 +2144,7 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
+        assert_prompt_project_read_access(request, project_id, principal)
         assert_prompt_project_manager(request, project_id, principal)
         try:
             return prompt_marketplace_service.install(
@@ -2154,7 +2170,7 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
+        assert_prompt_project_read_access(request, project_id, principal)
         try:
             return prompt_marketplace_service.rate(
                 project_id=project_id,
@@ -2176,7 +2192,7 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
+        assert_prompt_project_read_access(request, project_id, principal)
         return project_prompt_service.catalog(project_id, principal.user_id)
 
     @router.get("/projects/{project_id}/prompt-library/recommendations")
@@ -2187,7 +2203,7 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
+        assert_prompt_project_read_access(request, project_id, principal)
         try:
             return project_prompt_service.recommendations(
                 project_id,
@@ -2207,7 +2223,7 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
+        assert_prompt_project_read_access(request, project_id, principal)
         if prompt_observability_service is None:
             raise HTTPException(503, "模板可观测性任务服务不可用")
         try:
@@ -2229,7 +2245,7 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
+        assert_prompt_project_read_access(request, project_id, principal)
         if llm_provider_factory is None:
             raise HTTPException(503, "LLM provider is not configured")
         try:
@@ -2279,7 +2295,7 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
+        assert_prompt_project_read_access(request, project_id, principal)
         if payload.owner_scope == "project":
             assert_prompt_project_manager(request, project_id, principal)
         try:
@@ -2303,7 +2319,7 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
+        assert_prompt_project_read_access(request, project_id, principal)
         template = project_prompt_service.store.get_template(template_id)
         if template and template.get("owner_scope") == "project":
             assert_prompt_project_manager(request, project_id, principal)
@@ -2327,7 +2343,7 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
+        assert_prompt_project_read_access(request, project_id, principal)
         result = project_prompt_service.governance(project_id)
         result["can_manage"] = can_manage_prompt_project(
             request, project_id, principal
@@ -2345,7 +2361,7 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
+        assert_prompt_project_read_access(request, project_id, principal)
         assert_prompt_project_manager(request, project_id, principal)
         try:
             return project_prompt_service.govern_template(
@@ -2369,7 +2385,7 @@ def build_creative_router(
         principal: Principal = Depends(current_principal),
     ):
         project_or_404(project_id)
-        assert_project_read_access(request, project_id, principal)
+        assert_prompt_project_read_access(request, project_id, principal)
         try:
             return project_prompt_service.module_state(
                 project_id,
@@ -2377,6 +2393,8 @@ def build_creative_router(
                 episode_number=episode_number,
                 actor_user_id=principal.user_id,
             )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -3195,7 +3213,6 @@ def build_creative_router(
             "get_sub_comments": False,
             "extra": {
                 "topic_id": payload.topic_id,
-                "db_path": str(repository.db_path.resolve()),
                 "runtime_dir": str(Path(runtime_dir).resolve()),
                 "workspace_root": str(workspace_root),
                 "transcript_coverage": coverage,
@@ -3800,6 +3817,26 @@ def build_creative_router(
         assert_project_read_access(request, project_id, principal)
         project = project_or_404(project_id)
         assert_mode_member(project, principal)
+        try:
+            prior = free_mode_service.completed_migration(
+                project_id, payload.operation_id
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if prior is not None:
+            return prior
+
+        def rollback_migration_members(compensation: dict[str, Any]) -> None:
+            workflow_repository.rollback_copied_project_members(
+                compensation["target_project_id"], compensation["membership_ids"]
+            )
+
+        try:
+            free_mode_service.recover_migration_compensation(
+                project_id, payload.operation_id, rollback_migration_members
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
         active_jobs = active_project_job_labels(
             project_id,
             ignored_crawler_types=_MODE_MIGRATION_NON_BLOCKING_JOB_TYPES,
@@ -3809,6 +3846,19 @@ def build_creative_router(
         migration_preview = free_mode_service.migration_preview(project_id)
         if migration_preview["blockers"]:
             raise HTTPException(409, "；".join(migration_preview["blockers"]))
+
+        def copy_migration_members(target_project_id: int) -> dict[str, Any]:
+            # The target is new and uncommitted; it cannot have a legacy identity.
+            target_identity = repository.workflow_project_id(target_project_id)
+            members = workflow_repository.copy_active_project_members(
+                workflow_project_id(project_id), target_identity, principal
+            )
+            membership_ids = [str(member["id"]) for member in members]
+            return {
+                "target_project_id": target_identity,
+                "membership_ids": membership_ids,
+            }
+
         try:
             migrated = free_mode_service.migrate_to_free(
                 project_id=project_id,
@@ -3816,6 +3866,8 @@ def build_creative_router(
                 operation_id=payload.operation_id,
                 actor_user_id=principal.user_id,
                 seed_text=payload.seed_text,
+                copy_members=copy_migration_members,
+                rollback_members=rollback_migration_members,
             )
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -3823,11 +3875,6 @@ def build_creative_router(
         target_project_id = target_project.get("id")
         if target_project_id is None:
             raise HTTPException(503, "自由创作副本成员同步失败，请重试")
-        workflow_repository.copy_active_project_members(
-            workflow_project_id(project_id),
-            workflow_project_id(int(target_project_id)),
-            principal,
-        )
         audit_service = getattr(request.app.state, "audit_service", None)
         if isinstance(audit_service, AuditService):
             audit_service.record(
@@ -4225,7 +4272,6 @@ def build_creative_router(
                     "count": payload.count if stage == "brief" else 1,
                     "llm_model_record_id": llm_model_record_id,
                     **prompt_job_identity(prompt_snapshot),
-                    "db_path": str(repository.db_path.resolve()),
                     "runtime_dir": str(Path(runtime_dir).resolve()),
                 },
             },
@@ -4338,7 +4384,6 @@ def build_creative_router(
                             "prompt_snapshot"
                         )
                     ),
-                    "db_path": str(repository.db_path.resolve()),
                     "runtime_dir": str(Path(runtime_dir).resolve()),
                 },
             },
@@ -4538,6 +4583,7 @@ def build_creative_router(
         versions, selected_resource_id, snapshot = generated_stage_snapshot(
             project, stage, resource_id
         )
+        snapshot = project_prompt_service.public_projection(snapshot, principal.user_id, project_id)
         return {
             "project": {"id": project["id"], "name": project["name"]},
             "stage": stage,
@@ -4558,6 +4604,7 @@ def build_creative_router(
         assert_project_owner_preview_access(request, project_id, principal)
         project = project_or_404(project_id)
         _, _, snapshot = generated_stage_snapshot(project, stage, resource_id)
+        snapshot = project_prompt_service.public_projection(snapshot, principal.user_id, project_id)
         body, media_type = serialize_generated_stage(project, stage, snapshot, format)
         if stage == "script":
             filename = script_download_filename(
@@ -4734,7 +4781,6 @@ def build_creative_router(
                 "project_id": project_id,
                 "source_fingerprint": source["fingerprint"],
                 "created_by_user_id": principal.user_id,
-                "db_path": str(repository.db_path.resolve()),
                 "runtime_dir": str(Path(runtime_dir).resolve()),
             },
         }
@@ -6000,10 +6046,10 @@ def register_creative_routes(
     application_service: CreativeApplicationService | None = None,
     llm_provider_factory: Callable[[], Any] | None = None,
     llm_model_resolver: Callable[[str], dict[str, Any]] | None = None,
+    rank_service: TodayRankService | None = None,
 ) -> None:
-    repository = repository or CreativeRepository(
-        Path(runtime_dir) / "creative" / "creative.db"
-    )
+    if repository is None:
+        raise ValueError("register_creative_routes requires an injected creative repository")
     if workflow_repository is None:
         workflow_repository = WorkflowRepository(
             IdentityRepository(
@@ -6025,5 +6071,6 @@ def register_creative_routes(
             application_service=application_service,
             llm_provider_factory=llm_provider_factory,
             llm_model_resolver=llm_model_resolver,
+            rank_service=rank_service,
         )
     )

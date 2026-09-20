@@ -708,11 +708,49 @@ creative_production_exports = Table(
     Column("workflow_mode", Text, nullable=False, server_default=text("'sequential'")),
     Column("version_strategy", Text, nullable=False, server_default=text("'current'")),
     _jsonb("version_manifest_json", default="{}"),
+    Column("artifact_format", Text, nullable=False, server_default=text("'json'")),
+    Column(
+        "media_type",
+        Text,
+        nullable=False,
+        server_default=text("'application/json'"),
+    ),
     UniqueConstraint(
         "project_id",
         "fingerprint",
         "contract_version",
         name="uq_creative_production_exports",
+    ),
+)
+
+creative_video_parameter_recommendations = Table(
+    "creative_video_parameter_recommendations",
+    CREATIVE_METADATA,
+    Column(
+        "project_id",
+        BigInteger,
+        ForeignKey(
+            "creative_projects.id",
+            name="fk_creative_video_parameter_recommendations_project_id",
+            ondelete="CASCADE",
+        ),
+        primary_key=True,
+    ),
+    Column("status", Text, nullable=False, server_default=text("'idle'")),
+    Column("job_id", Text, nullable=False, server_default=text("''")),
+    Column("source_fingerprint", Text, nullable=False, server_default=text("''")),
+    _jsonb("source_episode_numbers_json", default="[]"),
+    Column("source_complete", Boolean, nullable=False, server_default=text("false")),
+    _jsonb("recommendation_json", default="{}"),
+    _jsonb("confirmed_json", default="{}"),
+    Column("analysis_mode", Text, nullable=False, server_default=text("''")),
+    Column("analysis_error", Text, nullable=False, server_default=text("''")),
+    Column("created_by", Text, nullable=False, server_default=text("''")),
+    Column("generated_at", DateTime(timezone=True)),
+    *_created_updated(),
+    CheckConstraint(
+        "status IN ('idle', 'queued', 'running', 'ready', 'failed')",
+        name="ck_creative_video_parameter_recommendations_status",
     ),
 )
 
@@ -1366,8 +1404,7 @@ Index(
 # exported table inventories
 # ---------------------------------------------------------------------------
 
-#: The 36 tables that exist in the legacy SQLite store plus production_status,
-#: which the legacy store creates lazily and therefore may not contain yet.
+#: Creative business tables in the shared PostgreSQL schema.
 CREATIVE_BUSINESS_TABLES: frozenset[str] = frozenset(
     {
         "creative_store_metadata",
@@ -1393,6 +1430,7 @@ CREATIVE_BUSINESS_TABLES: frozenset[str] = frozenset(
         "script_optimization_drafts",
         "creative_deliveries",
         "creative_production_exports",
+        "creative_video_parameter_recommendations",
         "production_status",
         "creative_prompt_templates",
         "creative_prompt_template_revisions",

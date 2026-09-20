@@ -18,10 +18,12 @@ from typing import Any
 
 import config
 
-from analysis.llm import create_llm_provider_from_config
+from analysis.llm import create_llm_provider_from_config, get_llm_usage_snapshot
 from core.events import emit_event
 from core.job import CrawlJob
-from creative.repository import CreativeRepository
+from creative.llm_observability import dump_terminal_error, public_failure_summary
+from creative.postgres_repository import PostgresCreativeRepository
+from system_database import SystemDatabase, SystemDatabaseSettings
 
 from .service import review_source
 
@@ -56,17 +58,26 @@ def emit(
 
 
 def _usage_payload(job: CrawlJob, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    return dict(payload or {})
+    return {**(payload or {}), "llm_usage": get_llm_usage_snapshot(
+        *getattr(job, "_llm_usage_providers", ())
+    )}
 
 
 async def run(job: CrawlJob) -> None:
+    job._llm_usage_providers = []
+    database = SystemDatabase(SystemDatabaseSettings.from_environment())
+    try:
+        await _run_with_repository(job, PostgresCreativeRepository(database))
+    finally:
+        database.dispose()
+
+
+async def _run_with_repository(job: CrawlJob, repository: Any) -> None:
+    job._llm_usage_providers = []
     extra = job.extra or {}
     review_id = int(extra.get("review_id") or 0)
     if review_id < 1:
         raise ValueError("剧本审核任务缺少 review_id")
-    repository = CreativeRepository(
-        Path(str(extra.get("db_path") or ".runtime/creative/creative.db"))
-    )
     review = repository.get_script_review(review_id)
     if not review:
         raise ValueError("审核记录不存在")
@@ -131,9 +142,11 @@ async def run(job: CrawlJob) -> None:
             ):
                 raise ValueError("审核提示词快照与任务范围不匹配")
         provider = create_provider(profile="unit", retry_callback=report_retry)
+        job._llm_usage_providers.append(provider)
         summary_provider = create_provider(
             profile="summary", retry_callback=report_retry
         )
+        job._llm_usage_providers.append(summary_provider)
         report = await review_source(
             provider,
             review["source_payload"],
@@ -192,7 +205,11 @@ def main() -> int:
     try:
         asyncio.run(run(job))
     except Exception as exc:
-        emit(job, "job_failed", str(exc), "error", _usage_payload(job))
+        error_code, message = public_failure_summary(exc)
+        error_debug_path = dump_terminal_error(job.job_id, exc)
+        emit(job, "job_failed", message, "error", _usage_payload(job, {
+            "error_code": error_code, "error_debug_path": error_debug_path,
+        }))
         return 1
     return 0
 

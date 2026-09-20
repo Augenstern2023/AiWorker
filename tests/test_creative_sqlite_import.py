@@ -39,6 +39,7 @@ from creative.sqlite_import import (
     coerce_boolean,
     coerce_timestamp,
     import_sqlite_creative,
+    inspect_cross_domain_references,
     inspect_sqlite_creative,
     inspect_target_creative,
     normalize_for_target,
@@ -1002,13 +1003,13 @@ def _cli_module():
     return module
 
 
-def _cli_app():
+def _cli_app(module=None):
     """Wrap the ``typer.run`` style entry point in an app the runner can drive."""
 
     import typer
 
     app = typer.Typer(add_completion=False)
-    app.command()(_cli_module().main)
+    app.command()((module or _cli_module()).main)
     return app
 
 
@@ -1094,7 +1095,7 @@ def test_cli_refuses_a_test_named_database_without_the_flag(
     )
 
     result = _cli_runner().invoke(
-        _cli_app(), ["--source", str(legacy_creative_db), "--apply"]
+        _cli_app(module), ["--source", str(legacy_creative_db), "--apply"]
     )
     assert result.exit_code != 0
     assert "test-named database" in result.output
@@ -1114,6 +1115,87 @@ def test_test_database_name_protection_is_narrow():
     # A real target is never refused: a formal cutover is exactly this case.
     assert module._looks_like_a_test_database(_Probe("aiworker_system")) is False
     assert module._looks_like_a_test_database(_Probe("creative_prod")) is False
+
+
+# ---------------------------------------------------------------------------
+# cross-domain references
+# ---------------------------------------------------------------------------
+
+
+def test_cross_domain_references_target_the_real_parent_columns():
+    """Regression: users.user_id and workflow_tasks.task_id do not exist.
+
+    Because the resolver treats a missing parent column as "nothing resolves",
+    a wrong column silently turns every reference into an illegal orphan and
+    blocks the import with a misleading error instead of failing loudly.
+    """
+
+    from creative.sqlite_import import CROSS_DOMAIN_REFERENCE_COLUMNS
+
+    parents = {parent_column for _, _, parent_column in CROSS_DOMAIN_REFERENCE_COLUMNS}
+    assert "user_id" not in parents
+    assert "task_id" not in parents
+    assert ("created_by", "users", "id") in CROSS_DOMAIN_REFERENCE_COLUMNS
+    assert ("workflow_task_id", "workflow_tasks", "id") in CROSS_DOMAIN_REFERENCE_COLUMNS
+
+
+def test_legal_historical_gaps_are_declared_by_value_not_by_column():
+    """Declaring a column would also excuse a genuinely broken future reference."""
+
+    from creative.sqlite_import import LEGAL_HISTORICAL_GAP_REFERENCES
+
+    assert LEGAL_HISTORICAL_GAP_REFERENCES, "the audited gaps must be declared"
+    for entry in LEGAL_HISTORICAL_GAP_REFERENCES:
+        assert len(entry) == 3, f"{entry!r} must be a (table, column, value) triple"
+        table, column, value = entry
+        assert table and column and value
+
+    # The two non-user sentinels are the clearest audited cases.
+    assert (
+        "creative_projects",
+        "created_by",
+        "local",
+    ) in LEGAL_HISTORICAL_GAP_REFERENCES
+    assert (
+        "creative_prompt_template_revisions",
+        "created_by",
+        "system",
+    ) in LEGAL_HISTORICAL_GAP_REFERENCES
+
+
+def test_audited_legal_gaps_match_the_documented_count():
+    """The declaration must stay in step with the audit document."""
+
+    from creative.sqlite_import import LEGAL_HISTORICAL_GAP_REFERENCES
+
+    document = (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "operations"
+        / "creative-cross-domain-reference-audit.md"
+    )
+    assert document.is_file(), "the cross-domain audit document is missing"
+
+    text = document.read_text(encoding="utf-8")
+    for table, column, value in LEGAL_HISTORICAL_GAP_REFERENCES:
+        assert value in text, f"{table}.{column} gap {value} is not documented"
+    assert len(LEGAL_HISTORICAL_GAP_REFERENCES) == 8
+
+
+def test_cross_domain_resolution_ignores_a_missing_parent_table(
+    legacy_creative_db: Path, isolated_system_database: SystemDatabase
+):
+    """An absent parent domain must be reported, never crash the import."""
+
+    report = inspect_cross_domain_references(
+        isolated_system_database, source=legacy_creative_db
+    )
+    # workflow_submissions does not exist in the system schema.
+    assert all(
+        entry.parent_table != "workflow_submissions" or entry.unresolved
+        for entry in report
+    )
+    assert isinstance(report, tuple)
 
 
 # ---------------------------------------------------------------------------

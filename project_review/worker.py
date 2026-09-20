@@ -19,10 +19,11 @@ from typing import Any, Callable
 
 import config
 
-from analysis.llm import create_llm_provider_from_config
+from analysis.llm import create_llm_provider_from_config, get_llm_usage_snapshot
 from core.events import emit_event
 from core.job import CrawlJob
-from creative.repository import CreativeRepository
+from creative.postgres_repository import PostgresCreativeRepository
+from system_database import SystemDatabase, SystemDatabaseSettings
 
 from .service import review_project_source
 
@@ -57,7 +58,9 @@ def emit(
 
 
 def _usage_payload(job: CrawlJob, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    return dict(payload or {})
+    return {**(payload or {}), "llm_usage": get_llm_usage_snapshot(
+        *getattr(job, "_llm_usage_providers", ())
+    )}
 
 
 class _ObservedProvider:
@@ -143,13 +146,20 @@ class _ObservedProvider:
 
 
 async def run(job: CrawlJob) -> None:
+    job._llm_usage_providers = []
+    database = SystemDatabase(SystemDatabaseSettings.from_environment())
+    try:
+        await _run_with_repository(job, PostgresCreativeRepository(database))
+    finally:
+        database.dispose()
+
+
+async def _run_with_repository(job: CrawlJob, repository: Any) -> None:
+    job._llm_usage_providers = []
     extra = job.extra or {}
     review_id = _as_int(extra.get("review_id"))
     if review_id < 1:
         raise ValueError("完整项目审核任务缺少 review_id")
-    repository = CreativeRepository(
-        Path(str(extra.get("db_path") or ".runtime/creative/creative.db"))
-    )
     review = repository.get_script_review(review_id)
     if not review:
         raise ValueError("审核记录不存在")
@@ -193,6 +203,7 @@ async def run(job: CrawlJob) -> None:
             )
 
         provider = create_provider(retry_callback=observed.retry_callback)
+        job._llm_usage_providers.append(provider)
         observed.bind(provider)
         report = await review_project_source(
             observed,

@@ -26,11 +26,23 @@ from core.job import CrawlJob
 from creative.api import creative_api_principal, register_creative_routes
 from creative.free_mode_service import FreeCreativeModeService
 from creative.lifecycle_service import content_fingerprint, current_beats_content
+from creative.legacy_sqlite_repository import (
+    CreativeRepository as LegacyCreativeRepository,
+)
 from creative.repository import CreativeRepository
 from creative.topic_service import TopicService
 from identity.dependencies import current_principal
 from identity.schema import Principal
 from runtime.job_state import JobState
+
+
+@pytest.fixture(autouse=True)
+def _use_postgres_creative(monkeypatch, postgres_creative):
+    """Exercise runtime creative behavior on the isolated PostgreSQL store."""
+
+    monkeypatch.setitem(
+        globals(), "CreativeRepository", lambda *_args, **_kwargs: postgres_creative
+    )
 
 
 class LifecycleJobManager:
@@ -48,9 +60,19 @@ class LifecycleJobManager:
         return [state.to_dict() for state in self.states]
 
 
-def build_client(tmp_path: Path) -> tuple[TestClient, CreativeRepository, LifecycleJobManager]:
+def build_client(
+    tmp_path: Path,
+    repository: CreativeRepository | None = None,
+) -> tuple[TestClient, CreativeRepository, LifecycleJobManager]:
+    """Build a creative API client over ``repository``.
+
+    Runtime tests use the isolated PostgreSQL repository supplied by the fixture.
+    """
+
     runtime_dir = tmp_path / ".runtime"
     manager = LifecycleJobManager()
+    if repository is None:
+        repository = CreativeRepository(runtime_dir / "creative" / "creative.db")
     app = FastAPI()
     principal = Principal(
         user_id="lifecycle-admin",
@@ -73,8 +95,9 @@ def build_client(tmp_path: Path) -> tuple[TestClient, CreativeRepository, Lifecy
             root=tmp_path,
             runtime_dir=runtime_dir,
             job_manager=manager,
+            repository=repository,
         )
-    return TestClient(app), CreativeRepository(runtime_dir / "creative" / "creative.db"), manager
+    return TestClient(app), repository, manager
 
 
 def test_generation_retry_route_uses_creative_application_service(tmp_path: Path):
@@ -328,9 +351,12 @@ def test_scene_script_download_api_returns_delivery_txt(tmp_path: Path):
     ],
 )
 def test_free_resources_keep_the_common_generated_content_download(
-    tmp_path: Path, stage: str, format: str
+    tmp_path: Path, postgres_creative, stage: str, format: str
 ):
-    client, repository, _ = build_client(tmp_path)
+    # Free-mode resources live behind the PostgreSQL repository's transaction and
+    # resource-head boundary, so both the seeding service and the router read the
+    # isolated PostgreSQL schema rather than the frozen SQLite store.
+    client, repository, _ = build_client(tmp_path, repository=postgres_creative)
     project = repository.create_original_project(
         seed_text="一个能看见记忆裂缝的女孩",
         name="记忆裂缝",
@@ -393,8 +419,10 @@ def test_free_resources_keep_the_common_generated_content_download(
     assert "attachment" in download.headers["content-disposition"]
 
 
-def test_free_workspace_downloads_selected_and_all_episode_heads(tmp_path: Path):
-    client, repository, _ = build_client(tmp_path)
+def test_free_workspace_downloads_selected_and_all_episode_heads(
+    tmp_path: Path, postgres_creative
+):
+    client, repository, _ = build_client(tmp_path, repository=postgres_creative)
     project = repository.create_original_project(
         seed_text="女孩能读取遗失的梦",
         name="梦境档案",
@@ -876,7 +904,7 @@ def test_repository_backfills_legacy_hongguo_rank_source(tmp_path: Path):
             )
         """)
 
-    repository = CreativeRepository(db_path)
+    repository = LegacyCreativeRepository(db_path)
 
     topics = repository.list_topics(platform="hg", rank_source="全部")
     assert [item["title"] for item in topics] == ["旧版红果候选"]
@@ -983,10 +1011,10 @@ def test_adopting_rank_entry_promotes_the_matching_pending_topic(tmp_path: Path)
     )["outcome"] == "adopted"
     with repository._connect() as connection:
         snapshot_count = connection.execute(
-            "SELECT COUNT(*) FROM selection_stage_snapshots "
+            "SELECT COUNT(*) AS count FROM selection_stage_snapshots "
             "WHERE topic_id = ? AND stage = 'topic_decision' AND outcome = 'adopted'",
             (topic["id"],),
-        ).fetchone()[0]
+        ).fetchone()["count"]
     assert snapshot_count == 1
     assert [
         item["title"]
@@ -1076,7 +1104,7 @@ def test_matching_current_pending_is_promoted_among_historical_snapshots(tmp_pat
         current_id = int(
             connection.execute(
                 "SELECT id FROM creative_topics WHERE job_id = 'rank-current'"
-            ).fetchone()[0]
+            ).fetchone()["id"]
         )
 
     adopted = repository.adopt_rank_topic(current_topic, "actor-1")
@@ -1132,7 +1160,7 @@ def test_rank_adoption_reports_existing_topic_decision_conflicts(
 
 
 def test_pending_rank_adoption_rolls_back_when_snapshot_insert_fails(tmp_path: Path):
-    repository = CreativeRepository(tmp_path / "creative.db")
+    repository = LegacyCreativeRepository(tmp_path / "creative.db")
     pending = seed_topic(repository, "收录事务回滚短剧", platform="dy")
     with repository._connect() as connection:
         connection.execute(
@@ -1155,7 +1183,7 @@ def test_pending_rank_adoption_rolls_back_when_snapshot_insert_fails(tmp_path: P
 
 
 def test_new_rank_adoption_rolls_back_when_snapshot_insert_fails(tmp_path: Path):
-    repository = CreativeRepository(tmp_path / "creative.db")
+    repository = LegacyCreativeRepository(tmp_path / "creative.db")
     historical = seed_topic(repository, "新增收录事务回滚短剧", platform="dy")
     current = {
         **historical,

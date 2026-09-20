@@ -104,8 +104,7 @@ def character_messages(
 ) -> list[dict[str, str]]:
     return _messages(
         _with_project_style(
-        "根据已锁定 Brief 生成人物卡和人物关系。返回 characters 和 relationships 数组。"
-        "顶层必须返回 JSON 对象，严格使用 "
+        "根据已锁定 Brief 生成人物卡和人物关系。顶层必须返回 JSON 对象，严格使用 "
         '{"characters": [...], "relationships": [...]} 两个键，不得直接输出数组，'
         "不得改名、嵌套进其他对象或使用中文键名。characters 与 relationships 都必须是 JSON 数组；"
         "没有人物关系时返回空数组 []，不得返回对象、字符串或 null。"

@@ -806,6 +806,7 @@ class CreativeRepository:
                     source_fingerprint TEXT NOT NULL,
                     selected_findings_json TEXT NOT NULL,
                     target_episode_numbers_json TEXT NOT NULL,
+                    prompt_snapshot_json TEXT NOT NULL DEFAULT '{}',
                     status TEXT NOT NULL DEFAULT 'queued',
                     created_by TEXT NOT NULL,
                     job_id TEXT NOT NULL DEFAULT '',
@@ -836,6 +837,17 @@ class CreativeRepository:
                 CREATE INDEX IF NOT EXISTS idx_script_optimization_drafts_task
                 ON script_optimization_drafts(optimization_id, episode_number, kind);
             """)
+            optimization_columns = {
+                str(row[1])
+                for row in conn.execute(
+                    "PRAGMA table_info(script_optimizations)"
+                ).fetchall()
+            }
+            if "prompt_snapshot_json" not in optimization_columns:
+                conn.execute(
+                    "ALTER TABLE script_optimizations ADD COLUMN "
+                    "prompt_snapshot_json TEXT NOT NULL DEFAULT '{}'"
+                )
             for table in (
                 "creative_projects",
                 "creative_breakdowns",
@@ -6099,6 +6111,7 @@ class CreativeRepository:
         selected_findings: list[dict[str, Any]],
         target_episode_numbers: list[int],
         created_by: str,
+        prompt_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         now = time.time()
         with self._connect() as conn:
@@ -6107,8 +6120,8 @@ class CreativeRepository:
                 INSERT INTO script_optimizations (
                     review_id, project_id, mode, source_fingerprint,
                     selected_findings_json, target_episode_numbers_json,
-                    created_by, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    prompt_snapshot_json, created_by, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     review_id,
@@ -6117,6 +6130,7 @@ class CreativeRepository:
                     source_fingerprint,
                     json.dumps(selected_findings, ensure_ascii=False),
                     json.dumps(target_episode_numbers, ensure_ascii=False),
+                    json.dumps(prompt_snapshot or {}, ensure_ascii=False),
                     created_by,
                     now,
                     now,
@@ -6515,6 +6529,9 @@ class CreativeRepository:
         row["selected_findings"] = json.loads(row.pop("selected_findings_json") or "[]")
         row["target_episode_numbers"] = json.loads(
             row.pop("target_episode_numbers_json") or "[]"
+        )
+        row["prompt_snapshot"] = json.loads(
+            row.pop("prompt_snapshot_json", "{}") or "{}"
         )
         return row
 

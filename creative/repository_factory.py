@@ -7,13 +7,10 @@
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
 #
 
-"""Explicit back-end selection during the creative store migration.
+"""Creative repository construction after the PostgreSQL runtime cutover.
 
-Nothing here guesses. A caller states which back end it wants, so a missing or
-misconfigured PostgreSQL install can never be silently served by SQLite: the
-SQLite branch exists only for the frozen legacy implementation, contract
-comparison and the rollback tests, and it is removed once the seven day
-observation window closes.
+Runtime construction is PostgreSQL-only and fails closed. Explicit SQLite
+construction remains solely for offline import, rollback and contract tools.
 """
 
 from __future__ import annotations
@@ -32,10 +29,19 @@ DEFAULT_LEGACY_SQLITE_PATH = Path(".runtime/creative/creative.db")
 
 
 def creative_backend_from_environment() -> str:
-    """Read the transitional storage switch, defaulting to the live SQLite store."""
+    """Read the legacy tool switch, defaulting to PostgreSQL."""
 
     value = os.environ.get(STORAGE_ENVIRONMENT_VARIABLE, "").strip().lower()
-    return value or SQLITE_BACKEND
+    return value or POSTGRESQL_BACKEND
+
+
+def normalize_creative_backend(backend: str | None) -> str:
+    """Validate an explicitly chosen back end name."""
+
+    normalized = str(backend or "").strip().lower()
+    if normalized not in {SQLITE_BACKEND, POSTGRESQL_BACKEND}:
+        raise ValueError("AIWORKER_CREATIVE_STORAGE must be sqlite or postgresql")
+    return normalized
 
 
 def build_creative_repository(
@@ -46,19 +52,32 @@ def build_creative_repository(
 ):
     """Build a creative repository for an explicitly chosen back end."""
 
-    normalized = str(backend or "").strip().lower()
+    normalized = normalize_creative_backend(backend)
     if normalized == POSTGRESQL_BACKEND:
         return PostgresCreativeRepository(database)
-    if normalized == SQLITE_BACKEND:
-        from creative.legacy_sqlite_repository import LegacySQLiteCreativeRepository
+    if legacy_sqlite_path is None:
+        raise ValueError("the sqlite back end requires an explicit legacy_sqlite_path")
+    from creative.legacy_sqlite_repository import LegacySQLiteCreativeRepository
 
-        path = (
-            Path(legacy_sqlite_path)
-            if legacy_sqlite_path is not None
-            else DEFAULT_LEGACY_SQLITE_PATH
+    return LegacySQLiteCreativeRepository(Path(legacy_sqlite_path))
+
+
+def build_runtime_creative_repository(
+    database: SystemDatabase,
+    *,
+    legacy_sqlite_path: Path | str | None = None,
+):
+    """Build the PostgreSQL runtime repository, failing closed on bad health."""
+
+    del legacy_sqlite_path
+    health = database.health()
+    if not health.reachable or not health.schema_current:
+        raise RuntimeError(
+            "creative PostgreSQL is unavailable "
+            f"(reachable={health.reachable}, schema_current={health.schema_current}, "
+            f"revision={health.current_revision})"
         )
-        return LegacySQLiteCreativeRepository(path)
-    raise ValueError("AIWORKER_CREATIVE_STORAGE must be sqlite or postgresql")
+    return PostgresCreativeRepository(database)
 
 
 __all__ = [
@@ -67,5 +86,7 @@ __all__ = [
     "SQLITE_BACKEND",
     "STORAGE_ENVIRONMENT_VARIABLE",
     "build_creative_repository",
+    "build_runtime_creative_repository",
     "creative_backend_from_environment",
+    "normalize_creative_backend",
 ]

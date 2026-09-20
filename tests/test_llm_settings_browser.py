@@ -598,6 +598,78 @@ def test_llm_sensitive_request_errors_are_fixed_and_controls_lock_during_test() 
         browser.close()
 
 
+@pytest.mark.parametrize("busy_flag", ["saving", "testing", "syncing", "modelSaving"])
+def test_llm_operation_entry_points_block_requests_during_any_active_operation(busy_flag):
+    """Catch direct method calls bypassing disabled controls and overlapping writes."""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        _mount_llm_page(page)
+        page.evaluate("document.querySelector('main')._x_dataStack[0].fetchLLMSettings()")
+        page.add_script_tag(path=API_SCRIPT)
+        sent = []
+        page.on("request", lambda request: sent.append(request.url)
+                if "/api/llm/" in request.url else None)
+        page.route("**/api/llm/**", lambda route: route.fulfill(status=400, json={"detail": "blocked"}))
+        page.on("dialog", lambda dialog: dialog.accept())
+        for method in [
+            "saveLLMProvider", "clearLLMProviderCredential", "deleteLLMProvider",
+            "syncLLMModels", "addLLMModel", "saveLLMModel", "deleteLLMModel",
+            "setDefaultLLMModel", "testLLMConnection",
+        ]:
+            page.evaluate("""async ({busyFlag, method}) => {
+                const app = document.querySelector('main')._x_dataStack[0];
+                const state = app.llmSettings;
+                state.providers[0].is_default = false;
+                state.editor.credential_source = 'credential_store';
+                state.modelDraft = {model_id: 'new-model', display_name: ''};
+                const model = {...state.providers[0].models[0], is_default: false};
+                app.startEditLLMModel(model);
+                state[busyFlag] = true;
+                await app[method](model);
+                state[busyFlag] = false;
+            }""", {"busyFlag": busy_flag, "method": method})
+            assert sent == [], f"{method} sent a request while {busy_flag} was active"
+        browser.close()
+
+
+@pytest.mark.parametrize("busy_flag", ["saving", "testing", "syncing", "modelSaving"])
+def test_llm_editor_and_refresh_entry_points_preserve_state_while_busy(busy_flag):
+    """Catch public refresh or editor actions replacing an in-flight operation's state."""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        _mount_llm_page(page)
+        page.evaluate("document.querySelector('main')._x_dataStack[0].fetchLLMSettings()")
+        page.add_script_tag(path=API_SCRIPT)
+        sent = []
+        page.on("request", lambda request: sent.append(request.url)
+                if "/api/llm/" in request.url else None)
+        page.route("**/api/llm/**", lambda route: route.fulfill(status=400, json={"detail": "blocked"}))
+        changed = page.evaluate("""async busyFlag => {
+            const app = document.querySelector('main')._x_dataStack[0];
+            app.llmSettings.editor.preset = 'openai';
+            app.llmSettings[busyFlag] = true;
+            const initial = JSON.stringify(app.llmSettings);
+            const changed = [];
+            const actions = [
+                ['fetchLLMSettings', undefined],
+                ['selectLLMProvider', {id: 'another-provider', name: 'Another', models: []}],
+                ['startNewLLMProvider', 'openai'],
+                ['applyLLMProviderPreset', undefined],
+                ['startEditLLMModel', {id: 'another-model', model_id: 'another-model'}],
+            ];
+            for (const [method, argument] of actions) {
+                Object.assign(app.llmSettings, JSON.parse(initial));
+                await app[method](argument);
+                if (JSON.stringify(app.llmSettings) !== initial) changed.push(method);
+            }
+            return changed;
+        }""", busy_flag)
+        assert (sent, changed) == ([], [])
+        browser.close()
+
+
 def test_llm_temporary_key_success_discards_untrusted_response_data() -> None:
     """Would catch a successful temporary-key test reflecting server-controlled secrets."""
 

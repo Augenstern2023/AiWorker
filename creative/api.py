@@ -4312,6 +4312,36 @@ def build_creative_router(
         try:
             application_service.assert_stage_write_access(project_id, stage, principal)
             free_mode_service.assert_free_project(project_id)
+            refs_by_episode = {
+                episode_number: dict(context_refs)
+                for episode_number in range(1, total + 1)
+            }
+            if stage == "script":
+                missing_beats: list[int] = []
+                for episode_number in range(1, total + 1):
+                    head = free_mode_service.get_head(
+                        project_id, "beats", episode_number
+                    )
+                    beats = (
+                        repository.get_episode(int(head["resource_ref"]))
+                        if head is not None
+                        else None
+                    )
+                    if (
+                        beats is None
+                        or beats.get("stage") != "beats"
+                        or int(beats.get("episode_number") or 0) != episode_number
+                        or beats.get("status") not in {"locked", "approved"}
+                    ):
+                        missing_beats.append(episode_number)
+                        continue
+                    refs_by_episode[episode_number]["beats_id"] = int(beats["id"])
+                if missing_beats:
+                    missing_text = "、".join(str(number) for number in missing_beats)
+                    raise ValueError(
+                        "全剧场次剧本生成前必须锁定全部 Beats；"
+                        f"未锁定集数：{missing_text}"
+                    )
             contexts = {
                 episode_number: free_mode_service.create_generation_context(
                     context_id=f"{payload.operation_id}:{stage}:{episode_number}",
@@ -4319,7 +4349,7 @@ def build_creative_router(
                     stage=stage,
                     episode_number=episode_number,
                     instruction=payload.generation_instruction,
-                    context_refs=context_refs,
+                    context_refs=refs_by_episode[episode_number],
                     actor_user_id=principal.user_id,
                     prompt_snapshot=project_prompt_service.resolve_generation_snapshot(
                         project_id=project_id,

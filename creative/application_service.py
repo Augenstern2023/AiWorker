@@ -1091,8 +1091,12 @@ class CreativeApplicationService:
         extra = payload.get("extra")
         if not isinstance(extra, dict):
             raise ValueError("创作任务上下文缺失")
-        if str(extra.get("workflow_mode") or "sequential") != "sequential":
-            raise ValueError("自由创作任务需要重新发起生成")
+        if str(extra.get("workflow_mode") or "sequential") == "free":
+            return self._retry_free_generation_job(
+                payload=payload,
+                extra=extra,
+                actor=actor,
+            )
 
         operation_id = str(extra.get("operation_id") or "").strip()
         request_hash = str(extra.get("generation_request_hash") or "").strip()
@@ -1160,6 +1164,60 @@ class CreativeApplicationService:
             retry_payload,
             created_by_user_id=creator_id,
             workflow_task_id=workflow_task_id,
+            project_id=project_id,
+        )
+
+    def _retry_free_generation_job(
+        self,
+        *,
+        payload: dict[str, Any],
+        extra: dict[str, Any],
+        actor: Principal,
+    ) -> Any:
+        operation_id = str(extra.get("operation_id") or "").strip()
+        request_hash = str(extra.get("generation_request_hash") or "").strip()
+        creator_id = str(extra.get("created_by_user_id") or "").strip()
+        try:
+            project_id = int(extra.get("project_id") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("自由创作任务项目范围无效") from exc
+        action = str(extra.get("action") or "").strip()
+        stage = str(extra.get("normalized_stage") or "").strip()
+        expected_stage = {
+            "blueprints": "brief",
+            "characters": "characters",
+            "outlines": "outline",
+            "beats": "beats",
+            "script": "script",
+        }.get(action)
+        if (
+            project_id < 1
+            or not operation_id
+            or not request_hash
+            or not creator_id
+            or expected_stage is None
+            or stage != expected_stage
+        ):
+            raise ValueError("自由创作任务业务身份不完整，无法安全重试")
+        project = self.repository.get_project(project_id)
+        if project is None:
+            raise KeyError(project_id)
+        if project.get("workflow_mode") != "free":
+            raise ValueError("项目创作模式已变化，请重新发起生成")
+        if not actor.is_system_admin and creator_id != actor.user_id:
+            raise CreativeProjectAccessDenied("只有原任务创建人可以重试")
+        self.assert_stage_write_access(project_id, stage, actor)
+
+        retry_payload = json.loads(json.dumps(payload, ensure_ascii=False))
+        retry_payload["extra"]["retry_failed_operation"] = True
+        get_or_create = getattr(self.job_manager, "get_or_create_job", None)
+        if not callable(get_or_create):
+            raise RuntimeError("creative operation retry is unavailable")
+        return get_or_create(
+            operation_id,
+            retry_payload,
+            created_by_user_id=creator_id,
+            workflow_task_id=None,
             project_id=project_id,
         )
 

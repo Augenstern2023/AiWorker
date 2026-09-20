@@ -175,7 +175,7 @@ class JobManager:
         data: dict[str, Any],
         *,
         created_by_user_id: str,
-        workflow_task_id: str,
+        workflow_task_id: str | None,
         project_id: str | int,
     ) -> JobState:
         """Reserve operation_id transactionally so only one worker can launch."""
@@ -189,11 +189,12 @@ class JobManager:
         job.extra.update(
             {
                 "created_by_user_id": created_by_user_id,
-                "workflow_task_id": workflow_task_id,
                 "project_id": str(project_id),
                 "operation_id": operation_id,
             }
         )
+        if workflow_task_id is not None:
+            job.extra["workflow_task_id"] = workflow_task_id
         scope = creative_job_scope(job)
         proposed = JobState(job=job)
         launcher_owner = f"job-launcher-{uuid.uuid4().hex}"

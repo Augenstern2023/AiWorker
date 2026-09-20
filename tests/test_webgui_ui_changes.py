@@ -2052,7 +2052,8 @@ def test_creative_generation_retry_uses_owning_business_action():
 
     assert "/generation-jobs/${this.creativeWorkspace.jobId}/retry" in script
     assert "operation-bound jobs" not in script
-    assert "String(extra.workflow_mode || 'sequential') === 'sequential'" in script
+    assert "String(extra.workflow_mode || 'sequential') === 'sequential'" not in script
+    assert "return status === 'failed';" in script
     assert "this.creativeWorkspace.retrying = true" in script
     assert "creativeJobRunning() && creativeWorkspace.jobProgress?.retry_attempt" in modal
 
